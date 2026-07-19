@@ -418,6 +418,18 @@ pub mod capability {
     pub const RESOURCE_FIELD_SIZE: usize = 76; // 84..160
     pub const MAX_RESOURCE_STRING: usize = 64; // cap for File / Network host strings
 
+    /// Maximum delegation depth permitted for a capability chain.
+    ///
+    /// A freshly-granted root token has `delegation_depth == 0`; each
+    /// [`CapabilitySet::delegate`] call increments the child's depth by 1.
+    /// Once a token's depth reaches this limit, further delegation is
+    /// refused by [`CapabilitySet::delegate`] with
+    /// [`IpcError::DelegationDepthExceeded`], and
+    /// [`verify_delegation_chain`] rejects any chain whose leaf exceeds
+    /// it. This bounds the length of a delegation chain so a compromised
+    /// intermediate cannot pyramid authority out indefinitely.
+    pub const MAX_DELEGATION_DEPTH: u8 = 8;
+
     const TAG_FILE: u8 = 1;
     const TAG_NETWORK: u8 = 2;
     const TAG_MEMORY: u8 = 3;
@@ -627,6 +639,82 @@ pub mod capability {
             if self.is_revoked(token.id) { return false; }
             if now > token.expires_at { return false; }
             true
+        }
+
+        /// Revoke a token *and* every token that was delegated (directly
+        /// or transitively) from it.
+        ///
+        /// When `token_id` is revoked, authority for every child token
+        /// delegated from it collapses: a child token whose `source_pid`
+        /// equals the revoked token's `target_pid` and whose
+        /// `delegation_depth` is exactly one more than the revoked
+        /// token's depth was minted by [`CapabilitySet::delegate`] from
+        /// this parent, and so must also be revoked. The walk is
+        /// breadth-first: each newly-revoked token's children are
+        /// discovered by scanning `self.tokens`, so transitive
+        /// descendants are pulled in regardless of how deep the
+        /// delegation chain goes.
+        ///
+        /// Returns the list of every token ID revoked by this call —
+        /// `token_id` itself first, followed by all descendants in
+        /// discovery order. If `token_id` is unknown to the set the
+        /// call still records it as revoked (defensive: a revoked-but-
+        /// unknown id is a tombstone that prevents any future token
+        /// with the same id from being verified) and returns a
+        /// single-element vector. Idempotent: revoking an already-
+        /// revoked token returns an empty vector and walks nothing.
+        pub fn revoke_with_propagation(&mut self, token_id: u128) -> Vec<u128> {
+            let mut revoked_list: Vec<u128> = Vec::new();
+            // Worklist of token IDs whose children still need to be
+            // discovered. We push `token_id` first, then append child
+            // IDs as we revoke each parent.
+            let mut worklist: Vec<u128> = vec![token_id];
+
+            while let Some(current_id) = worklist.pop() {
+                // set.insert returns true iff the value was newly added —
+                // so an already-revoked id short-circuits here, which is
+                // what makes the walk idempotent and cycle-free.
+                if !self.revoked.insert(current_id) {
+                    continue;
+                }
+                revoked_list.push(current_id);
+
+                // Snapshot the parent's (target_pid, depth) so we can
+                // find children without holding a borrow into the
+                // HashMap while we mutate it below.
+                let parent_target_pid: u64;
+                let parent_depth: u8;
+                if let Some(parent) = self.tokens.get(&current_id) {
+                    parent_target_pid = parent.target_pid;
+                    parent_depth = parent.delegation_depth;
+                } else {
+                    // Token isn't tracked in `tokens` (e.g. it was
+                    // revoked before ever being granted through this
+                    // set, or it lives in a peer set). No children to
+                    // propagate to.
+                    continue;
+                }
+
+                // A token is a child of `current_id` iff it was minted
+                // by `delegate(current_id, ...)`: its `source_pid` is
+                // the parent's `target_pid` (the delegator becomes the
+                // source of the child), and its `delegation_depth` is
+                // exactly `parent_depth + 1`. Collect matches first,
+                // then extend the worklist — we can't mutate `revoked`
+                // while iterating `tokens`, so the two passes are
+                // separate.
+                let children: Vec<u128> = self
+                    .tokens
+                    .iter()
+                    .filter(|(_, t)| {
+                        t.source_pid == parent_target_pid
+                            && t.delegation_depth == parent_depth + 1
+                    })
+                    .map(|(k, _)| *k)
+                    .collect();
+                worklist.extend(children);
+            }
+            revoked_list
         }
     }
 
@@ -846,6 +934,79 @@ pub mod capability {
             });
         }
         Ok(())
+    }
+
+    /// Verify a delegation chain end-to-end.
+    ///
+    /// `chain` is the ordered sequence of tokens from the root grant
+    /// (`chain[0]`, with `delegation_depth == 0`) down to the leaf
+    /// (`chain.last()`). `token` is the leaf being authorised — it
+    /// must equal `chain.last()`, otherwise the chain is for a
+    /// different token and verification fails.
+    ///
+    /// For every adjacent pair `(parent, child)` in the chain we
+    /// require:
+    ///
+    /// 1. **Pid linkage** — `child.source_pid == parent.target_pid`.
+    ///    [`CapabilitySet::delegate`] sets the delegator's pid as the
+    ///    child's `source_pid`, so a broken link means `child` was
+    ///    not delegated from `parent`.
+    /// 2. **Depth increment** — `child.delegation_depth == parent.delegation_depth + 1`.
+    ///    A skipped or repeated depth means the chain was forged.
+    ///
+    /// Additionally every token's `delegation_depth` must be
+    /// `<= MAX_DELEGATION_DEPTH`; a chain whose leaf exceeds the
+    /// limit could not have been produced by `delegate` (it refuses
+    /// at the limit) and so is rejected here as well.
+    ///
+    /// Returns `false` for an empty chain, a chain whose last
+    /// element is not `token`, a chain that starts at a non-root
+    /// depth, any broken parent→child link, or any depth overflow.
+    pub fn verify_delegation_chain(
+        token: &CapabilityToken,
+        chain: &[CapabilityToken],
+    ) -> bool {
+        // Empty chain has nothing to verify — a leaf with no provenance
+        // is never authorisable through delegation.
+        if chain.is_empty() {
+            return false;
+        }
+        // The chain must lead to exactly `token`; otherwise we're
+        // being asked to authorise one token using some other token's
+        // proof.
+        if chain.last() != Some(token) {
+            return false;
+        }
+        // Root of the chain must be a freshly-granted token (depth 0).
+        // A chain that starts mid-way has no provable root of authority.
+        if chain[0].delegation_depth != 0 {
+            return false;
+        }
+        // Cheap upper-bound check on the root first, then per-pair below.
+        if chain[0].delegation_depth > MAX_DELEGATION_DEPTH {
+            return false;
+        }
+        for w in chain.windows(2) {
+            let parent = &w[0];
+            let child = &w[1];
+            // (1) Pid linkage: delegator becomes the source of the child.
+            if child.source_pid != parent.target_pid {
+                return false;
+            }
+            // (2) Depth must increment by exactly 1 — not 0, not 2.
+            // Wrapping_add guards against a malicious depth of 255
+            // on the parent: 255 + 1 wraps to 0, which won't equal
+            // any sane child depth, so the check correctly fails.
+            if child.delegation_depth != parent.delegation_depth.wrapping_add(1) {
+                return false;
+            }
+            // MAX_DELEGATION_DEPTH cap on the child. Combined with the
+            // root check above this transitively caps every element.
+            if child.delegation_depth > MAX_DELEGATION_DEPTH {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -2376,7 +2537,7 @@ impl capability::CapabilitySet {
             .ok_or(IpcError::CapabilityNotFound)?
             .clone();
 
-        if parent.delegation_depth >= 8 {
+        if parent.delegation_depth >= capability::MAX_DELEGATION_DEPTH {
             return Err(IpcError::DelegationDepthExceeded);
         }
 
@@ -2419,6 +2580,96 @@ fn rand_u128() -> u128 {
     let mut hasher = DefaultHasher::new();
     std::time::SystemTime::now().hash(&mut hasher);
     hasher.finish() as u128
+}
+
+// ── Cross-Process Capability Tracking ─────────────────────────────────
+//
+// A `CapabilitySet` answers "is token X still valid?" but it does not
+// track *which process currently holds* token X. The kernel needs the
+// reverse mapping — "given pid P, which tokens is it currently wielding?"
+// — so it can:
+//
+//   * sweep a dead process's capabilities on exit (revoke them all,
+//     propagating to any descendants the process delegated),
+//   * audit a process's authority at any moment (e.g. for a `procfs`-
+//     style capability listing, or a security monitor),
+//   * refuse to deliver a message to P whose capability set has grown
+//     past a policy ceiling.
+//
+// `CapabilityRegistry` is that reverse index. It owns one `Vec<u128>`
+// of token IDs per pid; the `CapabilityToken`s themselves live in a
+// (separate) `CapabilitySet`, so the registry is bookkeeping only —
+// it never mints or verifies tokens, it just remembers who has what.
+
+/// Per-process index of capability token IDs.
+///
+/// Invariant: if `token_id` appears in `process_capabilities[pid]`,
+/// the corresponding `CapabilityToken` (looked up in the caller's
+/// `CapabilitySet`) has `target_pid == pid` — that is, the token was
+/// either granted directly to `pid`, or delegated *to* `pid` by some
+/// other process. The registry does not enforce this invariant itself
+/// (it has no access to the token bytes); it is the caller's
+/// responsibility to call [`grant_to_process`] only with tokens whose
+/// `target_pid` matches `pid`.
+#[derive(Clone, Debug, Default)]
+pub struct CapabilityRegistry {
+    /// pid → ordered list of token IDs held by that process.
+    /// Duplicates are tolerated (a process may legitimately hold the
+    /// same token id under multiple aliases, e.g. after a re-grant of
+    /// an expired-and-renewed token); [`CapabilityRegistry::revoke_from_process`]
+    /// removes *all* occurrences so the alias problem is bounded.
+    pub process_capabilities: HashMap<u64, Vec<u128>>,
+}
+
+impl CapabilityRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `pid` now holds `token`. Idempotent in the sense
+    /// that the same `(pid, token.id)` pair may be recorded multiple
+    /// times — the registry does not de-duplicate on insert because
+    /// a real kernel often tracks per-grant metadata (e.g. the channel
+    /// the token arrived on) alongside the id, and silently coalescing
+    /// two grants would lose that. Use [`revoke_from_process`] to
+    /// remove every alias of a token at once.
+    pub fn grant_to_process(&mut self, pid: u64, token: &capability::CapabilityToken) {
+        self.process_capabilities
+            .entry(pid)
+            .or_default()
+            .push(token.id);
+    }
+
+    /// Remove every occurrence of `token_id` from `pid`'s held set.
+    /// Returns `true` iff at least one entry was removed (so a caller
+    /// can detect "you tried to revoke a token this process never
+    /// held" and treat it as a policy violation).
+    ///
+    /// Does *not* touch the `CapabilitySet` — propagating revocation
+    /// to descendants is the caller's job (call
+    /// [`capability::CapabilitySet::revoke_with_propagation`] on the
+    /// matching set, then call this for each pid in the registry to
+    /// scrub the reverse index).
+    pub fn revoke_from_process(&mut self, pid: u64, token_id: u128) -> bool {
+        if let Some(v) = self.process_capabilities.get_mut(&pid) {
+            let before = v.len();
+            v.retain(|&t| t != token_id);
+            v.len() != before
+        } else {
+            false
+        }
+    }
+
+    /// All token IDs currently held by `pid`, in insertion order.
+    /// Returns an empty slice for an unknown pid (a process that has
+    /// never been granted a capability) so callers can iterate
+    /// without a separate `contains_key` check.
+    pub fn get_process_capabilities(&self, pid: u64) -> &[u128] {
+        self.process_capabilities
+            .get(&pid)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 // ── Supervisor (Fault Tolerance) ─────────────────────────────────────
@@ -4973,5 +5224,420 @@ mod tests {
         assert_eq!(life.restart_count(pid_a2), Some(1));
         assert_eq!(life.restart_count(pid_b), Some(0));
         assert!(life.is_alive(pid_b));
+    }
+
+    // ── Wave 33–40: Capability delegation chains & propagation ────────
+
+    /// Helper: mint a synthetic token with arbitrary fields. Used by
+    /// the chain-verification tests where we need to construct chains
+    /// that `delegate()` itself would refuse (e.g. depth > MAX). The
+    /// signature is left zeroed — `verify_delegation_chain` checks
+    /// structural linkage, not signature validity, so a zero sig is
+    /// fine for these tests.
+    fn synth_chain_token(
+        id: u128,
+        src: u64,
+        tgt: u64,
+        depth: u8,
+    ) -> capability::CapabilityToken {
+        capability::CapabilityToken {
+            id,
+            source_pid: src,
+            target_pid: tgt,
+            resource: capability::Resource::Memory(0x1000, 0x1000),
+            permissions: capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            delegation_depth: depth,
+            created_at: 0,
+            expires_at: u64::MAX,
+            signature: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn test_delegation_chain_abc_passes() {
+        // A→B→C, real delegation through CapabilitySet::delegate.
+        // A is granted by pid 1 to pid 2 (depth 0). B is delegated
+        // from A to pid 3 (depth 1). C is delegated from B to pid 4
+        // (depth 2). The chain [A, B, C] must verify.
+        let key = [0x42u8; 32];
+        let mut set = capability::CapabilitySet::new();
+
+        let a = capability::grant_capability(
+            1001, 1, 2,
+            capability::Resource::Memory(0x1000, 0x1000),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        set.grant(a.clone());
+
+        let b = set.delegate(
+            a.id, 3,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            &key,
+        ).expect("delegate A→B");
+        let c = set.delegate(
+            b.id, 4,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            &key,
+        ).expect("delegate B→C");
+
+        // delegate() must produce a real child: depth+1, source = parent's target.
+        assert_eq!(b.delegation_depth, a.delegation_depth + 1);
+        assert_eq!(b.source_pid, a.target_pid);
+        assert_eq!(c.delegation_depth, b.delegation_depth + 1);
+        assert_eq!(c.source_pid, b.target_pid);
+
+        let chain = vec![a.clone(), b.clone(), c.clone()];
+        assert!(
+            capability::verify_delegation_chain(&c, &chain),
+            "A→B→C chain produced by delegate() must verify"
+        );
+    }
+
+    #[test]
+    fn test_delegation_chain_broken_link_fails() {
+        // Two failure modes for the pid-linkage check:
+        //   (a) child.source_pid != parent.target_pid
+        //   (b) depth does not increment by exactly 1
+        let a = synth_chain_token(1, 1, 2, 0);
+        // (a) broken pid link: B's source_pid is 99, not A's target_pid (2).
+        let bad_link = synth_chain_token(2, 99, 3, 1);
+        let chain_bad_link = vec![a.clone(), bad_link.clone()];
+        assert!(
+            !capability::verify_delegation_chain(&bad_link, &chain_bad_link),
+            "chain with broken pid linkage must fail"
+        );
+
+        // (b) broken depth: B's depth is 2 instead of 1 (skipped a level).
+        let bad_depth = synth_chain_token(3, 2, 3, 2);
+        let chain_bad_depth = vec![a, bad_depth.clone()];
+        assert!(
+            !capability::verify_delegation_chain(&bad_depth, &chain_bad_depth),
+            "chain with skipped depth must fail"
+        );
+    }
+
+    #[test]
+    fn test_delegation_chain_depth_exceeded_fails() {
+        // A chain whose leaf depth exceeds MAX_DELEGATION_DEPTH must
+        // be rejected even if every link is otherwise well-formed.
+        // delegate() would refuse to produce such a chain, so we
+        // construct it synthetically.
+        let depth_cap = capability::MAX_DELEGATION_DEPTH;
+        // Build a chain of length (depth_cap + 1): depths 0..=depth_cap.
+        // The leaf at depth_cap+1 would exceed, but we want a chain
+        // that *reaches* depth_cap+1, so we need depth_cap+2 elements
+        // (depths 0..=depth_cap+1).
+        let mut chain: Vec<capability::CapabilityToken> = Vec::new();
+        let mut pid = 10u64;
+        for d in 0..=(depth_cap + 1) {
+            chain.push(synth_chain_token(1000 + d as u128, pid, pid + 1, d));
+            pid += 1;
+        }
+        let leaf = chain.last().unwrap().clone();
+        assert!(
+            leaf.delegation_depth > depth_cap,
+            "test setup: leaf depth {} must exceed MAX {}",
+            leaf.delegation_depth, depth_cap
+        );
+        assert!(
+            !capability::verify_delegation_chain(&leaf, &chain),
+            "chain whose leaf exceeds MAX_DELEGATION_DEPTH must fail"
+        );
+
+        // Conversely, a chain exactly up to the cap must pass.
+        let mut ok_chain: Vec<capability::CapabilityToken> = Vec::new();
+        let mut pid2 = 50u64;
+        for d in 0..=depth_cap {
+            ok_chain.push(synth_chain_token(2000 + d as u128, pid2, pid2 + 1, d));
+            pid2 += 1;
+        }
+        let ok_leaf = ok_chain.last().unwrap().clone();
+        assert_eq!(ok_leaf.delegation_depth, depth_cap);
+        assert!(
+            capability::verify_delegation_chain(&ok_leaf, &ok_chain),
+            "chain exactly at MAX_DELEGATION_DEPTH must still verify"
+        );
+    }
+
+    #[test]
+    fn test_delegation_chain_empty_and_mismatched_leaf_fails() {
+        // Empty chain → false.
+        let leaf = synth_chain_token(7, 1, 2, 0);
+        assert!(
+            !capability::verify_delegation_chain(&leaf, &[]),
+            "empty chain must fail"
+        );
+
+        // Chain whose last element != token argument → false.
+        // (We're asked to authorise `leaf`, but the chain leads to
+        // a different token.)
+        let a = synth_chain_token(1, 1, 2, 0);
+        let b = synth_chain_token(2, 2, 3, 1);
+        let chain = vec![a, b];
+        assert!(
+            !capability::verify_delegation_chain(&leaf, &chain),
+            "chain whose leaf != token argument must fail"
+        );
+
+        // Chain that doesn't start at depth 0 → false (no provable root).
+        let mid1 = synth_chain_token(10, 5, 6, 3);
+        let mid2 = synth_chain_token(11, 6, 7, 4);
+        let mid_chain = vec![mid1.clone(), mid2.clone()];
+        assert!(
+            !capability::verify_delegation_chain(&mid2, &mid_chain),
+            "chain that doesn't start at depth 0 must fail"
+        );
+    }
+
+    #[test]
+    fn test_revoke_with_propagation_revokes_descendants() {
+        // Build A→B→C via delegate(), then revoke A. All three must
+        // appear in the returned list and all three must be marked
+        // revoked in the set.
+        let key = [0x99u8; 32];
+        let mut set = capability::CapabilitySet::new();
+
+        let a = capability::grant_capability(
+            2001, 1, 2,
+            capability::Resource::Memory(0x2000, 0x1000),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        set.grant(a.clone());
+        let b = set.delegate(
+            a.id, 3,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            &key,
+        ).expect("delegate A→B");
+        let c = set.delegate(
+            b.id, 4,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            &key,
+        ).expect("delegate B→C");
+
+        // Sanity: none revoked yet.
+        assert!(!set.is_revoked(a.id));
+        assert!(!set.is_revoked(b.id));
+        assert!(!set.is_revoked(c.id));
+
+        let revoked = set.revoke_with_propagation(a.id);
+
+        // A must be first (it's the seed of the worklist); B and C
+        // follow in discovery order.
+        assert_eq!(revoked.len(), 3, "must revoke A + B + C, got {:?}", revoked);
+        assert_eq!(revoked[0], a.id, "parent must be revoked first");
+        assert!(revoked.contains(&b.id), "child B must be revoked");
+        assert!(revoked.contains(&c.id), "grandchild C must be revoked");
+
+        // All three now revoked in the set.
+        assert!(set.is_revoked(a.id));
+        assert!(set.is_revoked(b.id));
+        assert!(set.is_revoked(c.id));
+
+        // verify() must now reject all three.
+        let now = 1_500;
+        assert!(!set.verify(&a, now), "revoked A must fail verify");
+        assert!(!set.verify(&b, now), "revoked B must fail verify");
+        assert!(!set.verify(&c, now), "revoked C must fail verify");
+    }
+
+    #[test]
+    fn test_revoke_with_propagation_idempotent_and_unknown() {
+        // Idempotent: revoking an already-revoked token walks nothing
+        // and returns an empty list.
+        let key = [0xABu8; 32];
+        let mut set = capability::CapabilitySet::new();
+        let a = capability::grant_capability(
+            3001, 1, 2,
+            capability::Resource::Channel(42),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        set.grant(a.clone());
+
+        let first = set.revoke_with_propagation(a.id);
+        assert_eq!(first, vec![a.id]);
+
+        let second = set.revoke_with_propagation(a.id);
+        assert!(
+            second.is_empty(),
+            "re-revoking must be a no-op, got {:?}",
+            second
+        );
+
+        // Unknown token id: still recorded as a tombstone (defensive),
+        // returns a single-element list, no panic.
+        let mut fresh = capability::CapabilitySet::new();
+        let unknown_id = 0xDEAD_BEEF_BEEF;
+        let r = fresh.revoke_with_propagation(unknown_id);
+        assert_eq!(r, vec![unknown_id]);
+        assert!(fresh.is_revoked(unknown_id));
+
+        // Revoking a leaf with no children returns just the leaf.
+        let mut set2 = capability::CapabilitySet::new();
+        let leaf = capability::grant_capability(
+            4001, 5, 6,
+            capability::Resource::Channel(7),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        set2.grant(leaf.clone());
+        let r2 = set2.revoke_with_propagation(leaf.id);
+        assert_eq!(r2, vec![leaf.id]);
+    }
+
+    #[test]
+    fn test_capability_registry_grant_revoke_get() {
+        // grant token_a to pid 1, grant token_b to pid 2; revoke from
+        // pid 1; pid 2 unaffected; unknown pid returns empty slice.
+        let key = [0x11u8; 32];
+        let token_a = capability::grant_capability(
+            5001, 100, 1,
+            capability::Resource::Channel(1),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        let token_b = capability::grant_capability(
+            5002, 100, 2,
+            capability::Resource::Channel(2),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+
+        let mut reg = CapabilityRegistry::new();
+
+        // Unknown pid → empty slice (no panic, no allocation).
+        assert!(reg.get_process_capabilities(999).is_empty());
+
+        reg.grant_to_process(1, &token_a);
+        reg.grant_to_process(2, &token_b);
+
+        // Each pid sees exactly its own token.
+        assert_eq!(reg.get_process_capabilities(1), &[token_a.id]);
+        assert_eq!(reg.get_process_capabilities(2), &[token_b.id]);
+
+        // Revoke token_a from pid 1 — returns true (something was removed).
+        let removed = reg.revoke_from_process(1, token_a.id);
+        assert!(removed, "revoke of held token must report true");
+        assert!(
+            reg.get_process_capabilities(1).is_empty(),
+            "pid 1 must have no tokens after revoke"
+        );
+        // pid 2 unaffected.
+        assert_eq!(
+            reg.get_process_capabilities(2), &[token_b.id],
+            "pid 2 must be unaffected by pid 1's revoke"
+        );
+
+        // Re-revoking from pid 1 returns false (nothing left to remove).
+        let removed_again = reg.revoke_from_process(1, token_a.id);
+        assert!(!removed_again, "re-revoke must report false");
+
+        // Revoking a token the pid never held returns false.
+        let stranger = reg.revoke_from_process(2, token_a.id);
+        assert!(!stranger, "pid 2 never held token_a; must report false");
+        assert_eq!(reg.get_process_capabilities(2), &[token_b.id]);
+    }
+
+    #[test]
+    fn test_capability_registry_alias_and_multi_grant() {
+        // A pid may hold multiple distinct tokens; grant_to_process
+        // appends (does not de-dup); revoke_from_process scrubs all
+        // aliases of a single id.
+        let key = [0x22u8; 32];
+        let t1 = capability::grant_capability(
+            6001, 0, 7,
+            capability::Resource::Channel(1),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        let t2 = capability::grant_capability(
+            6002, 0, 7,
+            capability::Resource::Channel(2),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+
+        let mut reg = CapabilityRegistry::new();
+        reg.grant_to_process(7, &t1);
+        reg.grant_to_process(7, &t2);
+        // Grant t1 twice — alias. Allowed; revoke scrubs both.
+        reg.grant_to_process(7, &t1);
+
+        let held = reg.get_process_capabilities(7);
+        assert_eq!(held.len(), 3);
+        assert_eq!(held[0], t1.id);
+        assert_eq!(held[1], t2.id);
+        assert_eq!(held[2], t1.id);
+
+        // Revoke t1 — both aliases must vanish, t2 stays.
+        reg.revoke_from_process(7, t1.id);
+        let held_after = reg.get_process_capabilities(7);
+        assert_eq!(held_after, &[t2.id]);
+    }
+
+    #[test]
+    fn test_revoke_propagation_plus_registry_sweep() {
+        // Integration: revoke a parent token, propagate to children in
+        // the CapabilitySet, then sweep the registry so every affected
+        // pid's held-set is scrubbed. This is the kernel-on-exit flow.
+        let key = [0x33u8; 32];
+        let mut set = capability::CapabilitySet::new();
+        let mut reg = CapabilityRegistry::new();
+
+        // pid 1 grants to pid 2 (root A). pid 2 delegates to pid 3 (B).
+        // pid 3 delegates to pid 4 (C).
+        let a = capability::grant_capability(
+            7001, 1, 2,
+            capability::Resource::Channel(1),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0, 1_000, 10_000, &key,
+        );
+        set.grant(a.clone());
+        reg.grant_to_process(2, &a);
+
+        let b = set.delegate(
+            a.id, 3,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            &key,
+        ).expect("delegate A→B");
+        reg.grant_to_process(3, &b);
+
+        let c = set.delegate(
+            b.id, 4,
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            &key,
+        ).expect("delegate B→C");
+        reg.grant_to_process(4, &c);
+
+        // Revoke A; propagation pulls in B and C.
+        let revoked = set.revoke_with_propagation(a.id);
+        assert_eq!(revoked.len(), 3);
+
+        // Sweep the registry: for each revoked token id, scrub it from
+        // every pid that held it. (In a real kernel this would be a
+        // single pass over the registry; here we iterate the revoked
+        // list and call revoke_from_process for each known holder.)
+        for tid in &revoked {
+            // We know a→pid2, b→pid3, c→pid4 from the grants above.
+            reg.revoke_from_process(2, *tid);
+            reg.revoke_from_process(3, *tid);
+            reg.revoke_from_process(4, *tid);
+        }
+
+        // Every affected pid's held-set is now empty.
+        assert!(reg.get_process_capabilities(2).is_empty());
+        assert!(reg.get_process_capabilities(3).is_empty());
+        assert!(reg.get_process_capabilities(4).is_empty());
+
+        // And the set itself rejects all three tokens at verify-time.
+        assert!(!set.verify(&a, 1_500));
+        assert!(!set.verify(&b, 1_500));
+        assert!(!set.verify(&c, 1_500));
     }
 }
