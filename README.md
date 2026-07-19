@@ -67,6 +67,8 @@ compile-time type check that runs at SCG construction time, before codegen.
 
 ## The VWK Kernel
 
+> **Status (as of Wave 57):** The VWK kernel has been refined through 57 waves of work. Language-level cascade limitations are resolved (string literals, struct literals, State-return, array scaling, function pointers). Kernel subsystems have real implementations (VMM translate, CFS scheduler, COW fork refcount, ELF parser, syscall dispatch via __call_indirect1, signal delivery, real SHA-256 compression, AES SubBytes+ShiftRows, VFS ops dispatch, TCP 10-state machine, DNS/HTTP round-trip). Shell has 12 built-ins with tab completion, pipes, redirection, color. Bare-metal boot.S (GDT/IDT/paging/long-mode) is written. kernel_smoke.sh passes. All kernel modules compile with IVE: Pass.
+
 VUMA now hosts a kernel written in its own PMT syntax: the **VWK** (Vuma Womb
 Kernel), living under `womb/kernel/`. The kernel is **PMT-only**: there is no
 pointer syntax, no `--pmt` flag, no escape hatch (kernel subtree only; stdlib crypto/net use legacy pointer syntax). Every kernel module is a
