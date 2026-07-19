@@ -216,6 +216,23 @@ layout FileTable = {
 // one page) when wiring sys_read / sys_write to userspace.
 layout ByteBuf = { data: [u8; 256] }
 
+// InodeTable: re-declared minimal subset of K5a's InodeTable (inode.vuma)
+// for K5f's vfs_stat + vfs_lseek SEEK_END. Only the fields K5f needs:
+// inos (u64 per slot × 64 = 512 bytes), modes (u32 per slot × 64 = 256
+// bytes), sizes (u64 per slot × 64 = 512 bytes), count. K6 will re-
+// declare the FULL InodeTable (with uids, gids, blocks, atimes, mtimes,
+// ops, privates) when wiring sys_stat / sys_lseek. VUMA has no import,
+// so this file re-declares the layout byte-identically to inode.vuma's
+// subset — the pack/unpack accessors below are byte-identical to K5a's
+// inode_get_ino / inode_set_ino / inode_get_mode / inode_set_mode /
+// inode_get_size / inode_set_size.
+layout InodeTable = {
+    inos: [u8; 512],
+    modes: [u8; 256],
+    sizes: [u8; 512],
+    count: u32,
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // u8 field accessors (used) — direct array index, no pack/unpack.
 // ────────────────────────────────────────────────────────────────────────────
@@ -297,6 +314,94 @@ fn file_set_pos(ft: State<FileTable>, idx: u32, val: u64) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Inode pack/unpack helpers (re-declared from K5a's inode.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// 8-byte LE pack/unpack for u64 fields (inos, sizes); 4-byte LE pack/
+// unpack for u32 fields (modes). Byte-identical pattern to K5a's
+// inode_get_ino / inode_set_ino / inode_get_mode / inode_set_mode /
+// inode_get_size / inode_set_size (inode.vuma) and to the file_get_*/
+// file_set_* helpers above. Used by vfs_stat (to fill Stat from the
+// inode) and vfs_lseek SEEK_END (to read inode.size).
+
+// Read the u64 `ino` field of Inode slot `idx` from InodeTable.inos.
+fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.inos[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `ino` field of Inode slot `idx` into InodeTable.inos.
+fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.inos[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u32 `mode` field of Inode slot `idx` from InodeTable.modes.
+fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.modes[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u32 `mode` field of Inode slot `idx` into InodeTable.modes.
+fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+    let off = idx * 4;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.modes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Read the u64 `size` field of Inode slot `idx` from InodeTable.sizes.
+fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
+    let off = idx * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.sizes[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `size` field of Inode slot `idx` into InodeTable.sizes.
+fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
+    let off = idx * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (val >> sh) & 255;
+        tbl.sizes[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // File slot lifecycle (file_alloc / file_free).
 // ────────────────────────────────────────────────────────────────────────────
 // Byte-identical in spirit to K5a's file_alloc / file_free (file.vuma)
@@ -365,10 +470,14 @@ fn vfs_open(ft: State<FileTable>, dentry_idx: u64, flags: u32) -> u32 {
 // + the function signature that K6 will rely on.
 fn vfs_read(ft: State<FileTable>, fd: u32, buf: State<ByteBuf>, count: u64) -> i64 {
     if file_get_used(ft, fd) == 0 {
-        return 9;  // -EBADF
+        return 0 - 9;  // -EBADF (negative i64)
     }
-    // Stub: return 0 (no data read).
-    return 0;
+    // Stub: return count (pretend all bytes read). The real read path
+    // requires the tmpfs (K5c) / initramfs (K5d) integration that K6
+    // will wire in (sys_read will dispatch to tmpfs_read / initramfs_
+    // read). Returning count (instead of 0) ensures valid fds don't
+    // look like EOF until the real read path is hooked up.
+    return count as i64;
 }
 
 // vfs_write: write up to `count` bytes from `buf` to open file `fd`.
@@ -379,9 +488,11 @@ fn vfs_read(ft: State<FileTable>, fd: u32, buf: State<ByteBuf>, count: u64) -> i
 // the write succeeded) — same caveat as vfs_read.
 fn vfs_write(ft: State<FileTable>, fd: u32, buf: State<ByteBuf>, count: u64) -> i64 {
     if file_get_used(ft, fd) == 0 {
-        return 9;  // -EBADF
+        return 0 - 9;  // -EBADF (negative i64)
     }
-    // Stub: return count (pretend we wrote it).
+    // Stub: return count (pretend we wrote it). The real write path
+    // requires the tmpfs (K5c) / initramfs (K5d) integration that K6
+    // will wire in (sys_write will dispatch to tmpfs_write).
     return count as i64;
 }
 
@@ -390,7 +501,7 @@ fn vfs_write(ft: State<FileTable>, fd: u32, buf: State<ByteBuf>, count: u64) -> 
 // open file.
 fn vfs_close(ft: State<FileTable>, fd: u32) -> i64 {
     if file_get_used(ft, fd) == 0 {
-        return 9;  // -EBADF
+        return 0 - 9;  // -EBADF (negative i64)
     }
     file_free(ft, fd);
     return 0;
@@ -456,9 +567,9 @@ transform vfs_close_transform(ft: State<FileTable>, fd: u32) -> State<FileTable>
 //                           InodeTable, which K6 will wire in)
 // Returns the new file position as i64, or 9 (= -EBADF as i64) if `fd`
 // is not a valid open file.
-fn vfs_lseek(ft: State<FileTable>, fd: u32, offset: u64, whence: u32) -> i64 {
+fn vfs_lseek(ft: State<FileTable>, fd: u32, offset: u64, whence: u32, itbl: State<InodeTable>) -> i64 {
     if file_get_used(ft, fd) == 0 {
-        return 9;  // -EBADF
+        return 0 - 9;  // -EBADF (negative i64)
     }
     if whence == 0 {  // SEEK_SET
         file_set_pos(ft, fd, offset);
@@ -466,12 +577,13 @@ fn vfs_lseek(ft: State<FileTable>, fd: u32, offset: u64, whence: u32) -> i64 {
         if whence == 1 {  // SEEK_CUR
             let cur = file_get_pos(ft, fd);
             file_set_pos(ft, fd, cur + offset);
+        } else {
+            if whence == 2 {  // SEEK_END: pos = inode.size + offset
+                let ino_idx = file_get_dentry(ft, fd) as u32;
+                let sz = inode_get_size(itbl, ino_idx);
+                file_set_pos(ft, fd, sz + offset);
+            }
         }
-        // SEEK_END (whence == 2) not implemented — would need inode
-        // size from the InodeTable. K6 will wire this when sys_lseek
-        // is added (the real implementation will look up the inode
-        // via file_get_dentry → DentryTable.inodes → InodeTable.sizes
-        // and set pos = inode.size + offset).
     }
     return file_get_pos(ft, fd) as i64;
 }
@@ -481,15 +593,21 @@ fn vfs_lseek(ft: State<FileTable>, fd: u32, offset: u64, whence: u32) -> i64 {
 // path requires the InodeTable integration from K5a + K5c — K6 will
 // wire this when sys_stat / sys_fstat / sys_lstat are added). Returns
 // 0 on success, 9 (= -EBADF as i64) if `fd` is not a valid open file.
-fn vfs_stat(ft: State<FileTable>, fd: u32, st: State<Stat>) -> i64 {
+fn vfs_stat(ft: State<FileTable>, fd: u32, st: State<Stat>, itbl: State<InodeTable>) -> i64 {
     if file_get_used(ft, fd) == 0 {
-        return 9;  // -EBADF
+        return 0 - 9;  // -EBADF (negative i64)
     }
-    // Stub: zero all Stat fields (real stat would fill from InodeTable
-    // via file_get_dentry → DentryTable.inodes[dentry] → InodeTable).
-    st.ino = 0;
-    st.mode = 0;
-    st.size = 0;
+    // Fill Stat from the InodeTable. In the simplified K5f model, the
+    // File's `dentry` field holds the inode index directly (no
+    // DentryTable indirection — K6 will wire the full lookup via
+    // file_get_dentry → DentryTable.inodes[dentry] → InodeTable when
+    // sys_stat is added). st.blocks is left at 0 (K5a's InodeTable
+    // subset here doesn't track blocks; K6 will compute
+    // blocks = (size + 511) / 512).
+    let ino_idx = file_get_dentry(ft, fd) as u32;
+    st.ino = inode_get_ino(itbl, ino_idx);
+    st.mode = inode_get_mode(itbl, ino_idx);
+    st.size = inode_get_size(itbl, ino_idx);
     st.blocks = 0;
     return 0;
 }
@@ -531,6 +649,21 @@ fn main() -> i32 {
         file_set_used(ft, i, 0);
         i = i + 1;
     }
+    // Create + init InodeTable for vfs_stat + vfs_lseek SEEK_END.
+    let itbl = state_new(InodeTable);
+    itbl.count = 0;
+    let j = 0;
+    while j < 64 {
+        inode_set_ino(itbl, j, 0);
+        j = j + 1;
+    }
+    // Populate inode slot 5 (the dentry/inode index used by vfs_open
+    // below): ino=6, mode=33188 (S_IFREG | 0o644 = 32768 + 420),
+    // size=1024 (1 KB).
+    inode_set_ino(itbl, 5, 6);
+    inode_set_mode(itbl, 5, 33188);
+    inode_set_size(itbl, 5, 1024);
+    itbl.count = 1;
     // Open a file (dentry 5).
     let fd = vfs_open(ft, 5, 0);
     if fd != 0 { return 1; }
@@ -539,16 +672,26 @@ fn main() -> i32 {
     let buf = state_new(ByteBuf);
     let ret = vfs_write(ft, fd, buf, 100);
     if ret != 100 { return 3; }
-    // Seek.
-    let pos = vfs_lseek(ft, fd, 50, 0);
+    // Seek SEEK_SET to 50.
+    let pos = vfs_lseek(ft, fd, 50, 0, itbl);
     if pos != 50 { return 4; }
+    // Seek SEEK_END to 0 → pos = inode.size + 0 = 1024.
+    let pos2 = vfs_lseek(ft, fd, 0, 2, itbl);
+    if pos2 != 1024 { return 12; }
+    // Stat the file → st.ino=6, st.mode=33188, st.size=1024.
+    let st = state_new(Stat);
+    let ret4 = vfs_stat(ft, fd, st, itbl);
+    if ret4 != 0 { return 13; }
+    if st.ino != 6 { return 14; }
+    if st.mode != 33188 { return 15; }
+    if st.size != 1024 { return 16; }
     // Close it (using the existing fn vfs_close — backward compat).
     let ret2 = vfs_close(ft, fd);
     if ret2 != 0 { return 5; }
     if ft.count != 0 { return 6; }
-    // Read from closed fd → -EBADF.
+    // Read from closed fd → -EBADF (0 - 9).
     let ret3 = vfs_read(ft, fd, buf, 10);
-    if ret3 != 9 { return 7; }  // -EBADF
+    if ret3 != 0 - 9 { return 7; }  // -EBADF
 
     // ── Fix 5b: vfs_close_transform (the linear-ownership variant) ──────
     // Open another file (dentry 6) — should get fd=0 again (slot 0 was
