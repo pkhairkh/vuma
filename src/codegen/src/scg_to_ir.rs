@@ -4390,7 +4390,19 @@ impl IRBuilder {
                 // For f64, store the full 64-bit f64 bits.
                 Ok(IRValue::Immediate(f.to_bits() as i64))
             }
-            ScgExpr::Label(name) => Ok(IRValue::Label(name.clone())),
+            ScgExpr::Label(name) => {
+                // Wave 5: Emit a GetAddress IR instruction to load the symbol's
+                // address into a register, instead of returning IRValue::Label
+                // (which load_value can't handle). GetAddress is lowered by the
+                // backend to a mov/lea + relocation, patched by encode_program.
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::anonymous(dst_vreg));
+                ir_func.current_block().push(IRInstruction::GetAddress {
+                    dst: IRValue::Register(dst_vreg),
+                    name: name.clone(),
+                });
+                Ok(IRValue::Register(dst_vreg))
+            }
             ScgExpr::Load { addr } => {
                 let addr_val = self.resolve_expr(addr, names, ir_func)?;
                 let dst_vreg = self.alloc_vreg();
