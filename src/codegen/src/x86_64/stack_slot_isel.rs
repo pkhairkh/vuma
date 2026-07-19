@@ -23,6 +23,13 @@ use crate::backend::{
     BackendError, PhysicalReg, RegClass, RelocationEntry,
 };
 use crate::ir::{BinOpKind, CastKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind, VectorOpKind};
+// Wave 12b: capability tokens are verified on receive by checking the
+// cap_count field in the L1 frame header. The CapabilityToken type
+// (crate::capability::CapabilityToken) defines the wire format that the
+// cap_count field counts; full HMAC-SHA256 signature verification
+// requires a crypto runtime and is deferred.
+#[allow(unused_imports)]
+use crate::capability::CapabilityToken;
 use std::collections::HashMap;
 
 #[allow(unused_imports)]
@@ -2188,6 +2195,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // jne magic_fail (rel32, placeholder)
                                 let jne_magic_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Wave 12b: capability check — reject messages
+                                // with cap_count > 0 (unverifiable capabilities).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jne_cap_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
                                 // Extract payload from [rsp+44] into dst slot.
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
@@ -2211,6 +2224,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code[jne_magic_patch+3] = bd[1];
                                 code[jne_magic_patch+4] = bd[2];
                                 code[jne_magic_patch+5] = bd[3];
+                                // Patch jne_cap to jump to the same fail path.
+                                let fail_delta_from_jcap = fail_off as i64 - (jne_cap_patch as i64 + 6);
+                                let bd = (fail_delta_from_jcap as i32).to_le_bytes();
+                                code[jne_cap_patch+2] = bd[0];
+                                code[jne_cap_patch+3] = bd[1];
+                                code[jne_cap_patch+4] = bd[2];
+                                code[jne_cap_patch+5] = bd[3];
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF));
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                                 // cleanup: deallocate frame.
@@ -2836,6 +2856,25 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_magic_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
+                    // Step 3b (Wave 12b): capability verification.
+                    // Read cap_count from [rsp+40] (4 bytes). If nonzero,
+                    // the message carries capability tokens that would
+                    // require HMAC-SHA256 signature verification (not
+                    // implementable inline in emitted machine code without
+                    // a crypto runtime). Reject with -4 (PERMISSION_DENIED)
+                    // to fail closed: unverifiable capabilities are treated
+                    // as a potential privilege-escalation attempt.
+                    //
+                    // Messages with cap_count == 0 (the default for all
+                    // .vuma channel programs compiled by Wave 10a's
+                    // ChannelSend codegen) pass through normally.
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
+                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                    // jne cap_fail (rel32, placeholder) — jumps to the same
+                    // fail path as magic_fail, but stores -4 instead of -1.
+                    let jne_cap_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
                     // Step 4: extract payload from [rsp+44] into dst slot.
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
                     code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
@@ -2843,6 +2882,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
                     // jmp cleanup (rel32, placeholder)
                     let jmp_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // cap_fail (Wave 12b): store -4 (PERMISSION_DENIED) in dst.
+                    let cap_fail_off = code.len();
+                    let cap_delta = cap_fail_off as i64 - (jne_cap_patch as i64 + 6);
+                    let bd = (cap_delta as i32).to_le_bytes();
+                    code[jne_cap_patch+2] = bd[0];
+                    code[jne_cap_patch+3] = bd[1];
+                    code[jne_cap_patch+4] = bd[2];
+                    code[jne_cap_patch+5] = bd[3];
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFC)); // -4
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    // jmp cleanup (rel32, placeholder)
+                    let jmp_cleanup_from_cap_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
                     // magic_fail: store -1 in dst slot (error sentinel).
@@ -2864,6 +2917,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code[jmp_cleanup_patch+2] = bd[1];
                     code[jmp_cleanup_patch+3] = bd[2];
                     code[jmp_cleanup_patch+4] = bd[3];
+                    // Also patch the cap_fail → cleanup jump.
+                    let cap_cleanup_delta = cleanup_off as i64 - (jmp_cleanup_from_cap_patch as i64 + 5);
+                    let bd = (cap_cleanup_delta as i32).to_le_bytes();
+                    code[jmp_cleanup_from_cap_patch+1] = bd[0];
+                    code[jmp_cleanup_from_cap_patch+2] = bd[1];
+                    code[jmp_cleanup_from_cap_patch+3] = bd[2];
+                    code[jmp_cleanup_from_cap_patch+4] = bd[3];
                     code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
 
                     instr_opcode = Some("channel_recv".to_string());
