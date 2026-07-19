@@ -295,6 +295,13 @@ extern "C" {
     // K11 stub: ecall with the SBI send_ipi extension ID, passing the
     // physical address of the hart mask as the argument.
     fn sbi_send_ipi(cpu_mask: u64);
+    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // at `ptr` with `arg` in RDI (SysV AMD64). Used by ipi_dispatch to
+    // invoke the per-vector IPI handler. Same stub category as
+    // write/read/exit — NOT a C library function. Real asm body
+    // registered in src/codegen/src/x86_64/mod.rs::build_runtime_
+    // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
+    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -438,34 +445,44 @@ fn ipi_broadcast(vector: u32) {
 // ipi_dispatch: dispatch an IPI to its registered handler. Called from
 // the trap handler (K3a's trap_trampoline.vuma / K3b's riscv64
 // equivalent) when an IPI is received. Looks up the handler for
-// `vector` via ipi_get_handler; if non-zero, would call it (in a real
-// kernel). In VUMA hosted mode, the call is a stub — VUMA has no
-// fn-pointer call (see "Why no fn-pointer call in dispatch?" in the
-// file header).
+// `vector` via ipi_get_handler; if non-zero, invokes it through the
+// Wave 5 __call_indirect1 runtime stub — VUMA has no first-class fn-
+// pointer type, so indirect dispatch is delegated to the asm trampoline
+// (see "Why no fn-pointer call in dispatch?" in the file header for the
+// rationale, and the extern block above for the stub signature).
 //
 //   tbl:     the IpiTable.
 //   vector:  IPI vector number (0..15) that was received.
 //
 // State<T> params: 1 (tbl). Calls ipi_get_handler (which reads 8 bytes
 // of tbl.handlers). The handler-address check `if handler != 0` is
-// the gate for "should we call the handler?" — in the stub, we just
-// return.
+// the gate for "should we call the handler?". `tbl` is preserved across
+// the __call_indirect1 extern call because it is passed as a regular
+// VUMA-fn borrow, NOT as an extern #[borrow] param (only extern
+// #[borrow] State<T> params are conservatively invalidated).
 //
 // This function is the RECEIVING-CPU side of the IPI. The SENDING
 // side is ipi_send / ipi_broadcast (above). The full IPI round-trip:
 //   CPU A: ipi_send(cpu_b, vector);                    // send
 //   CPU B: <trap handler runs>                          // LAPIC delivers
 //   CPU B: ipi_dispatch(tbl, vector);                   // receive
-//   CPU B: (in a real kernel) handler();                // run
-// In hosted mode the round-trip is stubbed (no real LAPIC, no real
-// trap delivery, no fn-pointer call), but the registration / lookup
-// / dispatch-logic paths are exercised by the self-test.
+//   CPU B: __call_indirect1(handler, vector);           // run
+// In hosted mode the LAPIC write is a stub, but the registration /
+// lookup / dispatch-logic paths are exercised by the self-test, and
+// the indirect-call site is IVE-verified (the compile_dump --verify
+// step runs the IVE state verifiers, not the binary itself).
 fn ipi_dispatch(tbl: State<IpiTable>, vector: u32) {
     if vector >= 16 { return; }
     let handler = ipi_get_handler(tbl, vector);
     if handler != 0 {
-        // In a real kernel: call handler().
-        // VUMA has no fn-pointer call — stub.
+        // Wave 5: invoke the per-vector IPI handler via the indirect-
+        // call trampoline. The handler receives `vector as u64` as its
+        // first SysV AMD64 argument (RDI) — the convention is "IPI
+        // handlers take the vector they were invoked for as their first
+        // argument" so a single handler can serve multiple vectors.
+        // The u64 return is currently discarded (IPI handlers conven-
+        // tionally return void or a status the dispatcher ignores).
+        let handler_ret = __call_indirect1(handler, vector as u64);
         return;
     }
 }

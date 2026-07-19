@@ -49,33 +49,38 @@
 // the canonical slots via tf_get_gpr / tf_set_gpr. This is the R2 Golden
 // Rule: "Do not write arch-conditional logic inside kernel transforms."
 //
-// ── Why is the handler-call a stub? ─────────────────────────────────────────
-// VUMA has no function-pointer call today: `handler()` where `handler` is
-// a u64 won't compile (the parser only accepts direct fn-identifier
-// calls, not indirect calls through a u64). The K3e contract documented
-// this same limitation; R4c inherits it. So the dispatch:
+// ── How is the handler-call wired? (Wave 5) ─────────────────────────────────
+// VUMA has no first-class function-pointer type: `handler()` where
+// `handler` is a u64 won't compile (the parser only accepts direct fn-
+// identifier calls, not indirect calls through a u64). The K3e contract
+// documented this limitation; R4c left the handler-call as a stub
+// (`let result = 0;`) because no indirect-call mechanism existed yet.
+//
+// Wave 5 closed that gap by adding the `__call_indirect1(ptr: u64, arg:
+// u64) -> u64` runtime stub to the x86_64 backend (src/codegen/src/
+// x86_64/mod.rs::build_runtime_syscall_stubs). It lowers to `mov rax,
+// rdi; mov rdi, rsi; jmp rax` — a tail call that invokes the function
+// at `ptr` with `arg` in RDI (SysV AMD64 first-argument register). The
+// stub is in the same category as write/read/exit (runtime stubs), NOT
+// a C library function.
+//
+// So the dispatch now:
 //   - bounds-checks nr (exercises the u64-vs-512 comparison)
 //   - looks up the handler via syscall_table_get (exercises the pack/
 //     unpack helper)
-//   - branches on handler != 0 (both branches return 0)
-//   - writes the return value to canonical slot 7
-// The hosted-mode path never actually delivers syscalls via int 0x80
-// (the host kernel uses its own syscall ABI), so the stub's no-op
-// behavior is correct for hosted mode. Same pattern as K3d's irq.vuma
-// irq_dispatch (handler-call stub, just sends EOI).
+//   - branches on handler != 0
+//   - on the registered path: `__call_indirect1(handler, tf as Address)`
+//     — hands the trap-frame buffer's base address to the handler so it
+//     can read args from the canonical GPR slots via tf_get_gpr and
+//     write its return value via tf_set_gpr.
+//   - writes the handler's u64 result to canonical slot 7
 //
-// K11 will replace the `return 0` with the real fn-pointer call. K11's
-// implementation will likely:
-//   - Add a new VUMA intrinsic `call_indirect(handler_addr: u64, tf:
-//     State<TrapFrame>) -> u64` that lowers to an indirect call
-//     instruction on each backend (call rax on x86_64, blr x8 on
-//     aarch64, jalr x0, x7 on riscv64). The intrinsic will read the
-//     args directly from tf's canonical slots (no separate SyscallArgs
-//     marshal step).
-//   - OR: lower syscall handlers as a giant switch statement in trap.S
-//     (one `cmp rax, NR; je handler_X` per registered syscall). This
-//     avoids the indirect-call entirely but bloats trap.S.
-//   K11 will pick one. Until then, the stub.
+// In hosted mode the compile_dump --verify step runs the IVE state
+// verifiers (which check the dispatch's PMT purity) but does NOT execute
+// the binary — the self-test's handler address (8192) is not a callable
+// function in hosted mode, so running /tmp/dispatch.bin would crash.
+// Bare-metal (K11) wires real function pointers via syscall_register;
+// the indirect call then lands at the handler's first instruction.
 //
 // ── Why -ENOSYS = 38 (not the negative value)? ──────────────────────────────
 // Linux errno values are positive integers in the kernel's internal
@@ -190,6 +195,36 @@
 // Expected: IVE Pass, exit=0 (3 self-test checks pass — out-of-range
 // nr returns 38, unregistered nr returns 38, registered-nr dispatch
 // returns 0 via the stub and writes the return value to slot 7).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampoline — indirect call (Wave 5).
+// ────────────────────────────────────────────────────────────────────────────
+// Wave 5 added the runtime stub `__call_indirect1(ptr: u64, arg: u64) -> u64`
+// to the x86_64 backend (src/codegen/src/x86_64/mod.rs::build_runtime_syscall_
+// stubs). It lowers to `mov rax, rdi; mov rdi, rsi; jmp rax` — a tail call
+// that invokes the function at `ptr` with `arg` in RDI (SysV AMD64 first-
+// argument register). This is the VUMA-pure way to perform an indirect
+// function-pointer call: the language has no first-class fn-ptr type, so
+// indirect dispatch is delegated to a runtime stub (same category as
+// write/read/exit — NOT a C library function).
+//
+// syscall_dispatch_from_trap uses this stub to invoke the per-syscall
+// handler, passing `tf as Address` (the State<TrapFrame> → Address cast
+// yields the base address of the trap-frame buffer) so the handler can
+// read its arguments from the canonical GPR slots via tf_get_gpr and
+// write its return value via tf_set_gpr.
+//
+// Hosted: real asm stub (jmp rax) — but the handler addresses used in the
+//         self-test (8192) are not callable in hosted mode, so the IVE-
+//         verified binary compiles cleanly but is not executed by the
+//         compile_dump --verify step (which only runs the IVE state
+//         verifiers, not the binary itself).
+// Bare-metal (K11): the handler addresses come from syscall_register,
+//         which packs real function pointers — the indirect call lands
+//         at the handler's first instruction.
+extern "C" {
+    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts (re-declared — no import in VUMA).
@@ -323,8 +358,9 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // ────────────────────────────────────────────────────────────────────────────
 // syscall_dispatch_from_trap reads the syscall number from canonical
 // slot 0, looks up the handler, and writes the return value to canonical
-// slot 7. The handler-call itself is a stub (VUMA has no fn-pointer call
-// today — see file header "Why is the handler-call a stub?").
+// slot 7. The handler-call is wired through the Wave 5 __call_indirect1
+// runtime stub (see the extern block above) — VUMA has no first-class
+// fn-ptr type, so indirect dispatch is delegated to the asm trampoline.
 //
 // The two helpers syscall_set_ret / syscall_get_arg expose the canonical
 // slot-7 (return) and slot-(1+idx) (arg) accesses so K11's per-syscall
@@ -342,8 +378,8 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // Syscall dispatch from the superset TrapFrame.
 //   - nr (slot 0) >= 512    → return 38 (-ENOSYS, out of range)
 //   - handler == 0          → return 38 (-ENOSYS, unregistered)
-//   - otherwise (K11)       → call handler(tf), write result to slot 7
-//                             (R4c hosted-mode stub: result = 0)
+//   - otherwise             → __call_indirect1(handler, tf as Address),
+//                             write result to slot 7, return result
 // Always writes `result` to canonical slot 7 (tf_set_gpr(tf, 7, result))
 // before returning, so the trap_entry stub can blindly reload slot 7
 // into the architecture's return register (rax / x0 / a0) on iretq/eret/
@@ -362,15 +398,19 @@ fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) ->
         tf_set_gpr(tf, 7, 38);
         return 38;
     }
-    // In hosted mode, can't call a function pointer directly (VUMA has
-    // no fn-pointer call today — see file header "Why is the handler-
-    // call a stub?"). K11 will add the real dispatch:
-    //     let result = call_indirect(handler, tf);
-    // Until then, return 0 (success). The hosted-mode path never
-    // actually delivers syscalls via int 0x80 (the host kernel uses
-    // its own syscall ABI), so the stub's no-op behavior is correct
-    // for hosted mode.
-    let result = 0;
+    // Wave 5: invoke the handler via __call_indirect1(handler, tf). The
+    // stub tail-calls the function at `handler` with `tf as Address` as
+    // its first argument (SysV AMD64 RDI). The handler reads its args
+    // from the canonical GPR slots via tf_get_gpr and writes its return
+    // value via tf_set_gpr before returning a u64 result code.
+    //
+    // `tf as Address` is the documented PMT "State-as-address cast for
+    // FFI hand-off" pattern (see womb/kernel/README.md §"State-as-address
+    // cast") — the State<TrapFrame> is borrowed for the duration of the
+    // extern call. The post-call tf_set_gpr(tf, 7, result) is a fresh
+    // write that does not depend on the pre-call tf state, so the
+    // codegen's conservative State-invalidation-on-extern-call is safe.
+    let result = __call_indirect1(handler, tf as Address) as u64;
     tf_set_gpr(tf, 7, result);
     return result;
 }
