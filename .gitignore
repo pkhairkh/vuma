@@ -60,3 +60,4 @@ flamegraph.svg
 *.iml
 wasmtime
 a.out
+*.txt
