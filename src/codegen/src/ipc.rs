@@ -850,8 +850,33 @@ pub mod capability {
 }
 
 // ── L3: Memory Windows ───────────────────────────────────────────────
+//
+// A MemoryWindow is the kernel-side record of a shared-memory mapping
+// established between two processes. The mmap itself is performed at
+// runtime by the codegen backend (which emits the appropriate syscalls
+// for the target architecture); this struct is the bookkeeping that
+// travels alongside the IPC message so the receiver can validate the
+// mapping before touching it.
+//
+// Wire format (MEMORY_WINDOW_SIZE bytes, little-endian):
+//   [  0..  8] source_pid      u64
+//   [  8.. 16] target_pid      u64
+//   [ 16.. 24] source_addr     u64
+//   [ 24.. 32] target_addr     u64
+//   [ 32.. 40] size            u64
+//   [ 40.. 48] capability_id   u128 (low 64 bits)
+//   [ 48.. 56] capability_id   u128 (high 64 bits)
+//   [     56 ] read            u8 (0/1)
+//   [     57 ] write           u8 (0/1)
+//   [     58 ] execute         u8 (0/1)
+//   [     59 ] revocable       u8 (0/1)
+//   [     60 ] revoked         u8 (0/1)
+//   [     61 ] linear          u8 (0/1)  — single-use window
+//   [ 62.. 64] reserved        zeros (future expansion)
 
-#[derive(Clone, Debug)]
+pub const MEMORY_WINDOW_SIZE: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryWindow {
     pub source_pid: u64,
     pub target_pid: u64,
@@ -860,10 +885,170 @@ pub struct MemoryWindow {
     pub size: u64,
     pub permissions: capability::MemoryPermissions,
     pub capability_id: u128,
+    /// If false, [`revoke_memory`] will refuse to revoke the window. This
+    /// is set at grant time and is immutable for the lifetime of the
+    /// window — it lets a grantor publish a permanent mapping (e.g. a
+    /// read-only configuration page) that cannot be yanked out from under
+    /// the receiver.
     pub revocable: bool,
+    /// Set to true by [`revoke_memory`]. Once revoked the window is dead:
+    /// [`is_valid`] returns false and the receiver must unmap its local
+    /// view. The kernel/backend is responsible for the actual unmap; this
+    /// flag is the IPC-level signal.
+    pub revoked: bool,
+    /// A linear window is single-use: after one send/recv cycle the
+    /// backend invalidates it automatically. Non-linear windows persist
+    /// across messages until explicitly revoked or the channel closes.
+    pub linear: bool,
+}
+
+impl MemoryWindow {
+    /// Serialise to a fixed-width `MEMORY_WINDOW_SIZE` byte buffer
+    /// (little-endian). Inverse of [`MemoryWindow::decode`].
+    pub fn encode(&self) -> [u8; MEMORY_WINDOW_SIZE] {
+        let mut buf = [0u8; MEMORY_WINDOW_SIZE];
+        buf[0..8].copy_from_slice(&self.source_pid.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.target_pid.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.source_addr.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.target_addr.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.size.to_le_bytes());
+        let cap_lo = (self.capability_id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+        let cap_hi = (self.capability_id >> 64) as u64;
+        buf[40..48].copy_from_slice(&cap_lo.to_le_bytes());
+        buf[48..56].copy_from_slice(&cap_hi.to_le_bytes());
+        buf[56] = if self.permissions.read { 1 } else { 0 };
+        buf[57] = if self.permissions.write { 1 } else { 0 };
+        buf[58] = if self.permissions.execute { 1 } else { 0 };
+        buf[59] = if self.revocable { 1 } else { 0 };
+        buf[60] = if self.revoked { 1 } else { 0 };
+        buf[61] = if self.linear { 1 } else { 0 };
+        // bytes 62..64 left as zero (reserved)
+        buf
+    }
+
+    /// Parse a window from a byte slice. Requires at least
+    /// `MEMORY_WINDOW_SIZE` bytes; extra trailing bytes are ignored so a
+    /// caller can hand in a slice of a larger IPC frame without first
+    /// trimming it. Returns an error string on short buffer.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < MEMORY_WINDOW_SIZE {
+            return Err(format!(
+                "memory window too short: {} < {}",
+                bytes.len(),
+                MEMORY_WINDOW_SIZE
+            ));
+        }
+        let cap_lo = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let cap_hi = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+        let capability_id = (cap_hi as u128) << 64 | (cap_lo as u128);
+        Ok(Self {
+            source_pid: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            target_pid: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            source_addr: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            target_addr: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            size: u64::from_le_bytes(bytes[32..40].try_into().unwrap()),
+            permissions: capability::MemoryPermissions {
+                read: bytes[56] != 0,
+                write: bytes[57] != 0,
+                execute: bytes[58] != 0,
+            },
+            capability_id,
+            revocable: bytes[59] != 0,
+            revoked: bytes[60] != 0,
+            linear: bytes[61] != 0,
+        })
+    }
+}
+
+/// Grant a memory window from `source_pid` to `target_pid`.
+///
+/// This records the mapping in a [`MemoryWindow`] struct and mints a
+/// fresh `capability_id` that the receiver can present back to the kernel
+/// to claim the mapping. The actual mmap/munmap is performed at runtime
+/// by the codegen backend (which emits the target-arch syscalls); this
+/// function is purely the IPC-level bookkeeping that travels with the
+/// message.
+///
+/// The window starts life as: valid (`revoked == false`), revocable
+/// (so the grantor can pull it later), and non-linear (persists across
+/// messages). Callers that want a single-use window can flip `.linear`
+/// after the call.
+pub fn grant_memory(
+    source_pid: u64,
+    target_pid: u64,
+    addr: u64,
+    size: u64,
+    perms: capability::MemoryPermissions,
+) -> MemoryWindow {
+    MemoryWindow {
+        source_pid,
+        target_pid,
+        source_addr: addr,
+        // The target-side virtual address is assigned by the receiver's
+        // own address space; we record 0 here and the backend fills in
+        // the real value after the receiver's mmap succeeds. This keeps
+        // the grant asynchronous: the sender does not need to know where
+        // the mapping will land in the receiver.
+        target_addr: 0,
+        size,
+        permissions: perms,
+        capability_id: rand_u128(),
+        revocable: true,
+        revoked: false,
+        linear: false,
+    }
+}
+
+/// Revoke a previously granted memory window.
+///
+/// Marks the window as revoked so that [`is_valid`] subsequently returns
+/// false. Returns an error if the window was created with `revocable ==
+/// false` (permanent mappings cannot be yanked), or if it is already
+/// revoked (idempotent revoke is a programming error — the caller should
+/// have dropped its reference after the first revoke).
+pub fn revoke_memory(window: &mut MemoryWindow) -> Result<(), IpcError> {
+    if !window.revocable {
+        return Err(IpcError::MemoryWindowPermissionDenied);
+    }
+    if window.revoked {
+        return Err(IpcError::MemoryWindowRevoked);
+    }
+    window.revoked = true;
+    Ok(())
+}
+
+/// True iff the window is still usable: not revoked, and sized non-zero
+/// (a zero-size window is a tombstone the backend leaves behind after
+/// unmapping, so a stale pointer to it must not be treated as live).
+pub fn is_valid(window: &MemoryWindow) -> bool {
+    !window.revoked && window.size > 0
 }
 
 // ── L4: Protocol State Machine ──────────────────────────────────────
+//
+// The channel-level protocol FSM. Each IPC channel carries an instance
+// of this state machine; every inbound message is checked against the
+// current state before it is delivered to the application. This is the
+// L4 layer in the 8-layer stack: it sits below the application and
+// rejects messages that would violate the channel's protocol contract
+// (e.g. a recv arriving while the channel is idle and waiting for a
+// send).
+//
+// Transitions are keyed by `(current_state, type_hash)`. The default
+// table installed by [`new_protocol`] models a request/response channel:
+//
+//   Idle           --send-->    WaitingForSend
+//   WaitingForSend --sent-->    WaitingForRecv
+//   WaitingForRecv --recv-->    Idle
+//   Idle           --recv-->    WaitingForRecv   (receiver may block first)
+//   WaitingForRecv --send-->    WaitingForSend   (pipelined reply)
+//   Idle           --close-->   Closed
+//   WaitingForSend --close-->   Closed
+//   WaitingForRecv --close-->   Closed
+//
+// `type_hash` here is the same FNV-1a 64 value computed by [`type_hash`]
+// for the message's Rust type string, so the FSM keys off the same
+// identifier that already rides in `MessageHeader::type_hash`.
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProtocolState {
@@ -873,29 +1058,114 @@ pub enum ProtocolState {
     Closed,
 }
 
+impl ProtocolState {
+    /// Stable string tag for use in error messages and logging. Keeping
+    /// this hand-written (rather than `{:?}`) decouples the wire/log
+    /// representation from `derive(Debug)` formatting drift.
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            ProtocolState::Idle => "idle",
+            ProtocolState::WaitingForSend => "waiting_for_send",
+            ProtocolState::WaitingForRecv => "waiting_for_recv",
+            ProtocolState::Closed => "closed",
+        }
+    }
+}
+
+/// Errors raised by [`ProtocolStateMachine::check_transition`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProtocolError {
+    /// The current state does not permit a transition on the supplied
+    /// `type_hash`. `expected` is the state the machine was in (and
+    /// would have had to leave), and `got` is the offending type hash.
+    ProtocolViolation {
+        expected: ProtocolState,
+        got: u64,
+    },
+    /// The channel has been closed and accepts no further transitions.
+    /// Distinct from `ProtocolViolation` so a receiver can tear down
+    /// cleanly rather than logging a protocol fault.
+    Closed,
+}
+
+impl std::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProtocolError::ProtocolViolation { expected, got } => write!(
+                f,
+                "protocol violation: state={} does not permit type_hash={}",
+                expected.as_tag(),
+                got
+            ),
+            ProtocolError::Closed => write!(f, "channel closed: no transitions permitted"),
+        }
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
 #[derive(Clone, Debug)]
 pub struct ProtocolStateMachine {
-    pub state: ProtocolState,
+    pub current_state: ProtocolState,
     pub allowed_transitions: HashMap<(ProtocolState, u64), ProtocolState>,
 }
 
 impl ProtocolStateMachine {
-    pub fn new() -> Self {
+    /// Construct a state machine with the default request/response
+    /// transition table (see the module docs above). The machine starts
+    /// in [`ProtocolState::Idle`].
+    pub fn new_protocol() -> Self {
+        let mut allowed = HashMap::new();
+        let send = type_hash("send");
+        let sent = type_hash("sent");
+        let recv = type_hash("recv");
+        let close = type_hash("close");
+        // Forward path: a sender initiates, the receiver acknowledges.
+        allowed.insert((ProtocolState::Idle, send), ProtocolState::WaitingForSend);
+        allowed.insert((ProtocolState::WaitingForSend, sent), ProtocolState::WaitingForRecv);
+        allowed.insert((ProtocolState::WaitingForRecv, recv), ProtocolState::Idle);
+        // Receiver may also block first (idle → recv → wait for a send).
+        allowed.insert((ProtocolState::Idle, recv), ProtocolState::WaitingForRecv);
+        // Pipelined reply: a recv blocked in WaitingForRecv can flip
+        // straight to WaitingForSend when the peer sends.
+        allowed.insert((ProtocolState::WaitingForRecv, send), ProtocolState::WaitingForSend);
+        // Close is permitted from any live state.
+        allowed.insert((ProtocolState::Idle, close), ProtocolState::Closed);
+        allowed.insert((ProtocolState::WaitingForSend, close), ProtocolState::Closed);
+        allowed.insert((ProtocolState::WaitingForRecv, close), ProtocolState::Closed);
         Self {
-            state: ProtocolState::Idle,
-            allowed_transitions: HashMap::new(),
+            current_state: ProtocolState::Idle,
+            allowed_transitions: allowed,
         }
     }
 
-    pub fn check(&mut self, type_hash: u64) -> Result<ProtocolState, String> {
-        let key = (self.state.clone(), type_hash);
+    /// Check whether `type_hash` is a legal transition out of the
+    /// current state. On success, advances the machine to the new state
+    /// and returns it. On failure, leaves the machine in its current
+    /// state and returns an error — this is deliberate so that a
+    /// protocol-violating message does not corrupt the FSM for
+    /// subsequent (legitimate) traffic.
+    pub fn check_transition(&mut self, type_hash: u64) -> Result<ProtocolState, ProtocolError> {
+        if self.current_state == ProtocolState::Closed {
+            return Err(ProtocolError::Closed);
+        }
+        let key = (self.current_state.clone(), type_hash);
         match self.allowed_transitions.get(&key) {
             Some(new_state) => {
-                self.state = new_state.clone();
+                self.current_state = new_state.clone();
                 Ok(new_state.clone())
             }
-            None => Err(format!("protocol violation: state={:?} type_hash={}", self.state, type_hash)),
+            None => Err(ProtocolError::ProtocolViolation {
+                expected: self.current_state.clone(),
+                got: type_hash,
+            }),
         }
+    }
+}
+
+impl Default for ProtocolStateMachine {
+    fn default() -> Self {
+        Self::new_protocol()
     }
 }
 
@@ -1011,7 +1281,7 @@ pub fn checkpoint_state(channels: &[(u64, u64, ProtocolState)]) -> Checkpoint {
 
 // ── L7: Error Encapsulation (fault containment) ──────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IpcError {
     // Framing errors
     BadMagic,
@@ -2512,5 +2782,276 @@ mod tests {
             capability::verify_capability(&decoded.capabilities[1], key, now, None, &required_ro).is_ok(),
             "second recovered capability must verify"
         );
+    }
+
+    // ── W13: MemoryWindow tests ──────────────────────────────────────
+
+    #[test]
+    fn test_memory_window_grant_is_valid_revoke() {
+        // grant → is_valid true → revoke → is_valid false, the canonical
+        // lifecycle the W13 spec calls out. Uses grant_memory so the
+        // capability_id is a real minted value rather than a hand-rolled
+        // zero, and exercises revoke_memory's Result return.
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        };
+        let mut window = grant_memory(100, 200, 0xDEAD_0000, 4096, perms);
+        assert_eq!(window.source_pid, 100);
+        assert_eq!(window.target_pid, 200);
+        assert_eq!(window.source_addr, 0xDEAD_0000);
+        assert_eq!(window.size, 4096);
+        assert!(window.revocable);
+        assert!(!window.revoked);
+        assert!(!window.linear);
+        assert!(is_valid(&window), "freshly granted window must be valid");
+
+        revoke_memory(&mut window).expect("revoke of a revocable window must succeed");
+        assert!(
+            !is_valid(&window),
+            "revoked window must report invalid via is_valid"
+        );
+        assert!(window.revoked, "revoked flag must be set on the struct");
+    }
+
+    #[test]
+    fn test_memory_window_revoke_non_revocable_fails() {
+        // A window with revocable=false is permanent: revoke_memory must
+        // refuse rather than silently no-op. This pins the IpcError
+        // variant the grantor relies on to detect a buggy revoke attempt.
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        let mut window = grant_memory(1, 2, 0x1000, 0x1000, perms);
+        window.revocable = false;
+        let err = revoke_memory(&mut window).expect_err("non-revocable revoke must error");
+        assert_eq!(err, IpcError::MemoryWindowPermissionDenied);
+        assert!(is_valid(&window), "failed revoke must leave window valid");
+    }
+
+    #[test]
+    fn test_memory_window_double_revoke_fails() {
+        // Idempotent revoke is a programming error — the caller should
+        // have dropped its reference after the first revoke. The second
+        // revoke must surface MemoryWindowRevoked so the bug is visible
+        // rather than silently swallowed.
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: true,
+        };
+        let mut window = grant_memory(7, 8, 0, 0x2000, perms);
+        revoke_memory(&mut window).expect("first revoke must succeed");
+        let err = revoke_memory(&mut window).expect_err("second revoke must error");
+        assert_eq!(err, IpcError::MemoryWindowRevoked);
+    }
+
+    #[test]
+    fn test_memory_window_zero_size_is_invalid() {
+        // A zero-size window is a tombstone the backend leaves behind
+        // after unmapping; is_valid must not treat it as live even before
+        // revoke is called.
+        let perms = capability::MemoryPermissions::default();
+        let mut window = grant_memory(1, 2, 0, 0, perms);
+        assert!(!is_valid(&window), "zero-size window must be invalid");
+        // ...and revoke still works on a tombstone (it's revocable by
+        // default), it just doesn't change the is_valid answer.
+        revoke_memory(&mut window).expect("revoke of revocable tombstone must succeed");
+        assert!(!is_valid(&window));
+    }
+
+    #[test]
+    fn test_memory_window_encode_decode_roundtrip() {
+        // Full encode → decode round-trip must preserve every field,
+        // including the u128 capability_id (split across two u64 lanes
+        // on the wire) and all three permission bits.
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: true,
+        };
+        let window = MemoryWindow {
+            source_pid: 0x0123_4567_89AB_CDEF,
+            target_pid: 0xFEDC_BA98_7654_3210,
+            source_addr: 0xCAFE_BABE_0000,
+            target_addr: 0xDEAD_BEEF_0000,
+            size: 0x10000,
+            permissions: perms,
+            capability_id: 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF,
+            revocable: true,
+            revoked: false,
+            linear: true,
+        };
+        let encoded = window.encode();
+        assert_eq!(
+            encoded.len(),
+            MEMORY_WINDOW_SIZE,
+            "encode must produce exactly MEMORY_WINDOW_SIZE bytes"
+        );
+        let decoded = MemoryWindow::decode(&encoded).expect("decode of valid buffer must succeed");
+        assert_eq!(decoded, window, "round-trip must preserve all fields");
+    }
+
+    #[test]
+    fn test_memory_window_decode_preserves_revoked_flag() {
+        // A revoked window serialised by the sender and deserialised by
+        // the receiver must still report revoked=true on the receive
+        // side — otherwise a revoked mapping could be smuggled past
+        // is_valid by re-encoding it.
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        };
+        let mut window = grant_memory(10, 20, 0x4000, 0x2000, perms);
+        revoke_memory(&mut window).expect("revoke must succeed");
+        let encoded = window.encode();
+        let decoded = MemoryWindow::decode(&encoded).expect("decode must succeed");
+        assert!(decoded.revoked, "revoked flag must survive the wire");
+        assert!(!is_valid(&decoded), "decoded revoked window must be invalid");
+    }
+
+    #[test]
+    fn test_memory_window_decode_too_short() {
+        // Defensive: a short buffer must error rather than panic on the
+        // slice indexing inside decode.
+        let short = [0u8; MEMORY_WINDOW_SIZE - 1];
+        let err = MemoryWindow::decode(&short).expect_err("short buffer must error");
+        assert!(err.contains("too short"), "error must mention truncation, got: {}", err);
+    }
+
+    #[test]
+    fn test_memory_window_decode_ignores_trailing_bytes() {
+        // A caller may hand in a slice of a larger IPC frame; decode
+        // must accept the leading MEMORY_WINDOW_SIZE bytes and ignore
+        // the rest.
+        let perms = capability::MemoryPermissions {
+            read: false,
+            write: true,
+            execute: false,
+        };
+        let window = grant_memory(5, 6, 0x100, 0x800, perms);
+        let mut buf = Vec::with_capacity(MEMORY_WINDOW_SIZE + 8);
+        buf.extend_from_slice(&window.encode());
+        buf.extend_from_slice(&[0xFF; 8]); // trailing junk
+        let decoded = MemoryWindow::decode(&buf).expect("trailing bytes must be ignored");
+        assert_eq!(decoded.source_pid, window.source_pid);
+        assert_eq!(decoded.size, window.size);
+        assert_eq!(decoded.capability_id, window.capability_id);
+    }
+
+    // ── W14: ProtocolStateMachine tests ──────────────────────────────
+
+    #[test]
+    fn test_protocol_state_machine_valid_transitions() {
+        // The default request/response FSM: Idle --send--> WaitingForSend
+        // --sent--> WaitingForRecv --recv--> Idle. Each step must return
+        // the new state and advance current_state; a full cycle must
+        // return the machine to Idle.
+        let mut fsm = ProtocolStateMachine::new_protocol();
+        assert_eq!(fsm.current_state, ProtocolState::Idle);
+
+        let s = fsm.check_transition(type_hash("send")).expect("send from Idle must be allowed");
+        assert_eq!(s, ProtocolState::WaitingForSend);
+        assert_eq!(fsm.current_state, ProtocolState::WaitingForSend);
+
+        let s = fsm.check_transition(type_hash("sent")).expect("sent from WaitingForSend must be allowed");
+        assert_eq!(s, ProtocolState::WaitingForRecv);
+        assert_eq!(fsm.current_state, ProtocolState::WaitingForRecv);
+
+        let s = fsm.check_transition(type_hash("recv")).expect("recv from WaitingForRecv must be allowed");
+        assert_eq!(s, ProtocolState::Idle);
+        assert_eq!(fsm.current_state, ProtocolState::Idle);
+    }
+
+    #[test]
+    fn test_protocol_state_machine_invalid_transition_returns_error() {
+        // A recv in Idle (without first having sent) is not in the
+        // default table for the *send* type hash — submitting a 'sent'
+        // type hash while in Idle must yield ProtocolViolation, and the
+        // machine must remain in Idle so the next legitimate message
+        // still works.
+        let mut fsm = ProtocolStateMachine::new_protocol();
+        assert_eq!(fsm.current_state, ProtocolState::Idle);
+
+        let bad_hash = type_hash("sent");
+        let err = fsm
+            .check_transition(bad_hash)
+            .expect_err("sent from Idle must be rejected");
+        assert_eq!(
+            err,
+            ProtocolError::ProtocolViolation {
+                expected: ProtocolState::Idle,
+                got: bad_hash,
+            }
+        );
+        assert_eq!(
+            fsm.current_state,
+            ProtocolState::Idle,
+            "failed transition must not advance the FSM"
+        );
+
+        // The machine is still usable: a legitimate send now must work.
+        let s = fsm.check_transition(type_hash("send")).expect("send from Idle must still work");
+        assert_eq!(s, ProtocolState::WaitingForSend);
+    }
+
+    #[test]
+    fn test_protocol_state_machine_close_from_any_state() {
+        // close is permitted from Idle, WaitingForSend, and
+        // WaitingForRecv — and once Closed, no further transitions
+        // (including another close) are accepted.
+        let mut fsm = ProtocolStateMachine::new_protocol();
+        fsm.check_transition(type_hash("send")).expect("send");
+        fsm.check_transition(type_hash("close"))
+            .expect("close from WaitingForSend must be allowed");
+        assert_eq!(fsm.current_state, ProtocolState::Closed);
+
+        // Any transition out of Closed must yield ProtocolError::Closed,
+        // not ProtocolViolation — the channel is gone, not mis-driven.
+        let err = fsm
+            .check_transition(type_hash("send"))
+            .expect_err("send from Closed must be rejected");
+        assert_eq!(err, ProtocolError::Closed);
+        let err = fsm
+            .check_transition(type_hash("close"))
+            .expect_err("close from Closed must also be rejected");
+        assert_eq!(err, ProtocolError::Closed);
+        assert_eq!(fsm.current_state, ProtocolState::Closed);
+    }
+
+    #[test]
+    fn test_protocol_state_machine_default_impl_matches_new_protocol() {
+        // Default::default() must install the same transition table as
+        // new_protocol() so generic code (e.g. struct fields defaulted
+        // via derive(Default)) gets the real FSM, not an empty one.
+        let a = ProtocolStateMachine::default();
+        let b = ProtocolStateMachine::new_protocol();
+        assert_eq!(a.current_state, b.current_state);
+        assert_eq!(
+            a.allowed_transitions.len(),
+            b.allowed_transitions.len(),
+            "default and new_protocol must install identical tables"
+        );
+    }
+
+    #[test]
+    fn test_protocol_error_display_contains_state_and_hash() {
+        // The Display impl is what ends up in logs; it must mention both
+        // the offending state tag and the type hash so an operator
+        // reading the log can diagnose the violation without a debugger.
+        let err = ProtocolError::ProtocolViolation {
+            expected: ProtocolState::WaitingForRecv,
+            got: 0x1234,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("waiting_for_recv"), "msg must mention state tag: {}", msg);
+        assert!(msg.contains("0x1234") || msg.contains("4660"), "msg must mention type hash: {}", msg);
+
+        let closed = format!("{}", ProtocolError::Closed);
+        assert!(closed.contains("closed"), "Closed msg must mention closed: {}", closed);
     }
 }
