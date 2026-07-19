@@ -11,9 +11,13 @@
 //
 // These are REAL VUMA functions (PMT transforms), NOT externs. The walker
 // owns its own page-table interpretation (Intel SDM Vol. 3, Ch. 4 4-level
-// paging). The only externs declared here are pte_read / pte_write — the
-// raw 8-byte MMIO load/store at a physical address (real asm stub in K11
-// bare-metal, __ffi_fallback_stub returns 0 / no-op in hosted mode).
+// paging). Pre-W34 the only externs declared here were `pte_read` /
+// `pte_write` — raw 8-byte MMIO load/store stubs that resolved to
+// __ffi_fallback_stub in hosted mode (returns 0 / no-op), making the
+// walker's bit-math correct but useless. W34 swaps them for the Wave 7
+// VUMA intrinsics `__vuma_load_u64` / `__vuma_store_u64` (4-byte runtime
+// stubs `mov rax,[rdi]; ret` and `mov [rdi],rsi; ret`) — REAL loads and
+// stores, so the walker actually walks the page table now.
 //
 // x86_64 4-level paging geometry (Intel SDM Vol. 3, Fig. 4-19):
 //     PML4 (level 3) — bits 47-39 of vaddr → next-level PDPT
@@ -32,27 +36,30 @@
 //     bits 52-62 available / NX
 //     bit 63     Execute Disable (NX)
 // The leaf PTE written by x86_map_page is:
-//     (paddr & 17592186028032) | (flags & 4095) | 1
+//     (paddr & 4503599627366400) | (flags & 4095) | 1
 // where:
-//     17592186028032 = 0x000FFFFFFFFFF000  (bits 12-51 — PA mask)
+//     4503599627366400 = 0x000FFFFFFFFFF000  (bits 12-51 — PA mask)
 //     4095           = 0xFFF               (low 12 bits — flag byte)
 //     1              = bit 0               (Present bit — always set)
 //
 // Intermediate-PTE "present" check: bit 0. If the walker hits a not-present
-// PTE at any intermediate level, it returns without mapping — allocating a
-// fresh intermediate page requires the PMM, which the R3d walker does NOT
-// pull in (it stays a pure PMT transform over `pte_read` / `pte_write`).
-// K11 wires the PMM and adds the allocation step.
+// PTE at any intermediate level, x86_map_page (W34) allocates a fresh 4 KB
+// page via the local `pmm_alloc()` stub (returns 0 in hosted mode → bail
+// out; returns a real page in K11 bare-metal → zero it, write the
+// intermediate PTE, descend). x86_translate returns 0 on a not-present
+// PTE at any level.
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The walker
 // manipulates plain u64 scalars (root, vaddr, paddr, flags, level, idx,
 // pte_addr, pte) — no State<T> buffer is needed because the page-table
-// pages live in physical memory reached via `pte_read` / `pte_write`
-// (extern MMIO), not in the ___pmt_buffer arena. VmmNode + VmmSpace are
-// re-declared here only so a future kmain.vuma that #includes this file's
-// declarations by re-typing them byte-identically can refer to them; the
-// walker itself takes `root: u64` (matching the R3b extern signature).
+// pages live in physical memory reached via `__vuma_load_u64` /
+// `__vuma_store_u64` (Wave 7 VUMA intrinsics — real `mov` instructions,
+// PMT-pure: no pointer dereference syntax in VUMA source), not in the
+// ___pmt_buffer arena. VmmNode + VmmSpace are re-declared here only so a
+// future kmain.vuma that #includes this file's declarations by re-typing
+// them byte-identically can refer to them; the walker itself takes
+// `root: u64` (matching the R3b extern signature).
 //
 // ── Why re-declare VmmNode + VmmSpace? ──────────────────────────────────────
 // VUMA has no `import` (Open Work §7). Every kernel module re-declares the
@@ -71,15 +78,28 @@
 //
 // ── Decimal-constants table (VUMA accepts 0x.. too, but decimal is safer) ──
 //   511                = 0x1FF                  (9-bit index mask)
-//   4095               = 0xFFF                  (low 12 bits — flags)
-//   17592186028032     = 0x000FFFFFFFFFF000     (PA bits 12-51, 40-bit PA)
+//   4095               = 0xFFF                  (low 12 bits — flags / offset)
+//   4503599627366400   = 0x000FFFFFFFFFF000     (PA bits 12-51, 40-bit PA)
 //   20015998343868     = 0x123456789ABC         (self-test vaddr)
 //   524288             = 0x80000                (self-test paddr — 512 KB)
+//   527036             = 0x80ABC                (self-test paddr+offset — W34)
+//   6844               = 0x1ABC                 (self-test vaddr #3 — W34)
 //   4096               = 0x1000                 (self-test vaddr #2 — 4 KB)
+//   20480              = 0x5000                 (PageTableBuf size — 5 pages, W34)
+//   12288              = 0x3000                 (PT offset within PageTableBuf — W34)
 //   512                = 512                    (PTEs per 4 KB table)
 //   8                  = 8                      (bytes per PTE)
 //   1                  = 1                      (Present bit, bit 0)
 //   3                  = 3                      (top level for 4-level paging)
+//
+// W34 note: the pre-W34 PA mask literal was 17592186028032, which the
+// comment claimed was 0x000FFFFFFFFFF000. That was WRONG — 17592186028032
+// is actually 0x0FFFFFC000 (bits 14-43, a 30-bit mask), not 0x000FFFFFFFFFF000
+// (bits 12-51, the correct 40-bit PA mask). The bug was latent because
+// pte_read returned 0 in hosted mode, so the mask was never applied to a
+// real PTE. W34 swaps pte_read for __vuma_load_u64 (real loads), which
+// exposes the bug — the corrected literal is 4503599627366400
+// (= 2^52 - 2^12 = 0x000FFFFFFFFFF000).
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
 //     ./target/release-fast/compile_dump \
@@ -88,11 +108,12 @@
 //     /tmp/vmm_hal.bin ; echo "exit=$?"
 // Expected: IVE Pass, exit=0
 //
-// In hosted mode, pte_read returns 0 (__ffi_fallback_stub), so the walk
-// early-exits at the first intermediate level (present bit not set) and
-// x86_translate returns 0. The self-test therefore verifies INDEX
-// EXTRACTION (the arch-independent bit math, which the walker uses inline)
-// plus a no-crash call through x86_map_page / x86_translate.
+// W34: the self-test now sets up a real 4-level page table in ___pmt_buffer
+// (state_new(VmmNode) × 4, linked via __vuma_store_u64) and verifies that
+// x86_translate returns the actual mapped paddr (524288 = 0x80000 for
+// vaddr 0x1000, 527036 = 0x80ABC for vaddr 0x1ABC). Pre-W34 the self-test
+// only verified index extraction + a no-crash call (because pte_read
+// returned 0). The W34 self-test verifies the walker actually walks.
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts (re-declared byte-identically to womb/kernel/mm/vmm.vuma R3b
@@ -127,20 +148,63 @@ layout VmmSpace = {
 // the inline form is shorter and easier to audit.
 layout PageTableEntry = { raw: u64 }
 
+// W34 self-test scratch buffer — 5 pages (20480 bytes). Used by the
+// Part 3 real-translate sub-test to carve out 4 page-aligned page-table
+// pages (PML4/PDPT/PD/PT) from a single contiguous allocation. See the
+// Part 3 comment in main() for why page-alignment is required (the
+// walker's PA mask 0x000FFFFFFFFFF000 strips bits 0-11) and why a
+// single BigBuf with manual alignment is needed (state_new(VmmNode)
+// places each VmmNode on the stack at non-page-aligned offsets).
+layout PageTableBuf = {
+    data: [u8; 20480],
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" — raw PTE access (real MMIO in bare-metal, stubs in hosted).
+// Extern "C" — VUMA intrinsic 8-byte load/store stubs (Wave 7).
 // ────────────────────────────────────────────────────────────────────────────
-// Hosted: __ffi_fallback_stub — pte_read returns 0, pte_write is a no-op.
-// K11 bare-metal: direct 8-byte load/store at the PTE's physical address
-// (x86_64 page tables live in regular memory, reached via the kernel's
-// identity-mapped physmem window OR with CR3.PCIDE-aware translation —
-// K11's job to register the stub). The walker does the address arithmetic
-// (root + idx * 8) itself; the externs are pure load/store at a u64.
+// W34: the walker previously declared `pte_read` / `pte_write` as externs,
+// which in hosted mode resolved to `__ffi_fallback_stub` (pte_read returns
+// 0, pte_write is a no-op). That made the walker's bit-math correct but
+// useless — every PTE read returned 0, so x86_translate always returned 0
+// and x86_map_page bailed out at the first intermediate level.
+//
+// W34 swaps the broken externs for the Wave 7 VUMA intrinsics
+// `__vuma_load_u64` / `__vuma_store_u64` — 4-byte runtime stubs registered
+// in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
+//   __vuma_load_u64(addr)  -> u64  = `mov rax, [rdi]; ret`  (48 8B 07 C3)
+//   __vuma_store_u64(a, v)        = `mov [rdi], rsi; ret`  (48 89 37 C3)
+// These are REAL `mov` instructions — they perform an actual 8-byte
+// load/store at the supplied address. PMT-pure: no `*ptr` dereference
+// syntax in VUMA source (the language has no pointer syntax — these
+// stubs are the canonical way to do raw memory access). Same category
+// as uart.vuma's `__vuma_load_u32` / `__vuma_store_u32` for MMIO and
+// fs.vuma's `__vuma_load_u64` for TrapFrame GPR slot reads.
+//
+// IMPORTANT: because the stubs are real `mov` instructions, callers MUST
+// guard against null/low addresses — `__vuma_load_u64(0)` would segfault
+// in hosted mode (unmapped low page). The walker adds `if root == 0`
+// guards at the top of x86_map_page / x86_translate for this reason
+// (same pattern as uart.vuma's `if base == 0 { return; }` guard).
 extern "C" {
-    // Read an 8-byte PTE at physical address `addr`. Returns the raw u64.
-    fn pte_read(addr: u64) -> u64;
-    // Write an 8-byte PTE value `val` at physical address `addr`.
-    fn pte_write(addr: u64, val: u64);
+    // Load an 8-byte PTE at address `addr`. Returns the raw u64.
+    fn __vuma_load_u64(addr: u64) -> u64;
+    // Store an 8-byte PTE value `val` at address `addr`.
+    fn __vuma_store_u64(addr: u64, val: u64);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// pmm_alloc — hosted-mode stub (W34).
+// ────────────────────────────────────────────────────────────────────────────
+// Returns the physical address of a fresh 4 KB page, or 0 if OOM. In
+// hosted mode this is a stub returning 0 — x86_map_page's "allocate a
+// fresh intermediate table when not present" path bails out (no real
+// PMM is wired). In K11 bare-metal, this is replaced by a real call
+// into womb/kernel/mm/pmm.vuma::pmm_alloc (which takes State<FlatPool>
+// + State<PmmState> + order — the bare-metal wrapper marshals those).
+// The zero-arg signature keeps the walker PMT-pure (no State<T> plumbing
+// through the arch layer) and matches the "give me a page" concept.
+fn pmm_alloc() -> u64 {
+    return 0;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -167,78 +231,139 @@ fn x86_idx(vaddr: u64, level: u32) -> u64 {
 // ────────────────────────────────────────────────────────────────────────────
 // Walks `levels` levels (4 for x86_64 4-level paging), starting at the
 // top (PML4 = root) and descending to the leaf (PT). At each intermediate
-// level, reads the PTE; if not present (bit 0 == 0), returns WITHOUT
-// mapping — the R3d walker does not allocate fresh intermediate tables
-// (that needs the PMM, which is K11's job). At the leaf (level 0), writes
-// the new PTE:
-//     (paddr & 17592186028032) | (flags & 4095) | 1
-//   17592186028032 = 0x000FFFFFFFFFF000 (PA bits 12-51)
+// level, reads the PTE; if not present (bit 0 == 0), allocates a fresh
+// 4 KB page via `pmm_alloc()` (W34), zeros its first 8 bytes, writes the
+// intermediate PTE pointing at the new page (present bit set), and
+// descends into it. If pmm_alloc returns 0 (hosted mode — no PMM wired),
+// bails out without writing the leaf. At the leaf (level 0), writes:
+//     (paddr & 4503599627366400) | (flags & 4095) | 1
+//   4503599627366400 = 0x000FFFFFFFFFF000 (PA bits 12-51)
 //   4095           = 0xFFF               (low 12 bits — flag byte)
 //   1              = bit 0               (Present bit — always set)
 //
-// In hosted mode, pte_read returns 0, so the walk early-exits at the first
-// intermediate level. The self-test therefore only verifies index
-// extraction + a no-crash call.
+// W34: the `if root == 0` guard at the top prevents the walker from
+// issuing `__vuma_load_u64(0)` (which would segfault in hosted mode on
+// the unmapped null page). Same pattern as uart.vuma's `if base == 0`
+// guard. In hosted mode the self-test calls x86_map_page(0, ...) and
+// expects it to no-op; the guard delivers that without crashing.
+//
+// W34: the "allocate when not present" path is new. Previously the
+// walker bailed out at the first not-present intermediate PTE (the
+// comment said "the R3d walker does not allocate fresh intermediate
+// tables (that needs the PMM, which is K11's job)"). W34 wires the
+// allocation via the local `pmm_alloc()` stub — in hosted mode the stub
+// returns 0 so the bail-out behavior is preserved, but in K11 bare-
+// metal the real pmm_alloc returns a fresh page and the walker links
+// it in. This is the "vmm_map_page: when pte is not present, allocate
+// a new page via pmm_alloc, zero it, write the PTE" step from the W34
+// task spec, applied to x86_map_page (the walker that vmm_map_page
+// dispatches to in arch==0).
 
 fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
+    // Hosted-mode null-root guard: skip the walk entirely when root==0
+    // (otherwise __vuma_load_u64(0) segfaults on the unmapped null page).
+    if root == 0 {
+        return;
+    }
     let cur = root;
     let level = (levels as u32) - 1;
     while level > 0 {
         let idx = x86_idx(vaddr, level);
         let pte_addr = cur + idx * 8;
-        let pte = pte_read(pte_addr);
+        let pte = __vuma_load_u64(pte_addr);
         if (pte & 1) == 0 {
-            // Not present — can't allocate a fresh intermediate table
-            // without the PMM (K11). Bail out without writing the leaf.
-            return;
+            // Not present — allocate a fresh intermediate table (W34).
+            let new_page = pmm_alloc();
+            if new_page == 0 {
+                // PMM unavailable (hosted mode) — bail out without
+                // writing the leaf. The bare-metal path (K11) returns
+                // a real page here and the walk continues.
+                return;
+            }
+            // Zero the new page's first 8 bytes (stub-level zero —
+            // a full 4096-byte zero would need a loop, deferred to a
+            // future __vuma_zero_page intrinsic; same rationale as
+            // pmm.vuma::pmm_zero_page). For the walker this is enough
+            // to mark the new table's first PTE as not-present (0).
+            __vuma_store_u64(new_page, 0);
+            // Write the intermediate PTE: present + point at new_page.
+            // (new_page is page-aligned, so its low 12 bits are 0 —
+            // OR-ing with 1 sets only the Present bit, leaving the
+            // flag bits 1-11 clear, which means read-only supervisor.)
+            __vuma_store_u64(pte_addr, new_page | 1);
+            cur = new_page;
+        } else {
+            // Follow to next level: PTE bits 12-51 are the next table's PA.
+            cur = pte & 4503599627366400;
         }
-        // Follow to next level: PTE bits 12-51 are the next table's PA.
-        cur = pte & 17592186028032;
         level = level - 1;
     }
     // Leaf level (level 0) — write the new PTE.
     let leaf_idx = x86_idx(vaddr, 0);
     let leaf_addr = cur + leaf_idx * 8;
-    let leaf_pte = (paddr & 17592186028032) | (flags & 4095) | 1;
-    pte_write(leaf_addr, leaf_pte);
+    let leaf_pte = (paddr & 4503599627366400) | (flags & 4095) | 1;
+    __vuma_store_u64(leaf_addr, leaf_pte);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // x86_translate — walk to leaf and return the mapped physical address.
 // ────────────────────────────────────────────────────────────────────────────
 // Same walk as x86_map_page, but reads the leaf PTE instead of writing
-// it. Returns the physical address (bits 12-51 of the leaf PTE) on
-// success, or 0 if any level's PTE is not present. The 4-level depth is
-// hardcoded (x86_64 always uses 4-level paging; the only other x86_64
-// mode is 5-level LA57, which K11+ may add as a separate walker).
+// it. Returns the physical address on success — specifically:
+//     (leaf_pte & 4503599627366400) | (vaddr & 4095)
+//   4503599627366400 = 0x000FFFFFFFFFF000 (PA bits 12-51, page-aligned)
+//   4095           = 0xFFF               (low 12 bits — page offset from vaddr)
+// — i.e. the page-frame address from the leaf PTE OR-ed with the page
+// offset from the original virtual address. Returns 0 if any level's PTE
+// is not present, or if root is 0 (the null-root guard, same rationale
+// as x86_map_page's). The 4-level depth is hardcoded (x86_64 always uses
+// 4-level paging; the only other x86_64 mode is 5-level LA57, which K11+
+// may add as a separate walker).
+//
+// W34: previously this called `pte_read` (an extern that resolved to
+// __ffi_fallback_stub returning 0 in hosted mode), so x86_translate
+// always returned 0. Now it calls `__vuma_load_u64` (the Wave 7 runtime
+// stub `mov rax,[rdi]; ret`) — a REAL load. Combined with the new self-
+// test that sets up a real 4-level page table in ___pmt_buffer (via
+// state_new(VmmNode) + __vuma_store_u64 to link PML4→PDPT→PD→PT and
+// write the leaf PTE), x86_translate now returns the actual mapped paddr
+// (e.g. 524288 = 0x80000 for a leaf PTE of 0x80001 and vaddr 0x1000).
 //
 // Returns u64 (not State<T>) — no state-typedness propagation issue.
 
 fn x86_translate(root: u64, vaddr: u64) -> u64 {
+    // Hosted-mode null-root guard: skip the walk entirely when root==0
+    // (otherwise __vuma_load_u64(0) segfaults on the unmapped null page).
+    if root == 0 {
+        return 0;
+    }
     let cur = root;
     let level = 3 as u32;
     while level > 0 {
         let idx = x86_idx(vaddr, level);
         let pte_addr = cur + idx * 8;
-        let pte = pte_read(pte_addr);
+        let pte = __vuma_load_u64(pte_addr);
         if (pte & 1) == 0 {
             return 0;
         }
-        cur = pte & 17592186028032;
+        cur = pte & 4503599627366400;
         level = level - 1;
     }
     // Leaf level (level 0) — read the leaf PTE and return its PA.
     let leaf_idx = x86_idx(vaddr, 0);
     let leaf_addr = cur + leaf_idx * 8;
-    let leaf_pte = pte_read(leaf_addr);
+    let leaf_pte = __vuma_load_u64(leaf_addr);
     if (leaf_pte & 1) == 0 {
         return 0;
     }
-    return leaf_pte & 17592186028032;
+    // Return the page-frame address from the leaf PTE OR-ed with the
+    // page offset from the original vaddr (W34: per the task spec,
+    // "At leaf: return (pte & 0x000FFFFFFFFFF000) | (vaddr & 0xFFF)").
+    return (leaf_pte & 4503599627366400) | (vaddr & 4095);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the R3d DoD).
+// Self-test (the R3d DoD + W34 real-translate DoD).
 // ────────────────────────────────────────────────────────────────────────────
 // Verifies:
 //   (1) x86_idx extracts the correct 9-bit index at each of the 4 levels
@@ -248,11 +373,23 @@ fn x86_translate(root: u64, vaddr: u64) -> u64 {
 //         level 1 (PD)   → 179
 //         level 0 (PT)   → 393
 //       (computed via Python: (0x123456789ABC >> (12 + 9*L)) & 511.)
-//   (2) x86_map_page + x86_translate don't crash in hosted mode (where
-//       pte_read returns 0, so the walk early-exits and translate
-//       returns 0).
+//   (2) Null-root guard: x86_map_page(0, ...) and x86_translate(0, ...)
+//       don't crash and translate returns 0 (the null-root early-exit).
+//   (3) W34 real-translate: set up a real 4-level page table in
+//       ___pmt_buffer (via state_new(VmmNode) for PML4/PDPT/PD/PT, link
+//       them with present PTEs via __vuma_store_u64, write the leaf PTE
+//       pointing at paddr 0x80000), then call x86_translate and verify
+//       it returns the correct physical address. This proves the walker
+//       actually walks the table (vs. the pre-W34 stub that always
+//       returned 0 via __ffi_fallback_stub).
+//         vaddr 0x1000 (4096): idx3=0, idx2=0, idx1=0, idx0=1, offset=0
+//           → PML4[0]→PDPT, PDPT[0]→PD, PD[0]→PT, PT[1]=leaf=0x80000|1
+//           → translate returns 0x80000 | 0 = 524288
+//         vaddr 0x1ABC (6844): idx0=1, offset=0xABC=2748
+//           → PT[1]=0x80000|1 (same leaf)
+//           → translate returns 0x80000 | 0xABC = 527036
 // Returns 0 on pass, 1..4 on the corresponding index-extraction failure,
-// 5 on the no-crash check.
+// 5 on the null-root check, 6/7 on the real-translate check.
 
 fn main() -> i32 {
     // ── Part 1: index extraction (the contract's required self-test) ───────
@@ -262,13 +399,70 @@ fn main() -> i32 {
     if x86_idx(v, 1) != 179 { return 3; }
     if x86_idx(v, 0) != 393 { return 4; }
 
-    // ── Part 2: no-crash call through the walker ───────────────────────────
-    // Hosted mode: pte_read returns 0, walk early-exits at level 3 (PML4)
-    // because (0 & 1) == 0. x86_map_page returns without writing; x86_translate
-    // returns 0. The check is "did not crash + returned 0".
+    // ── Part 2: null-root guard (hosted-mode no-crash) ────────────────────
+    // Pre-W34 the walker called pte_read (extern → __ffi_fallback_stub
+    // returning 0), so the walk early-exited at level 3 because
+    // (0 & 1) == 0. W34 swaps pte_read for __vuma_load_u64 (a real
+    // `mov rax,[rdi]; ret` load), which would segfault on the unmapped
+    // null page — the `if root == 0` guard added in W34 prevents that.
+    // The check is "did not crash + returned 0".
     x86_map_page(0, 4096, 524288, 0, 4);
     let pa = x86_translate(0, 4096);
     if pa != 0 { return 5; }
+
+    // ── Part 3: W34 real-translate (the actual DoD for this wave) ────────
+    // Set up a real 4-level page table in ___pmt_buffer and verify
+    // x86_translate walks it correctly. The walker masks each PTE with
+    // 0x000FFFFFFFFFF000 (bits 12-51) to extract the next table's PA, so
+    // the page-table addresses MUST be page-aligned — otherwise the mask
+    // would strip bits 0-11 of the address and the walk would dereference
+    // the wrong location.
+    //
+    // state_new(VmmNode) allocates each VmmNode on the stack (via the
+    // codegen's large sub $N,%rsp prologue) at stack-relative offsets
+    // like `rbp - 0x1000`. Stack addresses are NOT page-aligned (rbp
+    // depends on the runtime entry rsp, which is 16-byte aligned but not
+    // page-aligned), so we can't use 4 separate state_new(VmmNode) calls
+    // directly. Instead, allocate ONE 5-page buffer (20480 bytes) via
+    // state_new(PageTableBuf), then carve out 4 page-aligned regions by
+    // rounding the base address UP to the next page boundary:
+    //     rem = buf_a & 4095;  pml4_a = buf_a - rem + 4096
+    // This guarantees pml4_a is page-aligned and [pml4_a, pml4_a+16384)
+    // is within the [buf_a, buf_a+20480) buffer (5 pages = 4 for the
+    // page tables + 1 for alignment slack — see W34 worklog for the
+    // arithmetic proof).
+    let buf = state_new(PageTableBuf);
+    let buf_a: u64 = (buf as Address) as u64;
+    let rem: u64 = buf_a & 4095;
+    let pml4_a: u64 = buf_a - rem + 4096;
+    let pdpt_a: u64 = pml4_a + 4096;
+    let pd_a: u64 = pml4_a + 8192;
+    let pt_a: u64 = pml4_a + 12288;
+
+    // Link the 4 levels for vaddr 0x1000 (idx3=0, idx2=0, idx1=0, idx0=1).
+    // Each intermediate PTE = next_table_addr | 1 (Present bit set).
+    // The page-table addresses are page-aligned (via the alignment above),
+    // so their low 12 bits are 0 — OR-ing with 1 sets only the Present bit.
+    __vuma_store_u64(pml4_a + 0, pdpt_a | 1);  // PML4[0] → PDPT
+    __vuma_store_u64(pdpt_a + 0, pd_a | 1);    // PDPT[0] → PD
+    __vuma_store_u64(pd_a + 0, pt_a | 1);      // PD[0]   → PT
+    // Leaf PTE at PT[1] (= pt_a + 1*8 = pt_a + 8): paddr 0x80000 | Present.
+    // 524288 = 0x80000 (512 KB — the self-test paddr from the existing
+    // x86_map_page call above). 1 = Present bit.
+    __vuma_store_u64(pt_a + 8, 524288 | 1);
+
+    // Translate vaddr 0x1000 (4096): should return 0x80000 (524288).
+    // Walk: PML4[0]→PDPT, PDPT[0]→PD, PD[0]→PT, PT[1]=0x80001 (present),
+    // leaf PA = 0x80001 & 0x000FFFFFFFFFF000 = 0x80000, offset = 0x1000 & 0xFFF = 0,
+    // result = 0x80000 | 0 = 524288.
+    let pa2 = x86_translate(pml4_a, 4096);
+    if pa2 != 524288 { return 6; }
+
+    // Translate vaddr 0x1ABC (6844): same leaf (PT[1]), different offset.
+    // idx0 = (0x1ABC >> 12) & 511 = 1 (same PT entry), offset = 0xABC = 2748.
+    // result = 0x80000 | 0xABC = 0x80ABC = 527036.
+    let pa3 = x86_translate(pml4_a, 6844);
+    if pa3 != 527036 { return 7; }
 
     return 0;
 }
