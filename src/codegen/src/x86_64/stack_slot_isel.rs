@@ -2174,6 +2174,51 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("channel_close".to_string());
                                 channel_builtin_matched = true;
                             }
+                            "spawn_worker" if args.is_empty() && dst.is_some() => {
+                                // fork() syscall: x86_64 sys_fork=57
+                                // Parent: rax = child PID (>0)
+                                // Child: rax = 0
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 57)); // sys_fork
+                                code.extend(encode_syscall());
+                                // Store fork result (PID or 0) to dst slot
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                instr_opcode = Some("spawn_worker".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            "wait_worker" if args.len() == 1 && dst.is_some() => {
+                                // wait4(pid, &status, 0, NULL): x86_64 sys_wait4=61
+                                // rdi=pid, rsi=&status, rdx=0 (options), r10=NULL
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                // Load pid into RDI
+                                code.extend(load_value(&args[0], Gpr::Rdi));
+                                // Allocate 4 bytes on stack for status
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16)); // 16-byte align
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0)); // rsi = &status
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0)); // options=0
+                                code.extend(encode_mov_reg_imm32(Gpr::R10, 0)); // rusage=NULL
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 61)); // sys_wait4
+                                code.extend(encode_syscall());
+                                // WEXITSTATUS: (status >> 8) & 0xFF
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0)); // load status
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 8)); code.extend(encode_shr_reg_cl(Gpr::Rax)); // shift right 8
+                                code.extend(encode_and_reg_imm32(Gpr::Rax, 0xFF)); // mask
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16)); // cleanup
+                                instr_opcode = Some("wait_worker".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            "kill_worker" if args.len() == 1 => {
+                                // kill(pid, SIGTERM=15): x86_64 sys_kill=62
+                                code.extend(load_value(&args[0], Gpr::Rdi)); // pid
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 15)); // SIGTERM
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 62)); // sys_kill
+                                code.extend(encode_syscall());
+                                instr_opcode = Some("kill_worker".to_string());
+                                channel_builtin_matched = true;
+                            }
                             _ => {}
                         }
                     }
