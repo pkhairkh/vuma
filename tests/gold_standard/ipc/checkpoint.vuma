@@ -1,0 +1,13 @@
+// checkpoint — Wave 19-21: verify checkpoint_save/restore roundtrip.
+//
+// The parent calls checkpoint_save(42424242) to write the value to
+// /tmp/vuma_checkpoint.bin, then calls checkpoint_restore() to read
+// it back. If the round-trip preserves the value, exit 1.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    checkpoint_save(42424242);
+    v = checkpoint_restore();
+    if v == 42424242 { return 1; }
+    return 0;
+}
