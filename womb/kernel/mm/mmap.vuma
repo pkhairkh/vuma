@@ -17,24 +17,28 @@
 //     /tmp/mmap.bin ; echo "exit=$?"
 // Expected exit: 0
 //
-// ── Arch-independence (R3c audit) ───────────────────────────────────────────
+// ── Arch-independence (R3c audit, updated W35) ──────────────────────────────
 // mmap is 100% arch-independent.
 //
-// Verified R3c: zero `if arch == ...`, zero `extern` blocks (the PMM/VMM
-// references below are LOCAL fn stubs, not extern declarations), zero
-// arch-conditional code, zero arch-specific constants. The sys_mmap /
-// sys_munmap region-table bookkeeping is a pure PMT transform over
-// State<RegionTable> — it records (vaddr, paddr, len, flags) tuples as
-// opaque u64 values and delegates physical-page allocation + page-table
-// mapping to the PMM/VMM via the local stubs. Compiles identically for
-// all 19 backends.
+// Verified R3c: zero `if arch == ...`, zero arch-conditional code, zero
+// arch-specific constants. The sys_mmap / sys_munmap region-table
+// bookkeeping is a pure PMT transform over State<RegionTable> — it records
+// (vaddr, paddr, len, flags) tuples as opaque u64 values and delegates
+// physical-page allocation + page-table mapping to the PMM/VMM via the
+// forward-declared VUMA fns (pmm_alloc / vmm_map_page / etc.). Compiles
+// identically for all 19 backends.
 //
-// NOTE: mmap.vuma's local vmm_map / vmm_unmap stubs (lines ~120-140) use
-// the K2b PageTable layout (pre-R3b). They do NOT dispatch on arch —
-// they're hosted-mode no-ops. A future wave may migrate mmap.vuma onto
-// the R3b VmmSpace + vmm_map_page dispatcher (calling vmm_map_page(space,
-// vaddr, paddr, flags) instead of vmm_map(pt, vaddr, paddr, flags)), but
-// R3c explicitly does NOT change mmap.vuma's code (audit + header only).
+// W35: the pre-W35 local no-op stub fns (pmm_alloc / pmm_free / vmm_map /
+// vmm_unmap) have been REMOVED. They are now forward-declared VUMA `fn`
+// signatures (NOT extern "C") matching pmm.vuma / vmm.vuma's real
+// signatures. The `PageTable` layout is replaced by `VmmSpace` (R3b
+// root + levels + arch + _pad), and the call sites use vmm_map_page /
+// vmm_unmap_page (matching vmm.vuma's real function names) instead of
+// vmm_map / vmm_unmap. In hosted mode the forward declarations resolve
+// to empty-body functions (pmm_alloc returns 0; vmm_map_page /
+// vmm_unmap_page are no-ops). In K11 bare-metal mode the linker
+// resolves them against the real pmm.vuma / vmm.vuma compiled objects.
+//
 // The R3b VMM (womb/kernel/mm/vmm.vuma) is the ONLY mm/ file that
 // branches on arch (via VmmSpace.arch → x86/arm/riscv walker dispatch —
 // the HAL boundary); pmm/kmalloc/mmap have ZERO arch-dispatch.
@@ -43,34 +47,35 @@
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All storage
 // lives in ___pmt_buffer-backed State<T> buffers:
 //   - State<RegionTable> — the region table (64 slots, flat byte arrays)
-//   - State<FlatPool>    — re-declared PMM free-list pool (K2a)
-//   - State<PmmState>    — re-declared PMM state (K2a)
-//   - State<PageTable>   — re-declared VMM page-table root (K2b)
+//   - State<FlatPool>    — re-declared PMM free-list pool (pmm.vuma)
+//   - State<PmmState>    — re-declared PMM state (pmm.vuma)
+//   - State<VmmSpace>    — re-declared VMM address space (vmm.vuma, W35)
 // All are allocated via `state_new(...)` by the CALLER (init-style API —
 // see "Why init-style?" in womb/kernel/mm/pmm.vuma for the codegen
 // rationale). sys_mmap / sys_munmap take all four states by reference.
 //
-// ── Why re-declare PMM/VMM as externs? ──────────────────────────────────────
+// ── Why re-declare PMM/VMM as forward declarations? (W35) ───────────────────
 // VUMA has no `import` (Open Work §7). pmm_alloc / pmm_free live in
-// womb/kernel/mm/pmm.vuma (K2a) and vmm_map / vmm_unmap live in
-// womb/kernel/mm/vmm.vuma (K2b). To call them from this file, we
-// re-declare their signatures here as externs. In hosted mode (compile_dump
-// on x86_64), the linker resolves unresolved externs to
-// __ffi_fallback_stub (returns 0), so:
+// womb/kernel/mm/pmm.vuma and vmm_map_page / vmm_unmap_page live in
+// womb/kernel/mm/vmm.vuma. To call them from this file, we re-declare
+// their signatures here as VUMA `fn` forward declarations (NOT extern
+// "C" — per the W35 task spec, pmm_alloc/vmm_map are VUMA functions).
+// In hosted mode (compile_dump on x86_64) the forward declarations
+// have empty bodies, so:
 //   - pmm_alloc returns 0  (no physical page available — paddr = 0)
 //   - pmm_free is a no-op
-//   - vmm_map is a no-op   (no PTE write — but the walk doesn't crash)
-//   - vmm_unmap is a no-op
-// In K11 bare-metal mode, the linker resolves these externs against the
-// real pmm.vuma / vmm.vuma compiled object files, and sys_mmap / sys_munmap
-// work end-to-end with no source changes (the extern block is the ONLY swap
-// point — same pattern as womb/kernel/tty/console.vuma re-declaring its extern
-// `write`, and womb/kernel/mm/vmm.vuma re-declaring pte_read / pte_write).
+//   - vmm_map_page is a no-op   (no PTE write — but the walk doesn't crash)
+//   - vmm_unmap_page is a no-op
+// In K11 bare-metal mode, the linker resolves these against the real
+// pmm.vuma / vmm.vuma compiled object files, and sys_mmap / sys_munmap
+// work end-to-end with no source changes (same pattern as
+// womb/kernel/tty/console.vuma re-declaring its extern `write`).
 //
-// The FlatPool / PmmState / PageTable layouts are re-declared here
-// byte-identically to K2a / K2b so the State<T> marshaling on the extern
-// calls uses the correct field offsets. (A mismatch would silently produce
-// different offsets in different translation units.)
+// The FlatPool / PmmState / VmmSpace layouts are re-declared here
+// byte-identically to pmm.vuma / vmm.vuma so the State<T> marshaling on
+// the forward-declared calls uses the correct field offsets. (A mismatch
+// would silently produce different offsets in different translation
+// units.)
 //
 // ── Why a flat byte-array RegionTable? ──────────────────────────────────────
 // Same codegen limitation as K2a's FlatPool and K2f's SlabState: VUMA's
@@ -102,64 +107,72 @@
 // re-declaring its extern `write`).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Re-declared layouts (byte-identical to K2a's FlatPool/PmmState and K2b's
-// PageTable). The PMM/VMM externs take State<T> params whose field offsets
-// are determined by these layouts — a mismatch would silently produce
-// different offsets in different translation units.
+// Re-declared layouts (byte-identical to pmm.vuma's FlatPool/PmmState and
+// vmm.vuma's VmmSpace). The PMM/VMM forward declarations take State<T>
+// params whose field offsets are determined by these layouts — a mismatch
+// would silently produce different offsets in different translation units.
 // ────────────────────────────────────────────────────────────────────────────
 
-// PMM free-list node pool (K2a). Re-declared for the pmm_alloc / pmm_free
-// extern's State<FlatPool> param.
+// PMM free-list node pool (pmm.vuma). Re-declared for the pmm_alloc /
+// pmm_free forward declarations' State<FlatPool> param. Byte-identical
+// to womb/kernel/mm/pmm.vuma::FlatPool (W35: previously mmap.vuma
+// re-declared a 256-slot K2a-era FlatPool without the free_head field;
+// updated to the real 4096-slot layout so the State<T> marshaling uses
+// the correct field offsets when calling the real pmm.vuma pmm_alloc).
 layout FlatPool = {
-    bases: [u8; 2048],   // 256 * 8 bytes — u64 base per node, LE-packed
-    orders: [u8; 256],   // 256 bytes    — u8 buddy order per node
-    nexts: [u8; 2048],   // 256 * 8 bytes — u64 next-node index per node, LE-packed
-    count: u32,
+    bases: [u8; 32768],  // 4096 * 8 bytes — u64 base address per node, LE-packed
+    orders: [u8; 4096],  // 4096 bytes     — u8 buddy order per node
+    nexts: [u8; 32768],  // 4096 * 8 bytes — u64 next-node index per node, LE-packed
+    count: u32,          // bump-alloc high-water mark (0..4096), never decreases
+    free_head: u32,      // head of recycle list, or 4096 if empty
 }
 
-// PMM state (K2a). Re-declared for the pmm_alloc / pmm_free extern's
-// State<PmmState> param.
+// PMM state (pmm.vuma). Re-declared for the pmm_alloc / pmm_free forward
+// declarations' State<PmmState> param. Byte-identical to
+// womb/kernel/mm/pmm.vuma::PmmState.
 layout PmmState = {
     pool: u64,
-    free_lists: [u8; 88], // 11 * 8 bytes — head FreeNode index per order, 256 = empty
+    free_lists: [u8; 88], // 11 * 8 bytes — head FreeNode index per order, 4096 = empty
     total_pages: u64,
     free_pages: u64,
 }
 
-// VMM page-table root (K2b). Re-declared for the vmm_map / vmm_unmap
-// extern's State<PageTable> param.
-layout PageTable = {
-    root_phys: u64,
-    levels: u8,
+// VMM address space (vmm.vuma). Re-declared for the vmm_map_page /
+// vmm_unmap_page forward declarations' State<VmmSpace> param.
+// Byte-identical to womb/kernel/mm/vmm.vuma::VmmSpace. W35: replaces
+// the pre-R3b `PageTable` layout (root_phys + levels, 9 bytes). The
+// real vmm.vuma::vmm_map_page takes State<VmmSpace> and dispatches on
+// `space.arch` to the per-arch walker (x86/arm/riscv) — this is the
+// R3b HAL boundary.
+layout VmmSpace = {
+    root: u64,            // top-level page-table physical address (PML4/PGD/SATP)
+    levels: u8,           // paging levels (4 for x86_64/aarch64, 3 for riscv64 Sv39)
+    arch: u8,             // arch discriminant (0=x86_64, 1=aarch64, 2=riscv64)
+    _pad: [u8; 6],        // pad to 16 bytes for clean alignment
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// PMM/VMM stubs (hosted mode).
-// In a real kernel, these would be imported from pmm.vuma + vmm.vuma. VUMA
-// has no import yet, so we define local stubs. In hosted mode these return
-// 0 / do nothing. In bare-metal mode (K11) these would be replaced with
-// the real implementations (copied from pmm.vuma + vmm.vuma).
+// PMM/VMM forward declarations (W35).
 // ────────────────────────────────────────────────────────────────────────────
+// VUMA has no `import` (Open Work §7). pmm_alloc / pmm_free live in
+// womb/kernel/mm/pmm.vuma and vmm_map_page / vmm_unmap_page live in
+// womb/kernel/mm/vmm.vuma. To call them from this file we re-declare
+// their signatures here as VUMA `fn` forward declarations (NOT extern
+// "C" — per the W35 task spec, pmm_alloc/vmm_map are VUMA functions).
+//
+// In hosted mode these resolve to empty-body functions (pmm_alloc
+// returns 0; pmm_free / vmm_map_page / vmm_unmap_page are no-ops) —
+// sys_mmap records paddr=0 and returns the vaddr; the region is still
+// usable as a bookkeeping entry. In K11 bare-metal mode the linker
+// resolves these against the real pmm.vuma / vmm.vuma compiled object
+// files, and sys_mmap / sys_munmap work end-to-end with no source
+// changes (same pattern as womb/kernel/tty/console.vuma re-declaring
+// its extern `write`).
 
-fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
-    // Hosted-mode stub: return 0 (no physical memory).
-    return 0;
-}
-
-fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
-    // Hosted-mode stub: no-op.
-    return;
-}
-
-fn vmm_map(pt: State<PageTable>, vaddr: u64, paddr: u64, flags: u64) {
-    // Hosted-mode stub: no-op.
-    return;
-}
-
-fn vmm_unmap(pt: State<PageTable>, vaddr: u64) {
-    // Hosted-mode stub: no-op.
-    return;
-}
+fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
+fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8);
+fn vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64);
+fn vmm_unmap_page(space: State<VmmSpace>, vaddr: u64);
 
 // ────────────────────────────────────────────────────────────────────────────
 // RegionTable layout (flat byte arrays — see "Why a flat byte-array
@@ -364,7 +377,8 @@ fn rt_find_by_vaddr(regions: State<RegionTable>, addr: u64) -> u32 {
 // Adds a region to the table: finds a free slot, allocates a physical page
 // via pmm_alloc (one page per 4096 bytes of `len`, rounded up — for the
 // K2f self-test, len is one page so we allocate exactly one order-0 page),
-// maps it via vmm_map, and records (vaddr, paddr, len, flags) in the slot.
+// maps it via vmm_map_page, and records (vaddr, paddr, len, flags) in the
+// slot.
 //
 // If `addr` is non-zero, it is used as the requested virtual address. If
 // `addr` is zero, the kernel should pick a free virtual address (the K2f
@@ -373,9 +387,14 @@ fn rt_find_by_vaddr(regions: State<RegionTable>, addr: u64) -> u32 {
 // brk/mmap-area allocator).
 //
 // Returns the recorded vaddr on success, or 0 on failure (table full, or
-// pmm_alloc returned 0 — in hosted mode pmm_alloc is a stub returning 0,
-// so sys_mmap records paddr=0 and returns the vaddr; the region is still
-// usable as a bookkeeping entry even without a real physical page).
+// pmm_alloc returned 0 — in hosted mode pmm_alloc is a forward-declared
+// empty-body stub returning 0, so sys_mmap records paddr=0 and returns
+// the vaddr; the region is still usable as a bookkeeping entry even
+// without a real physical page).
+//
+// W35: the `pt: State<PageTable>` param is replaced by `space: State<VmmSpace>`
+// to match the real vmm.vuma::vmm_map_page signature (R3b VmmSpace + arch
+// dispatcher, not the pre-R3b PageTable). vmm_map is renamed vmm_map_page.
 //
 // Init-style API (caller allocates all four states via state_new, passes
 // by reference — see "Why init-style?" in womb/kernel/mm/pmm.vuma).
@@ -384,7 +403,7 @@ transform sys_mmap(
     regions: State<RegionTable>,
     pmm_pool: State<FlatPool>,
     pmm: State<PmmState>,
-    pt: State<PageTable>,
+    space: State<VmmSpace>,
     addr: u64,
     len: u64,
     prot: u64,
@@ -408,11 +427,11 @@ transform sys_mmap(
     // the region to record a page-array base + count.
     let paddr = pmm_alloc(pmm_pool, pmm, 0);
 
-    // Map the virtual page to the physical page. In hosted mode vmm_map
-    // is a no-op (pte_read returns 0 = not present, so the walk bails
-    // early — see womb/kernel/mm/vmm.vuma). The vmm_map call is still
+    // Map the virtual page to the physical page. In hosted mode
+    // vmm_map_page is a forward-declared no-op (the per-arch walker
+    // resolves to __ffi_fallback_stub). The vmm_map_page call is still
     // made so K11 bare-metal mode works without source changes.
-    vmm_map(pt, vaddr, paddr, prot);
+    vmm_map_page(space, vaddr, paddr, prot);
 
     // Record the region.
     rt_set_vaddr(regions, slot, vaddr);
@@ -428,18 +447,22 @@ transform sys_mmap(
 // ────────────────────────────────────────────────────────────────────────────
 // sys_munmap — munmap syscall handler.
 // ────────────────────────────────────────────────────────────────────────────
-// Finds the region with matching vaddr, unmaps it via vmm_unmap, frees
-// the physical page via pmm_free (if paddr != 0 — in hosted mode paddr is
-// 0, so pmm_free is skipped to avoid freeing an invalid address), and
-// clears the slot.
+// Finds the region with matching vaddr, unmaps it via vmm_unmap_page,
+// frees the physical page via pmm_free (if paddr != 0 — in hosted mode
+// paddr is 0, so pmm_free is skipped to avoid freeing an invalid
+// address), and clears the slot.
 //
 // Returns 0 on success, or -1 if the vaddr was not found in any region.
+//
+// W35: the `pt: State<PageTable>` param is replaced by `space: State<VmmSpace>`
+// to match the real vmm.vuma::vmm_unmap_page signature. vmm_unmap is
+// renamed vmm_unmap_page.
 
 fn sys_munmap(
     regions: State<RegionTable>,
     pmm_pool: State<FlatPool>,
     pmm: State<PmmState>,
-    pt: State<PageTable>,
+    space: State<VmmSpace>,
     addr: u64,
 ) -> i64 {
     let slot = rt_find_by_vaddr(regions, addr);
@@ -448,12 +471,13 @@ fn sys_munmap(
         return 0xFFFFFFFFFFFFFFFF;
     }
 
-    // Unmap the virtual page. In hosted mode vmm_unmap is a no-op.
-    vmm_unmap(pt, addr);
+    // Unmap the virtual page. In hosted mode vmm_unmap_page is a
+    // forward-declared no-op.
+    vmm_unmap_page(space, addr);
 
     // Free the physical page (skip if paddr == 0 — hosted mode has no
     // real physical page to free, and pmm_free(0) would be a no-op
-    // anyway since pmm_free is a stub).
+    // anyway since pmm_free is a forward-declared empty-body stub).
     let paddr = rt_get_paddr(regions, slot);
     if paddr != 0 {
         pmm_free(pmm_pool, pmm, paddr, 0);
@@ -479,14 +503,19 @@ fn sys_munmap(
 //   1. Region-table bookkeeping (the contract's specified self-test): add a
 //      region manually via rt_set_*, verify it's read back correctly, clear
 //      it, verify it's cleared.
-//   2. sys_mmap / sys_munmap end-to-end: set up stub PMM/VMM states (via
-//      state_new — in hosted mode pmm_alloc returns 0 and vmm_map/unmap
-//      are no-ops, but the region-table updates are real). Verify:
+//   2. sys_mmap / sys_munmap end-to-end: set up PMM/VMM states (via
+//      state_new — in hosted mode the forward-declared pmm_alloc returns 0
+//      and vmm_map_page / vmm_unmap_page are no-ops, but the region-table
+//      updates are real). Verify:
 //        - sys_mmap adds a region (count goes 0 → 1, slot 0 is used, vaddr
 //          matches).
 //        - A second sys_mmap at a different vaddr goes into slot 1.
 //        - sys_munmap of the first vaddr clears slot 0 (count 2 → 1).
 //        - sys_munmap of a non-existent vaddr returns -1.
+//
+// (Part 2 is documented but not exercised by the current main() body —
+// the K2f DoD only requires part 1. A future wave may add the end-to-end
+// sys_mmap / sys_munmap calls.)
 //
 // Returns 0 on pass.
 
