@@ -3975,6 +3975,7 @@ impl Backend for X86_64Backend {
                 for reloc in &func.relocations {
                     if reloc.reloc_type == R_X86_64_64
                         && !func_offsets.contains_key(&reloc.symbol)
+                        && !program.function_names.contains(&reloc.symbol)
                         && seen.insert(reloc.symbol.clone())
                     {
                         data_symbols.push(reloc.symbol.clone());
@@ -4130,7 +4131,7 @@ impl Backend for X86_64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&resolved.to_le_bytes());
                     }
-                } else if reloc.reloc_type == R_X86_64_64 {
+                } else if reloc.reloc_type == "R_X86_64_64" {
                     // R_X86_64_64 — absolute 64-bit address relocation.
                     // Used by GetAddress to load the address of a data symbol.
                     if abs_offset + 8 > all_code.len() {
@@ -4146,11 +4147,12 @@ impl Backend for X86_64Backend {
                         all_code[abs_offset..abs_offset + 8]
                             .copy_from_slice(&func_addr.to_le_bytes());
                     } else {
-                        vuma_log!(warn, 
+                        vuma_log!(warn,
                             "Unresolved external symbol '{}' in '{}' at 0x{:X} — static ELF has no linker step, call will jump to address 0",
                             reloc.symbol, func.name, reloc.offset
                         );
                     }
+                } else {
                 }
             }
             let func_size: usize = func.blocks.iter()

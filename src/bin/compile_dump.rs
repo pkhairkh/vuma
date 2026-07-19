@@ -119,6 +119,11 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
         opt_level,
         verification_level: VerificationLevel::Normal,
+        // Wave 5: Disable inlining so functions referenced via GetAddress
+        // (function pointers) survive the O2 pipeline. Without this, simple
+        // functions like `fn my_handler(x: u64) -> u64 { return x + 1; }`
+        // get inlined into their callers, and GetAddress can't find them.
+        inline_threshold: 0,
         ..Default::default()
     };
     let _ = run_scg_transforms(&mut scg, &o2_config);
@@ -219,7 +224,18 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         .filter(|ds| ds.kind == vuma_codegen::ir::DataSectionKind::ReadOnly)
         .flat_map(|ds| ds.data.iter().copied())
         .collect();
-    let program = AllocatedProgram { functions: allocated, total_code_size: total_code, total_data_size: 0, rodata_data };
+    // Wave 5: Collect all function names from the AST so the backend can
+    // distinguish function symbols (text) from data symbols (bss).
+    // Functions removed by the O2 optimizer but still referenced via
+    // GetAddress must not be classified as data symbols.
+    let function_names: std::collections::HashSet<String> = ast.items.iter()
+        .filter_map(|item| match item {
+            vuma_parser::ast::Item::FnDef(fd) => Some(fd.name.clone()),
+            vuma_parser::ast::Item::TransformDef(td) => Some(td.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let program = AllocatedProgram { functions: allocated, total_code_size: total_code, total_data_size: 0, rodata_data, function_names };
     let binary = backend.encode_program(&program).map_err(|e| format!("encode: {}", e))?;
     Ok((binary, ive_status))
 }
