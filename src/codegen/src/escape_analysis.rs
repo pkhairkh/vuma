@@ -398,6 +398,10 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(ch, from, to);
                     sub(dst, from, to);
                 }
+                IRInstr::ChannelRecvTimeout { ch, dst, .. } => {
+                    sub(ch, from, to);
+                    sub(dst, from, to);
+                }
                 IRInstr::ChannelClose { ch } => sub(ch, from, to),
             }
         }

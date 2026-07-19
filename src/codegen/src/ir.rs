@@ -1722,6 +1722,26 @@ pub enum IRInstr {
         /// Channel handle (opaque capability).
         ch: IRValue,
     },
+
+    /// Receive a message from a channel with a timeout:
+    /// `dst = channel_recv_timeout ch, timeout_ms`.
+    ///
+    /// Like [`IRInstr::ChannelRecv`] but blocks for at most `timeout_ms`
+    /// milliseconds.  On timeout the destination is written the sentinel
+    /// value `-2` (TIMEOUT); on other errors `-3` is written.  On success
+    /// the 8-byte message is written to `dst`.
+    ///
+    /// **Effects:** performs I/O (may block for up to `timeout_ms`).
+    ChannelRecvTimeout {
+        /// Channel handle (opaque capability).
+        ch: IRValue,
+        /// Destination register (receives the message or error sentinel).
+        dst: IRValue,
+        /// Optional message type (selects backend load width).
+        ty: Option<IRType>,
+        /// Maximum time to block, in milliseconds.  0 means non-blocking.
+        timeout_ms: u64,
+    },
 }
 
 impl IRInstr {
@@ -1759,7 +1779,8 @@ impl IRInstr {
             | IRInstr::AtomicLoad { dst, .. }
             | IRInstr::AtomicCas { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::ChannelOpen { dst, .. }
-            | IRInstr::ChannelRecv { dst, .. } => dst.as_register().into_iter().collect(),
+            | IRInstr::ChannelRecv { dst, .. }
+            | IRInstr::ChannelRecvTimeout { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Store { .. }
             | IRInstr::Free { .. }
             | IRInstr::Ret { .. }
@@ -1860,6 +1881,7 @@ impl IRInstr {
                 r
             }
             IRInstr::ChannelRecv { ch, .. } => ch.as_register().into_iter().collect(),
+            IRInstr::ChannelRecvTimeout { ch, .. } => ch.as_register().into_iter().collect(),
             IRInstr::ChannelClose { ch } => ch.as_register().into_iter().collect(),
         }
     }
@@ -2014,6 +2036,10 @@ impl fmt::Display for IRInstr {
                 None => write!(f, "{} = channel_recv {}", dst, ch),
             },
             IRInstr::ChannelClose { ch } => write!(f, "channel_close {}", ch),
+            IRInstr::ChannelRecvTimeout { ch, dst, ty, timeout_ms } => match ty {
+                Some(t) => write!(f, "{} = channel_recv_timeout {}, {} ({})", dst, ch, timeout_ms, t),
+                None => write!(f, "{} = channel_recv_timeout {}, {}", dst, ch, timeout_ms),
+            },
         }
     }
 }
