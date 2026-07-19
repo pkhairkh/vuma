@@ -302,6 +302,476 @@ impl Default for WorkerConfig {
     }
 }
 
+
+
+// ── L5: Worker Encapsulation (seccomp sandboxing) ────────────────────
+
+/// Allowed syscalls for each trust level.
+pub fn allowed_syscalls(trust: &TrustLevel) -> Vec<u32> {
+    match trust {
+        TrustLevel::Kernel => (0..512).collect(), // all syscalls
+        TrustLevel::Verified => vec![
+            0, 1, 2, 3, 9, 10, 11, 12, 13, 14,  // read, write, open, close, mmap, mprotect, munmap, brk, rt_sigaction, rt_sigprocmask
+            22, 39, 56, 57, 59, 60, 61, 62,  // pipe, getpid, clone, fork, execve, exit, wait4, kill
+            63, 64, 72, 78, 79, 80,  // read, write, getcwd, getdents, getcwd, chdir
+            89, 90, 97,  // readlink, getuid, getrlimit
+            102, 107, 108,  // getuid, geteuid, getgid
+            202, 257,  // futex, openat
+        ],
+        TrustLevel::Untrusted => vec![0, 1, 3, 9, 12, 60],  // read, write, close, mmap, brk, exit
+        TrustLevel::Sandboxed => vec![60],  // exit only
+    }
+}
+
+/// Generate a seccomp BPF filter for the given trust level.
+pub fn generate_seccomp_filter(config: &WorkerConfig) -> Vec<u8> {
+    let allowed = allowed_syscalls(&config.trust_level);
+    let mut filter = Vec::new();
+    // BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr))
+    filter.extend_from_slice(&[0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for nr in &allowed {
+        // BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1)
+        filter.extend_from_slice(&[0x15, 0x00, 0x01, 0x00]);
+        filter.extend_from_slice(&nr.to_le_bytes());
+        // BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+        filter.extend_from_slice(&[0x06, 0x00, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x00]);
+    }
+    // BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL)
+    filter.extend_from_slice(&[0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    filter
+}
+
+// ── L6: State Encapsulation (checkpointing) ──────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct Checkpoint {
+    pub pid: u64,
+    pub channels: Vec<ChannelState>,
+    pub timestamp: u64,
+    pub integrity_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub struct ChannelState {
+    pub channel_id: u64,
+    pub sequence: u64,
+    pub protocol_state: ProtocolState,
+}
+
+/// Create a checkpoint of the current process state.
+/// In a real implementation, this uses copy-on-write to snapshot memory.
+pub fn checkpoint_state(channels: &[(u64, u64, ProtocolState)]) -> Checkpoint {
+    let channel_states: Vec<ChannelState> = channels.iter()
+        .map(|(id, seq, state)| ChannelState {
+            channel_id: *id,
+            sequence: *seq,
+            protocol_state: state.clone(),
+        })
+        .collect();
+    let mut hash_input = Vec::new();
+    for ch in &channel_states {
+        hash_input.extend_from_slice(&ch.channel_id.to_le_bytes());
+        hash_input.extend_from_slice(&ch.sequence.to_le_bytes());
+    }
+    let mut integrity_hash = [0u8; 32];
+    for (i, byte) in hash_input.iter().enumerate() {
+        integrity_hash[i % 32] ^= byte;
+    }
+    Checkpoint {
+        pid: 0, // would be filled by kernel
+        channels: channel_states,
+        timestamp: 0, // would be filled by kernel
+        integrity_hash,
+    }
+}
+
+// ── L7: Error Encapsulation (fault containment) ──────────────────────
+
+#[derive(Clone, Debug)]
+pub enum IpcError {
+    // Framing errors
+    BadMagic,
+    UnsupportedVersion(u16),
+    PayloadTooLarge(u64),
+    CrcMismatch { expected: u32, actual: u32 },
+    TruncatedMessage,
+
+    // Channel errors
+    ChannelClosed,
+    ChannelFull,
+    ChannelEmpty,
+    ChannelTimeout,
+    ChannelNotFound(u64),
+    PermissionDenied,
+
+    // Type errors
+    TypeMismatch { expected: u64, actual: u64 },
+    InvalidMessageType,
+    DeserializationError,
+
+    // Capability errors
+    CapabilityNotFound,
+    CapabilityRevoked,
+    CapabilityExpired,
+    DelegationDepthExceeded,
+    InvalidCapabilitySignature,
+
+    // Worker errors
+    WorkerCrashed(i32),
+    WorkerTimeout,
+    WorkerNotFound,
+    MaxRestartsExceeded,
+
+    // Memory errors
+    MemoryWindowNotFound,
+    MemoryWindowRevoked,
+    MemoryWindowPermissionDenied,
+
+    // Protocol errors
+    ProtocolViolation { expected: String, got: String },
+    UnexpectedMessage,
+    MissingRequiredCapability,
+
+    // Information flow (v2)
+    InformationFlowViolation { source: u64, target: u64 },
+    UnauthorizedDowngrade,
+
+    // STARK (v2)
+    StarkProofInvalid,
+    StarkProofExpired,
+
+    // System
+    TooManyProcesses,
+    TooManyChannels,
+    OutOfMemory,
+    KernelError,
+}
+
+impl std::fmt::Display for IpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for IpcError {}
+
+// ── L8: Cryptographic Encapsulation (AEAD) ───────────────────────────
+
+/// ChaCha20-Poly1305 AEAD encryption for IPC messages.
+/// In a real implementation, this would use a crypto library.
+/// For now, this is a stub that passes through plaintext.
+pub struct CryptoState {
+    pub key: [u8; 32],
+    pub nonce_counter: u64,
+}
+
+impl CryptoState {
+    pub fn new(key: [u8; 32]) -> Self {
+        Self { key, nonce_counter: 0 }
+    }
+
+    /// Encrypt plaintext (stub: returns plaintext + fake tag)
+    pub fn encrypt(&mut self, plaintext: &[u8]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(plaintext.len() + 12 + 16);
+        // Nonce (12 bytes)
+        let nonce = self.nonce_counter.to_le_bytes();
+        output.extend_from_slice(&nonce);
+        output.extend_from_slice(&[0u8; 4]); // padding
+        // Ciphertext (same as plaintext for stub)
+        output.extend_from_slice(plaintext);
+        // Tag (16 bytes, fake)
+        output.extend_from_slice(&[0u8; 16]);
+        self.nonce_counter += 1;
+        output
+    }
+
+    /// Decrypt ciphertext (stub: extracts plaintext)
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, IpcError> {
+        if ciphertext.len() < 28 {
+            return Err(IpcError::DeserializationError);
+        }
+        // Skip nonce (12) and tag (16)
+        Ok(ciphertext[12..ciphertext.len()-16].to_vec())
+    }
+}
+
+// ── FFI Process Isolation (extern "process") ─────────────────────────
+
+/// Configuration for an FFI worker process.
+#[derive(Clone, Debug)]
+pub struct FfiWorkerConfig {
+    pub library_path: String,
+    pub function_name: String,
+    pub trust_level: TrustLevel,
+    pub max_restarts: u32,
+    pub timeout_ms: u64,
+}
+
+impl Default for FfiWorkerConfig {
+    fn default() -> Self {
+        Self {
+            library_path: String::new(),
+            function_name: String::new(),
+            trust_level: TrustLevel::Untrusted,
+            max_restarts: 3,
+            timeout_ms: 10000,
+        }
+    }
+}
+
+/// Marshal a function call for IPC transport.
+/// The worker process receives this and calls the actual C function.
+#[derive(Clone, Debug)]
+pub struct FfiCall {
+    pub function_name: String,
+    pub args: Vec<Vec<u8>>,  // serialized arguments
+    pub return_type_hash: u64,
+}
+
+/// Result of an FFI call from a worker process.
+#[derive(Clone, Debug)]
+pub struct FfiResult {
+    pub success: bool,
+    pub return_value: Vec<u8>,
+    pub error: Option<String>,
+}
+
+// ── Capability Delegation ────────────────────────────────────────────
+
+impl capability::CapabilitySet {
+    /// Delegate a capability to another process with reduced permissions.
+    pub fn delegate(
+        &mut self,
+        parent_id: u128,
+        new_target_pid: u64,
+        subset_perms: capability::MemoryPermissions,
+        signing_key: &[u8; 32],
+    ) -> Result<capability::CapabilityToken, IpcError> {
+        let parent = self.tokens.get(&parent_id)
+            .ok_or(IpcError::CapabilityNotFound)?
+            .clone();
+
+        if parent.delegation_depth >= 8 {
+            return Err(IpcError::DelegationDepthExceeded);
+        }
+
+        // Verify subset
+        if subset_perms.read && !parent.permissions.read {
+            return Err(IpcError::PermissionDenied);
+        }
+        if subset_perms.write && !parent.permissions.write {
+            return Err(IpcError::PermissionDenied);
+        }
+        if subset_perms.execute && !parent.permissions.execute {
+            return Err(IpcError::PermissionDenied);
+        }
+
+        let child = capability::CapabilityToken {
+            id: rand_u128(),
+            source_pid: parent.target_pid, // delegator becomes source
+            target_pid: new_target_pid,
+            resource: parent.resource.clone(),
+            permissions: subset_perms,
+            delegation_depth: parent.delegation_depth + 1,
+            created_at: 0, // would be now()
+            expires_at: parent.expires_at,
+            signature: [0u8; 32], // would be HMAC(signing_key, ...)
+        };
+
+        self.tokens.insert(child.id, child.clone());
+        Ok(child)
+    }
+}
+
+fn rand_u128() -> u128 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut hasher);
+    hasher.finish() as u128
+}
+
+// ── Supervisor (Fault Tolerance) ─────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct Supervisor {
+    pub max_restarts: u32,
+    pub timeout_ms: u64,
+    pub restart_count: u32,
+}
+
+impl Supervisor {
+    pub fn new(max_restarts: u32, timeout_ms: u64) -> Self {
+        Self { max_restarts, timeout_ms, restart_count: 0 }
+    }
+
+    pub fn should_restart(&mut self) -> bool {
+        if self.restart_count >= self.max_restarts {
+            return false;
+        }
+        self.restart_count += 1;
+        true
+    }
+
+    pub fn reset(&mut self) {
+        self.restart_count = 0;
+    }
+}
+
+// ── Hot Reloading ────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct HotSwapRequest {
+    pub worker_pid: u64,
+    pub new_binary_path: String,
+    pub transfer_state: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct HotSwapResult {
+    pub success: bool,
+    pub new_pid: u64,
+    pub state_transferred: bool,
+}
+
+// ── Distributed Channels ─────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct RemoteWorker {
+    pub addr: String,
+    pub port: u16,
+    pub connected: bool,
+}
+
+/// Noise Protocol Framework handshake state (stub).
+/// Real implementation would use the Noise_XX pattern.
+#[derive(Clone, Debug)]
+pub struct NoiseChannel {
+    pub local_static_key: [u8; 32],
+    pub remote_static_key: Option<[u8; 32]>,
+    pub handshake_complete: bool,
+    pub cipher_key: [u8; 32],
+}
+
+impl NoiseChannel {
+    pub fn new(local_key: [u8; 32]) -> Self {
+        Self {
+            local_static_key: local_key,
+            remote_static_key: None,
+            handshake_complete: false,
+            cipher_key: [0u8; 32],
+        }
+    }
+
+    /// Initiate Noise_XX handshake (stub).
+    pub fn initiate(&mut self, remote_addr: &str) -> Result<(), IpcError> {
+        // Real implementation: exchange ephemeral + static keys
+        self.handshake_complete = true;
+        Ok(())
+    }
+
+    /// Send encrypted message over Noise channel.
+    pub fn send(&mut self, msg: &[u8]) -> Result<Vec<u8>, IpcError> {
+        if !self.handshake_complete {
+            return Err(IpcError::PermissionDenied);
+        }
+        let mut crypto = CryptoState::new(self.cipher_key);
+        Ok(crypto.encrypt(msg))
+    }
+}
+
+// ── Compile-Time Encapsulation (stubs) ───────────────────────────────
+
+/// Session type for compile-time protocol verification.
+/// CT1: Session Types (arxiv 2510.19129)
+#[derive(Clone, Debug)]
+pub enum SessionType {
+    End,
+    Send(u64, Box<SessionType>),  // type_hash, rest
+    Recv(u64, Box<SessionType>),
+    Choice(Box<SessionType>, Box<SessionType>),
+    Loop(Box<SessionType>),
+}
+
+impl SessionType {
+    /// Compute the dual (other end's perspective).
+    pub fn dual(&self) -> SessionType {
+        match self {
+            SessionType::End => SessionType::End,
+            SessionType::Send(t, rest) => SessionType::Recv(*t, Box::new(rest.dual())),
+            SessionType::Recv(t, rest) => SessionType::Send(*t, Box::new(rest.dual())),
+            SessionType::Choice(a, b) => SessionType::Choice(Box::new(b.dual()), Box::new(a.dual())),
+            SessionType::Loop(body) => SessionType::Loop(Box::new(body.dual())),
+        }
+    }
+}
+
+/// Security label for information-flow control.
+/// CT2: Information-Flow Types (arxiv 2210.12996)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SecurityLabel {
+    Public,
+    Internal,
+    Secret,
+    TopSecret,
+}
+
+impl SecurityLabel {
+    pub fn can_flow_to(self, target: SecurityLabel) -> bool {
+        self <= target
+    }
+
+    pub fn join(self, other: SecurityLabel) -> SecurityLabel {
+        if self >= other { self } else { other }
+    }
+}
+
+/// zk-STARK proof (stub).
+/// CT6: zk-STARK Attestation (arxiv 2512.10020)
+#[derive(Clone, Debug)]
+pub struct StarkProof {
+    pub proof_data: Vec<u8>,
+    pub public_inputs: Vec<u64>,
+    pub validity_window: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CapabilityAttestation {
+    pub proof: StarkProof,
+    pub worker_pid: u64,
+    pub capability_count: u64,
+    pub commitment_hash: u64,
+}
+
+impl CapabilityAttestation {
+    /// Verify the STARK proof (stub: always succeeds).
+    pub fn verify(&self, expected_pid: u64) -> Result<(), IpcError> {
+        if self.worker_pid != expected_pid {
+            return Err(IpcError::StarkProofInvalid);
+        }
+        Ok(())
+    }
+}
+
+/// Fractional permission for concurrent access.
+/// CT7: CSL-Perm
+#[derive(Clone, Copy, Debug)]
+pub struct Permission {
+    pub fraction: f64,
+}
+
+impl Permission {
+    pub fn full() -> Self { Self { fraction: 1.0 } }
+    pub fn split(self) -> (Self, Self) {
+        (Self { fraction: self.fraction / 2.0 }, Self { fraction: self.fraction / 2.0 })
+    }
+    pub fn merge(a: Self, b: Self) -> Self {
+        Self { fraction: a.fraction + b.fraction }
+    }
+    pub fn can_write(&self) -> bool { self.fraction >= 1.0 }
+    pub fn can_read(&self) -> bool { self.fraction > 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
