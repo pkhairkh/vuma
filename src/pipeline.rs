@@ -9622,6 +9622,65 @@ pub fn flatten_expr(
             ScgExpr::Var(result_tmp)
         }
 
+        // ── Wave 2: Struct literal — `Point { x: 10, y: 20 }` ──
+        // Lower to: allocate stack slot, register as state-typed, write each field.
+        Expr::StructInit { name, fields, .. } => {
+            // Look up the layout to get the total size.
+            if let Some((total_size, layout_fields)) = ctx.layouts.get(name).cloned() {
+                let temp = ctx.alloc_temp();
+                // Emit stack allocation for the state buffer.
+                stmts.push(ScgStatement::Allocation(AllocationNode::Stack {
+                    name: temp.clone(),
+                    size: total_size as u32,
+                    ty: ScgType::Ptr,
+                }));
+                // Register the temp as state-typed so field accesses work.
+                ctx.state_var_layouts.insert(temp.clone(), name.clone());
+                // For each field, emit a Store at the field's offset.
+                for (field_name, field_expr) in fields {
+                    // Find the field's offset and type from the layout registry.
+                    let (offset, _size, field_ty) = layout_fields.iter()
+                        .find_map(|(fn_, ir_ty, off, sz, _tn)| {
+                            if fn_ == field_name {
+                                Some((*off, *sz, ir_ty.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or((0, 0, vuma_codegen::ir::IRType::U64));
+                    // Compute address: base + offset.
+                    let ptr = if offset == 0 {
+                        ScgExpr::Var(temp.clone())
+                    } else {
+                        let addr_tmp = ctx.alloc_temp();
+                        stmts.push(ScgStatement::Computation(ComputationNode {
+                            dst: addr_tmp.clone(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var(temp.clone()),
+                            rhs: ScgExpr::Int(offset as i64),
+                            tail_call: false,
+                            reassigns: None,
+                        }));
+                        ScgExpr::Var(addr_tmp)
+                    };
+                    // Flatten the field value.
+                    let value = flatten_expr(field_expr, stmts, ctx);
+                    // Emit the Store.
+                    stmts.push(ScgStatement::Access(AccessNode::Store {
+                        ptr,
+                        offset: None,
+                        value,
+                        ty: Some(field_ty),
+                    }));
+                }
+                // Return the temp as the expression result.
+                ScgExpr::Var(temp)
+            } else {
+                eprintln!("[vuma] WARNING: struct literal with unknown layout '{}'; using 0", name);
+                ScgExpr::Int(0)
+            }
+        }
+
         // ── Fallback for unsupported expression types ──
         // Log a warning instead of silently returning 0. This makes
         // unsupported constructs visible during compilation.
@@ -9769,6 +9828,18 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                         size: *total_size as u32,
                         ty: ScgType::Ptr,
                     })];
+                }
+            }
+
+            // Wave 2: `let p = Point { x: 10, y: 20 }` — register the let
+            // variable as state-typed so subsequent `p.field` accesses work.
+            // The actual allocation + field writes are handled by flatten_expr's
+            // StructInit arm (which emits an AllocationNode::Stack for a temp,
+            // writes each field, and returns the temp). Here we just pre-register
+            // the let variable name as state-typed with the struct's layout.
+            if let vuma_parser::ast::Expr::StructInit { name, .. } = &let_stmt.value {
+                if ctx.layouts.contains_key(name) {
+                    ctx.state_var_layouts.insert(let_stmt.name.clone(), name.clone());
                 }
             }
 
