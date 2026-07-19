@@ -752,6 +752,63 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
     }
 }
 
+/// Load an f32 value into an FPR with the f32 bits in the HIGH 32 bits
+/// (where s390x f32 instructions expect them).
+///
+/// **Convention:** f32 values in stack slots and immediates have their f32
+/// bits in the LOW 32 bits of the 64-bit GPR value (zero-extended).  This
+/// matches:
+///   - The IR's representation of f32 literals (f32 bits in low 32 of the i64
+///     immediate).
+///   - The `materialize_f32_immediates` pass (integer `Add` + `STG` stores
+///     f32 bits in the GPR's low 32, which on big-endian s390x lands at
+///     offset 4–7 of the 8-byte slot — the LOW 4 bytes).
+///   - `ss_store_f32_from_fpr` below (LGDR + SRLG + STG), which stores the
+///     f32 result bits in the GPR's low 32.
+///
+/// On big-endian s390x, `ss_ld` (LG) loads 8 bytes: offset 0–3 → high 32,
+/// offset 4–7 → low 32.  So f32 bits at offset 4–7 land in the GPR's LOW 32.
+/// `SLLG scratch, scratch, 32` then shifts them to the HIGH 32, and `LDGR`
+/// copies to the FPR where AEBR/LDEBR/CEBR expect them (bits 0–31).
+///
+/// **Sequence:** `ss_load_value` (loads 8 bytes; f32 bits in low 32) →
+/// `SLLG scratch, scratch, 32` (shifts f32 bits to high 32) → `LDGR fpr,
+/// scratch` (copies to FPR).  After this, the FPR's bits 0–31 hold the f32
+/// value, ready for AEBR/LDEBR/CEBR/etc.
+fn ss_load_f32_to_fpr(
+    val: &IRValue,
+    slots: &HashMap<u32, i32>,
+    scratch: Gpr,
+    dst_fpr: Fpr,
+) -> Vec<u8> {
+    let mut code = ss_load_value(val, slots, scratch);
+    // SLLG scratch, scratch, 32: move f32 bits from low 32 to high 32.
+    code.extend_from_slice(&encode_sllg(scratch, scratch, 32));
+    // LDGR dst_fpr, scratch: copy to FPR (f32 bits now in high 32).
+    code.extend_from_slice(&encode_ldgr(dst_fpr, scratch));
+    code
+}
+
+/// Store an f32 result from an FPR to a stack slot, using the "f32 bits in
+/// GPR low 32" convention (see `ss_load_f32_to_fpr`).
+///
+/// **Sequence:** `LGDR scratch, fpr` (copies FPR to GPR; f32 result is in
+/// the GPR's HIGH 32 because s390x f32 ops produce results in bits 0–31) →
+/// `SRLG scratch, scratch, 32` (shifts f32 bits from high 32 to low 32) →
+/// `ss_st` (STG, 8-byte store; f32 bits land at offset 4–7 on big-endian,
+/// i.e. the LOW 4 bytes of the slot).
+///
+/// This is the inverse of `ss_load_f32_to_fpr` and ensures round-trip
+/// correctness (store f32 → load f32 produces the same value).
+fn ss_store_f32_from_fpr(fpr: Fpr, scratch: Gpr, offset: i32) -> Vec<u8> {
+    let mut code = encode_lgdr(scratch, fpr).to_vec();
+    // SRLG scratch, scratch, 32: move f32 bits from high 32 to low 32.
+    code.extend_from_slice(&encode_srlg(scratch, scratch, 32));
+    // STG: store 8 bytes (f32 bits in low 32 = offset 4–7 on big-endian).
+    code.extend(ss_st(scratch, offset));
+    code
+}
+
 /// Determine whether a type is 32-bit (for selecting 32-bit vs 64-bit ops).
 fn is_32bit_ty(ty: Option<&IRType>) -> bool {
     matches!(
@@ -1585,7 +1642,7 @@ fn emit_instr(
                         // CEGBRA: signed int64 → F32.  op1=0xB3, op2=0xA4.  m3=0.
                         //   binutils: b3a4 cegbra RRF_UUFR.
                         code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA4, FA.encoding(), S0.encoding(), 0, 0));
-                        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+                        code.extend(ss_store_f32_from_fpr(FA, S0, dst_off));
                     } else {
                         // CDGBRA: signed int64 → F64.  op1=0xB3, op2=0xA5.  m3=0.
                         //   binutils: b3a5 cdgbra RRF_UUFR.
@@ -1614,7 +1671,7 @@ fn emit_instr(
                         // CELGBRA: unsigned int64 → F32.  op1=0xB3, op2=0xA0.  m3=0.
                         //   binutils: b3a0 celgbr.
                         code.extend_from_slice(&encode_fp_rrf_r(0xB3, 0xA0, FA.encoding(), S0.encoding(), 0, 0));
-                        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+                        code.extend(ss_store_f32_from_fpr(FA, S0, dst_off));
                     } else {
                         // CDLGBRA: unsigned int64 → F64.  op1=0xB3, op2=0xA1.  m3=0.
                         //   binutils: b3a1 cdlgbr.
@@ -1628,6 +1685,14 @@ fn emit_instr(
                     // pattern (LG-loaded from the slot).  CGDBRA takes an F64
                     // operand in FPR R2, so ferry S0's bits into FA via LDGR first,
                     // widening F32 → F64 if needed.
+                    //
+                    // For F32 sources: S0 holds f32 bits in the LOW 32 bits
+                    // (4-byte STE convention).  SLLG S0, S0, 32 shifts them to
+                    // the HIGH 32 bits where LDEBR expects them, then LDGR
+                    // copies to FA, and LDEBR widens F32 → F64.
+                    if matches!(from_ty, Some(IRType::F32)) {
+                        code.extend_from_slice(&encode_sllg(S0, S0, 32));
+                    }
                     code.extend_from_slice(&encode_ldgr(FA, S0)); // FA bits = float bits
                     if matches!(from_ty, Some(IRType::F32)) {
                         // LDEBR FA, FA: widen F32 → F64.  op1=0xB3, op2=0x04.
@@ -1644,6 +1709,12 @@ fn emit_instr(
                 }
                 CastKind::FloatToUInt => {
                     // Float → unsigned int64 (truncating).
+                    //
+                    // For F32 sources: SLLG S0, S0, 32 shifts f32 bits from
+                    // low 32 to high 32 before LDGR + LDEBR.
+                    if matches!(from_ty, Some(IRType::F32)) {
+                        code.extend_from_slice(&encode_sllg(S0, S0, 32));
+                    }
                     code.extend_from_slice(&encode_ldgr(FA, S0));
                     if matches!(from_ty, Some(IRType::F32)) {
                         code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA)); // LDEBR widen
@@ -1662,12 +1733,19 @@ fn emit_instr(
                         // F64 → F32: LEDBRA (RRF-a, narrows with current rounding mode).
                         // op1=0xB3, op2=0x44.  M3=0 (current rounding), M4=0 (silent).
                         //   Verified against binutils s390-opc.txt: b344 ledbr.
+                        // S0 holds f64 bits; LDGR + LEDBR narrows to f32 (high 32).
+                        // ss_store_f32_from_fpr (LGDR + SRLG + STG) stores the f32
+                        // result bits in the GPR's low 32 (4-byte f32 convention).
                         code.extend_from_slice(&encode_ldgr(FA, S0));
                         code.extend_from_slice(&encode_fp_rrf(0xB3, 0x44, FA, FA, 0, 0));
-                        code.extend_from_slice(&encode_ste(FA, FP, dst_off));
+                        code.extend(ss_store_f32_from_fpr(FA, S0, dst_off));
                         return; // skip trailing ss_st.
                     } else if !src_is_f64 && dst_is_f64 {
                         // F32 → F64: LDEBR (widen, exact).  op1=0xB3, op2=0x04.
+                        // S0 holds f32 bits in the LOW 32 bits (4-byte STE
+                        // convention).  SLLG S0, S0, 32 shifts them to the HIGH
+                        // 32 bits, LDGR copies to FA, and LDEBR widens F32 → F64.
+                        code.extend_from_slice(&encode_sllg(S0, S0, 32));
                         code.extend_from_slice(&encode_ldgr(FA, S0));
                         code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA));
                         code.extend_from_slice(&encode_std(FA, FP, dst_off));
@@ -2510,23 +2588,25 @@ fn emit_s390x_fp_binop(
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
     let is_f64 = matches!(ty, Some(IRType::F64));
 
-    // Load operands into FPRs FA (lhs) and FB (rhs) via the GPR file.
-    // For F32: the IR stores float literals as f64 bits in i64 immediates.
-    // ss_load_value returns these f64 bits in a GPR. LDGR copies them to FPR.
-    // Then we narrow F64→F32 via LEDBR (op2=0x44) so the FPR holds the
-    // correct f32 value in the high 32 bits (where F32 ops expect it).
-    // For register operands (already stored as f64 bits in stack slots),
-    // the same approach works — LDGR + LEDBR narrows to f32.
-    code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
-    code.extend_from_slice(&encode_ldgr(FA, S0));
-    if !is_f64 {
-        // LEDBR FA, FA: narrow F64 → F32 (round to nearest, high 32 bits)
-        code.extend_from_slice(&encode_fp_rrf(0xB3, 0x44, FA, FA, 0, 0));
-    }
-    code.extend(ss_load_value(rhs, vreg_stack_slots, S0));
-    code.extend_from_slice(&encode_ldgr(FB, S0));
-    if !is_f64 {
-        code.extend_from_slice(&encode_fp_rrf(0xB3, 0x44, FB, FB, 0, 0));
+    // Load operands into FPRs FA (lhs) and FB (rhs).
+    //
+    // For F64: operands are stored as full 64-bit f64 bits in stack slots /
+    // immediates.  `ss_load_value` (LG) + `LDGR` copies them verbatim into the
+    // FPR, ready for ADBR/SDBR/etc.
+    //
+    // For F32: operands are stored as 32-bit f32 bits in the LOW 32 bits of
+    // the slot / immediate (4-byte STE convention).  `ss_load_f32_to_fpr`
+    // loads the 8-byte slot value, shifts the f32 bits from low 32 to high 32
+    // via SLLG, then LDGRs into the FPR — placing the f32 value in bits 0–31
+    // where AEBR/SEBR/MEBR/DEBR expect it.
+    if is_f64 {
+        code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+        code.extend_from_slice(&encode_ldgr(FA, S0));
+        code.extend(ss_load_value(rhs, vreg_stack_slots, S0));
+        code.extend_from_slice(&encode_ldgr(FB, S0));
+    } else {
+        code.extend(ss_load_f32_to_fpr(lhs, vreg_stack_slots, S0, FA));
+        code.extend(ss_load_f32_to_fpr(rhs, vreg_stack_slots, S0, FB));
     }
 
     match op {
@@ -2631,18 +2711,16 @@ fn emit_s390x_fp_binop(
         }
     }
 
-    // Store FP result back to dst slot via STD (F64, 8 bytes) / STE (F32, 4 bytes).
-    // The slot now holds the result's bit pattern; subsequent FP ops will
-    // ss_load_value (LG) → LDGR to retrieve it.
+    // Store FP result back to dst slot.
+    //
+    // For F64: STD stores the full 8-byte f64 value.
+    // For F32: ss_store_f32_from_fpr (LGDR + SRLG + STG) stores the f32
+    // result bits in the GPR's low 32 (offset 4–7 on big-endian), matching
+    // the convention used by ss_load_f32_to_fpr and the materialize pass.
     if is_f64 {
         code.extend_from_slice(&encode_std(FA, FP, dst_off));
     } else {
-        // For f32 results: widen f32→f64 (LDEBR) then store as f64 (STD).
-        // This keeps the slot as a full 8-byte f64 value, which ss_load_value
-        // (LG) + LDGR retrieves correctly. The LEDBR in the BinOp load path
-        // narrows it back to f32 for AEBR/etc.
-        code.extend_from_slice(&encode_fp_rre(0xB3, 0x04, FA, FA)); // LDEBR: f32→f64
-        code.extend_from_slice(&encode_std(FA, FP, dst_off)); // STD: store as f64
+        code.extend(ss_store_f32_from_fpr(FA, S0, dst_off));
     }
 }
 

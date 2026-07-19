@@ -2651,7 +2651,8 @@ fn emit_instr(
                     } else {
                         // Default to F32 for None / non-F64 targets.
                         code.extend_from_slice(&encode_fp_unary(FP_FXTOS, FA, FA));
-                        code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+                        // F32: STF to [FP - dst_off + 4] (LOW 4 bytes).
+                        code.extend_from_slice(&encode_stf(FA, Gpr::I6, 4 - dst_off));
                     }
                     let _ = (from_ty, to_ty);
                     return; // skip trailing integer ss_stx
@@ -2704,7 +2705,8 @@ fn emit_instr(
                     // store as f64.
                     if matches!(to_ty, Some(IRType::F32)) {
                         code.extend_from_slice(&encode_fp_unary(FP_FDTOS, FA, FA));
-                        code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+                        // F32: STF to [FP - dst_off + 4] (LOW 4 bytes).
+                        code.extend_from_slice(&encode_stf(FA, Gpr::I6, 4 - dst_off));
                     } else {
                         code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
                     }
@@ -2725,11 +2727,14 @@ fn emit_instr(
                             // above); spill to slot 0 so LDF/LDDF can read
                             // them.  NOTE: slot 0 overlaps the register
                             // save area (see emit_sparc64_fp_binop doc).
+                            // For F32: STX puts f32 bits at [FP+4..7]
+                            // (GPR LOW 32 = offset 4-7 on big-endian).
                             code.extend(ss_stx(Gpr::L0, 0));
                             0
                         });
                     if matches!(from_ty, Some(IRType::F32)) {
-                        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, -src_off));
+                        // F32: LDF from [FP - src_off + 4] (LOW 4 bytes).
+                        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, 4 - src_off));
                         code.extend_from_slice(&encode_fp_unary(FP_FSTOD, FA, FA));
                     } else {
                         code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -src_off));
@@ -2749,11 +2754,12 @@ fn emit_instr(
                         .as_register()
                         .and_then(|id| vreg_stack_slots.get(&id).copied())
                         .unwrap_or_else(|| {
+                            // For F32: STX puts f32 bits at [FP+4..7].
                             code.extend(ss_stx(Gpr::L0, 0));
                             0
                         });
                     if matches!(from_ty, Some(IRType::F32)) {
-                        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, -src_off));
+                        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, 4 - src_off));
                         code.extend_from_slice(&encode_fp_unary(FP_FSTOD, FA, FA));
                     } else {
                         code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -src_off));
@@ -2770,6 +2776,7 @@ fn emit_instr(
                         .as_register()
                         .and_then(|id| vreg_stack_slots.get(&id).copied())
                         .unwrap_or_else(|| {
+                            // For F32: STX puts f32 bits at [FP+4..7].
                             code.extend(ss_stx(Gpr::L0, 0));
                             0
                         });
@@ -2777,11 +2784,13 @@ fn emit_instr(
                         // f64 → f32: FDTOS (narrow).
                         code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -src_off));
                         code.extend_from_slice(&encode_fp_unary(FP_FDTOS, FA, FA));
-                        code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+                        // F32: STF to [FP - dst_off + 4] (LOW 4 bytes).
+                        code.extend_from_slice(&encode_stf(FA, Gpr::I6, 4 - dst_off));
                     } else {
                         // f32 → f64: FSTOD (widen).  Also the default for
                         // None / unknown from_ty.
-                        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, -src_off));
+                        // F32: LDF from [FP - src_off + 4] (LOW 4 bytes).
+                        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, 4 - src_off));
                         code.extend_from_slice(&encode_fp_unary(FP_FSTOD, FA, FA));
                         code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
                     }
@@ -3964,13 +3973,21 @@ fn emit_sparc64_fp_binop(
             // NOTE: slot 0 = [%fp + 0] overlaps the register save area.
             // See TODO in doc comment.  Safe here because we LDDF into FA
             // immediately, before any other spill.
+            //
+            // For F32: f32 bits are in the GPR's LOW 32 (from ss_load_imm).
+            // STX stores GPR LOW 32 to [FP+4..7] (LOW 4 bytes on big-endian).
+            // LDF reads from [FP+4..7] (displacement 4) = f32 bits. ✓
+            // No SLLX shift needed — the 4-byte offset adjustment in the
+            // LDF displacement handles the big-endian byte ordering.
             code.extend(ss_stx(Gpr::L0, 0));
             0
         });
     if is_f64 {
         code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -lhs_off));
     } else {
-        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, -lhs_off));
+        // F32: LDF from [FP - lhs_off + 4] (LOW 4 bytes on big-endian),
+        // where STX/materialize-pass stores f32 bits in the GPR's LOW 32.
+        code.extend_from_slice(&encode_ldf(FA, Gpr::I6, 4 - lhs_off));
     }
 
     let rhs_off = rhs
@@ -3985,7 +4002,7 @@ fn emit_sparc64_fp_binop(
     if is_f64 {
         code.extend_from_slice(&encode_lddf(FB, Gpr::I6, -rhs_off));
     } else {
-        code.extend_from_slice(&encode_ldf(FB, Gpr::I6, -rhs_off));
+        code.extend_from_slice(&encode_ldf(FB, Gpr::I6, 4 - rhs_off));
     }
 
     match op {
@@ -4052,11 +4069,15 @@ fn emit_sparc64_fp_binop(
                 code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
                 code.extend(ss_ld(Gpr::L0, dst_off));
             } else {
-                code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+                // F32: STF to [FP - dst_off + 4] (LOW 4 bytes on big-endian),
+                // then LDUW from the same address.  This matches the f32
+                // convention used by LDF (offset 4) and the materialize pass
+                // (integer STX puts f32 bits in GPR LOW 32 = offset 4-7).
+                code.extend_from_slice(&encode_stf(FA, Gpr::I6, 4 - dst_off));
                 code.extend_from_slice(&Instruction::Lduw {
                     rd: Gpr::L0,
                     rs1: Gpr::I6,
-                    imm: -dst_off,
+                    imm: 4 - dst_off,
                 }
                 .encode());
             };
@@ -4186,7 +4207,8 @@ fn emit_sparc64_fp_binop(
     if is_f64 {
         code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
     } else {
-        code.extend_from_slice(&encode_stf(FA, Gpr::I6, -dst_off));
+        // F32: STF to [FP - dst_off + 4] (LOW 4 bytes on big-endian).
+        code.extend_from_slice(&encode_stf(FA, Gpr::I6, 4 - dst_off));
     }
     code.extend(ss_ld(Gpr::L0, dst_off));
     let _ = (lhs_off, rhs_off);
