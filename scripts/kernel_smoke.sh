@@ -27,13 +27,19 @@
 # program.  This is the only execution environment available in the
 # current sandbox: there is no QEMU (no sudo, no system/user emulator).
 #
-# BARE-METAL QEMU IS A K11 TASK
-# -----------------------------
-# Wave K11 (parity sweep) will install QEMU and add a second harness
-# that boots the same kernel.vuma under a bare-metal x86_64 QEMU
-# target with a real trampoline + MMIO console.  Until then, this
-# hosted-mode smoke test is the gate for the "kernel boots, prints
-# banner, exits 0" DoD item.
+# BARE-METAL COUNTERPART: scripts/qemu_system_boot.sh
+# ---------------------------------------------------
+# This harness executes the kernel as a regular x86_64 Linux process
+# (hosted mode).  The bare-metal counterpart is
+# scripts/qemu_system_boot.sh (Wave W54), which boots the same
+# kernel.vuma under `qemu-system-x86_64 -kernel` using the W53
+# boot.S (Multiboot2 + GDT + PAE + 4-level identity-mapped page
+# tables + long mode + call VUMA main) with a serial console.
+# Until qemu-system-x86_64 is installed in the sandbox and the
+# bare-metal build pipeline (link boot.o + trap.o + switch.o + the
+# VUMA-compiled .o files into a Multiboot2 ELF) is wired up, this
+# hosted-mode smoke test remains the gate for the "kernel boots,
+# prints banner, exits 0" DoD item.
 
 set -euo pipefail
 
