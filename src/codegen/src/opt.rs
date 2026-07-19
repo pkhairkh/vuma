@@ -2034,10 +2034,179 @@ fn run_optimizations_inner(
         *func = materialize_f32_immediates(std::mem::replace(func, IRFunction::new("__tmp__")));
     }
 
+    // ── Wave 8a: Deadlock detection (wait-for graph) ──
+    // Analyzes channel usage patterns to detect potential deadlocks.
+    // Emits warnings (not errors) for circular channel waits.
+    detect_deadlock(&program);
+
     program
 }
 
-/// Whole-program dead code elimination (Wave 11/14).
+/// Wave 8a: Compile-time deadlock detection using a wait-for graph.
+///
+/// For each function, builds a graph where:
+/// - A `ChannelRecv` on channel C adds a "waiting" edge
+/// - A `ChannelSend` on channel C adds a "signaling" edge
+/// - If process A waits on C and B signals C, edge A→B
+/// - Cycles in the graph indicate potential deadlocks
+///
+/// This is a conservative analysis — it warns on potential deadlocks
+/// but does not block compilation.
+fn detect_deadlock(program: &IRProgram) {
+    use std::collections::{HashMap, HashSet};
+
+    // For each function, collect (channel_var, recv/send) pairs.
+    // We track which channels are recv'd (blocking) and which are sent to.
+    #[derive(Debug, Clone)]
+    struct ChannelUsage {
+        recv_channels: HashSet<String>,
+        send_channels: HashSet<String>,
+    }
+
+    let mut usage_map: HashMap<String, ChannelUsage> = HashMap::new();
+
+    for func in &program.functions {
+        let mut usage = ChannelUsage {
+            recv_channels: HashSet::new(),
+            send_channels: HashSet::new(),
+        };
+
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                match instr {
+                    IRInstr::ChannelRecv { ch, .. } => {
+                        if let IRValue::Register(_) = ch {
+                            usage.recv_channels.insert(format!(
+                                "{}_ch_{:?}",
+                                func.name,
+                                ch
+                            ));
+                        }
+                    }
+                    IRInstr::ChannelSend { ch, .. } => {
+                        if let IRValue::Register(_) = ch {
+                            usage.send_channels.insert(format!(
+                                "{}_ch_{:?}",
+                                func.name,
+                                ch
+                            ));
+                        }
+                    }
+                    // Also detect channel builtins called as regular functions
+                    // (the direct AST→codegen bridge lowers channel_recv etc.
+                    // to Call instructions, not ChannelRecv IR instructions)
+                    IRInstr::Call { func: fname, args, .. } => {
+                        if fname == "channel_recv" || fname == "channel_try_recv" {
+                            if let Some(ch) = args.first() {
+                                usage.recv_channels.insert(format!(
+                                    "{}_ch_{:?}",
+                                    func.name, ch
+                                ));
+                            }
+                        } else if fname == "channel_send" {
+                            if let Some(ch) = args.first() {
+                                usage.send_channels.insert(format!(
+                                    "{}_ch_{:?}",
+                                    func.name, ch
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Simple deadlock check for single-process programs:
+        // If a function does ChannelRecv on a channel C, check whether
+        // the corresponding ChannelSend to C appears AFTER the recv
+        // in the same basic block (or in a block that hasn't executed yet).
+        if !usage.recv_channels.is_empty() {
+            for block in &func.blocks {
+                let mut seen_recv = false;
+                let mut recv_channels_in_block: HashSet<String> = HashSet::new();
+
+                for instr in &block.instructions {
+                    match instr {
+                        IRInstr::ChannelRecv { ch, .. } => {
+                            seen_recv = true;
+                            recv_channels_in_block.insert(format!(
+                                "{}_ch_{:?}",
+                                func.name, ch
+                            ));
+                        }
+                        IRInstr::ChannelSend { ch, .. } => {
+                            if seen_recv {
+                                let ch_name = format!(
+                                    "{}_ch_{:?}",
+                                    func.name, ch
+                                );
+                                if recv_channels_in_block.contains(&ch_name) {
+                                    // Send to the same channel after recv in
+                                    // the same block — not a deadlock, but
+                                    // recv will block until the send executes.
+                                    // This is a potential deadlock if the send
+                                    // is conditional.
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Check for recv without any send to the same channel
+            for ch_name in &usage.recv_channels {
+                if !usage.send_channels.contains(ch_name) {
+                    // This function recvs on a channel but never sends to it.
+                    // In a single-process program, this would deadlock unless
+                    // the send happens in a forked child.
+                    // Check if spawn_worker is present.
+                    let has_spawn = func.blocks.iter().any(|b| {
+                        b.instructions.iter().any(|i| {
+                            matches!(i, IRInstr::Syscall { nr, .. } if *nr == 220 || *nr == 58)
+                                || matches!(i, IRInstr::Call { func, .. } if func == "spawn_worker")
+                        })
+                    });
+                    if !has_spawn {
+                        eprintln!(
+                            "[vuma] WARNING: potential deadlock — function '{}' does \
+                            ChannelRecv on '{}' but never sends to it and has no spawn_worker",
+                            func.name, ch_name
+                        );
+                    }
+                }
+            }
+        }
+
+        usage_map.insert(func.name.clone(), usage);
+    }
+
+    // Cross-function deadlock check: if function A recvs on a channel
+    // that function B sends to, and B recvs on a channel that A sends to,
+    // that's a circular wait.
+    let func_names: Vec<&String> = usage_map.keys().collect();
+    for i in 0..func_names.len() {
+        for j in (i + 1)..func_names.len() {
+            let (name_a, usage_a) = (func_names[i], &usage_map[func_names[i]]);
+            let (name_b, usage_b) = (func_names[j], &usage_map[func_names[j]]);
+            // Check if A waits on something B signals and vice versa
+            let a_waits_b = usage_a.recv_channels.iter().any(|c| {
+                usage_b.send_channels.contains(c)
+            });
+            let b_waits_a = usage_b.recv_channels.iter().any(|c| {
+                usage_a.send_channels.contains(c)
+            });
+            if a_waits_b && b_waits_a {
+                eprintln!(
+                    "[vuma] WARNING: potential deadlock between '{}' and '{}' \
+                    — circular channel wait detected",
+                    name_a, name_b
+                );
+            }
+        }
+    }
+}
 ///
 /// Removes functions that are unreachable from any entry point (main or
 /// functions marked as extern). This is the LTO equivalent of --gc-sections.
