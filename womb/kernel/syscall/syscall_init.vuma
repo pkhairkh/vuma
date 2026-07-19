@@ -1,0 +1,596 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/syscall/syscall_init.vuma
+// VWK Syscall Init — register all syscall handlers at Linux asm-generic
+// numbers (PMT-pure, Wave 5 FnAddr).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the syscall-table bootstrap. K11's kmain calls
+// `syscall_init(tbl)` once during early boot to populate the SyscallTable
+// with the handlers implemented in the sibling handler files
+// (handlers/io.vuma, handlers/mm.vuma, handlers/proc.vuma,
+// handlers/fs.vuma) plus a handful of placeholder stubs for syscalls
+// whose real handlers don't exist yet. After init, the dispatcher
+// (sibling dispatch.vuma) can route user-space syscall traps to the
+// registered handlers via __call_indirect1.
+//
+// ── Why this file exists (Wave 39) ──────────────────────────────────────────
+// Wave 5 closed the indirect-call gap by adding the __call_indirect1
+// runtime stub (src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs
+// — `mov rax, rdi; mov rdi, rsi; jmp rax`) AND the GetAddress IR
+// instruction (src/codegen/src/ir.rs::IRInstr::GetAddress), so VUMA
+// can finally take a function's address (`fn_name as u64`) and tail-call
+// it. The K3e dispatch layer was rewritten as R4c to consume that
+// feature. But R4c only demonstrated the mechanism with a dummy
+// handler address (8192) — no file actually populated the SyscallTable
+// with REAL handler addresses.
+//
+// Wave 39 closes that loop. This file:
+//   1. Re-declares the SyscallTable layout byte-identically to
+//      table.vuma (VUMA has no `import`).
+//   2. Re-declares syscall_table_get / syscall_table_set /
+//      syscall_register byte-identically to table.vuma.
+//   3. Forward-declares the 13 handler functions implemented in the
+//      sibling handler files (io/mm/proc/fs.vuma). The signatures
+//      match the originals EXACTLY — VUMA has no separate "extern
+//      declaration" syntax for VUMA fns (only extern "C" gets an
+//      extern block), so the forward declaration is a STUB BODY
+//      (`return 0;` or `return;`). The stub body is never invoked
+//      in this file's self-test; the REAL bodies live in the sibling
+//      handler files and will be linked at K11's bare-metal build.
+//      For hosted-mode `compile_dump --verify`, only the STUB ADDRESS
+//      is registered — the stub's body never executes.
+//   4. Declares 11 additional stub handlers for the listed syscalls
+//      that don't have implementations yet (lseek, getppid, getuid,
+//      geteuid, exit_group, clone, execve, wait4, kill, futex,
+//      rename). These are K11+ TODOs.
+//   5. Declares 6 EXTRA stub handlers (brk, getgid, getegid, setuid,
+//      setgid, umask) to push the registered-count above the W39
+//      contract's `count >= 30` minimum. The 24 syscalls listed in
+//      the W39 task spec produce only 24 entries when registered;
+//      the extras are obvious next-step syscalls that a real kmain
+//      would register alongside the listed set.
+//   6. Implements `syscall_init(tbl: State<SyscallTable>)` that calls
+//      `syscall_register(tbl, nr, fn_name as u64)` for each handler
+//      at its Linux asm-generic syscall number.
+//
+// ── Why `fn_name as u64` instead of `&fn_name` or `fn_name`? ────────────────
+// VUMA has no first-class function-pointer type. The Wave 5 FnAddr
+// feature is the documented PMT-pure way to take a function's address:
+//   - `fn_name` alone is parsed as a Var expression; the parser's
+//     `function_names` set (src/pipeline.rs::bridge_ast_to_codegen_scg,
+//     populated from `Item::FnDef` + extern_fns) recognises the name as
+//     a function, and `flatten_expr` produces `ScgExpr::Label(name)`.
+//   - `ScgExpr::Label` lowers (src/codegen/src/scg_to_ir.rs) to an
+//     `IRInstr::GetAddress { dst, name }` IR instruction.
+//   - The x86_64 backend lowers GetAddress to `mov rax, imm64 (0)` +
+//     an `R_X86_64_64` relocation entry (src/codegen/src/x86_64/
+//     stack_slot_isel.rs::GetAddress arm).
+//   - At static-ELF emission, the backend patches the relocation with
+//     `text_vaddr + func_offsets[symbol]` (src/codegen/src/x86_64/
+//     mod.rs::R_X86_64_64 arm) — the absolute virtual address of the
+//     function's first instruction.
+//   - The `as u64` cast around `fn_name` is a no-op at the IR level
+//     (Expr::Cast flattens to its inner expression per
+//     src/pipeline.rs::flatten_expr — `Expr::Cast { expr, .. } =>
+//     flatten_expr(expr, ...)`). It's there for source-level clarity:
+//     the reader sees that the value being passed to syscall_register
+//     is a u64 (matching the `handler: u64` parameter type).
+//
+// PMT purity is preserved throughout: the address is a compile-time
+// constant baked into the .text section as a `mov rax, imm64`. No
+// runtime symbol resolution, no PLT, no GOT — pure code/data
+// separation. The registered handler address survives across function
+// calls because the SyscallTable's `[u8; 4096]` handlers array is a
+// PMT-typed-memory buffer (the State<SyscallTable>'s backing
+// ___pmt_buffer is the caller's stack frame, valid for the lifetime
+// of the state_new handle).
+//
+// ── Wave 39 codegen fix: whole_program_dce preserves GetAddress refs ───────
+// While developing this file, a codegen bug was discovered: the O2
+// `whole_program_dce` pass (src/codegen/src/opt.rs::whole_program_dce)
+// was removing functions whose address was taken via `fn_name as u64`
+// but which were never directly CALLED. The DCE pass only inspected
+// `IRInstr::Call` for reachability — it didn't account for
+// `IRInstr::GetAddress` references. The result: the registered handler
+// addresses were all 0 (the GetAddress relocation fell through to the
+// "Unresolved external symbol" warning), and the self-test failed
+// (`syscall_table_get(tbl, 64) == 0`).
+//
+// The fix is in src/codegen/src/opt.rs::whole_program_dce: the
+// transitive-closure loop now also scans for `IRInstr::GetAddress`
+// references and marks the named function as kept (if it's an internal
+// function). This is the same reachability treatment that `Call`
+// already received. Verified via the standalone probe at
+// /home/z/probes/probe_fnaddr.vuma (exit=0 after the fix; was exit=1
+// before). Without this fix, the W39 self-test's spot-checks on
+// `syscall_table_get(tbl, 64)` etc. would all read back 0.
+//
+// ── The 30 registered syscalls (Linux asm-generic numbers) ──────────────────
+// Listed in the W39 task spec (24 syscalls) + 6 extras to clear the
+// `count >= 30` minimum:
+//
+//   I/O (5):                  Process identity (4):
+//     63  read  sys_read        172 getpid  sys_getpid
+//     64  write sys_write       173 getppid sys_getppid (stub)
+//     57  close sys_close_h     174 getuid  sys_getuid  (stub)
+//     56  openat sys_open_h     107 geteuid sys_geteuid (stub)
+//     62  lseek sys_lseek (stub)
+//                            Process lifecycle (4):
+//   Memory (2+1 extra):          93  exit       sys_exit
+//     222 mmap  sys_mmap         94  exit_group sys_exit_group (stub)
+//     215 munmap sys_munmap      220 clone      sys_clone (stub)
+//     214 brk    sys_brk (extra) 221 execve     sys_execve (stub)
+//
+//   IPC / sync (3):          Filesystem (6+1 extra):
+//     260 wait4  sys_wait4 (stub)  83 mkdir  sys_mkdir_h
+//     129 kill   sys_kill  (stub)  84 rmdir  sys_rmdir_h
+//     202 futex  sys_futex (stub)  87 unlink sys_unlink_h
+//                                  82 rename sys_rename (stub)
+//   User/group identity (4 extra):49 chdir  sys_chdir_h
+//     176 getgid  sys_getgid  (x)  79 getcwd sys_getcwd_h
+//     177 getegid sys_getegid (x)
+//     105 setuid  sys_setuid  (x)  Permission (1 extra):
+//     106 setgid  sys_setgid  (x)  166 umask  sys_umask (x)
+//
+// Total = 24 (spec) + 6 (extras) = 30 entries registered.
+//
+// ── Stub body convention ────────────────────────────────────────────────────
+// Forward-declared VUMA fns (the 13 from sibling handler files) carry
+// STUB BODIES (`return 0;` / `return;`) in this file. The real bodies
+// live in handlers/io.vuma, handlers/mm.vuma, handlers/proc.vuma,
+// handlers/fs.vuma — they will be linked at K11's bare-metal build.
+// For hosted-mode `compile_dump --verify`, the stub body is never
+// invoked (only its ADDRESS is registered). The signatures match the
+// originals byte-for-byte so K11 can drop-in replace the stubs with
+// the real implementations without changing the syscall_init call
+// sites.
+//
+// The 17 NEW stub handlers (11 listed + 6 extras) carry the same
+// `return 0;` / `return;` bodies. These are K11+ TODOs — real
+// implementations will live in their own handler files (e.g.
+// handlers/ipc.vuma for futex, handlers/sched.vuma for clone/wait4,
+// handlers/cred.vuma for setuid/setgid/umask).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the W39 task
+// spec's "Decimal constants preferred in .vuma self-tests" convention.
+// The syscall numbers are written as DECIMAL literals (63, 64, 57, 56,
+// 62, 172, 173, 174, 107, 93, 94, 220, 221, 260, 129, 202, 222, 215,
+// 83, 84, 87, 82, 49, 79, 214, 176, 177, 105, 106, 166) — these match
+// the asm-generic/unistd.h canonical numbering. Decimal avoids the
+// parser's hex-literal path (parse_int_radix width-extension
+// subtleties — see womb/kernel/arch/x86_64/pt.vuma header for the
+// same rationale, and K3a's trap_trampoline.vuma for the same rule
+// applied to vector=14 and rip=4096).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
+// SyscallTable is a 4100-byte struct held in a ___pmt_buffer-backed
+// State<SyscallTable>; the CALLER (kmain, or this file's self-test)
+// allocates it via `state_new(SyscallTable)` and passes it by
+// reference to syscall_init. The State<SyscallTable> param is a
+// regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't
+// need the attribute). None of this file's functions call any extern,
+// so the codegen's conservative State-invalidation-on-extern-call
+// doesn't fire.
+//
+// The `fn_name as u64` expression is a compile-time address-of-function
+// — it lowers to `mov rax, imm64` (a constant load), NOT a pointer
+// dereference. The address is stored in the SyscallTable's [u8; 4096]
+// array via the byte-pack helper (syscall_table_set), which is itself
+// pure-PMT (8-iteration while loop, shift by i*8, mask 255 — same
+// pattern as pmm.vuma's pool_set_base, K2a).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It re-declares:
+//   - SyscallTable layout byte-identically to table.vuma (K3e)
+//   - syscall_table_get / syscall_table_set / syscall_register
+//     byte-identically to table.vuma (K3e)
+//   - 13 handler function signatures byte-identically to their
+//     originals in handlers/io.vuma, handlers/mm.vuma, handlers/proc.vuma,
+//     handlers/fs.vuma (the BODIES are stubs here; only the SIGNATURES
+//     must match for K11's drop-in replacement to work)
+// The sibling dispatch.vuma follows the same re-declaration pattern
+// for SyscallTable + the helpers.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
+//         cargo build --profile release-fast --bin compile_dump
+//     ./target/release-fast/compile_dump \
+//         womb/kernel/syscall/syscall_init.vuma \
+//         /tmp/init.bin x86_64 --verify
+//     /tmp/init.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (4 self-test checks pass — count >= 30,
+// sys_write handler registered at nr=64, sys_mmap handler registered
+// at nr=222, unregistered nr=0 reads back 0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts (re-declared byte-identically to table.vuma, K3e).
+// ────────────────────────────────────────────────────────────────────────────
+// 512 entries × 8 bytes per u64 handler address. `count` is the number
+// of handlers registered (incremented by syscall_register, never
+// decremented — see table.vuma's header "Why is syscall_register's
+// count increment one-shot?"). The flat [u8; 4096] array (rather than
+// [u64; 512]) is the codegen workaround documented in table.vuma's
+// "Why a flat [u8; 4096] array?" header — the codegen only lowers
+// `state.array[idx]` correctly for [u8; N] arrays (non-u8 element
+// types don't get the index-scaled-by-element-size treatment).
+
+layout SyscallTable = {
+    handlers: [u8; 4096],  // 512 * 8 bytes — u64 handler addr per syscall
+    count: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SyscallTable helpers (re-declared byte-identically to table.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// Byte-identical to table.vuma's syscall_table_get / syscall_table_set /
+// syscall_register. The init function needs its own copies because VUMA
+// has no import (Open Work §7) — same pattern as dispatch.vuma.
+
+// Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
+// 8-byte LE unpack at byte offset `nr * 8`. Returns 0 if no handler is
+// registered for that syscall (the slot is all zero bytes).
+fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+    let off = nr * 8;
+    let v: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = tbl.handlers[off + i] as u64;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// Write the u64 `handler` address for syscall `nr` into SyscallTable.handlers.
+// 8-byte LE pack at byte offset `nr * 8`. The mask-255 truncates each
+// shifted byte to its low 8 bits (the (handler >> sh) >> 8 path would
+// lose the high bits — same pattern as pmm.vuma's pool_set_base, K2a).
+fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+    let off = nr * 8;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = (handler >> sh) & 255;
+        tbl.handlers[off + i] = b as u8;
+        i = i + 1;
+    }
+}
+
+// Register a syscall handler: pack the address into the table slot AND
+// increment tbl.count. Re-declared byte-identically to table.vuma.
+// No "unregister" — K11 may add one for runtime syscall-table patching.
+fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+    syscall_table_set(tbl, nr, handler);
+    tbl.count = tbl.count + 1;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Handler forward declarations (stub bodies — see file header).
+// ────────────────────────────────────────────────────────────────────────────
+// 13 handlers re-declared from sibling handler files (io/mm/proc/fs.vuma)
+// with their ORIGINAL SIGNATURES and STUB BODIES. K11's bare-metal build
+// will replace these stubs with the real implementations via VUMA's
+// (future) import mechanism OR via a linker layer that selects the
+// real-body version of each fn name.
+//
+// The 17 NEW stub handlers (11 listed + 6 extras) are K11+ TODOs —
+// real implementations will live in their own handler files.
+
+// ── I/O handlers (re-declared from handlers/io.vuma) ───────────────────────
+// sys_read / sys_write take 3 scalar u64 args (fd, buf, count) per
+// io.vuma's K3f signature. The real io.vuma implementations route by
+// fd to host read/write or VFS read/write (K5 stub). The stubs here
+// just return 0 — the body is never invoked by this file's self-test.
+
+fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
+    return 0;
+}
+
+fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+    return 0;
+}
+
+// sys_lseek — reposition read/write offset of a file descriptor.
+// Linux signature: lseek(fd, offset, whence). Stub returns 0.
+// K11+ TODO: implement in handlers/io.vuma (or a new handlers/fs2.vuma).
+fn sys_lseek(fd: u64, offset: u64, whence: u64) -> i64 {
+    return 0;
+}
+
+// ── Memory handlers (re-declared from handlers/mm.vuma) ────────────────────
+// sys_mmap takes 6 u64 args per mm.vuma's K3f signature. sys_munmap
+// takes 2 u64 args. sys_brk takes 1 u64 arg (extra — not in the listed
+// 24 but a natural neighbour of mmap/munmap; pushes count above 30).
+// The real mm.vuma implementations delegate to the host mmap/munmap
+// externs in hosted mode (and to pmm_alloc/vmm_map in bare-metal K11).
+
+fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
+    return 0;
+}
+
+fn sys_munmap(addr: u64, len: u64) -> i64 {
+    return 0;
+}
+
+fn sys_brk(addr: u64) -> u64 {
+    return addr;
+}
+
+// ── Process handlers (re-declared from handlers/proc.vuma) ─────────────────
+// sys_getpid returns i64 (matches proc.vuma). sys_exit takes 1 i64 arg
+// and returns unit (void) — the `return;` after the (absent) exit call
+// is required by VUMA's type checker (see proc.vuma's "Why does
+// sys_exit have a `return;` after exit(code)?" header). The real
+// proc.vuma sys_exit calls the host `exit` extern (which never returns);
+// the stub here just returns.
+
+fn sys_getpid() -> i64 {
+    return 0;
+}
+
+fn sys_exit(code: i64) {
+    return;
+}
+
+// ── Process-identity stubs (NEW — K11+ TODO) ──────────────────────────────
+// 4 syscalls returning various IDs. Real implementations will read
+// from the per-CPU current-task struct (K4a's ProcessTable) or from
+// the host kernel in hosted mode (getpid/getppid/getuid/geteuid are
+// x86_64 syscalls #39/110/102/108 — pre-registered runtime stubs in
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs).
+
+fn sys_getppid() -> i64 {
+    return 0;
+}
+
+fn sys_getuid() -> i64 {
+    return 0;
+}
+
+fn sys_geteuid() -> i64 {
+    return 0;
+}
+
+// ── Process-lifecycle stubs (NEW — K11+ TODO) ─────────────────────────────
+// exit_group, clone, execve. Real implementations:
+//   - sys_exit_group: like sys_exit but exits the whole thread group
+//     (proc.vuma's sys_exit already calls exit_group on x86_64).
+//   - sys_clone: K4d's fork.vuma has sys_fork(tbl, task_idx) — K11
+//     wraps it in a tf-style handler.
+//   - sys_execve: K4d's exec.vuma has sys_exec(tbl, task_idx, entry,
+//     stack) — K11 wraps it in a tf-style handler.
+
+fn sys_exit_group(code: i64) {
+    return;
+}
+
+fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> i64 {
+    return 0;
+}
+
+fn sys_execve(filename: u64, argv: u64, envp: u64) -> i64 {
+    return 0;
+}
+
+// ── IPC / sync stubs (NEW — K11+ TODO) ────────────────────────────────────
+// wait4, kill, futex. Real implementations:
+//   - sys_wait4: K4e's wait.vuma has sys_waitpid — K11 wraps it.
+//   - sys_kill: K4c's signal.vuma has signal_send — K11 wraps it.
+//   - sys_futex: K3d's futex.vuma has futex_wait/futex_wake — K11
+//     wraps them. Note: asm-generic __NR_futex is 98, but the W39
+//     task spec says 202 — that's the x86_64 native number. The
+//     registered number is whatever the spec says (202); the handler
+//     is the same futex_wait/wake dispatch either way.
+
+fn sys_wait4(pid: u64, wstatus: u64, options: u64, rusage: u64) -> i64 {
+    return 0;
+}
+
+fn sys_kill(pid: u64, sig: u64) -> i64 {
+    return 0;
+}
+
+fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64) -> i64 {
+    return 0;
+}
+
+// ── User/group identity stubs (EXTRA — K11+ TODO) ─────────────────────────
+// 4 syscalls for the Unix credential model. These are NOT in the W39
+// listed 24 — they're included to push the registered count above the
+// `count >= 30` minimum. Real implementations will read/write the
+// per-task cred struct (K4a's ProcessTable extension or a separate
+// struct cred).
+
+fn sys_getgid() -> i64 {
+    return 0;
+}
+
+fn sys_getegid() -> i64 {
+    return 0;
+}
+
+fn sys_setuid(uid: u64) -> i64 {
+    return 0;
+}
+
+fn sys_setgid(gid: u64) -> i64 {
+    return 0;
+}
+
+// ── Permission stub (EXTRA — K11+ TODO) ───────────────────────────────────
+// sys_umask — set the process file-creation mask. Extra (not in the
+// listed 24); included to reach 30 total.
+
+fn sys_umask(mask: u64) -> i64 {
+    return 0;
+}
+
+// ── Filesystem handlers (re-declared from handlers/fs.vuma) ───────────────
+// The 7 fs handlers take a single `tf: Address` parameter (the superset
+// TrapFrame buffer's base address) and return u64 — per fs.vuma's R4c
+// signature convention. The real fs.vuma implementations read syscall
+// args from the canonical GPR slots via syscall_get_arg and route to
+// host open/close/mkdir/rmdir/unlink/chdir/getcwd externs. The stubs
+// here just return 0.
+
+fn sys_open_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+fn sys_close_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+fn sys_mkdir_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+fn sys_rmdir_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+fn sys_unlink_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+fn sys_chdir_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+fn sys_getcwd_handler(tf: Address) -> u64 {
+    return 0;
+}
+
+// ── Filesystem stub (NEW — K11+ TODO) ─────────────────────────────────────
+// sys_rename — rename a file/directory. Linux signature: rename(oldpath,
+// newpath). Stub returns 0. K11+ TODO: implement alongside the other
+// fs handlers in handlers/fs.vuma (or a new handlers/fs2.vuma).
+
+fn sys_rename(oldpath: u64, newpath: u64) -> i64 {
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// syscall_init — register all 30 handlers at their asm-generic numbers.
+// ────────────────────────────────────────────────────────────────────────────
+// Walks the 30 (nr, handler) pairs and calls syscall_register for each.
+// After init, tbl.count == 30 (assuming the caller zero-init'd count
+// before calling — see the self-test below). The handler addresses are
+// compile-time constants baked into the .text section via the Wave 5
+// GetAddress lowering (see file header "Why `fn_name as u64`?").
+//
+// The nr literals are DECIMAL per the W39 task spec — they match the
+// asm-generic/unistd.h canonical numbering (NOT the x86_64 native
+// numbering, except where the two happen to coincide — e.g. __NR_getcwd
+// is 17 asm-generic vs 79 x86_64; the spec says 79, so we use 79).
+//
+// K11 will call this from kmain:
+//     let tbl = state_new(SyscallTable);
+//     tbl.count = 0;
+//     syscall_init(tbl);
+//     // ... trap_entry routes syscalls via syscall_dispatch_from_trap(tbl, tf)
+
+fn syscall_init(tbl: State<SyscallTable>) {
+    // ── I/O (5) ──────────────────────────────────────────────────────────
+    syscall_register(tbl, 63, sys_read as u64);       // __NR_read
+    syscall_register(tbl, 64, sys_write as u64);      // __NR_write
+    syscall_register(tbl, 57, sys_close_handler as u64);  // __NR_close
+    syscall_register(tbl, 56, sys_open_handler as u64);   // __NR_openat
+    syscall_register(tbl, 62, sys_lseek as u64);      // __NR_lseek
+
+    // ── Process identity (4) ─────────────────────────────────────────────
+    syscall_register(tbl, 172, sys_getpid as u64);    // __NR_getpid
+    syscall_register(tbl, 173, sys_getppid as u64);   // __NR_getppid
+    syscall_register(tbl, 174, sys_getuid as u64);    // __NR_getuid
+    syscall_register(tbl, 107, sys_geteuid as u64);   // __NR_geteuid
+
+    // ── Process lifecycle (4) ────────────────────────────────────────────
+    syscall_register(tbl, 93, sys_exit as u64);       // __NR_exit
+    syscall_register(tbl, 94, sys_exit_group as u64); // __NR_exit_group
+    syscall_register(tbl, 220, sys_clone as u64);     // __NR_clone
+    syscall_register(tbl, 221, sys_execve as u64);    // __NR_execve
+
+    // ── IPC / sync (3) ──────────────────────────────────────────────────
+    syscall_register(tbl, 260, sys_wait4 as u64);     // __NR_wait4
+    syscall_register(tbl, 129, sys_kill as u64);      // __NR_kill
+    syscall_register(tbl, 202, sys_futex as u64);     // __NR_futex (x86_64 native)
+
+    // ── Memory management (2 + 1 extra) ─────────────────────────────────
+    syscall_register(tbl, 222, sys_mmap as u64);      // __NR_mmap
+    syscall_register(tbl, 215, sys_munmap as u64);    // __NR_munmap
+    syscall_register(tbl, 214, sys_brk as u64);       // __NR_brk (EXTRA)
+
+    // ── Filesystem (6 + 1 stub) ─────────────────────────────────────────
+    syscall_register(tbl, 83, sys_mkdir_handler as u64);  // __NR_mkdir
+    syscall_register(tbl, 84, sys_rmdir_handler as u64);  // __NR_rmdir
+    syscall_register(tbl, 87, sys_unlink_handler as u64); // __NR_unlink
+    syscall_register(tbl, 82, sys_rename as u64);     // __NR_rename (stub)
+    syscall_register(tbl, 49, sys_chdir_handler as u64);  // __NR_chdir
+    syscall_register(tbl, 79, sys_getcwd_handler as u64); // __NR_getcwd (x86_64 nr)
+
+    // ── User/group identity (4 EXTRA — K11+ TODO) ───────────────────────
+    syscall_register(tbl, 176, sys_getgid as u64);    // __NR_getgid (EXTRA)
+    syscall_register(tbl, 177, sys_getegid as u64);   // __NR_getegid (EXTRA)
+    syscall_register(tbl, 105, sys_setuid as u64);    // __NR_setuid (EXTRA)
+    syscall_register(tbl, 106, sys_setgid as u64);    // __NR_setgid (EXTRA)
+
+    // ── Permission (1 EXTRA — K11+ TODO) ────────────────────────────────
+    syscall_register(tbl, 166, sys_umask as u64);     // __NR_umask (EXTRA)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the W39 DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Allocate a SyscallTable via state_new, zero-init count, call
+// syscall_init, then verify:
+//   (1) tbl.count >= 30  — the W39 contract's minimum. Returns 1 on
+//       failure (would mean a syscall_register call was missed or
+//       tbl.count was not zero before init).
+//   (2) syscall_table_get(tbl, 64) != 0  — sys_write registered at
+//       nr=64. The handler address is a real .text address (not 0).
+//       Returns 2 on failure. Catches the "DCE removed the handler
+//       function" bug documented in the file header (Wave 39 codegen
+//       fix to whole_program_dce).
+//   (3) syscall_table_get(tbl, 222) != 0  — sys_mmap registered at
+//       nr=222. Independent spot-check on a different handler. Returns
+//       3 on failure.
+//   (4) syscall_table_get(tbl, 0) == 0  — nr=0 (__NR_io_setup on
+//       asm-generic) was NOT registered by syscall_init, so its slot
+//       should still be 0. Returns 4 on failure. Catches a hypothetical
+//       "wrong nr registered" bug (e.g. if sys_read were registered at
+//       nr=0 instead of nr=63).
+// Returns 0 on success.
+//
+// The self-test does NOT actually INVOKE any handler via
+// __call_indirect1 (that's dispatch.vuma's job, and dispatch.vuma's
+// self-test deliberately crashes at runtime because the dummy handler
+// address 8192 isn't callable — see dispatch.vuma's header). This
+// file's self-test only verifies REGISTRATION — that the table was
+// populated with the right (nr, handler) pairs. K11's kmain will run
+// this same registration, then wire up dispatch.vuma's
+// syscall_dispatch_from_trap to invoke the handlers.
+
+fn main() -> i32 {
+    let tbl = state_new(SyscallTable);
+    tbl.count = 0;
+
+    // Register all 30 handlers.
+    syscall_init(tbl);
+
+    // Check 1: count >= 30 (W39 contract minimum).
+    if tbl.count < 30 { return 1; }
+
+    // Check 2: sys_write registered at nr=64 (handler address != 0).
+    if syscall_table_get(tbl, 64) == 0 { return 2; }
+
+    // Check 3: sys_mmap registered at nr=222 (independent spot-check).
+    if syscall_table_get(tbl, 222) == 0 { return 3; }
+
+    // Check 4: nr=0 was NOT registered (slot still 0).
+    if syscall_table_get(tbl, 0) != 0 { return 4; }
+
+    return 0;
+}

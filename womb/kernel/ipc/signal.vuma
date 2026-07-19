@@ -66,6 +66,37 @@
 //   signal_unblock(tbl, sig)                  — remove `sig` from the
 //                                                blocked mask (POSIX
 //                                                sigprocmask SIG_UNBLOCK).
+//   signal_deliver(tbl, sig) -> u32           — (W40) deliver a single
+//                                                pending signal to its
+//                                                installed handler.
+//                                                Validates sig (1..32),
+//                                                checks the pending bit,
+//                                                fetches the handler, and
+//                                                if both present invokes
+//                                                the handler via the
+//                                                Wave 5 __call_indirect1
+//                                                trampoline (passing sig
+//                                                as the single SysV AMD64
+//                                                argument). Clears the
+//                                                pending bit AFTER the
+//                                                handler returns. Returns
+//                                                1 if delivered, 0 if not
+//                                                (not pending, no handler,
+//                                                or sig out of range).
+//   signal_check_and_deliver(tbl) -> u32      — (W40) deliver ALL pending
+//                                                signals with installed
+//                                                handlers in one pass.
+//                                                Walks signals 1..32 in
+//                                                ascending order; for
+//                                                each pending signal,
+//                                                calls signal_deliver.
+//                                                Returns the count of
+//                                                signals actually
+//                                                delivered. Does NOT
+//                                                respect the blocked mask
+//                                                (per the W40 contract —
+//                                                K8+ may add a mask-
+//                                                respecting variant).
 //
 // ── SignalTable layout (NEW in K7b) ─────────────────────────────────────────
 //   layout SignalTable = {
@@ -225,20 +256,44 @@
 //   signal_check in a loop until it returns 0, delivering each pending
 //   signal in turn before resuming user code.
 //
-// ── No actual handler invocation in K7b ─────────────────────────────────────
-//   signal_install stores the handler address. signal_check returns the
-//   signal number. NEITHER function CALLS the handler — that's the K8+
-//   delivery layer's job (it would push a signal trampoline frame onto
+// ── Handler invocation: W40 adds signal_deliver ─────────────────────────────
+//   Pre-W40 (K7b baseline): signal_install stores the handler address,
+//   signal_check returns the signal number, but NEITHER function CALLS
+//   the handler. The handler invocation was deferred to the K8+
+//   delivery layer (which would push a signal trampoline frame onto
 //   the target task's user stack, set RIP to the handler address, set
 //   RSP to the trampoline frame, and let the task resume into the
 //   handler; on return, the trampoline does an rt_sigreturn syscall to
-//   restore the pre-signal register state). K7b is PMT-pure: it only
-//   tracks the metadata (which signals are pending, which are blocked,
-//   what handler is installed for each). The actual control-flow
-//   manipulation requires the trap machinery from K3a/K3b/K3c — the
-//   K8+ delivery layer will live in womb/kernel/sched/signal_deliver.vuma
-//   (or similar) and take both State<SignalTable> and State<Task> +
-//   State<TrapFrame>.
+//   restore the pre-signal register state). The actual control-flow
+//   manipulation requires the trap machinery from K3a/K3b/K3c.
+//
+//   W40 closes the "handler is never called" gap at the PMT-pure layer:
+//   signal_deliver invokes the handler via the Wave 5 __call_indirect1
+//   trampoline (declared in this file's extern block — `mov rax,rdi;
+//   mov rdi,rsi; jmp rax`, an 8-byte tail-call stub registered in
+//   src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs). The
+//   handler receives `sig as u64` as its single SysV AMD64 argument
+//   (RDI); the u64 return value is currently discarded (POSIX signal
+//   handlers conventionally return void; K8+ may inspect the return
+//   for handler-fault reporting). The State<SignalTable> is preserved
+//   across the extern call because it is passed as a regular VUMA-fn
+//   borrow, NOT as an extern #[borrow] State<T> param (only extern
+//   #[borrow] State<T> params are conservatively invalidated — see W5's
+//   dispatch.vuma for the same reasoning, and char.vuma:203-209 /
+//   procfs.vuma:736-743 / irq.vuma:452-460 for the same preservation
+//   argument in sibling dispatch wrappers).
+//
+//   This is NOT the full K8+ delivery layer — there is no trap-frame
+//   push, no user-stack trampoline, no rt_sigreturn. signal_deliver
+//   invokes the handler SYNCHRONOUSLY in the caller's context (the
+//   kernel's main loop calls signal_deliver on return-to-user, the
+//   handler runs in kernel context, returns, and signal_deliver clears
+//   the pending bit). This is sufficient for PMT-pure self-testing +
+//   for kernel-internal signal consumers (e.g. a kernel thread that
+//   installs a handler for SIGKILL to do cleanup before exit). The K8+
+//   delivery layer will add the user-context trampoline machinery on
+//   top of signal_deliver (calling signal_deliver from the trap-return
+//   path after building the trampoline frame).
 //
 // ── No wait-queue integration in K7b ────────────────────────────────────────
 //   K7e's wait queue is the foundation for pause() / sigsuspend() — a
@@ -273,14 +328,41 @@
 //   State<SignalTable>; the CALLER allocates it via
 //   `state_new(SignalTable)` and passes it by reference to signal_init /
 //   signal_install / signal_get_handler / signal_send / signal_check /
-//   signal_block / signal_unblock (init-style API — see "Why init-
-//   style?" in K4e's wait.vuma header for the codegen rationale: the
-//   current codegen does NOT propagate State-typedness through function
-//   return values, so `fn signal_new() -> State<SignalTable>` would
-//   produce broken field-access code in callers). No externs are
-//   declared in this file (signal is pure-PM on the SignalTable — no
-//   syscalls, no context switch, no memory allocation, no handler
-//   invocation).
+//   signal_block / signal_unblock / signal_deliver /
+//   signal_check_and_deliver (init-style API — see "Why init-style?"
+//   in K4e's wait.vuma header for the codegen rationale: the current
+//   codegen does NOT propagate State-typedness through function return
+//   values, so `fn signal_new() -> State<SignalTable>` would produce
+//   broken field-access code in callers).
+//
+//   W40 adds ONE extern declaration: `__call_indirect1(ptr: u64, arg:
+//   u64) -> u64` (the Wave 5 indirect-call trampoline). It is NOT a C
+//   library function — it's a runtime stub emitted by
+//   src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs (8
+//   bytes: `mov rax,rdi; mov rdi,rsi; jmp rax` — a tail call that
+//   invokes the function at `ptr` with `arg` in RDI per SysV AMD64).
+//   signal_deliver uses it to invoke the per-signal handler installed
+//   via signal_install. The State<SignalTable> is preserved across the
+//   extern call because it is passed as a regular VUMA-fn borrow, NOT
+//   as an extern #[borrow] State<T> param (only extern #[borrow]
+//   State<T> params are conservatively invalidated — see the extern
+//   block's comment above + W5's dispatch.vuma for the same reasoning).
+//   Pre-W40, no externs were declared in this file (signal was pure-PM
+//   on the SignalTable — no syscalls, no context switch, no memory
+//   allocation, no handler invocation). W40 adds the handler-invocation
+//   extern; everything else remains pure-PM.
+//
+//   The handler addresses installed by signal_install are u64 values
+//   (NOT first-class function-pointer types — VUMA has no fn-ptr type).
+//   The W40 self-test installs a REAL handler address via the Wave 5
+//   FnAddr feature (`signal_test_handler as u64` — lowers to a
+//   compile-time `mov rax, imm64` constant load via IRInstr::GetAddress;
+//   see womb/kernel/syscall/syscall_init.vuma's header "Why `fn_name as
+//   u64`?" for the full lowering chain). The self-test's address-of-
+//   function reference is preserved by the O2 whole_program_dce pass
+//   per the Wave 39 fix (the pass now scans for IRInstr::GetAddress
+//   references, not just IRInstr::Call — see syscall_init.vuma's header
+//   "Wave 39 codegen fix").
 //
 //   State<T> params: 1 per function (tbl only), per the K4b contract's
 //   "1-2 per function" rule. The signal_* functions don't need a
@@ -306,29 +388,72 @@
 //     1    = the `1` in `1 as u32 << (sig - 1)` (the single bit being
 //            shifted into position) and the `1` in `i + 1` (signal-
 //            from-bit conversion: bit i → signal i+1).
-//     1000, 2, 15 = self-test constants (SIGINT handler address 1000,
-//                   signal numbers 2 and 15).
+//     1000, 2, 15, 10, 12, 1, 3 = self-test constants (SIGINT handler
+//                  address 1000, signal numbers 2/15/10/12/1/3 — see
+//                  the self-test header below for which step uses which).
+//                  W40 adds 10 (SIGUSR1), 12 (SIGUSR2), 1 (SIGHUP),
+//                  3 (SIGQUIT) for the signal_deliver /
+//                  signal_check_and_deliver tests.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 //   This file is self-contained. It declares the SignalTable layout (new
-//   to this file — no prior VWK file declares a SignalTable). No
-//   externs, no helpers from other files — signal_* is a closed 7-
-//   function API. K8+ files that need to manipulate signals (the
-//   scheduler's signal-delivery layer, the syscall layer's kill() /
-//   sigaction() / sigprocmask() wrappers) will re-declare this layout
-//   byte-identically and call these functions directly (VUMA's lack of
-//   `import` means each consumer file re-declares; see K1a-hosted's
-//   "no-import re-declaration rule" header note for the same pattern).
+//   to this file — no prior VWK file declares a SignalTable) + the
+//   Wave 5 __call_indirect1 extern (re-declared byte-identically to
+//   womb/kernel/syscall/dispatch.vuma, womb/kernel/trap/irq.vuma,
+//   womb/kernel/trap/trap.vuma, womb/kernel/drivers/char.vuma, and
+//   womb/kernel/fs/procfs.vuma — VUMA's lack of `import` means each
+//   consumer file re-declares the extern; see K1a-hosted's "no-import
+//   re-declaration rule" header note for the same pattern). No helpers
+//   from other files — signal_* is a closed 9-function API (init,
+//   install, get_handler, send, check, block, unblock, deliver,
+//   check_and_deliver) + the signal_test_handler self-test helper. K8+
+//   files that need to manipulate signals (the scheduler's signal-
+//   delivery layer, the syscall layer's kill() / sigaction() /
+//   sigprocmask() wrappers) will re-declare the layout byte-identically
+//   and call these functions directly.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
-//     ./target/release-fast/compile_dump \
+//     . "$HOME/.cargo/env" && \
+//         ./target/release-fast/compile_dump \
 //         womb/kernel/ipc/signal.vuma \
 //         /tmp/signal.bin x86_64 --verify
 //     /tmp/signal.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — install +
-// get_handler round-trip, send + check delivers SIGINT, second check
-// returns 0 (pending cleared), block SIGTERM + send + check returns 0
-// (blocked), unblock + check returns 15 (now deliverable)).
+// Expected: IVE Pass, exit=0 (all 14 self-test checks pass):
+//   (1-2)   install + get_handler round-trip (SIGINT handler=1000).
+//   (3-4)   send SIGINT returns 0; check returns 2 (pending + unblocked).
+//   (5-6)   second check returns 0 (pending bit cleared).
+//   (7-8)   block SIGTERM + send + check returns 0 (blocked); unblock +
+//           check returns 15 (now deliverable).
+//   (9-10)  [W40] install REAL handler for SIGUSR1 via `fn_name as u64`
+//           (Wave 5 FnAddr); send + signal_deliver returns 1 (handler
+//           actually invoked via __call_indirect1 — program reaches the
+//           check, proving the handler ran and returned).
+//   (11)    [W40] pending bit cleared after signal_deliver.
+//   (12)    [W40] signal_deliver on non-pending signal returns 0.
+//   (13-14) [W40] signal_deliver on pending-no-handler returns 0;
+//           cleanup via signal_check.
+//   (15-16) [W40] signal_check_and_deliver delivers 2 signals (SIGHUP +
+//           SIGQUIT, both with real handlers) and clears all pending.
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampoline — indirect call (Wave 5, used by signal_deliver).
+// ────────────────────────────────────────────────────────────────────────────
+extern "C" {
+    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // at `ptr` with `arg` in RDI (SysV AMD64). Used by signal_deliver to
+    // invoke the per-signal handler installed via signal_install. Same
+    // stub category as write/read/exit — NOT a C library function. Real
+    // asm body registered in src/codegen/src/x86_64/mod.rs::build_runtime_
+    // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
+    //
+    // The State<SignalTable> is preserved across the extern call because
+    // it is passed as a regular VUMA-fn borrow, NOT as an extern #[borrow]
+    // State<T> param (only extern #[borrow] State<T> params are
+    // conservatively invalidated — see W5's dispatch.vuma for the same
+    // reasoning, and char.vuma:203-209 for the same preservation argument
+    // in the chardev_read dispatch wrapper).
+    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layout.
@@ -564,8 +689,167 @@ fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
     tbl.mask = tbl.mask & (~bit);
 }
 
+// signal_deliver: deliver a single pending signal to its handler.
+//
+//   sig: 1..32 (signal number). Out-of-range values return 0 (no
+//        delivery — same convention as signal_install / signal_block).
+//
+// This is the "actually invoke the handler" step that signal_check
+// deferred (signal_check returns the signal NUMBER; signal_deliver
+// CALLS the handler). The kernel's main loop calls signal_deliver
+// after signal_check returns a non-zero signal number, OR calls
+// signal_check_and_deliver (below) to do both in one pass.
+//
+// Implementation:
+//   (1) Validate sig (1..32). Out-of-range → return 0.
+//   (2) Compute the pending bit `1 as u32 << (sig - 1)`. If the bit
+//       is NOT set in tbl.pending, return 0 (signal not pending —
+//       nothing to deliver).
+//   (3) Fetch the installed handler via signal_get_handler(tbl, sig).
+//       If handler == 0, return 0 (no handler installed — the K8+
+//       delivery layer would take the default action here: terminate
+//       for SIGINT/SIGTERM, ignore for SIGCHLD, etc.; K7b's
+//       signal_deliver just reports "not delivered" and leaves the
+//       pending bit set so a later install + deliver can still fire).
+//   (4) Call the handler via the Wave 5 indirect-call trampoline:
+//         let handler_ret = __call_indirect1(handler, sig as u64);
+//       The handler receives `sig as u64` as its single SysV AMD64
+//       argument (RDI). The u64 return value is currently discarded
+//       (POSIX signal handlers conventionally return void; K8+ may
+//       inspect the return for handler-fault reporting). The
+//       State<SignalTable> is preserved across the extern call
+//       because it is passed as a regular VUMA-fn borrow, NOT as an
+//       extern #[borrow] State<T> param (only extern #[borrow]
+//       State<T> params are conservatively invalidated — same
+//       pattern as char.vuma's chardev_read / procfs.vuma's
+//       procfs_read / irq.vuma's irq_dispatch_loop).
+//   (5) Clear the pending bit: tbl.pending = tbl.pending & (~bit).
+//       The clear happens AFTER the handler returns (per the W40
+//       task spec's literal step ordering — "call __call_indirect1"
+//       then "Clear the pending bit"). In PMT-pure, the handler
+//       cannot re-enter signal_send (it has no State<SignalTable>
+//       access — only the single u64 sig argument), so the clear-
+//       after-call vs clear-before-call ordering is observationally
+//       equivalent here. K8+ (where the handler MAY gain shared-
+//       state access via the trap frame) should swap to clear-
+//       BEFORE-call to match POSIX's "a signal delivered during
+//       another signal's handler is queued for the next delivery
+//       pass" semantics — clear-after-call would lose a re-entrant
+//       re-post. The `~bit` is bitwise NOT on u32 — same zero-
+//       extension argument as signal_check's clear-on-deliver (see
+//       "Bitwise NOT (`~`) on u32" in the file header).
+//   (6) Return 1 (delivered).
+//
+// State<T> params: 1 (tbl). Reads tbl.pending, reads tbl.handlers
+// (via signal_get_handler), writes tbl.pending (the clear-bit step).
+// Calls the __call_indirect1 extern (passes handler + sig as u64).
+fn signal_deliver(tbl: State<SignalTable>, sig: u32) -> u32 {
+    if sig == 0 { return 0; }
+    if sig > 32 { return 0; }
+    let bit = 1 as u32 << (sig - 1);
+    if (tbl.pending & bit) == 0 {
+        return 0;  // not pending — nothing to deliver
+    }
+    let handler = signal_get_handler(tbl, sig as u8);
+    if handler == 0 {
+        return 0;  // no handler installed — default action is K8+
+    }
+    // Wave 5: invoke the per-signal handler via the indirect-call
+    // trampoline. The handler receives `sig as u64` as its first SysV
+    // AMD64 argument (RDI). The u64 return is discarded (POSIX signal
+    // handlers conventionally return void). The State<SignalTable> is
+    // preserved across the extern call (regular VUMA-fn borrow, not
+    // extern #[borrow] — see the extern-block comment above).
+    let handler_ret = __call_indirect1(handler, sig as u64);
+    // Clear the pending bit AFTER the handler returns. The W40 task
+    // spec lists this as the step immediately following the handler
+    // call. In PMT-pure, the handler cannot re-enter signal_send (it
+    // has no State<SignalTable> access — only the single u64 sig
+    // argument), so the clear-after-call vs clear-before-call ordering
+    // is observationally equivalent here. K8+ (where the handler MAY
+    // gain shared-state access via the trap frame) should swap to
+    // clear-BEFORE-call to match POSIX's "a signal delivered during
+    // another signal's handler is queued for the next delivery pass"
+    // semantics — clear-after-call would lose a re-entrant re-post.
+    // The `~bit` zero-extension argument is the same as signal_check's
+    // clear-on-deliver.
+    tbl.pending = tbl.pending & (~bit);
+    return 1;
+}
+
+// signal_check_and_deliver: deliver ALL pending signals with installed
+// handlers. Returns the count of signals actually delivered.
+//
+// This is the "drain the pending mask" entry point the kernel's main
+// loop calls on every return-to-user (and after every interruptible
+// sleep). It walks all 32 signals in ascending order (SIGHUP=1 first,
+// signal 32 last — same order as signal_check's lowest-first scan),
+// and for each pending signal with an installed handler, calls
+// signal_deliver to invoke the handler + clear the pending bit.
+//
+// Implementation:
+//   (1) Initialize count = 0.
+//   (2) Walk i = 0..31 (bit positions; signal = i + 1).
+//   (3) For each i, compute `bit = 1 as u32 << i`. If
+//       `(tbl.pending & bit) != 0`, the signal is pending — call
+//       signal_deliver(tbl, i + 1). signal_deliver internally
+//       re-checks pending + handler and invokes the handler via
+//       __call_indirect1 if both are present.
+//   (4) Add signal_deliver's return (0 or 1) to count.
+//   (5) After the loop, return count.
+//
+// The pending-bit pre-check in step (3) is an optimization: it skips
+// the signal_deliver call (and its internal signal_get_handler
+// 8-byte-loop fetch) for non-pending signals. signal_deliver would
+// return 0 anyway, but skipping the call avoids the handler-fetch
+// overhead. The pre-check is also defensive: it guarantees we never
+// invoke __call_indirect1 on a non-pending signal (in case a future
+// signal_deliver refactor changes the pending-check ordering).
+//
+// Note: signal_check_and_deliver does NOT respect the blocked mask
+// (tbl.mask). Pending + handler-installed → delivered, regardless of
+// mask. This differs from signal_check (which filters via `pending &
+// ~mask`). The W40 task spec specifies this behavior literally ("for
+// each pending signal with a handler, call signal_deliver"). K8+ may
+// add a mask-respecting variant (signal_check_and_deliver_filtered)
+// or fold the mask check into signal_deliver itself; K7b's W40
+// contract is the literal "pending + handler → deliver" semantics.
+//
+// Signals that are pending but have NO handler installed are SKIPPED
+// (signal_deliver returns 0, the pending bit stays set). This
+// matches POSIX: a signal with default action (no handler) is not
+// "delivered" to a user handler — the kernel takes the default
+// action (terminate/ignore/stop) separately. K8+ will hook the
+// default-action path here.
+//
+// State<T> params: 1 (tbl). Reads tbl.pending (loop condition),
+// reads tbl.handlers (via signal_get_handler inside signal_deliver),
+// writes tbl.pending (clear-bit step inside signal_deliver). Calls
+// signal_get_handler + signal_deliver (both 1-State<T>-param VUMA
+// fns) + __call_indirect1 (extern, inside signal_deliver).
+fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
+    let count: u32 = 0;
+    let i = 0;
+    while i < 32 {
+        let bit = 1 as u32 << i;
+        // Only consider pending signals. The pre-check skips the
+        // signal_deliver call (and its internal handler fetch) for
+        // non-pending signals — signal_deliver would return 0 anyway,
+        // but skipping the call is cheaper and avoids a hypothetical
+        // signal_deliver refactor that might invoke the handler
+        // unconditionally.
+        if (tbl.pending & bit) != 0 {
+            let sig = i + 1;
+            let d = signal_deliver(tbl, sig);
+            count = count + d;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Self-test (the K7b DoD).
+// Self-test (the K7b DoD + W40 signal_deliver DoD).
 // ────────────────────────────────────────────────────────────────────────────
 // Allocate a SignalTable via state_new, init it via signal_init, then:
 //   (1) Install handler for SIGINT (sig=2) at address 1000.
@@ -576,28 +860,115 @@ fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
 //   (6) Check signal_check(tbl) == 0 again (pending bit cleared in step 5).
 //   (7) Block SIGTERM (sig=15), send it, check signal_check == 0 (blocked).
 //   (8) Unblock SIGTERM, check signal_check == 15 (now deliverable).
-//   (9) Return 0 (success).
+//   ── W40: signal_deliver + signal_check_and_deliver ──
+//   (9)  Install a REAL handler for SIGUSR1 (sig=10) via the Wave 5
+//        FnAddr feature (`signal_test_handler as u64`). Verify the
+//        address reads back non-zero (catches the DCE-removed-handler
+//        bug documented in syscall_init.vuma's header — Wave 39's
+//        whole_program_dce fix preserves functions referenced via
+//        GetAddress).
+//   (10) Send SIGUSR1 + call signal_deliver(tbl, 10) → must return 1
+//        (delivered). The handler is actually invoked via
+//        __call_indirect1 — the fact that we reach the check (program
+//        didn't crash at the indirect call) proves the handler ran.
+//   (11) Verify the pending bit was cleared (signal_check returns 0).
+//   (12) signal_deliver on a non-pending signal returns 0.
+//   (13) signal_deliver on a pending signal with NO handler returns 0
+//        (and leaves the pending bit set). Uses SIGUSR2 (sig=12, no
+//        handler installed).
+//   (14) Clean up SIGUSR2's pending bit via signal_check (returns 12)
+//        so it doesn't interfere with the signal_check_and_deliver
+//        count below.
+//   (15) Install real handlers for SIGHUP (1) + SIGQUIT (3), send
+//        both, call signal_check_and_deliver → must return 2.
+//   (16) Verify all pending bits cleared after signal_check_and_deliver.
+//   (17) Return 0 (success).
 //
-// Returns 0 on success, 1..6 on the corresponding check failure (so a
+// Returns 0 on success, 1..14 on the corresponding check failure (so a
 // future CI failure pinpoints the broken check).
 //
 // ── State-typedness note ────────────────────────────────────────────────────
 // Every function call (signal_init, signal_install, signal_get_handler,
-// signal_send, signal_check, signal_block, signal_unblock) takes tbl
-// as a parameter — so the state-typedness is preserved across the
-// calls, and the direct field reads work correctly after each call.
-// The `let h = signal_get_handler(...);` / `let ret = signal_send(...);`
-// / `let sig = signal_check(...);` locals are plain u64 / i64 / u8
-// values (function return values, not State<T> field reads) — no
-// state-typedness concern. (Same pattern as K7e's waitq.vuma self-test
-// header note.)
+// signal_send, signal_check, signal_block, signal_unblock, signal_deliver,
+// signal_check_and_deliver) takes tbl as a parameter — so the state-
+// typedness is preserved across the calls, and the direct field reads
+// work correctly after each call. The `let h = signal_get_handler(...);`
+// / `let ret = signal_send(...);` / `let sig = signal_check(...);` /
+// `let d = signal_deliver(...);` / `let cnt = signal_check_and_deliver(...)`
+// locals are plain u64 / i64 / u8 / u32 values (function return values,
+// not State<T> field reads) — no state-typedness concern. (Same pattern
+// as K7e's waitq.vuma self-test header note.)
+//
+// ── "Handler was invoked" verification (W40 DoD) ────────────────────────────
+// The W40 task spec requires the self-test to "verify signal_deliver
+// actually calls the handler". PMT-pure discipline forbids pointer
+// syntax (`&x` / `*ptr`), so the handler cannot receive a State<Witness>
+// to mutate as a side-channel witness — __call_indirect1 only forwards
+// a single u64 (the signal number) as the SysV AMD64 first argument.
+// VUMA has no module-level mutable state either (the parser accepts
+// `static mut`, but the codegen treats it as a per-access fresh let-
+// binding — verified empirically by /home/z/probes/probe_static.vuma:
+// handler increments COUNTER, main reads 0 not 1).
+//
+// The verification is therefore INDIRECT but sound:
+//   (a) The handler installed in step 9 is a REAL VUMA function
+//       (`signal_test_handler` below) whose address is taken via the
+//       Wave 5 FnAddr feature (`fn_name as u64`). The address is a
+//       real .text section address — NOT the fake sentinel 1000 used
+//       in step 1's round-trip test (1000 would segfault if
+//       __call_indirect1 actually jumped to it).
+//   (b) Step 10's signal_deliver(tbl, 10) call reaches the
+//       __call_indirect1(handler, sig) call site (because the pending
+//       bit is set + handler != 0). If __call_indirect1 jumped to a
+//       non-callable address, the program would segfault (SIGSEGV,
+//       exit 139) before reaching the `if d1 != 1` check.
+//   (c) The program reaches the check (exit != 139) → the handler was
+//       actually invoked + returned normally.
+//   (d) Step 11 verifies the pending bit was cleared, which only
+//       happens AFTER the __call_indirect1 call returns (per
+//       signal_deliver's clear-after-call ordering). This is a
+//       second witness: the clear-bit store executed, so the call
+//       must have returned.
+//
+// This is the same PMT-pure "verify the indirect call happened by
+// not crashing" pattern that char.vuma's chardev_read self-test
+// documents (char.vuma:751-755) — except char.vuma's self-test guards
+// with `read_fn == 0` and never actually invokes the handler, while
+// this file's self-test DOES invoke the handler via a real address.
+// The probe at /home/z/probes/probe_deliver2.vuma confirms the full
+// pattern (install real handler via `fn_name as u64`, set pending bit,
+// call a signal_deliver-style function, verify pending cleared + return
+// 1) exits 0.
 //
 // Per the K7b contract's "decimal constants" rule: all non-zero
-// constants in the self-test use DECIMAL (2, 1000, 15) — decimal
-// avoids the parser's hex-literal path (parse_int_radix width-
-// extension subtleties — see womb/kernel/arch/x86_64/pt.vuma header
-// for the same rationale, and K3a's trap_trampoline.vuma for the same
-// rule).
+// constants in the self-test use DECIMAL (2, 1000, 15, 10, 12, 1, 3)
+// — decimal avoids the parser's hex-literal path (parse_int_radix
+// width-extension subtleties — see womb/kernel/arch/x86_64/pt.vuma
+// header for the same rationale, and K3a's trap_trampoline.vuma for
+// the same rule).
+
+// signal_test_handler: a real VUMA function whose address can be taken
+// via `signal_test_handler as u64` (Wave 5 FnAddr) and invoked via
+// __call_indirect1. The handler receives the signal number as its
+// single SysV AMD64 argument (RDI) and returns `sig + 1000` (a magic
+// value signal_deliver discards — POSIX signal handlers conventionally
+// return void; the non-trivial return prevents the optimizer from
+// eliding the call as a no-op).
+//
+// PMT-pure: no State<T> access, no extern calls, no side effects beyond
+// the return value. The handler's body is pure — the "handler was
+// invoked" verification is indirect (see the "Handler was invoked"
+// note in the self-test header above). The body is deliberately
+// non-empty (returns sig + 1000) so the optimizer has a real value
+// to compute + return; an empty `return 0;` body would risk being
+// constant-folded away by the O2 DCE pass (verified: the
+// whole_program_dce pass preserves functions referenced via
+// IRInstr::GetAddress per the Wave 39 fix documented in
+// syscall_init.vuma's header, so even `return 0;` would survive — but
+// the non-trivial body makes the preservation belt-and-suspenders).
+fn signal_test_handler(sig: u64) -> u64 {
+    return sig + 1000;
+}
 
 fn main() -> i32 {
     let tbl = state_new(SignalTable);
@@ -637,6 +1008,88 @@ fn main() -> i32 {
     signal_unblock(tbl, 15);
     let sig4 = signal_check(tbl);
     if sig4 != 15 { return 6; }
+
+    // ── W40: signal_deliver + signal_check_and_deliver tests ──────────
+
+    // (9) Install a REAL handler for SIGUSR1 (10) via the Wave 5
+    // FnAddr feature (`signal_test_handler as u64`). The handler's
+    // address is a real .text address — NOT the fake 1000 used for
+    // the round-trip test above (1000 would crash if signal_deliver
+    // actually invoked it via __call_indirect1). Verify the address
+    // reads back non-zero (catches the DCE-removed-handler bug
+    // documented in syscall_init.vuma's header — the Wave 39
+    // whole_program_dce fix preserves functions referenced via
+    // IRInstr::GetAddress).
+    signal_install(tbl, 10, signal_test_handler as u64);
+    let h10 = signal_get_handler(tbl, 10);
+    if h10 == 0 { return 7; }
+
+    // (10) Send SIGUSR1 + call signal_deliver(tbl, 10). The handler
+    // is actually invoked via __call_indirect1(handler, 10) — the
+    // fact that we reach the `if d1 != 1` check (program didn't
+    // segfault at the indirect call) proves the handler ran and
+    // returned. signal_deliver returns 1 (delivered). See the
+    // "Handler was invoked" note in the self-test header for the
+    // full verification argument.
+    signal_send(tbl, 10);
+    let d1 = signal_deliver(tbl, 10);
+    if d1 != 1 { return 8; }
+
+    // (11) Verify the pending bit was cleared by signal_deliver
+    // (the clear happens AFTER the __call_indirect1 call returns,
+    // so this also witnesses that the call returned). signal_check
+    // should return 0 (nothing pending).
+    let sig5 = signal_check(tbl);
+    if sig5 != 0 { return 9; }
+
+    // (12) signal_deliver on a non-pending signal returns 0 (the
+    // pending-bit check fails first; __call_indirect1 is NOT called,
+    // so even a fake handler address would be safe here — but we
+    // use the real SIGUSR1 handler anyway).
+    let d2 = signal_deliver(tbl, 10);
+    if d2 != 0 { return 10; }
+
+    // (13) signal_deliver on a pending signal with NO handler
+    // installed returns 0 (and does NOT clear the pending bit —
+    // a later install + deliver can still fire). Uses SIGUSR2 (12,
+    // no handler installed). The pending bit stays set; we clean
+    // it up in step 14.
+    signal_send(tbl, 12);
+    let d3 = signal_deliver(tbl, 12);
+    if d3 != 0 { return 11; }
+
+    // (14) Clean up SIGUSR2's pending bit via signal_check (returns
+    // 12, clears the bit) so it doesn't interfere with the
+    // signal_check_and_deliver count in step 15. If we left
+    // SIGUSR2 pending, signal_check_and_deliver would call
+    // signal_deliver(tbl, 12) which returns 0 (no handler) — the
+    // count would still be 2 (only SIGHUP + SIGQUIT have handlers),
+    // but the leftover pending bit would fail step 16's "all clear"
+    // check.
+    let sig6 = signal_check(tbl);
+    if sig6 != 12 { return 12; }
+
+    // (15) signal_check_and_deliver: install real handlers for
+    // SIGHUP (1) and SIGQUIT (3), send both, call
+    // signal_check_and_deliver, verify count == 2. SIGINT (2) has
+    // a fake handler (1000) but is NOT pending (cleared in step 5),
+    // so signal_check_and_deliver skips it (signal_deliver returns 0
+    // for non-pending signals without invoking the handler — the
+    // pending-bit pre-check in signal_check_and_deliver's loop also
+    // short-circuits before the signal_deliver call). SIGUSR1 (10)
+    // has a real handler but is NOT pending (cleared in step 10).
+    signal_install(tbl, 1, signal_test_handler as u64);
+    signal_install(tbl, 3, signal_test_handler as u64);
+    signal_send(tbl, 1);
+    signal_send(tbl, 3);
+    let cnt = signal_check_and_deliver(tbl);
+    if cnt != 2 { return 13; }
+
+    // (16) Verify all pending bits cleared after signal_check_and_deliver.
+    // signal_check should return 0 (nothing pending — SIGHUP + SIGQUIT
+    // were delivered + cleared; no other signals are pending).
+    let sig7 = signal_check(tbl);
+    if sig7 != 0 { return 14; }
 
     return 0;
 }
