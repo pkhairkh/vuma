@@ -5871,7 +5871,7 @@ pub fn emit_wasm(
         functions: allocated_funcs,
         total_code_size: 0, // computed by the backend during encoding
         total_data_size: 0,
-        rodata_data: Vec::new(),
+        rodata_data: Vec::new(), function_names: std::collections::HashSet::new(),
     };
 
     // ── Encode the program into a .wasm module ──

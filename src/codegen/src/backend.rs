@@ -468,6 +468,12 @@ pub struct AllocatedProgram {
     /// Wave 1: Read-only data (string literals) to be placed in .rodata.
     /// Concatenated bytes of all ReadOnly data sections.
     pub rodata_data: Vec<u8>,
+    /// Wave 5: All known function names (from the AST). Used to distinguish
+    /// function symbols (which should be in .text) from data symbols (which
+    /// go in .bss). Without this, functions removed by the O2 optimizer but
+    /// still referenced via GetAddress would be incorrectly classified as
+    /// data symbols.
+    pub function_names: std::collections::HashSet<String>,
 }
 
 // ---------------------------------------------------------------------------
