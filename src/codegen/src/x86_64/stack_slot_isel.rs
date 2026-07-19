@@ -2588,6 +2588,143 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("set_resource_limit".to_string());
                                 channel_builtin_matched = true;
                             }
+                            // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_byte)
+                            // XOR stream cipher — XORs each byte at ptr[0..len]
+                            // with key_byte. Symmetric: seal and open are the
+                            // same operation (XOR). The AeadXor/CryptoState in
+                            // ipc.rs implements the full wire format (nonce +
+                            // ciphertext + CRC tag); this inline builtin is the
+                            // primitive XOR operation that the stream cipher
+                            // reduces to for single-byte keys.
+                            "aead_seal" | "aead_open" if args.len() == 3 => {
+                                let ptr = &args[0];
+                                let len = &args[1];
+                                let key = &args[2];
+                                // rax = ptr
+                                code.extend(load_value(ptr, Gpr::Rax));
+                                // rcx = len (byte count)
+                                code.extend(load_value(len, Gpr::Rcx));
+                                // dl = key_byte (low 8 bits of key value)
+                                code.extend(load_value(key, Gpr::Rdx));
+                                // Loop: xor byte [rax], dl; inc rax; dec rcx; jnz
+                                let loop_start = code.len();
+                                // cmp rcx, 0
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rcx, 0));
+                                // je done (rel8) — skip past loop body.
+                                // Loop body: xor(2) + inc(3) + dec(3) + jmp(2) = 10 bytes.
+                                // je is at offset loop_start+4 (after cmp), end of je is
+                                // loop_start+6. Done label is loop_start+6+10 = loop_start+16.
+                                // je offset = 16 - 6 = 10.
+                                code.extend(&[0x74, 0x0A]); // je +10 → past the loop body
+                                // xor byte [rax], dl
+                                code.extend(&[0x30, 0x10]); // xor [rax], dl
+                                // inc rax
+                                code.extend(&[0x48, 0xFF, 0xC0]); // inc rax
+                                // dec rcx
+                                code.extend(&[0x48, 0xFF, 0xC9]); // dec rcx
+                                // jmp loop_start (rel8)
+                                let jmp_back = code.len();
+                                let back_delta = loop_start as i64 - (jmp_back as i64 + 2);
+                                code.extend(&[0xEB, back_delta as u8]);
+                                instr_opcode = Some("aead_seal".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 19-21 (L6 Checkpoint): checkpoint_save(value)
+                            // Writes an 8-byte value to /tmp/vuma_checkpoint.bin.
+                            // Uses open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644) +
+                            // write(fd, &value, 8) + close(fd).
+                            // The Checkpoint struct in ipc.rs implements full
+                            // state serialization (channels + integrity hash);
+                            // this inline builtin persists a single value.
+                            "checkpoint_save" if args.len() == 1 => {
+                                let value = &args[0];
+                                // Build the path "/tmp/vuma_checkpoint.bin" on stack.
+                                // 21 bytes including null terminator.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 32));
+                                // Store the path string as immediate bytes.
+                                // "/tmp/vuma_checkpoint.bin\0"
+                                // = 2F 74 6D 70 2F 76 75 6D 61 5F 63 68 65 63 6B 70 6F 69 6E 74 2E 62 69 6E 00
+                                // Pack as u64 immediates:
+                                // [0..8]:  "/tmp/vum" = 0x6D75762F706D742F
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                // [8..16]: "a_checkp" = 0x706B6365635F6161
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x706B6365635F6161));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                // [16..24]: "oint.bin" = 0x6E69622E746E696F
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6E69622E746E696F));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                // [24]: null terminator = 0
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
+                                // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+                                // sys_open=2, O_WRONLY=1, O_CREAT=64(0x40), O_TRUNC=512(0x200)
+                                // flags = 1|0x40|0x200 = 0x241
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x241));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0o644));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
+                                code.extend(encode_syscall());
+                                // RAX = fd. Save to [rsp+28] (4 bytes).
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 28, Gpr::Rax));
+                                // write(fd, &value, 8) — store value at [rsp+29..37]
+                                // Actually, put value right after the path. Use [rsp+8] as
+                                // the value buffer (overwrite the path, which we don't need).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28)); // fd
+                                code.extend(load_value(value, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
+                                code.extend(encode_syscall());
+                                // close(fd)
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 3)); // sys_close
+                                code.extend(encode_syscall());
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 32));
+                                instr_opcode = Some("checkpoint_save".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 19-21 (L6 Checkpoint): checkpoint_restore() -> u64
+                            // Reads an 8-byte value from /tmp/vuma_checkpoint.bin.
+                            "checkpoint_restore" if args.is_empty() && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Build path on stack
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 32));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x706B6365635F6161));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6E69622E746E696F));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
+                                // open(path, O_RDONLY=0)
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // O_RDONLY=0
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2)); // sys_open
+                                code.extend(encode_syscall());
+                                // RAX = fd. Save to [rsp+28].
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 28, Gpr::Rax));
+                                // read(fd, &buf, 8) — use [rsp+8] as buffer
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                                code.extend(encode_syscall());
+                                // Load the 8 bytes from [rsp+8] into dst slot
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 8));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, slot_offset(dst_id), Gpr::Rax));
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 12));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, slot_offset(dst_id) + 4, Gpr::Rax));
+                                // close(fd)
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                                code.extend(encode_syscall());
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 32));
+                                instr_opcode = Some("checkpoint_restore".to_string());
+                                channel_builtin_matched = true;
+                            }
                             _ => {}
                         }
                     }

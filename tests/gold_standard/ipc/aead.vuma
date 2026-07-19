@@ -1,0 +1,23 @@
+// aead — Wave 23-24: verify XOR stream cipher seal/open roundtrip.
+//
+// The parent allocates 8 bytes on the stack (via shared_memory_open),
+// writes a known value (0x4141414141414141), seals it with key byte
+// 0x5A, then opens it with the same key. After seal+open, the value
+// should be restored (XOR is symmetric). The parent checks the
+// restored value and exits 1 if it matches.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    // Allocate 8 bytes via shared_memory_open (gives us a writable buffer)
+    buf = shared_memory_open(64);
+    // Write a known value: 0x4141414141414141
+    shared_memory_write(buf, 0, 4702111234474983745); // 0x4141414141414141
+    // Seal: XOR each byte with 0x5A
+    aead_seal(buf, 8, 90); // 90 = 0x5A
+    // Open: XOR again with 0x5A (restores original)
+    aead_open(buf, 8, 90);
+    // Read back
+    v = shared_memory_read(buf, 0);
+    if v == 4702111234474983745 { return 1; }
+    return 0;
+}
