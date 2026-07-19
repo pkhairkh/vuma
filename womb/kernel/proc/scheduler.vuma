@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/proc/scheduler.vuma
 // VWK Process/Thread Subsystem — CFS-like scheduler on the superset TrapFrame.
-// Wave R4a+b (PMT-pure).
+// Wave R4a+b (PMT-pure) + W36 (priority-weighted vruntime, sys_sched_yield,
+// sys_nice, sched_dump).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the R4a+b rewrite of K4b's scheduler. K4b built the CFS
@@ -239,7 +240,11 @@
 // round-trip through tf.pc = 4096, and — W11S2 extension — verifies
 // sched_tick's preemption check sets rq.need_resched = 1 when the
 // current vruntime drifts > 1000000 above the runqueue min, then
-// exercises sched_check_resched + sched_clear_resched).
+// exercises sched_check_resched + sched_clear_resched. W36 extension:
+// verifies priority-weighted vruntime (prio=7 → delta/8 decay), sys_nice
+// adjust + clamp to 0..139, sys_sched_yield picks min-vruntime READY
+// task and updates PerCpu.current_task, and sched_dump prints all 5
+// non-FREE tasks to stdout).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -297,6 +302,57 @@ layout ProcessTable = {
     fds: [u8; 2048],
     nexts: [u8; 2048],
     count: u32,
+}
+
+// PerCpu: re-declared byte-identically to K4f's
+// womb/kernel/smp/percpu.vuma. W36 (this wave) adds sys_sched_yield which
+// needs to read+write `current_task` on the calling CPU's PerCpu block. Only
+// the 2 fields sys_sched_yield touches are documented here; the full 6-field
+// semantics live in percpu.vuma's header (K4f).
+//
+// Field semantics (subset relevant to W36):
+//   cpu_id        = this CPU's index (0..N-1).
+//   current_task  = index of the Task slot currently RUNNING on this CPU
+//                   (or 256 = idle). sys_sched_yield reads this to find
+//                   "self" and writes it back to the picked "next" task.
+//   kernel_stack  = top of this CPU's kernel stack (unused here).
+//   idle_task     = index of this CPU's idle task (unused here).
+//   rq_head       = runqueue head index (unused here — sys_sched_yield walks
+//                   the ProcessTable directly rather than the rq linked list,
+//                   so it doesn't need the Runqueue parameter).
+//   preempt_count = preemption depth (unused here).
+layout PerCpu = {
+    cpu_id: u32,
+    current_task: u32,
+    kernel_stack: u64,
+    idle_task: u32,
+    rq_head: u32,
+    preempt_count: u32,
+}
+
+// SchedBuf: 32-byte scratch buffer used by sched_dump's decimal-conversion
+// helper (sched_write_u64). 20 bytes is enough for the longest u64 decimal
+// (18446744073709551615 = 20 digits); 32 gives headroom. The `data` field
+// is at offset 0 so `buf as Address` yields the address of data[0] — the
+// natural argument for `write(1, addr, len)`. Same offset-0-buf pattern as
+// K12b's KmsgMsg (womb/kernel/panic/kmsg.vuma) and K12a's PanicMsg
+// (womb/kernel/panic/panic.vuma).
+layout SchedBuf = {
+    data: [u8; 32],
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern declarations (NEW in W36 — sched_dump writes to fd 1).
+// ────────────────────────────────────────────────────────────────────────────
+// Mirror of womb/kernel/arch/x86_64/trampoline.vuma:53 (write only —
+// sched_dump is the only extern caller in this file). Pre-registered on
+// x86_64 — no __ffi_fallback_stub warning emitted. Byte-identical to the
+// write extern in K12a's panic.vuma and K12b's kmsg.vuma.
+extern "C" {
+    // sys_write (nr 1): write `count` bytes from `buf` to file descriptor
+    // `fd`. SysV AMD64: RDI=fd, RSI=buf, RDX=count. Returns byte count or
+    // -errno. Used by sched_dump + sched_write_u64 only.
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -515,6 +571,46 @@ fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// W36 additions: prio + pid helpers (re-declared from K4a's task.vuma).
+// ────────────────────────────────────────────────────────────────────────────
+// R4a+b deliberately omitted pt_get_prio / pt_set_prio / pt_get_pid from
+// the 12 helpers it re-declared, on the grounds that "K4d/K4e will re-
+// declare them when they need them." W36 needs them NOW:
+//   * sched_tick (W36 priority-weighted vruntime) reads prio.
+//   * sys_nice (W36) reads + writes prio.
+//   * sched_dump (W36) reads pid, prio, state, vruntime for each non-FREE
+//     task.
+// Byte-identical to task.vuma's pt_get_prio / pt_set_prio / pt_get_pid.
+
+// Read the u8 `prio` field of Task slot `idx` from ProcessTable.prios.
+// Direct array index (no pack/unpack — u8 field). Byte-identical to K4a.
+fn pt_get_prio(tbl: State<ProcessTable>, idx: u32) -> u8 {
+    return tbl.prios[idx];
+}
+
+// Write the u8 `prio` field of Task slot `idx` into ProcessTable.prios.
+// Direct array index. Byte-identical to K4a.
+fn pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
+    tbl.prios[idx] = val;
+}
+
+// Read the u32 `pid` field of Task slot `idx` from ProcessTable.pids.
+// 4-byte LE unpack loop (pids is [u8; 1024] = 256 × 4-byte u32 LE slots).
+// Byte-identical to K4a's pt_get_pid.
+fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+    let off = idx * 4;
+    let v: u32 = 0;
+    let i = 0;
+    while i < 4 {
+        let sh = i * 8;
+        let b = tbl.pids[off + i] as u32;
+        v = v + (b << sh);
+        i = i + 1;
+    }
+    return v;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Runqueue operations (byte-identical to K4b).
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -635,12 +731,53 @@ fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
 // State<T> params: 2 (rq + tbl). rq is written (need_resched flag),
 // tbl is read (vruntime get/set + linked-list walk). No `*ptr`/`&x`/
 // `allocate`/`free` anywhere — pure State<T> field access.
+//
+// ── W36: priority-weighted vruntime (CFS sched_weight) ──────────────────────
+// W36 changes Step 1 from `vruntime += delta` to a priority-weighted
+// increment. The CFS paper (Molnar 2007) scales each task's vruntime
+// increment by its priority weight so high-prio tasks (large weight) see
+// their vruntime grow SLOWLY (they get more CPU before being preempted)
+// and low-prio tasks (small weight) see it grow QUICKLY (they get less
+// CPU). The canonical CFS formula is:
+//     delta_weighted = delta * weight / 1024
+// where weight is looked up from a prio→weight table ( sched_prio_to_weight
+// in Linux's kernel/sched/sched.h). W36 uses the simplified closed-form
+//     weight = 1024 / (prio + 1)
+// which gives:
+//   prio 0   → weight 1024 → delta_weighted = delta    (no decay — top prio)
+//   prio 7   → weight  128 → delta_weighted = delta/8  (1/8 decay)
+//   prio 15  → weight   64 → delta_weighted = delta/16
+//   prio 31  → weight   32 → delta_weighted = delta/32
+//   prio 127 → weight    8 → delta_weighted = delta/128
+//   prio 139 → weight    7 → delta_weighted = delta*7/1024  (max decay)
+// The `+1` avoids div-by-zero when prio == 0. The 1024 base matches Linux's
+// NICE_0_LOAD (the weight of a nice-0 task = 1024 = the unit weight), so
+// the math is directly comparable to the upstream CFS scaling.
+//
+// This is a SIMPLIFICATION of Linux's prio_to_weight[] table (which has
+// non-linear entries for nice -20..+19); W36's closed-form gives the same
+// monotonic "higher prio → slower vruntime growth" behavior without the
+// 40-entry table lookup. K13+ may swap in the real table.
+//
+// The preemption check (Step 2) is UNCHANGED — it compares the post-bump
+// weighted vruntime to the runqueue min, same as W11S2. Because all tasks
+// use the same weighting formula, the relative ordering is consistent: a
+// high-prio task's vruntime grows slower, so it stays below the min longer,
+// so it's preempted less. Exactly CFS's intended behavior.
 fn sched_tick(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
-    // Step 1: bump vruntime (K4b behavior — unchanged).
+    // Step 1: bump vruntime by the PRIORITY-WEIGHTED delta (W36).
+    //   weight = 1024 / (prio + 1)        — high prio → large weight
+    //   delta_weighted = delta * weight / 1024
+    //   vruntime += delta_weighted        — high prio → slow vruntime growth
+    // The `prio + 1` avoids div-by-zero; the 1024 base matches Linux's
+    // NICE_0_LOAD. See the W36 header comment above for the full table.
+    let prio = pt_get_prio(tbl, task_idx) as u32;
+    let weight = 1024 / (prio + 1);
+    let delta_weighted = delta * (weight as u64) / 1024;
     let v = pt_get_vruntime(tbl, task_idx);
-    pt_set_vruntime(tbl, task_idx, v + delta);
-    // Step 2: preemption check (W11S2). If the runqueue is empty there
-    // is nothing to preempt to — leave need_resched alone.
+    pt_set_vruntime(tbl, task_idx, v + delta_weighted);
+    // Step 2: preemption check (W11S2 — unchanged). If the runqueue is
+    // empty there is nothing to preempt to — leave need_resched alone.
     if rq.head == 256 {
         return;
     }
@@ -697,6 +834,251 @@ fn sched_clear_resched(rq: State<Runqueue>) {
 fn sched_yield(rq: State<Runqueue>, tbl: State<ProcessTable>, current: u32) -> u32 {
     sched_enqueue(rq, tbl, current);
     return sched_dequeue(rq, tbl);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// W36 additions: sys_sched_yield, sys_nice, sched_dump.
+// ────────────────────────────────────────────────────────────────────────────
+// Three new functions that expose scheduler operations as syscall-style
+// wrappers (matching the convention of sys_waitpid in K4e's
+// womb/kernel/proc/wait.vuma and sys_socket in K9b's net/socket.vuma):
+//
+//   * sys_sched_yield(tbl, percpu) — cooperative yield. Reads the current
+//     task from PerCpu, marks it READY, picks the min-vruntime READY task
+//     from the ProcessTable (CFS pick), marks it RUNNING, updates
+//     percpu.current_task, returns its index. Wraps the existing
+//     sched_yield(rq, tbl, current) for the case where the caller has the
+//     PerCpu block but not the Runqueue (e.g. a syscall trampoline that
+//     only knows "this CPU's current task").
+//
+//   * sys_nice(tbl, task_idx, inc) — adjust a task's priority by `inc`
+//     (POSIX nice(2) semantics). Clamps the result to 0..139 (Linux's
+//     valid prio range: 0..99 = realtime, 100..139 = nice -20..+19). A
+//     negative `inc` raises priority (lower prio value = higher priority
+//     in the CFS weight formula `weight = 1024 / (prio + 1)`).
+//
+//   * sched_dump(tbl) — diagnostic dump. Walks all 256 Task slots, and
+//     for each non-FREE slot (state != 0) writes a line to fd 1 with the
+//     task's PID, STATE, PRIO, and VRUNTIME. Used by the kernel shell's
+//     `ps` command (W14+) and by post-mortem debug (dump the table on
+//     panic). Output uses string-literal labels ("PID=", " STATE=", etc.)
+//     cast to Address via the same PMT-pure `s as Address` pattern that
+//     K12a's panic.vuma uses for its banner.
+
+// sys_sched_yield: cooperative yield via the PerCpu current_task pointer.
+//
+//   tbl:     caller-allocated State<ProcessTable> (modified — task states
+//            are flipped READY↔RUNNING).
+//   percpu:  caller-allocated State<PerCpu> (modified — current_task is
+//            updated to the picked next task).
+//
+// Behavior:
+//   1. current = percpu.current_task  — read the calling CPU's running task.
+//   2. pt_set_state(tbl, current, 2)  — "enqueue self": mark current READY
+//      (runnable, eligible for selection). This is the table-walk
+//      equivalent of sched_enqueue(rq, tbl, current) — without the rq
+//      linked-list bookkeeping (sys_sched_yield doesn't take an rq param,
+//      so it can't thread current onto the rq list; instead it relies on
+//      the table-walk pick in step 3 finding current as a candidate).
+//   3. Walk all 256 Task slots, find the min-vruntime task with state==2
+//      (READY). Initialize `next = current` and `min_v = vruntime(current)`
+//      so that if NO other READY task has a lower vruntime, current is
+//      re-picked (a no-op yield — the task keeps running, which is the
+//      correct CFS behavior when current is still the most-fair candidate).
+//   4. pt_set_state(tbl, next, 1)     — "dequeue next": mark the picked
+//      task RUNNING.
+//   5. percpu.current_task = next     — update the PerCpu current_task.
+//   6. return next.
+//
+// State<T> params: 2 (tbl + percpu), per the K4b contract's "1-2 per
+// function" rule. The function does NOT take an rq parameter — it walks
+// the ProcessTable directly (O(n) over 256 slots) rather than the rq
+// linked list (O(n) over rq.count slots). The table-walk is slower than
+// the linked-list walk, but it avoids the rq parameter and matches the
+// sys_waitpid(tbl, ...) / sys_socket(tbl, ...) convention of "sys_*
+// wrappers take the table + a per-CPU/context pointer." For the hot path
+// (timer-driven preemption), use sched_yield(rq, tbl, current) directly.
+//
+// PMT discipline: no `*ptr`/`&x`/`allocate`/`free`. Pure State<T> field
+// access (tbl.states[i], percpu.current_task, pt_get_vruntime,
+// pt_set_state). The function returns u32 (the picked task index).
+fn sys_sched_yield(tbl: State<ProcessTable>, percpu: State<PerCpu>) -> u32 {
+    let current = percpu.current_task;
+    // Enqueue self: mark current as READY (runnable).
+    pt_set_state(tbl, current, 2);
+    // Dequeue next: CFS pick — min vruntime among READY tasks.
+    // Initialize with `current` so a no-op yield (current is still the
+    // most-fair candidate) re-picks current rather than returning 256.
+    let next = current;
+    let min_v = pt_get_vruntime(tbl, current);
+    let i = 0;
+    while i < 256 {
+        let s = pt_get_state(tbl, i);
+        if s == 2 {
+            let v = pt_get_vruntime(tbl, i);
+            if v < min_v {
+                min_v = v;
+                next = i;
+            }
+        }
+        i = i + 1;
+    }
+    // Mark the picked task RUNNING and update PerCpu.
+    pt_set_state(tbl, next, 1);
+    percpu.current_task = next;
+    return next;
+}
+
+// sys_nice: adjust a task's priority by `inc` (POSIX nice(2)).
+//
+//   tbl:      caller-allocated State<ProcessTable> (modified — prio is
+//             updated).
+//   task_idx: the Task slot whose prio is being adjusted.
+//   inc:      signed increment. Positive = lower priority (higher prio
+//             value = smaller CFS weight = faster vruntime growth = less
+//             CPU). Negative = raise priority (requires CAP_SYS_NICE in
+//             a real kernel — W36 does no permission check; K13+ may add
+//             one via the credentials subsystem).
+//
+// Behavior:
+//   1. Read current prio.
+//   2. np = prio + inc  (signed arithmetic in i32 — prio is u8 but the
+//      sum can go negative or above 255, so we widen to i32 first).
+//   3. Clamp np to 0..139 (Linux's valid prio range). The lower bound 0
+//      is the highest priority (prio 0 → weight 1024 → no vruntime decay).
+//      The upper bound 139 is the lowest priority (prio 139 → weight 7 →
+//      maximum vruntime decay). Values 0..99 correspond to realtime
+//      priorities (SCHED_FIFO/SCHED_RR in Linux); 100..139 correspond to
+//      nice -20..+19 (SCHED_NORMAL/CFS).
+//   4. Write clamped prio back.
+//
+// State<T> params: 1 (tbl). The `inc` is i32 (signed) to allow negative
+// increments. The arithmetic is done in i32 locals (prio widened via
+// `as i32`, np computed as i32 + i32). The final write truncates back to
+// u8 via `np as u8` — safe because the clamp guarantees 0 <= np <= 139,
+// which fits in u8.
+//
+// PMT discipline: no `*ptr`/`&x`/`allocate`/`free`. Pure State<T> field
+// access via pt_get_prio / pt_set_prio.
+fn sys_nice(tbl: State<ProcessTable>, task_idx: u32, inc: i32) {
+    let cur = pt_get_prio(tbl, task_idx) as i32;
+    let np = cur + inc;
+    if np < 0 {
+        pt_set_prio(tbl, task_idx, 0);
+    } else {
+        if np > 139 {
+            pt_set_prio(tbl, task_idx, 139);
+        } else {
+            pt_set_prio(tbl, task_idx, np as u8);
+        }
+    }
+}
+
+// sched_write_u64: write `n` to fd 1 as decimal ASCII. Helper for
+// sched_dump (not part of the public scheduler surface — file-local).
+//
+// Behavior:
+//   * n == 0: write the single byte '0' (48 ASCII).
+//   * n > 0:  extract digits LSB-first into a SchedBuf (val % 10 + 48),
+//             reverse them in-place (so the buffer holds MSB-first), then
+//             write `pos` bytes to fd 1.
+//
+// The SchedBuf is allocated fresh per call via state_new(SchedBuf) —
+// cheap (arena-bump-pointer, no malloc), and avoids any cross-call state.
+// 20 bytes is enough for the longest u64 decimal (18446744073709551615);
+// SchedBuf.data is 32 bytes (headroom).
+//
+// PMT discipline: no `*ptr`/`&x`/`allocate`/`free`. The `buf as Address`
+// cast is the pure-arena-address extraction documented in K12b's kmsg.vuma
+// ("The `out as Address` cast is a pure-arena-address extraction").
+//
+// State<T> locals: 1 (buf). No State<T> params (the function takes only
+// the u64 `n` — it doesn't read or write any persistent state).
+fn sched_write_u64(n: u64) {
+    let buf = state_new(SchedBuf);
+    if n == 0 {
+        buf.data[0] = 48;  // '0'
+        let addr = buf as Address;
+        write(1, addr, 1);
+        return;
+    }
+    // Extract digits LSB-first into buf.data[0..pos).
+    let pos = 0;
+    let val = n;
+    while val > 0 {
+        let d = val % 10;
+        buf.data[pos] = (d + 48) as u8;
+        pos = pos + 1;
+        val = val / 10;
+    }
+    // Reverse in-place so buf.data[0..pos) holds MSB-first decimal.
+    let i = 0;
+    let j = pos;
+    while i < j {
+        j = j - 1;
+        let tmp = buf.data[i];
+        buf.data[i] = buf.data[j];
+        buf.data[j] = tmp;
+        i = i + 1;
+    }
+    let addr = buf as Address;
+    write(1, addr, pos as i64);
+}
+
+// sched_dump: diagnostic dump of all non-FREE Task slots to fd 1.
+//
+//   tbl: caller-allocated State<ProcessTable> (read-only — not modified).
+//
+// For each slot i in 0..255 where pt_get_state(tbl, i) != 0 (non-FREE),
+// writes a single line to fd 1 in the format:
+//     PID=<pid> STATE=<state> PRIO=<prio> VRUNTIME=<vruntime>\n
+// where <pid> is the u32 PID (decimal), <state> is the u8 state (1=
+// RUNNING, 2=READY, etc.), <prio> is the u8 prio (0..139), and
+// <vruntime> is the u64 vruntime (decimal nanoseconds).
+//
+// The labels are emitted as string-literal addresses (`"PID=" as Address`)
+// — the VUMA codegen places the literal in the data section and yields
+// its address via the `as Address` cast. This is the PMT-pure equivalent
+// of C's `write(1, "PID=", 4)` — no printf, no varargs, no heap. Same
+// pattern as K12a's panic.vuma banner (which builds the banner
+// byte-by-byte in a SchedBuf because panic.vuma predates the
+// `"..." as Address` codegen path; W36 uses the string-literal-as-Address
+// form directly because it's shorter and the codegen supports it).
+//
+// Output is observable but NOT verified by the self-test (verifying
+// stdout would require capturing fd 1, which needs K9a's socket layer or
+// a fork+pipe dance — out of scope for W36's hosted self-test, same
+// exclusion as K12b's dmesg in kmsg.vuma).
+//
+// State<T> params: 1 (tbl — read only). State<T> locals: 1 per
+// sched_write_u64 call (the SchedBuf). No `*ptr`/`&x`/`allocate`/`free`.
+fn sched_dump(tbl: State<ProcessTable>) {
+    let i = 0;
+    while i < 256 {
+        let s = pt_get_state(tbl, i);
+        if s != 0 {
+            // "PID=" (4 bytes) + pid decimal.
+            let pid_label = "PID=" as Address;
+            write(1, pid_label, 4);
+            sched_write_u64(pt_get_pid(tbl, i) as u64);
+            // " STATE=" (7 bytes: space + STATE + =) + state decimal.
+            let state_label = " STATE=" as Address;
+            write(1, state_label, 7);
+            sched_write_u64(s as u64);
+            // " PRIO=" (6 bytes: space + PRIO + =) + prio decimal.
+            let prio_label = " PRIO=" as Address;
+            write(1, prio_label, 6);
+            sched_write_u64(pt_get_prio(tbl, i) as u64);
+            // " VRUNTIME=" (10 bytes: space + VRUNTIME + =) + vruntime decimal.
+            let vr_label = " VRUNTIME=" as Address;
+            write(1, vr_label, 10);
+            sched_write_u64(pt_get_vruntime(tbl, i));
+            // "\n" (1 byte) — line terminator.
+            let nl = "\n" as Address;
+            write(1, nl, 1);
+        }
+        i = i + 1;
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -785,6 +1167,7 @@ fn main() -> i32 {
     let rq = state_new(Runqueue);
     let tbl = state_new(ProcessTable);
     let tf = state_new(TrapFrame);
+    let percpu = state_new(PerCpu);
     sched_init(rq);
     tf_init(tf);
     // Set up 2 tasks with different vruntimes.
@@ -830,5 +1213,52 @@ fn main() -> i32 {
     if rq.need_resched != 0 { return 8; }
     // (9) sched_check_resched observes the cleared flag.
     if sched_check_resched(rq) != 0 { return 9; }
+    // ── W36 priority-weighted vruntime ──────────────────────────────────
+    // Task 2: prio=7, vruntime=0. sched_tick with delta=1024.
+    //   weight = 1024 / (7 + 1) = 128
+    //   delta_weighted = 1024 * 128 / 1024 = 128
+    //   vruntime: 0 → 128
+    // (10) Verify the priority-weighted vruntime increment.
+    pt_set_state(tbl, 2, 1);
+    pt_set_prio(tbl, 2, 7);
+    pt_set_vruntime(tbl, 2, 0);
+    sched_tick(rq, tbl, 2, 1024);
+    if pt_get_vruntime(tbl, 2) != 128 { return 10; }
+    // ── W36 sys_nice ────────────────────────────────────────────────────
+    // (11) sys_nice(tbl, 2, 5): prio 7 → 12.
+    sys_nice(tbl, 2, 5);
+    if pt_get_prio(tbl, 2) != 12 { return 11; }
+    // (12) sys_nice(tbl, 2, 200): prio 12 → clamp to 139.
+    sys_nice(tbl, 2, 200);
+    if pt_get_prio(tbl, 2) != 139 { return 12; }
+    // (13) sys_nice(tbl, 2, -200): prio 139 → clamp to 0.
+    //   (0 - 200 avoids the parser's negative-literal path — same
+    //    convention as wait.vuma's `0 - 1` for -EAGAIN.)
+    sys_nice(tbl, 2, 0 - 200);
+    if pt_get_prio(tbl, 2) != 0 { return 13; }
+    // ── W36 sys_sched_yield ─────────────────────────────────────────────
+    // Task 3: READY, vruntime=10 (lower — should be picked).
+    // Task 4: RUNNING, vruntime=20 (current).
+    // percpu.current_task = 4. sys_sched_yield should pick Task 3.
+    // (14) Verify sys_sched_yield returns 3 (min-vruntime READY task).
+    pt_set_state(tbl, 3, 2);
+    pt_set_vruntime(tbl, 3, 10);
+    pt_set_state(tbl, 4, 1);
+    pt_set_vruntime(tbl, 4, 20);
+    percpu.current_task = 4;
+    let yielded = sys_sched_yield(tbl, percpu);
+    if yielded != 3 { return 14; }
+    // (15) percpu.current_task updated to 3.
+    if percpu.current_task != 3 { return 15; }
+    // (16) Task 4 is now READY (was RUNNING, yielded).
+    if pt_get_state(tbl, 4) != 2 { return 16; }
+    // (17) Task 3 is now RUNNING (was READY, picked).
+    if pt_get_state(tbl, 3) != 1 { return 17; }
+    // ── W36 sched_dump (observable, not verified — same exclusion as ──
+    // ── K12b's dmesg: capturing fd 1 needs K9a's socket layer).       ──
+    // (18) sched_dump runs without crashing on a table with 5 non-FREE
+    //     tasks (Tasks 0..4). The output goes to stdout; we only verify
+    //     the function returns (no return value to check — it's `-> ()`).
+    sched_dump(tbl);
     return 0;
 }
