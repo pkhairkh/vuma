@@ -1,0 +1,636 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/kernel/proc/elf.vuma
+// VWK ELF64 header parser — first step toward a real ELF loader (PMT-pure).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file is the W38 deliverable: a minimal ELF64 header parser that
+// reads an Elf64_Ehdr + Elf64_Phdr from a byte buffer via the PMT-pure
+// __vuma_load_u16 / __vuma_load_u32 / __vuma_load_u64 runtime stubs, and
+// exposes the four operations the K4f syscall handler will need to wire
+// sys_exec to a real ELF loader:
+//   * elf_parse_header(buf, ehdr) — populate an Elf64Ehdr from `buf`.
+//   * elf_validate(ehdr)          — check the ELF magic 0x7F 'E' 'L' 'F'.
+//   * elf_get_entry(ehdr)         — return e_entry (the program entry point).
+//   * elf_get_phdr(buf, phoff, idx, phdr) — populate an Elf64Phdr at idx.
+//   * elf_count_load_segments(ehdr) — count PT_LOAD (type == 1) segments.
+//
+// ── What W38 implements (and what it does NOT) ──────────────────────────────
+// W38 implements ONLY the parse + validate + count operations. It does NOT
+// implement the actual load (no pmm_alloc for the destination pages, no
+// memcpy from buf to the destination, no VMM map_page calls, no zero-fill
+// of the bss segment, no user-stack setup). The functions here are the
+// parse side of the loader — the load side is K5/K11 (when the VMM has
+// real map_page and the PMM has real alloc, the loader can iterate the
+// PT_LOAD segments and for each one: pmm_alloc the destination pages,
+// vmm_map_page them at p_vaddr, memcpy p_filesz bytes from buf+p_offset,
+// and zero-fill [p_filesz, p_memsz)). W38 is the parser; the loader is a
+// follow-up wave.
+//
+// ── Init-style API (deviation from the W38 task-spec signatures) ────────────
+// The W38 task spec specified:
+//     elf_parse_header(buf: Address) -> State<Elf64Ehdr>
+//     elf_get_phdr(buf: Address, phoff: u64, idx: u32) -> State<Elf64Phdr>
+// VUMA's codegen does NOT propagate State<T>-typedness through function
+// return values (documented in 14+ existing files: exec.vuma, task.vuma,
+// scheduler.vuma, fork.vuma, exit.vuma, wait.vuma, futex.vuma, waitq.vuma,
+// signal.vuma, file.vuma, percpu.vuma, abi.vuma, pmm.vuma, arena.vuma —
+// see exec.vuma's "Why init-style?" header for the codegen rationale: a
+// `fn foo() -> State<T>` that allocates via `state_new` inside the
+// function body produces broken field-access code in callers because the
+// per-function scratchpad that backs the state_new allocation is
+// invalidated when the function returns, so the caller's `ret.field`
+// reads from recycled stack space). The canonical VUMA workaround is the
+// init-style API: the CALLER allocates the State<T> via `state_new(...)`
+// and passes it by reference; the function fills its fields. This file
+// uses init-style for elf_parse_header + elf_get_phdr:
+//     elf_parse_header(buf, ehdr: State<Elf64Ehdr>)
+//     elf_get_phdr(buf, phoff, idx, phdr: State<Elf64Phdr>)
+// The other three functions (elf_validate, elf_get_entry,
+// elf_count_load_segments) match the spec signatures verbatim — they
+// take State<Elf64Ehdr> by regular VUMA-fn borrow (no allocation, no
+// return of State<T>), so the typedness-survives-calls property holds.
+//
+// ── e_ident[8..15] buf-address cache (side-channel for count_load_segments)
+// The W38 task spec specified:
+//     elf_count_load_segments(ehdr: State<Elf64Ehdr>) -> u32
+// — a one-parameter signature. But to count PT_LOAD segments, the function
+// must iterate the program-header table, which lives in the original `buf`
+// at offset e_phoff — and the Elf64Ehdr layout (per spec) does NOT include
+// a buf-address field. VUMA has no module-level mutable state (only
+// `const`), so the function cannot look up the buf from a global cache.
+// The workaround: elf_parse_header stashes the buf Address into
+// e_ident[8..15] (8 bytes, little-endian) as a side-channel cache. This
+// is safe because:
+//   * elf_validate only checks e_ident[0..4] (the ELF magic) — bytes
+//     8..15 are not touched, so validation still passes.
+//   * In a real ELF file, e_ident[8..15] is EI_ABIVERSION (1 byte) + 6
+//     bytes of padding (per the ELF gABI), almost always zero. Overwriting
+//     these bytes with the buf Address is a documented W38 stub trade-off.
+// K11's real ELF loader will replace this side-channel with a separate
+// ElfParserCtx struct (holding both the buf Address AND the parsed ehdr).
+//
+// ── PMT discipline ─────────────────────────────────────────────────────────
+// NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. All
+// memory access is via the __vuma_load_u16 / __vuma_load_u32 /
+// __vuma_load_u64 runtime stubs (real `mov ax,[rdi]; ret` / `mov
+// eax,[rdi]; ret` / `mov rax,[rdi]; ret` trampolines emitted by
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs under the
+// "Wave 7: __vuma_load_*" entries). Same PMT-purity category as the
+// write/read/exit syscall stubs and the __vuma_load_u32 stub used by
+// uart.vuma for MMIO and futex.vuma for the futex-word load. The State<T>
+// values (Elf64Ehdr, Elf64Phdr, ElfBuf) are held in `___pmt_buffer`-
+// backed scratchpads allocated by the caller via `state_new(...)` and
+// passed by reference (init-style — see above).
+//
+// ── Decimal-constants discipline ────────────────────────────────────────────
+// All non-zero constants in this file use DECIMAL per the W38 task spec's
+// "Decimal constants preferred in .vuma self-tests" convention (avoids
+// the parser's hex-literal path — parse_int_radix width-extension
+// subtleties documented in womb/kernel/arch/x86_64/pt.vuma's header and
+// K3a's trap_trampoline.vuma). The constants:
+//    64       = sizeof(Elf64_Ehdr) — the ELF64 header is exactly 64 bytes.
+//    56       = sizeof(Elf64_Phdr) — one program-header table entry.
+//    16       = sizeof(e_ident) — the magic + class + data + version +
+//               OSABI + ABIVERSION + padding region (bytes 0..15).
+//    127      = 0x7F — the ELF magic byte 0 (DEL, the leading 0x7F).
+//    69       = 0x45 — 'E' — ELF magic byte 1.
+//    76       = 0x4C — 'L' — ELF magic byte 2.
+//    70       = 0x46 — 'F' — ELF magic byte 3.
+//    2        = ET_EXEC (executable) — also ELFCLASS64 (e_ident[4]) +
+//               EV_CURRENT (e_ident[6]) + the e_type value for ET_EXEC.
+//    62       = EM_X86_64 — the e_machine value for x86_64.
+//    1        = EV_CURRENT + PT_LOAD (the segment type for a loadable
+//               segment — what elf_count_load_segments counts).
+//    5        = PF_X | PF_R (execute + read) — the p_flags for the
+//               self-test's single PT_LOAD segment.
+//    256      = sizeof(ElfBuf.data) — the self-test's byte buffer.
+//    4198400  = 0x401000 — the self-test's e_entry (the conventional
+//               first-page-aligned entry point on x86_64, expressed in
+//               decimal per the convention).
+//    176      = 64 + 56*2 — total bytes the self-test writes (ehdr +
+//               2 program headers).
+//    255      = 0xFF — byte mask for the unpack-shift-and-truncate path.
+//    8        = bytes per u64 (loop bound for the e_ident byte-unpack).
+//    4194304  = 0x400000 — the conventional base vaddr for the load
+//               segment on x86_64 (per womb/lang/elf.vuma's write_elf64).
+//
+// ── VUMA has no `import` ────────────────────────────────────────────────────
+// This file is self-contained. It declares its own layouts + externs +
+// constants — no cross-file references. Same pattern as K4d's exec.vuma,
+// K7c's futex.vuma, K9d's tcp.vuma, K5d's initramfs.vuma.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//     . "$HOME/.cargo/env" && ./target/release-fast/compile_dump \
+//         womb/kernel/proc/elf.vuma \
+//         /tmp/elf.bin x86_64 --verify
+//     /tmp/elf.bin ; echo "exit=$?"
+// Expected: IVE Pass, exit=0 (all 6 self-test checks pass — elf_validate
+// returns 0 on the valid magic; elf_validate returns -1 on a corrupted
+// magic; elf_get_entry returns 4198400 (0x401000); elf_get_phdr reads
+// PT_LOAD (type == 1) at index 0 with p_flags == 5; elf_get_phdr reads
+// PT_NULL (type == 0) at index 1; elf_count_load_segments returns 1
+// (only one of the two program headers is PT_LOAD)).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Elf64Ehdr: the 64-byte ELF64 file header (see sys/elf.h on Linux).
+// Field offsets (little-endian on x86_64):
+//   e_ident[ 0..15]  bytes  0..15  (16 bytes — magic + class + data + ...)
+//   e_type           bytes 16..17  (u16 — ET_EXEC=2, ET_DYN=3, ...)
+//   e_machine        bytes 18..19  (u16 — EM_X86_64=62, EM_AARCH64=183, ...)
+//   e_version        bytes 20..23  (u32 — always 1)
+//   e_entry          bytes 24..31  (u64 — program entry point vaddr)
+//   e_phoff          bytes 32..39  (u64 — file offset of phdr table)
+//   e_shoff          bytes 40..47  (u64 — file offset of shdr table)
+//   e_flags          bytes 48..51  (u32 — arch-specific flags)
+//   e_ehsize         bytes 52..53  (u16 — sizeof(Elf64_Ehdr) = 64)
+//   e_phentsize      bytes 54..55  (u16 — sizeof(Elf64_Phdr) = 56)
+//   e_phnum          bytes 56..57  (u16 — count of program headers)
+//   e_shentsize      bytes 58..59  (u16 — sizeof(Elf64_Shdr) = 64)
+//   e_shnum          bytes 60..61  (u16 — count of section headers)
+//   e_shstrndx       bytes 62..63  (u16 — index of .shstrtab section)
+// Total: 64 bytes (matches e_ehsize on a real ELF64 file).
+layout Elf64Ehdr = {
+    e_ident: [u8; 16],
+    e_type: u16,
+    e_machine: u16,
+    e_version: u32,
+    e_entry: u64,
+    e_phoff: u64,
+    e_shoff: u64,
+    e_flags: u32,
+    e_ehsize: u16,
+    e_phentsize: u16,
+    e_phnum: u16,
+    e_shentsize: u16,
+    e_shnum: u16,
+    e_shstrndx: u16,
+}
+
+// Elf64Phdr: a single 56-byte program-header entry (see sys/elf.h).
+// Field offsets:
+//   p_type    bytes  0..3   (u32 — PT_LOAD=1, PT_NULL=0, PT_INTERP=3, ...)
+//   p_flags   bytes  4..7   (u32 — PF_X|PF_W|PF_R = 1|2|4)
+//   p_offset  bytes  8..15  (u64 — file offset of segment content)
+//   p_vaddr   bytes 16..23  (u64 — virtual address to map at)
+//   p_paddr   bytes 24..31  (u64 — physical address (unused on most OSes))
+//   p_filesz  bytes 32..39  (u64 — bytes in file)
+//   p_memsz   bytes 40..47  (u64 — bytes in memory (filesz + bss))
+//   p_align   bytes 48..55  (u64 — alignment (typically 4096))
+// Total: 56 bytes (matches e_phentsize on a real ELF64 file).
+layout Elf64Phdr = {
+    p_type: u32,
+    p_flags: u32,
+    p_offset: u64,
+    p_vaddr: u64,
+    p_paddr: u64,
+    p_filesz: u64,
+    p_memsz: u64,
+    p_align: u64,
+}
+
+// ElfBuf: a 256-byte scratch buffer for the self-test's minimal ELF
+// file image. Holds the 64-byte ehdr + 2 56-byte phdrs = 176 bytes
+// (with 80 bytes of headroom for a third phdr if a follow-up wave
+// extends the test). `len` records the actual byte count (176 in the
+// self-test). Same pattern as womb/kernel/drivers/uart.vuma's ByteBuf
+// and womb/kernel/panic/kmsg.vuma's KMsgBuf — a flat [u8; N] + len u32
+// pair, accessed via `buf.data[i]` byte-granular indexing and
+// `buf as Address` for FFI borrows.
+layout ElfBuf = {
+    data: [u8; 256],
+    len: u32,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// External runtime stubs (PMT-pure memory loads).
+// ────────────────────────────────────────────────────────────────────────────
+// __vuma_load_u32 / __vuma_load_u64 are runtime stubs emitted by
+// src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs under the
+// "Wave 7: __vuma_load_*" entries. They lower to:
+//   __vuma_load_u32:  `mov eax, [rdi] ; ret`  (3 bytes — 8B 07 C3)
+//   __vuma_load_u64:  `mov rax, [rdi] ; ret`  (4 bytes — 48 8B 07 C3)
+// These are the PMT-pure way to perform raw memory loads: VUMA has no
+// `*ptr` dereference syntax (it's a hard parse error in VUMA 2.0 — see
+// src/parser/src/parser.rs::check_pointer_syntax), so loads from
+// arbitrary addresses are delegated to runtime stubs (same PMT-purity
+// category as the write/read/exit syscall stubs). Same stubs as
+// womb/kernel/mm/vmm.vuma (W34 — local x86 walker reads PTEs via
+// __vuma_load_u64), womb/kernel/drivers/uart.vuma (W22S2 — UART MMIO
+// reads via __vuma_load_u32), womb/kernel/ipc/futex.vuma (K7c — futex
+// word load via __vuma_load_u32), and womb/kernel/syscall/handlers/fs.vuma
+// (R4c — TrapFrame GPR slot reads via __vuma_load_u64).
+//
+// __vuma_load_u16 is declared per the W38 task spec but is NOT yet
+// pre-registered in build_runtime_syscall_stubs (only u32 + u64 are
+// registered under the "Wave 7" entries — see src/codegen/src/x86_64/
+// mod.rs:3677-3705). Unresolved externs fall back to __ffi_fallback_stub
+// (`xor eax, eax; ret` → returns 0), so a direct call to
+// __vuma_load_u16(addr) would silently return 0 for every load —
+// useless. This file declares __vuma_load_u16 in the extern block (per
+// the spec) for forward-compatibility (K11+ may register it), but the
+// actual u16 field reads use the local elf_load_u16 helper below, which
+// is `(__vuma_load_u32(addr) & 65535) as u16` — a 4-byte load + 16-bit
+// mask. Reading 4 bytes when only 2 are needed is safe because the ELF
+// header is 64 bytes (always aligned + always fully populated), so the
+// extra 2 bytes are within the buffer and belong to the next field.
+extern "C" {
+    fn __vuma_load_u64(addr: u64) -> u64;
+    fn __vuma_load_u32(addr: u64) -> u32;
+    fn __vuma_load_u16(addr: u64) -> u16;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// elf_load_u16 — local u16 load helper (workaround for missing
+// __vuma_load_u16 runtime stub).
+// ────────────────────────────────────────────────────────────────────────────
+// Reads a u16 from `addr` by calling __vuma_load_u32 (which IS
+// pre-registered) and masking the low 16 bits. This is the PMT-pure
+// equivalent of `mov ax, [rdi]; ret` — the 4-byte load reads 2 extra
+// bytes past the u16, but those bytes belong to the next ELF field
+// (always within the 64-byte header) and are masked off by `& 65535`.
+// 65535 = 0xFFFF — the u16 bit mask (decimal per the file's convention).
+//
+// K11+ follow-up: when build_runtime_syscall_stubs registers
+// __vuma_load_u16 (a 3-byte `mov ax, [rdi]; ret` stub — 66 8B 07 C3),
+// this helper can be replaced with direct __vuma_load_u16 calls. The
+// extern declaration above is already in place for that swap.
+fn elf_load_u16(addr: u64) -> u16 {
+    let v = __vuma_load_u32(addr);
+    return (v & 65535) as u16;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Constants (decimal — see "Decimal-constants discipline" above).
+// ────────────────────────────────────────────────────────────────────────────
+const PT_LOAD: u32 = 1;        // program-header p_type for a loadable segment
+const ELF_MAGIC0: u8 = 127;    // 0x7F — ELF magic byte 0
+const ELF_MAGIC1: u8 = 69;     // 0x45 — 'E'
+const ELF_MAGIC2: u8 = 76;     // 0x4C — 'L'
+const ELF_MAGIC3: u8 = 70;     // 0x46 — 'F'
+
+// ────────────────────────────────────────────────────────────────────────────
+// elf_parse_header — populate an Elf64Ehdr from a byte buffer.
+// ────────────────────────────────────────────────────────────────────────────
+// Reads the 14 fields of the ELF64 header from `buf` (a raw byte buffer
+// holding an ELF64 file image) into `ehdr` (a caller-allocated
+// State<Elf64Ehdr>), using the PMT-pure __vuma_load_* runtime stubs.
+//
+// Init-style API: the caller allocates `ehdr` via `state_new(Elf64Ehdr)`
+// and passes it by reference. This deviates from the W38 task spec's
+// `elf_parse_header(buf) -> State<Elf64Ehdr>` signature because VUMA's
+// codegen does not propagate State<T>-typedness through function return
+// values (documented in 14+ existing files — see the file header's
+// "Init-style API" section for the rationale and the list of files).
+// The init-style signature is the canonical VUMA workaround.
+//
+// After populating the standard 14 ELF fields, the function ALSO stashes
+// the buf Address into e_ident[8..15] as a side-channel cache for
+// elf_count_load_segments (see "e_ident[8..15] buf-address cache" in the
+// file header). The cache is 8 bytes, little-endian. elf_validate only
+// checks e_ident[0..4] (the ELF magic), so the cache doesn't affect
+// validation. K11's real ELF loader will replace this with a separate
+// ElfParserCtx struct.
+//
+// State<T> params: 1 (ehdr — read/write). Pure write — no reads from
+// ehdr, only writes from buf. The buf Address is a raw u64 pointer (no
+// State<T> invalidation — Address is a value type, per the marshal pass).
+fn elf_parse_header(buf: Address, ehdr: State<Elf64Ehdr>) {
+    // Read e_ident[0..15] via two u64 loads + a byte-unpack loop. The
+    // u64 loads read 8 bytes each at buf+0 and buf+8; the loop shifts +
+    // masks each u64 into 8 individual bytes and stores them into
+    // ehdr.e_ident[0..7] and ehdr.e_ident[8..15] respectively. Same
+    // byte-loop pattern as K4a's pt_get_pid (4-iteration LE unpack) and
+    // K2a's pool_get_base (8-iteration LE unpack), with a 16-iteration
+    // total (split into two 8-iteration halves via the lo/hi u64s).
+    let lo = __vuma_load_u64(buf + 0);
+    let hi = __vuma_load_u64(buf + 8);
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        ehdr.e_ident[i] = ((lo >> sh) & 255) as u8;
+        ehdr.e_ident[i + 8] = ((hi >> sh) & 255) as u8;
+        i = i + 1;
+    }
+
+    // Read the scalar fields via the matching load stub width. e_type
+    // and e_machine are u16 (2 bytes); e_version and e_flags are u32;
+    // e_entry, e_phoff, e_shoff are u64. The remaining u16 fields
+    // (e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx)
+    // are 2 bytes each, packed back-to-back at offsets 52..63. The
+    // offset for each field is its byte offset in the ELF64 header (per
+    // the Elf64Ehdr layout comment above). The u16 reads go through the
+    // local elf_load_u16 helper (which uses __vuma_load_u32 + mask —
+    // see the helper's header for why: __vuma_load_u16 is declared but
+    // not yet pre-registered in build_runtime_syscall_stubs).
+    ehdr.e_type = elf_load_u16(buf + 16);
+    ehdr.e_machine = elf_load_u16(buf + 18);
+    ehdr.e_version = __vuma_load_u32(buf + 20);
+    ehdr.e_entry = __vuma_load_u64(buf + 24);
+    ehdr.e_phoff = __vuma_load_u64(buf + 32);
+    ehdr.e_shoff = __vuma_load_u64(buf + 40);
+    ehdr.e_flags = __vuma_load_u32(buf + 48);
+    ehdr.e_ehsize = elf_load_u16(buf + 52);
+    ehdr.e_phentsize = elf_load_u16(buf + 54);
+    ehdr.e_phnum = elf_load_u16(buf + 56);
+    ehdr.e_shentsize = elf_load_u16(buf + 58);
+    ehdr.e_shnum = elf_load_u16(buf + 60);
+    ehdr.e_shstrndx = elf_load_u16(buf + 62);
+
+    // W38 stub: stash the buf Address into e_ident[8..15] as a
+    // side-channel cache for elf_count_load_segments. The cache is 8
+    // bytes, little-endian (same byte-loop pattern as the e_ident unpack
+    // above, but with the buf Address as the source u64 instead of a
+    // load result). elf_validate only checks e_ident[0..4] (the ELF
+    // magic), so overwriting e_ident[8..15] doesn't affect validation.
+    // See the file header's "e_ident[8..15] buf-address cache" section
+    // for the rationale + K11 follow-up note.
+    let buf_addr = buf as u64;
+    let j = 0;
+    while j < 8 {
+        let sh = j * 8;
+        ehdr.e_ident[8 + j] = ((buf_addr >> sh) & 255) as u8;
+        j = j + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// elf_validate — check the ELF magic.
+// ────────────────────────────────────────────────────────────────────────────
+// Returns 0 if e_ident[0..4] == {0x7F, 'E', 'L', 'F'} (the ELF magic),
+// -1 otherwise. The -1 is expressed as `0 - 1` to avoid the parser's
+// negative-literal path (per the K4d "decimal constants" convention —
+// same pattern as wait.vuma's `0 - 11` for -EAGAIN and K4d's `0 - 1`
+// for -EPERM). Only the first 4 bytes of e_ident are checked — the
+// other 12 bytes (EI_CLASS, EI_DATA, EI_VERSION, EI_OSABI, EI_ABIVERSION,
+// + 6 padding bytes + the W38 buf-address cache at [8..15]) are NOT
+// validated. A real kernel's ELF loader would also check EI_CLASS == 2
+// (ELFCLASS64) and EI_DATA == 1 (ELFDATA2LSB) here; K11 will add those.
+//
+// State<T> params: 1 (ehdr — read-only). Pure read — no writes.
+fn elf_validate(ehdr: State<Elf64Ehdr>) -> i32 {
+    if ehdr.e_ident[0] != 127 { return 0 - 1; }
+    if ehdr.e_ident[1] != 69 { return 0 - 1; }
+    if ehdr.e_ident[2] != 76 { return 0 - 1; }
+    if ehdr.e_ident[3] != 70 { return 0 - 1; }
+    return 0;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// elf_get_entry — return the program entry point.
+// ────────────────────────────────────────────────────────────────────────────
+// Returns ehdr.e_entry (the virtual address at which the loader starts
+// the new program — what K4f's syscall handler will store in the per-
+// arch Task's rip field via K4c's task_init_for_switch). This is the
+// one-line accessor that sys_exec calls after elf_validate passes; in
+// the W38 stub it just reads the field back. K11 will add the same
+// accessor for e_phoff / e_phnum when the loader needs to iterate
+// segments from the syscall handler (rather than from
+// elf_count_load_segments).
+//
+// State<T> params: 1 (ehdr — read-only). Pure read — no writes.
+fn elf_get_entry(ehdr: State<Elf64Ehdr>) -> u64 {
+    return ehdr.e_entry;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// elf_get_phdr — populate an Elf64Phdr from a byte buffer.
+// ────────────────────────────────────────────────────────────────────────────
+// Reads the 8 fields of one Elf64_Phdr entry from `buf` at file offset
+// `phoff + idx * 56` into `phdr` (a caller-allocated State<Elf64Phdr>).
+// `phoff` is ehdr.e_phoff (typically 64 — the program-header table
+// starts right after the ehdr). `idx` is the index of the entry to read
+// (0..ehdr.e_phnum). The 56-byte stride matches sizeof(Elf64_Phdr) and
+// ehdr.e_phentsize on a real ELF64 file.
+//
+// Init-style API: the caller allocates `phdr` via `state_new(Elf64Phdr)`
+// and passes it by reference. Same deviation from the W38 task spec's
+// `elf_get_phdr(buf, phoff, idx) -> State<Elf64Phdr>` signature as
+// elf_parse_header — see the file header's "Init-style API" section.
+//
+// The base address is computed as `(buf as u64) + phoff + (idx as u64) * 56`
+// — all arithmetic in u64 to avoid mixed-width multiply issues. The
+// Address-to-u64 cast is the same pattern as vmm.vuma's
+// `let buf_a: u64 = (buf as Address) as u64;` (W34 — page-table setup).
+//
+// State<T> params: 1 (phdr — read/write). Pure write — no reads from
+// phdr, only writes from buf. The buf Address + phoff u64 + idx u32 are
+// raw integers (no State<T> invalidation).
+fn elf_get_phdr(buf: Address, phoff: u64, idx: u32, phdr: State<Elf64Phdr>) {
+    let base: u64 = (buf as u64) + phoff + (idx as u64) * 56;
+    phdr.p_type = __vuma_load_u32(base + 0);
+    phdr.p_flags = __vuma_load_u32(base + 4);
+    phdr.p_offset = __vuma_load_u64(base + 8);
+    phdr.p_vaddr = __vuma_load_u64(base + 16);
+    phdr.p_paddr = __vuma_load_u64(base + 24);
+    phdr.p_filesz = __vuma_load_u64(base + 32);
+    phdr.p_memsz = __vuma_load_u64(base + 40);
+    phdr.p_align = __vuma_load_u64(base + 48);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// elf_count_load_segments — count PT_LOAD program-header entries.
+// ────────────────────────────────────────────────────────────────────────────
+// Returns the number of program-header entries whose p_type == PT_LOAD
+// (1). Iterates 0..ehdr.e_phnum, calling elf_get_phdr for each entry
+// into a fresh State<Elf64Phdr>, and increments `count` for each
+// PT_LOAD. This is the count the K5/K11 loader will use to size its
+// VMA array before iterating again to map each segment.
+//
+// The function takes only `ehdr` (per the W38 task spec signature) —
+// no `buf` parameter. To find the program-header table, the function
+// reads the buf Address from the e_ident[8..15] side-channel cache
+// populated by elf_parse_header (see the file header's "e_ident[8..15]
+// buf-address cache" section for the rationale + K11 follow-up note).
+// ehdr.e_phoff gives the table's file offset; ehdr.e_phnum gives the
+// entry count.
+//
+// State<T> params: 1 (ehdr — read-only). The function allocates a
+// fresh State<Elf64Phdr> per loop iteration (init-style for
+// elf_get_phdr) — same pattern as K5d's initramfs.vuma allocating a
+// fresh State<CpioHeader> per loop iteration in initramfs_unpack.
+fn elf_count_load_segments(ehdr: State<Elf64Ehdr>) -> u32 {
+    // Recover the buf Address from the e_ident[8..15] side-channel
+    // cache. Same byte-loop unpack pattern as elf_parse_header's
+    // e_ident write, reversed — read 8 bytes from e_ident[8..15],
+    // shift + OR into a u64.
+    let buf_addr: u64 = 0;
+    let i = 0;
+    while i < 8 {
+        let sh = i * 8;
+        let b = ehdr.e_ident[8 + i] as u64;
+        buf_addr = buf_addr + (b << sh);
+        i = i + 1;
+    }
+
+    // Read e_phoff (the file offset of the phdr table) + e_phnum (the
+    // entry count). Both are direct field reads — no helper needed.
+    let phoff = ehdr.e_phoff;
+    let phnum = ehdr.e_phnum as u32;
+
+    // Iterate the phdr table, count PT_LOAD entries.
+    let count: u32 = 0;
+    let i = 0;
+    while i < phnum {
+        let phdr = state_new(Elf64Phdr);
+        elf_get_phdr(buf_addr as Address, phoff, i, phdr);
+        if phdr.p_type == 1 {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (the W38 DoD).
+// ────────────────────────────────────────────────────────────────────────────
+// Build a minimal ELF64 file image in an ElfBuf, then verify the parser:
+//   (1) elf_validate(ehdr) == 0  — the magic 0x7F 'E' 'L' 'F' is valid.
+//   (2) elf_validate(corrupted_ehdr) == -1  — corrupting byte 0 fails.
+//   (3) elf_get_entry(ehdr) == 4198400  — e_entry = 0x401000 round-trips.
+//   (4) elf_get_phdr(buf, 64, 0, phdr0); phdr0.p_type == 1 (PT_LOAD)
+//       and phdr0.p_flags == 5 (PF_X|PF_R)  — first phdr reads back.
+//   (5) elf_get_phdr(buf, 64, 1, phdr1); phdr1.p_type == 0 (PT_NULL)  —
+//       second phdr reads back.
+//   (6) elf_count_load_segments(ehdr) == 1  — only one of the two phdrs
+//       is PT_LOAD (the other is PT_NULL).
+// Returns 0 on success, 1..6 on the corresponding check failure (so a
+// future CI failure pinpoints the broken check).
+//
+// The minimal ELF64 file image is 176 bytes:
+//   bytes   0..63   = Elf64_Ehdr (64 bytes)
+//   bytes  64..119  = Elf64_Phdr #0 (PT_LOAD, 56 bytes)
+//   bytes 120..175  = Elf64_Phdr #1 (PT_NULL, 56 bytes)
+// Only the non-zero bytes are written explicitly — the rest are zero
+// from state_new's zero-fill. The image is a valid ELF64 file in the
+// sense that elf_validate passes (the magic is correct) and the phdr
+// table is at the conventional offset (e_phoff = 64 = sizeof(ehdr)).
+// It's NOT a runnable program — there's no code segment — but the
+// parser doesn't care; it just reads the header + phdrs.
+fn main() -> i32 {
+    let buf = state_new(ElfBuf);
+
+    // ── ELF header (64 bytes) ──────────────────────────────────────────
+    // e_ident[0..3]: magic 0x7F 'E' 'L' 'F'
+    buf.data[0] = 127;
+    buf.data[1] = 69;
+    buf.data[2] = 76;
+    buf.data[3] = 70;
+    // e_ident[4]: EI_CLASS = 2 (ELFCLASS64)
+    buf.data[4] = 2;
+    // e_ident[5]: EI_DATA = 1 (ELFDATA2LSB, little-endian)
+    buf.data[5] = 1;
+    // e_ident[6]: EI_VERSION = 1 (EV_CURRENT)
+    buf.data[6] = 1;
+    // e_ident[7..15]: 0 (EI_OSABI=SYSV + padding — left zero by state_new)
+
+    // e_type = ET_EXEC = 2 (LE: 0x02 0x00)
+    buf.data[16] = 2;
+    buf.data[17] = 0;
+    // e_machine = EM_X86_64 = 62 (LE: 0x3E 0x00)
+    buf.data[18] = 62;
+    buf.data[19] = 0;
+    // e_version = 1 (LE: 0x01 0x00 0x00 0x00)
+    buf.data[20] = 1;
+    // bytes 21..23 = 0
+
+    // e_entry = 0x401000 = 4198400 (LE: 0x00 0x10 0x40 0x00 0x00 0x00 0x00 0x00)
+    buf.data[24] = 0;
+    buf.data[25] = 16;
+    buf.data[26] = 64;
+    // bytes 27..31 = 0
+
+    // e_phoff = 64 (LE: 0x40 0x00 0x00 0x00 0x00 0x00 0x00 0x00)
+    buf.data[32] = 64;
+    // bytes 33..39 = 0
+
+    // e_shoff = 0 (bytes 40..47 = 0 — no section headers)
+    // e_flags = 0 (bytes 48..51 = 0)
+
+    // e_ehsize = 64 (LE: 0x40 0x00)
+    buf.data[52] = 64;
+    // e_phentsize = 56 (LE: 0x38 0x00)
+    buf.data[54] = 56;
+    // e_phnum = 2 (LE: 0x02 0x00) — two program headers
+    buf.data[56] = 2;
+    // bytes 57..63 = 0 (e_phnum high + e_shentsize + e_shnum + e_shstrndx)
+
+    // ── Program header #0 at offset 64 (56 bytes): PT_LOAD ────────────
+    // p_type = PT_LOAD = 1 (LE: 0x01 0x00 0x00 0x00)
+    buf.data[64] = 1;
+    // bytes 65..67 = 0
+    // p_flags = PF_X|PF_R = 5 (LE: 0x05 0x00 0x00 0x00)
+    buf.data[68] = 5;
+    // bytes 69..71 = 0
+    // p_offset = 0 (bytes 72..79 = 0)
+    // p_vaddr = 0x400000 = 4194304 (LE: 0x00 0x00 0x40 0x00 0x00 0x00 0x00 0x00)
+    buf.data[80] = 0;
+    buf.data[81] = 0;
+    buf.data[82] = 64;
+    // bytes 83..87 = 0
+    // p_paddr = 0x400000 (bytes 88..95 — same as p_vaddr)
+    buf.data[88] = 0;
+    buf.data[89] = 0;
+    buf.data[90] = 64;
+    // bytes 91..95 = 0
+    // p_filesz = 176 (LE: 0xB0 0x00 0x00 0x00 0x00 0x00 0x00 0x00)
+    buf.data[96] = 176;
+    // bytes 97..103 = 0
+    // p_memsz = 176 (bytes 104..111 — same as p_filesz, no bss)
+    buf.data[104] = 176;
+    // bytes 105..111 = 0
+    // p_align = 4096 = 0x1000 (LE: 0x00 0x10 0x00 0x00 0x00 0x00 0x00 0x00)
+    buf.data[112] = 0;
+    buf.data[113] = 16;
+    // bytes 114..119 = 0
+
+    // ── Program header #1 at offset 120 (56 bytes): PT_NULL ───────────
+    // p_type = PT_NULL = 0 (bytes 120..123 = 0 — left zero by state_new)
+    // All other fields 0 — left zero by state_new. PT_NULL entries are
+    // ignored by the ELF loader; they exist in real ELF files as
+    // padding / reserved slots. The self-test uses PT_NULL to verify
+    // elf_count_load_segments counts ONLY PT_LOAD entries (not all
+    // entries).
+
+    buf.len = 176;
+
+    // ── Parse the header ──────────────────────────────────────────────
+    let ba = buf as Address;
+    let ehdr = state_new(Elf64Ehdr);
+    elf_parse_header(ba, ehdr);
+
+    // ── Check (1): elf_validate returns 0 on the valid magic ──────────
+    if elf_validate(ehdr) != 0 { return 1; }
+
+    // ── Check (2): elf_validate returns -1 on a corrupted magic ───────
+    // Corrupt e_ident[0] (set to 0 instead of 0x7F). The validate
+    // should now fail. We restore the byte after the check so the rest
+    // of the self-test sees the original valid magic.
+    ehdr.e_ident[0] = 0;
+    if elf_validate(ehdr) != (0 - 1) { return 2; }
+    ehdr.e_ident[0] = 127;
+
+    // ── Check (3): elf_get_entry returns 4198400 (0x401000) ───────────
+    if elf_get_entry(ehdr) != 4198400 { return 3; }
+
+    // ── Check (4): phdr #0 is PT_LOAD with p_flags == 5 ───────────────
+    let phdr0 = state_new(Elf64Phdr);
+    elf_get_phdr(ba, 64, 0, phdr0);
+    if phdr0.p_type != 1 { return 4; }
+    if phdr0.p_flags != 5 { return 5; }
+
+    // ── Check (5): phdr #1 is PT_NULL (p_type == 0) ───────────────────
+    let phdr1 = state_new(Elf64Phdr);
+    elf_get_phdr(ba, 64, 1, phdr1);
+    if phdr1.p_type != 0 { return 6; }
+
+    // ── Check (6): elf_count_load_segments returns 1 ──────────────────
+    // (Only phdr #0 is PT_LOAD; phdr #1 is PT_NULL and should be
+    // skipped by the count.)
+    if elf_count_load_segments(ehdr) != 1 { return 7; }
+
+    return 0;
+}
