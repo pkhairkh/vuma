@@ -1,0 +1,28 @@
+// shared_memory — Wave 13: parent writes to shared memory, child reads.
+//
+// Uses mmap with MAP_SHARED|MAP_ANONYMOUS to create a memory region
+// shared between parent and child (via fork()). The parent writes
+// 200 at offset 0, the child reads it and exits with the value.
+//
+// Expected exit code: 200
+//
+// Note: MAP_SHARED|MAP_ANONYMOUS memory is inherited across fork()
+// and both processes see the same physical pages, so writes by the
+// parent are visible to the child (and vice versa).
+fn main() -> i32 {
+    shm = shared_memory_open(4096);
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child: wait for parent to write, then read
+        // Simple busy-wait: read until nonzero
+        v = 0;
+        while v == 0 {
+            v = shared_memory_read(shm, 0);
+        }
+        return (v as i32) % 256;
+    }
+    // Parent: write 200 to offset 0
+    shared_memory_write(shm, 0, 200);
+    status = wait_worker(pid);
+    return status;
+}

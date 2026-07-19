@@ -2475,6 +2475,79 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("channel_recv_timeout".to_string());
                                 channel_builtin_matched = true;
                             }
+                            // Wave 13b: shared_memory_open(size) -> *mut u8
+                            // mmap(NULL, size, PROT_READ|PROT_WRITE,
+                            //      MAP_SHARED|MAP_ANONYMOUS, -1, 0)
+                            // x86_64 sys_mmap = 9. Args:
+                            //   rdi=addr(0), rsi=len, rdx=prot, r10=flags,
+                            //   r8=fd(-1), r9=offset(0)
+                            // PROT_READ|PROT_WRITE = 0x1|0x2 = 0x3
+                            // MAP_SHARED|MAP_ANONYMOUS = 0x01|0x20 = 0x21
+                            // Returns pointer in RAX, or MAP_FAILED (-1) on error.
+                            "shared_memory_open" if args.len() == 1 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // rdi = 0 (NULL — kernel chooses address)
+                                code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));
+                                // rsi = size (from argument)
+                                code.extend(load_value(&args[0], Gpr::Rsi));
+                                // rdx = prot = PROT_READ|PROT_WRITE = 0x3
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0x3));
+                                // r10 = flags = MAP_SHARED|MAP_ANONYMOUS = 0x21
+                                code.extend(encode_mov_reg_imm32(Gpr::R10, 0x21));
+                                // r8 = fd = -1 (MAP_ANONYMOUS ignores fd)
+                                code.extend(encode_mov_reg_imm32(Gpr::R8, -1));
+                                // r9 = offset = 0
+                                code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));
+                                // rax = 9 (sys_mmap)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));
+                                code.extend(encode_syscall());
+                                // Store returned pointer to dst slot
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                instr_opcode = Some("shared_memory_open".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 13b: shared_memory_write(ptr, offset, value)
+                            // Stores a u64 at ptr+offset. Used by the parent
+                            // process to write into the shared region.
+                            "shared_memory_write" if args.len() == 3 => {
+                                let ptr = &args[0];
+                                let offset = &args[1];
+                                let value = &args[2];
+                                // rax = ptr (base address)
+                                code.extend(load_value(ptr, Gpr::Rax));
+                                // rcx = offset
+                                code.extend(load_value(offset, Gpr::Rcx));
+                                // rdx = value
+                                code.extend(load_value(value, Gpr::Rdx));
+                                // [rax + rcx] = rdx
+                                // mov [rax + rcx*1 + 0], rdx
+                                code.push(0x48); // REX.W
+                                code.push(0x89);
+                                code.push(0x14); // ModRM: [rax + rcx], rdx
+                                code.push(0x08); // SIB: base=rax, index=rcx
+                                instr_opcode = Some("shared_memory_write".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 13b: shared_memory_read(ptr, offset) -> u64
+                            // Loads a u64 from ptr+offset.
+                            "shared_memory_read" if args.len() == 2 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let ptr = &args[0];
+                                let offset = &args[1];
+                                // rax = ptr
+                                code.extend(load_value(ptr, Gpr::Rax));
+                                // rcx = offset
+                                code.extend(load_value(offset, Gpr::Rcx));
+                                // rdx = [rax + rcx]
+                                code.push(0x48); // REX.W
+                                code.push(0x8B);
+                                code.push(0x14); // ModRM: rdx, [rax + rcx]
+                                code.push(0x08); // SIB: base=rax, index=rcx
+                                // Store rdx to dst slot
+                                code.extend(store_vreg(dst_id, Gpr::Rdx));
+                                instr_opcode = Some("shared_memory_read".to_string());
+                                channel_builtin_matched = true;
+                            }
                             _ => {}
                         }
                     }
