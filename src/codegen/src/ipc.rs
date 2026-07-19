@@ -1804,6 +1804,18 @@ pub enum IpcError {
     WorkerTimeout,
     WorkerNotFound,
     MaxRestartsExceeded,
+    /// [`DriverWorker::start`] was called on a worker that is already
+    /// running. The supervisor's start/stop state machine is strict:
+    /// a second `start()` without an intervening `stop()` is a bug.
+    WorkerAlreadyRunning,
+    /// [`DriverWorker::stop`] or [`DriverWorker::handle_irq`] was
+    /// called on a worker that is not currently running — there is no
+    /// live process to receive the stop signal / IRQ dispatch.
+    WorkerNotRunning,
+    /// [`DriverWorker::handle_irq`] was called with an IRQ vector that
+    /// is not in the driver's `irq_vectors` allowlist. The kernel's IRQ
+    /// demuxer routed the interrupt to the wrong driver.
+    IrqNotRegistered(u32),
 
     // Memory errors
     MemoryWindowNotFound,
@@ -3189,6 +3201,378 @@ impl Permission {
     }
     pub fn can_write(&self) -> bool { self.fraction >= 1.0 }
     pub fn can_read(&self) -> bool { self.fraction > 0.0 }
+}
+
+// ── W49-56: Driver Isolation ──────────────────────────────────────────
+//
+// Drivers run as untrusted user-space workers. Each DriverWorker
+// encapsulates the device path, MMIO regions, IRQ vectors, and DMA
+// buffers the driver is allowed to touch — anything outside these
+// lists is structurally unreachable. The trust_level is pinned to
+// Untrusted regardless of what the caller passes: even a kernel-
+// blessed driver runs in user space, so a compromised driver cannot
+// escalate through the kernel's authority.
+
+/// Direction of a DMA transfer. `ToDev` is host→device, `FromDev` is
+/// device→host, `Bidirectional` is both. Used by [`DmaBuffer`] to
+/// describe which way(s) the device may push data through a buffer;
+/// the IOMMU enforces this when mapping the buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmaDirection {
+    ToDev,
+    FromDev,
+    Bidirectional,
+}
+
+/// A single DMA buffer descriptor: bus address, size in bytes, and the
+/// direction(s) in which the device may transfer. [`is_valid`] is the
+/// L5 sanity check the supervisor runs before mapping the buffer into
+/// the IOMMU: a zero-size buffer or a zero base address is never
+/// legitimately DMA-able (the IOMMU rejects zero-page mappings to
+/// catch null-pointer-dereference-by-DMA), and an address+size that
+/// would wrap the 64-bit bus address space is also rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaBuffer {
+    /// Bus address of the buffer. Must be non-zero (see [`is_valid`]).
+    pub addr: u64,
+    /// Size of the buffer in bytes. Must be non-zero.
+    pub size: u64,
+    /// Permitted transfer direction(s) for this buffer.
+    pub direction: DmaDirection,
+}
+
+impl DmaBuffer {
+    /// Construct a new DMA buffer descriptor.
+    pub fn new(addr: u64, size: u64, direction: DmaDirection) -> Self {
+        Self { addr, size, direction }
+    }
+
+    /// True iff `addr` is non-zero, `size` is non-zero, and
+    /// `addr + size` does not overflow the 64-bit bus address space.
+    /// Used by [`DriverWorker`] before advertising the buffer to the
+    /// device — the IOMMU would reject the mapping anyway, so we fail
+    /// fast at config time rather than at map time.
+    pub fn is_valid(&self) -> bool {
+        self.addr != 0
+            && self.size != 0
+            && self.addr.checked_add(self.size).is_some()
+    }
+}
+
+/// Configuration for a driver worker process. Bundles the device path,
+/// the MMIO regions the driver may memory-map, the IRQ vectors it may
+/// register handlers for, the DMA buffers it may map into the IOMMU,
+/// and the trust level.
+///
+/// `trust_level` is always [`TrustLevel::Untrusted`]: even a kernel-
+/// blessed driver runs in user space so a compromised driver cannot
+/// escalate through kernel authority. The constructor enforces this;
+/// callers cannot construct a `DriverWorkerConfig` with a higher trust
+/// level — the `trust_level` parameter is accepted only for source-
+/// level symmetry with the rest of the worker-config family.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriverWorkerConfig {
+    pub driver_name: String,
+    pub device_path: String,
+    /// `(base, size)` for each MMIO region the driver may map. The
+    /// supervisor installs these as device-file mmaps in the worker's
+    /// address space; any access outside is a fault.
+    pub mmio_regions: Vec<(u64, u64)>,
+    /// IRQ vectors the driver may register handlers for. The kernel's
+    /// IRQ demuxer refuses to route any other vector to this driver.
+    pub irq_vectors: Vec<u32>,
+    /// DMA buffers the driver may map into the IOMMU. Each must pass
+    /// [`DmaBuffer::is_valid`] before the supervisor will map it.
+    pub dma_buffers: Vec<DmaBuffer>,
+    /// Always [`TrustLevel::Untrusted`] — see struct doc.
+    pub trust_level: TrustLevel,
+}
+
+impl DriverWorkerConfig {
+    /// Construct a driver worker config. `trust_level` is forced to
+    /// [`TrustLevel::Untrusted`] regardless of the argument — drivers
+    /// always run untrusted. The parameter is kept so call sites read
+    /// clearly and so a future "trust the driver binary" mode can be
+    /// added behind a feature flag without churning every constructor.
+    pub fn new(
+        driver_name: impl Into<String>,
+        device_path: impl Into<String>,
+        mmio_regions: Vec<(u64, u64)>,
+        irq_vectors: Vec<u32>,
+        dma_buffers: Vec<DmaBuffer>,
+        trust_level: TrustLevel,
+    ) -> Self {
+        // Pin to Untrusted: even if the caller passes Kernel, a driver
+        // is still a user-space worker and must not inherit kernel
+        // authority.
+        let _ = trust_level;
+        Self {
+            driver_name: driver_name.into(),
+            device_path: device_path.into(),
+            mmio_regions,
+            irq_vectors,
+            dma_buffers,
+            trust_level: TrustLevel::Untrusted,
+        }
+    }
+}
+
+impl Default for DriverWorkerConfig {
+    fn default() -> Self {
+        Self::new(
+            "default",
+            "/dev/null",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            TrustLevel::Untrusted,
+        )
+    }
+}
+
+/// A live driver worker process. Wraps the worker's
+/// [`DriverWorkerConfig`] plus the supervisor-visible runtime state:
+/// is it currently running, and how many times has it been restarted
+/// in the current window.
+///
+/// [`start`] / [`stop`] flip `is_running`; [`handle_irq`] is the mock
+/// dispatch entry point the kernel's IRQ demultiplexer calls when a
+/// hardware interrupt for one of this driver's registered vectors
+/// fires. The real dispatch (in the runtime backend) wakes the driver
+/// worker over IPC; here it just validates the request and returns Ok.
+#[derive(Clone, Debug)]
+pub struct DriverWorker {
+    pub config: DriverWorkerConfig,
+    pub is_running: bool,
+    pub restart_count: u32,
+}
+
+impl DriverWorker {
+    /// Construct a stopped driver worker (`is_running = false`,
+    /// `restart_count = 0`) from the given config.
+    pub fn new(config: DriverWorkerConfig) -> Self {
+        Self {
+            config,
+            is_running: false,
+            restart_count: 0,
+        }
+    }
+
+    /// Mark the worker as running. Returns
+    /// [`IpcError::WorkerAlreadyRunning`] if it is already running —
+    /// the supervisor's start/stop state machine is strict, a second
+    /// `start()` without an intervening `stop()` is a bug.
+    pub fn start(&mut self) -> Result<(), IpcError> {
+        if self.is_running {
+            return Err(IpcError::WorkerAlreadyRunning);
+        }
+        self.is_running = true;
+        Ok(())
+    }
+
+    /// Mark the worker as stopped. Returns [`IpcError::WorkerNotRunning`]
+    /// if it is not currently running — symmetric with [`start`].
+    pub fn stop(&mut self) -> Result<(), IpcError> {
+        if !self.is_running {
+            return Err(IpcError::WorkerNotRunning);
+        }
+        self.is_running = false;
+        Ok(())
+    }
+
+    /// Mock-dispatch an IRQ to the driver. The kernel's IRQ demuxer
+    /// calls this when a hardware interrupt for one of the driver's
+    /// registered vectors fires; the real backend wakes the driver
+    /// worker over IPC, here we just validate the request:
+    ///
+    ///   * If the worker is not running → [`IpcError::WorkerNotRunning`]
+    ///     (the IRQ arrived but there is nobody to dispatch it to).
+    ///   * If `vector` is not in `config.irq_vectors` →
+    ///     [`IpcError::IrqNotRegistered(vector)`] (the demuxer routed
+    ///     the IRQ to the wrong driver — a kernel bug).
+    ///   * Otherwise → `Ok(())`. The real backend replaces the Ok arm
+    ///     with the IPC round-trip to the driver worker.
+    pub fn handle_irq(&self, vector: u32) -> Result<(), IpcError> {
+        if !self.is_running {
+            return Err(IpcError::WorkerNotRunning);
+        }
+        if !self.config.irq_vectors.contains(&vector) {
+            return Err(IpcError::IrqNotRegistered(vector));
+        }
+        // Mock dispatch — real backend does an IPC round-trip here.
+        Ok(())
+    }
+}
+
+// ── W57-64: Sandboxing ────────────────────────────────────────────────
+//
+// Three sandboxed runtime services: an untrusted worker process with
+// a zero-capability default (SandboxedWorker), a length-bounded input
+// parser (SandboxedParser), and a length-bounded crypto primitive
+// (SandboxedCrypto). Each enforces its limit *before* doing any work
+// so an attacker cannot OOM or DoS the service by sending a huge
+// input — the limit check is the gate, the work is what's gated.
+
+/// A sandboxed worker process. Runs with an empty capability set by
+/// default — `capabilities` is the explicit allowlist the supervisor
+/// has granted, and [`is_sandboxed`] is always true so a generic
+/// caller can verify the sandbox is in force without downcasting.
+///
+/// `plugin_path` is the optional dlopen-style plugin the worker has
+/// loaded; `None` means "no plugin loaded" (a pure-Rust worker). The
+/// supervisor refuses to spawn a worker whose `plugin_path` is `Some`
+/// unless the binary has been attested (W33-40 STARK attestation).
+#[derive(Clone, Debug)]
+pub struct SandboxedWorker {
+    pub worker_pid: u64,
+    /// Capability token IDs currently held by this worker. Mirrors the
+    /// kernel's per-pid [`capability::CapabilityRegistry`] entry — kept
+    /// here so the worker can self-audit without crossing the IPC
+    /// boundary. Empty by default (zero-capability).
+    pub capabilities: Vec<u128>,
+    pub plugin_path: Option<String>,
+}
+
+impl SandboxedWorker {
+    /// Construct a fresh sandboxed worker: empty capability set, no
+    /// plugin path. The caller supplies the pid (assigned by the
+    /// supervisor's `ProcessTable`).
+    pub fn new(worker_pid: u64) -> Self {
+        Self {
+            worker_pid,
+            capabilities: Vec::new(),
+            plugin_path: None,
+        }
+    }
+
+    /// Always true — this is a [`SandboxedWorker`]. Provided so a
+    /// caller with a generic process handle can verify the sandbox is
+    /// in force without downcasting.
+    pub fn is_sandboxed(&self) -> bool {
+        true
+    }
+
+    /// True iff the capability token `token_id` is in this worker's
+    /// allowlist. The supervisor checks this before honouring any
+    /// privileged operation the worker requests.
+    pub fn has_capability(&self, token_id: u128) -> bool {
+        self.capabilities.contains(&token_id)
+    }
+
+    /// Grant the capability token `token_id` to this worker. Idempotent:
+    /// granting an already-held capability is a no-op (the token is
+    /// not duplicated in the list).
+    pub fn grant_capability(&mut self, token_id: u128) {
+        if !self.has_capability(token_id) {
+            self.capabilities.push(token_id);
+        }
+    }
+}
+
+/// A length-bounded input parser. [`feed`] appends bytes to an
+/// internal buffer until `max_input_size` is reached; further `feed()`
+/// calls return [`IpcError::PayloadTooLarge`] without mutating the
+/// buffer. [`is_over_limit`] is the polling predicate the supervisor
+/// uses between IPC turns to decide whether to drain or kill the
+/// parser.
+///
+/// This is the L5 input-bounding half of the sandbox: a malicious or
+/// buggy producer cannot cause the parser to allocate unbounded memory
+/// — the limit is checked *before* the allocation, not after.
+#[derive(Clone, Debug)]
+pub struct SandboxedParser {
+    pub input_buffer: Vec<u8>,
+    pub max_input_size: u64,
+}
+
+impl SandboxedParser {
+    /// Construct a parser with the given limit and an empty buffer.
+    pub fn new(max_input_size: u64) -> Self {
+        Self {
+            input_buffer: Vec::new(),
+            max_input_size,
+        }
+    }
+
+    /// Append `data` to the input buffer. Returns the number of bytes
+    /// actually appended (always `data.len()` on success). If the
+    /// append would push `input_buffer.len()` past `max_input_size`,
+    /// returns [`IpcError::PayloadTooLarge`] with the configured limit
+    /// and leaves the buffer untouched.
+    pub fn feed(&mut self, data: &[u8]) -> Result<usize, IpcError> {
+        let new_len = self.input_buffer.len().saturating_add(data.len());
+        if new_len as u64 > self.max_input_size {
+            return Err(IpcError::PayloadTooLarge(self.max_input_size));
+        }
+        self.input_buffer.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    /// True iff the buffer is currently at or past the limit. The
+    /// supervisor polls this between IPC turns; once it flips true the
+    /// parser must be drained or killed before any further `feed()`.
+    /// Note that `feed()` rejects over-limit appends, so this predicate
+    /// flipping true does not mean the limit was *exceeded* — it means
+    /// the buffer is full and the next `feed()` (of any non-zero size)
+    /// will fail.
+    pub fn is_over_limit(&self) -> bool {
+        self.input_buffer.len() as u64 >= self.max_input_size
+    }
+}
+
+/// A length-bounded cryptographic primitive. Wraps a mock hash
+/// function (CRC32, see [`hash`]) with an `input_limit` ceiling: any
+/// input larger than `input_limit` is rejected with
+/// [`IpcError::PayloadTooLarge`] before the hash is computed.
+///
+/// # SECURITY WARNING — NOT CRYPTOGRAPHICALLY SECURE
+///
+/// [`hash`](Self::hash) uses [`crc32`] as a *mock*. CRC32 is a linear
+/// integrity check, not a cryptographic hash: it is trivially
+/// collidable and forgeable. This struct exists so the rest of the
+/// sandboxing stack can be built and tested against a real
+/// `hash`/`verify` contract without pulling in a vetted crypto crate.
+/// **No production deployment may rely on this for any security
+/// property.** Replacing the mock with SHA-256 or BLAKE3 is a drop-in:
+/// keep the `algorithm` field, `input_limit` field, and `hash()`
+/// signature; swap the `crc32` call for the real primitive.
+#[derive(Clone, Debug)]
+pub struct SandboxedCrypto {
+    /// Informational algorithm name (e.g. "sha256", "aes128").
+    /// `hash()` always uses the crc32 mock regardless of this value
+    /// (see struct doc) — the field exists so callers and attestation
+    /// can record *which* algorithm the worker believes it is using.
+    pub algorithm: String,
+    pub input_limit: u64,
+}
+
+impl SandboxedCrypto {
+    /// Construct a sandboxed crypto primitive for the named algorithm
+    /// (e.g. "sha256", "aes128") with the given input-size ceiling.
+    pub fn new(algorithm: impl Into<String>, input_limit: u64) -> Self {
+        Self {
+            algorithm: algorithm.into(),
+            input_limit,
+        }
+    }
+
+    /// Hash `data` under the configured algorithm (mock: CRC32). If
+    /// `data.len()` exceeds `input_limit`, returns
+    /// [`IpcError::PayloadTooLarge`] with the configured limit and
+    /// does not compute the hash.
+    ///
+    /// Returns the hash as a 4-byte little-endian `Vec<u8>` (the
+    /// width of a CRC32). A real SHA-256 would return 32 bytes; the
+    /// caller must not assume the length matches the algorithm's
+    /// nominal digest width — read the `algorithm` field if you need
+    /// to know which primitive was used.
+    pub fn hash(&self, data: &[u8]) -> Result<Vec<u8>, IpcError> {
+        if data.len() as u64 > self.input_limit {
+            return Err(IpcError::PayloadTooLarge(self.input_limit));
+        }
+        // Mock: CRC32. See struct doc — NOT cryptographically secure.
+        Ok(crc32(data).to_le_bytes().to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -6186,5 +6570,239 @@ mod tests {
             "kill_user on kernel pid must fail (kernel is not a user)"
         );
         assert!(table.kernel.is_some(), "kernel slot must survive kill_user");
+    }
+
+    // ── W49-56: Driver isolation tests ────────────────────────────────
+
+    #[test]
+    fn test_dma_buffer_is_valid() {
+        // A well-formed buffer: non-zero addr, non-zero size, no overflow.
+        let good = DmaBuffer::new(0x1000, 0x1000, DmaDirection::ToDev);
+        assert!(good.is_valid());
+
+        // Each of these is invalid: zero addr, zero size, or overflow.
+        assert!(!DmaBuffer::new(0, 0x1000, DmaDirection::ToDev).is_valid(),
+            "zero base address must be invalid (null-DMA guard)");
+        assert!(!DmaBuffer::new(0x1000, 0, DmaDirection::ToDev).is_valid(),
+            "zero size must be invalid");
+        // addr + size overflow: u64::MAX + 1 wraps.
+        assert!(!DmaBuffer::new(u64::MAX, 1, DmaDirection::ToDev).is_valid(),
+            "addr+size overflow must be invalid");
+
+        // Direction does not affect validity.
+        assert!(DmaBuffer::new(0x2000, 0x800, DmaDirection::FromDev).is_valid());
+        assert!(DmaBuffer::new(0x2000, 0x800, DmaDirection::Bidirectional).is_valid());
+    }
+
+    #[test]
+    fn test_driver_worker_config_trust_level_pinned_to_untrusted() {
+        // Even if the caller passes Kernel, the config's trust_level
+        // must be Untrusted — drivers always run untrusted.
+        let cfg = DriverWorkerConfig::new(
+            "nvme",
+            "/dev/nvme0",
+            vec![(0xFE00_0000, 0x1000)],
+            vec![16, 17],
+            vec![DmaBuffer::new(0x8000, 0x4000, DmaDirection::Bidirectional)],
+            TrustLevel::Kernel,
+        );
+        assert_eq!(cfg.trust_level, TrustLevel::Untrusted,
+            "driver trust_level must be pinned to Untrusted");
+        assert_eq!(cfg.driver_name, "nvme");
+        assert_eq!(cfg.device_path, "/dev/nvme0");
+        assert_eq!(cfg.mmio_regions.len(), 1);
+        assert_eq!(cfg.irq_vectors, vec![16, 17]);
+        assert_eq!(cfg.dma_buffers.len(), 1);
+        assert!(cfg.dma_buffers[0].is_valid());
+    }
+
+    #[test]
+    fn test_driver_worker_start_stop_state_machine() {
+        let cfg = DriverWorkerConfig::new(
+            "eth0", "/dev/eth0", vec![], vec![], vec![],
+            TrustLevel::Untrusted,
+        );
+        let mut w = DriverWorker::new(cfg);
+        assert!(!w.is_running, "fresh worker is stopped");
+        assert_eq!(w.restart_count, 0);
+
+        // start → Ok, is_running = true
+        w.start().expect("first start must succeed");
+        assert!(w.is_running);
+
+        // second start → Err (already running)
+        let err = w.start().unwrap_err();
+        assert_eq!(err, IpcError::WorkerAlreadyRunning,
+            "double-start must fail with WorkerAlreadyRunning");
+
+        // stop → Ok, is_running = false
+        w.stop().expect("stop after start must succeed");
+        assert!(!w.is_running);
+
+        // second stop → Err (not running)
+        let err = w.stop().unwrap_err();
+        assert_eq!(err, IpcError::WorkerNotRunning,
+            "double-stop must fail with WorkerNotRunning");
+    }
+
+    #[test]
+    fn test_driver_worker_handle_irq_dispatch_and_reject() {
+        let cfg = DriverWorkerConfig::new(
+            "uart", "/dev/ttyS0",
+            vec![(0xFE00_0000, 0x1000)],
+            vec![4, 5], // registered IRQ vectors
+            vec![],
+            TrustLevel::Untrusted,
+        );
+        let mut w = DriverWorker::new(cfg);
+
+        // Worker stopped → IRQ dispatch must fail (nobody to dispatch to).
+        let err = w.handle_irq(4).unwrap_err();
+        assert_eq!(err, IpcError::WorkerNotRunning,
+            "IRQ on stopped worker must fail");
+
+        // Start the worker, then dispatch a registered vector.
+        w.start().expect("start");
+        w.handle_irq(4).expect("registered IRQ on running worker must dispatch");
+        w.handle_irq(5).expect("second registered IRQ must dispatch");
+
+        // Unregistered vector → IrqNotRegistered.
+        let err = w.handle_irq(99).unwrap_err();
+        assert_eq!(err, IpcError::IrqNotRegistered(99),
+            "unregistered IRQ vector must be rejected");
+
+        // Stop the worker → IRQ dispatch must fail again.
+        w.stop().expect("stop");
+        let err = w.handle_irq(4).unwrap_err();
+        assert_eq!(err, IpcError::WorkerNotRunning,
+            "IRQ on stopped worker must fail");
+    }
+
+    // ── W57-64: Sandboxing tests ─────────────────────────────────────
+
+    #[test]
+    fn test_sandboxed_worker_default_zero_capability() {
+        let w = SandboxedWorker::new(4242);
+        assert!(w.is_sandboxed(), "is_sandboxed() must always be true");
+        assert_eq!(w.worker_pid, 4242);
+        assert!(w.capabilities.is_empty(),
+            "fresh worker must have zero capabilities");
+        assert!(w.plugin_path.is_none(),
+            "fresh worker must have no plugin path");
+
+        // has_capability on empty set: always false.
+        assert!(!w.has_capability(0));
+        assert!(!w.has_capability(u128::MAX));
+    }
+
+    #[test]
+    fn test_sandboxed_worker_grant_and_check_capability() {
+        let mut w = SandboxedWorker::new(100);
+
+        // Grant a capability → has_capability returns true for it.
+        w.grant_capability(0xDEAD_BEEF);
+        assert!(w.has_capability(0xDEAD_BEEF));
+        assert!(!w.has_capability(0xCAFE_BABE));
+
+        // Grant a second capability → both present.
+        w.grant_capability(0xCAFE_BABE);
+        assert!(w.has_capability(0xDEAD_BEEF));
+        assert!(w.has_capability(0xCAFE_BABE));
+        assert_eq!(w.capabilities.len(), 2);
+
+        // Re-granting an existing capability is idempotent.
+        w.grant_capability(0xDEAD_BEEF);
+        assert_eq!(w.capabilities.len(), 2,
+            "re-granting existing capability must not duplicate");
+    }
+
+    #[test]
+    fn test_sandboxed_parser_feed_within_limit() {
+        let mut p = SandboxedParser::new(16);
+        assert!(p.input_buffer.is_empty());
+        assert!(!p.is_over_limit());
+
+        // Feed 8 bytes — ok.
+        let n = p.feed(&[0u8; 8]).expect("feed within limit must succeed");
+        assert_eq!(n, 8);
+        assert_eq!(p.input_buffer.len(), 8);
+        assert!(!p.is_over_limit());
+
+        // Feed another 8 bytes — exactly at limit.
+        p.feed(&[0u8; 8]).expect("feed exactly to limit must succeed");
+        assert_eq!(p.input_buffer.len(), 16);
+        assert!(p.is_over_limit(), "at-limit must report over_limit");
+    }
+
+    #[test]
+    fn test_sandboxed_parser_feed_over_limit_rejected() {
+        let mut p = SandboxedParser::new(8);
+
+        // Feed 4 bytes — ok.
+        p.feed(&[0u8; 4]).expect("feed within limit");
+
+        // Feed 8 more bytes — would push to 12, over limit. Must reject
+        // AND leave the buffer untouched (4 bytes).
+        let err = p.feed(&[0u8; 8]).unwrap_err();
+        assert!(matches!(err, IpcError::PayloadTooLarge(8)),
+            "over-limit feed must return PayloadTooLarge(limit), got {:?}", err);
+        assert_eq!(p.input_buffer.len(), 4,
+            "rejected feed must not mutate the buffer");
+
+        // Feed exactly 4 more — at limit, ok.
+        p.feed(&[0u8; 4]).expect("feed exactly to limit must succeed");
+        assert_eq!(p.input_buffer.len(), 8);
+        assert!(p.is_over_limit());
+
+        // One more byte → over limit, rejected.
+        let err = p.feed(&[1u8; 1]).unwrap_err();
+        assert!(matches!(err, IpcError::PayloadTooLarge(8)));
+        assert_eq!(p.input_buffer.len(), 8,
+            "rejected feed must not mutate the buffer");
+    }
+
+    #[test]
+    fn test_sandboxed_crypto_hash_within_limit() {
+        // sha256 algorithm name is informational; the mock uses crc32.
+        let c = SandboxedCrypto::new("sha256", 32);
+        assert_eq!(c.algorithm, "sha256");
+        assert_eq!(c.input_limit, 32);
+
+        // Hash within limit → 4-byte CRC32 little-endian.
+        let h = c.hash(b"hello").expect("hash within limit must succeed");
+        assert_eq!(h.len(), 4, "mock hash must be 4-byte CRC32");
+        let expected = crc32(b"hello").to_le_bytes();
+        assert_eq!(h, expected, "mock hash must match crc32(data).to_le_bytes()");
+
+        // Determinism: same input → same hash.
+        let h2 = c.hash(b"hello").expect("second hash must succeed");
+        assert_eq!(h, h2);
+
+        // Distinct inputs → distinct hashes (CRC32 is not collision-
+        // resistant, but distinct short inputs almost always differ).
+        let h3 = c.hash(b"world").expect("third hash must succeed");
+        assert_ne!(h, h3);
+    }
+
+    #[test]
+    fn test_sandboxed_crypto_hash_over_limit_rejected() {
+        let c = SandboxedCrypto::new("sha256", 4);
+
+        // Exactly at limit: ok.
+        c.hash(&[0u8; 4]).expect("hash at limit must succeed");
+
+        // Over limit: rejected, no hash computed.
+        let err = c.hash(&[0u8; 5]).unwrap_err();
+        assert!(matches!(err, IpcError::PayloadTooLarge(4)),
+            "over-limit hash must return PayloadTooLarge(limit), got {:?}", err);
+
+        // Empty input is always within any non-negative limit (0 > 0 is false).
+        let c2 = SandboxedCrypto::new("aes128", 0);
+        let h = c2.hash(b"").expect("empty input must succeed even at limit 0");
+        assert_eq!(h, crc32(b"").to_le_bytes());
+
+        // Non-empty input at limit 0: rejected.
+        let err = c2.hash(&[1u8]).unwrap_err();
+        assert!(matches!(err, IpcError::PayloadTooLarge(0)));
     }
 }
