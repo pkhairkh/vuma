@@ -112,6 +112,8 @@ fn compile_to_wasm(scg: &Scg) -> Vec<u8> {
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     backend

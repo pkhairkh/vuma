@@ -21,6 +21,12 @@ use crate::ir::{
 // ===========================================================================
 
 /// Substitute a single IRValue using a register-to-value mapping.
+///
+/// Channel<T> values are pointer-sized opaque capability handles.  They
+/// are not represented as a separate IRValue variant - they live in
+/// ordinary virtual registers (`IRValue::Register`) - so the existing
+/// substitution logic passes them through unchanged.  (Wave 1a / Task 1a
+/// step 7: "pass through - channel values are opaque handles".)
 fn substitute_value(val: &IRValue, map: &HashMap<u32, IRValue>) -> IRValue {
     if let IRValue::Register(id) = val {
         if let Some(replacement) = map.get(id) {
@@ -399,6 +405,11 @@ fn has_side_effects(instr: &IRInstr) -> bool {
             BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
         ),
         IRInstr::Div { .. } => true,
+        // Wave 1a / Task 1a step 8: channel handle creation
+        // (a future IRInstr::CreateChannel variant added in Wave 1d) has
+        // no side effects - it merely materializes an opaque capability
+        // token in a virtual register.  Until that variant exists, the
+        // `_` arm below already returns `false` for it.
         _ => false,
     }
 }
@@ -960,6 +971,11 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             let result = try_fold_cmp(*kind, l, r)?;
             Some((dst_id, result))
         }
+        // Wave 1a / Task 1a step 9: channel handle operations (e.g. a
+        // future IRInstr::CreateChannel added in Wave 1d) cannot be
+        // constant-folded - each handle is a fresh opaque capability
+        // whose identity is known only at runtime.  The `_` arm returns
+        // `None`, leaving such instructions in place.
         _ => None,
     }
 }

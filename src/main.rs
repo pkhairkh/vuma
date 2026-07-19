@@ -1570,6 +1570,8 @@ fn compile_to_binary_direct(
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     backend
@@ -2018,6 +2020,8 @@ fn cmd_emit(
             functions: allocated_functions,
             total_code_size: 0,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
         match backend.encode_program(&allocated_program) {
             Ok(bytes) => {
@@ -2132,6 +2136,8 @@ fn cmd_compile(
             functions: allocated_functions,
             total_code_size: 0,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
 
         // For --format obj, we want ET_REL output with relocation entries
@@ -2593,6 +2599,8 @@ fn cmd_bench(_cli: &Cli) {
                         functions: allocated_functions,
                         total_code_size: 0,
                         total_data_size: 0,
+                        rodata_data: Vec::new(),
+                        function_names: std::collections::HashSet::new(),
                     };
                     match backend.encode_program(&allocated_program) {
                         Ok(bytes) => bytes.len(),

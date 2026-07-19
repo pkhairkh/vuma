@@ -619,6 +619,11 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "lock" => Some(TokenKind::Lock),
         "unlock" => Some(TokenKind::Unlock),
         "channel" => Some(TokenKind::Channel),
+        // Wave 1b: `Channel<T>` type keyword (capitalised). Reuses the
+        // existing `TokenKind::Channel` variant; the parser distinguishes
+        // the type usage (`Channel<...>`) from the lowercase channel
+        // primitive by syntactic position (type context vs expression).
+        "Channel" => Some(TokenKind::Channel),
         "send" => Some(TokenKind::Send),
         "recv" => Some(TokenKind::Recv),
 

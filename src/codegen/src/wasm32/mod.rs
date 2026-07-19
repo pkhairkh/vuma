@@ -93,6 +93,9 @@ impl WasmType {
             IRType::I64 | IRType::U64 => Some(WasmType::I64),
             IRType::F32 => Some(WasmType::F32),
             IRType::F64 => Some(WasmType::F64),
+            // Channel<T> is a pointer-sized opaque handle — lower to I32
+            // (the wasm32 pointer representation), matching Ptr/Func.
+            IRType::Channel(_) => Some(WasmType::I32),
             IRType::Void | IRType::Struct { .. } | IRType::Array { .. } | IRType::TaggedUnion { .. } => None,
         }
     }
@@ -7148,6 +7151,8 @@ mod wasm_target_tests {
             functions: vec![allocated],
             total_code_size: 0,
             total_data_size: 0,
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
         };
         let result = backend.encode_program(&program);
         let wasm_bytes = result.expect("encode_program should succeed");

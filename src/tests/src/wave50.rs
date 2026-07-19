@@ -1880,6 +1880,8 @@ fn test_wave50_cross_backend_opt_regression() {
                     functions: vec![allocated.clone()],
                     total_code_size: 0,
                     total_data_size: 0,
+                rodata_data: Vec::new(),
+                function_names: std::collections::HashSet::new(),
                 };
                 let elf_result = catch_panic(|| -> Result<Vec<u8>, String> {
                     backend
@@ -2462,6 +2464,8 @@ fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
     backend.encode_program(&allocated_program).map_err(|e| {
         format!("x86_64 encode_program failed: {}", e)

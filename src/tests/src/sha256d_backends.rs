@@ -426,6 +426,8 @@ fn compile_ir_to_binary(backend: &dyn Backend, functions: &[IRFunction], label: 
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     backend
@@ -457,6 +459,8 @@ fn compile_scg_to_binary(scg: &Scg, backend: &dyn Backend) -> Result<Vec<u8>, St
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
+    rodata_data: Vec::new(),
+    function_names: std::collections::HashSet::new(),
     };
 
     backend.encode_program(&program).map_err(|e| e.to_string())
