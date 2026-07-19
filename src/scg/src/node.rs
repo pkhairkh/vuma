@@ -93,6 +93,18 @@ pub enum NodeType {
     ArenaGrow,
     /// Arena destruction node (Arena Model — `arena_free(arena)`).
     ArenaFree,
+    /// Channel creation node (Wave 2b — `channel_open<T>()`).
+    /// Produces a fresh `Channel<T>` handle (pointer-sized opaque capability).
+    ChannelOpen,
+    /// Channel send node (Wave 2b — `channel_send(ch, msg)`).
+    /// Enqueues a message of type `T` onto the channel.
+    ChannelSend,
+    /// Channel receive node (Wave 2b — `channel_recv(ch) -> T`).
+    /// Dequeues the next message of type `T` from the channel.
+    ChannelRecv,
+    /// Channel close node (Wave 2b — `channel_close(ch)`).
+    /// Releases the channel's underlying kernel resource (linear consume).
+    ChannelClose,
 }
 
 impl std::fmt::Display for NodeType {
@@ -122,6 +134,10 @@ impl std::fmt::Display for NodeType {
             NodeType::ArenaAlloc => write!(f, "ArenaAlloc"),
             NodeType::ArenaGrow => write!(f, "ArenaGrow"),
             NodeType::ArenaFree => write!(f, "ArenaFree"),
+            NodeType::ChannelOpen => write!(f, "ChannelOpen"),
+            NodeType::ChannelSend => write!(f, "ChannelSend"),
+            NodeType::ChannelRecv => write!(f, "ChannelRecv"),
+            NodeType::ChannelClose => write!(f, "ChannelClose"),
         }
     }
 }
@@ -226,6 +242,14 @@ pub enum NodePayload {
     ArenaGrow(ArenaGrowNode),
     /// Payload for `NodeType::ArenaFree`.
     ArenaFree(ArenaFreeNode),
+    /// Payload for `NodeType::ChannelOpen`.
+    ChannelOpen(ChannelOpenNode),
+    /// Payload for `NodeType::ChannelSend`.
+    ChannelSend(ChannelSendNode),
+    /// Payload for `NodeType::ChannelRecv`.
+    ChannelRecv(ChannelRecvNode),
+    /// Payload for `NodeType::ChannelClose`.
+    ChannelClose(ChannelCloseNode),
 }
 
 /// The kind of computation performed by a [`ComputationNode`].
@@ -850,6 +874,66 @@ pub struct ArenaGrowNode {
 pub struct ArenaFreeNode {
     /// Virtual register holding the arena being freed.
     pub arena_vreg: u32,
+}
+
+// ── Channel operation nodes (Wave 2b) ────────────────────────────────────
+
+/// Data specific to a channel-open node (`NodeType::ChannelOpen`).
+///
+/// `channel_open<T>()` → `Channel<T>`. Allocates a fresh kernel channel
+/// handle (e.g. via `pipe2` / `socketpair` on Linux) and returns a
+/// pointer-sized opaque capability.  The element type name is carried for
+/// type-checking only; it does not affect the runtime layout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelOpenNode {
+    /// Name of the destination variable receiving the channel handle.
+    pub dst: String,
+    /// Element type name (e.g. `"i32"`, `"*u8"`) — the message payload type.
+    /// Stored as a string because the scg crate does not depend on
+    /// vuma-codegen (where the typed `ScgType` lives).
+    pub elem_type: String,
+}
+
+/// Data specific to a channel-send node (`NodeType::ChannelSend`).
+///
+/// `channel_send(ch, msg)` → void. Enqueues `msg` onto `ch`.  The channel
+/// is consumed and re-produced (linear ownership) — subsequent operations
+/// must use the channel value produced by this node (or the original if
+/// the runtime semantics are borrowing rather than consuming; the IR
+/// lowering treats the channel as borrowed for now).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelSendNode {
+    /// Name of the variable holding the channel handle.
+    pub channel: String,
+    /// Name of the variable holding the message to send.
+    pub message: String,
+    /// Element type name of the channel's payload (for diagnostics).
+    pub ty: String,
+}
+
+/// Data specific to a channel-recv node (`NodeType::ChannelRecv`).
+///
+/// `channel_recv(ch) -> T`. Dequeues the next message from `ch`.  The
+/// message is stored into a fresh virtual register named by `dst`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelRecvNode {
+    /// Name of the destination variable receiving the message.
+    pub dst: String,
+    /// Name of the variable holding the channel handle.
+    pub channel: String,
+    /// Element type name of the channel's payload (the type of `dst`).
+    pub ty: String,
+}
+
+/// Data specific to a channel-close node (`NodeType::ChannelClose`).
+///
+/// `channel_close(ch)` → void. Releases the channel's underlying kernel
+/// resource (e.g. closes both ends of a pipe).  The channel is consumed
+/// (linear) — any subsequent operation on the channel is a linearity error.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelCloseNode {
+    /// Name of the variable holding the channel handle being closed.
+    pub channel: String,
 }
 
 #[cfg(test)]

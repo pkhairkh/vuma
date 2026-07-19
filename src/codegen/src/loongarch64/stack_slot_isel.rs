@@ -1944,6 +1944,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── VectorOp (Wave 29) ──
                 // LoongArch64 has no SIMD encoder in the Wave 29 suite; emit nothing.
                 IRInstr::VectorOp { .. } => Vec::new(),
+                // ── Channel operations (Wave 1d / Task 2a) ──
+                // Backend lowering not yet implemented; emit no bytes.
+                IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
+                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
             };
 
             if !code.is_empty() {

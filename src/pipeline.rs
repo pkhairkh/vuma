@@ -50,6 +50,7 @@ use vuma_codegen::{
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
         Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
+        ChannelOpenStmt, ChannelSendStmt, ChannelRecvStmt, ChannelCloseStmt,
     },
     CastKind as CodegenCastKind, CodegenError, DataSectionKind,
 };
@@ -2486,6 +2487,40 @@ fn convert_node_to_statement_with_externs(
         | NodePayload::ArenaAlloc(_)
         | NodePayload::ArenaGrow(_)
         | NodePayload::ArenaFree(_) => Vec::new(),
+
+        // Wave 2b: channel operations.  Lower the SCG-side NodePayload
+        // (which uses String-typed variable/type names — the scg crate
+        // cannot depend on vuma-codegen) into the codegen-side
+        // ScgStatement (which uses ScgType / ScgExpr).  The IRBuilder
+        // then lowers these to IRInstr::Channel{Open,Send,Recv,Close}.
+        NodePayload::ChannelOpen(co) => {
+            let elem_ty = parse_scg_type(&co.elem_type).unwrap_or(ScgType::U8);
+            single(Some(ScgStatement::ChannelOpen(ChannelOpenStmt {
+                dst: node_var(node_id, "ch"),
+                elem_ty,
+            })))
+        }
+        NodePayload::ChannelSend(cs) => {
+            let ty = parse_scg_type(&cs.ty).unwrap_or(ScgType::U8);
+            single(Some(ScgStatement::ChannelSend(ChannelSendStmt {
+                channel: ScgExpr::Var(cs.channel.clone()),
+                message: ScgExpr::Var(cs.message.clone()),
+                ty,
+            })))
+        }
+        NodePayload::ChannelRecv(cr) => {
+            let ty = parse_scg_type(&cr.ty).unwrap_or(ScgType::U8);
+            single(Some(ScgStatement::ChannelRecv(ChannelRecvStmt {
+                dst: node_var(node_id, "msg"),
+                channel: ScgExpr::Var(cr.channel.clone()),
+                ty,
+            })))
+        }
+        NodePayload::ChannelClose(cc) => {
+            single(Some(ScgStatement::ChannelClose(ChannelCloseStmt {
+                channel: ScgExpr::Var(cc.channel.clone()),
+            })))
+        }
     }
 }
 

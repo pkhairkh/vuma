@@ -3855,6 +3855,8 @@ mod tests {
             }],
             total_code_size: 4,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
         let elf = backend.encode_program(&prog).unwrap();
         // Check ELF magic
@@ -5054,6 +5056,8 @@ mod tests {
             }],
             total_code_size: 4,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
         let elf = backend.encode_program(&prog).unwrap();
         // Check ELFCLASS64
@@ -5088,6 +5092,8 @@ mod tests {
             }],
             total_code_size: 4,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
         let elf = backend.encode_program(&prog).unwrap();
         // Check e_flags at offset 48 (4 bytes)
@@ -5121,6 +5127,8 @@ mod tests {
             }],
             total_code_size: 4,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
         let elf = backend.encode_program(&prog).unwrap();
         // e_entry at offset 24 (8 bytes)
@@ -5215,6 +5223,8 @@ mod tests {
             }],
             total_code_size: 4,
             total_data_size: 0,
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
         let elf = backend.encode_program(&prog).unwrap();
 
