@@ -1,7 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/drivers/char.vuma
-// VWK char device registry — CharDevice + CharDevTable + register / lookup.
-// PMT-pure (hosted mode: function pointers are u64 stubs; K11 adds dispatch).
+// VWK char device registry — CharDevice + CharDevTable + register / lookup /
+// dispatch. W24S1 adds the __call_indirect1 read/write dispatch wrappers
+//(hosted mode: function pointers are u64 stubs that short-circuit to
+// -ENOSYS when 0; K11 swaps them for real asm handler addresses).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the K6d layer of the VWK kernel: the character device
@@ -25,11 +27,17 @@
 //       Returns the slot index, or 32 if not found.
 //   chardev_lookup_name(tbl, name) -> u32                 — lookup by name.
 //       Returns the slot index, or 32 if not found.
+//   chardev_read(tbl, major, minor, buf, count) -> i64      — W24S1 dispatch.
+//       Looks up the slot by major, fetches read_fn, and invokes it via
+//       __call_indirect1(read_fn, minor as u64). Returns -ENODEV if no
+//       slot matches, -ENOSYS if read_fn == 0, else the handler's result.
+//   chardev_write(tbl, major, minor, buf, count) -> i64     — W24S1 dispatch.
+//       Same as chardev_read but for the write_fn slot field.
 //
 //   Plus the 16 pack/unpack/accessor helpers used by register/lookup and
-//   exposed for future waves (K7+ will add cdev_open / cdev_read /
-//   cdev_write / cdev_ioctl / cdev_close dispatch wrappers that look up a
-//   slot, fetch the corresponding fn pointer, and call it).
+//   exposed for future waves (K7+ will add cdev_open / cdev_ioctl /
+//   cdev_close dispatch wrappers that look up a slot, fetch the
+//   corresponding fn pointer, and call it).
 //
 // ── Why a registry, not a flat array of CharDevice structs? ─────────────────
 // VUMA has no struct arrays — there is no `[CharDevice; 32]` syntax. The
@@ -165,15 +173,40 @@
 // K7+ (syscall layer) will re-declare CharDevTable byte-identically when
 // it wires sys_open → chardev_lookup_name → cdev_open dispatch.
 //
-// ── No externs ──────────────────────────────────────────────────────────────
-// Like K6b (line_discipline) and K6c (vt100), K6d has NO extern
-// declarations. The registry is purely computational — it doesn't touch
-// hardware, doesn't call syscalls, doesn't do FFI. The fn-pointer
-// dispatch is a K11 concern (and even then, K11 will dispatch via a new
-// `extern_call` builtin, not via an `extern "C"` declaration in this
-// file). The integration with the syscall layer happens at the CALLER:
-// K7's sys_open calls chardev_lookup_name to find the slot, then K11's
-// cdev_open calls the slot's open_fn.
+// ── Extern: __call_indirect1 (W24S1 dispatch trampoline) ───────────────────
+// Unlike K6b (line_discipline) and K6c (vt100), char.vuma now has ONE
+// extern declaration: the Wave 5 runtime stub `__call_indirect1(ptr: u64,
+// arg: u64) -> u64`. It lowers to `mov rax, rdi; mov rdi, rsi; jmp rax` —
+// a tail call that invokes the function at `ptr` with `arg` in RDI (SysV
+// AMD64 first-argument register). This is the VUMA-pure way to perform an
+// indirect function-pointer call: the language has no first-class fn-ptr
+// type, so indirect dispatch is delegated to a runtime stub (same category
+// as write/read/exit — NOT a C library function; real asm body registered
+// in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs).
+//
+// chardev_read / chardev_write use this stub to invoke the per-slot
+// read_fn / write_fn, passing `minor as u64` as the single SysV AMD64
+// argument (RDI). The handler receives the minor number and is expected
+// to read its buf/count from the canonical syscall context (the TrapFrame
+// GPR slots — see K7's syscall layer). The u64 return is cast to i64 and
+// returned to the caller as the read/write result (bytes transferred or
+// negative errno).
+//
+// Hosted: real asm stub (jmp rax) — but the handler addresses registered
+//         in the self-test are all 0 (the read_fn == 0 / write_fn == 0
+//         guard short-circuits to -ENOSYS before the stub is reached), so
+//         the IVE-verified binary compiles cleanly AND runs to exit 0.
+// Bare-metal (K11): the handler addresses come from chardev_register,
+//         which packs real function pointers — the indirect call lands at
+//         the handler's first instruction.
+//
+// The `tbl` (State<CharDevTable>) is preserved across the extern call
+// because it is passed as a regular VUMA-fn borrow, NOT as an extern
+// #[borrow] State<T> param (only extern #[borrow] State<T> params are
+// conservatively invalidated — see W5's dispatch.vuma for the same
+// reasoning). `buf` and `count` are part of the API signature for K7+
+// wiring but are not passed through __call_indirect1 (the handler reads
+// them from the trap frame); they are therefore unused in the W24S1 body.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
 //     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
@@ -189,6 +222,22 @@
 //   (3) chardev_lookup(tbl, 1) → returns slot 0 (lookup by major).
 //   (4) chardev_lookup_name(tbl, name) → returns slot 0 (lookup by name).
 //   (5) chardev_lookup(tbl, 99) → returns 32 (no such major).
+//   (6) chardev_read(tbl, 99, 0, 0, 0) → returns -19 (-ENODEV).
+//   (7) chardev_read(tbl, 1, 3, 0, 0) → returns -38 (-ENOSYS, read_fn==0).
+//   (8) chardev_write(tbl, 1, 3, 0, 0) → returns -38 (-ENOSYS, write_fn==0).
+
+// ────────────────────────────────────────────────────────────────────────────
+// Extern "C" trampoline — indirect call (Wave 5, used by W24S1 dispatch).
+// ────────────────────────────────────────────────────────────────────────────
+extern "C" {
+    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // at `ptr` with `arg` in RDI (SysV AMD64). Used by chardev_read /
+    // chardev_write to invoke the per-slot read_fn / write_fn. Same stub
+    // category as write/read/exit — NOT a C library function. Real asm
+    // body registered in src/codegen/src/x86_64/mod.rs::build_runtime_
+    // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
+    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -671,6 +720,83 @@ fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Dispatch wrappers (W24S1) — read / write via __call_indirect1.
+// ────────────────────────────────────────────────────────────────────────────
+// These are the K6d+dispatch entry points that K7's sys_read / sys_write
+// will call after resolving a file descriptor to a (major, minor) pair
+// (sys_read → fdtable lookup → chardev_lookup → chardev_read). The
+// dispatch mirrors R5e's syscall_dispatch_from_trap pattern: look up the
+// slot, fetch the fn pointer, guard against 0 (no handler registered —
+// hosted-mode stub), and invoke the Wave 5 __call_indirect1 trampoline.
+//
+// The single SysV AMD64 argument passed to the handler is `minor as u64`.
+// This matches the Linux convention: the cdev's read/write op receives
+// the minor number (plus the file/inode/buf/count from the VFS layer,
+// which on bare metal arrive via the TrapFrame GPR slots — see K7's
+// syscall layer; the W24S1 body only forwards `minor` because that is
+// the only argument __call_indirect1 can carry, and the handler is
+// expected to pull buf/count from the trap frame). `buf` and `count`
+// are kept in the signature so K7 can pass them through unchanged when
+// it wires sys_read / sys_write; they are intentionally unused here.
+//
+// Return values (i64, matching vfs_read / vfs_write in K5f):
+//   -ENODEV (0 - 19)   — no slot with this major is registered
+//                        (chardev_lookup returned the 32 sentinel).
+//   -ENOSYS (0 - 38)   — slot found but read_fn / write_fn == 0 (hosted
+//                        mode: the registry is a name→index table only;
+//                        K11 swaps the 0s for real handler addresses).
+//   <handler result>   — the u64 returned by __call_indirect1, cast to
+//                        i64 (bytes transferred or negative errno).
+//
+// The read_fn == 0 guard is essential in hosted mode: __call_indirect1
+// lowers to `mov rax, rdi; mov rdi, rsi; jmp rax`, which would jump to
+// address 0 (NULL deref → SIGSEGV) if called with ptr == 0. The guard
+// short-circuits before the stub is reached, so the IVE-verified binary
+// runs to exit 0 without faulting.
+
+// chardev_read: look up the cdev for `major`, fetch its read_fn, and
+// invoke it via __call_indirect1(read_fn, minor as u64). See the block
+// comment above for the full contract.
+fn chardev_read(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, count: u64) -> i64 {
+    let slot = chardev_lookup(tbl, major);
+    if slot == 32 {
+        return 0 - 19;  // -ENODEV: no such major
+    }
+    let read_fn = cdev_get_read_fn(tbl, slot);
+    if read_fn == 0 {
+        return 0 - 38;  // -ENOSYS: no read handler registered (hosted stub)
+    }
+    // Wave 5: invoke the per-slot read handler via the indirect-call
+    // trampoline. The handler receives `minor as u64` as its first SysV
+    // AMD64 argument (RDI) and is expected to read buf/count from the
+    // canonical syscall context (TrapFrame GPR slots — K7 concern). The
+    // u64 return is cast to i64 (bytes read or negative errno).
+    let result = __call_indirect1(read_fn, minor as u64) as i64;
+    return result;
+}
+
+// chardev_write: look up the cdev for `major`, fetch its write_fn, and
+// invoke it via __call_indirect1(write_fn, minor as u64). Byte-identical
+// to chardev_read except for the slot field (write_fns vs read_fns).
+fn chardev_write(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, count: u64) -> i64 {
+    let slot = chardev_lookup(tbl, major);
+    if slot == 32 {
+        return 0 - 19;  // -ENODEV: no such major
+    }
+    let write_fn = cdev_get_write_fn(tbl, slot);
+    if write_fn == 0 {
+        return 0 - 38;  // -ENOSYS: no write handler registered (hosted stub)
+    }
+    // Wave 5: invoke the per-slot write handler via the indirect-call
+    // trampoline (same trampoline as chardev_read — the handler decides
+    // read vs write semantics from its own slot identity, not from the
+    // trampoline). u64 return cast to i64 (bytes written or negative
+    // errno).
+    let result = __call_indirect1(write_fn, minor as u64) as i64;
+    return result;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Self-test (the K6d DoD).
 // ────────────────────────────────────────────────────────────────────────────
 // Allocate a CharDevTable via state_new, init it via cdev_table_init,
@@ -682,10 +808,22 @@ fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
 //   (4) chardev_lookup_name(tbl, name) returns slot 0 (lookup by name).
 //   (5) chardev_lookup(tbl, 99) returns 32 (no such major — the
 //       "not found" sentinel).
+//   (6) chardev_read(tbl, 99, 0, 0, 0) returns -19 (-ENODEV — no such
+//       major; chardev_read's slot-lookup failed and short-circuited
+//       before reaching the read_fn == 0 guard or the trampoline).
+//   (7) chardev_read(tbl, 1, 3, 0, 0) returns -38 (-ENOSYS — slot found
+//       but read_fn == 0, the hosted-mode stub guard fires before the
+//       __call_indirect1 trampoline is reached; K11 swaps the 0 for a
+//       real handler address and this path exercises the indirect call).
+//   (8) chardev_write(tbl, 1, 3, 0, 0) returns -38 (-ENOSYS — same guard
+//       on the write_fn slot field).
 //
-// The fn pointers are all 0 in this self-test (hosted mode — no
-// dispatch). K7+ will register real cdevs with non-zero fn pointers
-// and exercise the dispatch.
+// The fn pointers are all 0 in this self-test (hosted mode — the
+// read_fn == 0 / write_fn == 0 guard short-circuits to -ENOSYS before
+// the __call_indirect1 trampoline is reached, so the IVE-verified binary
+// compiles cleanly AND runs to exit 0 without faulting). K7+ will
+// register real cdevs with non-zero fn pointers and exercise the full
+// indirect-call dispatch.
 //
 // Per the K6d contract's "Use decimal ASCII values" rule: the name
 // "null" is built from decimal ASCII values (110='n', 117='u',
@@ -723,6 +861,24 @@ fn main() -> i32 {
     // Lookup non-existent major — should return 32 (sentinel).
     let not_found = chardev_lookup(tbl, 99);
     if not_found != 32 { return 5; }
+
+    // W24S1 dispatch: chardev_read on a non-existent major should return
+    // -ENODEV (0 - 19) — chardev_lookup returns 32 and chardev_read
+    // short-circuits before the read_fn == 0 guard.
+    let rd_enodev = chardev_read(tbl, 99, 0, 0, 0);
+    if rd_enodev != 0 - 19 { return 6; }
+
+    // W24S1 dispatch: chardev_read on /dev/null (major=1, minor=3) should
+    // return -ENOSYS (0 - 38) — slot found, but read_fn == 0 (hosted
+    // stub). The guard fires before __call_indirect1 is reached, so the
+    // binary does not fault on a NULL indirect call.
+    let rd_enosys = chardev_read(tbl, 1, 3, 0, 0);
+    if rd_enosys != 0 - 38 { return 7; }
+
+    // W24S1 dispatch: chardev_write on /dev/null should return -ENOSYS —
+    // same guard on the write_fn slot field.
+    let wr_enosys = chardev_write(tbl, 1, 3, 0, 0);
+    if wr_enosys != 0 - 38 { return 8; }
 
     return 0;
 }
