@@ -1,0 +1,18 @@
+// resource_limit — Wave 18: verify setrlimit syscall emission.
+//
+// The child calls set_resource_limit(9, 1048576) which emits
+// setrlimit(RLIMIT_AS=9, {rlim_cur=1MB, rlim_max=1MB}). This limits
+// the child's address space to 1MB. The syscall returns 0 on success.
+// The child exits 1 if the limit was set.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    pid = spawn_worker();
+    if pid == 0 {
+        // RLIMIT_AS = 9, limit = 1MB (1048576 bytes)
+        set_resource_limit(9, 1048576);
+        return 1;
+    }
+    status = wait_worker(pid);
+    return status;
+}
