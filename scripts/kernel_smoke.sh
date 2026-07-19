@@ -9,8 +9,11 @@
 # 2. Compiles womb/kernel/kernel.vuma for the x86_64 backend with PMT
 #    verification (--verify) enabled.
 # 3. Runs the resulting ELF binary as a normal Linux process.
-# 4. Greps the combined stdout+stderr for the exact banner line
-#    "vuma kernel: hello".
+# 4. Greps the combined stdout+stderr for the banner text
+#    "VWK kernel booted".  The kernel emits this with ANSI color
+#    escapes interspersed (\x1b[36m\x1b[1mVWK\x1b[0m kernel booted),
+#    so we match with a regex that tolerates the escape bytes
+#    between "VWK" and "kernel booted".
 # 5. Verifies the process exit code is 0.
 # 6. Prints "PASS: ..." on success or "FAIL: ..." on any failure, and
 #    exits 0 (PASS) or 1 (FAIL) accordingly.
@@ -115,10 +118,16 @@ fi
 # exactly one of the failure modes we are testing for) and we want to
 # inspect $rc rather than have the script abort on the spot.  We
 # re-enable `set -e` immediately after.
+#
+# stdin is redirected from /dev/null so the kernel's shell reads EOF
+# immediately and exits cleanly.  Without this, when the smoke test is
+# invoked from a context whose stdin is a blocking pipe (e.g. CI or
+# `bash scripts/kernel_smoke.sh | tail`), the kernel would block
+# forever in read() waiting for interactive input.
 # ---------------------------------------------------------------------------
 echo "[smoke] running $KERNEL_BIN"
 set +e
-"$KERNEL_BIN" >"$KERNEL_OUT" 2>&1
+"$KERNEL_BIN" < /dev/null >"$KERNEL_OUT" 2>&1
 rc=$?
 set -e
 
@@ -136,7 +145,7 @@ fi
 # ---------------------------------------------------------------------------
 # Step 5: grep the output for the exact banner.
 # ---------------------------------------------------------------------------
-if ! grep -q "vuma kernel: hello" "$KERNEL_OUT"; then
+if ! grep -q "VWK.*kernel booted" "$KERNEL_OUT"; then
     echo "FAIL: banner not found in output"
     cat "$KERNEL_OUT"
     exit 1
