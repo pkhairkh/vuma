@@ -24,8 +24,11 @@
 // == 0; task_free writes state = 0 (or 4 then later 0 — K4e).
 //
 // ── Task layout (control-block fields) ──────────────────────────────────────
-//   pid       (u32) — process ID (slot + 1, so PID 0 is never handed out;
-//                     matches Linux where PID 0 is the swapper/idle task)
+//   pid       (u32) — process ID (monotonic, allocated from ProcessTable.
+//                     next_pid — see "Real PID allocation" below. PID 0 is
+//                     never handed out; matches Linux where PID 0 is the
+//                     swapper/idle task. PIDs wrap at 4194304 = 2^22, the
+//                     Linux default pid_max on 64-bit systems.)
 //   ppid      (u32) — parent PID (set by K4d's fork; 0 for init/kthreadd)
 //   state     (u8)  — task state (see above)
 //   prio      (u8)  — static priority (0 = highest; CFS uses vruntime
@@ -95,6 +98,22 @@
 //     fds:       [u8; 2048]   = 256 * 8 bytes (u64 per task)
 //     nexts:     [u8; 2048]   = 256 * 8 bytes (u64 per task)
 //     count:     u32          — number of slots in use (0..256)
+//     next_pid:  u32          — monotonic PID counter (W10S4-S5). Initialized
+//                              to 1 by pt_init; bumped by every task_alloc;
+//                              wraps to 1 when it would exceed 4194304.
+//                              Range of valid PIDs: 1..=4194304.
+//
+// ── Real PID allocation (W10S4-S5) ───────────────────────────────────────────
+// Pre-W10S4-S5, PID was `slot + 1` — so freeing slot 5 and re-allocating
+// it handed out PID 6 again, indistinguishable from the original occupant.
+// That breaks any stale reference (a waitpid() result cached by userspace,
+// a /proc/<pid> dentry, a kill(2) sent after the original task exited).
+// Linux solves this with the `alloc_pidmap` monotonic counter; this file
+// now mirrors that: `next_pid` is a u32 in ProcessTable, task_alloc assigns
+// `tbl.next_pid` to the new slot's pid and then bumps next_pid, wrapping to
+// 1 when next_pid > 4194304 (Linux's default pid_max on 64-bit). The
+// self-test still passes because the very first alloc still hands out
+// PID 1 (next_pid starts at 1).
 //
 // ── Why init-style? ─────────────────────────────────────────────────────────
 // The K4a contract's main() allocates `tbl = state_new(ProcessTable)` and
@@ -130,26 +149,36 @@
 //
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 //   pt_init(tbl)            — zero all 256 states (mark every slot FREE),
-//                             set count = 0. Idempotent. Called by kmain
-//                             at boot before the first task_alloc.
+//                             set count = 0, set next_pid = 1 (W10S4-S5).
+//                             Idempotent. Called by kmain at boot before
+//                             the first task_alloc.
 //   task_alloc(tbl) -> u32  — find the first slot with state == 0
 //                             (FREE), mark it READY (state = 2), assign
-//                             PID = slot + 1 (so PID 0 is never handed
-//                             out — matches Linux where PID 0 is the
-//                             swapper/idle task), bump count, return the
-//                             slot index. Returns 256 if the table is
-//                             full (the caller MUST check this — K4d's
-//                             fork returns -EAGAIN in that case).
-//   task_free(tbl, idx)     — mark slot `idx` as FREE (state = 0),
-//                             decrement count. Does NOT zero the other
-//                             fields (pid, regs, etc. stay stale until
-//                             task_alloc reuses the slot — task_alloc
-//                             only writes state + pid, leaving the other
-//                             fields for K4d's fork to populate).
+//                             PID = tbl.next_pid (W10S4-S5: monotonic,
+//                             NOT slot + 1; PID 0 is never handed out —
+//                             matches Linux where PID 0 is the swapper/
+//                             idle task), bump next_pid (wrapping to 1
+//                             past 4194304), bump count, return the slot
+//                             index. Returns 256 if the table is full
+//                             (the caller MUST check — K4d's fork
+//                             returns -EAGAIN in that case).
+//   task_free(tbl, idx)     — zero EVERY field of slot `idx` (pid, ppid,
+//                             state, prio, vruntime, mm_root, fs_root,
+//                             fds, next — W10S4-S5 changed this from
+//                             "only state=0" so that a re-allocated slot
+//                             starts from a clean slate and a stale
+//                             pointer/reference can't observe the prior
+//                             occupant's data), decrement count. K4e
+//                             (exit/wait) will flip state to ZOMBIE first
+//                             (state = 4) and only call task_free (full
+//                             zero) when the parent reaps via waitpid.
 //
 //   The slot-reuse semantics are important: task_free'ing slot 0 and
 //   then task_alloc'ing again returns slot 0 (lowest free slot wins —
-//   same as Linux's find_next_zero_bit). The self-test verifies this.
+//   same as Linux's find_next_zero_bit), but the new PID will be the
+//   next monotonic value (not 1 again) — the self-test verifies the slot
+//   reuse but not the PID monotonicity directly (PID 1 is only handed
+//   out on the very first alloc, when next_pid is still 1).
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
@@ -176,7 +205,12 @@
 //     255  = 0xFF (byte mask for the unpack-shift-and-truncate path)
 //     2    = READY state value (set by task_alloc on the new slot)
 //     0    = FREE state value (set by task_free and pt_init)
-//     1    = PID offset (PID = slot + 1, so slot 0 → PID 1)
+//     1    = initial value of next_pid (set by pt_init) AND the wrap-
+//            around target when next_pid exceeds 4194304 (so PID 0 is
+//            never handed out and the PID space is 1..=4194304)
+//     4194304 = 0x400000 = 2^22, the PID wrap limit (matches Linux's
+//               default pid_max on 64-bit systems). When next_pid is
+//               bumped above this, it wraps to 1.
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It re-declares TrapFrame byte-identically
@@ -193,7 +227,12 @@
 //     /tmp/task.bin ; echo "exit=$?"
 // Expected: IVE Pass, exit=0 (all 9 self-test checks pass — alloc,
 // state=READY, pid=1, count=1, second alloc, count=2, free, state=FREE,
-// count=1, reuse-slot-0 alloc).
+// count=1, reuse-slot-0 alloc). The W10S4-S5 changes (monotonic next_pid
+// counter, task_free zeroes all fields) are transparent to these 9
+// checks: the first alloc still hands out PID 1 (next_pid starts at 1),
+// and the third alloc still reuses slot 0 (lowest-free-slot-wins) — the
+// PID of that third alloc is now 3 (monotonic) instead of 1 (recycled),
+// but no check asserts that value.
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -253,8 +292,10 @@ layout Task = {
 // (VUMA has no struct-array support — see "Why parallel flat byte
 // arrays?" in the file header). Each field is a separate [u8; N] array
 // sized for 256 slots × the field's byte width. `count` tracks how many
-// slots are in use (0..256). Field accessors (pt_get_* / pt_set_*)
-// pack/unpack the multi-byte values byte-by-byte.
+// slots are in use (0..256). `next_pid` (W10S4-S5) is the monotonic PID
+// counter — see "Real PID allocation" in the file header. Field
+// accessors (pt_get_* / pt_set_*) pack/unpack the multi-byte values
+// byte-by-byte.
 layout ProcessTable = {
     pids: [u8; 1024],
     ppids: [u8; 1024],
@@ -266,6 +307,7 @@ layout ProcessTable = {
     fds: [u8; 2048],
     nexts: [u8; 2048],
     count: u32,
+    next_pid: u32,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -494,11 +536,15 @@ fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
 // Lifecycle primitives.
 // ────────────────────────────────────────────────────────────────────────────
 
-// pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
-// Idempotent. Called by kmain at boot before the first task_alloc.
-// Does NOT zero the other Task fields (pids, ppids, vruntimes, etc.)
-// — those are populated by task_alloc / K4d's fork on first use, so
-// zeroing them here would be wasted work (and VUMA has no memset).
+// pt_init: zero all 256 states (mark every slot FREE), set count = 0,
+// and set next_pid = 1 (W10S4-S5: the first PID handed out by task_alloc
+// must be 1, not 0). Idempotent. Called by kmain at boot before the
+// first task_alloc. Does NOT zero the other Task fields (pids, ppids,
+// vruntimes, etc.) — those are populated by task_alloc / K4d's fork on
+// first use and zeroed by task_free on free, so zeroing them here would
+// be wasted work (and VUMA has no memset). next_pid is the exception
+// because task_alloc READS it before writing any pid field — if pt_init
+// left it as garbage, the first PID handed out would be garbage too.
 fn pt_init(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
@@ -506,21 +552,33 @@ fn pt_init(tbl: State<ProcessTable>) {
         i = i + 1;
     }
     tbl.count = 0;
+    tbl.next_pid = 1;
 }
 
 // task_alloc: find the first FREE slot (state == 0), mark it READY
-// (state = 2), assign PID = slot + 1 (so PID 0 is never handed out),
-// bump count, return the slot index. Returns 256 if the table is full
-// (the caller MUST check — K4d's fork returns -EAGAIN in that case).
+// (state = 2), assign PID = tbl.next_pid (W10S4-S5: monotonic PID,
+// NOT slot + 1 — so PID 0 is never handed out and a re-allocated slot
+// gets a fresh PID rather than recycling the prior occupant's), bump
+// next_pid (wrapping to 1 when it exceeds 4194304 = Linux's default
+// pid_max on 64-bit), bump count, return the slot index. Returns 256
+// if the table is full (the caller MUST check — K4d's fork returns
+// -EAGAIN in that case).
 //
 // The lowest-free-slot-wins policy matches Linux's find_next_zero_bit
 // (verified by the self-test: free slot 0, alloc → returns 0, not 2).
+// The PID, however, is NOT recycled: if slot 0 held PID 1, was freed,
+// and is re-allocated, the new PID is whatever next_pid has reached —
+// monotonicity across slot reuse is the whole point of W10S4-S5.
 fn task_alloc(tbl: State<ProcessTable>) -> u32 {
     let i = 0;
     while i < 256 {
         if pt_get_state(tbl, i) == 0 {
             pt_set_state(tbl, i, 2);  // READY
-            pt_set_pid(tbl, i, i + 1);  // PID = slot + 1
+            pt_set_pid(tbl, i, tbl.next_pid);  // PID = next_pid (monotonic, W10S4-S5)
+            tbl.next_pid = tbl.next_pid + 1;
+            if tbl.next_pid > 4194304 {  // 2^22, Linux default pid_max
+                tbl.next_pid = 1;
+            }
             tbl.count = tbl.count + 1;
             return i;
         }
@@ -529,14 +587,27 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
     return 256;  // table full
 }
 
-// task_free: mark slot `idx` as FREE (state = 0), decrement count.
-// Does NOT zero the other Task fields (pid, regs, etc. stay stale until
-// task_alloc reuses the slot — task_alloc only writes state + pid,
-// leaving the other fields for K4d's fork to repopulate). K4e (exit/
-// wait) will flip state to ZOMBIE first (state = 4) and only call
-// task_free (state = 0) when the parent reaps via waitpid.
+// task_free: zero EVERY field of slot `idx` (W10S4-S5: was
+// "state = 0 only", leaving stale pid/regs/mm_root/fs_root/fds/next
+// for the next task_alloc — a stale pointer/reference held by another
+// task could then observe the prior occupant's mm_root or fds and
+// follow it into freed memory). Now zeros pid, ppid, state, prio,
+// vruntime, mm_root, fs_root, fds, next via the existing pt_set_*
+// helpers (regs is not stored as a separate array in ProcessTable —
+// it lives in K4c's per-arch Task; K4e will zero it there). Decrements
+// count. K4e (exit/wait) will flip state to ZOMBIE first (state = 4)
+// and only call task_free (full zero) when the parent reaps via
+// waitpid.
 fn task_free(tbl: State<ProcessTable>, idx: u32) {
+    pt_set_pid(tbl, idx, 0);
+    pt_set_ppid(tbl, idx, 0);
     pt_set_state(tbl, idx, 0);
+    pt_set_prio(tbl, idx, 0);
+    pt_set_vruntime(tbl, idx, 0);
+    pt_set_mm_root(tbl, idx, 0);
+    pt_set_fs_root(tbl, idx, 0);
+    pt_set_fds(tbl, idx, 0);
+    pt_set_next(tbl, idx, 0);
     tbl.count = tbl.count - 1;
 }
 
@@ -546,7 +617,13 @@ fn task_free(tbl: State<ProcessTable>, idx: u32) {
 // Allocate a ProcessTable via state_new, init it via pt_init, then:
 //   (1) task_alloc → returns 0 (first slot).
 //   (2) pt_get_state(0) == 2 (READY).
-//   (3) pt_get_pid(0) == 1 (PID = slot + 1).
+//   (3) pt_get_pid(0) == 1 (PID = next_pid, which pt_init set to 1 —
+//       W10S4-S5 changed PID from slot+1 to a monotonic counter; the
+//       first alloc still yields PID 1 because next_pid starts at 1).
+//       Note: the third alloc (check 9) reuses slot 0 but would get
+//       PID 3, not 1 — monotonic across reuse. The self-test doesn't
+//       check that directly (it only checks the slot index for reuse),
+//       but it's the whole point of the W10S4-S5 change.
 //   (4) tbl.count == 1.
 //   (5) task_alloc → returns 1 (second slot).
 //   (6) tbl.count == 2.
