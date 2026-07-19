@@ -31,29 +31,38 @@
 //                                                  pads to 16 for a uniform
 //                                                  CipherCtx shape).
 //   cipher_encrypt(ctx, in, out, len) -> i64     — encrypt `len` bytes from
-//                                                  `in` into `out`. K10a
-//                                                  STUB: byte-wise copy
-//                                                  (placeholder for K10b's
-//                                                  AES + K10d's ChaCha20).
-//   cipher_decrypt(ctx, in, out, len) -> i64     — decrypt (K10a stub: same
-//                                                  as encrypt for symmetric
-//                                                  ciphers).
+//                                                  `in` into `out`. W29S5:
+//                                                  real AddRoundKey round-0
+//                                                  XOR with ctx.round_keys
+//                                                  (inline equivalent of
+//                                                  aes.vuma's aes_encrypt_block
+//                                                  — VUMA has no import).
+//   cipher_decrypt(ctx, in, out, len) -> i64     — decrypt (W29S5: delegates
+//                                                  to encrypt — the AddRoundKey
+//                                                  XOR is symmetric).
 //   hash_init(ctx, algo)                         — zero state + buffer, set
 //                                                  ctx.algo + ctx.len=0 +
 //                                                  ctx.total=0, and for
 //                                                  SHA-256 (algo==2) seed
 //                                                  ctx.state with the eight
-//                                                  32-bit SHA-256 IV words.
-//   hash_update(ctx, data, len)                  — account for `len` bytes
-//                                                  of input (K10a stub: only
-//                                                  bumps ctx.total; K10c
-//                                                  absorbs the bytes into the
-//                                                  SHA-256 state via the
-//                                                  compression function).
-//   hash_final(ctx, out)                         — emit the digest. K10a
+//                                                  32-bit SHA-256 IV words
+//                                                  (inline equivalent of
+//                                                  sha.vuma's sha256_init —
+//                                                  all 8 IVs per W29S2).
+//   hash_update(ctx, data, len)                  — absorb `len` bytes of
+//                                                  input. W29S5: buffers
+//                                                  bytes into ctx.buf +
+//                                                  bumps ctx.total (inline
+//                                                  equivalent of sha.vuma's
+//                                                  sha256_update — compression
+//                                                  still a K11 task).
+//   hash_final(ctx, out)                         — emit the digest. W29S5
 //                                                  STUB: writes 32 zero
-//                                                  bytes (K10c emits the
-//                                                  real SHA-256 digest).
+//                                                  bytes (should call
+//                                                  sha.vuma's sha256_final —
+//                                                  VUMA has no import; K11
+//                                                  will inline the real
+//                                                  padding + compression).
 //
 // ── Algorithm IDs ──────────────────────────────────────────────────────────
 //   0 = AES-128     — 128-bit key, 128-bit block, 10 rounds.
@@ -161,6 +170,25 @@
 //   K8a/K8e/K8f/K9a/K9d/K9e/K9f) extends to K10a's CipherCtx + HashCtx
 //   + CipherKey + CipherIV + CryptoBuf.
 //
+//   W29S5: because VUMA has no import, cipher_encrypt / hash_init /
+//   hash_update / hash_final cannot directly call aes.vuma's
+//   aes_encrypt_block or sha.vuma's sha256_init / sha256_update /
+//   sha256_final (each .vuma file is a separate compilation unit with
+//   its own main — compile_dump takes a single source file). W29S5
+//   therefore INLINES the equivalent behavior: cipher_encrypt mirrors
+//   aes_encrypt_block's AddRoundKey round-0 XOR against ctx.round_keys
+//   (populated by cipher_set_key, which mirrors aes_key_expansion's
+//   stub — copy the 16-byte key into all 11 round-key slots);
+//   hash_init seeds all 8 SHA-256 IVs (matching sha256_init per W29S2);
+//   hash_update buffers bytes + bumps total (matching sha256_update's
+//   stub); hash_final remains a 32-zero-byte stub (sha256_final's
+//   state→out copy can't be mirrored directly due to the [u64; 8] vs
+//   [u8; 32] layout mismatch — K11 will inline the real padding +
+//   compression when it lands). K11 will add a real cross-file
+//   dispatch mechanism (or merge the crypto files into one compilation
+//   unit) so cipher_encrypt can call aes_encrypt_block + hash_* can
+//   call sha256_* directly.
+//
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
 //     . "$HOME/.cargo/env" && CARGO_BUILD_JOBS=4 \
 //         cargo build --profile release-fast --bin compile_dump
@@ -168,30 +196,36 @@
 //         womb/kernel/crypto/api.vuma \
 //         /tmp/crypto_api.bin x86_64 --verify
 //     /tmp/crypto_api.bin ; echo "exit=$?"
-// Expected: IVE Pass, exit=0 (all 7 self-test checks pass — cipher
-// init+set_key+encrypt stub + hash init with SHA-256 IV byte +
-// hash_update total accounting + hash_final stub).
+// Expected: IVE Pass, exit=0 (all 12 self-test checks pass — cipher
+// init+set_key+round_keys expansion + W29S5 AddRoundKey XOR encrypt +
+// hash init with all 8 SHA-256 IVs + hash_update buffering + total
+// accounting + hash_final zero-digest stub).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
 // ────────────────────────────────────────────────────────────────────────────
 
-// CipherCtx: 116-byte symmetric-cipher context (AES-128/256, ChaCha20).
-// Carries the algorithm ID, key (up to 256 bits = 32 bytes), IV (16
-// bytes — AES uses 16, ChaCha20's 12-byte nonce is zero-padded to 16
-// for a uniform CipherCtx shape), an internal 64-byte buffer for
+// CipherCtx: 292-byte symmetric-cipher context (AES-128/256, ChaCha20).
+// Carries the algorithm ID, key (up to 256 bits = 32 bytes), the
+// expanded round-key schedule (176 bytes = 11 × 16-byte round keys for
+// AES-128 — W29S5 adds this field so cipher_encrypt can mirror
+// aes.vuma's aes_encrypt_block AddRoundKey round-0 XOR directly),
+// IV (16 bytes — AES uses 16, ChaCha20's 12-byte nonce is zero-padded
+// to 16 for a uniform CipherCtx shape), an internal 64-byte buffer for
 // block-buffering (AES's 16-byte block × 4 = 64 bytes), and `len`
-// tracking bytes currently in the buffer. K10a's stub encrypt path
-// does not use `buf` or `len` (it copies input to output directly);
-// K10b (real AES) will use them to absorb partial blocks across
-// cipher_encrypt calls (the typical "update / final" streaming API
-// shape — see OpenSSL's EVP_EncryptUpdate).
+// tracking bytes currently in the buffer. W29S5's cipher_encrypt uses
+// `round_keys` for the real AddRoundKey XOR; K10b/K11 (real AES) will
+// use `buf` + `len` to absorb partial blocks across cipher_encrypt
+// calls (the typical "update / final" streaming API shape — see
+// OpenSSL's EVP_EncryptUpdate) and replace the stub key-expansion in
+// cipher_set_key with the real Rijndael schedule.
 layout CipherCtx = {
-    algo: u32,       // algorithm ID (0=AES-128, 1=AES-256, 4=ChaCha20)
-    key: [u8; 32],   // key (up to 256 bits; AES-128 uses bytes 0..15)
-    iv: [u8; 16],    // initialization vector (AES=16B, ChaCha20 nonce padded)
-    buf: [u8; 64],   // internal buffer (4 × AES-128 blocks for streaming)
-    len: u32,        // bytes currently in `buf` (0..64)
+    algo: u32,              // algorithm ID (0=AES-128, 1=AES-256, 4=ChaCha20)
+    key: [u8; 32],          // raw key (up to 256 bits; AES-128 uses bytes 0..15)
+    round_keys: [u8; 176],  // expanded key schedule (11 × 16B for AES-128; W29S5)
+    iv: [u8; 16],           // initialization vector (AES=16B, ChaCha20 nonce padded)
+    buf: [u8; 64],          // internal buffer (4 × AES-128 blocks for streaming)
+    len: u32,               // bytes currently in `buf` (0..64)
 }
 
 // HashCtx: 200-byte digest context (SHA-256/SHA-512). Carries the
@@ -246,7 +280,8 @@ layout CryptoBuf = {
 // Cipher API functions.
 // ────────────────────────────────────────────────────────────────────────────
 
-// cipher_init: zero a CipherCtx's key + IV + buffer, set algo + len.
+// cipher_init: zero a CipherCtx's key + round_keys + IV + buffer, set
+// algo + len.
 //
 //   ctx:  caller-allocated State<CipherCtx> (output — modified in
 //         place).
@@ -256,7 +291,9 @@ layout CryptoBuf = {
 // After cipher_init, the caller typically calls cipher_set_key +
 // cipher_set_iv to load keying material before cipher_encrypt /
 // cipher_decrypt. K10a's cipher_init does NOT validate the algo ID
-// (K10b's real AES will reject unknown algos with -EINVAL).
+// (K10b's real AES will reject unknown algos with -EINVAL). W29S5
+// also zeroes the 176-byte round_keys field (added in W29S5 so
+// cipher_encrypt can mirror aes_encrypt_block's AddRoundKey XOR).
 fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
     ctx.algo = algo;
     ctx.len = 0;
@@ -266,6 +303,12 @@ fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
         ctx.key[i] = 0;
         i = i + 1;
     }
+    // Zero the 176-byte expanded round-key schedule (W29S5).
+    let k = 0;
+    while k < 176 {
+        ctx.round_keys[k] = 0;
+        k = k + 1;
+    }
     // Zero the 16-byte IV.
     let j = 0;
     while j < 16 {
@@ -274,7 +317,8 @@ fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
     }
 }
 
-// cipher_set_key: copy a 32-byte key from CipherKey into CipherCtx.key.
+// cipher_set_key: copy a 32-byte key from CipherKey into CipherCtx.key
+// and run the stub key expansion into ctx.round_keys.
 //
 //   ctx: caller-allocated State<CipherCtx> (modified in place).
 //   key: caller-allocated State<CipherKey> holding the raw key bytes.
@@ -283,12 +327,37 @@ fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
 // are unused but cleared to keep CipherCtx.key deterministic across
 // algo switches (K10b's real AES will only read the first 16 bytes for
 // AES-128 / 32 bytes for AES-256, but the unused bytes are zeroed by
-// cipher_init so they don't leak prior-key state).
+// cipher_init so they don't leak prior-key state). W29S5 then runs
+// the stub key expansion (inline equivalent of aes.vuma's
+// aes_key_expansion): copy the 16-byte AES-128 key into all 11
+// round-key slots (round_keys[0..15] = key, round_keys[16..31] = key,
+// ..., round_keys[160..175] = key). K11 will replace this with the
+// real Rijndael key expansion (RotWord + SubWord + Rcon per FIPS-197
+// §5.2).
 fn cipher_set_key(ctx: State<CipherCtx>, key: State<CipherKey>) {
+    // Copy all 32 raw key bytes into ctx.key.
     let i = 0;
     while i < 32 {
         ctx.key[i] = key.data[i];
         i = i + 1;
+    }
+    // W29S5: stub key expansion — copy the 16-byte AES-128 key into
+    // all 11 round-key slots (mirrors aes.vuma's aes_key_expansion).
+    // Round 0: copy key verbatim.
+    let r0 = 0;
+    while r0 < 16 {
+        ctx.round_keys[r0] = key.data[r0];
+        r0 = r0 + 1;
+    }
+    // Rounds 1..10: copy the same 16 bytes into each round-key slot.
+    let round = 1;
+    while round < 11 {
+        let j = 0;
+        while j < 16 {
+            ctx.round_keys[round * 16 + j] = key.data[j];
+            j = j + 1;
+        }
+        round = round + 1;
     }
 }
 
@@ -312,29 +381,32 @@ fn cipher_set_iv(ctx: State<CipherCtx>, iv: State<CipherIV>) {
 
 // cipher_encrypt: encrypt `len` bytes from `input` into `output`.
 //
-//   ctx:    caller-allocated State<CipherCtx> (carries algo + key + IV;
-//           not modified by K10a's stub but used by K10b's real AES to
-//           look up the round keys + IV).
+//   ctx:    caller-allocated State<CipherCtx> (carries algo + key +
+//           round_keys + IV; W29S5 reads round_keys for the AddRoundKey
+//           XOR).
 //   input:  caller-allocated State<CryptoBuf> holding the plaintext.
 //   output: caller-allocated State<CryptoBuf> (ciphertext output).
 //   len:    number of bytes to encrypt (0..256).
 //
 // Returns `len` (the number of bytes encrypted) on success, or a
-// negative errno on failure. K10a STUB: byte-wise copy of input to
-// output (placeholder for K10b's AES-128/256 + K10d's ChaCha20). The
-// stub preserves the streaming-API contract — callers can swap K10a's
-// stub for K10b's real AES by replacing just the body of cipher_encrypt
-// (same signature, same return convention). The `ctx` param is
-// accepted but not used by the stub; K10b will read ctx.algo +
-// ctx.key + ctx.iv from it.
+// negative errno on failure. W29S5: real AddRoundKey round-0 XOR —
+// each input byte is XORed with the corresponding round_keys byte
+// (inline equivalent of aes.vuma's aes_encrypt_block, which now has
+// the real FIPS-197 S-box per W29S1; the S-box is not yet wired into
+// this path — K11 will add the full 10-round SubBytes + ShiftRows +
+// MixColumns + AddRoundKey loop). Because VUMA has no import, the
+// aes_encrypt_block body is inlined here rather than called. The
+// streaming-API contract is preserved — callers can swap W29S5's
+// inline XOR for K11's real AES by replacing just the body of
+// cipher_encrypt (same signature, same return convention).
 fn cipher_encrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
-    // Stub: copy input to output byte-by-byte. K10b (real AES) will
-    // replace this with the AES-128/256 round-function loop; K10d
-    // (ChaCha20) will replace it with the 20-round quarter-round
-    // loop; K10e (HW accel) will dispatch to AES-NI / SHA-NI intrinsics.
+    // W29S5: real AddRoundKey round 0 — XOR each input byte with the
+    // corresponding round_keys byte (mirrors aes.vuma's
+    // aes_encrypt_block). K11 will wrap this in the real 10-round
+    // cipher loop (SubBytes + ShiftRows + MixColumns + AddRoundKey).
     let i = 0;
     while i < len {
-        output.data[i] = input.data[i];
+        output.data[i] = input.data[i] ^ ctx.round_keys[i];
         i = i + 1;
     }
     return len as i64;
@@ -347,13 +419,12 @@ fn cipher_encrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<
 //   output: caller-allocated State<CryptoBuf> (plaintext output).
 //   len:    number of bytes to decrypt (0..256).
 //
-// Returns `len` on success. K10a STUB: delegates to cipher_encrypt
-// (symmetric ciphers — AES + ChaCha20 — have the same encrypt/decrypt
-// codepath modulo the round-key schedule inversion, so K10a's stub
-// reuses cipher_encrypt's byte-copy body). K10b's real AES-CBC will
-// invert the round-key schedule (last round first) for decrypt; K10d's
-// ChaCha20 will use the identical codepath as encrypt (XOR-keystream
-// is symmetric).
+// Returns `len` on success. W29S5: delegates to cipher_encrypt (the
+// AddRoundKey XOR is symmetric — encrypting twice with the same round
+// keys returns the original plaintext, so decrypt == encrypt for this
+// stub). K10b's real AES-CBC will invert the round-key schedule (last
+// round first) for decrypt; K10d's ChaCha20 will use the identical
+// codepath as encrypt (XOR-keystream is symmetric).
 fn cipher_decrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
     return cipher_encrypt(ctx, input, output, len);
 }
@@ -371,12 +442,14 @@ fn cipher_decrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<
 //
 // After hash_init, the caller typically calls hash_update one or more
 // times to absorb input bytes, then hash_final to emit the digest.
-// K10a seeds the SHA-256 IVs (algo == 2) but NOT the SHA-512 IVs
-// (algo == 3) — K10c+ will add the SHA-512 IV seeding when the SHA-512
-// compression path lands. The SHA-256 IVs are written byte-by-byte
-// into the first 4 bytes of each 8-byte word slot (state[8*w + 0..3])
-// in little-endian order — see "Why byte-by-byte IV storage?" in the
-// file header for the VUMA-byte-granular-indexing rationale.
+// W29S5: this is the inline equivalent of sha.vuma's sha256_init
+// (which now seeds all 8 IVs per W29S2). Because VUMA has no import,
+// the sha256_init body is inlined here rather than called. The SHA-256
+// IVs are written as full u64 words into ctx.state[0..7] (using Fix 2's
+// typed-array index scaling — state[i] on [u64; 8] accesses offset i*8
+// with a u64 store). K10a does NOT seed the SHA-512 IVs (algo == 3) —
+// K10c+ will add the SHA-512 IV seeding when the SHA-512 compression
+// path lands.
 fn hash_init(ctx: State<HashCtx>, algo: u32) {
     ctx.algo = algo;
     ctx.len = 0;
@@ -416,15 +489,30 @@ fn hash_init(ctx: State<HashCtx>, algo: u32) {
 //   data: caller-allocated State<CryptoBuf> holding the input bytes.
 //   len:  number of bytes to absorb (0..256).
 //
-// K10a STUB: only bumps `ctx.total` by `len` (the message-length
-// counter that hash_final uses for the padding suffix). K10c (real
-// SHA-256) will absorb the bytes via the SHA-256 compression
-// function — buffer partial blocks into ctx.buf[0..len], and when a
-// full 64-byte block accumulates, run the 64-round compression loop
-// to fold the block into ctx.state. The stub preserves the streaming-
-// API contract — callers can swap K10a's stub for K10c's real SHA-256
-// by replacing just the body of hash_update.
+// W29S5: inline equivalent of sha.vuma's sha256_update (which buffers
+// bytes into ctx.buf + bumps ctx.total — compression is still a K11
+// task). Because VUMA has no import, the sha256_update body is inlined
+// here rather than called. Bytes are buffered into ctx.buf (capped at
+// the 128-byte buffer size — SHA-256's 64-byte block × 2 = 128B for
+// the HashCtx layout; sha.vuma's Sha256Ctx caps at 64 since its buf is
+// only 64 bytes). When ctx.len reaches 64 (SHA-256 block size) a real
+// SHA-256 would invoke the 64-round compression (FIPS-180-4 §6.2.2)
+// and reset ctx.len = 0 — W29S5 does NOT do this (K11 will). The
+// digest therefore still equals the IV regardless of input.
 fn hash_update(ctx: State<HashCtx>, data: State<CryptoBuf>, len: u64) {
+    // W29S5: buffer bytes into ctx.buf (mirror sha256_update's stub).
+    let i = 0;
+    while i < len {
+        if ctx.len < 128 {
+            ctx.buf[ctx.len] = data.data[i];
+            ctx.len = ctx.len + 1;
+            // W29S5 STUB: when ctx.len == 64 (SHA-256 block) a real
+            // SHA-256 would call sha256_compress(ctx, ctx.buf) here
+            // and reset ctx.len = 0. Compression not implemented —
+            // K11 will add it.
+        }
+        i = i + 1;
+    }
     ctx.total = ctx.total + len;
 }
 
@@ -435,16 +523,27 @@ fn hash_update(ctx: State<HashCtx>, data: State<CryptoBuf>, len: u64) {
 //   out: caller-allocated State<CryptoBuf> (digest output — first 32
 //        bytes for SHA-256, first 64 bytes for SHA-512).
 //
-// K10a STUB: writes 32 zero bytes to out.data[0..31]. K10c (real
-// SHA-256) will: (1) append a 0x80 byte + zero-pad to 56 mod 64,
-// (2) append the 64-bit big-endian bit-count (ctx.total × 8),
-// (3) run the final compression pass, (4) emit the 8 little-endian
-// 32-bit state words as the 32-byte digest. See FIPS 180-4 §5.1.1
-// for the SHA-256 padding scheme. The stub preserves the API contract
-// (always writes 32 bytes to out — the digest size for SHA-256).
+// W29S5 STUB: writes 32 zero bytes to out.data[0..31]. This SHOULD
+// call sha.vuma's sha256_final (which copies ctx.state's 32 bytes
+// verbatim into out — the digest equals the IV since sha256_update
+// never compresses), but VUMA has no import so the call cannot be
+// wired here. The state→out copy also can't be mirrored directly
+// because api.vuma's HashCtx.state is [u64; 8] (8 u64 words, 64 bytes)
+// while sha.vuma's Sha256Ctx.state is [u8; 32] (32 bytes) —
+// ctx.state[i] on [u64; 8] returns a u64 word (Fix 2 typed-array
+// scaling), not a byte, so a byte-by-byte copy would require
+// byte-level access to the u64 words (not clean in VUMA). K11 will
+// inline the real SHA-256 padding (0x80 + zero-pad + 64-bit big-endian
+// bit-count per FIPS-180-4 §5.1.1) + final compression pass + 32-byte
+// digest emit, at which point the layout mismatch becomes moot (the
+// digest will be computed from the compressed state, not copied from
+// the IV). The stub preserves the API contract (always writes 32
+// bytes to out — the digest size for SHA-256).
 fn hash_final(ctx: State<HashCtx>, out: State<CryptoBuf>) {
-    // Stub: write 32 zero bytes. K10c will replace this with the real
-    // SHA-256 padding + final compression + digest-emit path.
+    // W29S5 STUB: write 32 zero bytes. Should call sha.vuma's
+    // sha256_final — VUMA has no import, so the call is documented
+    // here but not wired. K11 will inline the real SHA-256 padding +
+    // final compression + digest-emit path.
     let i = 0;
     while i < 32 {
         out.data[i] = 0;
@@ -455,14 +554,15 @@ fn hash_final(ctx: State<HashCtx>, out: State<CryptoBuf>) {
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (main).
 // ────────────────────────────────────────────────────────────────────────────
-// Exercises the K10a API surface end-to-end:
-//   1. cipher_init(cctx, 0)  → AES-128 algo set, len=0, key+IV zeroed.
-//   2. cipher_set_key(cctx, key) → 32-byte key copied (verify key[0]).
-//   3. cipher_encrypt(cctx, input, output, 16) → 16 bytes copied
-//      (stub: output[0] == input[0]).
-//   4. hash_init(hctx, 2)  → SHA-256 algo set, state seeded with IV.
-//   5. hash_update(hctx, data, 10) → ctx.total bumped to 10.
-//   6. hash_final(hctx, digest) → 32 zero bytes written.
+// Exercises the W29S5 API surface end-to-end:
+//   1. cipher_init(cctx, 0)  → AES-128 algo set, len=0, key+IV+round_keys zeroed.
+//   2. cipher_set_key(cctx, key) → 32-byte key copied + 11 round-key slots
+//      populated (verify key[0]).
+//   3. cipher_encrypt(cctx, input, output, 16) → 16 bytes XORed with
+//      round_keys (W29S5: output[0] == input[0] ^ key[0] == 99 ^ 42 == 73).
+//   4. hash_init(hctx, 2)  → SHA-256 algo set, state seeded with all 8 IVs.
+//   5. hash_update(hctx, data, 10) → 10 bytes buffered + ctx.total bumped to 10.
+//   6. hash_final(hctx, digest) → 32 zero bytes written (sha256_final not wired).
 //
 // Returns 0 on success, 1..7 on the 7 individual check failures.
 //
@@ -490,14 +590,14 @@ fn main() -> i32 {
     key.data[31] = 99;
     cipher_set_key(cctx, key);
     if cctx.key[0] != 42 { return 3; }
-    // Encrypt (stub: copy) + verify byte 0 round-trips.
+    // Encrypt (W29S5: AddRoundKey XOR) + verify byte 0 = 99 ^ 42 = 73.
     let input = state_new(CryptoBuf);
     let output = state_new(CryptoBuf);
     input.data[0] = 99;
     input.data[15] = 7;
     let n = cipher_encrypt(cctx, input, output, 16);
     if n != 16 { return 4; }
-    if output.data[0] != 99 { return 5; }   // stub: copy
+    if output.data[0] != 73 { return 5; }   // W29S5: 99 ^ 42 = 73 (AddRoundKey)
     // ── Hash path: init + IV check + update + final ──
     let hctx = state_new(HashCtx);
     hash_init(hctx, 2);  // SHA-256
@@ -508,7 +608,7 @@ fn main() -> i32 {
     if hctx.state[0] != 1779033703 { return 7; }
     if hctx.state[1] != 3144134277 { return 8; }
     if hctx.state[7] != 1541459225 { return 9; }
-    // Update + final (stubs: only total accounting + zero-digest).
+    // Update + final (W29S5: byte buffering + total accounting + zero-digest).
     let data = state_new(CryptoBuf);
     hash_update(hctx, data, 10);
     if hctx.total != 10 { return 10; }
