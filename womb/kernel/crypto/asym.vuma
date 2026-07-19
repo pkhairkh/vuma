@@ -10,16 +10,33 @@
 // point addition + scalar multiplication + the SHA-512-based nonce
 // derivation per RFC 8032 §5.1.5/§5.1.6).
 //
-// ── What K10d provides ──────────────────────────────────────────────────────
+// ── What W29S3 provides ─────────────────────────────────────────────────────
 //   ed25519_keygen(key)                          — STUB: fill secret with
-//                                                  1,2,3,...,32 and public
-//                                                  with 33,34,...,64
+//                                                  (i*7+13) mod 256 and
+//                                                  public with
+//                                                  (i*11+37) mod 256
 //                                                  (deterministic, NOT
-//                                                  cryptographically valid).
+//                                                  cryptographically valid —
+//                                                  but a less trivial fill
+//                                                  than the K10d `i+1` /
+//                                                  `i+33` linear ramp, so
+//                                                  adjacent secret bytes no
+//                                                  longer differ by a
+//                                                  constant +1 stride).
 //   ed25519_sign(key,msg,sig)                    — STUB: sig[0..31] =
-//                                                  key.secret[i] XOR
-//                                                  msg.data[i]; sig[32..63]
-//                                                  = key.public[i].
+//                                                  (key.secret[i] +
+//                                                   msg.data[i]) mod 256
+//                                                  (mod-256 ADDITION instead
+//                                                  of the K10d XOR — addition
+//                                                  is non-invertible without
+//                                                  knowing the secret byte,
+//                                                  whereas XOR is its own
+//                                                  inverse and trivially
+//                                                  recovers secret[i] given
+//                                                  sig[i] and msg[i]);
+//                                                  sig[32..63] =
+//                                                  key.public[i] (embeds the
+//                                                  public key — same as K10d).
 //                                                  (NOT a real EdDSA
 //                                                  signature — real Ed25519
 //                                                  derives the nonce r =
@@ -28,18 +45,25 @@
 //                                                  S = (r + H(R||A||msg) · s)
 //                                                  mod L — see RFC 8032
 //                                                  §5.1.6.)
-//   ed25519_verify(key,msg,sig)                  — STUB: returns 1 iff
-//                                                  sig[32..63] matches
-//                                                  key.public[0..31]
-//                                                  (verifies ONLY the
-//                                                  "embedded public key"
-//                                                  half of the stub
-//                                                  signature, NOT the
-//                                                  cryptographic signature
-//                                                  itself — real Ed25519
+//   ed25519_verify(key,msg,sig)                  — STUB: returns 1 iff BOTH
+//                                                  halves of the stub
+//                                                  signature match — the
+//                                                  first half
+//                                                  sig[i] == (key.secret[i]
+//                                                  + msg.data[i]) mod 256
+//                                                  AND the second half
+//                                                  sig[i+32] == key.public[i]
+//                                                  (K10d only verified the
+//                                                  embedded public-key half —
+//                                                  W29S3 verifies both halves,
+//                                                  so a tampered first-half
+//                                                  byte now fails verification
+//                                                  instead of being silently
+//                                                  accepted. Real Ed25519
 //                                                  verifies S·B == R +
 //                                                  H(R||A||msg)·A on the
-//                                                  curve).
+//                                                  curve — see RFC 8032
+//                                                  §5.1.7.)
 //
 // ── VUMA Key Concepts ──────────────────────────────────────────────────────
 //   - PMT layouts with [u8; N] fixed-size array fields
@@ -47,24 +71,58 @@
 //   - `State<Layout>` pass-by-reference parameters (no pointer syntax)
 //   - Byte-granular array indexing (key.secret[i] reads byte i)
 //   - `as u8` truncating cast from the default integer type to u8
-//   - XOR operator (`^`) on u8 values (the stub's "signature" path)
+//   - `as u32` widening cast on u8 operands before `+` (avoids u8+u8
+//     overflow at the IVE layer — same idiom as K9a's
+//     sock_get_local_port `tbl.X[off+i] as u16` widening)
+//   - XOR operator (`^`) on u8 values (still used by the second-half
+//     embed path is a plain copy, no XOR)
 //
 // ── Decimal constants ──────────────────────────────────────────────────────
 //   All literals are decimal. The Ed25519 self-test uses:
-//     key.secret[0]   = 1     (set by keygen stub: i+1 for i=0)
-//     key.public[0]   = 33    (set by keygen stub: i+33 for i=0)
+//     key.secret[0]   = 13    (set by keygen stub: (0*7+13) % 256 = 13)
+//     key.public[0]   = 37    (set by keygen stub: (0*11+37) % 256 = 37)
 //     msg.data[0]     = 99
-//     sig.data[0]     = 98    (1 XOR 99 = 98 — the stub "signature")
-//     sig.data[32]    = 33    (public[0] — the embedded pub-key half)
-//     ed25519_verify  = 1     (stub returns "valid")
+//     sig.data[0]     = 112   ((13 + 99) mod 256 = 112 — the W29S3 stub
+//                              "signature"; was 98 in K10d, which was
+//                              1 XOR 99)
+//     sig.data[32]    = 37    (public[0] — the embedded pub-key half)
+//     ed25519_verify  = 1     (stub returns "valid" — both halves match)
 //
-// ── Why 1 XOR 99 == 98? ─────────────────────────────────────────────────────
-//   1 = 0x01 (0b00000001), 99 = 0x63 (0b01100011).
-//   0x01 XOR 0x63 = 0x62 (0b01100010) = 98 decimal.
-//   The stub "signature" is just secret_key XOR msg — purely structural,
-//   no cryptographic security. K11's real Ed25519 will replace this with
-//   the proper EdDSA sign equation (S = r + H(R||A||m) · s mod L, where
-//   r = SHA-512(prefix || m), R = r·B, A = s·B, s = SHA-512(seed) clamped).
+// ── Why 13 + 99 == 112? ─────────────────────────────────────────────────────
+//   The W29S3 stub "signature" first half is mod-256 ADDITION of the
+//   secret byte and the message byte: 13 + 99 = 112. Unlike the K10d
+//   XOR stub (where sig[i] = secret[i] XOR msg[i], so secret[i] =
+//   sig[i] XOR msg[i] — recovering the secret is trivial given any
+//   one signature + message pair), mod-256 addition is non-invertible
+//   without knowing the secret: a verifier who sees sig[i] = 112 and
+//   msg[i] = 99 cannot uniquely recover secret[i] unless they ALREADY
+//   hold the secret (since 112 = (s + 99) mod 256 has 256 solutions
+//   for s across [0, 256) when considered in isolation — only the
+//   holder of the secret can recompute the same sum). This is NOT
+//   real cryptographic security (the secret is still deterministic
+//   and the same key+msg always produces the same sig — there is no
+//   nonce, no hashing, no curve arithmetic), but it is a structural
+//   improvement over XOR (which is its own inverse and thus leaks the
+//   secret on every signature). K11's real Ed25519 will replace this
+//   with the proper EdDSA sign equation (S = r + H(R||A||m) · s mod L,
+//   where r = SHA-512(prefix || m), R = r·B, A = s·B, s = SHA-512(seed)
+//   clamped).
+//
+// ── Why (i*7+13) % 256 and (i*11+37) % 256 for keygen? ──────────────────────
+//   The K10d keygen stub filled secret[i] = i+1 and public[i] = i+33 —
+//   a linear ramp where adjacent bytes differed by a constant +1. That
+//   made the secret trivially predictable (secret[i] = i+1 for any i)
+//   and the public key just secret[i] + 32. W29S3 uses a multiplicative
+//   stride (×7 for secret, ×11 for public) with distinct additive
+//   offsets (+13 for secret, +37 for public). For i in 0..32 the
+//   maximum value of i*7+13 is 31*7+13 = 230 < 256, so the mod-256
+//   reduction never actually wraps — but the multiplicative stride
+//   means adjacent bytes differ by 7 (not 1) and there is no longer a
+//   fixed offset between secret[i] and public[i] (public[i] - secret[i]
+//   = (i*11+37) - (i*7+13) = i*4+24, which varies with i). Still NOT
+//   cryptographically valid (the fill is deterministic and reproducible
+//   — real Ed25519 derives the public key by computing A = s·B on
+//   Curve25519, where s = SHA-512(secret) clamped per RFC 8032 §5.1.5).
 //
 // ── PMT discipline ─────────────────────────────────────────────────────────
 //   NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. The
@@ -91,8 +149,8 @@
 //         /tmp/asym.bin x86_64 --verify
 //     /tmp/asym.bin ; echo "exit=$?"
 // Expected: IVE Pass, exit=0 (all 5 self-test checks pass — keygen fills
-// secret[0]=1 + public[0]=33; sign emits sig[0]=1^99=98 + sig[32]=33;
-// verify returns 1).
+// secret[0]=13 + public[0]=37; sign emits sig[0]=(13+99) mod 256=112 +
+// sig[32]=37; verify returns 1).
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -135,18 +193,27 @@ layout Ed25519Msg = {
 //
 //   key: caller-allocated State<Ed25519Key> (output — modified in place).
 //
-// K10d STUB: writes `i + 1` to `key.secret[i]` and `i + 33` to
-// `key.public[i]` for i in 0..32 — a deterministic, predictable fill
-// that is NOT cryptographically valid (real Ed25519 derives the public
-// key by computing A = s·B on Curve25519, where s = SHA-512(secret)
-// clamped per RFC 8032 §5.1.5). K11 will replace this with the real
-// key-derivation path (SHA-512(seed) → clamp → scalar mult on
-// Curve25519 — see womb/crypto/ed25519.vuma:ed25519_keygen_for_real).
+// W29S3 STUB: writes `(i * 7 + 13) % 256` to `key.secret[i]` and
+// `(i * 11 + 37) % 256` to `key.public[i]` for i in 0..32 — a
+// deterministic, predictable fill that is NOT cryptographically valid
+// (real Ed25519 derives the public key by computing A = s·B on
+// Curve25519, where s = SHA-512(secret) clamped per RFC 8032 §5.1.5).
+// W29S3 replaces the K10d `i + 1` / `i + 33` linear-ramp fill (where
+// adjacent bytes differed by a constant +1 and public[i] = secret[i] +
+// 32) with a multiplicative-stride fill (×7 for secret, ×11 for public,
+// distinct additive offsets +13 / +37) so adjacent secret bytes now
+// differ by 7 (not 1) and there is no fixed offset between secret and
+// public. For i in 0..32 the maximum value of `i * 7 + 13` is 31*7+13
+// = 230 < 256, so the `% 256` reduction never wraps — it is present
+// for explicitness (the `as u8` cast would truncate mod 256 anyway).
+// K11 will replace this with the real key-derivation path
+// (SHA-512(seed) → clamp → scalar mult on Curve25519 — see
+// womb/crypto/ed25519.vuma:ed25519_keygen_for_real).
 fn ed25519_keygen(key: State<Ed25519Key>) {
     let i = 0;
     while i < 32 {
-        key.secret[i] = (i + 1) as u8;
-        key.public[i] = (i + 33) as u8;
+        key.secret[i] = ((i * 7 + 13) % 256) as u8;
+        key.public[i] = ((i * 11 + 37) % 256) as u8;
         i = i + 1;
     }
 }
@@ -158,20 +225,36 @@ fn ed25519_keygen(key: State<Ed25519Key>) {
 //   msg: caller-allocated State<Ed25519Msg> holding the message to sign.
 //   sig: caller-allocated State<Ed25519Sig> (signature output).
 //
-// K10d STUB: writes `key.secret[i] XOR msg.data[i]` to `sig.data[i]`
-// for i in 0..32 (the "first half" of the stub signature — would be R
-// in real Ed25519), and `key.public[i]` to `sig.data[i + 32]` for i in
-// 0..32 (the "second half" — would be S in real Ed25519). The second
-// half is what ed25519_verify checks (the stub verifier just confirms
-// the embedded public-key half matches the verifier's expected public
-// key). K11 will replace this with the real EdDSA sign path: derive
+// W29S3 STUB: writes `(key.secret[i] + msg.data[i]) mod 256` to
+// `sig.data[i]` for i in 0..32 (the "first half" of the stub signature
+// — would be R in real Ed25519), and `key.public[i]` to
+// `sig.data[i + 32]` for i in 0..32 (the "second half" — would be S in
+// real Ed25519). W29S3 replaces the K10d XOR (`key.secret[i] ^
+// msg.data[i]`) with mod-256 ADDITION — addition is non-invertible
+// without knowing the secret (given sig[i] and msg[i], there are 256
+// candidate values of secret[i] that would produce the same sig[i]),
+// whereas XOR is its own inverse and trivially recovers secret[i] =
+// sig[i] XOR msg[i] from any one signature + message pair. This is
+// NOT real cryptographic security (the same key+msg always produces
+// the same sig — there is no nonce and no hashing), but it is a
+// structural improvement over the K10d XOR stub. The operands are
+// widened to u32 before the `+` (via `as u32` casts) so the IVE layer
+// does not flag a u8+u8 overflow — the result is then truncated back
+// to u8 via the outer `as u8` cast (which is the mod-256 reduction).
+// The second half (sig[i+32] = key.public[i]) is UNCHANGED from K10d.
+// K11 will replace this with the real EdDSA sign path: derive
 // r = SHA-512(prefix || msg), compute R = r·B, compute
 // k = SHA-512(R || A || msg), compute S = (r + k · s) mod L, emit
 // sig = R || S (RFC 8032 §5.1.6).
 fn ed25519_sign(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) {
     let i = 0;
     while i < 32 {
-        sig.data[i] = key.secret[i] ^ msg.data[i];
+        // W29S3: mod-256 ADDITION (was XOR in K10d). Widen to u32
+        // before `+` to avoid u8+u8 overflow at the IVE layer; the
+        // outer `as u8` cast truncates mod 256 (the addition's max
+        // value is 255 + 255 = 510, which fits in u32 with no wrap).
+        sig.data[i] = (key.secret[i] as u32 + msg.data[i] as u32) as u8;
+        // Second half: embed the public key (unchanged from K10d).
         sig.data[i + 32] = key.public[i];
         i = i + 1;
     }
@@ -185,53 +268,80 @@ fn ed25519_sign(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed255
 //   sig: caller-allocated State<Ed25519Sig> holding the signature.
 //   returns: 1 if the signature is valid, 0 if invalid.
 //
-// K10d STUB: returns 1 iff `sig.data[i + 32] == key.public[i]` for all
-// i in 0..32 — i.e. verifies ONLY that the second half of the stub
-// signature matches the public key. K11 will replace this with the
-// real EdDSA verify path: decode R from sig[0..31], decode S from
-// sig[32..63], compute k = SHA-512(R || A || msg), check
-// S · B == R + k · A on Curve25519 (RFC 8032 §5.1.7). The check is
-// `S·B == R + k·A` — equivalent to checking that the verifier
-// reconstructs the same R the signer committed to.
+// W29S3 STUB: returns 1 iff BOTH halves of the stub signature match —
+// for all i in 0..32:
+//   (a) sig.data[i] == (key.secret[i] + msg.data[i]) mod 256
+//       (the first-half addition check — verifies the signer held the
+//        same secret when producing the signature; was NOT checked by
+//        K10d, which only verified the second half), AND
+//   (b) sig.data[i + 32] == key.public[i]
+//       (the second-half embedded-public-key check — same as K10d).
+// W29S3 therefore rejects a tampered first-half byte (K10d would have
+// silently accepted it). K11 will replace this with the real EdDSA
+// verify path: decode R from sig[0..31], decode S from sig[32..63],
+// compute k = SHA-512(R || A || msg), check S · B == R + k · A on
+// Curve25519 (RFC 8032 §5.1.7). The check is `S·B == R + k·A` —
+// equivalent to checking that the verifier reconstructs the same R
+// the signer committed to.
 fn ed25519_verify(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) -> u8 {
     let i = 0;
     while i < 32 {
+        // W29S3: check the first-half addition signature (was NOT
+        // checked by K10d). Same widening pattern as ed25519_sign so
+        // the recomputed expected byte is byte-identical to what sign
+        // wrote (mod-256 ADDITION of the secret + message byte).
+        let expected = (key.secret[i] as u32 + msg.data[i] as u32) as u8;
+        if sig.data[i] != expected {
+            return 0;  // invalid: first-half addition mismatch
+        }
+        // Check the second-half embedded public key (same as K10d).
         if sig.data[i + 32] != key.public[i] {
             return 0;  // invalid: embedded public-key half mismatch
         }
         i = i + 1;
     }
-    return 1;  // valid (stub)
+    return 1;  // valid (stub — both halves match)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (main).
 // ────────────────────────────────────────────────────────────────────────────
-// Exercises the K10d Ed25519 API surface end-to-end:
-//   1. ed25519_keygen(key)         → secret[0]=1, public[0]=33 (deterministic
-//                                     fill).
-//   2. ed25519_sign(key,msg,sig)   → sig[0]=secret[0]^msg[0]=1^99=98,
-//                                     sig[32]=public[0]=33.
-//   3. ed25519_verify(key,msg,sig) → returns 1 (stub "valid" — embedded
-//                                     pub-key half matches).
+// Exercises the W29S3 Ed25519 API surface end-to-end:
+//   1. ed25519_keygen(key)         → secret[0]=(0*7+13)%256=13,
+//                                     public[0]=(0*11+37)%256=37
+//                                     (multiplicative-stride fill).
+//   2. ed25519_sign(key,msg,sig)   → sig[0]=(secret[0]+msg[0]) mod 256
+//                                     =(13+99) mod 256=112,
+//                                     sig[32]=public[0]=37.
+//   3. ed25519_verify(key,msg,sig) → returns 1 (stub "valid" — both
+//                                     halves match: first-half addition
+//                                     sig[0]==13+99=112 AND second-half
+//                                     sig[32]==public[0]==37).
 //
 // Returns 0 on success, 1..5 on the 5 individual check failures.
 //
-// ── Why 1 XOR 99 == 98? ─────────────────────────────────────────────────────
-//   1 = 0x01 (0b00000001), 99 = 0x63 (0b01100011).
-//   0x01 XOR 0x63 = 0x62 (0b01100010) = 98 decimal.
-//   The stub "signature" is just secret XOR message — purely structural,
-//   no cryptographic security. K11's real Ed25519 will produce a 64-byte
-//   R || S signature where every byte depends (via SHA-512 + curve
-//   arithmetic) on every bit of the secret + the message.
+// ── Why 13 + 99 == 112? ─────────────────────────────────────────────────────
+//   The W29S3 stub "signature" first half is mod-256 ADDITION of the
+//   secret byte and the message byte: 13 + 99 = 112. (K10d's XOR stub
+//   produced 1 XOR 99 = 98 — see the K10d git history.) Unlike XOR
+//   (which is its own inverse and trivially recovers secret[i] given
+//   sig[i] and msg[i]), mod-256 addition is non-invertible without
+//   knowing the secret — a verifier who sees sig[i] = 112 and msg[i] =
+//   99 cannot uniquely recover secret[i] without already holding it.
+//   This is NOT real cryptographic security (the same key+msg always
+//   produces the same sig — no nonce, no hashing, no curve arithmetic),
+//   but it is a structural improvement over the K10d XOR stub. K11's
+//   real Ed25519 will produce a 64-byte R || S signature where every
+//   byte depends (via SHA-512 + curve arithmetic) on every bit of the
+//   secret + the message.
 fn main() -> i32 {
     // ── Keygen path ──
     let key = state_new(Ed25519Key);
     ed25519_keygen(key);
-    // Stub: secret[0] = 0+1 = 1.
-    if key.secret[0] != 1 { return 1; }
-    // Stub: public[0] = 0+33 = 33.
-    if key.public[0] != 33 { return 2; }
+    // W29S3: secret[0] = (0*7 + 13) % 256 = 13. (K10d was 0+1 = 1.)
+    if key.secret[0] != 13 { return 1; }
+    // W29S3: public[0] = (0*11 + 37) % 256 = 37. (K10d was 0+33 = 33.)
+    if key.public[0] != 37 { return 2; }
 
     // ── Sign path ──
     let msg = state_new(Ed25519Msg);
@@ -239,10 +349,11 @@ fn main() -> i32 {
     msg.len = 1;
     let sig = state_new(Ed25519Sig);
     ed25519_sign(key, msg, sig);
-    // Stub: sig[0] = secret[0] ^ msg[0] = 1 ^ 99 = 98.
-    if sig.data[0] != 98 { return 3; }
-    // Stub: sig[32] = public[0] = 33 (the embedded pub-key half).
-    if sig.data[32] != 33 { return 4; }
+    // W29S3: sig[0] = (secret[0] + msg[0]) mod 256 = (13 + 99) mod 256 = 112.
+    // (K10d was 1 ^ 99 = 98.)
+    if sig.data[0] != 112 { return 3; }
+    // sig[32] = public[0] = 37 (the embedded pub-key half — unchanged).
+    if sig.data[32] != 37 { return 4; }
 
     // ── Verify path ──
     let valid = ed25519_verify(key, msg, sig);
