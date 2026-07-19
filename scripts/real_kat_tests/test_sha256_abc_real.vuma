@@ -1,0 +1,554 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// scripts/real_kat_tests/test_sha256_abc_real.vuma
+// Real KAT test: SHA-256("abc") computed via FIPS-180-4 §6.2.2 algorithm
+// and compared byte-by-byte against the published 32-byte digest.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// W51: This is the FIRST real-KAT test in the suite that compiles under the
+// PMT-only parser (every pre-existing file under scripts/real_kat_tests/
+// still uses the legacy `allocate()` + `*(ptr + off)` syntax, which is a
+// hard parse error in VUMA 2.0 — see src/parser/src/parser.rs
+// `check_pointer_syntax`). Those legacy tests verify single-byte exit
+// codes (q mod 256) via `return (result >> 24) & 255;` (see e.g.
+// womb_kat_tests/test_sha256_empty.vuma). This W51 test demonstrates the
+// PMT-pure pattern for real KAT: state_new(Layout) for buffers, State<T>
+// field reads/writes for byte-granular work, and a 32-byte byte-by-byte
+// comparison loop that PROVES the framework can compare multi-byte
+// values, not just single bytes.
+//
+// ── Algorithm ────────────────────────────────────────────────────────────────
+//   SHA-256("abc") is computed via the canonical FIPS-180-4 §6.2.2 path:
+//     sha256_init(ctx)         — seed all 8 IV words (decimal)
+//     sha256_update(ctx,data,3) — copy "abc" into the 64-byte buffer
+//     sha256_final(ctx,out)    — append 0x80 padding + 64-bit BE bit count,
+//                                run the 64-round compression, serialize
+//                                ctx.state as 8 BE u32 words into out
+//   The compression function (sha256_compress) uses all 64 §4.2.2 K
+//   round constants and the 64-word message schedule (σ0/σ1 expansion).
+//
+// ── Expected digest (FIPS-180-4 §B.1) ────────────────────────────────────────
+//   SHA-256("abc") = ba7816bf 8f01cfea 414140de 5dae2223
+//                    b00361a3 96177a9c b410ff61 f20015ad
+//   Stored byte-by-byte (decimal) into expected.data[0..31] by
+//   load_expected_abc().
+//
+// ── Multi-byte comparison ────────────────────────────────────────────────────
+//   main() loops over ALL 32 bytes of computed vs expected; if every byte
+//   matches, it writes 186 (0xBA — the first byte of the expected digest)
+//   to stdout. If any byte differs, it writes 0. The 32-iteration
+//   comparison loop is the proof that the test framework can compare
+//   multi-byte values, not just single bytes (the legacy KAT pattern).
+//
+// ── PMT discipline ───────────────────────────────────────────────────────────
+//   NO `*ptr`, `&x`, `as *`, `allocate`, or `free` anywhere in this file.
+//   All buffers are State<T> allocated via state_new(Layout). All
+//   non-zero constants are DECIMAL (no hex literals — hex literals have
+//   width-extension issues per aes.vuma's header note). The `out as
+//   Address` cast hands the State<OutByte> base pointer to write() — the
+//   canonical PMT-to-FFI pattern from womb/kernel/syscall/handlers/io.vuma.
+//
+// ── Build & verify (hosted x86_64) ──────────────────────────────────────────
+//   . "$HOME/.cargo/env" && \
+//   ./target/release-fast/compile_dump \
+//       scripts/real_kat_tests/test_sha256_abc_real.vuma \
+//       /tmp/kat.bin x86_64 --verify
+//   /tmp/kat.bin | xxd
+// Expected: IVE: Pass, stdout = single byte 0xBA (186).
+
+// ────────────────────────────────────────────────────────────────────────────
+// FFI declaration — write(2) syscall wrapper.
+// ────────────────────────────────────────────────────────────────────────────
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts.
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-256 streaming context: 32-byte hash state (8 × 4-byte IV words stored
+// little-endian), 64-byte input buffer, in-buffer byte count, total-bytes
+// counter (for the §5.1.1 64-bit BE length suffix).
+layout Sha256Ctx = {
+    state: [u8; 32],
+    buf: [u8; 64],
+    len: u32,
+    total: u64,
+}
+
+// SHA-256 input data wrapper (64 bytes — one full SHA-256 block).
+layout ShaData = { data: [u8; 64] }
+
+// SHA-256 digest output (32 bytes — eight 32-bit hash words serialized
+// big-endian per FIPS-180-4 §5.1.2).
+layout ShaDigest = { data: [u8; 32] }
+
+// SHA-256 message schedule (64 × u32 words = 256 bytes).
+layout Sha256W = { w: [u32; 64] }
+
+// SHA-256 round-constants table (64 × u32 = 256 bytes — FIPS-180-4 §4.2.2).
+layout Sha256K = { k: [u32; 64] }
+
+// Single-byte output buffer for write(2). The `byte` field is at offset 0
+// so `out as Address` yields the address of the byte — the natural arg
+// for write(1, addr, 1).
+layout OutByte = { byte: u8 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Constants.
+// ────────────────────────────────────────────────────────────────────────────
+// 32-bit mask — VUMA's default integer literal type widens u32 arithmetic
+// to u64; the explicit & MASK32 keeps each round's additions within 32-bit
+// range, matching FIPS-180-4's mod-2^32 arithmetic.
+const MASK32: u32 = 4294967295;
+
+// SHA-256 IV — all 8 words (FIPS-180-4 §5.3.3), in DECIMAL per the K10d/K11
+// contract. These are the canonical initial hash values H0..H7. The
+// sha256_init function seeds these (byte-by-byte, little-endian) into
+// ctx.state[0..31].
+const IV0: u32 = 1779033703;  // 0x6a09e667
+const IV1: u32 = 3144134277;  // 0xbb67ae85
+const IV2: u32 = 1013904242;  // 0x3c6ef372
+const IV3: u32 = 2773480762;  // 0xa54ff53a
+const IV4: u32 = 1359893119;  // 0x510e527f
+const IV5: u32 = 2600822924;  // 0x9b05688c
+const IV6: u32 = 528734635;   // 0x1f83d9ab
+const IV7: u32 = 1541459225;  // 0x5be0cd19
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-256 helper functions (FIPS-180-4 §4.1.2).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Right-rotate a 32-bit word by n positions (1 <= n <= 31).
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & MASK32;
+}
+
+// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z).
+fn ch32(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ ((x ^ MASK32) & z);
+}
+
+// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z).
+fn maj32(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+// Big Sigma0(x) = ROTR^2(x) XOR ROTR^13(x) XOR ROTR^22(x).
+fn bsig0_32(x: u32) -> u32 {
+    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+}
+
+// Big Sigma1(x) = ROTR^6(x) XOR ROTR^11(x) XOR ROTR^25(x).
+fn bsig1_32(x: u32) -> u32 {
+    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+}
+
+// Small sigma0(x) = ROTR^7(x) XOR ROTR^18(x) XOR SHR^3(x).
+fn ssig0_32(x: u32) -> u32 {
+    return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
+}
+
+// Small sigma1(x) = ROTR^17(x) XOR ROTR^19(x) XOR SHR^10(x).
+fn ssig1_32(x: u32) -> u32 {
+    return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Round-constants loader (FIPS-180-4 §4.2.2).
+// ────────────────────────────────────────────────────────────────────────────
+// Fill K.k[0..63] with the 64 round constants — the first 32 bits of the
+// fractional parts of the cube roots of the first 64 primes. All literals
+// are decimal per the VUMA convention.
+fn sha256_load_k(K: State<Sha256K>) {
+    K.k[0] = 1116352408;
+    K.k[1] = 1899447441;
+    K.k[2] = 3049323471;
+    K.k[3] = 3921009573;
+    K.k[4] = 961987163;
+    K.k[5] = 1508970993;
+    K.k[6] = 2453635748;
+    K.k[7] = 2870763221;
+    K.k[8] = 3624381080;
+    K.k[9] = 310598401;
+    K.k[10] = 607225278;
+    K.k[11] = 1426881987;
+    K.k[12] = 1925078388;
+    K.k[13] = 2162078206;
+    K.k[14] = 2614888103;
+    K.k[15] = 3248222580;
+    K.k[16] = 3835390401;
+    K.k[17] = 4022224774;
+    K.k[18] = 264347078;
+    K.k[19] = 604807628;
+    K.k[20] = 770255983;
+    K.k[21] = 1249150122;
+    K.k[22] = 1555081692;
+    K.k[23] = 1996064986;
+    K.k[24] = 2554220882;
+    K.k[25] = 2821834349;
+    K.k[26] = 2952996808;
+    K.k[27] = 3210313671;
+    K.k[28] = 3336571891;
+    K.k[29] = 3584528711;
+    K.k[30] = 113926993;
+    K.k[31] = 338241895;
+    K.k[32] = 666307205;
+    K.k[33] = 773529912;
+    K.k[34] = 1294757372;
+    K.k[35] = 1396182291;
+    K.k[36] = 1695183700;
+    K.k[37] = 1986661051;
+    K.k[38] = 2177026350;
+    K.k[39] = 2456956037;
+    K.k[40] = 2730485921;
+    K.k[41] = 2820302411;
+    K.k[42] = 3259730800;
+    K.k[43] = 3345764771;
+    K.k[44] = 3516065817;
+    K.k[45] = 3600352804;
+    K.k[46] = 4094571909;
+    K.k[47] = 275423344;
+    K.k[48] = 430227734;
+    K.k[49] = 506948616;
+    K.k[50] = 659060556;
+    K.k[51] = 883997877;
+    K.k[52] = 958139571;
+    K.k[53] = 1322822218;
+    K.k[54] = 1537002063;
+    K.k[55] = 1747873779;
+    K.k[56] = 1955562222;
+    K.k[57] = 2024104815;
+    K.k[58] = 2227730452;
+    K.k[59] = 2361852424;
+    K.k[60] = 2428436474;
+    K.k[61] = 2756734187;
+    K.k[62] = 3204031479;
+    K.k[63] = 3329325298;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// State load/store helpers (LE byte <-> u32 word).
+// ────────────────────────────────────────────────────────────────────────────
+// Read 4 LE bytes from ctx.state[base..base+3] as a u32. State is stored
+// little-endian (per sha256_init's IV seeding).
+fn load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
+    let b0 = ctx.state[base] as u32;
+    let b1 = ctx.state[base + 1] as u32;
+    let b2 = ctx.state[base + 2] as u32;
+    let b3 = ctx.state[base + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+}
+
+// Fold working-variable `val` into the running state at `base` (mod 2^32):
+//   new_state[base..base+3] (LE) = old_state[base..base+3] (LE) + val
+fn add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
+    let old = load_state_le(ctx, base);
+    let acc = (val + old) & MASK32;
+    ctx.state[base] = (acc & 255) as u8;
+    ctx.state[base + 1] = ((acc >> 8) & 255) as u8;
+    ctx.state[base + 2] = ((acc >> 16) & 255) as u8;
+    ctx.state[base + 3] = ((acc >> 24) & 255) as u8;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-256 API.
+// ────────────────────────────────────────────────────────────────────────────
+
+// sha256_init: seed the SHA-256 IV (all 8 words) into ctx.state, byte-by-
+// byte little-endian. The IV0..IV7 const-declarations above are the
+// decimal values of H0..H7; this function decomposes each word into 4 LE
+// bytes via shifts and masks.
+fn sha256_init(ctx: State<Sha256Ctx>) {
+    // H0 = IV0 → LE bytes.
+    ctx.state[0] = (IV0 & 255) as u8;
+    ctx.state[1] = ((IV0 >> 8) & 255) as u8;
+    ctx.state[2] = ((IV0 >> 16) & 255) as u8;
+    ctx.state[3] = ((IV0 >> 24) & 255) as u8;
+    // H1 = IV1.
+    ctx.state[4] = (IV1 & 255) as u8;
+    ctx.state[5] = ((IV1 >> 8) & 255) as u8;
+    ctx.state[6] = ((IV1 >> 16) & 255) as u8;
+    ctx.state[7] = ((IV1 >> 24) & 255) as u8;
+    // H2 = IV2.
+    ctx.state[8] = (IV2 & 255) as u8;
+    ctx.state[9] = ((IV2 >> 8) & 255) as u8;
+    ctx.state[10] = ((IV2 >> 16) & 255) as u8;
+    ctx.state[11] = ((IV2 >> 24) & 255) as u8;
+    // H3 = IV3.
+    ctx.state[12] = (IV3 & 255) as u8;
+    ctx.state[13] = ((IV3 >> 8) & 255) as u8;
+    ctx.state[14] = ((IV3 >> 16) & 255) as u8;
+    ctx.state[15] = ((IV3 >> 24) & 255) as u8;
+    // H4 = IV4.
+    ctx.state[16] = (IV4 & 255) as u8;
+    ctx.state[17] = ((IV4 >> 8) & 255) as u8;
+    ctx.state[18] = ((IV4 >> 16) & 255) as u8;
+    ctx.state[19] = ((IV4 >> 24) & 255) as u8;
+    // H5 = IV5.
+    ctx.state[20] = (IV5 & 255) as u8;
+    ctx.state[21] = ((IV5 >> 8) & 255) as u8;
+    ctx.state[22] = ((IV5 >> 16) & 255) as u8;
+    ctx.state[23] = ((IV5 >> 24) & 255) as u8;
+    // H6 = IV6.
+    ctx.state[24] = (IV6 & 255) as u8;
+    ctx.state[25] = ((IV6 >> 8) & 255) as u8;
+    ctx.state[26] = ((IV6 >> 16) & 255) as u8;
+    ctx.state[27] = ((IV6 >> 24) & 255) as u8;
+    // H7 = IV7.
+    ctx.state[28] = (IV7 & 255) as u8;
+    ctx.state[29] = ((IV7 >> 8) & 255) as u8;
+    ctx.state[30] = ((IV7 >> 16) & 255) as u8;
+    ctx.state[31] = ((IV7 >> 24) & 255) as u8;
+    ctx.len = 0;
+    ctx.total = 0;
+}
+
+// sha256_compress: fold one 64-byte block (ctx.buf) into ctx.state via the
+// FIPS-180-4 §6.2.2 64-round SHA-256 compression.
+fn sha256_compress(ctx: State<Sha256Ctx>) {
+    let W = state_new(Sha256W);
+    let K = state_new(Sha256K);
+    sha256_load_k(K);
+
+    // Step 1: build the 64-word message schedule.
+    // W[0..15] = big-endian load of ctx.buf[i*4..i*4+3].
+    let i = 0;
+    while i < 16 {
+        let off = i * 4;
+        let b0 = ctx.buf[off] as u32;
+        let b1 = ctx.buf[off + 1] as u32;
+        let b2 = ctx.buf[off + 2] as u32;
+        let b3 = ctx.buf[off + 3] as u32;
+        W.w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
+        i = i + 1;
+    }
+    // W[16..63] = W[i-16] + ssig0(W[i-15]) + W[i-7] + ssig1(W[i-2]).
+    i = 16;
+    while i < 64 {
+        let w15 = W.w[i - 15];
+        let w2 = W.w[i - 2];
+        let w7 = W.w[i - 7];
+        let w16 = W.w[i - 16];
+        W.w[i] = (w16 + ssig0_32(w15) + w7 + ssig1_32(w2)) & MASK32;
+        i = i + 1;
+    }
+
+    // Step 2: initialize working variables a..h from ctx.state (LE load).
+    let a = load_state_le(ctx, 0);
+    let b = load_state_le(ctx, 4);
+    let c = load_state_le(ctx, 8);
+    let d = load_state_le(ctx, 12);
+    let e = load_state_le(ctx, 16);
+    let f = load_state_le(ctx, 20);
+    let g = load_state_le(ctx, 24);
+    let h = load_state_le(ctx, 28);
+
+    // Step 3: 64 SHA-256 rounds.
+    let r = 0;
+    while r < 64 {
+        let ki = K.k[r];
+        let wi = W.w[r];
+        let t1 = (h + bsig1_32(e) + ch32(e, f, g) + ki + wi) & MASK32;
+        let t2 = (bsig0_32(a) + maj32(a, b, c)) & MASK32;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+        r = r + 1;
+    }
+
+    // Step 4: fold a..h back into ctx.state (H[i] += working[i] mod 2^32).
+    add_state_word(ctx, 0, a);
+    add_state_word(ctx, 4, b);
+    add_state_word(ctx, 8, c);
+    add_state_word(ctx, 12, d);
+    add_state_word(ctx, 16, e);
+    add_state_word(ctx, 20, f);
+    add_state_word(ctx, 24, g);
+    add_state_word(ctx, 28, h);
+}
+
+// sha256_update: absorb `len` bytes of data into the hash state.
+fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
+    let i = 0;
+    while i < len {
+        if ctx.len < 64 {
+            ctx.buf[ctx.len] = data.data[i];
+            ctx.len = ctx.len + 1;
+            if ctx.len == 64 {
+                sha256_compress(ctx);
+                ctx.len = 0;
+            }
+        }
+        i = i + 1;
+    }
+    ctx.total = ctx.total + len;
+}
+
+// sha256_final: append FIPS-180-4 §5.1.1 padding + 64-bit BE bit count,
+// run the final compression, and serialize ctx.state as 8 BE u32 words
+// into out (§5.1.2).
+fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
+    let total_bits = ctx.total * 8;
+
+    // Step 1: append 0x80 at ctx.buf[ctx.len].
+    ctx.buf[ctx.len] = 128;
+    let pos = ctx.len + 1;
+
+    // Step 2: zero-pad to offset 56 (mod 64).
+    if pos < 56 {
+        let p = pos;
+        while p < 56 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+    } else {
+        let p = pos;
+        while p < 64 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+        ctx.len = 64;
+        sha256_compress(ctx);
+        ctx.len = 0;
+        let q = 0;
+        while q < 56 {
+            ctx.buf[q] = 0;
+            q = q + 1;
+        }
+    }
+
+    // Step 3: 64-bit big-endian bit count at ctx.buf[56..63].
+    ctx.buf[56] = ((total_bits >> 56) & 255) as u8;
+    ctx.buf[57] = ((total_bits >> 48) & 255) as u8;
+    ctx.buf[58] = ((total_bits >> 40) & 255) as u8;
+    ctx.buf[59] = ((total_bits >> 32) & 255) as u8;
+    ctx.buf[60] = ((total_bits >> 24) & 255) as u8;
+    ctx.buf[61] = ((total_bits >> 16) & 255) as u8;
+    ctx.buf[62] = ((total_bits >> 8) & 255) as u8;
+    ctx.buf[63] = (total_bits & 255) as u8;
+
+    // Step 4: final compression.
+    ctx.len = 64;
+    sha256_compress(ctx);
+
+    // Step 5: serialize ctx.state as 8 big-endian u32 words.
+    let i = 0;
+    while i < 8 {
+        let base = i * 4;
+        let word = load_state_le(ctx, base);
+        out.data[base] = ((word >> 24) & 255) as u8;
+        out.data[base + 1] = ((word >> 16) & 255) as u8;
+        out.data[base + 2] = ((word >> 8) & 255) as u8;
+        out.data[base + 3] = (word & 255) as u8;
+        i = i + 1;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Expected-digest loader.
+// ────────────────────────────────────────────────────────────────────────────
+// load_expected_abc: fill out.data[0..31] with the 32-byte SHA-256("abc")
+// digest (FIPS-180-4 §B.1). All values are decimal; the inline comment
+// shows the hex equivalent for cross-checking.
+//   ba7816bf 8f01cfea 414140de 5dae2223
+//   b00361a3 96177a9c b410ff61 f20015ad
+fn load_expected_abc(out: State<ShaDigest>) {
+    out.data[0] = 186;   // 0xBA
+    out.data[1] = 120;   // 0x78
+    out.data[2] = 22;    // 0x16
+    out.data[3] = 191;   // 0xBF
+    out.data[4] = 143;   // 0x8F
+    out.data[5] = 1;     // 0x01
+    out.data[6] = 207;   // 0xCF
+    out.data[7] = 234;   // 0xEA
+    out.data[8] = 65;    // 0x41
+    out.data[9] = 65;    // 0x41
+    out.data[10] = 64;   // 0x40
+    out.data[11] = 222;  // 0xDE
+    out.data[12] = 93;   // 0x5D
+    out.data[13] = 174;  // 0xAE
+    out.data[14] = 34;   // 0x22
+    out.data[15] = 35;   // 0x23
+    out.data[16] = 176;  // 0xB0
+    out.data[17] = 3;    // 0x03
+    out.data[18] = 97;   // 0x61
+    out.data[19] = 163;  // 0xA3
+    out.data[20] = 150;  // 0x96
+    out.data[21] = 23;   // 0x17
+    out.data[22] = 122;  // 0x7A
+    out.data[23] = 156;  // 0x9C
+    out.data[24] = 180;  // 0xB4
+    out.data[25] = 16;   // 0x10
+    out.data[26] = 255;  // 0xFF
+    out.data[27] = 97;   // 0x61
+    out.data[28] = 242;  // 0xF2
+    out.data[29] = 0;    // 0x00
+    out.data[30] = 21;   // 0x15
+    out.data[31] = 173;  // 0xAD
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Self-test (main).
+// ────────────────────────────────────────────────────────────────────────────
+// W51 verifies the real SHA-256 compression against the canonical
+// FIPS-180-4 §B.1 single-block test vector:
+//
+//   SHA-256("abc") = ba7816bf 8f01cfea 414140de 5dae2223
+//                    b00361a3 96177a9c b410ff61 f20015ad
+//
+// The test computes the digest via the real 64-round algorithm, hardcodes
+// the expected 32-byte digest into a separate buffer, then compares ALL
+// 32 bytes byte-by-byte (the multi-byte comparison that distinguishes
+// this W51 test from the legacy single-byte KAT pattern). If every byte
+// matches, the test writes 186 (0xBA — the first byte of the expected
+// digest) to stdout via write(1, out, 1); if any byte differs, it writes
+// 0. Either way main returns 0 — the stdout byte is the KAT verdict.
+fn main() -> i32 {
+    // ── Step 1: compute SHA-256("abc") via the real algorithm. ──
+    let ctx = state_new(Sha256Ctx);
+    sha256_init(ctx);
+
+    let data = state_new(ShaData);
+    data.data[0] = 97;   // 'a'
+    data.data[1] = 98;   // 'b'
+    data.data[2] = 99;   // 'c'
+    sha256_update(ctx, data, 3);
+
+    let computed = state_new(ShaDigest);
+    sha256_final(ctx, computed);
+
+    // ── Step 2: load the expected 32-byte digest. ──
+    let expected = state_new(ShaDigest);
+    load_expected_abc(expected);
+
+    // ── Step 3: multi-byte comparison — all 32 bytes. ──
+    // This is the proof that the test framework can compare multi-byte
+    // values, not just single bytes. A mismatch on ANY of the 32 bytes
+    // flips `match` to 0; only a full 32-byte match leaves `match` at 1.
+    let match_byte: u8 = 1;
+    let i = 0;
+    while i < 32 {
+        if computed.data[i] != expected.data[i] {
+            match_byte = 0;
+        }
+        i = i + 1;
+    }
+
+    // ── Step 4: write the verdict to stdout. ──
+    // On full 32-byte match: write 186 (0xBA — the first byte of the
+    // expected digest, "the expected byte" per the W51 task spec).
+    // On any mismatch: write 0 (the failure sentinel).
+    let out = state_new(OutByte);
+    if match_byte == 1 {
+        out.byte = 186;   // 0xBA — pass
+    } else {
+        out.byte = 0;     // fail
+    }
+    let out_addr = out as Address;
+    write(1, out_addr, 1);
+
+    return 0;
+}
