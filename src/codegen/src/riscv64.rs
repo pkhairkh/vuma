@@ -5665,6 +5665,49 @@ impl Backend for RiscV64Backend {
                                 code.extend(Instruction::Ecall.encode());
                                 true
                             }
+                            ("spawn_worker", 0, _) => {
+                                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 17 }.encode()); // SIGCHLD
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 220 }.encode()); // sys_clone
+                                code.extend(Instruction::Ecall.encode());
+                                if let Some(d) = dst {
+                                    if let Some(dst_id) = d.as_register() {
+                                        let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                        code.extend(ss_store_to_slot(Gpr::A0, dst_off));
+                                    }
+                                }
+                                true
+                            }
+                            ("wait_worker", 1, _) => {
+                                code.extend(ss_load_value(&args[0], &vreg_stack_slots, Gpr::A0));
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(ss_load_imm(Gpr::A7, 2601));
+                                code.extend(Instruction::Ecall.encode());
+                                code.extend(Instruction::Ld { rd: Gpr::A0, rs1: Gpr::Sp, imm: 0 }.encode());
+                                code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::A0, shamt: 8 }.encode());
+                                code.extend(Instruction::Andi { rd: Gpr::A0, rs1: Gpr::A0, imm: 255 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
+                                if let Some(d) = dst {
+                                    if let Some(dst_id) = d.as_register() {
+                                        let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                        code.extend(ss_store_to_slot(Gpr::A0, dst_off));
+                                    }
+                                }
+                                true
+                            }
+                            ("kill_worker", 1, _) => {
+                                code.extend(ss_load_value(&args[0], &vreg_stack_slots, Gpr::A0));
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 15 }.encode());
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 129 }.encode());
+                                code.extend(Instruction::Ecall.encode());
+                                true
+                            }
                             _ => false,
                         };
 
