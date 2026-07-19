@@ -13,7 +13,7 @@ fields back. Memory safety becomes a structural type-checking property, not a
 constraint solver over an unbounded heap graph. VUMA compiles PMT source
 through a full O2 pipeline — SCG construction, monomorphization, closure
 conversion, e-graph equality saturation, instruction scheduling, LICM,
-escape analysis + SROA, vectorization, loop unrolling — to **19 bare-metal
+escape analysis + SROA, vectorization, loop unrolling — to **19 backends (7 executable + 12 compile-only)
 backends** (x86_64 through wasm32, including big-endian variants), under a
 single-buffer runtime with zero per-state `malloc`/`free`. The same compiler
 also builds **VWK** (the Vuma Womb Kernel), a kernel written entirely in
@@ -69,7 +69,7 @@ compile-time type check that runs at SCG construction time, before codegen.
 
 VUMA now hosts a kernel written in its own PMT syntax: the **VWK** (Vuma Womb
 Kernel), living under `womb/kernel/`. The kernel is **PMT-only**: there is no
-pointer syntax, no `--pmt` flag, no escape hatch. Every kernel module is a
+pointer syntax, no `--pmt` flag, no escape hatch (kernel subtree only; stdlib crypto/net use legacy pointer syntax). Every kernel module is a
 composition of typed-state transformations over arena-allocated `State<T>`
 buffers. The compiler's three IVE state verifiers (`StateRead`,
 `StateWrite`, `StateTransform`) discharge all memory-safety obligations at
@@ -203,7 +203,7 @@ bash scripts/kernel_parity.sh --quick    # arena_basic + kernel smoke only
   `___pmt_buffer`; the runtime `arena_alloc` checks the capacity (stored at
   `[arena_ptr+16]`) and traps via `__arena_overflow` on overflow. There is no
   `free` and one deallocation site — program exit.
-- **19 bare-metal backends** — `x86_64`, `aarch64`, `aarch64_be`, `riscv64`,
+- **19 backends (7 executable + 12 compile-only)** — `x86_64`, `aarch64`, `aarch64_be`, `riscv64`,
   `riscv32`, `arm32`, `armeb`, `mips64`, `mips64be`, `ppc64`, `ppc64le`,
   `loongarch64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`, `x86_32`,
   `wasm32`. Each backend emits real machine code (or wasm), not a stub.
@@ -237,7 +237,7 @@ bash scripts/kernel_parity.sh --quick    # arena_basic + kernel smoke only
   (copy into a scratch buffer), or `ForeignPass` (hand off a `#[foreign]`
   layout's `.raw`). `#[borrow]`, `#[marshal]`, `#[may_retain]`, and
   `#[foreign]` attributes select the mode.
-- **VWK kernel subsystems** — 75 PMT-pure `.vuma` files across 13 waves
+- **VWK kernel subsystems** — 84 PMT-pure `.vuma` files across 13 waves
   (K0–K12): mm, proc, vfs, trap, ipc, sync, net, crypto, tty, shell, panic,
   power. The kernel is a complete PMT program that compiles for every
   backend.
@@ -662,7 +662,7 @@ backend passes.
 
 ### Gold-standard categories
 
-Test categories in `tests/gold_standard/` (manifest-driven, 5,832+ programs):
+Test categories in `tests/gold_standard/` (manifest-driven, 1,502 programs (post-cleanup)):
 
 | Category | Count | What it exercises |
 |---|---|---|
@@ -805,7 +805,7 @@ vuma/
 │   ├── string/  io/  fs/  codec/  encoding/  env/  ieee/  graph/  lang/
 │   └── kernel/               # VWK kernel (75 .vuma files, 13 waves K0–K12)
 ├── tests/
-│   ├── gold_standard/        # 5,832+ manifest-driven PMT test programs
+│   ├── gold_standard/        # 1,502 manifest-driven (post-cleanup) PMT test programs
 │   └── *.rs                  # Rust integration tests (scheduler, egraph, …)
 ├── examples/                 # 48 example .vuma programs
 ├── docs/                     # 7 documentation files (34K+ words)
@@ -854,7 +854,7 @@ encoding (base64, hex, url), and a self-hosted language toolchain
 The kernel subtree is described in [The VWK Kernel](#the-vwk-kernel)
 above. It is PMT-pure, IVE-verified, and compiles for all 19 backends.
 
-### `tests/gold_standard/` — 5,832+ test programs
+### `tests/gold_standard/` — 1,502 (post-cleanup) test programs
 
 Manifest-driven PMT test programs grouped by feature category (arithmetic,
 atomics, bitwise, control_flow, functions, structs, …) and PMT wave
