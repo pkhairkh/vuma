@@ -11,31 +11,46 @@
 // "sleeps instead of spins" — the spinlock burns CPU on contention
 // (lockup-prone in single-CPU hosted mode), while the mutex queues the
 // contended acquirer on a wait queue and (in a real kernel) schedules
-// another task. In hosted single-CPU mode, the sleep is stubbed to a
-// single retry of the CAS — the contract calls this out explicitly:
-// "In a real kernel: sleep_on(waitq), then retry when woken. For hosted
-// mode: just spin once and try again." In practice, the hosted self-test
-// is single-threaded so contention never arises (the first CAS always
-// succeeds), and the wait-queue path is exercised only by the book-
-// keeping increments / decrements of m.waitq_count.
+// another task. In hosted single-CPU mode there is no scheduler (K9
+// builds it), so the sleep is stubbed to a BOUNDED retry loop (W16S1):
+// the slow path bumps waitq_count (waitq_add simulation), retries the
+// CAS up to 1000 times (hosted stand-in for sleep_on + schedule), and
+// returns -EAGAIN (-11) if the cap is exhausted — instead of the
+// previous unbounded `while success == 0 { ... }` busy-wait that would
+// lock up the hosted runtime if the slow path were ever taken. This is
+// NOT real blocking (the CPU still spins through the CAS attempts), but
+// it bounds the wait and tracks the waiter count. mutex_release
+// simulates waitq_wake_one by decrementing waitq_count when waiters are
+// present. In practice, the hosted self-test is single-threaded so
+// contention never arises (the first CAS always succeeds), and the
+// wait-queue path is exercised only by the book-keeping increments /
+// decrements of m.waitq_count.
 //
 // ── What K8b provides ──────────────────────────────────────────────────────
 //   mutex_init(m)                          — locked=0, _pad0=0, owner=256,
 //                                              waitq_count=0. Called once
 //                                              per mutex before any acquire.
-//   mutex_acquire(m, task_idx)             — acquire the mutex. Fast path:
+//   mutex_acquire(m, task_idx) -> i32      — acquire the mutex. Returns 0
+//                                              on success, -EAGAIN (-11) if
+//                                              the slow path exhausts its
+//                                              1000-retry cap. Fast path:
 //                                              AtomicCas(0 → 1) succeeds,
-//                                              record owner, return. Slow
-//                                              path: bump waitq_count (in a
-//                                              real kernel: sleep_on(waitq)),
-//                                              retry CAS until success,
-//                                              decrement waitq_count, record
-//                                              owner.
+//                                              record owner, return 0. Slow
+//                                              path (W16S1): bump
+//                                              waitq_count (waitq_add sim),
+//                                              retry CAS in a bounded loop
+//                                              (max 1000 — hosted stand-in
+//                                              for sleep_on + schedule),
+//                                              return -EAGAIN on cap
+//                                              exhaustion, record owner on
+//                                              success.
 //   mutex_release(m, task_idx)             — release the mutex. Ownership
 //                                              check (silent no-op if not
 //                                              the owner), clear owner,
-//                                              atomic_store(0). In a real
-//                                              kernel: wake_one(waitq).
+//                                              atomic_store(0), then if
+//                                              waitq_count > 0 decrement it
+//                                              (wake_one simulation). In a
+//                                              real kernel: waitq_wake_one.
 //
 // ── WaitQueue (re-declared from K7e — no import in VUMA) ───────────────────
 //   layout WaitQueue = { head: u64, tail: u64, count: u32 }
@@ -81,8 +96,11 @@
 //   the 8-byte CAS window at offset 0 would span `locked | (owner << 32)`.
 //   mutex_init sets locked=0 and owner=256. After init, bytes [0..7] would
 //   be 0x0000010000000000 — NOT 0. The CAS(expected=0) would fail forever,
-//   the slow-path busy-wait would spin forever, and the self-test would
-//   hang.
+//   the slow-path bounded retry would exhaust its 1000-retry cap and
+//   return -EAGAIN, and the self-test would fail (the acquire would not
+//   set locked=1/owner=task_idx — the first check `if m.locked != 1`
+//   would trip). Before W16S1 this was an infinite hang; W16S1's bounded
+//   retry converts it to a loud test failure.
 //
 //   WITH _pad0, the layout pushes `owner` to offset 8 (outside the 8-byte
 //   CAS window). After init, bytes [0..7] = locked(0) + _pad0(0) =
@@ -134,30 +152,42 @@
 //
 //   FAST PATH (uncontended): atomic_cas(addr, 0, 1) returns 0 (the old
 //   value, meaning the swap 0→1 succeeded). Record owner = task_idx and
-//   return. NO waitq_count increment, NO busy-wait, NO sleep. This is
+//   return 0. NO waitq_count increment, NO retry loop, NO sleep. This is
 //   the path taken in the hosted self-test (single-threaded, no
 //   contention). Cost: one LOCK CMPXCHG (always succeeds on first try).
 //
-//   SLOW PATH (contended): atomic_cas returns non-zero (the old value
-//   was 1 — someone else holds the lock). Increment waitq_count (in a
-//   real kernel: this is where we'd call sleep_on(waitq) to schedule
-//   another task; here we just bump the counter for diagnostics). Then
-//   retry CAS in a busy-wait loop until it succeeds. The contract calls
-//   this out: "In a real kernel: sleep_on(waitq), then retry when woken.
-//   For hosted mode: just spin once and try again." In practice, the
-//   loop is identical to K8a's spinlock busy-wait — the only difference
-//   is the waitq_count bookkeeping around it. After the CAS succeeds,
-//   decrement waitq_count (we're no longer a waiter) and record owner.
+//   SLOW PATH (contended, W16S1: bounded retry): atomic_cas returns non-
+//   zero (the old value was 1 — someone else holds the lock). The slow
+//   path then:
+//     (a) waitq_add simulation: m.waitq_count = m.waitq_count + 1.
+//         In a real kernel: waitq_add(&m.waitq, current_task_idx).
+//     (b) Bounded retry loop: retry atomic_cas(addr, 0, 1) up to 1000
+//         times. This is the hosted stand-in for sleep_on(waitq) +
+//         schedule() — in a real kernel we'd mark the task SLEEPING and
+//         context-switch away, then be woken by mutex_release's
+//         waitq_wake_one. Hosted mode has no scheduler (K9 builds it),
+//         so we just retry the CAS. The 1000-retry cap is the safety
+//         net: if the holder is deadlocked or just very slow, the
+//         acquirer gives up and returns -EAGAIN (-11) instead of
+//         spinning forever.
+//     (c) On CAS success: record owner, return 0. Do NOT decrement
+//         waitq_count here — the unlocker's wake_one simulation handles
+//         that (matching real-kernel semantics where the unlocker pops
+//         the waiter from the queue).
+//     (d) On retry-cap exhaustion: decrement waitq_count (cleanup —
+//         we're bailing, no one will wake us), return -EAGAIN.
 //
-//   The slow path's busy-wait is the same shape as K8a's spinlock
-//   busy-wait — but the SEMANTICS are different. K8a's spinlock is
-//   SUPPOSED to spin (it's a spinlock — that's the point). K8b's mutex
-//   is NOT supposed to spin — in a real kernel, the slow path would
-//   call into the scheduler (sleep_on(waitq)), which would context-
-//   switch to another task. The hosted-mode stub just spins because
-//   there's no scheduler yet (K9 builds the scheduler). The waitq_count
-//   counter is the diagnostic that tells you "this would have slept in
-//   a real kernel."
+//   The slow path's bounded retry is NOT real blocking — the CPU still
+//   spins through the CAS attempts. But it's better than the previous
+//   K8b behavior (infinite `while success == 0 { ... }` busy-wait that
+//   would lock up the hosted runtime if the slow path were ever taken)
+//   because (1) it bounds the wait — a deadlocked holder can't hang the
+//   acquirer forever, and (2) it tracks the waiter count — the
+//   waitq_count counter is the diagnostic that tells you "this would
+//   have slept in a real kernel." When K9 lands the scheduler, the
+//   bounded loop gets replaced by sleep_on(waitq) + schedule(), and the
+//   cap becomes a safety timeout rather than the primary termination
+//   condition.
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
 //   All non-zero constants in this file use DECIMAL per the K8b contract's
@@ -252,10 +282,13 @@
 //       deadlock if the lock is held — the ISR can't sleep waiting for
 //       the holder to release). Use spinlock_save_irq first, then mutex.
 //     - NOT recursive (the contract doesn't specify a depth counter).
-//       A recursive acquire would deadlock: the second CAS(0→1) would
-//       fail (locked=1), the slow path would bump waitq_count, the
-//       busy-wait would spin forever (no one can release because we're
-//       the holder). K8c/K8d may add recursive mutex support; K8b stays
+//       A recursive acquire would fail: the second CAS(0→1) fails
+//       (locked=1), the slow path bumps waitq_count, the bounded retry
+//       exhausts its 1000-retry cap (no one can release because we're
+//       the holder), and mutex_acquire returns -EAGAIN. Before W16S1
+//       this was an infinite hang; W16S1's bounded retry converts it to
+//       a loud -EAGAIN return. Still a bug — callers must not recursively
+//       acquire. K8c/K8d may add recursive mutex support; K8b stays
 //       non-recursive for simplicity.
 //
 // ── Build & verify (hosted x86_64) ──────────────────────────────────────────
@@ -325,11 +358,13 @@ layout WaitQueue = {
 //                 consistency.
 //   waitq_count — number of waiters (simplified WaitQueue — see "WaitQueue
 //                 (re-declared from K7e)" in the file header). Modified
-//                 by mutex_acquire (incremented on the slow path before
-//                 the busy-wait, decremented after the CAS succeeds) and
-//                 read by the self-test indirectly (no direct check in
-//                 the contract's main — but the field is touched on the
-//                 slow path). In the hosted single-threaded self-test,
+//                 by mutex_acquire (incremented on slow-path entry as
+//                 the waitq_add simulation; decremented on retry-cap
+//                 exhaustion as cleanup) and by mutex_release (decremented
+//                 when > 0 as the waitq_wake_one simulation — W16S1). The
+//                 acquirer does NOT decrement on success — the unlocker's
+//                 wake_one simulation handles that, matching real-kernel
+//                 semantics. In the hosted single-threaded self-test,
 //                 this counter stays at 0 (the slow path is never taken)
 //                 — but the increment / decrement logic is present and
 //                 correct so a real kernel that does encounter
@@ -360,33 +395,52 @@ fn mutex_init(m: State<Mutex>) {
     m.waitq_count = 0;
 }
 
-// mutex_acquire: acquire the mutex. Fast path: AtomicCas(0 → 1) succeeds,
-// record owner, return. Slow path: bump waitq_count, retry CAS in a
-// busy-wait until success, decrement waitq_count, record owner.
+// mutex_acquire: acquire the mutex. Returns 0 on success, -EAGAIN (-11)
+// if the slow path exhausts its 1000-retry cap without winning the CAS.
+//
+//   Fast path: AtomicCas(0 → 1) succeeds → record owner, return 0.
+//   Slow path (W16S1: bounded retry, no infinite spin):
+//     1. waitq_add simulation: m.waitq_count = m.waitq_count + 1
+//        (in a real kernel: waitq_add(&m.waitq, current_task_idx)).
+//     2. Retry CAS in a bounded loop (max 1000 attempts). This is the
+//        hosted-mode stand-in for sleep_on(waitq) + schedule(): in a
+//        real kernel we'd mark the task SLEEPING and context-switch
+//        away; here we just retry the CAS up to 1000 times. The bound
+//        prevents a deadlocked holder from hanging the acquirer.
+//     3a. CAS succeeds → record owner, return 0. (We do NOT decrement
+//         waitq_count here — the unlocker's wake_one simulation does
+//         that, matching real-kernel semantics where the unlocker pops
+//         the waiter from the queue.)
+//     3b. Retry cap hit → decrement waitq_count (cleanup — we're no
+//         longer a waiter since no one will wake us), return -EAGAIN.
 //
 //   m:         the Mutex to acquire.
 //   task_idx:  the calling task's index (stored in m.owner on success).
 //
 // State<T> params: 1 (m). Reads m.waitq_count (slow path). Writes m.owner,
-// m.waitq_count. Calls one IR builtin (atomic_cas) — twice (fast-path try
-// + slow-path retry loop).
+// m.waitq_count. Calls one IR builtin (atomic_cas) — fast-path try plus
+// slow-path bounded retry loop.
 //
 // The fast path is the common case (uncontended). In the hosted single-
 // threaded self-test, ONLY the fast path is ever taken (no other CPU can
-// hold the lock). The slow path is exercised only by the bookkeeping
-// increments / decrements of m.waitq_count — which never execute in the
-// self-test because the fast path always succeeds.
+// hold the lock), so waitq_count stays at 0 and the -EAGAIN path is never
+// exercised. A real SMP kernel with concurrent waiters would exercise
+// the slow path; the 1000-retry cap is the safety net for a deadlocked
+// or long-holding lock holder.
 //
-// The slow path's busy-wait loop is identical in shape to K8a's
-// spinlock busy-wait — but the SEMANTICS are different. K8a's spinlock is
-// SUPPOSED to spin (it's a spinlock). K8b's mutex is NOT supposed to
-// spin — in a real kernel, the slow path would call into the scheduler
-// (sleep_on(waitq)), which would context-switch to another task. The
-// hosted-mode stub just spins because there's no scheduler yet (K9 builds
-// the scheduler). The waitq_count counter is the diagnostic that tells
-// you "this would have slept in a real kernel."
+// Why bounded retry instead of real sleep? K8b's Mutex doesn't embed a
+// full WaitQueue (just the simplified waitq_count: u32 counter), and
+// hosted mode has no scheduler (K9 builds it). The bounded retry is the
+// hosted stand-in: it's NOT real blocking (the CPU still spins through
+// the CAS attempts), but it's better than infinite spin because (a) it
+// bounds the wait — a deadlocked holder can't hang the acquirer forever,
+// and (b) it tracks the waiter count — the waitq_count counter is the
+// diagnostic that tells you "this would have slept in a real kernel."
+// When K9 lands the scheduler, the bounded loop gets replaced by
+// sleep_on(waitq) + schedule(), and the cap becomes a safety timeout
+// rather than the primary termination condition.
 //
-// The busy-wait loop terminates because:
+// The bounded retry loop terminates because:
 //   - In hosted mode, only one task is running (single-threaded self-
 //     test), so the slow path is never taken — the fast path's CAS
 //     succeeds immediately (locked was 0 after init, or 0 after a prior
@@ -394,13 +448,18 @@ fn mutex_init(m: State<Mutex>) {
 //   - In a real SMP/preemptive kernel, the loop terminates when the
 //     holder calls mutex_release, which does atomic_store(0). At that
 //     point our CAS(0 → 1) succeeds.
+//   - If the holder is deadlocked or very slow, the loop terminates at
+//     the 1000-retry cap and returns -EAGAIN (the hosted-mode safety
+//     net — prevents the acquirer from hanging the runtime).
 //
 // Note: NOT recursive. A second acquire by the same task while it
-// already holds the lock would deadlock (the CAS fails, the slow path
-// bumps waitq_count, the busy-wait spins forever because no one can
-// release — we're the holder, but we're stuck in the busy-wait instead
-// of calling mutex_release). See "Mutex vs. spinlock" in the file header.
-fn mutex_acquire(m: State<Mutex>, task_idx: u32) {
+// already holds the lock would fail the CAS, bump waitq_count, exhaust
+// the 1000-retry cap (no one can release — we're the holder, but we're
+// stuck in the retry loop), and return -EAGAIN. This is strictly better
+// than the previous K8b behavior (infinite busy-wait → hosted runtime
+// hang) but still a bug — callers must not recursively acquire. See
+// "Mutex vs. spinlock" in the file header.
+fn mutex_acquire(m: State<Mutex>, task_idx: u32) -> i32 {
     // Fast path: try AtomicCas(0 → 1).
     //   atomic_cas(addr, expected, desired) returns the OLD value at
     //   addr. If old == expected (0), the swap succeeded (we got the
@@ -410,57 +469,94 @@ fn mutex_acquire(m: State<Mutex>, task_idx: u32) {
     //   not, so dst receives the old value.
     let old = atomic_cas(m as Address, 0, 1);
     if old == 0 {
-        // Got the lock — record owner and return.
+        // Got the lock — record owner and return 0 (success).
         m.owner = task_idx;
-        return;
+        return 0;
     }
-    // Contended: increment wait count (stub for sleep).
-    //   In a real kernel: this is where we'd call sleep_on(waitq) —
-    //   mark the current task BLOCKED, add it to the Mutex's wait
-    //   queue, and call schedule() to context-switch to another task.
-    //   The task would be woken by mutex_release's wake_one(waitq)
-    //   (which we don't have yet — K7e's waitq_wake_one exists, but
-    //   K8b's Mutex doesn't embed a full WaitQueue, just the count).
-    //   For hosted mode: just bump the counter for diagnostics, then
-    //   retry the CAS in a busy-wait loop.
+    // SLOW PATH — contended (W16S1: bounded retry, no infinite spin).
+    //   In a real kernel this is where we'd integrate the WaitQueue:
+    //     waitq_add(&m.waitq, current_task_idx)  // enqueue self
+    //     current_task.state = SLEEPING          // mark not runnable
+    //     schedule()                             // context-switch away
+    //     ... woken by mutex_release's waitq_wake_one ...
+    //   K8b's Mutex doesn't embed a full WaitQueue (just the simplified
+    //   waitq_count: u32 counter — see "WaitQueue (re-declared from
+    //   K7e)" in the file header), and hosted mode has no scheduler
+    //   (K9 builds it), so we SIMULATE the wait-queue bookkeeping with
+    //   the counter and the sleep with a BOUNDED retry loop. This is
+    //   NOT real blocking — it just bounds the wait so a contended
+    //   acquire can't spin forever (the previous K8b `while success ==
+    //   0 { ... }` was an unbounded busy-wait that would lock up the
+    //   hosted runtime if the slow path were ever taken). The bound is
+    //   1000 retries — generous enough that a real holder will almost
+    //   always release in time, but finite so a deadlocked holder
+    //   doesn't hang the acquirer. If the cap is hit, we return
+    //   -EAGAIN (-11) so the caller can retry, defer, or surface
+    //   "Resource temporarily unavailable" to user-space.
+    //
+    //   waitq_add simulation: increment the counter (we're now a
+    //   waiter). In a real kernel this would be
+    //   `waitq_add(&m.waitq, current_task_idx)`; here it's just
+    //   `m.waitq_count = m.waitq_count + 1`.
     m.waitq_count = m.waitq_count + 1;
-    // In a real kernel: sleep_on(waitq), then retry when woken.
-    // For hosted mode: just spin once and try again.
-    //   The `success` flag is 0 until the CAS returns 0 (old=0 means
-    //   the swap 0→1 succeeded — we now hold the lock).
+    // Bounded retry loop. `retries` counts failed CAS attempts since
+    //   entering the slow path. `success` is 0 until a CAS returns 0
+    //   (old=0 means the swap 0→1 succeeded — we now hold the lock).
+    //   The loop exits via either `success == 1` (got the lock) or
+    //   `retries >= 1000` (gave up — return -EAGAIN). This is the
+    //   hosted-mode stand-in for sleep_on(waitq) + schedule(): in a
+    //   real kernel we'd sleep and be woken by wake_one; here we just
+    //   retry the CAS up to 1000 times.
     let success = 0;
+    let retries = 0;
     while success == 0 {
         let old2 = atomic_cas(m as Address, 0, 1);
         if old2 == 0 {
             success = 1;
+        } else {
+            // Still contended — bump the retry counter. If we've hit
+            //   the cap, give up: simulate removing ourselves from
+            //   the wait queue (decrement waitq_count — no one will
+            //   wake_one us since we're bailing), then return
+            //   -EAGAIN (-11 = `0 - 11` — see K7e's waitq.vuma header
+            //   for the "negative literal via Sub" discipline) so the
+            //   caller can retry, queue work for later, or surface
+            //   "Resource temporarily unavailable" to user-space.
+            retries = retries + 1;
+            if retries >= 1000 {
+                if m.waitq_count > 0 {
+                    m.waitq_count = m.waitq_count - 1;
+                }
+                return 0 - 11;  // -EAGAIN
+            }
         }
-        // If old2 != 0, someone else holds the lock — spin (retry).
-        // In hosted single-threaded mode, this branch is never taken
-        // because the slow path itself is never taken (the fast path
-        // always succeeds).
     }
-    // We won the CAS — record ourselves as the owner.
+    // Won the CAS — record ourselves as the owner.
+    //   Note: we do NOT decrement waitq_count here. In a real kernel,
+    //   the holder that wakes us does so via waitq_wake_one(&m.waitq),
+    //   which pops us from the queue (decrementing the count). K8b
+    //   simulates that wake_one in mutex_release: `if m.waitq_count
+    //   > 0 { m.waitq_count = m.waitq_count - 1 }`. So the acquirer
+    //   leaves the count bumped on success and lets the unlocker clean
+    //   it up — matching real-kernel wake-one semantics where the
+    //   unlocker pops the waiter. In the hosted single-threaded self-
+    //   test this branch is never reached (the slow path is never
+    //   entered).
     m.owner = task_idx;
-    // Decrement wait count — we're no longer a waiter (we got the
-    // lock). The `if m.waitq_count > 0` guard is defensive (in the
-    // hosted self-test, the slow path is never taken, so this branch
-    // is never executed; but a real kernel with concurrent waiters
-    // could in principle see waitq_count == 0 here if wake_one raced
-    // and already decremented — the guard prevents underflow).
-    if m.waitq_count > 0 {
-        m.waitq_count = m.waitq_count - 1;
-    }
+    return 0;
 }
 
 // mutex_release: release the mutex. Ownership check (silent no-op if not
 // the owner — stub error path, a real kernel would panic or log), clear
-// owner, atomic_store(0) to drop the lock word.
+// owner, atomic_store(0) to drop the lock word, then (W16S1) if
+// waitq_count > 0 decrement it as the waitq_wake_one simulation.
 //
 //   m:         the Mutex to release.
 //   task_idx:  the calling task's index (used for the ownership check).
 //
-// State<T> params: 1 (m). Reads m.owner (ownership check). Writes m.owner.
-// Calls one IR builtin (atomic_store).
+// State<T> params: 1 (m). Reads m.owner (ownership check), m.waitq_count
+// (wake_one simulation guard). Writes m.owner, m.waitq_count. Calls one
+// IR builtin (atomic_store).
 //
 // The ownership check `if m.owner != task_idx` returns silently on
 // failure (no error code). This is the K8b contract's stub error
@@ -476,8 +572,16 @@ fn mutex_acquire(m: State<Mutex>, task_idx: u32) {
 //      bytes [0..7], clearing both `locked` and `_pad0`). A waiting
 //      CPU's atomic_cas(addr, 0, 1) will now succeed on its next
 //      iteration. In a real kernel: this is where we'd call
-//      wake_one(waitq) to wake exactly one waiter (avoiding thundering
-//      herd).
+//      waitq_wake_one(&m.waitq) to wake exactly one waiter (avoiding
+//      thundering herd).
+//   3. (W16S1) if m.waitq_count > 0 { m.waitq_count = m.waitq_count - 1 }
+//      — the wake_one simulation. The decrement happens AFTER
+//      atomic_store(0) so a contended acquirer's next CAS attempt sees
+//      the unlocked state first. The `if > 0` guard prevents underflow
+//      in the uncontended case (no waiters — the fast path was taken,
+//      waitq_count is still 0). The acquirer leaves the count bumped
+//      on success and lets the unlocker clean it up — matching real-
+//      kernel wake-one semantics where the unlocker pops the waiter.
 //
 // The atomic_store writes 0 to bytes [0..7] (clearing `locked` AND
 // `_pad0`); the `owner` field at offset 8 is untouched by the
@@ -491,18 +595,28 @@ fn mutex_release(m: State<Mutex>, task_idx: u32) {
     // Clear owner BEFORE dropping the lock word (see comment above).
     m.owner = 256;
     // atomic_store(addr, val): store `val` atomically to [addr].
-    // On x86_64 this is a plain MOV (already atomic for aligned
-    // accesses — no LOCK prefix needed for stores). Writes 0 to
-    // bytes [0..7], clearing `locked` and `_pad0`. A waiting CPU's
-    // atomic_cas(addr, 0, 1) will now succeed on its next iteration.
-    // In a real kernel: this is where we'd call wake_one(waitq).
-    // Here: just decrement wait count (waiters will retry) — but
-    // since the Mutex doesn't track individual waiters (only the
-    // count), and the count is bumped/decremented by the acquirer
-    // side of the contract, we don't decrement here (the acquirer
-    // decrements its own count after it wins the CAS). This matches
-    // the K8b contract exactly.
+    //   On x86_64 this is a plain MOV (already atomic for aligned
+    //   accesses — no LOCK prefix needed for stores). Writes 0 to
+    //   bytes [0..7], clearing `locked` and `_pad0`. A waiting CPU's
+    //   atomic_cas(addr, 0, 1) will now succeed on its next iteration.
+    // In a real kernel: this is where we'd call waitq_wake_one(&m.waitq)
+    //   to pop exactly one waiter from the queue (avoiding thundering
+    //   herd) and mark it RUNNABLE. K8b simulates wake_one (W16S1) by
+    //   decrementing the waitq_count counter (the simplified WaitQueue
+    //   — see "WaitQueue (re-declared from K7e)" in the file header).
+    //   The decrement happens AFTER atomic_store(0) so a contended
+    //   acquirer's next CAS attempt sees the unlocked state. The
+    //   `if m.waitq_count > 0` guard prevents underflow in the
+    //   uncontended case (no waiters — the fast path was taken,
+    //   waitq_count is still 0). In the hosted single-threaded self-
+    //   test, this branch is never taken (waitq_count stays at 0
+    //   because the slow path is never entered); a real SMP kernel
+    //   with concurrent waiters would decrement once per release,
+    //   matching wake_one's "pop one" semantics.
     atomic_store(m as Address, 0);
+    if m.waitq_count > 0 {
+        m.waitq_count = m.waitq_count - 1;  // simulate waitq_wake_one
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -511,7 +625,10 @@ fn mutex_release(m: State<Mutex>, task_idx: u32) {
 
 // main: exercise the mutex end-to-end with 4 sequential checks.
 //   1. Create + init the mutex.
-//   2. Acquire as task 5 — verify locked=1, owner=5.
+//   2. Acquire as task 5 — verify locked=1, owner=5. (mutex_acquire now
+//      returns i32 — 0 on success, -EAGAIN on retry-cap exhaustion. The
+//      return value is discarded here because the self-test never hits
+//      the slow path; a real caller would check `if ret != 0 { ... }`.)
 //   3. Release as task 5 — verify owner=256 (no owner).
 //   4. Re-acquire as task 10 (different task) — verify owner=10.
 //   5. Release as task 10.
@@ -522,7 +639,8 @@ fn mutex_release(m: State<Mutex>, task_idx: u32) {
 //     succeeds on the first try, locked was 0 after init or after the
 //     prior release's atomic_store(0)).
 //   - The slow path is NEVER taken (no other CPU can hold the lock), so
-//     waitq_count stays at 0 throughout.
+//     waitq_count stays at 0 throughout and the -EAGAIN path is never
+//     exercised.
 //   - The ownership-check error path in mutex_release is NOT exercised
 //     (the test always releases as the current owner — could add a 5th
 //     check `mutex_release(m, 99); if m.owner != 256 { return 5; }` to
@@ -530,12 +648,16 @@ fn mutex_release(m: State<Mutex>, task_idx: u32) {
 //     checks).
 //
 // The test exercises:
-//   - The acquire fast path (CAS succeeds, owner recorded).
-//   - The release path (owner cleared, atomic_store drops the lock word).
+//   - The acquire fast path (CAS succeeds, owner recorded, return 0).
+//   - The release path (owner cleared, atomic_store drops the lock word,
+//     waitq_count decrement guard evaluates false — no waiters).
 //   - Re-acquire after release (different task_idx — owner updated).
 // It does NOT exercise:
-//   - The acquire slow path (would require SMP contention — K8e covers
-//     this with the SMP IPI test infrastructure).
+//   - The acquire slow path / bounded retry loop (would require SMP
+//     contention — K8e covers this with the SMP IPI test infrastructure).
+//   - The -EAGAIN return on retry-cap exhaustion (would require a
+//     deadlocked holder — could add as a 5th check, but the contract
+//     specifies 4).
 //   - The waitq_count increment / decrement (would require the slow path
 //     to be taken — same reason).
 //   - The ownership-check error path (would require a buggy caller —
