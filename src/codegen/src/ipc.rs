@@ -104,10 +104,24 @@ impl EncapsulatedMessage {
 }
 
 pub fn frame_message(msg: &EncapsulatedMessage) -> Vec<u8> {
+    // Auto-set HAS_CAPS when capabilities are present so producers can't
+    // forget to advertise them on the wire. The flag is informational on
+    // the deframe side (`cap_count` in the fixed header is the source of
+    // truth for how many tokens to read), but keeping it in sync with the
+    // actual capability vector makes the wire format self-describing and
+    // lets receivers cheaply decide whether to parse the cap section at
+    // all. Clearing HAS_CAPS when the vec is empty is intentionally NOT
+    // done — a producer that deliberately set the bit (e.g. to reserve
+    // space for a future cap section) keeps it.
+    let mut effective_flags = msg.header.flags;
+    if !msg.capabilities.is_empty() {
+        effective_flags |= MessageFlags::HAS_CAPS;
+    }
+
     let mut buf = Vec::with_capacity(HEADER_SIZE + msg.payload.len() + CRC32_SIZE);
     buf.extend_from_slice(&MAGIC);
     buf.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-    buf.extend_from_slice(&msg.header.flags.bits().to_le_bytes());
+    buf.extend_from_slice(&effective_flags.bits().to_le_bytes());
     buf.extend_from_slice(&msg.header.channel_id.to_le_bytes());
     buf.extend_from_slice(&msg.header.sequence.to_le_bytes());
     buf.extend_from_slice(&msg.header.type_hash.to_le_bytes());
@@ -1590,9 +1604,11 @@ mod tests {
 
     #[test]
     fn test_frame_message_sets_has_caps_flag_consistency() {
-        // When capabilities are present, the framing layer copies them but
-        // does not mutate header.flags — the producer must set HAS_CAPS.
-        // This test pins that contract.
+        // When capabilities are present, `frame_message` must auto-set the
+        // HAS_CAPS flag in the wire header — the producer does not need to
+        // set it manually. This test pins that contract: a message whose
+        // header.flags is EMPTY, but whose `capabilities` vec is non-empty,
+        // must still deframe with HAS_CAPS set in the recovered header.
         let mut msg = EncapsulatedMessage::new(1, 1, type_hash("T"), vec![0]);
         assert_eq!(msg.header.flags, MessageFlags::EMPTY);
 
@@ -1608,7 +1624,7 @@ mod tests {
             signature: [0; 32],
         };
         msg.capabilities.push(cap);
-        msg.header.flags = MessageFlags::HAS_CAPS;
+        // Deliberately do NOT set HAS_CAPS — frame_message must set it.
 
         let framed = frame_message(&msg);
         let decoded = deframe_message(&framed).unwrap();
@@ -2314,5 +2330,187 @@ mod tests {
         let required = capability::MemoryPermissions { read: true, write: false, execute: false };
         let result = capability::verify_capability(recovered, key, 1_500, Some(&resource), &required);
         assert!(result.is_ok(), "recovered capability must verify: {:?}", result.err());
+    }
+
+    // ── Wave 12: capability-in-IPC-message roundtrip tests ─────────────
+    //
+    // W11 made `CapabilityToken::encode`/`decode` real and added
+    // `grant_capability`/`verify_capability`. The L1 framer already
+    // serialised `cap_count` (u32 LE) into the fixed header and appended
+    // each token's `encode()` bytes after the payload, but it did NOT
+    // auto-set the HAS_CAPS flag — the producer had to remember to set
+    // it, and a forgetful producer would silently ship capabilities with
+    // the flag cleared. W12 closes that gap: `frame_message` now sets
+    // HAS_CAPS whenever `msg.capabilities` is non-empty, and the three
+    // tests below pin the 0/1/2-capability roundtrip contract that the
+    // channel-send/recv runtime helper will rely on.
+
+    #[test]
+    fn test_frame_deframe_one_capability_roundtrip() {
+        // Frame a message carrying exactly one capability token, deframe
+        // it, and verify the capability survives the round-trip
+        // byte-for-byte (whole-token equality, the strongest check).
+        let key = b"w12-single-cap-key";
+        let cap = capability::grant_capability(
+            0x1111_2222_3333_4444_5555_6666_7777_8888,
+            1,
+            2,
+            capability::Resource::File("/etc/vuma/cap1.conf".into()),
+            capability::MemoryPermissions { read: true, write: false, execute: false },
+            0,
+            1_000,
+            2_000,
+            key,
+        );
+
+        let mut msg = EncapsulatedMessage::new(
+            0xAAAA,
+            0x0001,
+            type_hash("Vec<u8>"),
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+        );
+        msg.capabilities.push(cap.clone());
+        // Deliberately do NOT set HAS_CAPS — frame_message must auto-set it.
+
+        let framed = frame_message(&msg);
+        // Layout: header + payload + 1 cap token + CRC32.
+        assert_eq!(
+            framed.len(),
+            HEADER_SIZE + msg.payload.len()
+                + capability::CAPABILITY_TOKEN_SIZE
+                + CRC32_SIZE
+        );
+
+        let decoded = deframe_message(&framed).expect("deframe must succeed");
+        assert_eq!(decoded.header.channel_id, 0xAAAA);
+        assert_eq!(decoded.header.sequence, 0x0001);
+        assert_eq!(decoded.header.cap_count, 1);
+        assert_eq!(decoded.capabilities.len(), 1);
+        // Whole-token equality — the strongest round-trip check.
+        assert_eq!(decoded.capabilities[0], cap, "single capability must round-trip exactly");
+        // HAS_CAPS must have been auto-set by frame_message.
+        assert!(decoded.header.flags.contains(MessageFlags::HAS_CAPS));
+        // Payload must survive too.
+        assert_eq!(decoded.payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // The recovered token must still verify.
+        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let result = capability::verify_capability(&decoded.capabilities[0], key, 1_500, None, &required);
+        assert!(result.is_ok(), "recovered single capability must verify: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_frame_deframe_zero_capabilities_roundtrip() {
+        // Frame a message with NO capabilities, deframe it, and verify the
+        // capabilities vec is empty and HAS_CAPS is NOT set. This is the
+        // common case for ordinary channel payloads (e.g. an i32 sent over
+        // a channel with no capability attachments).
+        let msg = EncapsulatedMessage::new(
+            0xBBBB,
+            0x0002,
+            type_hash("i32"),
+            vec![0x2A, 0x00, 0x00, 0x00],
+        );
+        // No capabilities pushed, no flags set.
+
+        let framed = frame_message(&msg);
+        // Layout: header + payload + CRC32 (no cap tokens).
+        assert_eq!(framed.len(), HEADER_SIZE + msg.payload.len() + CRC32_SIZE);
+
+        let decoded = deframe_message(&framed).expect("deframe must succeed");
+        assert_eq!(decoded.header.channel_id, 0xBBBB);
+        assert_eq!(decoded.header.sequence, 0x0002);
+        assert_eq!(decoded.header.cap_count, 0);
+        assert!(decoded.capabilities.is_empty());
+        // HAS_CAPS must NOT be set when there are no capabilities.
+        assert!(!decoded.header.flags.contains(MessageFlags::HAS_CAPS));
+        // Payload must survive.
+        assert_eq!(decoded.payload, vec![0x2A, 0x00, 0x00, 0x00]);
+        let recovered = i32::from_le_bytes(decoded.payload[..].try_into().unwrap());
+        assert_eq!(recovered, 42);
+    }
+
+    #[test]
+    fn test_frame_deframe_two_capabilities_roundtrip() {
+        // Frame a message carrying TWO capability tokens, deframe it, and
+        // verify both tokens survive the round-trip in order,
+        // byte-for-byte. This pins the cap_count*CAPABILITY_TOKEN_SIZE
+        // slicing arithmetic in deframe_message for the multi-cap case
+        // (the single-cap case is covered by the W11 integration test
+        // above, but there was previously no test exercising >1 cap).
+        let key = b"w12-two-caps-key";
+        let cap_a = capability::grant_capability(
+            0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000_1111,
+            1,
+            2,
+            capability::Resource::Network("10.0.0.1".into(), 443),
+            capability::MemoryPermissions { read: true, write: true, execute: false },
+            0,
+            5_000,
+            10_000,
+            key,
+        );
+        let cap_b = capability::grant_capability(
+            0x2222_3333_4444_5555_6666_7777_8888_9999,
+            3,
+            4,
+            capability::Resource::Memory(0x1000, 0x2000),
+            capability::MemoryPermissions { read: true, write: false, execute: true },
+            1,
+            6_000,
+            9_000,
+            key,
+        );
+
+        let mut msg = EncapsulatedMessage::new(
+            0xCCCC,
+            0x0003,
+            type_hash("Vec<u8>"),
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+        );
+        msg.capabilities.push(cap_a.clone());
+        msg.capabilities.push(cap_b.clone());
+        // Deliberately do NOT set HAS_CAPS — frame_message must auto-set it.
+
+        let framed = frame_message(&msg);
+        // Layout: header + payload + 2 cap tokens + CRC32.
+        assert_eq!(
+            framed.len(),
+            HEADER_SIZE + msg.payload.len()
+                + 2 * capability::CAPABILITY_TOKEN_SIZE
+                + CRC32_SIZE
+        );
+
+        let decoded = deframe_message(&framed).expect("deframe must succeed");
+        assert_eq!(decoded.header.channel_id, 0xCCCC);
+        assert_eq!(decoded.header.sequence, 0x0003);
+        assert_eq!(decoded.header.cap_count, 2);
+        assert_eq!(decoded.capabilities.len(), 2);
+        // Both tokens must round-trip exactly, in the order they were framed.
+        assert_eq!(decoded.capabilities[0], cap_a, "first capability must round-trip");
+        assert_eq!(decoded.capabilities[1], cap_b, "second capability must round-trip");
+        // Different ids / resources confirm we didn't accidentally read the
+        // same token twice.
+        assert_ne!(decoded.capabilities[0].id, decoded.capabilities[1].id);
+        assert_ne!(decoded.capabilities[0].resource, decoded.capabilities[1].resource);
+        // HAS_CAPS must be set.
+        assert!(decoded.header.flags.contains(MessageFlags::HAS_CAPS));
+        // Payload must survive.
+        assert_eq!(decoded.payload, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+
+        // Both recovered tokens must still verify against the signing key,
+        // proving the wire round-trip didn't mangle any signature-relevant
+        // field. now=7_000 is inside both validity windows
+        // ([5_000, 10_000] and [6_000, 9_000]).
+        let now = 7_000u64;
+        let required_ro = capability::MemoryPermissions { read: true, write: false, execute: false };
+        assert!(
+            capability::verify_capability(&decoded.capabilities[0], key, now, None, &required_ro).is_ok(),
+            "first recovered capability must verify"
+        );
+        assert!(
+            capability::verify_capability(&decoded.capabilities[1], key, now, None, &required_ro).is_ok(),
+            "second recovered capability must verify"
+        );
     }
 }
