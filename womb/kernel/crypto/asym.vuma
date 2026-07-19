@@ -10,6 +10,140 @@
 // point addition + scalar multiplication + the SHA-512-based nonce
 // derivation per RFC 8032 §5.1.5/§5.1.6).
 //
+// ═══════════════════════════════════════════════════════════════════════════
+// ── W52 STATUS (current state of Ed25519 in VUMA) ───────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The current Ed25519 implementation is NOT cryptographically secure. It
+// is a structural skeleton that exists to validate the PMT-pure API shape
+// (layouts + function signatures + caller-allocated State<T> parameters)
+// against IVE, NOT to produce signatures that would pass real-world
+// verification. Concretely:
+//
+//   • ed25519_keygen fills secret[i] = (i*7+13) mod 256 and
+//     public[i] = (i*11+37) mod 256 — a deterministic, fully predictable
+//     byte fill. The "public key" is NOT derived from the secret via any
+//     curve operation; it is an independent linear ramp. Anyone who knows
+//     the fill rule can forge every "key pair" in the system.
+//
+//   • ed25519_sign emits sig[0..31] = (secret[i] + msg[i]) mod 256 —
+//     mod-256 ADDITION of the secret byte and the message byte. This is
+//     NOT the EdDSA sign equation. There is:
+//       - NO nonce derivation (real Ed25519 derives r = SHA-512(prefix
+//         || msg) per RFC 8032 §5.1.5 — the prefix is the second half of
+//         SHA-512(secret), bytes 32..63);
+//       - NO elliptic-curve scalar multiplication (real Ed25519 computes
+//         R = r·B on Curve25519 — the twisted Edwards curve
+//         -x^2 + y^2 = 1 + d·x^2·y^2 with d = -121665/121666 mod p);
+//       - NO scalar reduction mod L (real Ed25519 computes
+//         S = (r + H(R||A||msg) · s) mod L, where
+//         L = 2^252 + 27742317777372353535851937790883648493 is the
+//         Curve25519 group order, and s = SHA-512(secret)[0..31]
+//         clamped per RFC 8032 §5.1.5 — clear bit 255, set bit 254,
+//         clear bits 0..2 of byte 31).
+//     The mod-256 addition IS a structural improvement over the K10d XOR
+//     stub (addition is non-invertible without knowing the secret, whereas
+//     XOR is its own inverse and trivially recovers secret[i] = sig[i]
+//     XOR msg[i] from any one signature + message pair) — but it is still
+//     NOT real cryptographic security. The same key+msg always produces
+//     the same sig (no nonce, no hashing, no curve arithmetic).
+//
+//   • ed25519_verify re-checks both halves of the stub signature (the
+//     first-half addition check + the second-half embedded public key
+//     check). It does NOT perform the real EdDSA verify equation
+//     (S·B == R + H(R||A||msg)·A on Curve25519 per RFC 8032 §5.1.7).
+//
+// ── What a real implementation would need (RFC 8032 Ed25519) ─────────────────
+//
+//   (1) Curve25519 field arithmetic — all field operations mod
+//       p = 2^255 - 19 (the Mersenne-like prime). Required primitives:
+//         • fe_add, fe_sub, fe_mul, fe_sq, fe_invert — 256-bit field
+//           element arithmetic (VUMA's bignum2048.vuma has the limb
+//           structure; K11+ would specialize it for the 255-bit field).
+//         • fe_reduce — reduction mod p after each multiply (the
+//           "R = R - (R >> 255) * 19" trick from RFC 7748 §5).
+//         • fe_carry — propagate carries across the 5×51-bit or
+//           10×26-bit limb decomposition (the choice is a perf/sec
+//           tradeoff — 10×26 is the canonical Curve25519 representation
+//           per the ref10 implementation).
+//
+//   (2) Twisted Edwards group operations — point addition + doubling on
+//       the curve -x^2 + y^2 = 1 + d·x^2·y^2 (where d is the
+//       -121665/121666 mod p constant, ~a small negative number after the
+//       field reduction). Required primitives:
+//         • ge_add (extended-coordinates addition formula from
+//           RFC 8032 §5.1.5 — the "add-2008-hwcd-3" formula).
+//         • ge_double (the doubling specialization of the add formula).
+//         • ge_scalarmult — variable-base scalar multiplication via
+//           double-and-add (the standard left-to-right bit scan over the
+//           256-bit scalar — MUST be constant-time in production to
+//           avoid leaking the secret scalar via timing side channels;
+//           the ref10 implementation uses a precomputed 2^4 table per
+//           signer to fold 4 scalar bits per iteration).
+//         • ge_scalarmult_base — fixed-base scalar multiplication for
+//           computing A = s·B (B is the Curve25519 base point with
+//           y = 4/5 mod p — a fixed input, so a 256-entry precomputed
+//           table of multiples of B makes this ~8x faster than the
+//           variable-base path).
+//
+//   (3) SHA-512 nonce derivation per RFC 8032 §5.1.5:
+//         • h = SHA-512(secret)  — 64-byte hash of the 32-byte seed.
+//         • s = h[0..31] with clamping (clear bit 255, set bit 254,
+//               clear bits 0..2 of byte 0 — i.e. the scalar is always a
+//               multiple of 8 and lies in 2^254..2^255 to defeat small-
+//               subgroup attacks via cofactor multiplication).
+//         • prefix = h[32..63]  — the second half of the hash, used as
+//               the per-key nonce material.
+//         • r = SHA-512(prefix || msg) mod L  — the per-message nonce
+//               (MUST be reduced mod L before scalar multiplication to
+//               avoid leaking bits of r via the high-order scalar bits;
+//               the reduction is a 512-bit → 252-bit Barrett or
+//               Montgomery reduction).
+//
+//   (4) Point compression / decompression:
+//         • encode_point(R) — the 32-byte y-coordinate of the curve
+//               point R, little-endian, with the high bit of byte 31
+//               carrying the sign of x (since the curve has both x and
+//               -x for each y, the signer must commit to one of them).
+//         • decode_point(sig[0..31]) — the inverse: recover the full
+//               (x, y) point from the 32-byte y + sign bit. The x
+//               coordinate is recovered via x = ±sqrt((y^2 - 1) /
+//               (d·y^2 + 1)) mod p (the choice of sign is the embedded
+//               sign bit). The square root uses the fact that
+//               p ≡ 5 (mod 8), so sqrt(a) = a^((p+3)/8) mod p with a
+//               conditional multiply by 2^((p-1)/4) if a is a non-
+//               residue. (RFC 8032 §5.1.3 has the full algorithm.)
+//
+//   (5) Constant-time scalar reduction mod L (L = 2^252 + 27742317777372353535851937790883648493)
+//         — the scalar S = (r + k·s) mod L computed at sign time, and
+//         the scalar S decoded from the signature at verify time, must
+//         both be reduced mod L (otherwise the scalar multiplication
+//         would be on the wrong group element). The reduction is a
+//         512-bit → 252-bit Barrett reduction with a precomputed L^(-1)
+//         mod 2^512 constant.
+//
+//   (6) Constant-time verification equation per RFC 8032 §5.1.7:
+//         compute k = SHA-512(R || A || msg), then check S·B == R + k·A
+//         on the curve. The check MUST be constant-time (the same number
+//         of operations regardless of which point is being verified) to
+//         avoid leaking information about the signature's validity via
+//         timing. The reference implementation uses a single combined
+//         double-scalar multiplication (S·B - k·A == R) rather than two
+//         separate scalar multiplications + a point comparison.
+//
+// ── Why this is hard in VUMA ──────────────────────────────────────────────────
+//   VUMA's default integer type widens u32 arithmetic to u64 — every
+//   field-element limb operation has to be carefully masked with
+//   `& MASK64` and reduced mod p after each multiply to fit within
+//   the 10×26-bit limb representation. The 512-bit SHA-512 nonce
+//   reduction mod L requires a 256×256-bit multiply (the bignum2048
+//   scaffolding exists but is unoptimized). And there is currently NO
+//   constant-time conditional-swap primitive (the `cswap(t, a, b)` that
+//   swaps a and b iff t=1, used in the Montgomery ladder for variable-
+//   base scalar multiplication) — K11+ would need to add a
+//   `fn cswap_u8(t: u8, a: State<Fe>, b: State<Fe>)` helper built on
+//   top of the existing atomic_cas primitive (womb/kernel/sync/spinlock.vuma).
+//
 // ── What W29S3 provides ─────────────────────────────────────────────────────
 //   ed25519_keygen(key)                          — STUB: fill secret with
 //                                                  (i*7+13) mod 256 and
