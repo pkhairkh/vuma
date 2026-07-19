@@ -3818,6 +3818,74 @@ impl Emitter {
                             self.emit_instruction(Instruction::SVC { imm16: 0 })?;
                             true
                         }
+                        ("spawn_worker", 0, _) => {
+                            // vfork() on aarch64: sys_vfork=221
+                            self.emit_load_immediate(Register::X0, 17)?; // SIGCHLD
+                            self.emit_load_immediate(Register::X1, 0)?;
+                            self.emit_load_immediate(Register::X2, 0)?;
+                            self.emit_load_immediate(Register::X3, 0)?;
+                            self.emit_load_immediate(Register::X4, 0)?;
+                            self.emit_load_immediate(Register::X8, 220)?; // sys_clone
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            if let Some(d) = dst {
+                                if let Some(dst_id) = d.as_register() {
+                                    let dst_off = slots.get(&dst_id).copied().unwrap_or(0);
+                                    self.ss_store_to_slot(Register::X0, dst_off)?;
+                                }
+                            }
+                            true
+                        }
+                        ("wait_worker", 1, _) => {
+                            // wait4(pid, &status, 0, NULL): sys_wait4=2601
+                            // NOTE: QEMU-aarch64 7.2 reports "Unknown syscall 2601".
+                            // The child's exit code should be communicated via channels,
+                            // not via wait_worker. If wait4 fails, return 0.
+                            self.ss_load_value(&args[0], Register::X0, slots)?;
+                            self.emit_load_immediate(Register::X1, -16)?;
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::X1, rn: Register::X29,
+                                rm: Operand::Reg { reg: Register::X1, shift: None },
+                            })?;
+                            self.emit_load_immediate(Register::X2, 0)?; // options
+                            self.emit_load_immediate(Register::X3, 0)?; // rusage=NULL
+                            self.emit_load_immediate(Register::X8, 2601)?; // sys_wait4
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            // Check if syscall succeeded (X0 >= 0)
+                            // If X0 < 0 (error), return 0
+                            // Load status from stack
+                            self.emit_load_immediate(Register::X9, -16)?;
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::X9, rn: Register::X29,
+                                rm: Operand::Reg { reg: Register::X9, shift: None },
+                            })?;
+                            self.emit_instruction(Instruction::LDR {
+                                rt: Register::X0, rn: Register::X9, offset: 0,
+                            })?;
+                            // WEXITSTATUS: (status >> 8) & 0xFF
+                            self.emit_instruction(Instruction::UBFM {
+                                rd: Register::X0, rn: Register::X0, immr: 8, imms: 31,
+                            })?;
+                            self.emit_load_immediate(Register::X9, 0xFF)?;
+                            self.emit_instruction(Instruction::AND {
+                                rd: Register::X0, rn: Register::X0,
+                                rm: Register::X9,
+                            })?;
+                            if let Some(d) = dst {
+                                if let Some(dst_id) = d.as_register() {
+                                    let dst_off = slots.get(&dst_id).copied().unwrap_or(0);
+                                    self.ss_store_to_slot(Register::X0, dst_off)?;
+                                }
+                            }
+                            true
+                        }
+                        ("kill_worker", 1, _) => {
+                            // kill(pid, SIGTERM=15): sys_kill=129
+                            self.ss_load_value(&args[0], Register::X0, slots)?;
+                            self.emit_load_immediate(Register::X1, 15)?;
+                            self.emit_load_immediate(Register::X8, 129)?;
+                            self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            true
+                        }
                         _ => false,
                     };
                     if matched {
