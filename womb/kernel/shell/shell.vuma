@@ -56,6 +56,19 @@
 //                                   line; if 0, does nothing. Helpers:
 //                                   shell_name_has_prefix (prefix check) +
 //                                   shell_complete_name (append rest + space).
+//   shell_do_help(s)              — W27S2: print a formatted 13-line list of
+//                                   all 12 commands with one-line descriptions
+//                                   ("Available commands:\n" header + 12 rows).
+//                                   Each row routed through shell_print_paged.
+//   shell_print_paged(s,text,len) — W27S3: write one logical line to stdout
+//                                   and bump s.line_count; when the counter
+//                                   reaches 24, emit "--More--\n" and reset.
+//                                   Pagination pause is a no-op in hosted mode
+//                                   (no keypress read); the marker is still
+//                                   emitted so the page boundary is visible.
+//                                   PMT-pure limitation: cannot dereference
+//                                   `text` to count actual '\n' bytes, so
+//                                   each call counts as exactly 1 line.
 //
 // ── Shell line-buffer geometry ─────────────────────────────────────────────
 // The shell's line buffer is a flat [u8; 256] array with one cursor:
@@ -135,7 +148,8 @@
 // layout it uses. The two layouts are NEW (K6f introduces them — no prior
 // wave declares Shell or ShellOut):
 //
-//   Shell (W27S4: +68 bytes for cwd/cwd_len — now ~600 bytes total):
+//   Shell (W27S4: +68 bytes for cwd/cwd_len; W27S3: +4 bytes for
+//          line_count — now ~604 bytes total):
 //     buf       @ 0    [u8; 256]  — the input line buffer (256 bytes).
 //                                    Indexed [0..buf_len) during parsing;
 //                                    bytes beyond buf_len are stale
@@ -157,6 +171,12 @@
 //                                    Initialized to "/" by shell_init;
 //                                    K7+ `cd` will mutate it.
 //     cwd_len   @ 593  u32        — W27S4: bytes currently in cwd (0..64).
+//     line_count @ ~600 u32       — W27S3: pagination line counter (0..24).
+//                                    Bumped by shell_print_paged on each
+//                                    line emitted; reset to 0 when it
+//                                    reaches 24 (after emitting "--More--\n").
+//                                    Persists across commands (see
+//                                    shell_print_paged's "Persistence" note).
 //   (The exact layout padding doesn't matter for K6f because we access
 //   fields by name, never by hand-computed offset — VUMA's layout pass
 //   handles alignment. The offsets above are approximate for documentation.)
@@ -313,6 +333,7 @@ layout Shell = {
     redirect_mode: u8,       // W26S5-S6: 1 = capturing output, 0 = normal
     cwd: [u8; 64],           // W27S4: current working directory (max 64 bytes)
     cwd_len: u32,            // W27S4: bytes currently in cwd (0..64)
+    line_count: u32,         // W27S3: pagination line counter (0..24)
 }
 
 // ShellOut: a 256-byte buffer used by shell_prompt (W27S4: cwd bytes for
@@ -348,6 +369,11 @@ fn shell_init(s: State<Shell>) {
     // starts at root and stays there.
     s.cwd[0] = 47;   // '/'
     s.cwd_len = 1;
+    // W27S3: initialize the pagination line counter to 0. Each call to
+    // shell_print_paged bumps this by 1; when it reaches 24, "--More--\n"
+    // is emitted and the counter resets. Initialized here so the first
+    // command after shell_init starts at line 0.
+    s.line_count = 0;
 }
 
 // Print a prompt to stdout. W27S4: the prompt format is now "vwk:" + cwd +
@@ -592,6 +618,72 @@ fn shell_puts(s: State<Shell>, addr: Address, len: i64) {
         // Capturing — drop literal output (cannot read from addr).
     } else {
         write(1, addr, len);
+    }
+}
+
+// shell_print_paged: write one logical line of output to stdout, with a
+// 24-line pagination pause. W27S3.
+//
+// Each call writes the `len` bytes starting at .rodata address `addr` to
+// stdout (via the `write` extern — same PMT "Borrowed read" pattern as
+// shell_puts), then bumps `s.line_count` by 1. When `s.line_count` reaches
+// 24, the function emits "--More--\n" (9 bytes — Wave 1 string literal)
+// and resets `s.line_count` to 0, mimicking the standard Unix `more` /
+// `less` "press SPACE to continue" prompt.
+//
+// PMT-pure limitation: the task spec says "count newlines and when count
+// >= 24, write `--More--\n` and reset". We CANNOT dereference `addr` (no
+// `*ptr` syntax in VUMA), so we cannot literally count the '\n' (byte 10)
+// bytes inside `text`. The simplification: each call to shell_print_paged
+// is treated as exactly ONE line of output (the caller is expected to
+// pass one logical line per call — typically a string literal whose
+// content ends with '\n'). This is the canonical usage pattern: the
+// built-in commands (shell_do_help, the W27S2 formatted list, future
+// long-output commands like a real `ls -l` or `cat` of a long file)
+// emit one line per shell_print_paged call, so the per-call = per-line
+// accounting is exact for them.
+//
+// "Brief pause instead of keypress": the task spec acknowledges that we
+// can't easily read a keypress in hosted mode (no raw terminal control —
+// `read` would block on a cooked-mode TTY waiting for Enter). The
+// implementation here does NOT pause at all — it emits "--More--\n" and
+// immediately continues. This matches the spec's "just continue after a
+// brief pause" guidance (the brief pause being effectively zero in this
+// implementation; a K8+ wave that wires up raw-mode TTY input could add
+// a real blocking read here). The "--More--\n" marker is still emitted
+// so the user sees where the page boundary would be on a real terminal.
+//
+// Redirect interaction: when `s.redirect_mode == 1` (capturing for a
+// pipe / file redirect), output is suppressed AND the line counter is
+// NOT bumped — pagination is meaningless while capturing (the captured
+// bytes aren't going to the terminal, so there's no page boundary to
+// honor). This mirrors shell_puts's redirect suppression. After the
+// redirect ends, the counter resumes from where it left off.
+//
+// Persistence: `s.line_count` is a Shell-layout field, so it persists
+// ACROSS commands — the counter is NOT reset between commands. This
+// means if a command emits 20 lines and the next emits 10, the
+// "--More--\n" marker fires 4 lines into the second command (20 + 4 =
+// 24). This is a known simplification (real `more` resets per
+// invocation); a K7+ wave could reset `s.line_count = 0` at the top of
+// shell_execute if per-command pagination is desired.
+fn shell_print_paged(s: State<Shell>, text: Address, len: u32) {
+    // W26S5-S6 redirect suppression — same as shell_puts.
+    if s.redirect_mode == 1 {
+        // Capturing — drop literal output (cannot read from text) AND
+        // skip the line-counter bump (pagination is meaningless while
+        // capturing to a pipe / file).
+        return;
+    }
+    // Write the one logical line to stdout.
+    write(1, text, len as i64);
+    // Bump the line counter. When it reaches 24, emit "--More--\n" and
+    // reset. The 24 threshold matches the standard 24-line terminal
+    // height (VT100 / DEC VT100 default — same as `more`'s default).
+    s.line_count = s.line_count + 1;
+    if s.line_count >= 24 {
+        write(1, "--More--\n", 9);
+        s.line_count = 0;
     }
 }
 
@@ -1000,11 +1092,66 @@ fn shell_do_echo(s: State<Shell>) {
 // route the new commands (otherwise "help" / "ls" / "cat" / "pwd" /
 // "ver" would all fall through to the "?\n" unknown-command marker).
 
-// `help` — print a one-line summary of available commands.
-// K7+ will extend this to a per-command help (`help echo` → echo docs).
+// `help` — print a formatted list of all 12 commands with one-line
+// descriptions. W27S2.
+//
+// Output (13 lines total — 1 header + 12 command rows):
+//   Available commands:
+//     echo <text>     Print text to stdout
+//     exit [code]     Exit the shell
+//     help            Show this help
+//     ls              List directory contents
+//     cat <file>      Display file contents
+//     pwd             Print working directory
+//     ver             Print version
+//     ps              List processes
+//     memstat         Show memory statistics
+//     clear           Clear screen
+//     true            Return success (0)
+//     false           Return failure (1)
+//
+// Layout: each row is "  " (2-space prefix) + command-name column (padded
+// to 16 chars wide so the descriptions align) + one-line description +
+// trailing newline. The 2-space prefix + 16-char name column puts the
+// description column at byte offset 18 (matches the canonical Unix
+// `help` / `usage` layout — same as bash's `help` builtin).
+//
+// W27S3: each line is routed through shell_print_paged instead of
+// shell_puts, so the 24-line pagination counter accumulates as the help
+// text streams out. Since help is only 13 lines, pagination does NOT
+// trigger for help itself — but if `help` is the second command in a
+// session whose first command emitted >= 11 lines, the "--More--\n"
+// marker would fire mid-help (the counter is persistent across commands;
+// see shell_print_paged's "Persistence" note).
+//
+// PMT-pure: each line is a Wave 1 string literal lowered to a .rodata
+// address, passed to shell_print_paged as the `text: Address` argument
+// (same "Borrowed read" pattern as shell_puts / shell_do_ver / etc.).
+// The byte counts passed to shell_print_paged are pre-computed at
+// authoring time (verified via Python `len()` — see the W27S2 worklog
+// entry); the compiler does NOT compute string-literal lengths
+// automatically in VUMA, so each `shell_print_paged(s, "...", N)` call
+// has a hand-verified N. A future wave could add a `strlen` extern or a
+// compiler intrinsic to avoid the manual count.
+//
+// K7+ will extend this to per-command help (`help echo` → echo docs).
 fn shell_do_help(s: State<Shell>) {
-    // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
-    shell_puts(s, "cmds: echo exit help ls cat pwd ver ps memstat clear true false\n", 64);
+    // Header.
+    shell_print_paged(s, "Available commands:\n", 20);
+    // 12 command rows. Each is "  " + name (padded to 16 wide) +
+    // description + "\n". Byte counts verified via Python len().
+    shell_print_paged(s, "  echo <text>     Print text to stdout\n", 39);
+    shell_print_paged(s, "  exit [code]     Exit the shell\n", 33);
+    shell_print_paged(s, "  help            Show this help\n", 33);
+    shell_print_paged(s, "  ls              List directory contents\n", 42);
+    shell_print_paged(s, "  cat <file>      Display file contents\n", 40);
+    shell_print_paged(s, "  pwd             Print working directory\n", 42);
+    shell_print_paged(s, "  ver             Print version\n", 32);
+    shell_print_paged(s, "  ps              List processes\n", 33);
+    shell_print_paged(s, "  memstat         Show memory statistics\n", 41);
+    shell_print_paged(s, "  clear           Clear screen\n", 31);
+    shell_print_paged(s, "  true            Return success (0)\n", 37);
+    shell_print_paged(s, "  false           Return failure (1)\n", 37);
 }
 
 // `ls` — list files in the current directory.
