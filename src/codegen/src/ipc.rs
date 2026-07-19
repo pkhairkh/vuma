@@ -1246,4 +1246,185 @@ mod tests {
         assert!(decoded.permissions.read);
         assert!(!decoded.permissions.write);
     }
+
+    // ── Wave 10: Channel-send/recv framing integration tests ───────────
+    //
+    // The x86_64 backend's `channel_send` / `channel_recv` handlers in
+    // `stack_slot_isel.rs` currently emit raw `write(fd, &msg, 8)` /
+    // `read(fd, &dst, 8)` syscalls — no framing. Inlining the full L1
+    // wire format (header + CRC32) in assembly is impractical, so the
+    // plan is to ship a Rust runtime helper (`__vuma_channel_send` /
+    // `__vuma_channel_recv`) that wraps the payload with `frame_message`
+    // / `deframe_message` and verifies CRC + type hash on the receive
+    // side. These four tests pin the contract that those helpers will
+    // rely on: they exercise the framing layer with the exact shape of
+    // payload a channel op produces (a little-endian i32) and verify
+    // roundtrip, CRC mismatch detection, type-hash mismatch detection,
+    // and multi-message stream framing.
+
+    /// Helper: build a channel-style EncapsulatedMessage for an i32 payload.
+    ///
+    /// Mirrors what `__vuma_channel_send(write_fd, buf, count=4,
+    /// channel_id, type_hash=type_hash("i32"))` would feed into
+    /// `frame_message` — a 4-byte little-endian payload, a per-channel
+    /// channel_id, a monotonically increasing sequence number, and the
+    /// canonical FNV-1a type hash for "i32".
+    fn channel_i32_message(channel_id: u64, sequence: u64, value: i32) -> EncapsulatedMessage {
+        EncapsulatedMessage::new(
+            channel_id,
+            sequence,
+            type_hash("i32"),
+            value.to_le_bytes().to_vec(),
+        )
+    }
+
+    #[test]
+    fn test_frame_deframe_roundtrip_i32_channel_payload() {
+        // Simulate a single `channel_send(ch, 42)` → `channel_recv(ch)`.
+        let msg = channel_i32_message(/*channel_id*/ 7, /*sequence*/ 0, /*value*/ 42);
+        let framed = frame_message(&msg);
+
+        // Framed layout: 44-byte header + 4-byte payload + 4-byte CRC.
+        assert_eq!(framed.len(), HEADER_SIZE + 4 + CRC32_SIZE);
+        assert_eq!(&framed[0..4], &MAGIC);
+
+        let decoded = deframe_message(&framed).expect("deframe should succeed");
+
+        // Header fields must survive the roundtrip exactly.
+        assert_eq!(decoded.header.channel_id, 7);
+        assert_eq!(decoded.header.sequence, 0);
+        assert_eq!(decoded.header.type_hash, type_hash("i32"));
+        assert_eq!(decoded.header.payload_len, 4);
+        assert_eq!(decoded.header.cap_count, 0);
+
+        // Payload must decode back to the original i32 (little-endian).
+        assert_eq!(decoded.payload.len(), 4);
+        let recovered = i32::from_le_bytes(decoded.payload[..].try_into().unwrap());
+        assert_eq!(recovered, 42);
+    }
+
+    #[test]
+    fn test_frame_deframe_crc_mismatch_detection() {
+        // Model the receive side detecting a corrupted frame on the wire.
+        let msg = channel_i32_message(11, 0, -1);
+        let mut framed = frame_message(&msg);
+
+        // Flip a payload byte — must invalidate the CRC32 trailer.
+        let payload_byte = HEADER_SIZE;
+        let original_byte = framed[payload_byte];
+        framed[payload_byte] ^= 0xFF;
+        assert_ne!(framed[payload_byte], original_byte);
+
+        // Recompute the CRC the way `__vuma_channel_recv` would, and
+        // confirm it no longer matches the stored trailer.
+        let body_end = framed.len() - CRC32_SIZE;
+        let stored_crc = u32::from_le_bytes(framed[body_end..].try_into().unwrap());
+        let recomputed_crc = crc32(&framed[..body_end]);
+        assert_ne!(stored_crc, recomputed_crc);
+
+        // The deframer must reject the corrupted frame with CrcMismatch.
+        match deframe_message(&framed) {
+            Err(FrameError::CrcMismatch { expected, actual }) => {
+                assert_eq!(expected, stored_crc);
+                assert_eq!(actual, recomputed_crc);
+            }
+            other => panic!("expected CrcMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_frame_deframe_type_hash_mismatch_detection() {
+        // A producer sends an i32; the consumer expects an i64. The L1
+        // deframer accepts any well-formed frame (it has no notion of
+        // the *expected* type), so the type-hash mismatch is detected
+        // by the recv helper *after* deframing succeeds. This test
+        // pins that two-step contract: deframe OK, then type-hash
+        // compare fails.
+        let sent_value: i32 = 0x1234_5678;
+        let msg = channel_i32_message(/*channel_id*/ 3, /*sequence*/ 1, sent_value);
+        let framed = frame_message(&msg);
+
+        let decoded = deframe_message(&framed).expect("well-formed frame must deframe");
+
+        // The producer's type hash is for "i32".
+        let produced_hash = decoded.header.type_hash;
+        assert_eq!(produced_hash, type_hash("i32"));
+
+        // The consumer was compiled to expect an i64 — different hash.
+        let expected_hash = type_hash("i64");
+        assert_ne!(produced_hash, expected_hash);
+
+        // This is the check `__vuma_channel_recv` would perform:
+        //   if decoded.header.type_hash != expected_type_hash { return -1 }
+        let type_matches = decoded.header.type_hash == expected_hash;
+        assert!(!type_matches, "i32 frame must not satisfy i64 consumer");
+
+        // Sanity: when the consumer expects i32, the same check passes.
+        let correct_expected_hash = type_hash("i32");
+        assert_eq!(decoded.header.type_hash, correct_expected_hash);
+
+        // And the payload still decodes to the original i32 value.
+        let recovered = i32::from_le_bytes(decoded.payload[..].try_into().unwrap());
+        assert_eq!(recovered, sent_value);
+    }
+
+    #[test]
+    fn test_frame_deframe_multi_message_sequence() {
+        // Model the existing `multi_message.vuma` gold test (send 3,
+        // recv 3 in order: 10, 20, 33) but at the framing layer: three
+        // framed messages are concatenated into a single stream (as
+        // they would be when written to a pipe by a Rust helper), and
+        // the receiver walks the stream one frame at a time.
+        let payloads: [(u64, i32); 3] = [
+            (0, 10),
+            (1, 20),
+            (2, 33),
+        ];
+        let channel_id: u64 = 0xCAFE_F00D;
+
+        // Producer side: frame each message and concatenate.
+        let mut stream: Vec<u8> = Vec::new();
+        let mut frame_lengths: Vec<usize> = Vec::with_capacity(3);
+        for (seq, val) in payloads {
+            let msg = channel_i32_message(channel_id, seq, val);
+            let framed = frame_message(&msg);
+            frame_lengths.push(framed.len());
+            stream.extend_from_slice(&framed);
+        }
+
+        // Each i32 payload is 4 bytes, so every frame is the same size.
+        for &fl in &frame_lengths {
+            assert_eq!(fl, HEADER_SIZE + 4 + CRC32_SIZE);
+        }
+
+        // Consumer side: walk the stream, deframing one message at a time.
+        let mut offset = 0usize;
+        let mut received: Vec<i32> = Vec::with_capacity(3);
+        for (i, (expected_seq, expected_val)) in payloads.iter().enumerate() {
+            let frame_len = frame_lengths[i];
+            let frame = &stream[offset..offset + frame_len];
+            let decoded = deframe_message(frame).expect("each framed message must deframe");
+
+            // Header fields must match what the producer framed.
+            assert_eq!(decoded.header.channel_id, channel_id);
+            assert_eq!(decoded.header.sequence, *expected_seq);
+            assert_eq!(decoded.header.type_hash, type_hash("i32"));
+            assert_eq!(decoded.header.payload_len, 4);
+
+            // Payload must decode to the original i32, in order.
+            let val = i32::from_le_bytes(decoded.payload[..].try_into().unwrap());
+            assert_eq!(val, *expected_val);
+            received.push(val);
+
+            offset += frame_len;
+        }
+
+        // All three messages received in order — matches multi_message.vuma
+        // (exit code = 10 + 20 + 33 = 63).
+        assert_eq!(received, vec![10, 20, 33]);
+        assert_eq!(received.iter().map(|&v| v as i64).sum::<i64>(), 63);
+
+        // Stream must be fully consumed (no trailing bytes).
+        assert_eq!(offset, stream.len());
+    }
 }
