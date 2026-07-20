@@ -538,14 +538,20 @@ fn test_cross_backend_arithmetic() {
             .allocate_registers(&func)
             .unwrap_or_else(|e| panic!("{}: allocate_registers failed: {}", name, e));
 
-        // Arithmetic function should have more instructions than the simple one
+        // Arithmetic function should have more instructions than the simple one.
+        // Wasm32 is a stack machine: allocate_registers bundles the entire
+        // function body into a single "wasm_body" AllocatedInstruction (to
+        // preserve exact byte offsets for call-relocation patching), so the
+        // instruction count is always 1 regardless of the IR size.  For
+        // Wasm32 we skip the count check and rely on the byte-size check
+        // below to confirm real code was emitted.
         let total_instrs: usize = allocated
             .blocks
             .iter()
             .map(|b| b.instructions.len())
             .sum();
         assert!(
-            total_instrs >= 3,
+            total_instrs >= 3 || kind == BackendKind::Wasm32,
             "{}: arithmetic program should have at least 3 instructions (got {})",
             name,
             total_instrs
@@ -585,14 +591,20 @@ fn test_cross_backend_memory() {
             .allocate_registers(&func)
             .unwrap_or_else(|e| panic!("{}: allocate_registers failed: {}", name, e));
 
-        // Memory function should have alloc + store + load + and instructions
+        // Memory function should have alloc + store + load + and instructions.
+        // Wasm32 is a stack machine: allocate_registers bundles the entire
+        // function body into a single "wasm_body" AllocatedInstruction (to
+        // preserve exact byte offsets for call-relocation patching), so the
+        // instruction count is always 1 regardless of the IR size.  For
+        // Wasm32 we skip the count check and rely on the byte-size check
+        // below to confirm real code was emitted.
         let total_instrs: usize = allocated
             .blocks
             .iter()
             .map(|b| b.instructions.len())
             .sum();
         assert!(
-            total_instrs >= 4,
+            total_instrs >= 4 || kind == BackendKind::Wasm32,
             "{}: memory program should have at least 4 instructions (got {})",
             name,
             total_instrs

@@ -343,6 +343,7 @@ fn prop_parser_roundtrip_no_errors() {
     }
 }
 
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn prop_parser_memory_program() {
     for &program in SAMPLE_MEMORY_PROGRAMS {

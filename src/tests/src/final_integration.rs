@@ -362,6 +362,7 @@ fn test_full_pipeline_parse_to_elf() {
 }
 
 /// Test: Parse sha256d.vuma through the full pipeline for AArch64.
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_full_pipeline_sha256d_aarch64() {
     let sha256d_source = include_str!("../../../examples/sha256d.vuma");

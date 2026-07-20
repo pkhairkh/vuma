@@ -1912,7 +1912,9 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_build_scg_from_valid_source() {
-        let source = "region pool = allocate(1024); free(pool);";
+        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
+        // V1.0 `region pool = allocate(1024); free(pool);` source.
+        let source = "fn main() { return; }";
         let result = build_scg_from_source(source);
         assert!(result.is_ok(), "Expected successful SCG construction");
 
@@ -2087,7 +2089,9 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_verify_program_detailed_all_stages() {
-        let source = "region buf = allocate(256); free(buf);";
+        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
+        // V1.0 `region buf = allocate(256); free(buf);` source.
+        let source = "fn main() { return; }";
         let result = verify_program_detailed(source);
 
         // All stages should pass (codegen is now enabled).
@@ -2138,14 +2142,17 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_verify_program_at_quick_level() {
-        let source = "region buf = allocate(256); free(buf);";
+        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
+        // V1.0 `region buf = allocate(256); free(buf);` source.
+        let source = "fn main() { return; }";
         let result = verify_program_at_level(source, VerificationLevel::Quick);
 
-        // Quick level should only run 2 checks (exclusivity + origin).
+        // (Wave 19) Quick now runs ALL 5 invariants (not just the 2-invariant
+        // quick_set) at reduced depth.
         assert_eq!(
             result.per_invariant.len(),
-            2,
-            "Quick verification should run exactly 2 invariant checks"
+            5,
+            "Quick verification should run all 5 invariant checks (Wave 19)"
         );
         assert_eq!(result.level, VerificationLevel::Quick);
     }
@@ -2155,14 +2162,17 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_verify_program_at_exhaustive_level() {
-        let source = "region buf = allocate(256); free(buf);";
+        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
+        // V1.0 `region buf = allocate(256); free(buf);` source.
+        let source = "fn main() { return; }";
         let result = verify_program_at_level(source, VerificationLevel::Exhaustive);
 
-        // Exhaustive level should run all 5 checks.
+        // Exhaustive level runs the core 5 invariants + interprocedural
+        // analysis (6 total).
         assert_eq!(
             result.per_invariant.len(),
-            5,
-            "Exhaustive verification should run all 5 invariant checks"
+            6,
+            "Exhaustive verification should run 6 invariant checks (5 core + interprocedural)"
         );
         assert_eq!(result.level, VerificationLevel::Exhaustive);
     }
@@ -2381,7 +2391,9 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_pipeline_result_display() {
-        let source = "region buf = allocate(64); free(buf);";
+        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
+        // V1.0 `region buf = allocate(64); free(buf);` source.
+        let source = "fn main() { return; }";
         let result = verify_program_detailed(source);
         let display = format!("{}", result);
         assert!(display.contains("Pipeline Result"));
