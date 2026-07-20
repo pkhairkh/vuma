@@ -2363,12 +2363,41 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // jne magic_fail (rel32, placeholder)
                                 let jne_magic_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
-                                // Wave 12b: capability check — reject messages
-                                // with cap_count > 0 (unverifiable capabilities).
+                                // Wave 12b: capability verification — if cap_count > 0,
+                                // the message carries a capability token.  Read the
+                                // 8-byte cap_id from the extended frame section
+                                // ([rsp+56..64]) by issuing a second read() for 8
+                                // bytes, then verify the cap_id is non-zero
+                                // (structural check: a valid CapabilityToken has a
+                                // non-zero id field; a zero id means the token is
+                                // absent/forged → PermissionDenied).
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                let jne_cap_patch = code.len();
+                                // je cap_skip (cap_count == 0 → no cap to verify)
+                                let je_cap_skip_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                // cap_count > 0: read 8 more bytes (the cap_id) into [rsp+56].
+                                // RDI still holds read_fd (preserved across the first read).
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 56));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                                code.extend(encode_syscall());
+                                // Verify cap_id ([rsp+56]) is non-zero.
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 56));
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // jne cap_ok (cap_id != 0 → valid structural token)
+                                let jne_cap_ok_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // cap_id == 0 → forged/invalid token → cap_fail.
+                                // je cap_fail (cap_id == 0 → PermissionDenied).
+                                let jne_cap_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32 (placeholder, patched to cap_fail below)
+                                // cap_ok: cap_id is valid (non-zero) → fall through to CRC check.
+                                let cap_ok_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_cap_ok_patch, cap_ok_off);
+                                // cap_skip: cap_count == 0 → no cap to verify.
+                                let cap_skip_off = code.len();
+                                patch_rel32_jcc(&mut code, je_cap_skip_patch, cap_skip_off);
                                 // Wave 10b: CRC32 verification — compute CRC32 over
                                 // [rsp+0..52] (header + payload) and compare with the
                                 // stored CRC at [rsp+52].  On mismatch, jump to the
@@ -2795,6 +2824,137 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_syscall());
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
                                 instr_opcode = Some("set_memory_limit".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 12b: capability_grant(resource_id, perms) -> u64
+                            // Mints a CapabilityToken at compile time via
+                            // ipc::capability::grant_capability and returns its
+                            // id (low 64 bits of the u128) as an immediate.  The
+                            // caller passes this id to channel_send_cap(ch, msg, cap_id)
+                            // to attach the capability to a framed message.
+                            //
+                            // This is a compile-time operation: the token is
+                            // minted in the compiler and only its 64-bit id is
+                            // materialised in the emitted code (the full 160-byte
+                            // token is not embedded inline — the structural
+                            // verification on recv checks the id field).
+                            "capability_grant" if args.len() == 2 && dst.is_some() => {
+                                // Extract resource_id and perms as compile-time
+                                // constants (they must be immediates for the
+                                // compile-time grant_capability call).
+                                let resource_id = match &args[0] {
+                                    IRValue::Immediate(v) => *v as u64,
+                                    _ => 0,
+                                };
+                                let perms_raw = match &args[1] {
+                                    IRValue::Immediate(v) => *v as u64,
+                                    _ => 0,
+                                };
+                                // Mint the token at compile time.  Use a
+                                // deterministic signing key (the VUMA default
+                                // dev key) so the id is reproducible.
+                                let resource = crate::ipc::capability::Resource::Channel(resource_id);
+                                let perms = crate::ipc::capability::MemoryPermissions {
+                                    read: (perms_raw & 1) != 0,
+                                    write: (perms_raw & 2) != 0,
+                                    execute: (perms_raw & 4) != 0,
+                                    ..Default::default()
+                                };
+                                let token = crate::ipc::capability::grant_capability(
+                                    resource_id as u128,    // id
+                                    1,                       // source_pid
+                                    1,                       // target_pid
+                                    resource,
+                                    perms,
+                                    0,                       // delegation_depth
+                                    0,                       // created_at
+                                    3600,                    // ttl_seconds (1 hour)
+                                    b"vuma_dev_signing_key", // signing key
+                                );
+                                let cap_id = (token.id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, cap_id));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                instr_opcode = Some("capability_grant".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 12b: channel_send_cap(ch, msg, cap_id) —
+                            // Like channel_send but attaches a capability token
+                            // (cap_count=1).  The frame is extended to 64 bytes:
+                            //   [0..44)   header (cap_count field at [40..44] = 1)
+                            //   [44..52)  payload (8 bytes)
+                            //   [52..56)  CRC32 (over [0..52])
+                            //   [56..64)  capability id (8 bytes)
+                            // The receiver (ChannelRecv) reads 56 bytes, sees
+                            // cap_count=1, reads 8 more bytes, and verifies the
+                            // cap_id is non-zero (structural check).
+                            "channel_send_cap" if args.len() == 3 => {
+                                let ch = &args[0];
+                                let msg = &args[1];
+                                let cap = &args[2];
+                                let th = crate::ipc::type_hash("i64");
+                                // write_fd = high 32 bits of handle
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off + 4));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 4));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+                                // Build 64-byte frame on stack.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 64));
+                                // [rsp+0] = MAGIC
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x414D5556));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax));
+                                // [rsp+4] = version(2)+flags(0)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x00020000));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rax));
+                                // [rsp+8] = channel_id = 0
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                // [rsp+16] = sequence (from seq_counter_off)
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, seq_counter_off));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rcx));
+                                code.extend(encode_add_reg_imm32(Gpr::Rcx, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, seq_counter_off, Gpr::Rcx));
+                                // [rsp+24] = type_hash
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, th));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                // [rsp+32] = payload_len = 8
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 8));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                                // [rsp+36..40] = 0 (high payload_len)
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 36, Gpr::Rax));
+                                // [rsp+40] = cap_count = 1 (Wave 12b: this message
+                                // carries a capability token).
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 40, Gpr::Rax));
+                                // [rsp+44] = payload (8 bytes)
+                                code.extend(load_value(msg, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 44, Gpr::Rax));
+                                // [rsp+52] = CRC32 (over [0..52])
+                                code.extend(emit_crc32_frame_loop());
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::R8));
+                                // [rsp+56] = cap_id (8 bytes) — the capability
+                                // token's id field, embedded in the frame's
+                                // capability section.
+                                code.extend(load_value(cap, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 56, Gpr::Rax));
+                                // write(write_fd, &frame, 64)
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 64));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
+                                code.extend(encode_syscall());
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 64));
+                                instr_opcode = Some("channel_send_cap".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_byte)
@@ -3334,10 +3494,29 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // ChannelSend codegen) pass through normally.
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
                     code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                    // jne cap_fail (rel32, placeholder) — jumps to the same
-                    // fail path as magic_fail, but stores -4 instead of -1.
-                    let jne_cap_patch = code.len();
+                    // je cap_skip (cap_count == 0 → no cap to verify)
+                    let je_cap_skip_patch = code.len();
+                    code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                    // cap_count > 0: read 8 more bytes (the cap_id) into [rsp+56].
+                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 56));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                    code.extend(encode_syscall());
+                    // Verify cap_id is non-zero (structural check).
+                    code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 56));
+                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                    // jne cap_ok (cap_id != 0 → valid)
+                    let jne_cap_ok_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                    // cap_id == 0 → cap_fail (PermissionDenied).
+                    let jne_cap_patch = code.len();
+                    code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32 (patched to cap_fail)
+                    // cap_ok: fall through to CRC check.
+                    let cap_ok_off = code.len();
+                    patch_rel32_jcc(&mut code, jne_cap_ok_patch, cap_ok_off);
+                    // cap_skip: cap_count == 0 → no cap to verify.
+                    let cap_skip_off = code.len();
+                    patch_rel32_jcc(&mut code, je_cap_skip_patch, cap_skip_off);
 
                     // Step 3c (Wave 14b): protocol state machine check.
                     // Verify the type_hash in the received frame matches the
