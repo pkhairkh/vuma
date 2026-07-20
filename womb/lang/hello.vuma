@@ -1,0 +1,18 @@
+// womb/lang/hello.vuma — Minimal VUMA 2.0 PMT hello-world program
+// Prints 42 to stdout and exits 0.
+//
+// This is the bootstrap milestone target: a minimal program that
+// exercises the full VUMA pipeline (parse → SCG → IVE → codegen → ELF)
+// end-to-end. It uses VUMA 2.0 PMT syntax (layout + state_new + field
+// access) — no V1.0 pointer syntax.
+
+layout Point = { x: i32, y: i32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 42;
+    p.y = 0;
+    print_int(p.x);
+    print_newline();
+    return 0;
+}

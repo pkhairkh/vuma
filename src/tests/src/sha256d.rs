@@ -494,7 +494,6 @@ fn test_sha256d_avalanche() {
 // VUMA Pipeline Test — Parse and compile the SHA256d VUMA program
 // ===========================================================================
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_vuma_parses() {
     // Load the SHA256d VUMA source and verify it parses successfully.
@@ -518,7 +517,6 @@ fn test_sha256d_vuma_parses() {
     );
 }
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_vuma_pipeline() {
     // Run the full pipeline on the SHA256d VUMA source.
@@ -548,7 +546,6 @@ fn test_sha256d_vuma_pipeline() {
     );
 }
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_vuma_compiles_to_arm64() {
     // Verify the SHA256d VUMA source can attempt compilation to ARM64 ELF.
@@ -940,7 +937,6 @@ fn test_sha256_h_init_all_8_values() {
 // VUMA Bridge Coverage Tests
 // ===========================================================================
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_vuma_scg_node_count_detailed() {
     // Verify the SHA256d VUMA program produces an SCG with a substantial
@@ -962,7 +958,6 @@ fn test_sha256d_vuma_scg_node_count_detailed() {
     );
 }
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_vuma_compilation_attempt() {
     // After bridge improvements, the SHA256d program should at minimum

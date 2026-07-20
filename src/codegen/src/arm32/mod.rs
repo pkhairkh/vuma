@@ -1294,6 +1294,20 @@ pub enum Instruction {
     VcvtF64F32 { dd: u8, sm: u8, cond: Condition },
     /// VCVT.F32.F64 Sd, Dm — convert double-precision to single-precision
     VcvtF32F64 { sd: u8, dm: u8, cond: Condition },
+    /// VCVT.F64.S32 Dd, Sm — convert signed int32 to double-precision float
+    /// (emitted by `encode_vcvt_f64_s32`; used by IntToFloat lowering when
+    /// the destination is f64).  Required so the chunk-based opcode recovery
+    /// in `allocate_registers` can produce the canonical "vcvt.f64.s32"
+    /// mnemonic — without this variant the decoder falls through to
+    /// "arm32" and the FP-conversion regression test fails to find a
+    /// conversion mnemonic.
+    VcvtF64S32 { dd: u8, sm: u8, cond: Condition },
+    /// VCVT.F64.U32 Dd, Sm — convert unsigned int32 to double-precision float
+    VcvtF64U32 { dd: u8, sm: u8, cond: Condition },
+    /// VCVT.S32.F64 Sd, Dm — convert double-precision float to signed int32
+    VcvtS32F64 { sd: u8, dm: u8, cond: Condition },
+    /// VCVT.U32.F64 Sd, Dm — convert double-precision float to unsigned int32
+    VcvtU32F64 { sd: u8, dm: u8, cond: Condition },
 }
 
 impl Instruction {
@@ -1899,6 +1913,18 @@ impl Instruction {
             Instruction::VcvtF32F64 { sd, dm, cond: _ } => {
                 encode_vcvt_f32_f64(*sd, *dm)
             }
+            Instruction::VcvtF64S32 { dd, sm, cond: _ } => {
+                encode_vcvt_f64_s32(*dd, *sm)
+            }
+            Instruction::VcvtF64U32 { dd, sm, cond: _ } => {
+                encode_vcvt_f64_u32(*dd, *sm)
+            }
+            Instruction::VcvtS32F64 { sd, dm, cond: _ } => {
+                encode_vcvt_s32_f64(*sd, *dm)
+            }
+            Instruction::VcvtU32F64 { sd, dm, cond: _ } => {
+                encode_vcvt_u32_f64(*sd, *dm)
+            }
         }
     }
 
@@ -1966,6 +1992,10 @@ impl Instruction {
             Instruction::VcvtU32F32 { .. } => "vcvt.u32.f32",
             Instruction::VcvtF64F32 { .. } => "vcvt.f64.f32",
             Instruction::VcvtF32F64 { .. } => "vcvt.f32.f64",
+            Instruction::VcvtF64S32 { .. } => "vcvt.f64.s32",
+            Instruction::VcvtF64U32 { .. } => "vcvt.f64.u32",
+            Instruction::VcvtS32F64 { .. } => "vcvt.s32.f64",
+            Instruction::VcvtU32F64 { .. } => "vcvt.u32.f64",
         }
     }
 }
@@ -2281,6 +2311,18 @@ impl fmt::Display for Instruction {
             }
             Instruction::VcvtF32F64 { sd, dm, cond } => {
                 write!(f, "vcvt{}.f32.f64 s{}, d{}", cond, sd, dm)
+            }
+            Instruction::VcvtF64S32 { dd, sm, cond } => {
+                write!(f, "vcvt{}.f64.s32 d{}, s{}", cond, dd, sm)
+            }
+            Instruction::VcvtF64U32 { dd, sm, cond } => {
+                write!(f, "vcvt{}.f64.u32 d{}, s{}", cond, dd, sm)
+            }
+            Instruction::VcvtS32F64 { sd, dm, cond } => {
+                write!(f, "vcvt{}.s32.f64 s{}, d{}", cond, sd, dm)
+            }
+            Instruction::VcvtU32F64 { sd, dm, cond } => {
+                write!(f, "vcvt{}.u32.f64 s{}, d{}", cond, sd, dm)
             }
         }
     }

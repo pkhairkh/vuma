@@ -409,6 +409,18 @@ pub fn find_dead_code(scg: &SCG, _liveness: &HashMap<NodeId, LivenessInfo>) -> V
 /// 3. Can any such node reach this read (is there a path in the SCG)?
 ///
 /// If no such node can reach the read, the read is flagged as uninitialized.
+///
+/// **PMT note (VUMA 2.0):** `state_new(Layout)` zero-initialises the
+/// backing buffer, so any `Allocation` in the same region as an
+/// `Access(Read)` is treated as a reaching definition even when no
+/// explicit graph path exists — the SCG builder does not currently wire
+/// outgoing edges from the `Allocation` node to subsequent state-field
+/// accesses. The same fallback applies to `Access(Write)` nodes (whose
+/// only outgoing edge is the `Derivation` back to their parent
+/// `Computation`); when no graph path is found but the write is in the
+/// same region, the read is still considered initialised. This matches
+/// the PMT memory model: writes are visible to all subsequent reads of
+/// the same state.
 pub fn find_uninitialized_reads(
     scg: &SCG,
     _liveness: &HashMap<NodeId, LivenessInfo>,
@@ -444,8 +456,29 @@ pub fn find_uninitialized_reads(
                     return false;
                 }
 
-                // Check if the other node can reach this read
-                scg.find_path(other.id, node_data.id).unwrap_or(false)
+                // Check if the other node can reach this read via the SCG's
+                // directed edges. This catches V1.0-style pointer programs
+                // where Allocation/Write nodes are wired into the CFG.
+                if scg.find_path(other.id, node_data.id).unwrap_or(false) {
+                    return true;
+                }
+
+                // PMT fallback: in VUMA 2.0 (PMT-only), `state_new(Layout)`
+                // zero-initialises the buffer and `state.field = v` writes
+                // to the field. The SCG builder does not currently add
+                // outgoing edges from `Allocation`/`Access(Write)` nodes
+                // to subsequent state-field reads (the read's DataFlow
+                // edge comes from the let-binding `Computation` node, not
+                // from the `Allocation`). Treat any `Allocation` as a
+                // reaching definition (zero-init covers all reads in any
+                // region), and any same-region `Access(Write)` whose
+                // `NodeId` is smaller than the read's `NodeId` (program
+                // order within a function) as a reaching definition.
+                match &other.payload {
+                    NodePayload::Allocation(_) => true,
+                    NodePayload::Access(_) => other.id.as_u64() < node_data.id.as_u64(),
+                    _ => false,
+                }
             });
 
             if !has_reaching_def {

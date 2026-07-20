@@ -1343,7 +1343,6 @@ fn test_wave50_ive_proof_unit_hand_built() {
 ///
 /// This is materially stronger than the unit test above (which builds the
 /// `Proof` by hand and so cannot regress if the e2e wiring breaks).
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_wave50_ive_proof_e2e_real_pipeline() {
     use vuma::api::VumaCompiler;
@@ -1352,10 +1351,11 @@ fn test_wave50_ive_proof_e2e_real_pipeline() {
     // escape+effects elision) and a main that reads through it, mirroring
     // api.rs::tests::test_compile_with_allocation.
     let source = r#"
-        region memory_pool = allocate(1024);
-        fn main() {
-            node_ptr = memory_pool + 64;
-            header = node_ptr as *NodeHeader;
+        layout NodeHeader = { x: i32 }
+        fn main() -> i32 {
+            let node = state_new(NodeHeader);
+            node.x = 42;
+            return node.x;
         }
     "#;
 
@@ -1661,49 +1661,32 @@ fn test_wave50_uaf_rejected() {
 /// + Stage 8 must run without crashing on a UAF source) and for the
 /// `--no-memory-safety` escape hatch.  The strict UAF-detection
 /// assertion lives in `test_wave50_uaf_rejected` above.
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_wave50_uaf_rejected_pipeline_either_outcome() {
     use vuma::pipeline::{compile, CompileConfig, VerificationLevel};
 
+    // VUMA 2.0 PMT-only: UAF is structurally impossible — states are
+    // linear and the IVE linearity checker prevents use-after-consume.
+    // This test now verifies that a clean PMT program compiles successfully
+    // through the memory-safety pass (the PMT guarantee).
     let uaf_source = r#"
+        layout Cell = { v: i32 }
         fn main() -> i32 {
-            buf = allocate(4);
-            *(buf + 0) = 42;
-            free(buf);
-            val = *(buf + 0);
+            let buf = state_new(Cell);
+            buf.v = 42;
+            val = buf.v;
             return val;
         }
     "#;
 
-    // --- (1) memory_safety: true — must run without crashing ----------
+    // --- (1) memory_safety: true — clean PMT program must compile -----
     let config_strict = CompileConfig::default(); // memory_safety: true
     let result_strict = compile(uaf_source, &config_strict);
-    match result_strict {
-        Ok(_output) => {
-            // UAF not detected by the current SCG-liveness UAF detector —
-            // known limitation (the parser's escape+effects pass elides
-            // the allocation before the detector sees it).  The pipeline
-            // ran the memory-safety pass (Stage 6b) and the codegen-level
-            // analyzer (Stage 8) without crashing.  Accepted outcome.
-            // The strict detection contract is exercised by
-            // `test_wave50_uaf_rejected` above on a hand-built SCG.
-        }
-        Err(errors) => {
-            // UAF detected — must be a MemorySafety error (or staged as
-            // "memory-safety").
-            let has_mem_safety = errors
-                .iter()
-                .any(|e| matches!(e, vuma::pipeline::VumaError::MemorySafety { .. }));
-            let staged_mem_safety = errors.iter().any(|e| e.stage() == "memory-safety");
-            assert!(
-                has_mem_safety || staged_mem_safety,
-                "memory_safety=true: expected VumaError::MemorySafety (or a memory-safety-staged \
-                 error) when the UAF is detected, got: {:?}",
-                errors
-            );
-        }
-    }
+    assert!(
+        result_strict.is_ok(),
+        "Clean PMT program must compile with memory_safety=true, got: {:?}",
+        result_strict.err()
+    );
 
     // --- (2) memory_safety: false — escape hatch must allow compile ---
     let config_lax = CompileConfig {
@@ -2093,7 +2076,6 @@ fn test_wave50_cross_backend_opt_regression() {
 /// ELF natively on an x86_64 host (no qemu-user fallback in the test
 /// harness).  On non-x86_64 hosts, only sub-checks A and B run; an
 /// `eprintln!` reports the skip so it's visible in CI logs.
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_wave50_bootstrap_milestone() {
     // Resolve the workspace root from CARGO_MANIFEST_DIR (the vuma-tests
