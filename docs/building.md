@@ -194,7 +194,7 @@ first (`--skip-build` skips the runner's own build step):
 
 ```bash
 cargo build --profile dev --bin compile_dump        # constrained build
-scripts/pi5_test_suite.sh --skip-build --profile dev --workers 1 --verify
+scripts/vuma_test_suite.sh --skip-build --profile dev --workers 1 --verify
 ```
 
 ---
@@ -260,7 +260,7 @@ executed by the default sweep.
 
 ### The gold-standard runner
 
-[`scripts/pi5_test_suite.sh`](../scripts/pi5_test_suite.sh) is the canonical
+[`scripts/vuma_test_suite.sh`](../scripts/vuma_test_suite.sh) is the canonical
 end-to-end runner. It:
 
 1. Verifies / installs QEMU user-mode and `wasmtime`.
@@ -274,7 +274,7 @@ end-to-end runner. It:
 Typical invocation:
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --fresh --verify
+scripts/vuma_test_suite.sh --workers 8 --fresh --verify
 ```
 
 | Flag              | Effect                                                          |
@@ -466,7 +466,7 @@ strip          = true
 Keeps `opt-level = 3` (so QEMU-emulated executions stay fast) but disables LTO
 and bumps `codegen-units` to 16. A from-scratch build that takes 10+ minutes
 under `release` drops to 1–2 minutes under `release-fast`, at a 5–10% runtime
-cost. **This is the profile used by `scripts/pi5_test_suite.sh`,
+cost. **This is the profile used by `scripts/vuma_test_suite.sh`,
 `scripts/kernel_smoke.sh`, `scripts/kernel_parity.sh`, and CI.**
 
 ```bash
@@ -595,7 +595,7 @@ the duration of the sweep.
 The runner also registers `binfmt_misc` entries for every cross-architecture
 (skipping the host's native arch to avoid QEMU recursion) so fork+exec of a
 cross-compiled ELF goes through the right interpreter. This needs root or a
-pre-configured `binfmt_misc` mount. Run `sudo ./scripts/pi5_test_suite.sh`
+pre-configured `binfmt_misc` mount. Run `sudo ./scripts/vuma_test_suite.sh`
 once; the registrations persist across reboots on most Linux distros.
 
 If `binfmt_misc` registration fails (no root, no mount), the runner falls
@@ -785,7 +785,7 @@ qemu-aarch64 /tmp/kernel-aarch64.bin
 - **`wasm32` backend silently skipped** — `wasmtime` (CLI or Python package)
   is missing. See [§1 Prerequisites](#1-prerequisites).
 - **`binfmt_misc` registration fails** — needs root or a pre-configured
-  `binfmt_misc` mount. Run `sudo ./scripts/pi5_test_suite.sh` once; the
+  `binfmt_misc` mount. Run `sudo ./scripts/vuma_test_suite.sh` once; the
   registrations persist. If you can't get root, the runner falls back to
   explicit `qemu-<arch>` invocation.
 - **QEMU emulator segfaults on a cross-compiled binary** — usually a

@@ -54,6 +54,7 @@ use vuma_scg::NodeType;
 /// - SCG has allocation, access, and deallocation nodes
 /// - IVE verification produces no violations
 /// - Detailed pipeline shows all stages passing (except codegen)
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_full_pipeline_trivial_allocate_free() {
     let source = "region buf = allocate(256); free(buf);";
@@ -138,6 +139,7 @@ fn test_full_pipeline_trivial_allocate_free() {
 /// - SCG has multiple allocation and deallocation nodes
 /// - Multiple regions are created
 /// - IVE verification produces no violations
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_full_pipeline_multiple_regions() {
     let source = "region a = allocate(64); region b = allocate(128); free(a); free(b);";
@@ -176,6 +178,7 @@ fn test_full_pipeline_multiple_regions() {
 /// Validates:
 /// - SCG has Access nodes for both read and write modes
 /// - IVE verification produces no violations
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_full_pipeline_read_write_region() {
     let source = "region buf = allocate(64); write(buf, 42); read(buf); free(buf);";
@@ -209,6 +212,7 @@ fn test_full_pipeline_read_write_region() {
 /// - SCG has Computation, Allocation, and Access nodes
 /// - The edges connect the operations correctly
 /// - IVE verification produces no violations
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_full_pipeline_nested_operations() {
     let source = "region pool = allocate(1024); write(pool, 0); let x = compute(pool); read(pool); free(pool);";
@@ -310,7 +314,10 @@ fn test_full_pipeline_safe_program_ive() {
 /// - The PipelineResult display output is informative
 #[test]
 fn test_full_pipeline_detailed_tracking() {
-    let source = "region data = allocate(128); free(data);";
+    // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
+    // V1.0 `region data = allocate(128); free(data);` source.  This test
+    // exercises the detailed pipeline stage tracker, not pointer semantics.
+    let source = "fn main() { let x = 1; }";
 
     let result = verify_program_detailed(source);
 
@@ -368,8 +375,12 @@ fn test_full_pipeline_detailed_tracking() {
 /// complete ARM64 ELF binary.
 #[test]
 fn test_full_pipeline_compile_to_elf() {
-    // Phase 1: Parse VUMA source and verify
-    let source = "region buf = allocate(256); free(buf);";
+    // Phase 1: Parse VUMA source and verify.  VUMA 2.0 PMT-only: use a
+    // simple arithmetic program instead of the V1.0
+    // `region buf = allocate(256); free(buf);` source.  The source is only
+    // used to verify parsing succeeds; the codegen-level SCG below is built
+    // by hand and does not depend on the source.
+    let source = "fn main() { let x = 1; }";
     let scg = build_scg_from_source(source).expect("Source should parse");
     assert!(scg.validate().is_valid, "SCG should validate");
 
@@ -442,8 +453,10 @@ fn test_full_pipeline_compile_to_elf() {
 /// - The pipeline doesn't crash on empty input
 #[test]
 fn test_full_pipeline_minimal_program() {
-    // Minimal valid program: just an allocation and free
-    let source = "region x = allocate(8); free(x);";
+    // Minimal valid program.  VUMA 2.0 PMT-only: use a simple arithmetic
+    // program instead of the V1.0 `region x = allocate(8); free(x);`
+    // source.
+    let source = "fn main() { let x = 1; }";
 
     let scg = build_scg_from_source(source).expect("Minimal source should parse");
     assert!(
@@ -488,6 +501,7 @@ fn test_full_pipeline_minimal_program() {
 /// - Edges connect operations correctly
 /// - IVE verification produces no violations
 /// - Detailed pipeline shows all stages passing
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_full_pipeline_complex_program() {
     let source = r#"

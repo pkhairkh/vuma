@@ -84,13 +84,13 @@ cargo build --profile release-fast --bin compile_dump
 ### Run tests
 
 The end-to-end cross-backend runner is
-[`scripts/pi5_test_suite.sh`](../scripts/pi5_test_suite.sh). It builds
+[`scripts/vuma_test_suite.sh`](../scripts/vuma_test_suite.sh). It builds
 `compile_dump`, walks `tests/gold_standard/`, compiles every `.vuma` file on
 every backend, runs each under QEMU / wasmtime, and checks the exit code
 against the `// Expected exit code: N` header.
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --fresh --verify
+scripts/vuma_test_suite.sh --workers 8 --fresh --verify
 ```
 
 For a single quick check (one file, one backend, no QEMU):
@@ -283,9 +283,9 @@ so the CLI accepts the new backend name.
 ### Step 3 — add the QEMU mapping to the test runner
 
 Edit [`scripts/kernel_parity.sh`](../scripts/kernel_parity.sh) and
-[`scripts/pi5_test_suite.sh`](../scripts/pi5_test_suite.sh) and add a new
+[`scripts/vuma_test_suite.sh`](../scripts/vuma_test_suite.sh) and add a new
 entry to the `QEMU_MAP` array (in `kernel_parity.sh`) or the `binfmt_misc`
-`entries` array (in `pi5_test_suite.sh`). Each entry has the form
+`entries` array (in `vuma_test_suite.sh`). Each entry has the form
 `backend:qemu_binary` or `name|qemu_binary|magic_hex|mask_hex`:
 
 ```bash
@@ -304,7 +304,7 @@ existing category if the test exercises a general feature) with an
 gold-standard suite to confirm agreement with the other 18 backends:
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --backends <arch> --verify
+scripts/vuma_test_suite.sh --workers 8 --backends <arch> --verify
 ```
 
 Also confirm the kernel compiles on the new backend:
@@ -371,7 +371,7 @@ file an issue against the offending backend instead.
 ### Step 4 — run the full category
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --backends x86_64,aarch64,riscv64 --verify
+scripts/vuma_test_suite.sh --workers 8 --backends x86_64,aarch64,riscv64 --verify
 ```
 
 See [`tests/README.md`](../tests/README.md) for the test-suite layout and
@@ -813,7 +813,7 @@ that uses them — the layout registry is single-pass.
 1. `cargo fmt --all` — apply formatting.
 2. `cargo clippy --workspace -- -D warnings` — no clippy warnings.
 3. `cargo test --workspace` — unit / integration tests pass.
-4. `scripts/pi5_test_suite.sh --workers 8 --verify` — gold-standard suite
+4. `scripts/vuma_test_suite.sh --workers 8 --verify` — gold-standard suite
    passes on every backend you touched.
 5. `bash scripts/kernel_smoke.sh` — kernel boots, prints banner, exits 0
    (required for any PR that touches `womb/kernel/`, the codegen, or the
@@ -839,7 +839,7 @@ Every PR targeting `main` runs:
   `scheduler_tests.rs`, `verification_tests.rs`).
 - **Cross-compile** — builds for 8 targets (x86_64, aarch64, riscv64gc, armv7,
   mips64, powerpc64, loongarch64, wasm32).
-- **Gold-standard** — `scripts/pi5_test_suite.sh --workers 8 --verify` across
+- **Gold-standard** — `scripts/vuma_test_suite.sh --workers 8 --verify` across
   all 18 QEMU backends + `wasm32` under `wasmtime` (program count is in
   `tests/gold_standard/manifest.json`).
 - **Kernel smoke** — `scripts/kernel_smoke.sh` (boots `womb/kernel/kernel.vuma`

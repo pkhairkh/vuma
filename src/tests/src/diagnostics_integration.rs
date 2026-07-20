@@ -1636,10 +1636,10 @@ fn diagnostic_chain_root_cause() {
 }
 
 #[test]
-fn available_targets_returns_eight_targets() {
+fn available_targets_returns_twelve_targets() {
     let compiler = VumaCompiler::new();
     let targets = compiler.available_targets();
-    assert_eq!(targets.len(), 8, "Should have exactly 8 targets");
+    assert_eq!(targets.len(), 12, "Should have exactly 12 targets");
 
     let names: Vec<&str> = targets.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"x86_64"));
@@ -1650,12 +1650,16 @@ fn available_targets_returns_eight_targets() {
     assert!(names.contains(&"arm32"));
     assert!(names.contains(&"mips64"));
     assert!(names.contains(&"ppc64"));
+    assert!(names.contains(&"ppc64le"));
+    assert!(names.contains(&"x86_32"));
+    assert!(names.contains(&"riscv32"));
+    assert!(names.contains(&"sparc64"));
 }
 
 #[test]
-fn llm_targets_returns_eight_targets() {
+fn llm_targets_returns_ten_targets() {
     let targets = VumaForLLM::targets();
-    assert_eq!(targets.len(), 8, "LLM API should report 8 targets");
+    assert_eq!(targets.len(), 10, "LLM API should report 10 targets");
 }
 
 #[test]
