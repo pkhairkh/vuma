@@ -550,6 +550,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let proto_state_off: i32 = -(current_offset);
 
+    // Wave 22/65-72: reserve 8 bytes for the per-function circuit-breaker
+    // state machine. Layout: [state:u32 at +0, failure_count:u32 at +4].
+    // state: 0=Closed, 1=Open, 2=HalfOpen (matches the CircuitState enum
+    // in ipc.rs). failure_count: number of consecutive failures recorded
+    // while in Closed; the breaker trips to Open when count > threshold.
+    // Zeroed in the prologue (state=Closed, count=0).
+    current_offset += 8;
+    let cb_state_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -678,6 +687,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     emit(encode_mov_mem_reg(Gpr::Rbp, seq_counter_off, Gpr::Rax), "zero_seq_counter");
     // Wave 14b: zero the protocol-state slot (state = 0 = Idle).
     emit(encode_mov_mem_reg(Gpr::Rbp, proto_state_off, Gpr::Rax), "zero_proto_state");
+    // Wave 22/65-72: zero the circuit-breaker state slot (state=Closed=0,
+    // count=0). RAX is already zero from the xor above.
+    emit(encode_mov_mem_reg(Gpr::Rbp, cb_state_off, Gpr::Rax), "zero_cb_state");
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -719,6 +731,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         block_offsets.insert(block.label.clone(), byte_offset);
 
         for instr in &block.instructions {
+            if let IRInstr::Call { func: fname, .. } = instr {
+            }
             // Per-instruction overrides for the AllocatedInstruction's
             // opcode / reads / writes.  Populated by select match arms
             // (currently `IRInstr::Cast` for FP-conversion mnemonics); the
@@ -3818,37 +3832,57 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             // Wave 65-72 (Fault Tolerance):
-                            // circuit_breaker_call(fn_ptr, max_retries) -> i64
+                            // Wave 22 + 65-72 (Fault Tolerance): circuit_breaker_call
                             //
-                            // Retries a failing function up to max_retries
-                            // times. The function (whose address is in
-                            // fn_ptr) is invoked via an indirect `call r10`.
-                            // If the function returns 0 (success), the
-                            // breaker returns 0 (not tripped). If all
-                            // max_retries attempts fail (return non-zero),
-                            // the breaker trips and returns 1.
+                            //   circuit_breaker_call(fn_ptr, threshold) -> i64
                             //
-                            // Stack alignment: push rbx makes rsp 8 mod 16;
-                            // sub rsp, 8 before the call makes it 0 mod 16
-                            // (aligned for syscall/call). add rsp, 8 after
-                            // restores the 8 mod 16 alignment for the next
-                            // iteration. pop rbx at the end restores the
-                            // caller's rsp.
+                            // Real Closed/Open/HalfOpen state machine matching the
+                            // library CircuitBreaker (ipc.rs). State lives in a
+                            // per-function stack slot at [rbp + cb_state_off]:
+                            //   [cb_state_off + 0]: state  (u32: 0=Closed, 1=Open, 2=HalfOpen)
+                            //   [cb_state_off + 4]: count  (u32: consecutive failures in Closed)
+                            //
+                            // Semantics (mirrors CircuitBreaker::can_proceed/record_*):
+                            //   1. can_proceed()?  If state == Open (1), the breaker is
+                            //      tripped: the call is REJECTED (fn_ptr not invoked),
+                            //      return 1. This is the fault-isolation boundary — an
+                            //      Open breaker stops calling the failing function.
+                            //   2. Otherwise (Closed or HalfOpen) call fn_ptr ONCE.
+                            //   3. record_result: if fn returned 0 (success) →
+                            //      record_success: state=Closed(0), count=0, return 0.
+                            //      If fn returned non-zero (failure) → record_failure:
+                            //        - Closed arm: count += 1; if count > threshold →
+                            //          state=Open(1), return 1 (tripped); else keep
+                            //          Closed, return 0.
+                            //        - HalfOpen arm: a single failure re-opens →
+                            //          count += 1, state=Open(1), return 1.
+                            //
+                            // Register usage: R10=fn_ptr, RCX=threshold, RAX=scratch,
+                            // RBX=scratch for count (callee-saved via push). All
+                            // rel32 conditional jumps are patched with patch_rel32_jcc.
+                            //
+                            // Stack alignment: push rbx makes rsp 8 mod 16; sub rsp,8
+                            // before the call makes it 0 mod 16 (aligned). add rsp,8
+                            // after restores. pop rbx at the end restores caller's rsp.
                             "circuit_breaker_call" if args.len() == 2 && dst.is_some() => {
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
-                                // Push RBX (callee-saved, holds loop counter — survives calls).
+                                // Push RBX (callee-saved — we use it as scratch for count).
                                 code.extend(encode_push(Gpr::Rbx));
                                 // Load fn_ptr into R10 (caller-saved).
                                 code.extend(load_value(&args[0], Gpr::R10));
-                                // Load max_retries into RBX (loop counter).
-                                code.extend(load_value(&args[1], Gpr::Rbx));
-                                // Loop:
-                                let loop_start = code.len();
-                                // test rbx, rbx
-                                code.extend(encode_test_reg_reg(Gpr::Rbx, Gpr::Rbx));
-                                // jz tripped (rel8, placeholder)
-                                let jz_tripped_patch = code.len();
-                                code.extend(&[0x74, 0x00]);
+                                // Load threshold into RCX (caller-saved).
+                                code.extend(load_value(&args[1], Gpr::Rcx));
+
+                                // Step 1: can_proceed() — load state, check if Open.
+                                // mov eax, [rbp + cb_state_off]  (state is low 32 bits)
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, cb_state_off));
+                                // cmp eax, 1  (1 == Open)
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 1));
+                                // je open_short_circuit (rel32, placeholder)
+                                let je_open_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+
+                                // Step 2: call fn_ptr ONCE (state is Closed or HalfOpen).
                                 // sub rsp, 8 (align for call)
                                 code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
                                 // xor rax, rax (variadic count = 0)
@@ -3857,41 +3891,140 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(&[0x41, 0xFF, 0xD2]);
                                 // add rsp, 8
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
-                                // test rax, rax
+                                // test rax, rax  (fn return: 0 = success)
                                 code.extend(encode_test_reg_reg(Gpr::Rax, Gpr::Rax));
-                                // jz success (rel8, placeholder)
-                                let jz_success_patch = code.len();
-                                code.extend(&[0x74, 0x00]);
-                                // dec rbx
-                                code.extend(&[0x48, 0xFF, 0xCB]);
-                                // jmp loop_start (rel8)
-                                let jmp_back = code.len();
-                                let back_delta = loop_start as i64 - (jmp_back as i64 + 2);
-                                code.extend(&[0xEB, back_delta as u8]);
-                                // tripped:
-                                let tripped_off = code.len();
-                                let jz_tripped_delta = tripped_off as i64 - (jz_tripped_patch as i64 + 2);
-                                code[jz_tripped_patch + 1] = jz_tripped_delta as u8;
-                                // mov rax, 1 (breaker tripped)
+                                // je success (rel32, placeholder)
+                                let je_success_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+
+                                // Step 3a: failure path — record_failure.
+                                // Load current count into RBX.
+                                // mov ebx, [rbp + cb_state_off + 4]
+                                code.extend(encode_mov_reg32_mem(Gpr::Rbx, Gpr::Rbp, cb_state_off + 4));
+                                // add ebx, 1
+                                code.extend(encode_add_reg_imm32(Gpr::Rbx, 1));
+                                // Store updated count back.
+                                // mov [rbp + cb_state_off + 4], ebx
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, cb_state_off + 4, Gpr::Rbx));
+                                // Reload state to branch on Closed vs HalfOpen.
+                                // mov eax, [rbp + cb_state_off]
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, cb_state_off));
+                                // cmp eax, 2  (2 == HalfOpen)
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 2));
+                                // je reopen (rel32, placeholder) — HalfOpen single failure re-opens
+                                let je_reopen_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                // Closed arm: trip only if count > threshold.
+                                // cmp ebx, ecx  (count vs threshold)
+                                code.extend(encode_cmp_reg_reg(Gpr::Rbx, Gpr::Rcx));
+                                // jbe stay_closed (rel32, placeholder) — count <= threshold, no trip
+                                let jbe_closed_patch = code.len();
+                                code.extend(&[0x0F, 0x86, 0x00, 0x00, 0x00, 0x00]); // jbe rel32
+                                // count > threshold → trip to Open.
+                                // mov dword [rbp + cb_state_off], 1
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
-                                // jmp done (rel8, placeholder)
-                                let jmp_done_patch = code.len();
-                                code.extend(&[0xEB, 0x00]);
-                                // success:
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, cb_state_off, Gpr::Rax));
+                                // jmp return_tripped (rel32, placeholder)
+                                let jmp_tripped_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // reopen: HalfOpen → Open on single failure.
+                                let reopen_off = code.len();
+                                patch_rel32_jcc(&mut code, je_reopen_patch, reopen_off);
+                                // mov dword [rbp + cb_state_off], 1
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, cb_state_off, Gpr::Rax));
+                                // jmp return_tripped (rel32, placeholder)
+                                let jmp_tripped2_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // stay_closed: failure recorded but breaker still Closed.
+                                let stay_closed_off = code.len();
+                                patch_rel32_jcc(&mut code, jbe_closed_patch, stay_closed_off);
+                                // jmp return_not_tripped (rel32, placeholder)
+                                let jmp_not_tripped_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // Step 3b: success path — record_success.
                                 let success_off = code.len();
-                                let jz_success_delta = success_off as i64 - (jz_success_patch as i64 + 2);
-                                code[jz_success_patch + 1] = jz_success_delta as u8;
-                                // mov rax, 0 (success)
+                                patch_rel32_jcc(&mut code, je_success_patch, success_off);
+                                // record_success: state=Closed(0), count=0.
+                                // xor rax, rax
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // mov [rbp + cb_state_off], rax  (zeroes both state and count)
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, cb_state_off, Gpr::Rax));
+                                // jmp return_not_tripped (rel32, placeholder)
+                                let jmp_success_done_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // open_short_circuit: breaker Open, reject the call.
+                                let open_off = code.len();
+                                patch_rel32_jcc(&mut code, je_open_patch, open_off);
+                                // (fall through to return_tripped)
+
+                                // return_tripped: rax = 1
+                                let tripped_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_tripped_patch, tripped_off);
+                                patch_rel32_jmp(&mut code, jmp_tripped2_patch, tripped_off);
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                // jmp done (rel32, placeholder)
+                                let jmp_done_from_tripped_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // return_not_tripped: rax = 0
+                                let not_tripped_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_not_tripped_patch, not_tripped_off);
+                                patch_rel32_jmp(&mut code, jmp_success_done_patch, not_tripped_off);
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));
-                                // done:
+
+                                // done: store rax to dst, pop rbx.
                                 let done_off = code.len();
-                                let jmp_done_delta = done_off as i64 - (jmp_done_patch as i64 + 2);
-                                code[jmp_done_patch + 1] = jmp_done_delta as u8;
-                                // Store rax to dst.
+                                patch_rel32_jmp(&mut code, jmp_done_from_tripped_patch, done_off);
                                 code.extend(store_vreg(dst_id, Gpr::Rax));
-                                // pop rbx
                                 code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("circuit_breaker_call".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 22 + 65-72: circuit_breaker_reset() -> i64
+                            //
+                            // Transitions the per-function breaker from Open → HalfOpen
+                            // (matches library CircuitBreaker::reset). No-op in Closed
+                            // or HalfOpen. Returns 0 always. After reset, the next
+                            // circuit_breaker_call is allowed through as a single probe
+                            // (HalfOpen); its success closes the breaker, its failure
+                            // re-opens it.
+                            "circuit_breaker_reset" if args.is_empty() && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Load current state.
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, cb_state_off));
+                                // cmp eax, 1  (Open)
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 1));
+                                // jne skip (rel32, placeholder) — not Open, no-op
+                                let jne_skip_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Open → HalfOpen (2).
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, cb_state_off, Gpr::Rax));
+                                // skip: return 0.
+                                let skip_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_skip_patch, skip_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                instr_opcode = Some("circuit_breaker_reset".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 22 + 65-72: circuit_breaker_state() -> i64
+                            //
+                            // Returns the per-function breaker state for diagnostics:
+                            // 0 = Closed, 1 = Open, 2 = HalfOpen.
+                            "circuit_breaker_state" if args.is_empty() && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Load state (32-bit, zero-extended to 64).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, cb_state_off));
+                                // Zero-extend: xor rcx,rcx; mov ecx, eax would clobber;
+                                // instead use movzx-equivalent by clearing high bits
+                                // via a 32-bit mov into a 64-bit reg (already done —
+                                // a 32-bit write to RAX zero-extends to RAX on x86_64).
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                instr_opcode = Some("circuit_breaker_state".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 73-80 (Hot Reloading):
