@@ -5146,47 +5146,239 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("hot_swap_rollback".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 81-88 (Distributed Channels):
+                            // Wave 81-88 / Wave H (Distributed Channels):
                             // channel_open_remote(addr, port) -> u64
                             //
-                            // Creates a loopback socketpair (mock remote
-                            // channel). The addr and port args are accepted
-                            // for ABI compatibility with the real remote-
-                            // channel API but the implementation uses
-                            // AF_UNIX socketpair (always loopback). Returns
-                            // a 64-bit channel handle: low 32 bits = sv[0],
-                            // high 32 bits = sv[1]. Both ends are
-                            // bidirectional (unlike pipe2).
+                            // Creates a REAL TCP socket (AF_INET, SOCK_STREAM)
+                            // and connects it to (addr, port) using the real
+                            // Linux socket() + connect() syscalls.  Returns
+                            // the connected fd (zero-extended to u64) on
+                            // success, or 0 on failure (socket() or connect()
+                            // returned a negative -errno).
+                            //
+                            // This replaces the previous loopback
+                            // socketpair(AF_UNIX) mock which always succeeded
+                            // and ignored addr/port entirely.  The previous
+                            // mock could not distinguish "real network I/O"
+                            // from "loopback pipe" — this implementation
+                            // performs a real TCP connect() so a closed port
+                            // or unreachable address is observable as a
+                            // failure (returns 0).
+                            //
+                            // sockaddr_in layout (16 bytes, per <netinet/in.h>):
+                            //   [0..2]   sin_family  (u16, host byte order) = AF_INET = 2
+                            //   [2..4]   sin_port    (u16, NETWORK byte order) = htons(port)
+                            //   [4..8]   sin_addr    (u32, NETWORK byte order) = addr (low 32 bits)
+                            //   [8..16]  sin_zero    (8 bytes, padding = 0)
+                            //
+                            // The port is byte-swapped with `rol ax, 8`
+                            // (66 C1 C0 08) which swaps the two bytes of AX,
+                            // equivalent to htons() for a 16-bit value.
+                            //
+                            // Syscall ABI (x86_64 Linux):
+                            //   socket(domain, type, protocol)  = syscall 41, args RDI/RSI/RDX
+                            //   connect(fd, sockaddr*, addrlen) = syscall 42, args RDI/RSI/RDX
+                            //   syscall clobbers RCX and R11 only — RBX/R8 are preserved.
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = addr  (preserved across socket() syscall)
+                            //   R8                         = port  (caller-saved, NOT clobbered by syscall)
                             "channel_open_remote" if args.len() == 2 && dst.is_some() => {
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
-                                // "Use" the args (load them) — they're
-                                // markers for the remote address/port.
-                                code.extend(load_value(&args[0], Gpr::Rax));
-                                code.extend(load_value(&args[1], Gpr::Rcx));
-                                // Allocate 16 bytes for sv[2] (8 bytes used, 8 padding for alignment).
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
-                                // rdi = AF_UNIX = 1
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1));
-                                // rsi = SOCK_STREAM = 1
-                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1));
-                                // rdx = protocol = 0
-                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
-                                // r10 = &sv[0]
-                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rsp, 0));
-                                // rax = 53 (sys_socketpair)
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 53));
+                                // Push RBX so we can use it as a scratch that
+                                // survives the socket() syscall (RBX is
+                                // callee-saved and syscall only clobbers RCX/R11).
+                                code.extend(encode_push(Gpr::Rbx));
+                                // addr -> RBX (preserved across the socket() syscall).
+                                code.extend(load_value(&args[0], Gpr::Rbx));
+                                // port -> R8 (caller-saved, but NOT clobbered
+                                // by syscall — only RCX/R11 are).
+                                code.extend(load_value(&args[1], Gpr::R8));
+                                // ── socket(AF_INET=2, SOCK_STREAM=1, 0) → fd ──
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdi, 2));      // AF_INET
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1));      // SOCK_STREAM
+                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // protocol = 0
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 41));     // sys_socket
                                 code.extend(encode_syscall());
-                                // Load sv[0] and sv[1].
-                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
-                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 4));
-                                // Store as 64-bit handle: low 32 = sv[0], high 32 = sv[1].
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8,  Gpr::Rax));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 12, Gpr::Rcx));
-                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 8));
+                                // Check socket() failure: RAX < 0 (signed).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jl_socket_fail_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl rel32
+                                // ── Allocate 24 bytes on stack: 16 for sockaddr_in ──
+                                // ── + 8 to save fd (24 is 16-byte aligned).         ──
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 24));
+                                // Save fd at [rsp+16] (we need it preserved across
+                                // the sockaddr build which clobbers RAX).
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                // [rsp+0..2] = AF_INET = 2 (u16 LE).
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
+                                code.extend(encode_mov_mem16_reg16(Gpr::Rsp, 0, Gpr::Rax));
+                                // [rsp+2..4] = port in NETWORK byte order.
+                                // Load port from R8 into RAX, mask to 16 bits,
+                                // then byte-swap with `rol ax, 8` (66 C1 C0 08)
+                                // which rotates the 16-bit value by 8 bits,
+                                // swapping its two bytes (== htons()).
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::R8));
+                                code.extend(encode_and_reg_imm32(Gpr::Rax, 0xFFFF));
+                                code.extend(&[0x66, 0xC1, 0xC0, 0x08]); // rol ax, 8
+                                code.extend(encode_mov_mem16_reg16(Gpr::Rsp, 2, Gpr::Rax));
+                                // [rsp+4..8] = addr (low 32 bits, already in
+                                // network byte order per the channel_open_remote
+                                // ABI convention — store directly).
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rbx));
+                                // [rsp+8..16] = sin_zero (8 bytes of zero padding).
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                // ── connect(fd, &sockaddr, 16) → 0 / -errno ──
+                                code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 16));    // RDI = fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));      // RSI = &sockaddr
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 16));            // RDX = addrlen
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 42));            // sys_connect
+                                code.extend(encode_syscall());
+                                // Check connect() failure: RAX < 0 (signed).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jl_connect_fail_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl rel32
+                                // ── Success: load fd, return it (zero-extended to u64) ──
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16));
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 24));
+                                let jmp_done_from_success_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp done
+                                // ── connect_fail: restore stack, fall to fail_return ──
+                                let connect_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jl_connect_fail_patch, connect_fail_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 24));
+                                let jmp_fail_from_connect_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp fail_return
+                                // ── socket_fail: no stack to clean (we hadn't allocated yet) ──
+                                let socket_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jl_socket_fail_patch, socket_fail_off);
+                                let jmp_fail_from_socket_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp fail_return
+                                // ── fail_return: RAX = 0 (handle = 0 means failure) ──
+                                let fail_return_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_fail_from_connect_patch, fail_return_off);
+                                patch_rel32_jmp(&mut code, jmp_fail_from_socket_patch, fail_return_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // ── done: store result to dst slot, pop RBX ──
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_done_from_success_patch, done_off);
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+                                code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("channel_open_remote".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave H (Distributed Channels):
+                            // remote_send(handle, value) -> i64
+                            //
+                            // Sends an 8-byte value over a connected TCP
+                            // socket using the real Linux sendto() syscall
+                            // (nr 44).  On a connected SOCK_STREAM socket,
+                            // sendto() with NULL dest_addr behaves identically
+                            // to send() — the kernel uses the peer already
+                            // bound by connect().
+                            //
+                            // Returns the byte count sent (8 on success) or
+                            // a negative -errno on failure.
+                            //
+                            // Syscall ABI:
+                            //   sendto(fd, buf, len, flags, dest_addr, addrlen)
+                            //     = syscall 44
+                            //     RDI=fd, RSI=buf, RDX=len, R10=flags,
+                            //     R8=dest_addr (NULL for connected), R9=addrlen (0)
+                            "remote_send" if args.len() == 2 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                // Push RBX (callee-saved) to preserve fd
+                                // across the sendto() syscall.
+                                code.extend(encode_push(Gpr::Rbx));
+                                // fd -> RBX (preserved across syscall).
+                                code.extend(load_value(&args[0], Gpr::Rbx));
+                                // value -> R9 (preserved across the sub_reg_imm32
+                                // and the LEA/MOV sequence below — only RAX, RSI,
+                                // RDX, R10, R8 are touched).
+                                code.extend(load_value(&args[1], Gpr::R9));
+                                // Allocate 8 bytes on stack for the value buffer.
+                                // After push rbx, RSP is 8 mod 16; sub rsp,8
+                                // makes it 0 mod 16 (aligned for the syscall ABI).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                // Store value at [rsp+0..8].
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::R9));
+                                // sendto(fd, &buf, 8, flags=0, dest_addr=NULL, addrlen=0)
+                                code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rbx));    // RDI = fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));  // RSI = &buf
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));         // RDX = len
+                                code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));    // R10 = flags = 0
+                                code.extend(encode_xor_reg_reg(Gpr::R8,  Gpr::R8));     // R8  = dest_addr = NULL
+                                code.extend(encode_xor_reg_reg(Gpr::R9,  Gpr::R9));     // R9  = addrlen = 0
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 44));        // sys_sendto
+                                code.extend(encode_syscall());
+                                // RAX = bytes sent (8 on success) or -errno.
+                                // Restore stack and store result.
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
+                                instr_opcode = Some("remote_send".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave H (Distributed Channels):
+                            // remote_recv(handle) -> i64
+                            //
+                            // Receives an 8-byte value from a connected TCP
+                            // socket using the real Linux recvfrom() syscall
+                            // (nr 45).  On a connected SOCK_STREAM socket,
+                            // recvfrom() with NULL src_addr behaves identically
+                            // to recv().
+                            //
+                            // Returns the 8-byte value on success, or -1 on
+                            // error / EOF (recvfrom returns 0 on EOF or a
+                            // negative -errno on failure — both are mapped to -1).
+                            //
+                            // Syscall ABI:
+                            //   recvfrom(fd, buf, len, flags, src_addr, addrlenptr)
+                            //     = syscall 45
+                            //     RDI=fd, RSI=buf, RDX=len, R10=flags,
+                            //     R8=src_addr (NULL to skip), R9=addrlenptr (NULL to skip)
+                            "remote_recv" if args.len() == 1 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                // Push RBX (callee-saved) to preserve fd
+                                // across the recvfrom() syscall.
+                                code.extend(encode_push(Gpr::Rbx));
+                                // fd -> RBX (preserved across syscall).
+                                code.extend(load_value(&args[0], Gpr::Rbx));
+                                // Allocate 8 bytes on stack for the value buffer.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                // recvfrom(fd, &buf, 8, flags=0, src_addr=NULL, addrlenptr=NULL)
+                                code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rbx));    // RDI = fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));  // RSI = &buf
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));         // RDX = len
+                                code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));    // R10 = flags = 0
+                                code.extend(encode_xor_reg_reg(Gpr::R8,  Gpr::R8));     // R8  = src_addr = NULL
+                                code.extend(encode_xor_reg_reg(Gpr::R9,  Gpr::R9));     // R9  = addrlenptr = NULL
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 45));        // sys_recvfrom
+                                code.extend(encode_syscall());
+                                // RAX = bytes received (8 on success, 0 on EOF, -errno on error).
+                                // If RAX <= 0, return -1 (error or EOF).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jle_err_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+                                // Success: load the 8-byte value from [rsp] into RAX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                let jmp_done_from_success_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp done
+                                // Error/EOF: return -1 (0xFFFFFFFFFFFFFFFF).
+                                let err_off = code.len();
+                                patch_rel32_jcc(&mut code, jle_err_patch, err_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF));
+                                // done: restore stack, store result, pop RBX.
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_done_from_success_patch, done_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
+                                instr_opcode = Some("remote_recv".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 93-94 (zk-STARK):
