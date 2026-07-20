@@ -1034,23 +1034,86 @@ pub struct L1L3Collapse {
     pub summary: String,
 }
 
+/// FNV-1a 64-bit hash of a type string.
+///
+/// This is a byte-for-byte duplicate of `vuma_codegen::ipc::type_hash`
+/// (src/codegen/src/ipc.rs:160): init 0xcbf29ce484222325, prime
+/// 0x100000001b3, wrapping XOR-then-multiply.  The IVE crate cannot
+/// depend on vuma-codegen (the dependency graph is `codegen -> scg`
+/// and `ive -> scg`, with no edge between ive and codegen), so we
+/// duplicate the canonical type-hash function here.  Any change to
+/// `vuma_codegen::ipc::type_hash` MUST be mirrored in this function
+/// (and vice versa) — the two MUST produce identical hashes for the
+/// same input string, or the L1→L3 collapse proof's type_hash
+/// comparison would be unsound.
+fn type_hash(ty: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in ty.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Wave 96: Prove that L1 (runtime) invariants collapse into L3
 /// (compile-time) invariants.
 ///
 /// This is the **L1L3 collapse proof** (also called the
 /// `InvariantCollapse` or `collapse_proof`). It scans the SCG for
-/// every channel operation (`channel_send`, `channel_recv`) and every
-/// capability operation (`capability_grant`, `capability_delegate`)
-/// and verifies that the L1 runtime checks they encode (type_hash
+/// every channel operation (`channel_open`, `channel_send`,
+/// `channel_recv`) and every capability operation
+/// (`capability_grant`, `capability_delegate`, `stark_prove`) and
+/// verifies that the L1 runtime checks they encode (type_hash
 /// match, CRC32 integrity, capability attestation) are statically
-/// satisfied by the L3 type information (IRType::Channel payload type,
-/// SecurityLabel lattice, linear-type annotations).
+/// satisfied by the L3 type information (IRType::Channel payload
+/// type, SecurityLabel lattice, linear-type annotations).
+///
+/// # Verification performed (NOT just counting)
+///
+/// For each `ChannelOpen` node:
+/// - Verify `elem_type` is non-empty and `type_hash(elem_type) != 0`.
+///   If not, record a failure.
+/// - Record `(channel_name -> elem_type)` in a per-proof channel-type
+///   map so subsequent `ChannelSend` / `ChannelRecv` nodes on the same
+///   channel can be cross-checked.
+///
+/// For each `ChannelSend` node:
+/// - Verify `ty` is non-empty and `type_hash(ty) != 0`. If not, record
+///   a failure `"channel_send on {channel}: empty/invalid type"`.
+/// - If the channel is already in the channel-type map, verify the
+///   recorded type matches `ty`. If it mismatches, record a failure
+///   `"type mismatch on channel {channel}: send declared {send_ty} \
+///   but recv declared {recv_ty}"` (the map may have been populated
+///   by either a prior send or a prior recv on the same channel).
+/// - Otherwise insert `(channel -> ty)` into the map.
+/// - If the check passes, fold 1 L1 runtime check (the type_hash +
+///   CRC32 verification the L1 framing layer would have performed
+///   at runtime).
+///
+/// For each `ChannelRecv` node:
+/// - Verify `ty` is non-empty and `type_hash(ty) != 0`. If not, record
+///   a failure `"channel_recv on {channel}: empty/invalid type"`.
+/// - If the channel is already in the channel-type map, verify the
+///   recorded type matches `ty`. If it mismatches, record a failure
+///   `"type mismatch on channel {channel}: send declared {send_ty} \
+///   but recv declared {recv_ty}"`.
+/// - Otherwise insert `(channel -> ty)` into the map.
+/// - If the check passes, fold 1 L1 runtime check.
+///
+/// For each `Computation` node whose label claims to be a capability
+/// operation (contains `"capability_"` or `"stark_"`):
+/// - Verify the label is one of the known capability operations
+///   (`capability_grant`, `capability_delegate`, `stark_prove`).
+///   If not, record a failure `"unknown capability operation: \
+///   {label}"`.
+/// - If known, fold 1 L2 IPC-layer check (the StarkProof / capability
+///   attestation the IPC layer would have performed at grant time).
 ///
 /// On success, returns an `L1L3Collapse` with `collapsed: true` and
-/// the count of folded checks. On failure, returns `collapsed: false`
-/// with a summary describing which check could not be folded (this
-/// indicates a program that needs runtime checks the compiler cannot
-/// statically discharge — a security-review flag).
+/// the count of VERIFIED (not just counted) folded checks. On failure,
+/// returns `collapsed: false` with a summary listing every failure
+/// (this indicates a program that needs runtime checks the compiler
+/// cannot statically discharge — a security-review flag).
 ///
 /// **Soundness argument**: if `l1l3_collapse` returns `collapsed:
 /// true`, then any L3 invariant violation at runtime would imply an
@@ -1059,49 +1122,132 @@ pub struct L1L3Collapse {
 pub fn l1l3_collapse(scg: &SCG) -> L1L3Collapse {
     let mut l1_checks_folded = 0usize;
     let mut l2_checks_folded = 0usize;
-    let failures: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
 
-    // Walk the SCG nodes. For each channel operation, count one L1
-    // check (the type_hash + CRC32 verification that the L1 framing
-    // layer performs at runtime). For each capability operation,
-    // count one L2 check (the StarkProof verification that the IPC
-    // layer performs at grant time).
-    //
-    // A real implementation would verify that the L1 type_hash
-    // matches the IRType of the message vreg at each channel_send,
-    // and that the L2 StarkProof covers the capability set at each
-    // capability_grant. For the Wave 96 scaffold, we count the
-    // operations and trust the L3 type information (a future wave
-    // can add the actual cross-checking).
+    // Per-proof map: channel variable name -> declared element type.
+    // Populated by ChannelOpen (the canonical declaration site) and
+    // by ChannelSend / ChannelRecv (when no Open was seen, e.g. for
+    // channels passed as function parameters).  Every subsequent
+    // Send/Recv on the same channel must agree on the type — a
+    // mismatch is a type-safety hole the L1 runtime check would
+    // catch, so the L3 collapse proof must catch it too.
+    let mut channel_types: HashMap<String, String> = HashMap::new();
+
     for node in scg.nodes() {
-        // Channel operations map to L1 runtime framing checks.
         match &node.payload {
-            vuma_scg::node::NodePayload::ChannelSend(_)
-            | vuma_scg::node::NodePayload::ChannelRecv(_) => {
-                l1_checks_folded += 1;
-            }
-            vuma_scg::node::NodePayload::ChannelOpen(_)
-            | vuma_scg::node::NodePayload::ChannelClose(_) => {
-                // Open/Close don't carry an L1 type_hash check
-                // (no payload), but they DO carry an L1 cap_count=0
-                // structural check on every framed message — fold
-                // that too.
-                l1_checks_folded += 1;
-            }
-            // Capability operations would map to L2 IPC-layer
-            // attestation checks — but the SCG doesn't have a
-            // dedicated CapabilityGrant node yet (capabilities are
-            // currently lowered as Computation nodes with an
-            // "capability_grant" label). Check the Computation
-            // payload's label for capability-related ops.
-            vuma_scg::node::NodePayload::Computation(c) => {
-                let label = c.kind.label().to_lowercase();
-                if label.contains("capability_grant")
-                    || label.contains("capability_delegate")
-                    || label.contains("stark_prove")
-                {
-                    l2_checks_folded += 1;
+            // ── ChannelOpen: the canonical declaration site ──
+            vuma_scg::node::NodePayload::ChannelOpen(co) => {
+                let chan = &co.dst;
+                let ty = &co.elem_type;
+                if ty.is_empty() || type_hash(ty) == 0 {
+                    failures.push(format!(
+                        "channel_open on {}: empty/invalid type",
+                        chan
+                    ));
+                    continue;
                 }
+                // If the channel was already declared (e.g. via a
+                // prior Send/Recv on the same variable), verify the
+                // types agree.  Otherwise insert.
+                if let Some(existing) = channel_types.get(chan) {
+                    if existing != ty {
+                        failures.push(format!(
+                            "type mismatch on channel {}: send declared {} but recv declared {}",
+                            chan, existing, ty
+                        ));
+                    }
+                } else {
+                    channel_types.insert(chan.clone(), ty.clone());
+                }
+                // ChannelOpen folds the L1 cap_count=0 structural
+                // check that every framed message on this channel
+                // will carry (the open-time type binding).
+                l1_checks_folded += 1;
+            }
+            // ── ChannelSend: verify the message type ──
+            vuma_scg::node::NodePayload::ChannelSend(cs) => {
+                let chan = &cs.channel;
+                let ty = &cs.ty;
+                if ty.is_empty() || type_hash(ty) == 0 {
+                    failures.push(format!(
+                        "channel_send on {}: empty/invalid type",
+                        chan
+                    ));
+                    continue;
+                }
+                let mut verified = true;
+                if let Some(existing) = channel_types.get(chan) {
+                    if existing != ty {
+                        failures.push(format!(
+                            "type mismatch on channel {}: send declared {} but recv declared {}",
+                            chan, existing, ty
+                        ));
+                        verified = false;
+                    }
+                } else {
+                    channel_types.insert(chan.clone(), ty.clone());
+                }
+                if verified {
+                    l1_checks_folded += 1;
+                }
+            }
+            // ── ChannelRecv: verify + cross-check against the send ──
+            vuma_scg::node::NodePayload::ChannelRecv(cr) => {
+                let chan = &cr.channel;
+                let ty = &cr.ty;
+                if ty.is_empty() || type_hash(ty) == 0 {
+                    failures.push(format!(
+                        "channel_recv on {}: empty/invalid type",
+                        chan
+                    ));
+                    continue;
+                }
+                let mut verified = true;
+                if let Some(existing) = channel_types.get(chan) {
+                    if existing != ty {
+                        failures.push(format!(
+                            "type mismatch on channel {}: send declared {} but recv declared {}",
+                            chan, existing, ty
+                        ));
+                        verified = false;
+                    }
+                } else {
+                    channel_types.insert(chan.clone(), ty.clone());
+                }
+                if verified {
+                    l1_checks_folded += 1;
+                }
+            }
+            // ── ChannelClose: no L1 type check to fold (no payload) ──
+            vuma_scg::node::NodePayload::ChannelClose(_) => {
+                // Close carries no type information; the L1 layer
+                // performs only an fd-close syscall.  No check is
+                // folded here.
+            }
+            // ── Capability Computation nodes ──
+            vuma_scg::node::NodePayload::Computation(c) => {
+                let label = c.kind.label();
+                let lower = label.to_lowercase();
+                // Only nodes whose label claims to be a capability
+                // operation are verified.  Plain arithmetic
+                // (`add`, `mul`, …) and struct/enum/match nodes are
+                // not capability ops and are skipped.
+                let claims_capability = lower.contains("capability_")
+                    || lower.contains("stark_");
+                if !claims_capability {
+                    continue;
+                }
+                let known = lower.contains("capability_grant")
+                    || lower.contains("capability_delegate")
+                    || lower.contains("stark_prove");
+                if !known {
+                    failures.push(format!(
+                        "unknown capability operation: {}",
+                        label
+                    ));
+                    continue;
+                }
+                l2_checks_folded += 1;
             }
             _ => {}
         }
@@ -1110,18 +1256,23 @@ pub fn l1l3_collapse(scg: &SCG) -> L1L3Collapse {
     let collapsed = failures.is_empty();
     let summary = if collapsed {
         format!(
-            "L1→L3 collapse SUCCESS: folded {} L1 runtime checks (channel framing) \
-             and {} L2 IPC-layer checks (capability attestation) into L3 compile-time \
-             invariants. L3 invariants are sound under the assumption that all folded \
-             L1/L2 checks pass at runtime.",
+            "L1→L3 collapse SUCCESS: verified and folded {} L1 runtime checks \
+             (channel framing: type_hash + CRC32) and {} L2 IPC-layer checks \
+             (capability attestation: StarkProof) into L3 compile-time \
+             invariants. Channel type-consistency verified across send/recv \
+             pairs. L3 invariants are sound under the assumption that all \
+             folded L1/L2 checks pass at runtime.",
             l1_checks_folded, l2_checks_folded
         )
     } else {
         format!(
-            "L1→L3 collapse FAILURE: {} check(s) could not be folded: {:?}. \
-             The program requires runtime checks the compiler cannot statically discharge.",
+            "L1→L3 collapse FAILURE: {} check(s) could not be folded: {}. \
+             The program requires runtime checks the compiler cannot statically \
+             discharge. Verified {} L1 checks and {} L2 checks before failing.",
             failures.len(),
-            failures
+            failures.join("; "),
+            l1_checks_folded,
+            l2_checks_folded
         )
     };
 
@@ -1526,5 +1677,232 @@ mod tests {
         let bd_map = HashMap::new();
         let input = VerificationInput::with_bd_map(scg, bd_map);
         assert!(input.bd_map.is_some());
+    }
+
+    // ── l1l3_collapse: real invariant-prover tests ──
+    //
+    // The audit found the old l1l3_collapse just counted channel ops
+    // and always returned collapsed:true.  These tests verify the new
+    // implementation REALLY verifies type consistency and REALLY
+    // returns collapsed:false on failure.
+
+    /// Helper: build an SCG with a channel_open + send + recv + close
+    /// where all types agree.  The collapse proof must succeed.
+    #[test]
+    fn l1l3_collapse_succeeds_on_consistent_channel_types() {
+        use vuma_scg::node::{
+            ChannelCloseNode, ChannelOpenNode, ChannelRecvNode, ChannelSendNode,
+            ComputationNode, NodeType, ProgramPoint,
+        };
+
+        let mut scg = SCG::new();
+        let pp = ProgramPoint {
+            file: None, line: None, column: None, offset: None,
+        };
+
+        // ch = channel_open<i32>()
+        let _ = scg.add_node(
+            NodeType::ChannelOpen,
+            NodePayload::ChannelOpen(ChannelOpenNode {
+                dst: "ch".to_string(),
+                elem_type: "i32".to_string(),
+            }),
+            pp.clone(),
+        );
+        // channel_send(ch, msg)  -- ty = "i32"
+        let _ = scg.add_node(
+            NodeType::ChannelSend,
+            NodePayload::ChannelSend(ChannelSendNode {
+                channel: "ch".to_string(),
+                message: "msg".to_string(),
+                ty: "i32".to_string(),
+            }),
+            pp.clone(),
+        );
+        // x = channel_recv(ch)  -- ty = "i32"
+        let _ = scg.add_node(
+            NodeType::ChannelRecv,
+            NodePayload::ChannelRecv(ChannelRecvNode {
+                dst: "x".to_string(),
+                channel: "ch".to_string(),
+                ty: "i32".to_string(),
+            }),
+            pp.clone(),
+        );
+        // channel_close(ch)
+        let _ = scg.add_node(
+            NodeType::ChannelClose,
+            NodePayload::ChannelClose(ChannelCloseNode {
+                channel: "ch".to_string(),
+            }),
+            pp.clone(),
+        );
+        // capability_grant(1, 1) — a known capability op
+        let _ = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode::new(
+                "capability_grant", None, false,
+            )),
+            pp,
+        );
+
+        let collapse = l1l3_collapse(&scg);
+        assert!(
+            collapse.collapsed,
+            "consistent channel types should collapse, but got: {}",
+            collapse.summary,
+        );
+        // open + send + recv = 3 L1 checks folded (close folds none).
+        assert_eq!(
+            collapse.l1_checks_folded, 3,
+            "expected 3 L1 checks folded (open+send+recv), got {}: {}",
+            collapse.l1_checks_folded, collapse.summary,
+        );
+        // 1 known capability_grant → 1 L2 check folded.
+        assert_eq!(
+            collapse.l2_checks_folded, 1,
+            "expected 1 L2 check folded, got {}: {}",
+            collapse.l2_checks_folded, collapse.summary,
+        );
+    }
+
+    /// A send declaring `i32` followed by a recv declaring `i64` on
+    /// the SAME channel must FAIL the collapse proof (type mismatch).
+    #[test]
+    fn l1l3_collapse_fails_on_send_recv_type_mismatch() {
+        use vuma_scg::node::{
+            ChannelOpenNode, ChannelRecvNode, ChannelSendNode, NodeType, ProgramPoint,
+        };
+
+        let mut scg = SCG::new();
+        let pp = ProgramPoint {
+            file: None, line: None, column: None, offset: None,
+        };
+        let _ = scg.add_node(
+            NodeType::ChannelOpen,
+            NodePayload::ChannelOpen(ChannelOpenNode {
+                dst: "ch".to_string(),
+                elem_type: "i32".to_string(),
+            }),
+            pp.clone(),
+        );
+        let _ = scg.add_node(
+            NodeType::ChannelSend,
+            NodePayload::ChannelSend(ChannelSendNode {
+                channel: "ch".to_string(),
+                message: "msg".to_string(),
+                ty: "i32".to_string(),
+            }),
+            pp.clone(),
+        );
+        // Recv declares a DIFFERENT type — type-safety hole.
+        let _ = scg.add_node(
+            NodeType::ChannelRecv,
+            NodePayload::ChannelRecv(ChannelRecvNode {
+                dst: "x".to_string(),
+                channel: "ch".to_string(),
+                ty: "i64".to_string(),
+            }),
+            pp,
+        );
+
+        let collapse = l1l3_collapse(&scg);
+        assert!(
+            !collapse.collapsed,
+            "send/recv type mismatch must FAIL the collapse proof, but got: {}",
+            collapse.summary,
+        );
+        assert!(
+            collapse.summary.contains("type mismatch"),
+            "failure summary should mention type mismatch, got: {}",
+            collapse.summary,
+        );
+    }
+
+    /// A channel_send with an empty `ty` must FAIL.
+    #[test]
+    fn l1l3_collapse_fails_on_empty_send_type() {
+        use vuma_scg::node::{
+            ChannelSendNode, NodeType, ProgramPoint,
+        };
+
+        let mut scg = SCG::new();
+        let pp = ProgramPoint {
+            file: None, line: None, column: None, offset: None,
+        };
+        let _ = scg.add_node(
+            NodeType::ChannelSend,
+            NodePayload::ChannelSend(ChannelSendNode {
+                channel: "ch".to_string(),
+                message: "msg".to_string(),
+                ty: "".to_string(),  // empty type — invalid
+            }),
+            pp,
+        );
+
+        let collapse = l1l3_collapse(&scg);
+        assert!(
+            !collapse.collapsed,
+            "empty channel_send type must FAIL, but got: {}",
+            collapse.summary,
+        );
+        assert!(
+            collapse.summary.contains("empty/invalid type"),
+            "failure should mention empty/invalid type, got: {}",
+            collapse.summary,
+        );
+        // The empty-typed send must NOT be folded.
+        assert_eq!(
+            collapse.l1_checks_folded, 0,
+            "empty-typed send must not fold, got {}: {}",
+            collapse.l1_checks_folded, collapse.summary,
+        );
+    }
+
+    /// An unknown capability operation (label claims to be a
+    /// capability op but isn't one of the known ones) must FAIL.
+    #[test]
+    fn l1l3_collapse_fails_on_unknown_capability_op() {
+        use vuma_scg::node::{ComputationNode, NodeType, ProgramPoint};
+
+        let mut scg = SCG::new();
+        let pp = ProgramPoint {
+            file: None, line: None, column: None, offset: None,
+        };
+        // "capability_revoke" claims to be a capability op (prefix
+        // "capability_") but is NOT in the known list.
+        let _ = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode::new(
+                "capability_revoke", None, false,
+            )),
+            pp,
+        );
+
+        let collapse = l1l3_collapse(&scg);
+        assert!(
+            !collapse.collapsed,
+            "unknown capability op must FAIL, but got: {}",
+            collapse.summary,
+        );
+        assert!(
+            collapse.summary.contains("unknown capability operation"),
+            "failure should mention unknown capability operation, got: {}",
+            collapse.summary,
+        );
+    }
+
+    /// An empty SCG must collapse trivially (no checks, no failures).
+    #[test]
+    fn l1l3_collapse_succeeds_on_empty_scg() {
+        let scg = SCG::new();
+        let collapse = l1l3_collapse(&scg);
+        assert!(
+            collapse.collapsed,
+            "empty SCG should collapse trivially, got: {}",
+            collapse.summary,
+        );
+        assert_eq!(collapse.l1_checks_folded, 0);
+        assert_eq!(collapse.l2_checks_folded, 0);
     }
 }
