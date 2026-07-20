@@ -647,12 +647,12 @@ fn test_elf_validation_mips64() {
     let backend = Mips64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    // Mips64Backend::new() is little-endian by default (mips64el); a separate
-    // Mips64BeBackend exists for big-endian.  See backend.rs:1800.
+    // Mips64Backend::new() emits a big-endian ELF (ELFDATA2MSB, qemu-mips64).
+    // The Mips64BeBackend wrapper is retained as an explicit BE alias.
     validate_elf_for_backend(
         &elf_bytes,
         ELFCLASS64,
-        ELFDATA2LSB,
+        ELFDATA2MSB,
         EM_MIPS,
         "mips64",
     );
