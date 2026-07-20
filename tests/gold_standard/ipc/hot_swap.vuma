@@ -1,0 +1,14 @@
+// hot_swap — Wave 73-80: hot reloading via hot_swap_trigger.
+//
+// The hot_swap_trigger(module_id) builtin writes an 8-byte swap request
+// (the module_id) to /tmp/vuma_hotswap.bin. Mirrors checkpoint_save but
+// uses a distinct path so the hot-swap daemon can poll for swap requests
+// independently of checkpoint state.
+//
+// This test triggers a swap for module_id=42 and exits 1 on success.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    hot_swap_trigger(42);
+    return 1;
+}

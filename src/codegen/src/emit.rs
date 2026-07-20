@@ -827,6 +827,12 @@ pub struct Emitter {
     frame_size: u32,
     /// Registers pinned for the current instruction (auto-unpinned after each instruction).
     instr_pinned_regs: Vec<Register>,
+    /// Wave 10d (aarch64 port): per-function channel sequence counter stack
+    /// slot offset (positive, measured from X29 downward). Zeroed in the
+    /// prologue so the first `ChannelSend` emits sequence=0, the second
+    /// sequence=1, etc. Mirrors the x86_64 `seq_counter_off` slot
+    /// (stack_slot_isel.rs). 0 when no stack-slot function is active.
+    seq_counter_off: i32,
 }
 
 impl Emitter {
@@ -843,6 +849,7 @@ impl Emitter {
             func_text_offset: 0,
             frame_size: 0,
             instr_pinned_regs: Vec::new(),
+            seq_counter_off: 0,
         }
     }
 
@@ -3305,6 +3312,15 @@ impl Emitter {
             vreg_stack_slots.insert(id, current_offset); // slot at [X29, #-current_offset]
         }
 
+        // Wave 10d (aarch64 port): reserve an 8-byte stack slot for the
+        // per-function channel sequence counter, mirroring the x86_64
+        // `seq_counter_off` slot in stack_slot_isel.rs.  Zeroed in the
+        // prologue so the first ChannelSend emits sequence=0, the second
+        // sequence=1, etc.  This replaces the previous hardcoded
+        // sequence=0 placeholder.
+        current_offset += 8;
+        self.seq_counter_off = current_offset;
+
         let frame_size = ((current_offset + 15) & !15) as u32;
         self.frame_size = frame_size;
 
@@ -3375,6 +3391,22 @@ impl Emitter {
                     self.ss_store_to_slot(arg_regs[i], offset)?;
                 }
             }
+        }
+
+        // Wave 10d (aarch64 port): zero the per-function channel sequence
+        // counter slot so the first ChannelSend starts at sequence=0.
+        // Uses X9 (caller-saved scratch, free at this point after the
+        // parameter spill above) via `STR XZR, [X29, #-seq_counter_off]`
+        // lowered as an address-computation + STR.
+        if self.seq_counter_off > 0 {
+            // X16 = &seq_counter_slot
+            self.ss_emit_slot_addr(Register::X16, self.seq_counter_off)?;
+            // STR XZR, [X16]  (XZR = Register::X31 / Register::Xzr)
+            self.emit_instruction(Instruction::STR {
+                rt: Register::XZR,
+                rn: Register::X16,
+                offset: 0,
+            })?;
         }
 
         // ── Phase 3: Emit each basic block ──
@@ -3527,6 +3559,201 @@ impl Emitter {
     // -----------------------------------------------------------------------
     // Stack-slot instruction emission
     // -----------------------------------------------------------------------
+
+    /// Wave 10d (aarch64 port): emit an inline CRC32 loop over the 56-byte
+    /// L1 frame currently living at `[SP+0..52]` (header + payload), using
+    /// polynomial 0xEDB88320 (same as `ipc::crc32`).  The result (a 32-bit
+    /// CRC, with the final `!crc` inversion applied) is left in the low
+    /// 32 bits of **X11**.
+    ///
+    /// ## Register usage (all caller-saved scratch — does NOT touch X0–X8
+    /// syscall-arg registers, X16/X17 used by ss_load_value, or X29/X30)
+    ///
+    /// - **X11** — CRC accumulator (init 0xFFFFFFFF, final `^ 0xFFFFFFFF`)
+    /// - **X12** — polynomial 0xEDB88320
+    /// - **X13** — outer loop counter (0..52)
+    /// - **X14** — inner loop counter (0..8) / scratch for the final inversion
+    /// - **X15** — byte pointer into the frame (`SP` at entry, `SP+52` at exit)
+    ///
+    /// ## Algorithm (matches `ipc::crc32` and the x86_64 `emit_crc32_frame_loop`)
+    ///
+    /// ```text
+    /// crc = 0xFFFFFFFF
+    /// for byte in frame[0..52]:
+    ///     crc ^= byte
+    ///     for _ in 0..8:
+    ///         if crc & 1:  crc = (crc >> 1) ^ 0xEDB88320
+    ///         else:        crc =  crc >> 1
+    /// crc = !crc
+    /// ```
+    ///
+    /// The caller is responsible for storing W11 (the CRC) into `[SP+52]`
+    /// on the send side, or comparing W11 with `[SP+52]` on the receive side.
+    fn emit_crc32_frame_loop_aarch64(&mut self) -> Result<()> {
+        // X11 = 0xFFFFFFFF (crc init). Loaded as a 64-bit immediate so the
+        // upper 32 bits are zero, keeping the final `^ 0xFFFFFFFF` result in
+        // the low 32 bits (matches the x86_64 64-bit XOR trick).
+        self.emit_load_immediate(Register::X11, 0xFFFFFFFF)?;
+        // X12 = 0xEDB88320 (poly).
+        self.emit_load_immediate(Register::X12, 0xEDB88320)?;
+        // X15 = SP (byte pointer = &frame[0]).  `MOV Xd, SP` lowers to ADD Xd, SP, #0.
+        self.emit_instruction(Instruction::MOV {
+            rd: Register::X15,
+            rm: Register::SP,
+        })?;
+        // X13 = 0 (outer counter).
+        self.emit_load_immediate(Register::X13, 0)?;
+
+        // ── outer_loop: ──
+        let outer_loop_idx = self.code.len();
+        // CMP X13, #52  →  flags = X13 - 52
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X13,
+            rm: Operand::Imm12(52),
+        })?;
+        // B.CS outer_done  (unsigned X13 >= 52 → exit).  Placeholder offset=0.
+        let outer_done_patch = self.code.len();
+        self.emit_instruction(Instruction::BCond {
+            cond: Condition::CS,
+            offset: 0,
+        })?;
+        // X14 = byte [X15]  (zero-extended).
+        self.emit_instruction(Instruction::LDRB {
+            rt: Register::X14,
+            rn: Register::X15,
+            offset: 0,
+        })?;
+        // crc ^= byte  (EOR X11, X11, X14)
+        self.emit_instruction(Instruction::EOR {
+            rd: Register::X11,
+            rn: Register::X11,
+            rm: Register::X14,
+        })?;
+        // X14 = 0 (inner counter) — EOR X14, X14, X14.
+        self.emit_instruction(Instruction::EOR {
+            rd: Register::X14,
+            rn: Register::X14,
+            rm: Register::X14,
+        })?;
+
+        // ── inner_loop: ──
+        let inner_loop_idx = self.code.len();
+        // CMP X14, #8
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X14,
+            rm: Operand::Imm12(8),
+        })?;
+        // B.CS inner_done  (X14 >= 8 → exit inner loop).  Placeholder.
+        let inner_done_patch = self.code.len();
+        self.emit_instruction(Instruction::BCond {
+            cond: Condition::CS,
+            offset: 0,
+        })?;
+        // Test bit 0 of crc: TBZ X11, #0, skip_xor  (branches if bit 0 is 0).
+        let skip_xor_patch = self.code.len();
+        self.emit_instruction(Instruction::TBZ {
+            rt: Register::X11,
+            bit: 0,
+            offset: 0,
+        })?;
+        // crc = (crc >> 1) ^ poly  →  LSR X11, X11, #1 ; EOR X11, X11, X12.
+        self.emit_instruction(Instruction::LSR {
+            rd: Register::X11,
+            rn: Register::X11,
+            rm: Operand::Imm12(1),
+        })?;
+        self.emit_instruction(Instruction::EOR {
+            rd: Register::X11,
+            rn: Register::X11,
+            rm: Register::X12,
+        })?;
+        // B inner_next  (placeholder).
+        let inner_next_patch = self.code.len();
+        self.emit_instruction(Instruction::B { offset: 0 })?;
+
+        // skip_xor:  crc >>= 1  (no XOR with poly).
+        let skip_xor_idx = self.code.len();
+        // Patch TBZ → skip_xor.  NOTE: `self.code` is `Vec<u32>` (one word
+        // per instruction), so the delta is already in WORDS — the B.cond /
+        // TBZ / B imm fields encode word offsets (byte_offset / 4).  Do NOT
+        // divide by 4 again.
+        let delta_words = (skip_xor_idx as i32) - (skip_xor_patch as i32);
+        let imm14 = delta_words & 0x3FFF;
+        let old_word = self.code[skip_xor_patch];
+        // TBZ imm14 lives in bits[18:5].
+        self.code[skip_xor_patch] = (old_word & !(0x3FFFu32 << 5)) | ((imm14 as u32) << 5);
+        self.emit_instruction(Instruction::LSR {
+            rd: Register::X11,
+            rn: Register::X11,
+            rm: Operand::Imm12(1),
+        })?;
+
+        // inner_next:
+        let inner_next_idx = self.code.len();
+        // Patch B inner_next (imm26 = word delta).
+        let delta_words = (inner_next_idx as i32) - (inner_next_patch as i32);
+        let imm26 = delta_words & 0x3FFFFFF;
+        let old_word = self.code[inner_next_patch];
+        self.code[inner_next_patch] = (old_word & !0x03FFFFFFu32) | (imm26 as u32);
+        // X14 += 1 (inner counter).
+        self.emit_instruction(Instruction::ADD {
+            rd: Register::X14,
+            rn: Register::X14,
+            rm: Operand::Imm12(1),
+        })?;
+        // B inner_loop  (placeholder).
+        let inner_loop_branch_patch = self.code.len();
+        self.emit_instruction(Instruction::B { offset: 0 })?;
+        let delta_words = (inner_loop_idx as i32) - (inner_loop_branch_patch as i32);
+        let imm26 = delta_words & 0x3FFFFFF;
+        let old_word = self.code[inner_loop_branch_patch];
+        self.code[inner_loop_branch_patch] = (old_word & !0x03FFFFFFu32) | (imm26 as u32);
+
+        // inner_done:
+        let inner_done_idx = self.code.len();
+        // Patch B.CS inner_done (imm19 = word delta).
+        let delta_words = (inner_done_idx as i32) - (inner_done_patch as i32);
+        let imm19 = delta_words & 0x7FFFF;
+        let old_word = self.code[inner_done_patch];
+        self.code[inner_done_patch] = (old_word & !(0x7FFFFu32 << 5)) | ((imm19 as u32) << 5);
+        // X15 += 1 (byte pointer++).
+        self.emit_instruction(Instruction::ADD {
+            rd: Register::X15,
+            rn: Register::X15,
+            rm: Operand::Imm12(1),
+        })?;
+        // X13 += 1 (outer counter++).
+        self.emit_instruction(Instruction::ADD {
+            rd: Register::X13,
+            rn: Register::X13,
+            rm: Operand::Imm12(1),
+        })?;
+        // B outer_loop  (placeholder).
+        let outer_loop_branch_patch = self.code.len();
+        self.emit_instruction(Instruction::B { offset: 0 })?;
+        let delta_words = (outer_loop_idx as i32) - (outer_loop_branch_patch as i32);
+        let imm26 = delta_words & 0x3FFFFFF;
+        let old_word = self.code[outer_loop_branch_patch];
+        self.code[outer_loop_branch_patch] = (old_word & !0x03FFFFFFu32) | (imm26 as u32);
+
+        // outer_done:
+        let outer_done_idx = self.code.len();
+        // Patch B.CS outer_done (imm19 = word delta).
+        let delta_words = (outer_done_idx as i32) - (outer_done_patch as i32);
+        let imm19 = delta_words & 0x7FFFF;
+        let old_word = self.code[outer_done_patch];
+        self.code[outer_done_patch] = (old_word & !(0x7FFFFu32 << 5)) | ((imm19 as u32) << 5);
+        // crc ^= 0xFFFFFFFF  (the final `!crc` inversion).  Reuse X14 as
+        // scratch (it's no longer needed as the inner counter).
+        self.emit_load_immediate(Register::X14, 0xFFFFFFFF)?;
+        self.emit_instruction(Instruction::EOR {
+            rd: Register::X11,
+            rn: Register::X11,
+            rm: Register::X14,
+        })?;
+
+        Ok(())
+    }
 
     /// Emit a single IR instruction using the stack-slot strategy.
     fn ss_emit_instr(
@@ -3717,8 +3944,30 @@ impl Emitter {
                             true
                         }
                         ("channel_send", 2, _) => {
+                            // Wave 10d (aarch64 port): framed write — builds a
+                            // 56-byte L1 frame (44-byte header + 8-byte payload
+                            // + 4-byte CRC32) and writes it to the pipe.
+                            // Mirrors src/codegen/src/x86_64/stack_slot_isel.rs
+                            // "channel_send" arm.
+                            //
+                            // Frame layout (little-endian):
+                            //   [ 0.. 4]  MAGIC         = 0x414D5556 ("VUMA")
+                            //   [ 4.. 8]  version+flags = 0x00020000 (v2, no flags)
+                            //   [ 8..16]  channel_id    = 0
+                            //   [16..24]  sequence      = per-function counter
+                            //   [24..32]  type_hash     = ipc::type_hash("i64")
+                            //   [32..36]  payload_len   = 8
+                            //   [36..40]  (high payload_len pad) = 0
+                            //   [40..44]  cap_count     = 0
+                            //   [44..52]  payload       = msg
+                            //   [52..56]  CRC32         = crc32([0..52], 0xEDB88320)
                             let ch = &args[0];
                             let msg = &args[1];
+                            // Compute type_hash at compile time.  Default
+                            // "i64" since the Call path doesn't carry the
+                            // IR type; matches the existing 8-byte path and
+                            // the x86_64 implementation.
+                            let th = crate::ipc::type_hash("i64");
                             // X9 = full channel handle (64 bits).
                             self.ss_load_value(ch, Register::X9, slots)?;
                             // X0 = write_fd = high 32 bits of handle.
@@ -3727,41 +3976,145 @@ impl Emitter {
                                 rn: Register::X9,
                                 rm: Operand::Imm12(32),
                             })?;
-                            // Allocate 16 bytes of scratch on SP (must stay
-                            // 16-byte aligned for SVC).  Store the 8-byte
-                            // message there and pass its address to write().
+                            // Allocate 64 bytes of scratch on SP (must stay
+                            // 16-byte aligned for SVC; 56 isn't a multiple of
+                            // 16, so round up to 64).  The frame uses [SP+0..56];
+                            // [SP+56..64] is unused padding.
                             self.emit_instruction(Instruction::SUB {
                                 rd: Register::SP,
                                 rn: Register::SP,
-                                rm: Operand::Imm12(16),
+                                rm: Operand::Imm12(64),
                             })?;
-                            // X10 = msg value.
-                            self.ss_load_value(msg, Register::X10, slots)?;
-                            // [SP] = msg
-                            self.emit_instruction(Instruction::STR {
+                            // [SP+0] = MAGIC "VUMA" = 0x414D5556 (LE dword).
+                            self.emit_load_immediate(Register::X10, 0x414D5556)?;
+                            self.emit_instruction(Instruction::STR_W {
                                 rt: Register::X10,
                                 rn: Register::SP,
                                 offset: 0,
                             })?;
-                            // X1 = SP (buf) — MOV Xd, SP lowers to ADD Xd, SP, #0.
+                            // [SP+4] = version(2) + flags(0) = 0x00020000.
+                            self.emit_load_immediate(Register::X10, 0x00020000)?;
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 4,
+                            })?;
+                            // [SP+8] = channel_id = 0 (8 bytes).
+                            self.emit_instruction(Instruction::STR {
+                                rt: Register::XZR,
+                                rn: Register::SP,
+                                offset: 8,
+                            })?;
+                            // [SP+16] = sequence — Wave 10a: load the per-function
+                            // sequence counter from [X29, #-seq_counter_off],
+                            // write it into the frame, then increment + store
+                            // back so the next ChannelSend on any channel uses
+                            // the next sequence number.
+                            //
+                            // Load seq_counter into X10 via ss_load_from_slot
+                            // (which uses X16/X17 as scratch — X10 is safe).
+                            self.ss_load_from_slot(Register::X10, self.seq_counter_off)?;
+                            self.emit_instruction(Instruction::STR {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 16,
+                            })?;
+                            // Increment X10 and store back to seq_counter slot.
+                            // Use ADD X10, X10, #1 (Imm12=1).
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::X10,
+                                rn: Register::X10,
+                                rm: Operand::Imm12(1),
+                            })?;
+                            // Store X10 back to [X29, #-seq_counter_off] via
+                            // ss_store_to_slot (which uses X16/X17 as scratch).
+                            self.ss_store_to_slot(Register::X10, self.seq_counter_off)?;
+                            // [SP+24] = type_hash (8 bytes, compile-time constant).
+                            self.emit_load_immediate(Register::X10, th as i64)?;
+                            self.emit_instruction(Instruction::STR {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 24,
+                            })?;
+                            // [SP+32] = payload_len = 8 (4 bytes).
+                            self.emit_load_immediate(Register::X10, 8)?;
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 32,
+                            })?;
+                            // [SP+36] = 0 (high payload_len pad, 4 bytes).
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::XZR,
+                                rn: Register::SP,
+                                offset: 36,
+                            })?;
+                            // [SP+40] = cap_count = 0 (4 bytes).
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::XZR,
+                                rn: Register::SP,
+                                offset: 40,
+                            })?;
+                            // [SP+44] = payload (8 bytes).  STR requires an
+                            // 8-byte-aligned offset, but 44 isn't a multiple
+                            // of 8 — split into two 32-bit STR_W stores at
+                            // [SP+44] (low) and [SP+48] (high).
+                            //
+                            // X10 = msg value.
+                            self.ss_load_value(msg, Register::X10, slots)?;
+                            // STR_W X10, [SP, #44]  (low 32 bits).
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 44,
+                            })?;
+                            // X9 = X10 >> 32 (high 32 bits).
+                            self.emit_instruction(Instruction::LSR {
+                                rd: Register::X9,
+                                rn: Register::X10,
+                                rm: Operand::Imm12(32),
+                            })?;
+                            // STR_W X9, [SP, #48]  (high 32 bits).
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::X9,
+                                rn: Register::SP,
+                                offset: 48,
+                            })?;
+                            // [SP+52] = CRC32 — Wave 10b: compute the real
+                            // CRC32 over [SP+0..52] (header + payload) using
+                            // the inline loop with polynomial 0xEDB88320
+                            // (same as ipc::crc32).  Result in W11 (low 32
+                            // bits of X11).  This replaces the previous
+                            // hardcoded CRC=0 placeholder.
+                            self.emit_crc32_frame_loop_aarch64()?;
+                            // STR_W W11, [SP, #52]
+                            self.emit_instruction(Instruction::STR_W {
+                                rt: Register::X11,
+                                rn: Register::SP,
+                                offset: 52,
+                            })?;
+                            // write(write_fd, &frame, 56).  X0 still holds
+                            // write_fd (preserved across the frame-build
+                            // above — ss_load_value and ss_store_to_slot use
+                            // only X9, X10, X16, X17 as scratch).
                             self.emit_instruction(Instruction::MOV {
                                 rd: Register::X1,
                                 rm: Register::SP,
                             })?;
-                            // X2 = 8 (count)
-                            self.emit_load_immediate(Register::X2, 8)?;
+                            // X2 = 56 (count)
+                            self.emit_load_immediate(Register::X2, 56)?;
                             // X8 = 64 (sys_write)
                             self.emit_load_immediate(Register::X8, 64)?;
                             self.emit_instruction(Instruction::SVC { imm16: 0 })?;
-                            // Restore SP.
+                            // Restore SP (free the 64-byte frame).
                             self.emit_instruction(Instruction::ADD {
                                 rd: Register::SP,
                                 rn: Register::SP,
-                                rm: Operand::Imm12(16),
+                                rm: Operand::Imm12(64),
                             })?;
-                            // write() returns the byte count (8) on success —
-                            // store it for callers that inspect the call's
-                            // nominal return value.
+                            // write() returns the byte count (56) on
+                            // success — store it for callers that inspect
+                            // the call's nominal return value.
                             if let Some(d) = dst {
                                 if let Some(dst_id) = d.as_register() {
                                     let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
@@ -3771,6 +4124,17 @@ impl Emitter {
                             true
                         }
                         ("channel_recv", 1, true) => {
+                            // Wave 10d (aarch64 port): framed read — reads a
+                            // 56-byte L1 frame, verifies MAGIC, verifies
+                            // cap_count==0, verifies CRC32, then extracts the
+                            // 8-byte payload.  Mirrors src/codegen/src/
+                            // x86_64/stack_slot_isel.rs "channel_recv" arm.
+                            //
+                            // On any verification failure (read<=0, MAGIC
+                            // mismatch, cap_count!=0, CRC mismatch), the dst
+                            // vreg is set to a sentinel:
+                            //   -1  → read error / MAGIC mismatch / cap_count!=0
+                            //   -6  → CRC mismatch
                             let ch = &args[0];
                             let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                             let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
@@ -3783,14 +4147,181 @@ impl Emitter {
                                 immr: 0,
                                 imms: 31,
                             })?;
-                            // X1 = &dst_slot — read() writes the message
-                            // directly into the destination vreg slot.
-                            self.ss_emit_slot_addr(Register::X1, dst_offset)?;
-                            // X2 = 8 (count)
-                            self.emit_load_immediate(Register::X2, 8)?;
+                            // Allocate 64-byte frame on SP (16-byte aligned;
+                            // 56 isn't a multiple of 16, so round up).
+                            self.emit_instruction(Instruction::SUB {
+                                rd: Register::SP,
+                                rn: Register::SP,
+                                rm: Operand::Imm12(64),
+                            })?;
+                            // read(read_fd, &frame, 56).  X0 still holds
+                            // read_fd (preserved across the SUB above).
+                            self.emit_instruction(Instruction::MOV {
+                                rd: Register::X1,
+                                rm: Register::SP,
+                            })?;
+                            // X2 = 56 (count)
+                            self.emit_load_immediate(Register::X2, 56)?;
                             // X8 = 63 (sys_read)
                             self.emit_load_immediate(Register::X8, 63)?;
                             self.emit_instruction(Instruction::SVC { imm16: 0 })?;
+                            // Check read() return for errors (X0 <= 0 → fail).
+                            // read() returns -errno on failure (small negative)
+                            // or 0 on EOF.
+                            self.emit_instruction(Instruction::CMP {
+                                rn: Register::X0,
+                                rm: Operand::Imm12(0),
+                            })?;
+                            // B.LE fail_path (placeholder).
+                            let fail_le_patch = self.code.len();
+                            self.emit_instruction(Instruction::BCond {
+                                cond: Condition::LE,
+                                offset: 0,
+                            })?;
+                            // Verify MAGIC (first 4 bytes == "VUMA" = 0x414D5556).
+                            self.emit_instruction(Instruction::LDR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 0,
+                            })?;
+                            self.emit_load_immediate(Register::X11, 0x414D5556)?;
+                            self.emit_instruction(Instruction::CMP {
+                                rn: Register::X10,
+                                rm: Operand::reg(Register::X11),
+                            })?;
+                            // B.NE fail_path (placeholder).  MAGIC mismatch
+                            // folds into the same -1 sentinel as read error.
+                            let fail_magic_patch = self.code.len();
+                            self.emit_instruction(Instruction::BCond {
+                                cond: Condition::NE,
+                                offset: 0,
+                            })?;
+                            // Wave 12b (aarch64): capability verification — if
+                            // cap_count > 0, the message carries a capability
+                            // token.  For the Wave 10d port we only need to
+                            // accept cap_count==0 frames (the ChannelSend arm
+                            // above always writes cap_count=0).  A non-zero
+                            // cap_count is folded into the -1 fail path.
+                            self.emit_instruction(Instruction::LDR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 40,
+                            })?;
+                            // CBNZ X10, fail_path (placeholder) — branch if
+                            // cap_count != 0.
+                            let fail_cap_patch = self.code.len();
+                            self.emit_instruction(Instruction::CBNZ {
+                                rt: Register::X10,
+                                offset: 0,
+                            })?;
+                            // cap_skip (cap_count == 0): CRC verification.
+                            // Compute CRC32 over [SP+0..52]; result in W11.
+                            self.emit_crc32_frame_loop_aarch64()?;
+                            // Load stored CRC from [SP+52] into X10.
+                            self.emit_instruction(Instruction::LDR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 52,
+                            })?;
+                            // CMP X10, X11  (compare stored vs computed).
+                            self.emit_instruction(Instruction::CMP {
+                                rn: Register::X10,
+                                rm: Operand::reg(Register::X11),
+                            })?;
+                            // B.NE crc_fail (placeholder).
+                            let crc_fail_patch = self.code.len();
+                            self.emit_instruction(Instruction::BCond {
+                                cond: Condition::NE,
+                                offset: 0,
+                            })?;
+                            // Extract payload from [SP+44..52] into dst slot.
+                            // 44 isn't a multiple of 8, so use two LDR_W and
+                            // combine into a 64-bit value.
+                            self.emit_instruction(Instruction::LDR_W {
+                                rt: Register::X10,
+                                rn: Register::SP,
+                                offset: 44,
+                            })?;
+                            self.emit_instruction(Instruction::LDR_W {
+                                rt: Register::X9,
+                                rn: Register::SP,
+                                offset: 48,
+                            })?;
+                            // X9 = high 32 bits << 32 ; X10 |= X9.
+                            self.emit_instruction(Instruction::LSL {
+                                rd: Register::X9,
+                                rn: Register::X9,
+                                rm: Operand::Imm12(32),
+                            })?;
+                            self.emit_instruction(Instruction::ORR {
+                                rd: Register::X10,
+                                rn: Register::X10,
+                                rm: Register::X9,
+                            })?;
+                            // Store X10 (full payload) to dst slot.
+                            self.ss_store_to_slot(Register::X10, dst_offset)?;
+                            // B cleanup (placeholder).
+                            let jmp_cleanup_patch = self.code.len();
+                            self.emit_instruction(Instruction::B { offset: 0 })?;
+                            // crc_fail: store -6 (CRC_MISMATCH) sentinel.
+                            let crc_fail_idx = self.code.len();
+                            // Patch B.NE crc_fail → here (imm19 = word delta).
+                            let delta_words = (crc_fail_idx as i32) - (crc_fail_patch as i32);
+                            let imm19 = delta_words & 0x7FFFF;
+                            let old_word = self.code[crc_fail_patch];
+                            self.code[crc_fail_patch] =
+                                (old_word & !(0x7FFFFu32 << 5)) | ((imm19 as u32) << 5);
+                            // X10 = -6 (0xFFFFFFFFFFFFFFFA).
+                            self.emit_load_immediate(Register::X10, -6)?;
+                            self.ss_store_to_slot(Register::X10, dst_offset)?;
+                            // B cleanup (placeholder) from crc_fail path.
+                            let jmp_cleanup_from_crc_patch = self.code.len();
+                            self.emit_instruction(Instruction::B { offset: 0 })?;
+                            // fail_path (read error / MAGIC mismatch /
+                            // cap_count!=0): store -1 sentinel.
+                            let fail_idx = self.code.len();
+                            // Patch B.LE fail_le_patch → fail_idx (imm19 = word delta).
+                            let delta_words = (fail_idx as i32) - (fail_le_patch as i32);
+                            let imm19 = delta_words & 0x7FFFF;
+                            let old_word = self.code[fail_le_patch];
+                            self.code[fail_le_patch] =
+                                (old_word & !(0x7FFFFu32 << 5)) | ((imm19 as u32) << 5);
+                            // Patch B.NE fail_magic_patch → fail_idx.
+                            let delta_words = (fail_idx as i32) - (fail_magic_patch as i32);
+                            let imm19 = delta_words & 0x7FFFF;
+                            let old_word = self.code[fail_magic_patch];
+                            self.code[fail_magic_patch] =
+                                (old_word & !(0x7FFFFu32 << 5)) | ((imm19 as u32) << 5);
+                            // Patch CBNZ fail_cap_patch → fail_idx.
+                            let delta_words = (fail_idx as i32) - (fail_cap_patch as i32);
+                            let imm19 = delta_words & 0x7FFFF;
+                            let old_word = self.code[fail_cap_patch];
+                            self.code[fail_cap_patch] =
+                                (old_word & !(0x7FFFFu32 << 5)) | ((imm19 as u32) << 5);
+                            // X10 = -1 (0xFFFFFFFFFFFFFFFF).
+                            self.emit_load_immediate(Register::X10, -1)?;
+                            self.ss_store_to_slot(Register::X10, dst_offset)?;
+                            // cleanup: deallocate frame.  Patch the two
+                            // jmp_cleanup branches to land here.
+                            let cleanup_idx = self.code.len();
+                            // Patch B jmp_cleanup_patch → cleanup_idx (imm26 = word delta).
+                            let delta_words = (cleanup_idx as i32) - (jmp_cleanup_patch as i32);
+                            let imm26 = delta_words & 0x3FFFFFF;
+                            let old_word = self.code[jmp_cleanup_patch];
+                            self.code[jmp_cleanup_patch] =
+                                (old_word & !0x03FFFFFFu32) | (imm26 as u32);
+                            // Patch B jmp_cleanup_from_crc_patch → cleanup_idx.
+                            let delta_words = (cleanup_idx as i32) - (jmp_cleanup_from_crc_patch as i32);
+                            let imm26 = delta_words & 0x3FFFFFF;
+                            let old_word = self.code[jmp_cleanup_from_crc_patch];
+                            self.code[jmp_cleanup_from_crc_patch] =
+                                (old_word & !0x03FFFFFFu32) | (imm26 as u32);
+                            // ADD SP, SP, #64  (free the frame).
+                            self.emit_instruction(Instruction::ADD {
+                                rd: Register::SP,
+                                rn: Register::SP,
+                                rm: Operand::Imm12(64),
+                            })?;
                             true
                         }
                         ("channel_close", 1, _) => {

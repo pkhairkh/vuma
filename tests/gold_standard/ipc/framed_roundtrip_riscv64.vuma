@@ -1,0 +1,20 @@
+// framed_roundtrip_riscv64 — Wave 15a: verify L1 framed channel round-trip on riscv64.
+// Sends 42 as i64 through a framed channel (44-byte header + 8-byte
+// payload + 4-byte CRC32 = 56 bytes per message) and verifies the
+// receiver deframes, checks MAGIC + type_hash + CRC32, and extracts
+// the correct value. The frame is built by the riscv64 backend's
+// ChannelSend handler and verified by ChannelRecv.
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i64>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x;
+    }
+    channel_send(ch, 42);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
