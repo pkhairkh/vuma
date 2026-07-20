@@ -1,14 +1,40 @@
 warning: /home/pkhairkh/vuma/Cargo.toml: unused manifest key: profile.release-fast.bitflags
    Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
-   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
-   Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
    Compiling vuma-bd v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/bd)
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
    Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
+   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
+warning: unused import: `std::collections::HashMap`
+  --> src/ive/src/information_flow.rs:36:5
+   |
+36 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> src/ive/src/arena_bounds.rs:30:9
+   |
+30 |     let mut results = Vec::new();
+   |         ----^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `dst_vreg`
+   --> src/ive/src/refinement.rs:190:49
+    |
+190 |             RefinementKind::AssignFromRefined { dst_vreg, dst_refinement, src_refinement } => {
+    |                                                 ^^^^^^^^ help: try ignoring the field: `dst_vreg: _`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
 warning: unused import: `Condition`
-    --> src/codegen/src/backend.rs:2704:60
+    --> src/codegen/src/backend.rs:2706:60
      |
-2704 |         use crate::arm64::{Instruction, Register, Operand, Condition};
+2706 |         use crate::arm64::{Instruction, Register, Operand, Condition};
      |                                                            ^^^^^^^^^
      |
      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
@@ -45,57 +71,23 @@ warning: unused variable: `skip_sub_label`
 2702 |     let skip_sub_label = code.len();
      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skip_sub_label`
 
-   Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
-warning: unused import: `std::collections::HashMap`
-  --> src/ive/src/information_flow.rs:36:5
-   |
-36 | use std::collections::HashMap;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+warning: unused variable: `fname`
+    --> src/codegen/src/x86_64/stack_slot_isel.rs:1429:42
+     |
+1429 |             if let IRInstr::Call { func: fname, .. } = instr {
+     |                                          ^^^^^ help: if this is intentional, prefix it with an underscore: `_fname`
 
-warning: variable does not need to be mutable
-  --> src/ive/src/arena_bounds.rs:30:9
-   |
-30 |     let mut results = Vec::new();
-   |         ----^^^^^^^
-   |         |
-   |         help: remove this `mut`
-   |
-   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused variable: `dst_vreg`
-   --> src/ive/src/refinement.rs:190:49
-    |
-190 |             RefinementKind::AssignFromRefined { dst_vreg, dst_refinement, src_refinement } => {
-    |                                                 ^^^^^^^^ help: try ignoring the field: `dst_vreg: _`
-    |
-    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
-
-   Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
 warning: unused variable: `load_fn`
-   --> src/codegen/src/x86_64/stack_slot_isel.rs:756:29
-    |
-756 |                         let load_fn: &dyn Fn(&IRValue, Gpr) -> Vec<u8> = if is_f64 { &load_value } else { &load_value_f32 };
-    |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_load_fn`
+    --> src/codegen/src/x86_64/stack_slot_isel.rs:1465:29
+     |
+1465 |                         let load_fn: &dyn Fn(&IRValue, Gpr) -> Vec<u8> = if is_f64 { &load_value } else { &load_value_f32 };
+     |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_load_fn`
 
 warning: unused variable: `dst_off`
-    --> src/codegen/src/x86_64/stack_slot_isel.rs:2510:37
+    --> src/codegen/src/x86_64/stack_slot_isel.rs:3465:37
      |
-2510 | ...                   let dst_off = slot_offset(dst_id);
+3465 | ...                   let dst_off = slot_offset(dst_id);
      |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dst_off`
-
-warning: unused variable: `dst_off`
-    --> src/codegen/src/x86_64/stack_slot_isel.rs:2522:37
-     |
-2522 | ...                   let dst_off = slot_offset(dst_id);
-     |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dst_off`
-
-warning: unused variable: `ch`
-    --> src/codegen/src/x86_64/stack_slot_isel.rs:2659:37
-     |
-2659 | ...                   let ch = &args[0];
-     |                           ^^ help: if this is intentional, prefix it with an underscore: `_ch`
 
 warning: variable `fp_stack_count` is assigned to, but never used
     --> src/codegen/src/x86_32/stack_slot_isel.rs:3065:25
@@ -163,29 +155,29 @@ warning: value assigned to `overflow_idx` is never read
      = help: maybe it is overwritten before being read?
 
 warning: function `encode_vldr` is never used
-    --> src/codegen/src/arm32/mod.rs:9173:4
+    --> src/codegen/src/arm32/mod.rs:9215:4
      |
-9173 | fn encode_vldr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
+9215 | fn encode_vldr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
      |    ^^^^^^^^^^^
      |
      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: function `encode_vstr` is never used
-    --> src/codegen/src/arm32/mod.rs:9196:4
+    --> src/codegen/src/arm32/mod.rs:9238:4
      |
-9196 | fn encode_vstr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
+9238 | fn encode_vstr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
      |    ^^^^^^^^^^^
 
 warning: function `encode_vldr_d` is never used
-    --> src/codegen/src/arm32/mod.rs:9221:4
+    --> src/codegen/src/arm32/mod.rs:9263:4
      |
-9221 | fn encode_vldr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
+9263 | fn encode_vldr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
      |    ^^^^^^^^^^^^^
 
 warning: function `encode_vstr_d` is never used
-    --> src/codegen/src/arm32/mod.rs:9245:4
+    --> src/codegen/src/arm32/mod.rs:9287:4
      |
-9245 | fn encode_vstr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
+9287 | fn encode_vstr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
      |    ^^^^^^^^^^^^^
 
 warning: function `emit_softfloat_call` is never used
@@ -340,6 +332,7 @@ warning: constant `FP_FSTOX` is never used
 
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `StructAccessNode`
   --> src/pipeline.rs:52:87
    |
@@ -350,22 +343,22 @@ warning: unused import: `StructAccessNode`
 
 warning: `vuma-ive` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
 warning: unused variable: `nested_name`
-    --> src/pipeline.rs:9864:75
+    --> src/pipeline.rs:9916:75
      |
-9864 |                         if let vuma_parser::ast::Expr::StructInit { name: nested_name, fields: nested_fields, .. } = field_expr {
+9916 |                         if let vuma_parser::ast::Expr::StructInit { name: nested_name, fields: nested_fields, .. } = field_expr {
      |                                                                           ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_nested_name`
      |
      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: `vuma` (lib) generated 2 warnings (run `cargo fix --lib -p vuma` to apply 2 suggestions)
-warning: `vuma-codegen` (lib) generated 47 warnings (run `cargo fix --lib -p vuma-codegen` to apply 10 suggestions)
+warning: `vuma-codegen` (lib) generated 46 warnings (run `cargo fix --lib -p vuma-codegen` to apply 9 suggestions)
 warning: unused variable: `ds`
-   --> src/bin/compile_dump.rs:186:9
+   --> src/bin/compile_dump.rs:194:9
     |
-186 |     for ds in &ir_program.data_sections {
+194 |     for ds in &ir_program.data_sections {
     |         ^^ help: if this is intentional, prefix it with an underscore: `_ds`
     |
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: `vuma` (bin "compile_dump") generated 1 warning (run `cargo fix --bin "compile_dump" -p vuma` to apply 1 suggestion)
-    Finished `release-fast` profile [optimized] target(s) in 1m 47s
+    Finished `release-fast` profile [optimized] target(s) in 1m 41s
