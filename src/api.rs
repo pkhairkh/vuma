@@ -239,7 +239,7 @@ impl VumaCompiler {
         let front_result = run_frontend(source, &self.config);
 
         let (scg, mut diagnostics) = match front_result {
-            FrontendResult::Ok { scg } => (scg, Vec::new()),
+            FrontendResult::Ok { scg, .. } => (scg, Vec::new()),
             FrontendResult::Err { diagnostics } => {
                 return CompileResult {
                     success: false,
@@ -484,14 +484,15 @@ impl VumaCompiler {
         all_diagnostics
     }
 
-    /// Verify a VUMA program by running all five IVE invariant checkers
+    /// Verify a VUMA program by running the IVE PMT state verifiers
     /// on the SCG and producing a structured verification report.
     ///
     /// This method runs the full front-end pipeline (parse → SCG),
-    /// then invokes the IVE `InvariantAggregator` to check all five
-    /// core invariants (liveness, exclusivity, interpretation, origin,
-    /// cleanup) and the proof system to produce pass/fail per invariant
-    /// with counterexamples for any violations.
+    /// then invokes the IVE `InvariantAggregator` at the PMT level
+    /// (VUMA 2.0 default — runs the 3 PMT state verifiers:
+    /// state-read, state-write, state-transform) and the proof system
+    /// to produce pass/fail per invariant with counterexamples for
+    /// any violations.
     ///
     /// # Returns
     ///
@@ -520,8 +521,8 @@ impl VumaCompiler {
         // Run the front-end pipeline to get the SCG.
         let front_result = run_frontend(source, &self.config);
 
-        let scg = match front_result {
-            FrontendResult::Ok { scg } => *scg,
+        let (scg, pmt_layouts) = match front_result {
+            FrontendResult::Ok { scg, pmt_layouts } => (*scg, pmt_layouts),
             FrontendResult::Err { diagnostics } => {
                 let messages: Vec<String> =
                     diagnostics.iter().map(|d| d.message.clone()).collect();
@@ -538,9 +539,14 @@ impl VumaCompiler {
             }
         };
 
-        // Run the IVE invariant aggregator at Normal level (all 5 checks).
-        let aggregator = InvariantAggregator::new().with_level(IveVerificationLevel::Normal);
-        let input = VerificationInput::from_scg(scg.clone());
+        // VUMA 2.0 PMT-only: run the IVE invariant aggregator at the PMT
+        // level (the 3 state verifiers only — pointer invariants are
+        // skipped because pointer syntax is a hard parse error in VUMA
+        // 2.0). The PMT layout registry built by `run_frontend` is
+        // attached so the state verifiers have field offset/size info.
+        let aggregator = InvariantAggregator::new().with_level(IveVerificationLevel::Pmt);
+        let input = VerificationInput::from_scg(scg.clone())
+            .with_pmt_layouts(pmt_layouts);
         let aggregated = aggregator.verify_all(&input);
 
         // Convert the aggregated result into per-invariant API results,
@@ -696,7 +702,7 @@ impl VumaCompiler {
     pub fn build_proof_bundle(&self, source: &str) -> Result<ProofBundle, Vec<VumaDiagnostic>> {
         let front_result = run_frontend(source, &self.config);
         let scg = match front_result {
-            FrontendResult::Ok { scg } => *scg,
+            FrontendResult::Ok { scg, .. } => *scg,
             FrontendResult::Err { diagnostics } => return Err(diagnostics),
         };
         Ok(build_proof_bundle(&scg))
@@ -1240,6 +1246,10 @@ impl fmt::Display for VerificationReport {
 enum FrontendResult {
     Ok {
         scg: Box<vuma_scg::SCG>,
+        /// (VUMA 2.0 PMT-only) Layout registry built from the AST's
+        /// `Item::LayoutDef` items, used by `VerificationLevel::Pmt`
+        /// to run the 3 state verifiers with full field offset/size info.
+        pmt_layouts: HashMap<String, vuma_ive::PmtLayoutSpec>,
     },
     Err {
         diagnostics: Vec<VumaDiagnostic>,
@@ -1287,26 +1297,42 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
     let bd_results = inference_engine.infer_types(&scg);
     pipeline::refine_scg_types_with_bd(&mut scg, &bd_results);
 
+    // (VUMA 2.0 PMT-only) Build the PMT layout registry from the AST's
+    // `Item::LayoutDef` items so the IVE's `VerificationLevel::Pmt` can
+    // run the 3 state verifiers (state_read / state_write /
+    // state_transform) with full field offset/size info. Cheap (empty
+    // map if the program has no `layout` items).
+    let pmt_layouts = pipeline::build_pmt_layout_specs(&ast);
+
     // Stage 5: IVE Verification (non-fatal)
     if config.verification_level != VerificationLevel::None {
+        // VUMA 2.0 is PMT-only: every non-None pipeline verification
+        // level maps to `IveVerificationLevel::Pmt` (the 3 state
+        // verifiers only — the 5 legacy pointer invariants are skipped
+        // because pointer syntax is a hard parse error in VUMA 2.0).
         let ive_level = match config.verification_level {
-            VerificationLevel::Quick => IveVerificationLevel::Quick,
-            VerificationLevel::Normal => IveVerificationLevel::Normal,
-            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
-            VerificationLevel::Modular => IveVerificationLevel::Modular,
-            VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
-            VerificationLevel::Hardened => IveVerificationLevel::Hardened,
+            VerificationLevel::Quick
+            | VerificationLevel::Normal
+            | VerificationLevel::Exhaustive
+            | VerificationLevel::Modular
+            | VerificationLevel::ConstantTime
+            | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);
-        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let input =
+            vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+                .with_pmt_layouts(pmt_layouts.clone());
         let _ = aggregator.verify_all(&input);
     }
 
     // Stage 6: SCG Transforms
     pipeline::run_scg_transforms(&mut scg, config);
 
-    FrontendResult::Ok { scg: Box::new(scg) }
+    FrontendResult::Ok {
+        scg: Box::new(scg),
+        pmt_layouts,
+    }
 }
 
 /// Run target-specific codegen using the Backend trait.
@@ -2173,9 +2199,14 @@ mod tests {
             !report.invariants.is_empty(),
             "Should have per-invariant results"
         );
+        // VUMA 2.0 PMT-only: the verify path runs only the 3 PMT state
+        // verifiers (surfaced as a single `InvariantKind::Pmt` aggregated
+        // result), so `invariants.len() == 1`. The timing data may be 0
+        // on very fast machines, so we accept either a non-zero elapsed
+        // time OR at least one invariant result.
         assert!(
-            report.metadata.total_elapsed_ms > 0 || report.invariants.len() == 5,
-            "Should have timing data or all 5 invariants"
+            report.metadata.total_elapsed_ms > 0 || report.invariants.len() >= 1,
+            "Should have timing data or at least 1 PMT invariant result"
         );
     }
 
@@ -2220,7 +2251,7 @@ mod tests {
         // a ScgSummary, not the full SCG that build_proof_bundle needs).
         let front_result = run_frontend(source, &compiler.config);
         let scg = match front_result {
-            FrontendResult::Ok { scg } => *scg,
+            FrontendResult::Ok { scg, .. } => *scg,
             FrontendResult::Err { diagnostics } => {
                 panic!("Frontend failed: {:?}", diagnostics);
             }
@@ -2256,7 +2287,7 @@ mod tests {
         "#;
         let front_result = run_frontend(source, &compiler.config);
         let scg = match front_result {
-            FrontendResult::Ok { scg } => *scg,
+            FrontendResult::Ok { scg, .. } => *scg,
             FrontendResult::Err { diagnostics } => {
                 panic!("Frontend failed: {:?}", diagnostics);
             }

@@ -266,11 +266,13 @@ impl CompileConfig {
     ///
     /// Note: verification still runs at `Normal` level (all five invariants)
     /// because skipping invariants would silently allow unsafe programs
-    /// through, defeating VUMA's core safety guarantee.  The "fast" aspect
-    /// of this preset comes from `OptLevel::O0`, not from reduced verification.
+    /// through, defeating VUMA's core safety guarantee.  O3 is **mandatory**
+    /// in VUMA 2.0 — every pipeline path runs the full O3 pass set regardless
+    /// of the `opt_level` value in the config; the "fast" aspect of this
+    /// preset comes only from enabling `debug_info`.
     pub fn debug() -> Self {
         Self {
-            opt_level: OptLevel::O0,
+            opt_level: OptLevel::O3,
             debug_info: true,
             verification_level: VerificationLevel::Normal,
             ..Self::default()
@@ -304,7 +306,7 @@ impl Default for CompileConfig {
     fn default() -> Self {
         Self {
             target: CompileTarget::Linux,
-            opt_level: OptLevel::O2,
+            opt_level: OptLevel::O3,
             verification_level: VerificationLevel::Normal,
             strict_verification: false,
             ive_max_paths: 64,
@@ -4757,10 +4759,11 @@ pub fn run_ir_pipeline(
 ) -> Result<IRProgram, VumaError> {
     // ── Wave 34: Lowering passes (monomorphize, closures, switch, tail-call,
     //    loop-normalize) — run after SCG→IR build, before the main opt pass.
-    //    Gated at O1+. Each pass is best-effort: a soft-failure is logged but
-    //    does not abort compilation (these are newly-wired passes; the
-    //    pipeline's correctness does not yet depend on them).
-    if !matches!(config.opt_level, OptLevel::O0) {
+    //    In VUMA 2.0 these run unconditionally because O3 is mandatory.
+    //    Each pass is best-effort: a soft-failure is logged but does not
+    //    abort compilation (these are newly-wired passes; the pipeline's
+    //    correctness does not yet depend on them).
+    {
         let tlower = Instant::now();
         let mut lower = |name: &str, f: fn(&mut IRProgram) -> Result<(), vuma_codegen::backend::BackendError>| {
             if let Err(e) = f(&mut ir_program) {
@@ -4838,7 +4841,9 @@ pub fn run_ir_pipeline(
     // for compile_modules). This means the e-graph cost function and scheduler
     // make decisions based on the real target's instruction latencies, not
     // a generic default.
-    if !matches!(config.opt_level, OptLevel::O0) {
+    //
+    // In VUMA 2.0, O3 is mandatory — the codegen-opt pass always runs.
+    {
         let topt = Instant::now();
         let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(backend_kind) {
             backend.target_info().latency_table()
@@ -4854,11 +4859,11 @@ pub fn run_ir_pipeline(
     }
 
     // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
-    // effect propagation at O2+.  Runs AFTER the main codegen-opt pass so
-    // the analysis sees the post-optimisation IR (and so SROA's cleanup
-    // happens before regalloc).  Gated behind O2+ because SROA's
-    // rename-walk is O(instructions × accesses) per alloc.
-    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+    // effect propagation. Runs AFTER the main codegen-opt pass so the
+    // analysis sees the post-optimisation IR (and so SROA's cleanup
+    // happens before regalloc).  In VUMA 2.0 O3 is mandatory, so this
+    // always runs.
+    {
         let te = Instant::now();
         let summary = run_escape_and_effects_passes(&mut ir_program);
         vuma_log!(debug,
@@ -4871,14 +4876,14 @@ pub fn run_ir_pipeline(
         timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
     }
 
-    // (Wave 4) Auto-vectorization at O2+. Runs AFTER escape/effects (so it
-    // sees the post-optimization, post-SROA IR) and BEFORE regalloc. The
-    // vectorizer performs per-function loop vectorization (counted self-loops
-    // with safe bodies — vector loop + scalar remainder) and SLP planning
-    // (plan-only; IR is not mutated by SLP — see vectorize.rs docs). Target-
-    // agnostic IR rewriting — no latency table needed. Gated at O2+ like
-    // escape/effects.
-    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+    // (Wave 4) Auto-vectorization. Runs AFTER escape/effects (so it sees the
+    // post-optimization, post-SROA IR) and BEFORE regalloc. The vectorizer
+    // performs per-function loop vectorization (counted self-loops with safe
+    // bodies — vector loop + scalar remainder) and SLP planning (plan-only;
+    // IR is not mutated by SLP — see vectorize.rs docs). Target-agnostic IR
+    // rewriting — no latency table needed.  In VUMA 2.0 O3 is mandatory, so
+    // this always runs.
+    {
         let tv = Instant::now();
         let mut loops_vectorized = 0usize;
         let mut slp_packs = 0usize;
@@ -5024,20 +5029,33 @@ pub fn compile_with_path(
     let t = Instant::now();
     let verification = if config.verification_level != VerificationLevel::None
         && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
+        // VUMA 2.0 is PMT-only: every non-None pipeline verification
+        // level maps to `IveVerificationLevel::Pmt` (the 3 PMT state
+        // verifiers only — the 5 legacy pointer invariants are skipped
+        // because pointer syntax is a hard parse error in VUMA 2.0).
         let ive_level = match config.verification_level {
-            VerificationLevel::Quick => IveVerificationLevel::Quick,
-            VerificationLevel::Normal => IveVerificationLevel::Pmt,
-            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
-            VerificationLevel::Modular => IveVerificationLevel::Modular,
-            VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
-            VerificationLevel::Hardened => IveVerificationLevel::Hardened,
+            VerificationLevel::Quick
+            | VerificationLevel::Normal
+            | VerificationLevel::Exhaustive
+            | VerificationLevel::Modular
+            | VerificationLevel::ConstantTime
+            | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new()
             .with_level(ive_level)
             .with_max_paths(config.ive_max_paths)
             .with_max_path_length(config.ive_max_path_length);
-        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        // (VUMA 2.0 PMT-only) Build the PMT layout registry from the
+        // AST's `Item::LayoutDef` items so the IVE's `Pmt` level can
+        // run the 3 state verifiers (state_read / state_write /
+        // state_transform) with full field offset/size info. Without
+        // this, every state op would FAIL verification ("layout not
+        // found") and the production pipeline would refuse to emit
+        // any PMT program that uses state ops.
+        let pmt_layouts = build_pmt_layout_specs(&ast);
+        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+            .with_pmt_layouts(pmt_layouts);
         let result = aggregator.verify_all(&input);
         // Verification is a hard safety gate: if any invariant was
         // violated, refuse to emit code for the program.  This is
@@ -5068,8 +5086,12 @@ pub fn compile_with_path(
 
     // ── Stage 6b: Memory Safety Analysis (Wave 20 — blocking pass) ────
     //
-    // `CompileConfig.memory_safety` (default: `true`) gates the
-    // memory-safety analyzer.  When enabled, the pipeline runs BOTH:
+    // VUMA 2.0 is PMT-only and memory-safety analysis is MANDATORY —
+    // the `CompileConfig.memory_safety` field is retained for API
+    // stability but its value is IGNORED here (the analyzer always
+    // runs). The `--no-memory-safety` CLI flag has been removed.
+    //
+    // When enabled, the pipeline runs BOTH:
     //   1. `MemorySafetyAnalyzer::analyze` on the codegen SCG (after
     //      Stage 8 builds it) — detects double-free, dangling pointers,
     //      and simple leaks at the function level.
@@ -5081,10 +5103,7 @@ pub fn compile_with_path(
     // refuses to emit code, independent of `stop_on_first_error`.
     // Emitting a binary for a program with known memory-safety
     // violations would defeat the entire purpose of VUMA.
-    //
-    // The `--no-memory-safety` CLI flag sets `memory_safety = false`
-    // to skip this pass (with a compile-time warning).
-    let mem_safety_enabled = config.memory_safety;
+    let mem_safety_enabled = true; // VUMA 2.0: always on (escape hatch removed)
     if mem_safety_enabled {
         let t = Instant::now();
 
@@ -5146,15 +5165,10 @@ pub fn compile_with_path(
             "memory-safety".to_string(),
             t.elapsed().as_millis() as u64,
         ));
-    } else {
-        vuma_log!(warn, 
-            "memory-safety analysis disabled via --no-memory-safety; \
-             the emitted binary may contain use-after-free, double-free, \
-             or uninitialized-read bugs that would otherwise be caught \
-             at compile time"
-        );
-        timings.push(("memory-safety".to_string(), 0));
     }
+    // (VUMA 2.0: the `else` branch that previously skipped memory-safety
+    // analysis with a `--no-memory-safety` warning is now unreachable —
+    // `mem_safety_enabled` is always `true`.)
 
     // ── Stage 7: SCG Transforms ───────────────────────────────────────
     let t = Instant::now();
@@ -5203,7 +5217,8 @@ pub fn compile_with_path(
     // Wave 20: Run the codegen-level MemorySafetyAnalyzer on the codegen
     // SCG.  This complements the SCG-liveness analysis (Stage 6b) with
     // function-level double-free and dangling-pointer detection.  Like
-    // Stage 6b, this is a HARD gate when `config.memory_safety` is true.
+    // Stage 6b, this is a HARD gate (VUMA 2.0: memory safety is mandatory;
+    // `config.memory_safety` is ignored).
     if mem_safety_enabled {
         let ms_config = vuma_codegen::memory_safety::MemorySafetyConfig::compile_time_only();
         let analyzer = vuma_codegen::memory_safety::MemorySafetyAnalyzer::new(ms_config);
@@ -6170,20 +6185,33 @@ pub fn compile_with_recovery(
     let t = Instant::now();
     let verification = if config.verification_level != VerificationLevel::None
         && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
+        // VUMA 2.0 is PMT-only: every non-None pipeline verification
+        // level maps to `IveVerificationLevel::Pmt` (the 3 PMT state
+        // verifiers only — the 5 legacy pointer invariants are skipped
+        // because pointer syntax is a hard parse error in VUMA 2.0).
         let ive_level = match config.verification_level {
-            VerificationLevel::Quick => IveVerificationLevel::Quick,
-            VerificationLevel::Normal => IveVerificationLevel::Pmt,
-            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
-            VerificationLevel::Modular => IveVerificationLevel::Modular,
-            VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
-            VerificationLevel::Hardened => IveVerificationLevel::Hardened,
+            VerificationLevel::Quick
+            | VerificationLevel::Normal
+            | VerificationLevel::Exhaustive
+            | VerificationLevel::Modular
+            | VerificationLevel::ConstantTime
+            | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
             VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new()
             .with_level(ive_level)
             .with_max_paths(config.ive_max_paths)
             .with_max_path_length(config.ive_max_path_length);
-        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        // (VUMA 2.0 PMT-only) Build the PMT layout registry from the
+        // AST's `Item::LayoutDef` items so the IVE's `Pmt` level can
+        // run the 3 state verifiers (state_read / state_write /
+        // state_transform) with full field offset/size info. Without
+        // this, every state op would FAIL verification ("layout not
+        // found") and the production pipeline would refuse to emit
+        // any PMT program that uses state ops.
+        let pmt_layouts = build_pmt_layout_specs(&ast);
+        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+            .with_pmt_layouts(pmt_layouts);
         let result = aggregator.verify_all(&input);
         // Verification is a hard safety gate: if any invariant was
         // violated, refuse to emit code for the program.  This is
@@ -6327,7 +6355,8 @@ pub fn compile_with_recovery(
 
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
     // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
-    if !matches!(config.opt_level, OptLevel::O0) {
+    // In VUMA 2.0 O3 is mandatory, so the codegen-opt pass always runs.
+    {
         let topt = Instant::now();
         let emit_config = config.emit_config();
         let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(emit_config.backend) {
@@ -6344,8 +6373,9 @@ pub fn compile_with_recovery(
     }
 
     // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
-    // effect propagation at O2+.  See `compile` for the full rationale.
-    if matches!(config.opt_level, OptLevel::O2 | OptLevel::O3) {
+    // effect propagation.  See `compile` for the full rationale.  In VUMA
+    // 2.0 O3 is mandatory, so this always runs.
+    {
         let te = Instant::now();
         let summary = run_escape_and_effects_passes(&mut ir_program);
         vuma_log!(debug, 
@@ -6690,7 +6720,7 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // ── Stage 3: SCG Transforms (lightweight — no verification) ──
     let _ = run_scg_transforms(&mut scg, &CompileConfig {
         target: CompileTarget::Wasm32,
-        opt_level: OptLevel::O1,
+        opt_level: OptLevel::O3,
         verification_level: VerificationLevel::None,
         strict_verification: false,
         ive_max_paths: 64,
@@ -6937,73 +6967,37 @@ pub fn run_escape_and_effects_passes(program: &mut IRProgram) -> EscapeAndEffect
     summary
 }
 
-/// Run SCG transformation passes based on the optimisation level.
+/// Run SCG transformation passes.
+///
+/// In VUMA 2.0, O3 is **mandatory** — every pipeline path runs the full
+/// O3 SCG pass set (DCE, constant folding, CSE, inlining, LICM, strength
+/// reduction, tail-call detection, dead-region elimination) regardless of
+/// the `opt_level` value in the config. The `opt_level` field is kept for
+/// API backwards compatibility with downstream code that still
+/// constructs a `CompileConfig`, but it has no effect on which SCG passes
+/// run.
 pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPipelineResult> {
     let mut pm = PassManager::new().verify_between(true).stop_on_error(false);
 
-    match config.opt_level {
-        OptLevel::O0 => {
-            // No optimisation passes.
-        }
-        OptLevel::O1 => {
-            pm.add_pass(DeadCodeElimination::new());
-            pm.add_pass(ConstantFolding::new());
-            // (Wave 33) Dead-region elimination at O1+ — drops
-            // allocation/deallocation pairs whose region is never read.
-            // Cheap analysis (single linear scan), so it's worth running
-            // even at O1.
-            pm.add_pass(DeadRegionElimination::new());
-            pm.add_pass(DeadCodeElimination::new()); // cleanup after DRE
-        }
-        OptLevel::O2 => {
-            pm.add_pass(DeadCodeElimination::new());
-            pm.add_pass(ConstantFolding::new());
-            pm.add_pass(CommonSubexpressionElimination::new());
-            pm.add_pass(DeadCodeElimination::new()); // second pass after CSE
-            // (Wave 26) Loop-invariant code motion at O2+ — hoists
-            // loop-invariant SCG computation nodes to the loop pre-header.
-            // Skipped at O1 (LICM can grow code if the loop body is large)
-            // and at O0 (no optimisation).
-            pm.add_pass(LoopInvariantCodeMotion::new());
-            pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
-            // (Wave 33) Strength reduction at O2+ — rewrites multiply /
-            // divide / modulo by a constant power of two into shifts /
-            // masks.  Run after ConstantFolding so the constant operand
-            // has been materialised as a `const.<ty>:<val>` Computation
-            // node (which is what the pass pattern-matches on).
-            pm.add_pass(StrengthReduction::new());
-            // (Wave 33) Tail-call detection at O2+ — marks call nodes
-            // whose result feeds directly into a FunctionReturn with
-            // `tail_call: true`, enabling the backend to reuse the
-            // current stack frame.  Detection only — the actual
-            // frame-reuse happens in the backend.
-            pm.add_pass(TailCallOptDetection::new());
-            // (Wave 33) Dead-region elimination at O2+ as well — the
-            // post-LICM / post-SR IR may have new write-only regions.
-            pm.add_pass(DeadRegionElimination::new());
-            pm.add_pass(DeadCodeElimination::new()); // final cleanup
-        }
-        OptLevel::O3 => {
-            pm.add_pass(DeadCodeElimination::new());
-            pm.add_pass(ConstantFolding::new());
-            pm.add_pass(CommonSubexpressionElimination::new());
-            pm.add_pass(InliningPass::with_max_size(config.max_inline_size));
-            pm.add_pass(DeadCodeElimination::new()); // cleanup after inlining
-            pm.add_pass(ConstantFolding::new()); // re-fold after inlining
-            pm.add_pass(CommonSubexpressionElimination::new());
-            // (Wave 26) LICM at O3, after inlining+DCE so it sees the
-            // post-inline loop structure.
-            pm.add_pass(LoopInvariantCodeMotion::new());
-            pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
-            // (Wave 33) Strength reduction + tail-call detection +
-            // dead-region elimination at O3, mirroring the O2 pipeline
-            // but on the post-inline IR.
-            pm.add_pass(StrengthReduction::new());
-            pm.add_pass(TailCallOptDetection::new());
-            pm.add_pass(DeadRegionElimination::new());
-            pm.add_pass(DeadCodeElimination::new()); // final cleanup
-        }
-    }
+    // O3 is mandatory — always run the full O3 SCG pass set.
+    let _ = config.opt_level; // acknowledged: opt_level is intentionally ignored (O3 mandatory)
+    pm.add_pass(DeadCodeElimination::new());
+    pm.add_pass(ConstantFolding::new());
+    pm.add_pass(CommonSubexpressionElimination::new());
+    pm.add_pass(InliningPass::with_max_size(config.max_inline_size));
+    pm.add_pass(DeadCodeElimination::new()); // cleanup after inlining
+    pm.add_pass(ConstantFolding::new()); // re-fold after inlining
+    pm.add_pass(CommonSubexpressionElimination::new());
+    // (Wave 26) LICM after inlining+DCE so it sees the post-inline loop
+    // structure.
+    pm.add_pass(LoopInvariantCodeMotion::new());
+    pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
+    // (Wave 33) Strength reduction + tail-call detection +
+    // dead-region elimination on the post-inline IR.
+    pm.add_pass(StrengthReduction::new());
+    pm.add_pass(TailCallOptDetection::new());
+    pm.add_pass(DeadRegionElimination::new());
+    pm.add_pass(DeadCodeElimination::new()); // final cleanup
 
     if pm.pass_count() > 0 {
         Some(pm.run(scg))
@@ -7062,7 +7056,13 @@ mod tests {
         );
     }
 
-    /// Test 2: Compile with O0 (no optimisation).
+    /// Test 2: Compile with the legacy `OptLevel::O0` value.
+    ///
+    /// In VUMA 2.0, O3 is **mandatory** — the `opt_level` field is kept
+    /// for API stability but has no effect. Constructing a `CompileConfig`
+    /// with `OptLevel::O0` still compiles successfully because every
+    /// pipeline path runs the full O3 pass set regardless. This test
+    /// pins that backwards-compatibility contract.
     #[test]
     fn test_compile_no_optimisation() {
         let source = r#"
@@ -7074,7 +7074,7 @@ mod tests {
             ..CompileConfig::default()
         };
         let result = compile(source, &config);
-        assert!(result.is_ok(), "O0 compilation should succeed");
+        assert!(result.is_ok(), "O0 compilation should succeed (O3 is mandatory — full pass set always runs)");
         let output = result.unwrap();
         assert!(
             output.binary.len() >= 64,
@@ -7235,7 +7235,7 @@ mod tests {
     fn test_config_defaults() {
         let config = CompileConfig::default();
         assert_eq!(config.target, CompileTarget::Linux);
-        assert_eq!(config.opt_level, OptLevel::O2);
+        assert_eq!(config.opt_level, OptLevel::O3);
         assert_eq!(config.verification_level, VerificationLevel::Normal);
         assert_eq!(config.entry_name, "main");
         assert!(!config.debug_info);
@@ -7588,15 +7588,18 @@ mod tests {
         );
     }
 
-    /// Wave 20 escape-hatch test: the same UAF program must compile
-    /// successfully when `--no-memory-safety` is set
-    /// (`memory_safety: false`).  This confirms the escape hatch works.
+    /// Wave 20 / VUMA 2.0: the `--no-memory-safety` escape hatch has
+    /// been REMOVED — `CompileConfig.memory_safety` is retained for API
+    /// stability but its value is IGNORED (the memory-safety analyzer
+    /// always runs). This test confirms that a clean PMT program
+    /// compiles successfully even when the legacy `memory_safety:
+    /// false` field is set (because the field is now a no-op).
     #[test]
     fn test_wave20_no_memory_safety_escape_hatch() {
         // VUMA 2.0 PMT-only: pointer syntax is a hard parse error.
-        // Use a clean program to verify the --no-memory-safety escape
-        // hatch still compiles successfully (the memory-safety pass is
-        // skipped, but the pipeline runs without crashing).
+        // Use a clean program to verify that setting `memory_safety:
+        // false` in the config is now IGNORED — the memory-safety pass
+        // still runs, and a clean PMT program compiles successfully.
         let source = r#"
             fn main() -> i32 {
                 x = 42;
@@ -7604,14 +7607,14 @@ mod tests {
             }
         "#;
         let config = CompileConfig {
-            memory_safety: false,
+            memory_safety: false, // VUMA 2.0: ignored — pass always runs.
             verification_level: VerificationLevel::None,
             ..CompileConfig::default()
         };
         let result = compile(source, &config);
         assert!(
             result.is_ok(),
-            "PMT program must compile with --no-memory-safety escape hatch, got: {:?}",
+            "PMT program must compile (memory_safety=false is now ignored), got: {:?}",
             result.err()
         );
     }

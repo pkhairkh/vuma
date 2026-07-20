@@ -119,14 +119,22 @@ impl fmt::Display for InvariantKind {
 
 /// How thoroughly to verify the program.
 ///
-/// Controls which invariant checks are run and whether proofs are
-/// attempted for properties that can be formally established.
+/// VUMA 2.0 is PMT-only: every program is verified with
+/// [`VerificationLevel::Pmt`] (the default), which runs the three PMT
+/// state verifiers (state-read / state-write / state-transform) and
+/// SKIPS the five legacy pointer invariants. The other variants
+/// (`Quick`/`Normal`/`Exhaustive`/`Modular`/`ConstantTime`/`Hardened`)
+/// remain on the enum for API stability and for use by IVE-internal
+/// tests, but they are NOT user-selectable in the production pipeline —
+/// the CLI `--verification` flag accepts only `pmt`, and the pipeline
+/// hard-codes `VerificationLevel::Pmt`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VerificationLevel {
     /// Only run cheap, syntactic checks (exclusivity, origin).
     Quick,
-    /// Run all five core invariant checks (default).
-    #[default]
+    /// Run all five core pointer-invariant checks (LEGACY — not used
+    /// in VUMA 2.0 production code paths; retained for IVE-internal
+    /// tests and API stability).
     Normal,
     /// Run all checks and attempt formal proof generation.
     /// Also runs the interprocedural analysis (Wave 16).
@@ -141,11 +149,13 @@ pub enum VerificationLevel {
     /// (Wave 16) Run all 6 invariants (5 core + constant-time) plus
     /// interprocedural and modular analyses.  The most thorough level.
     Hardened,
-    /// (Wave 3d) PMT state verification only — runs the 3 state verifiers
-    /// (state-read, state-write, state-transform) and SKIPS the 5 pointer
-    /// invariants.  Used for PMT (Programs as Memory Transformations)
-    /// verification where memory safety is established by type-checking
-    /// rather than pointer proofs.
+    /// (Wave 3d / VUMA 2.0 default) PMT state verification only —
+    /// runs the 3 state verifiers (state-read, state-write,
+    /// state-transform) and SKIPS the 5 pointer invariants.  Used for
+    /// PMT (Programs as Memory Transformations) verification where
+    /// memory safety is established by type-checking rather than
+    /// pointer proofs.  This is the DEFAULT level for VUMA 2.0.
+    #[default]
     Pmt,
 }
 
@@ -555,7 +565,7 @@ impl fmt::Display for DiagnosticsReport {
 pub struct InvariantAggregator {
     /// The underlying verification engine.
     engine: VerificationEngine,
-    /// The verification level (default: Normal).
+    /// The verification level (default: Pmt in VUMA 2.0).
     level: VerificationLevel,
     /// Cached results from a previous run (for incremental verification).
     cache: Vec<Option<PerInvariantResult>>,
@@ -565,10 +575,13 @@ pub struct InvariantAggregator {
 
 impl InvariantAggregator {
     /// Construct a new invariant aggregator with default settings.
+    ///
+    /// In VUMA 2.0 the default level is [`VerificationLevel::Pmt`]
+    /// (PMT state verification only — no legacy pointer invariants).
     pub fn new() -> Self {
         Self {
             engine: VerificationEngine::new(),
-            level: VerificationLevel::Normal,
+            level: VerificationLevel::Pmt,
             cache: (0..EXTENDED_INVARIANT_COUNT).map(|_| None).collect(),
             verbose: false,
         }
@@ -1321,8 +1334,14 @@ impl Default for InvariantAggregator {
 // Free function: verify_all
 // ---------------------------------------------------------------------------
 
-/// Convenience function: run all five invariant checks at the Normal
-/// verification level and return the aggregated result.
+/// Convenience function: run verification at the default level
+/// ([`VerificationLevel::Pmt`] in VUMA 2.0 — the three PMT state
+/// verifiers only) and return the aggregated result.
+///
+/// Note: PMT state verification requires the layout registry to be
+/// attached to the [`VerificationInput`] via `with_pmt_layouts(...)`.
+/// If `pmt_layouts` is absent, the verifiers report "layout not found"
+/// for every state operation (a FAIL verdict).
 pub fn verify_all(input: &VerificationInput) -> AggregatedResult {
     InvariantAggregator::new().verify_all(input)
 }
@@ -1590,8 +1609,9 @@ mod tests {
     }
 
     #[test]
-    fn verification_level_default_is_normal() {
-        assert_eq!(VerificationLevel::default(), VerificationLevel::Normal);
+    fn verification_level_default_is_pmt() {
+        // VUMA 2.0: PMT is the default verification level.
+        assert_eq!(VerificationLevel::default(), VerificationLevel::Pmt);
     }
 
     #[test]
@@ -1632,11 +1652,26 @@ mod tests {
 
     #[test]
     fn verify_all_normal_returns_five_results() {
-        let aggregator = InvariantAggregator::new();
+        // VUMA 2.0: the default aggregator level is now Pmt (1 result),
+        // so to test the legacy 5-pointer-invariant `Normal` mode we
+        // must explicitly request it.
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 5);
         assert_eq!(result.level, VerificationLevel::Normal);
+    }
+
+    #[test]
+    fn verify_all_pmt_default_returns_one_result() {
+        // VUMA 2.0: the default level is PMT, which runs only the 3
+        // PMT state verifiers surfaced as a single `InvariantKind::Pmt`
+        // aggregated result.
+        let aggregator = InvariantAggregator::new();
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = aggregator.verify_all(&input);
+        assert_eq!(result.per_invariant.len(), 1);
+        assert_eq!(result.level, VerificationLevel::Pmt);
     }
 
     #[test]
@@ -1729,15 +1764,20 @@ mod tests {
 
     #[test]
     fn free_function_verify_all() {
+        // VUMA 2.0: the free function `verify_all` uses the new PMT
+        // default — it returns 1 result at the PMT level.
         let input = VerificationInput::from_scg(SCG::new());
         let result = verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 5);
-        assert_eq!(result.level, VerificationLevel::Normal);
+        assert_eq!(result.per_invariant.len(), 1);
+        assert_eq!(result.level, VerificationLevel::Pmt);
     }
 
     #[test]
     fn incremental_reuses_cache_for_unaffected() {
-        let mut aggregator = InvariantAggregator::new();
+        // VUMA 2.0: explicitly select Normal level so the 5 pointer
+        // invariants (liveness/exclusivity/...) are exercised by this
+        // cache test (default is now PMT, which runs only 1 invariant).
+        let mut aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
         let input = VerificationInput::from_scg(SCG::new());
 
         // First run to populate cache.
@@ -1772,7 +1812,9 @@ mod tests {
 
     #[test]
     fn incremental_empty_delta_uses_all_cache() {
-        let mut aggregator = InvariantAggregator::new();
+        // VUMA 2.0: explicitly select Normal level so all 5 pointer
+        // invariants are run and cached.
+        let mut aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
         let input = VerificationInput::from_scg(SCG::new());
 
         let first = aggregator.verify_all(&input);
@@ -1792,7 +1834,11 @@ mod tests {
 
     #[test]
     fn diagnostics_report_renders() {
-        let aggregator = InvariantAggregator::new();
+        // VUMA 2.0: explicitly select Normal level so the 5 pointer
+        // invariants (liveness, exclusivity, etc.) appear in the
+        // diagnostics report (default PMT level produces only a single
+        // pmt-state invariant).
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
         let report = aggregator.diagnostics(&result);
@@ -1881,13 +1927,16 @@ mod tests {
 
     #[test]
     fn default_aggregator() {
+        // VUMA 2.0: the default verification level is now PMT.
         let aggregator = InvariantAggregator::default();
-        assert_eq!(aggregator.level(), VerificationLevel::Normal);
+        assert_eq!(aggregator.level(), VerificationLevel::Pmt);
     }
 
     #[test]
     fn summary_display() {
-        let aggregator = InvariantAggregator::new();
+        // VUMA 2.0: explicitly select Normal level so 5 pointer
+        // invariants are run and the summary shows "Total checked : 5".
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
         let text = format!("{}", result.summary);
@@ -1907,17 +1956,14 @@ mod tests {
     // Wave 19 regression tests — verification escape-hatch closure
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// (Wave 19, Task 1) `--no-verify` is the ONLY way to get
-    /// `VerificationLevel::None`. The CLI no longer exposes `none` as a
-    /// `--verification` value. This test verifies the internal API still
-    /// accepts `None` (for testing) but that the default is `Normal`.
+    /// (Wave 19 / VUMA 2.0) The default verification level is now PMT
+    /// (PMT state verification only). The CLI `--verification` flag
+    /// accepts only `pmt`; `--no-verify` has been removed. This test
+    /// verifies the aggregator's default level is PMT.
     #[test]
-    fn wave19_default_verification_level_is_normal() {
-        // The default CompileConfig uses Normal, not None.
-        // (Tested at the pipeline level; here we verify the aggregator's
-        //  default level is Normal.)
+    fn wave19_default_verification_level_is_pmt() {
         let agg = InvariantAggregator::new();
-        assert_eq!(agg.level, VerificationLevel::Normal);
+        assert_eq!(agg.level, VerificationLevel::Pmt);
     }
 
     /// (Wave 19, Task 2) `--strict-verification` makes `Inconclusive`
