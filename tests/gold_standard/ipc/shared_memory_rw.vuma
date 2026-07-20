@@ -1,0 +1,18 @@
+// shared_memory_rw — Wave 16a: shared memory read+write roundtrip
+//
+// Distinct from shared_memory.vuma (which tests parent-write-child-read),
+// this test exercises BOTH shared_memory_write AND shared_memory_read on
+// the SAME region in a roundtrip: the parent writes a value, reads it
+// back, and verifies it matches.  This confirms the mmap'd region is
+// readable by the writer and that the write/read offsets are consistent.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    shm = shared_memory_open(64);
+    // Write a distinctive 64-bit value at offset 0.
+    shared_memory_write(shm, 0, 4242424242);
+    // Read it back and verify.
+    v = shared_memory_read(shm, 0);
+    if v == 4242424242 { return 1; }
+    return 0;
+}
