@@ -2548,34 +2548,107 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_try_recv" if args.len() == 1 && dst.is_some() => {
-                                // Non-blocking recv: use recvMSG_DONTWAIT via recvfrom
-                                // recvfrom(fd, buf, len, MSG_DONTWAIT, NULL, NULL)
-                                // x86_64: sys_recvfrom=45
+                                // Non-blocking recv via poll(timeout=0) + read().
+                                // recvfrom() is a socket syscall and returns ENOTSOCK
+                                // on a pipe — using it caused try_recv_success to hang.
+                                // The correct portable pattern for non-blocking reads
+                                // on any fd type (pipe, socket, regular file) is:
+                                //   poll({fd, POLLIN, 0}, 1, timeout=0)
+                                //     returns 0 = no data, >0 = ready, <0 = error
+                                //   if ready: read(fd, &buf, 8) → 0=EOF, >0=got data, <0=err
+                                // x86_64: sys_poll=7, sys_read=0.
+                                // pollfd layout: { i32 fd; i16 events; i16 revents; } = 8 bytes.
+                                // We allocate 16 bytes on the stack (aligned) for pollfd
+                                // plus an 8-byte read buffer.
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
-                                // Load read_fd (low 32 bits of handle)
-                                code.extend(load_value(ch, Gpr::Rdi));
-                                // rsi = &dst_slot
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8)); // len
-                                code.extend(encode_mov_reg_imm32(Gpr::R10, 0x40)); // MSG_DONTWAIT
-                                code.extend(encode_mov_reg_imm32(Gpr::R8, 0)); // src_addr=NULL
-                                code.extend(encode_mov_reg_imm32(Gpr::R9, 0)); // addrlen=NULL
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 45)); // sys_recvfrom
+
+                                // Load read_fd (low 32 bits of handle) into RAX.
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, off));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+
+                                // Build pollfd on stack (16 bytes, aligned):
+                                //   [rsp+0] = fd (read_fd, currently in RAX)
+                                //   [rsp+4] = events = POLLIN = 0x0001 (low 16 bits)
+                                //   [rsp+8] = revents = 0 (will be filled by kernel)
+                                //   [rsp+12] = read buffer (8 bytes, used after poll)
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax)); // fd
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001)); // POLLIN
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rcx));
+                                code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8, Gpr::Rcx)); // revents
+
+                                // poll(&pollfd, 1, timeout=0)
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1)); // nfds
+                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // timeout=0
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 7)); // sys_poll
                                 code.extend(encode_syscall());
-                                // Wave 8b: Convert recvfrom() return to try_recv result.
-                                // RAX > 0: message received → return 1
-                                // RAX <= 0: no message or closed → return 0
-                                // Use setg (set if greater) + movzx — no jumps needed.
-                                // cmp rax, 0
+
+                                // RAX = poll result: 0=no data, >0=ready, <0=error.
+                                // If RAX <= 0, store 0 in dst (no message) and jump to cleanup.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // jle no_data (rel32, placeholder)
+                                let jle_no_data_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+
+                                // Data ready — read(fd, &dst_slot, 8).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0)); // read_fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // sys_read=0
+                                code.extend(encode_syscall());
+                                // read returns: >0 = got data (store 1 in dst),
+                                //               0 = EOF (channel closed → store -1),
+                                //               <0 = error (store -1).
+                                // We use: if read > 0 → 1, else → 0 (for try_recv semantics).
+                                // (Closed-channel detection is the caller's job via
+                                //  channel_is_closed; try_recv just reports "no data".)
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
                                 // setg al (0F 9F C0) — set AL to 1 if RAX > 0 (signed)
                                 code.extend(&[0x0F, 0x9F, 0xC0]);
-                                // movzx eax, al (0F B6 C0) — zero-extend AL to RAX
+                                // movzx eax, al (0F B6 C0)
                                 code.extend(&[0x0F, 0xB6, 0xC0]);
-                                // Store result (0 or 1) in dst
+                                // jmp store_result (rel32, placeholder)
+                                let jmp_store_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]);
+
+                                // no_data: RAX = 0
+                                let no_data_off = code.len();
+                                let no_data_delta = no_data_off as i64 - (jle_no_data_patch as i64 + 6);
+                                let bd = (no_data_delta as i32).to_le_bytes();
+                                code[jle_no_data_patch+2] = bd[0];
+                                code[jle_no_data_patch+3] = bd[1];
+                                code[jle_no_data_patch+4] = bd[2];
+                                code[jle_no_data_patch+5] = bd[3];
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // 0 = no data
+
+                                // store_result: store RAX (0 or 1) to dst slot
+                                let store_off = code.len();
+                                let store_delta = store_off as i64 - (jmp_store_patch as i64 + 5);
+                                let bd = (store_delta as i32).to_le_bytes();
+                                code[jmp_store_patch+1] = bd[0];
+                                code[jmp_store_patch+2] = bd[1];
+                                code[jmp_store_patch+3] = bd[2];
+                                code[jmp_store_patch+4] = bd[3];
                                 code.extend(store_vreg(dst_id, Gpr::Rax));
+
+                                // cleanup: deallocate pollfd buffer
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+
                                 instr_opcode = Some("channel_try_recv".to_string());
                                 channel_builtin_matched = true;
                             }
@@ -3184,6 +3257,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             // Reads an 8-byte value from /tmp/vuma_checkpoint.bin.
                             "checkpoint_restore" if args.is_empty() && dst.is_some() => {
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
                                 // Build path on stack
                                 code.extend(encode_sub_reg_imm32(Gpr::Rsp, 32));
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F));
@@ -3199,7 +3273,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // O_RDONLY=0
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 2)); // sys_open
                                 code.extend(encode_syscall());
-                                // RAX = fd. Save to [rsp+28].
+                                // BUGFIX (audit 2025-07-20): check open() return.
+                                // If RAX < 0 (file missing, permission denied), store 0
+                                // in dst and skip to cleanup. Previously the code would
+                                // proceed to read() with fd=-1, which returns -1, and
+                                // then load garbage from the path-string buffer.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let open_jle_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+                                // RAX = fd (>= 0). Save to [rsp+28].
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 28, Gpr::Rax));
                                 // read(fd, &buf, 8) — use [rsp+8] as buffer
                                 code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
@@ -3207,15 +3289,53 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
                                 code.extend(encode_syscall());
-                                // Load the 8 bytes from [rsp+8] into dst slot
+                                // BUGFIX: check read() return. If RAX <= 0 (EOF or
+                                // error), the buffer at [rsp+8] was not written by
+                                // the kernel — it still holds the path string bytes.
+                                // Store 0 in dst and jump to cleanup.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let read_jle_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+                                // read succeeded (RAX > 0) — load the 8 bytes from
+                                // [rsp+8] into dst slot.
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 8));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, slot_offset(dst_id), Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 12));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, slot_offset(dst_id) + 4, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
                                 // close(fd)
                                 code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
                                 code.extend(encode_syscall());
+                                // jmp cleanup
+                                let jmp_cleanup_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // fail_path (open or read failed): store 0 in dst.
+                                let fail_off = code.len();
+                                let open_delta = fail_off as i64 - (open_jle_patch as i64 + 6);
+                                let bd = (open_delta as i32).to_le_bytes();
+                                code[open_jle_patch+2] = bd[0];
+                                code[open_jle_patch+3] = bd[1];
+                                code[open_jle_patch+4] = bd[2];
+                                code[open_jle_patch+5] = bd[3];
+                                let read_delta = fail_off as i64 - (read_jle_patch as i64 + 6);
+                                let bd = (read_delta as i32).to_le_bytes();
+                                code[read_jle_patch+2] = bd[0];
+                                code[read_jle_patch+3] = bd[1];
+                                code[read_jle_patch+4] = bd[2];
+                                code[read_jle_patch+5] = bd[3];
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+
+                                // cleanup: deallocate path buffer
+                                let cleanup_off = code.len();
+                                let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
+                                let bd = (cleanup_delta as i32).to_le_bytes();
+                                code[jmp_cleanup_patch+1] = bd[0];
+                                code[jmp_cleanup_patch+2] = bd[1];
+                                code[jmp_cleanup_patch+3] = bd[2];
+                                code[jmp_cleanup_patch+4] = bd[3];
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 32));
                                 instr_opcode = Some("checkpoint_restore".to_string());
                                 channel_builtin_matched = true;
