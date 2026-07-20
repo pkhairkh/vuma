@@ -76,7 +76,8 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 }
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<(Vec<u8>, Option<String>), String> {
-    compile_for_backend_with_path(source, kind, None, false, OptLevel::O3) // O3 always on
+    // VUMA 2.0: verification is MANDATORY — `verify=true` always.
+    compile_for_backend_with_path(source, kind, None, true, OptLevel::O3) // O3 always on
 }
 
 fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool, opt_level: OptLevel) -> Result<(Vec<u8>, Option<String>), String> {
@@ -131,12 +132,13 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     };
     let _ = run_scg_transforms(&mut scg, &o3_config);
 
-    // Optionally run IVE verification (non-fatal — report to stderr).
-    // Skip verification for programs marked with "// ive_skip" in the
-    // source header. This is used for tests that intentionally don't
-    // manage memory (e.g., pure arithmetic tests that allocate a buffer
-    // for computation but never free it — the leak is intentional and
-    // not the focus of the test).
+    // (VUMA 2.0) IVE PMT verification — MANDATORY and a HARD gate.
+    // There is no `// ive_skip` source marker anymore and the `--verify`
+    // flag defaults to `true`, so verification ALWAYS runs. A `Fail`
+    // verdict is a compile error (the tool exits non-zero, which the
+    // gold-standard test driver records as `CE`); `Inconclusive` and
+    // `NoChecks` are non-blocking (matching `compile_with_path`'s default
+    // non-strict behaviour).
     //
     // Wave 2: IVE now verifies the O3-optimized SCG (run_scg_transforms
     // was already applied above at O3). The previous local O0 config +
@@ -152,14 +154,13 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // VerificationInput so the state verifiers have field offset/size
     // info. There is no `Normal` mode anymore — VUMA 2.0 is PMT-only.
     let mut ive_status: Option<String> = None;
-    let ive_skip = source.lines().take(20).any(|l| l.contains("// ive_skip"));
     // VUMA 2.0 is PMT-only — every program uses VerificationLevel::Pmt.
     // PMT programs (with layouts/state_new) get the 3 state verifiers.
     // Legacy pointer programs never reach this point: pointer syntax
     // (`allocate`, `free`, `*ptr`, `&x`, `*T`) is now a hard parse error
     // (see src/parser/src/parser.rs `check_pointer_syntax`), so the
     // compile aborts before IVE verification runs.
-    if verify && !ive_skip {
+    if verify {
         let mut ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
         if let Some(layouts) = &pmt_layouts {
             ive_input = ive_input.with_pmt_layouts(layouts.clone());
@@ -177,9 +178,13 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         );
         ive_status = Some(format!("{} {}", verdict, summary));
         eprintln!("IVE: {} {}", verdict, summary);
-    } else if verify && ive_skip {
-        ive_status = Some("Skip ive_skip".to_string());
-        eprintln!("IVE: Skip (ive_skip marker)");
+        // HARD gate: refuse to emit a binary for a PMT-violating program.
+        if result.overall == vuma_ive::invariant_aggregator::OverallVerdict::Fail {
+            return Err(format!(
+                "PMT verification FAILED: {} invariant(s) violated",
+                result.summary.failed
+            ));
+        }
     }
 
     // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
@@ -346,20 +351,23 @@ fn main() {
         return;
     }
     // Parse flags:
-    //   --verify    enables IVE verification (non-fatal).
+    //   --verify    accepted for backwards compatibility (no-op —
+    //               verification is ALWAYS on in VUMA 2.0).
     //
     // PMT is always on in VUMA 2.0 (PMT-only mode). Pointer syntax
     // (`allocate`, `free`, `*ptr`, `&x`, `*T`) is always a hard parse
     // error at the parser level — no flag required. The IVE always uses
     // `VerificationLevel::Pmt` and the PMT layout registry is always
-    // built (cheap — empty map if no `layout` items).
-    let mut verify = false;
+    // built (cheap — empty map if no `layout` items). There is no
+    // `// ive_skip` source marker and no `--no-verify` flag — IVE
+    // verification CANNOT be skipped.
+    let verify = true;
     // O3 is **mandatory** in VUMA 2.0 — the `--opt-level` flag is retained
     // for backwards compatibility, but only `O3` is accepted. The pipeline
     // runs the full O3 pass set unconditionally regardless of this value.
     let mut opt_level = OptLevel::O3;
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
-        if *a == "--verify" { verify = true; false }
+        if *a == "--verify" { false } // accepted no-op (verification is always on)
         else if a.starts_with("--opt-level=") {
             let val = &a["--opt-level=".len()..];
             opt_level = match val {

@@ -588,8 +588,31 @@ impl InvariantAggregator {
     }
 
     /// Set the verification level.
+    ///
+    /// **VUMA 2.0 — PMT is mandatory in production.** In non-test builds
+    /// this method ALWAYS coerces the requested level to
+    /// [`VerificationLevel::Pmt`] (the 3 PMT state verifiers). The other
+    /// variants (`Quick`/`Normal`/`Exhaustive`/`Modular`/`ConstantTime`/
+    /// `Hardened`) run the 5 legacy pointer invariants instead of the
+    /// PMT state verifiers, which would silently bypass PMT enforcement —
+    /// that is not permitted in production. The requested level is
+    /// honoured only under `#[cfg(test)]` so the IVE-internal unit tests
+    /// can still exercise the legacy invariant sets. External production
+    /// callers (the `vuma` pipeline, `api::run_frontend`, `compile_dump`)
+    /// always pass `Pmt` anyway, so this coercion is a defence-in-depth
+    /// guarantee that there is no way to bypass PMT state verification.
     pub fn with_level(mut self, level: VerificationLevel) -> Self {
-        self.level = level;
+        #[cfg(not(test))]
+        {
+            self.level = VerificationLevel::Pmt;
+            // Acknowledge the unused parameter — any non-Pmt level is
+            // intentionally coerced to Pmt in production builds.
+            let _ = level;
+        }
+        #[cfg(test)]
+        {
+            self.level = level;
+        }
         self
     }
 

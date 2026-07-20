@@ -1691,7 +1691,7 @@ fn test_wave50_uaf_rejected_pipeline_either_outcome() {
     // --- (2) memory_safety: false — escape hatch must allow compile ---
     let config_lax = CompileConfig {
         memory_safety: false,
-        verification_level: VerificationLevel::None,
+        verification_level: VerificationLevel::Normal,
         ..CompileConfig::default()
     };
     let result_lax = compile(uaf_source, &config_lax);
