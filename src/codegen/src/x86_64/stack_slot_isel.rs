@@ -3380,32 +3380,47 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                                 // ── Child path: install the seccomp BPF filter. ──
                                 //
-                                // BPF program (70 instructions × 8 bytes = 560 bytes):
+                                // BPF program (72 instructions × 8 bytes = 576 bytes):
                                 //   instr 0:     BPF_LD | BPF_W | BPF_ABS  k=0   (load seccomp_data.nr)
-                                //   instr 1..68: 34 × (JEQ nr → ALLOW) pairs
-                                //   instr 69:    BPF_RET | BPF_K  k=0            (SECCOMP_RET_KILL_THREAD)
+                                //   instr 1..70: 35 × (JEQ nr → ALLOW) pairs
+                                //   instr 71:    BPF_RET | BPF_K  k=0            (SECCOMP_RET_KILL_THREAD)
                                 //
-                                // sock_fprog at [rsp+560]:
-                                //   { u16 len=70; u8 pad[6]; u64 filter=&[rsp+0] }  (16 bytes)
+                                // sock_fprog at [rsp+576]:
+                                //   { u16 len=72; u8 pad[6]; u64 filter=&[rsp+0] }  (16 bytes)
                                 //
-                                // Total stack: 576 bytes (16-byte aligned).
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 576));
+                                // Total stack: 592 bytes (16-byte aligned).
+                                //
+                                // The allowlist includes exit_group(231) in addition to
+                                // exit(60).  VUMA binaries normally exit via sys_exit(60)
+                                // (the _start stub and __arena_overflow both use nr 60),
+                                // but exit_group(231) is the canonical process-exit
+                                // syscall on modern Linux (glibc's exit() wrapper calls
+                                // exit_group).  Allowing it defensively prevents the
+                                // child from being SIGSYS-killed if a future runtime
+                                // change ever emits exit_group.  This mirrors the
+                                // explicit `sandbox_seccomp` builtin below which
+                                // already allows both 60 and 231.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 592));
 
                                 // Instruction 0: LD seccomp_data.nr
                                 // { code=0x0020, jt=0, jf=0, k=0 } → u64 LE = 0x0000000000000020
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000000020));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
 
-                                // Instructions 1..68: 34 × (JEQ nr → ALLOW) pairs.
+                                // Instructions 1..70: 35 × (JEQ nr → ALLOW) pairs.
                                 //   JEQ:   { code=0x0015, jt=0, jf=1, k=nr }
                                 //          → u64 LE = 0x0000000100000015 | (nr as u64) << 32
                                 //   ALLOW: { code=0x0006, jt=0, jf=0, k=0x7fff0000 }
                                 //          (SECCOMP_RET_ALLOW) → u64 LE = 0x7fff000000000006
+                                //
+                                // exit_group(231) is included so the child can exit
+                                // via either sys_exit(60) or sys_exit_group(231) —
+                                // both are canonical Linux exit syscalls.
                                 let allowed_syscalls: &[u32] = &[
                                     0, 1, 2, 3, 9, 10, 11, 12, 13, 14,
                                     22, 39, 56, 57, 59, 60, 61, 62, 63, 64,
                                     72, 78, 79, 80, 89, 90, 97, 102, 107, 108,
-                                    157, 160, 202, 257,
+                                    157, 160, 202, 231, 257,
                                 ];
                                 let allow_u64: u64 = 0x7fff000000000006;
                                 for (i, &nr) in allowed_syscalls.iter().enumerate() {
@@ -3418,22 +3433,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, allow_off as i32, Gpr::Rax));
                                 }
 
-                                // Instruction 69: RET KILL (SECCOMP_RET_KILL_THREAD = 0)
+                                // Instruction 71: RET KILL (SECCOMP_RET_KILL_THREAD = 0)
                                 // { code=0x0006, jt=0, jf=0, k=0 } → u64 LE = 0x0000000000000006
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000000006));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 552, Gpr::Rax)); // 69 * 8 = 552
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 568, Gpr::Rax)); // 71 * 8 = 568
 
-                                // Build sock_fprog at [rsp+560]:
-                                //   len = 70 (u16) at [rsp+560]
-                                //   filter_ptr = &[rsp+0] (u64) at [rsp+568]
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 70));
-                                // mov word [rsp+560], ax  →  66 89 84 24 <disp32>
-                                // (SIB required for RSP base; disp32 because 560 > 127)
+                                // Build sock_fprog at [rsp+576]:
+                                //   len = 72 (u16) at [rsp+576]
+                                //   filter_ptr = &[rsp+0] (u64) at [rsp+584]
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 72));
+                                // mov word [rsp+576], ax  →  66 89 84 24 <disp32>
+                                // (SIB required for RSP base; disp32 because 576 > 127)
                                 code.extend(&[0x66, 0x89, 0x84, 0x24]);
-                                code.extend(&560i32.to_le_bytes());
+                                code.extend(&576i32.to_le_bytes());
                                 // filter_ptr = &[rsp+0]
                                 code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rsp, 0));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 568, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 584, Gpr::Rax));
 
                                 // prctl(PR_SET_NO_NEW_PRIVS=38, 1, 0, 0, 0) — syscall 157
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdi, 38));
@@ -3444,12 +3459,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // prctl(PR_SET_SECCOMP=22, SECCOMP_MODE_FILTER=2, &sock_fprog)
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdi, 22));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rsi, 2));
-                                code.extend(encode_lea_reg_mem(Gpr::Rdx, Gpr::Rsp, 560));
+                                code.extend(encode_lea_reg_mem(Gpr::Rdx, Gpr::Rsp, 576));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 157)); // sys_prctl
                                 code.extend(encode_syscall());
 
-                                // Cleanup the 576-byte BPF frame.
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 576));
+                                // Cleanup the 592-byte BPF frame.
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 592));
 
                                 // ── skip_sandbox: parent (rax > 0) lands here. ──
                                 let skip_sandbox_off = code.len();
