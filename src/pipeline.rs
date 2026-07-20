@@ -4794,6 +4794,27 @@ pub fn run_ir_pipeline(
         timings.push(("wave34-lowering".to_string(), tlower.elapsed().as_millis() as u64));
     }
 
+    // ── IPC Builtin Lowering ──
+    // Expand IPC builtin Calls (channel_open, channel_send, etc.) into
+    // IR instruction sequences. This gives ALL backends IPC L0-L8 support
+    // without backend-specific inline code. On x86_64, the inline builtins
+    // in stack_slot_isel.rs handle IPC directly (they intercept the Call
+    // in the instruction selector); this pass is skipped for x86_64 to
+    // preserve the well-tested inline implementation. On all other
+    // backends (aarch64, riscv64, arm32, etc.), this pass is the ONLY
+    // IPC path — it lowers builtins to IR that those backends can emit.
+    {
+        let tipc = Instant::now();
+        // Skip for x86_64 — it has its own inline IPC implementation
+        // that is more complete (real CRC32, type_hash, cap sigs, etc.)
+        if backend_kind != vuma_codegen::backend::BackendKind::X86_64 {
+            for func in &mut ir_program.functions {
+                vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
+            }
+        }
+        timings.push(("ipc-lowering".to_string(), tipc.elapsed().as_millis() as u64));
+    }
+
     // ── Wave 36: bv_verify gate — verify all e-graph rewrite rules are sound
     //    BEFORE the opt pass (which runs the e-graph). If any rule is unsound,
     //    log a warning so the user knows the e-graph may miscompile. The gate

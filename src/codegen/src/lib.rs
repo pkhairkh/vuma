@@ -91,6 +91,7 @@ pub mod s390x;
 pub mod scg_to_ir;
 pub mod scheduler;
 pub mod proof_artifacts;
+pub mod ipc_lowering;
 pub mod vectorize;
 pub mod sparc64;
 /// VUMA-generic (asm-generic) syscall numbering + per-arch translation
