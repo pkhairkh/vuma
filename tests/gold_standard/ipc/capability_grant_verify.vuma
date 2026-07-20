@@ -1,18 +1,26 @@
-// capability_grant_verify — Wave 12b: capability grant + structural verification
+// capability_grant_verify — Wave 12b + Wave C: capability grant + real
+// FNV-1a×4 signature verification.
 //
-// Exercises the capability_grant builtin (compile-time CapabilityToken minting
-// via ipc::capability::grant_capability) and the channel_send_cap builtin
-// (sends a 64-byte frame with cap_count=1 and the cap_id embedded at [56..64]).
+// Exercises the capability_grant builtin (compile-time CapabilityToken
+// minting via ipc::capability::grant_capability) and the channel_send_cap
+// builtin (sends a 96-byte frame: 56 header+payload+CRC + 8 cap_id +
+// 32-byte FNV-1a×4 signature).
 //
-// The receiver's ChannelRecv codegen sees cap_count=1, reads the 8-byte cap_id
-// from the extended frame, and verifies it is non-zero (structural check: a
-// valid CapabilityToken has a non-zero id field).  A zero id would be rejected
-// with -4 (PermissionDenied); a non-zero id is accepted and the payload is
-// delivered.
+// Wave C: the receiver's ChannelRecv codegen, upon seeing cap_count > 0,
+// reads the 40-byte capability section (cap_id + 32-byte signature), checks
+// cap_id != 0 (structural check), and then RECOMPUTES the FNV-1a×4
+// signature over the same signature_input byte vector the grant used
+// (signing_key + id + pids + timestamps + perms + resource, embedded as
+// compile-time immediates in the prologue so both parent and child after
+// fork have them).  The recompute is a real byte-by-byte FNV-1a loop in
+// emitted x86_64 code (4 passes with salt bytes 0,1,2,3), NOT a library
+// call.  If the computed 32-byte sig does not match the received sig,
+// recv returns -4 (PermissionDenied).  A match delivers the payload.
 //
-// Flow: parent grants a capability (cap_id = resource_id, non-zero), attaches
+// Flow: parent grants a capability (resource_id=7, perms=3=r|w), attaches
 // it to a message carrying 42, and sends.  The child receives, the cap_id
-// passes the structural check, and the child exits with the payload (42).
+// passes the structural check, the recomputed FNV-1a×4 signature matches
+// the received signature, and the child exits with the payload (42).
 //
 // Expected exit code: 42
 fn main() -> i32 {
