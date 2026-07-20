@@ -1,0 +1,35 @@
+// driver_isolation — Wave 49-64: driver isolation via driver_register + driver_call.
+//
+// The driver_register(irq, handler_ptr) builtin mints a driver ID via a
+// compile-time AtomicU64 counter. The driver_call(driver_id, cmd) builtin
+// dispatches a command to a driver via a channel: it sends `cmd` as a
+// framed L1 message on the channel whose handle is `driver_id`, then
+// receives the framed result.
+//
+// Flow:
+//   1. Parent opens a channel and forks a worker.
+//   2. The child (the "driver handler") recvs a cmd, computes cmd + 21,
+//      and sends the result back.
+//   3. The parent registers a driver (exercise the builtin) and then
+//      calls driver_call(ch, 21) which sends 21 and recvs 42.
+//   4. The parent returns 42.
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child: act as the driver handler.
+        cmd = channel_recv(ch);
+        result = cmd + 21;
+        channel_send(ch, result);
+        channel_close(ch);
+        return 0;
+    }
+    // Parent: register a driver, then call it.
+    drv = driver_register(7, 0);
+    r = driver_call(ch, 21);
+    wait_worker(pid);
+    channel_close(ch);
+    return r as i32;
+}

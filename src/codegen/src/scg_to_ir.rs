@@ -4178,11 +4178,37 @@ impl IRBuilder {
             None => None,
         };
 
+        // Wave 25-32 (FFI Process Isolation): recognize `extern "process"`
+        // ABI. Functions declared in an `extern "process" { ... }` block are
+        // foreign functions that must NOT be called via a direct C-ABI call
+        // — instead they are marshaled across a process boundary using the
+        // `process_call(fn_name, arg) -> i64` builtin (see
+        // x86_64/stack_slot_isel.rs), which sends the argument over a
+        // channel and receives the result.
+        //
+        // The `FfiEnvelope` is the conceptual wire format: { fn_id: u64,
+        // arg: i64, result: i64 }. The process_call builtin constructs and
+        // tears down one FfiEnvelope per call. (The actual byte layout is
+        // handled by the framed channel_send/channel_recv codegen —
+        // FfiEnvelope is a logical descriptor, not a Rust struct emitted
+        // to the binary.)
+        //
+        // Minimal handling: if the call target is a known `extern "process"`
+        // function (identified by the `process_` prefix convention used by
+        // the FFI module), we mark it `is_extern = true` so the backend
+        // emits a relocation rather than trying to inline a body. The
+        // process_call builtin itself is intercepted in the x86_64 isel
+        // Call-form match (it never reaches this generic Call lowering
+        // because stack_slot_isel.rs handles it inline).
+        let is_extern_final = call.is_extern
+            || call.func.starts_with("process_")
+            || call.func.starts_with("extern_process_");
+
         ir_func.current_block().push(IRInstruction::Call {
             dst: dst.clone(),
             func: call.func.clone(),
             args,
-            is_extern: call.is_extern,
+            is_extern: is_extern_final,
         });
 
         // Arena State Model (Wave 3a): mark mmap/mremap return vregs as

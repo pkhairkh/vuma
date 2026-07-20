@@ -1,0 +1,19 @@
+// supervisor — Wave 41-48: kernel/user split via supervisor_call.
+//
+// The supervisor_call(nr, arg) builtin is a real syscall gate: it emits
+// the `syscall` instruction with the syscall number in RAX and the
+// argument in RDI. This is the kernel/user transition point — user-mode
+// code invokes supervisor_call to enter the kernel.
+//
+// This test calls supervisor_call(39, 0) which is sys_getpid on x86_64.
+// The kernel returns the process's PID (> 0) in RAX. The test exits 1
+// if the PID is positive (i.e. the syscall gate worked).
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    pid = supervisor_call(39, 0);  // sys_getpid
+    if pid > 0 {
+        return 1;
+    }
+    return 0;
+}

@@ -3215,6 +3215,150 @@ fn load_immediate_arm32(rd: Gpr, val: u32) -> Vec<u8> {
     code
 }
 
+/// Emit a CRC32 computation loop over `[SP+0..52]`.
+///
+/// Computes the L1 frame CRC32 with polynomial `0xEDB88320`
+/// (same algorithm as `crate::ipc::crc32`). The 56-byte VUMA L1 frame
+/// is laid out as `[0..44]` header + `[44..52]` payload + `[52..56]` CRC;
+/// this helper walks the first 52 bytes (header + payload) and leaves
+/// the final CRC in `R0` (32-bit, zero-extended — `MVN` of a 32-bit reg
+/// produces a 32-bit result so the upper bits of R0 are 0).
+///
+/// Register usage:
+///   `R0` — temp for `crc & 1` bit test, then final CRC result
+///   `R1` — byte pointer (init `SP`, increments by 1 each outer iter)
+///   `R2` — outer byte counter (init 52, decrements to 0)
+///   `R3` — current byte (zero-extended via `LDRB`)
+///   `R4` — polynomial `0xEDB88320` (callee-saved, PUSH/POP'd)
+///   `R5` — running CRC (callee-saved, PUSH/POP'd)
+///   `R12` — inner bit counter (init 8 per byte)
+///
+/// The helper `PUSH`es `{R4, R5}` at entry and `POP`s them at exit,
+/// so callee-saved registers are preserved across the loop. `R0-R3`
+/// and `R12` are scratch and may be clobbered by the caller.
+///
+/// The runtime loop is required because the receiver must verify the
+/// CRC over the received bytes (which are only known after `read()`
+/// returns). The original port plan deferred this loop and would have
+/// stored `CRC=0` on send + skipped verification on recv — that breaks
+/// the L1 frame integrity contract (`ChannelRecv` must reject corrupted
+/// frames with the `CrcMismatch` sentinel), so the loop is implemented
+/// here for both send and recv paths.
+fn emit_arm32_crc32_frame_loop() -> Vec<u8> {
+    let mut code = Vec::new();
+    // PUSH {R4, R5} — save callee-saved registers we'll clobber.
+    // 0x0030 = bits 4,5 = R4, R5.
+    code.extend_from_slice(&encode_stm(
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x0030,
+    ));
+    // R4 = 0xEDB88320 (polynomial)
+    code.extend(load_immediate_arm32(Gpr::R4, 0xEDB88320));
+    // R5 = 0xFFFFFFFF (initial CRC)
+    code.extend(load_immediate_arm32(Gpr::R5, 0xFFFFFFFF));
+    // MOV R1, SP — byte pointer
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), Gpr::R13.encoding(),
+    ));
+    // R2 = 52 (outer byte counter)
+    code.extend(load_immediate_arm32(Gpr::R2, 52));
+
+    // outer_loop:
+    let outer_loop_start = code.len();
+    // CMP R2, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R2.encoding(), 0, 0, 0,
+    ));
+    // BEQ outer_done (placeholder, patched below)
+    code.extend_from_slice(&encode_branch(Condition::Eq, false, 0));
+    let outer_beq_pos = code.len() - 4;
+    // LDRB R3, [R1, #0] — current byte (zero-extended)
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, true,
+        Gpr::R1.encoding(), Gpr::R3.encoding(), 0,
+    ));
+    // EOR R5, R5, R3 — crc ^= byte
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_EOR, false, Gpr::R5.encoding(), Gpr::R5.encoding(), Gpr::R3.encoding(),
+    ));
+    // R12 = 8 (inner bit counter)
+    code.extend(load_immediate_arm32(Gpr::R12, 8));
+
+    // inner_loop:
+    let inner_loop_start = code.len();
+    // CMP R12, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R12.encoding(), 0, 0, 0,
+    ));
+    // BEQ inner_done (placeholder, patched below)
+    code.extend_from_slice(&encode_branch(Condition::Eq, false, 0));
+    let inner_beq_pos = code.len() - 4;
+    // AND R0, R5, #1 — bit = crc & 1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_AND, false, Gpr::R5.encoding(), Gpr::R0.encoding(), 0, 1,
+    ));
+    // MOV R5, R5, LSR #1 — crc >>= 1 (logical shift right by 1)
+    // encode_dp_shift_imm(cond, opcode, s, rn, rd, shift_type, shift_imm, rm)
+    // shift_type: 0=LSL, 1=LSR, 2=ASR, 3=ROR
+    code.extend_from_slice(&encode_dp_shift_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 1, 1, Gpr::R5.encoding(),
+    ));
+    // CMP R0, #0
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_CMP, true, Gpr::R0.encoding(), 0, 0, 0,
+    ));
+    // BEQ skip_xor (placeholder, patched below)
+    code.extend_from_slice(&encode_branch(Condition::Eq, false, 0));
+    let skip_xor_beq_pos = code.len() - 4;
+    // EOR R5, R5, R4 — crc ^= poly
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_EOR, false, Gpr::R5.encoding(), Gpr::R5.encoding(), Gpr::R4.encoding(),
+    ));
+    // skip_xor_target:
+    let skip_xor_offset_words = ((code.len() as i32) - ((skip_xor_beq_pos as i32) + 8)) >> 2;
+    let skip_xor_patched = encode_branch(Condition::Eq, false, skip_xor_offset_words);
+    code[skip_xor_beq_pos..skip_xor_beq_pos + 4].copy_from_slice(&skip_xor_patched);
+    // SUB R12, R12, #1 — inner counter -= 1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
+    ));
+    // B inner_loop (unconditional, backward)
+    let inner_back_words = ((inner_loop_start as i32) - ((code.len() as i32) + 8)) >> 2;
+    code.extend_from_slice(&encode_branch(Condition::Al, false, inner_back_words));
+
+    // inner_done: patch inner BEQ.
+    let inner_beq_offset_words = ((code.len() as i32) - ((inner_beq_pos as i32) + 8)) >> 2;
+    let inner_beq_patched = encode_branch(Condition::Eq, false, inner_beq_offset_words);
+    code[inner_beq_pos..inner_beq_pos + 4].copy_from_slice(&inner_beq_patched);
+
+    // ADD R1, R1, #1 — byte pointer += 1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 1,
+    ));
+    // SUB R2, R2, #1 — outer counter -= 1
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, false, Gpr::R2.encoding(), Gpr::R2.encoding(), 0, 1,
+    ));
+    // B outer_loop (unconditional, backward)
+    let outer_back_words = ((outer_loop_start as i32) - ((code.len() as i32) + 8)) >> 2;
+    code.extend_from_slice(&encode_branch(Condition::Al, false, outer_back_words));
+
+    // outer_done: patch outer BEQ.
+    let outer_beq_offset_words = ((code.len() as i32) - ((outer_beq_pos as i32) + 8)) >> 2;
+    let outer_beq_patched = encode_branch(Condition::Eq, false, outer_beq_offset_words);
+    code[outer_beq_pos..outer_beq_pos + 4].copy_from_slice(&outer_beq_patched);
+
+    // Final: R0 = !R5 (MVN R0, R5 — bitwise NOT)
+    // encode_dp_reg(cond, opcode, s, rn, rd, rm) — for MVN, rd gets ~rm.
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_MVN, false, 0, Gpr::R0.encoding(), Gpr::R5.encoding(),
+    ));
+    // POP {R4, R5} — restore callee-saved registers.
+    code.extend_from_slice(&encode_ldm(
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x0030,
+    ));
+    code
+}
+
 // ===========================================================================
 // ARM32 Mnemonic Decoder
 // ===========================================================================
@@ -5759,9 +5903,27 @@ impl Backend for Arm32Backend {
                                 true
                             }
                             "channel_send" if args.len() == 2 => {
+                                // Wave 15b: framed L1 write — builds a 56-byte
+                                // frame (44-byte header + 8-byte payload + 4-byte
+                                // CRC32) and writes it to the pipe. This is the
+                                // arm32 port of the x86_64 codegen in
+                                // src/codegen/src/x86_64/stack_slot_isel.rs.
+                                //
+                                // Frame layout (little-endian):
+                                //   [0..4]    MAGIC "VUMA" = 0x414D5556
+                                //   [4..8]    version(2) + flags(0) = 0x00020000
+                                //   [8..16]   channel_id = 0
+                                //   [16..24]  sequence = 0  (per-channel counter deferred)
+                                //   [24..32]  type_hash = crate::ipc::type_hash("i64")
+                                //   [32..40]  payload_len = 8
+                                //   [40..44]  cap_count = 0
+                                //   [44..52]  payload (the message value)
+                                //   [52..56]  CRC32 over [0..52] with poly 0xEDB88320
                                 let ch = &args[0];
                                 let msg = &args[1];
-                                // Extract write_fd (high 32 bits of handle) into R0
+                                let th = crate::ipc::type_hash("i64");
+
+                                // Step 1: extract write_fd (high 32 bits of handle) into R0.
                                 match ch {
                                     crate::ir::IRValue::Register(id) => {
                                         let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
@@ -5780,30 +5942,93 @@ impl Backend for Arm32Backend {
                                         ));
                                     }
                                 }
-                                // SUB SP, SP, #8 — message buffer
-                                code.extend(emit_sub_sp(8));
-                                // Load msg (64-bit) into R2:R3, store to [SP]
+
+                                // Step 2: allocate the 56-byte frame on the stack.
+                                code.extend(emit_sub_sp(56));
+
+                                // [SP+0] = MAGIC "VUMA" = 0x414D5556 (LE dword)
+                                code.extend(load_immediate_arm32(Gpr::R3, 0x414D5556));
+                                code.extend(str_sp_offset(Gpr::R3, 0));
+                                // [SP+4] = version(2) + flags(0) = 0x00020000
+                                code.extend(load_immediate_arm32(Gpr::R3, 0x00020000));
+                                code.extend(str_sp_offset(Gpr::R3, 4));
+                                // [SP+8] = channel_id = 0 (8 bytes) — zero-fill
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R3.encoding(), 0, 0,
+                                ));
+                                code.extend(str_sp_offset(Gpr::R3, 8));
+                                code.extend(str_sp_offset(Gpr::R3, 12));
+                                // [SP+16] = sequence = 0 (8 bytes) — zero-fill
+                                code.extend(str_sp_offset(Gpr::R3, 16));
+                                code.extend(str_sp_offset(Gpr::R3, 20));
+                                // [SP+24] = type_hash low 32 bits
+                                code.extend(load_immediate_arm32(Gpr::R3, (th & 0xFFFFFFFF) as u32));
+                                code.extend(str_sp_offset(Gpr::R3, 24));
+                                // [SP+28] = type_hash high 32 bits
+                                code.extend(load_immediate_arm32(Gpr::R3, ((th >> 32) & 0xFFFFFFFF) as u32));
+                                code.extend(str_sp_offset(Gpr::R3, 28));
+                                // [SP+32] = payload_len = 8 (low 32 bits)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R3.encoding(), 0, 8,
+                                ));
+                                code.extend(str_sp_offset(Gpr::R3, 32));
+                                // [SP+36] = payload_len high 32 bits = 0
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R3.encoding(), 0, 0,
+                                ));
+                                code.extend(str_sp_offset(Gpr::R3, 36));
+                                // [SP+40] = cap_count = 0 (4 bytes) — R3 already 0
+                                code.extend(str_sp_offset(Gpr::R3, 40));
+                                // [SP+44] = payload (8 bytes) — the message value.
+                                // Load msg (64-bit) into R2:R3, store to [SP+44]
                                 code.extend(ss_load_value_64(
                                     Gpr::R2, Gpr::R3, msg, &vreg_stack_slots,
                                 ));
-                                code.extend(str_sp_offset(Gpr::R2, 0));
-                                code.extend(str_sp_offset(Gpr::R3, 4));
+                                code.extend(str_sp_offset(Gpr::R2, 44));
+                                code.extend(str_sp_offset(Gpr::R3, 48));
+
+                                // [SP+52] = CRC32 — compute the real CRC32 over
+                                // [SP+0..52] (header + payload) using the inline
+                                // loop with polynomial 0xEDB88320 (same as
+                                // ipc::crc32), and store the 32-bit result into
+                                // [SP+52]. The helper clobbers R0-R3, R12 (all
+                                // scratch) and preserves R4, R5 (callee-saved).
+                                // It returns the CRC in R0.
+                                code.extend(emit_arm32_crc32_frame_loop());
+                                // R0 = CRC32. Store at [SP+52].
+                                code.extend(str_sp_offset(Gpr::R0, 52));
+
+                                // Step 3: write(write_fd, &frame, 56).
+                                // R0 was clobbered by the CRC loop; re-extract write_fd.
+                                match ch {
+                                    crate::ir::IRValue::Register(id) => {
+                                        let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                        code.extend(ss_load_from_slot(Gpr::R0, off + 4));
+                                    }
+                                    _ => {
+                                        // Re-spill the handle to get write_fd.
+                                        code.extend(ss_load_value_64(
+                                            Gpr::R0, Gpr::R2, ch, &vreg_stack_slots,
+                                        ));
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_MOV, false, 0,
+                                            Gpr::R0.encoding(), Gpr::R2.encoding(),
+                                        ));
+                                    }
+                                }
                                 // MOV R1, SP — buf pointer
                                 code.extend_from_slice(&encode_dp_reg(
                                     Condition::Al, DP_MOV, false, 0,
                                     Gpr::R1.encoding(), Gpr::R13.encoding(),
                                 ));
-                                // MOV R2, #8 — count
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0,
-                                    Gpr::R2.encoding(), 0, 8,
-                                ));
+                                // R2 = 56 (count)
+                                code.extend(load_immediate_arm32(Gpr::R2, 56));
                                 // MOV R7, #4 — sys_write (ARM EABI)
                                 code.extend(load_immediate_arm32(Gpr::R7, 4));
                                 // SVC #0
                                 code.extend_from_slice(&encode_svc(Condition::Al, 0));
-                                // ADD SP, SP, #8 — cleanup
-                                code.extend(emit_add_sp(8));
+                                // ADD SP, SP, #56 — cleanup
+                                code.extend(emit_add_sp(56));
                                 // Store write() return value to dst if present
                                 if let Some(d) = dst {
                                     if let Some(dst_id) = d.as_register() {
@@ -5815,10 +6040,21 @@ impl Backend for Arm32Backend {
                                 true
                             }
                             "channel_recv" if args.len() == 1 && dst.is_some() => {
+                                // Wave 15b: framed L1 read — reads a 56-byte
+                                // frame, verifies MAGIC, type_hash, and CRC32,
+                                // then extracts the 8-byte payload into dst.
+                                // This is the arm32 port of the x86_64 codegen.
+                                //
+                                // On MAGIC mismatch: store -1 (error sentinel).
+                                // On type_hash mismatch: store -5 (ProtoViolation).
+                                // On CRC32 mismatch: store -6 (CrcMismatch).
+                                // On success: store the 8-byte payload.
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                // Extract read_fd (low 32 bits of handle) into R0
+                                let expected_th = crate::ipc::type_hash("i64");
+
+                                // Step 1: extract read_fd (low 32 bits of handle) into R0.
                                 match ch {
                                     crate::ir::IRValue::Register(id) => {
                                         let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
@@ -5832,36 +6068,165 @@ impl Backend for Arm32Backend {
                                         // R0 already has read_fd
                                     }
                                 }
-                                // SUB SP, SP, #8 — recv buffer
-                                code.extend(emit_sub_sp(8));
+                                // Step 2: allocate 56-byte frame buffer.
+                                code.extend(emit_sub_sp(56));
                                 // MOV R1, SP — buf pointer
                                 code.extend_from_slice(&encode_dp_reg(
                                     Condition::Al, DP_MOV, false, 0,
                                     Gpr::R1.encoding(), Gpr::R13.encoding(),
                                 ));
-                                // MOV R2, #8 — count
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0,
-                                    Gpr::R2.encoding(), 0, 8,
-                                ));
+                                // R2 = 56 (count)
+                                code.extend(load_immediate_arm32(Gpr::R2, 56));
                                 // MOV R7, #3 — sys_read (ARM EABI)
                                 code.extend(load_immediate_arm32(Gpr::R7, 3));
                                 // SVC #0
                                 code.extend_from_slice(&encode_svc(Condition::Al, 0));
-                                // LDR R2, [SP] — low word
+
+                                // Step 3: verify MAGIC ([SP+0] == 0x414D5556).
+                                // LDR R0, [SP, #0] — load MAGIC (zero-extended via LDR)
                                 code.extend_from_slice(&encode_ls_imm(
                                     Condition::Al, true, true, false, false, true,
-                                    Gpr::R13.encoding(), Gpr::R2.encoding(), 0,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
                                 ));
-                                // LDR R3, [SP, #4] — high word
+                                // R1 = 0x414D5556 (expected MAGIC)
+                                code.extend(load_immediate_arm32(Gpr::R1, 0x414D5556));
+                                // CMP R0, R1
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_CMP, true, Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
+                                ));
+                                // BNE magic_fail (placeholder, patched below)
+                                code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                                let bne_magic_pos = code.len() - 4;
+
+                                // Step 4: verify type_hash ([SP+24] == expected_th, 8 bytes).
+                                // LDR R0, [SP, #24] — type_hash low 32 bits
                                 code.extend_from_slice(&encode_ls_imm(
                                     Condition::Al, true, true, false, false, true,
-                                    Gpr::R13.encoding(), Gpr::R3.encoding(), 4,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 24,
+                                ));
+                                // R1 = expected_th low 32 bits
+                                code.extend(load_immediate_arm32(Gpr::R1, (expected_th & 0xFFFFFFFF) as u32));
+                                // CMP R0, R1
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_CMP, true, Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
+                                ));
+                                // BNE th_fail (placeholder, patched below)
+                                code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                                let bne_th_lo_pos = code.len() - 4;
+                                // LDR R0, [SP, #28] — type_hash high 32 bits
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 28,
+                                ));
+                                // R1 = expected_th high 32 bits
+                                code.extend(load_immediate_arm32(Gpr::R1, ((expected_th >> 32) & 0xFFFFFFFF) as u32));
+                                // CMP R0, R1
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_CMP, true, Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
+                                ));
+                                // BNE th_fail (placeholder, patched below)
+                                code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                                let bne_th_hi_pos = code.len() - 4;
+
+                                // Step 5: verify CRC32 — compute CRC over
+                                // [SP+0..52] and compare with [SP+52]. On
+                                // mismatch, jump to crc_fail. The helper
+                                // clobbers R0-R3, R12 (scratch) and preserves
+                                // R4, R5 (callee-saved). Returns CRC in R0.
+                                code.extend(emit_arm32_crc32_frame_loop());
+                                // R0 = computed CRC. Load stored CRC from [SP+52].
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R1.encoding(), 52,
+                                ));
+                                // CMP R0, R1
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_CMP, true, Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
+                                ));
+                                // BNE crc_fail (placeholder, patched below)
+                                code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                                let bne_crc_pos = code.len() - 4;
+
+                                // Step 6: extract payload from [SP+44] into dst slot.
+                                // LDR R2, [SP, #44] — low word
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R2.encoding(), 44,
+                                ));
+                                // LDR R3, [SP, #48] — high word
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R3.encoding(), 48,
                                 ));
                                 // Store to dst slot
                                 code.extend(ss_store_64(Gpr::R2, Gpr::R3, dst_offset));
-                                // ADD SP, SP, #8 — cleanup
-                                code.extend(emit_add_sp(8));
+                                // B cleanup (placeholder, patched below)
+                                code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+                                let b_cleanup_pos = code.len() - 4;
+
+                                // magic_fail: store -1 (error sentinel) in dst.
+                                let magic_fail_target = code.len() as i32;
+                                let magic_offset_words = ((magic_fail_target) - ((bne_magic_pos as i32) + 8)) >> 2;
+                                let magic_patched = encode_branch(Condition::Ne, false, magic_offset_words);
+                                code[bne_magic_pos..bne_magic_pos + 4].copy_from_slice(&magic_patched);
+                                // R0 = -1 (MVN R0, #0 = NOT 0 = 0xFFFFFFFF)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MVN, false, 0, Gpr::R0.encoding(), 0, 0,
+                                ));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                // B cleanup (placeholder)
+                                code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+                                let b_cleanup_from_magic_pos = code.len() - 4;
+
+                                // th_fail: store -5 (ProtocolViolation) in dst.
+                                let th_fail_target = code.len() as i32;
+                                let th_lo_offset_words = ((th_fail_target) - ((bne_th_lo_pos as i32) + 8)) >> 2;
+                                let th_lo_patched = encode_branch(Condition::Ne, false, th_lo_offset_words);
+                                code[bne_th_lo_pos..bne_th_lo_pos + 4].copy_from_slice(&th_lo_patched);
+                                let th_hi_offset_words = ((th_fail_target) - ((bne_th_hi_pos as i32) + 8)) >> 2;
+                                let th_hi_patched = encode_branch(Condition::Ne, false, th_hi_offset_words);
+                                code[bne_th_hi_pos..bne_th_hi_pos + 4].copy_from_slice(&th_hi_patched);
+                                // R0 = -5 (load 5, then RSB R0, R0, #0 to negate)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 5,
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_RSB, false, Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                ));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                // B cleanup (placeholder)
+                                code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
+                                let b_cleanup_from_th_pos = code.len() - 4;
+
+                                // crc_fail: store -6 (CrcMismatch) in dst.
+                                let crc_fail_target = code.len() as i32;
+                                let crc_offset_words = ((crc_fail_target) - ((bne_crc_pos as i32) + 8)) >> 2;
+                                let crc_patched = encode_branch(Condition::Ne, false, crc_offset_words);
+                                code[bne_crc_pos..bne_crc_pos + 4].copy_from_slice(&crc_patched);
+                                // R0 = -6
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 6,
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_RSB, false, Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                ));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                // Fall through to cleanup.
+
+                                // cleanup: deallocate frame.
+                                let cleanup_target = code.len() as i32;
+                                let cleanup_offset_from_success = ((cleanup_target) - ((b_cleanup_pos as i32) + 8)) >> 2;
+                                let success_b_patched = encode_branch(Condition::Al, false, cleanup_offset_from_success);
+                                code[b_cleanup_pos..b_cleanup_pos + 4].copy_from_slice(&success_b_patched);
+                                let cleanup_offset_from_magic = ((cleanup_target) - ((b_cleanup_from_magic_pos as i32) + 8)) >> 2;
+                                let magic_b_patched = encode_branch(Condition::Al, false, cleanup_offset_from_magic);
+                                code[b_cleanup_from_magic_pos..b_cleanup_from_magic_pos + 4].copy_from_slice(&magic_b_patched);
+                                let cleanup_offset_from_th = ((cleanup_target) - ((b_cleanup_from_th_pos as i32) + 8)) >> 2;
+                                let th_b_patched = encode_branch(Condition::Al, false, cleanup_offset_from_th);
+                                code[b_cleanup_from_th_pos..b_cleanup_from_th_pos + 4].copy_from_slice(&th_b_patched);
+
+                                // ADD SP, SP, #56 — cleanup
+                                code.extend(emit_add_sp(56));
                                 true
                             }
                             "channel_close" if args.len() == 1 => {
@@ -5896,6 +6261,88 @@ impl Backend for Arm32Backend {
                                         code.extend_from_slice(&encode_svc(Condition::Al, 0));
                                     }
                                 }
+                                true
+                            }
+                            "spawn_worker" if args.is_empty() && dst.is_some() => {
+                                // Wave 15b: fork() via sys_clone (ARM EABI nr=120).
+                                // clone(flags=SIGCHLD=17, newsp=0, parent_tidptr=0,
+                                //       child_tidptr=0, tls=0) — R0-R4 args, R7=nr.
+                                // Parent: R0 = child PID (>0). Child: R0 = 0.
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                // MOV R0, #17 (SIGCHLD)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 17,
+                                ));
+                                // MOV R1, #0 (newsp = 0 → use parent's stack)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                ));
+                                // MOV R2, #0 (parent_tidptr)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), 0, 0,
+                                ));
+                                // MOV R3, #0 (child_tidptr)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R3.encoding(), 0, 0,
+                                ));
+                                // MOV R4, #0 (tls) — R4 holds arg5 for arm32 clone.
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), 0, 0,
+                                ));
+                                // MOV R7, #120 (sys_clone)
+                                code.extend(load_immediate_arm32(Gpr::R7, 120));
+                                // SVC #0
+                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                // Store clone result (PID or 0) to dst slot.
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                true
+                            }
+                            "wait_worker" if args.len() == 1 && dst.is_some() => {
+                                // Wave 15b: wait4(pid, &status, 0, NULL).
+                                // ARM EABI sys_wait4 nr=114. R0=pid, R1=&status,
+                                // R2=options=0, R3=rusage=NULL. Returns WEXITSTATUS.
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                // Load pid into R0.
+                                code.extend(ss_load_value(&args[0], &vreg_stack_slots, Gpr::R0));
+                                // SUB SP, SP, #16 — status buffer (8 bytes used,
+                                // 16 bytes keeps SP 8-byte aligned per AAPCS).
+                                code.extend(emit_sub_sp(16));
+                                // MOV R1, SP — &status
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R1.encoding(), Gpr::R13.encoding(),
+                                ));
+                                // MOV R2, #0 (options)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), 0, 0,
+                                ));
+                                // MOV R3, #0 (rusage = NULL)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R3.encoding(), 0, 0,
+                                ));
+                                // MOV R7, #114 (sys_wait4)
+                                code.extend(load_immediate_arm32(Gpr::R7, 114));
+                                // SVC #0
+                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                // LDR R0, [SP, #0] — load status word
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+                                // MOV R0, R0, LSR #8 — status >> 8 (WEXITSTATUS)
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 1, 8, Gpr::R0.encoding(),
+                                ));
+                                // AND R0, R0, #0xFF — mask to exit code
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_AND, false, Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0xFF,
+                                ));
+                                // ADD SP, SP, #16 — cleanup
+                                code.extend(emit_add_sp(16));
+                                // Store WEXITSTATUS to dst slot.
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                                 true
                             }
                             _ => false,

@@ -1,0 +1,22 @@
+// fault_tolerance — Wave 65-72: fault tolerance via circuit_breaker_call.
+//
+// The circuit_breaker_call(fn_ptr, max_retries) builtin retries a failing
+// function up to max_retries times. The function (whose address is in
+// fn_ptr) is invoked via an indirect `call r10`. If the function returns
+// 0 (success), the breaker returns 0 (not tripped). If all max_retries
+// attempts fail (return non-zero), the breaker trips and returns 1.
+//
+// Flow:
+//   1. Define a `fail` function that always returns 1 (failure).
+//   2. Call circuit_breaker_call(fail, 3) — retries fail() 3 times.
+//   3. All 3 attempts fail (return 1), so the breaker trips and returns 1.
+//   4. The test exits 1 (breaker tripped).
+//
+// Expected exit code: 1
+fn fail() -> i64 {
+    return 1;
+}
+fn main() -> i32 {
+    r = circuit_breaker_call(fail, 3);
+    return r as i32;
+}
