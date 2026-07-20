@@ -1,23 +1,33 @@
-// aead — Wave 23-24: verify XOR stream cipher seal/open roundtrip.
+// aead — Wave D (L8): verify the AEAD seal/open round-trip using the
+// library's REAL wire format:  nonce(8B) | ciphertext(N bytes) | tag(4B).
 //
-// The parent allocates 8 bytes on the stack (via shared_memory_open),
-// writes a known value (0x4141414141414141), seals it with key byte
-// 0x5A, then opens it with the same key. After seal+open, the value
-// should be restored (XOR is symmetric). The parent checks the
-// restored value and exits 1 if it matches.
+// The parent allocates a 64-byte shared-memory buffer, writes a known
+// 8-byte plaintext at offset 8 (leaving room for the 8-byte nonce prefix
+// at offset 0), then seals it.  aead_seal writes the nonce at [buf+0..8],
+// XOR-encrypts the 8 plaintext bytes in-place at [buf+8..16], and stores
+// a 4-byte CRC32 tag at [buf+16..20].  aead_open verifies the tag FIRST
+// (CRC32 over [buf+8..16] vs stored tag), and only if it matches does it
+// XOR-decrypt the ciphertext back to the original plaintext.
+//
+// After seal+open, the value at offset 8 should be restored to the
+// original plaintext (0x4141414141414141).  The parent checks this and
+// exits 1 if it matches.
 //
 // Expected exit code: 1
 fn main() -> i32 {
-    // Allocate 8 bytes via shared_memory_open (gives us a writable buffer)
+    // Allocate 64 bytes via shared_memory_open (need >= 8+8+4 = 20 bytes
+    // for the wire format: 8 nonce + 8 ciphertext + 4 tag).
     buf = shared_memory_open(64);
-    // Write a known value: 0x4141414141414141
-    shared_memory_write(buf, 0, 4702111234474983745); // 0x4141414141414141
-    // Seal: XOR each byte with 0x5A
-    aead_seal(buf, 8, 90); // 90 = 0x5A
-    // Open: XOR again with 0x5A (restores original)
+    // Write the plaintext at offset 8 (NOT offset 0 — offset 0 is reserved
+    // for the 8-byte nonce prefix that aead_seal writes).
+    shared_memory_write(buf, 8, 4702111234474983745); // 0x4141414141414141
+    // Seal: writes nonce at [buf+0..8], encrypts [buf+8..16], stores
+    // CRC32 tag at [buf+16..20].
+    aead_seal(buf, 8, 90); // key_seed = 90 = 0x5A
+    // Open: verifies the CRC32 tag first, then decrypts [buf+8..16] in-place.
     aead_open(buf, 8, 90);
-    // Read back
-    v = shared_memory_read(buf, 0);
+    // Read back from offset 8 (the ciphertext/plaintext region).
+    v = shared_memory_read(buf, 8);
     if v == 4702111234474983745 { return 1; }
     return 0;
 }
