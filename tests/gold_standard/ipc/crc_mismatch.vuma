@@ -11,16 +11,18 @@
 // this test instead verifies the rejection path indirectly: the
 // child calls channel_recv on a freshly-opened channel with no
 // sender, using channel_recv_timeout with a short timeout. The
-// timeout returns -2 (TIMEOUT sentinel), proving the error-sentinel
+// timeout returns -3 (TIMEOUT sentinel), proving the error-sentinel
 // path works.
 //
 // Expected exit code: 88 (same as recv_timeout, but documents the
-// error-sentinel contract: -2 = TIMEOUT, -3 = ERROR, -4 = CAP_DENIED,
-// -5 = PROTO_VIOLATION, -6 = CRC_MISMATCH).
+// error-sentinel contract — Phase 2a L1 framing:
+//   -1 = Closed/Invalid, -3 = Timeout (recv_timeout),
+//   -2 = EAGAIN (try_recv), -4 = CAP_DENIED, -5 = PROTO_VIOLATION,
+//   -6 = CRC_MISMATCH, -7 = TypeMismatch).
 fn main() -> i32 {
     ch = channel_open<i32>();
     x = channel_recv_timeout(ch, 100);
     channel_close(ch);
-    if x == 0 - 2 { return 88; }
+    if x == 0 - 3 { return 88; }
     return x;
 }
