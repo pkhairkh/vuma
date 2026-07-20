@@ -154,7 +154,13 @@ def run_one(args):
             cmd = ["timeout", str(EXEC_TIMEOUT), out]
         else:
             os.chmod(out, 0o755)
-            cmd = ["timeout", str(EXEC_TIMEOUT), BACKENDS[backend], out]
+            qemu_bin = BACKENDS[backend]
+            cmd = ["timeout", str(EXEC_TIMEOUT), qemu_bin]
+            # riscv32: QEMU's default rv32 CPU lacks the D extension.
+            # Enable D explicitly via CPU properties.
+            if backend == "riscv32":
+                cmd += ["-cpu", "max"]
+            cmd.append(out)
 
         try:
             # self_exec uses fork/exec/pipe which is timing-sensitive
