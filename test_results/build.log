@@ -1,3 +1,4 @@
+warning: /home/pkhairkh/vuma/Cargo.toml: unused manifest key: profile.release-fast.bitflags
    Compiling vuma-scg v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/scg)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
    Compiling vuma-package v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/package)
@@ -5,87 +6,53 @@
    Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
    Compiling vuma-parser v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/parser)
 warning: unused import: `Condition`
-    --> src/codegen/src/backend.rs:2695:60
+    --> src/codegen/src/backend.rs:2704:60
      |
-2695 |         use crate::arm64::{Instruction, Register, Operand, Condition};
+2704 |         use crate::arm64::{Instruction, Register, Operand, Condition};
      |                                                            ^^^^^^^^^
      |
      = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
+warning: unused variable: `relocations`
+    --> src/codegen/src/m68k.rs:2602:5
+     |
+2602 |     relocations: &mut Vec<RelocationEntry>,
+     |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_relocations`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `left_shift_label`
+    --> src/codegen/src/hppa.rs:1286:9
+     |
+1286 |     let left_shift_label = code.len();
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_left_shift_label`
+
+warning: unused variable: `negate_label`
+    --> src/codegen/src/hppa.rs:1333:9
+     |
+1333 |     let negate_label = code.len();
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_negate_label`
+
+warning: unused variable: `do_sub_label`
+    --> src/codegen/src/hppa.rs:2681:9
+     |
+2681 |     let do_sub_label = code.len();
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_do_sub_label`
+
+warning: unused variable: `skip_sub_label`
+    --> src/codegen/src/hppa.rs:2702:9
+     |
+2702 |     let skip_sub_label = code.len();
+     |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_skip_sub_label`
+
    Compiling vuma-ive v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/ive)
-warning: constant `FP_CMPTUN` is never used
-    --> src/codegen/src/alpha.rs:1594:7
-     |
-1594 | const FP_CMPTUN: u32 = 0x5A4; // compare unordered
-     |       ^^^^^^^^^
-     |
-     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: function `encode_ld` is never used
-    --> src/codegen/src/s390x.rs:2082:4
-     |
-2082 | fn encode_ld(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
-     |    ^^^^^^^^^
-
-warning: function `encode_le` is never used
-    --> src/codegen/src/s390x.rs:2092:4
-     |
-2092 | fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
-     |    ^^^^^^^^^
-
-warning: constant `FC` is never used
-   --> src/codegen/src/sparc64.rs:415:7
-    |
-415 | const FC: Fpr = Fpr::F4; // FP third scratch / zero register (even for double)
-    |       ^^
-
-warning: constant `FP_FMOVS` is never used
-   --> src/codegen/src/sparc64.rs:571:7
-    |
-571 | const FP_FMOVS: u32 = 0x001; // F32 move
-    |       ^^^^^^^^
-
-warning: constant `FP_FNEGS` is never used
-   --> src/codegen/src/sparc64.rs:572:7
-    |
-572 | const FP_FNEGS: u32 = 0x005; // F32 negate
-    |       ^^^^^^^^
-
-warning: constant `FP_FABSS` is never used
-   --> src/codegen/src/sparc64.rs:573:7
-    |
-573 | const FP_FABSS: u32 = 0x009; // F32 abs
-    |       ^^^^^^^^
-
-warning: constant `FP_FSQRTS` is never used
-   --> src/codegen/src/sparc64.rs:574:7
-    |
-574 | const FP_FSQRTS: u32 = 0x029; // F32 sqrt
-    |       ^^^^^^^^^
-
-warning: constant `FP_FSQRTD` is never used
-   --> src/codegen/src/sparc64.rs:575:7
-    |
-575 | const FP_FSQRTD: u32 = 0x02A; // F64 sqrt
-    |       ^^^^^^^^^
-
-warning: constant `FP_FCMPS` is never used
-   --> src/codegen/src/sparc64.rs:587:7
-    |
-587 | const FP_FCMPS: u32 = 0x051; // F32 compare (FPop2)
-    |       ^^^^^^^^
-
-warning: constant `FP_FCMPD` is never used
-   --> src/codegen/src/sparc64.rs:588:7
-    |
-588 | const FP_FCMPD: u32 = 0x052; // F64 compare (FPop2)
-    |       ^^^^^^^^
-
-warning: constant `FP_FSTOX` is never used
-   --> src/codegen/src/sparc64.rs:590:7
-    |
-590 | const FP_FSTOX: u32 = 0x081; // F32 → i64 (truncate toward zero)
-    |       ^^^^^^^^
+warning: unused import: `std::collections::HashMap`
+  --> src/ive/src/information_flow.rs:36:5
+   |
+36 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: variable does not need to be mutable
   --> src/ive/src/arena_bounds.rs:30:9
@@ -97,18 +64,308 @@ warning: variable does not need to be mutable
    |
    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
+warning: unused variable: `dst_vreg`
+   --> src/ive/src/refinement.rs:190:49
+    |
+190 |             RefinementKind::AssignFromRefined { dst_vreg, dst_refinement, src_refinement } => {
+    |                                                 ^^^^^^^^ help: try ignoring the field: `dst_vreg: _`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
    Compiling vuma-proof v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/proof)
+warning: unused variable: `load_fn`
+   --> src/codegen/src/x86_64/stack_slot_isel.rs:756:29
+    |
+756 |                         let load_fn: &dyn Fn(&IRValue, Gpr) -> Vec<u8> = if is_f64 { &load_value } else { &load_value_f32 };
+    |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_load_fn`
+
+warning: unused variable: `dst_off`
+    --> src/codegen/src/x86_64/stack_slot_isel.rs:2510:37
+     |
+2510 | ...                   let dst_off = slot_offset(dst_id);
+     |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dst_off`
+
+warning: unused variable: `dst_off`
+    --> src/codegen/src/x86_64/stack_slot_isel.rs:2522:37
+     |
+2522 | ...                   let dst_off = slot_offset(dst_id);
+     |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dst_off`
+
+warning: unused variable: `ch`
+    --> src/codegen/src/x86_64/stack_slot_isel.rs:2659:37
+     |
+2659 | ...                   let ch = &args[0];
+     |                           ^^ help: if this is intentional, prefix it with an underscore: `_ch`
+
+warning: variable `fp_stack_count` is assigned to, but never used
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3065:25
+     |
+3065 |                     let mut fp_stack_count = 0usize;
+     |                         ^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_fp_stack_count` instead
+
+warning: variable `nonfp_overflow_count` is assigned to, but never used
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3066:25
+     |
+3066 |                     let mut nonfp_overflow_count = 0usize;
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_nonfp_overflow_count` instead
+
+warning: variable `fp_idx` is assigned to, but never used
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3120:25
+     |
+3120 |                     let mut fp_idx = 0usize;
+     |                         ^^^^^^^^^^
+     |
+     = note: consider using `_fp_idx` instead
+
+warning: variable `overflow_idx` is assigned to, but never used
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3121:25
+     |
+3121 |                     let mut overflow_idx = 0usize;
+     |                         ^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_overflow_idx` instead
+
+warning: value assigned to `fp_stack_count` is never read
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3074:29
+     |
+3074 | ...                   fp_stack_count += 1;
+     |                       ^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `nonfp_overflow_count` is never read
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3080:29
+     |
+3080 | ...                   nonfp_overflow_count += 1;
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `fp_idx` is never read
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3159:29
+     |
+3159 | ...                   fp_idx += 1;
+     |                       ^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `overflow_idx` is never read
+    --> src/codegen/src/x86_32/stack_slot_isel.rs:3165:29
+     |
+3165 | ...                   overflow_idx += 1;
+     |                       ^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: function `encode_vldr` is never used
+    --> src/codegen/src/arm32/mod.rs:9173:4
+     |
+9173 | fn encode_vldr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
+     |    ^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `encode_vstr` is never used
+    --> src/codegen/src/arm32/mod.rs:9196:4
+     |
+9196 | fn encode_vstr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
+     |    ^^^^^^^^^^^
+
+warning: function `encode_vldr_d` is never used
+    --> src/codegen/src/arm32/mod.rs:9221:4
+     |
+9221 | fn encode_vldr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
+     |    ^^^^^^^^^^^^^
+
+warning: function `encode_vstr_d` is never used
+    --> src/codegen/src/arm32/mod.rs:9245:4
+     |
+9245 | fn encode_vstr_d(dd: u8, rn: u8, offset: i32) -> [u8; 4] {
+     |    ^^^^^^^^^^^^^
+
+warning: function `emit_softfloat_call` is never used
+    --> src/codegen/src/m68k.rs:2348:4
+     |
+2348 | fn emit_softfloat_call(
+     |    ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `FP_CMPTUN` is never used
+    --> src/codegen/src/alpha.rs:1668:7
+     |
+1668 | const FP_CMPTUN: u32 = 0x5A4; // compare unordered  (cmptun/su)
+     |       ^^^^^^^^^
+
+warning: constant `F0` is never used
+  --> src/codegen/src/hppa.rs:71:7
+   |
+71 | const F0: FReg = 0;
+   |       ^^
+
+warning: constant `F1` is never used
+  --> src/codegen/src/hppa.rs:72:7
+   |
+72 | const F1: FReg = 1;
+   |       ^^
+
+warning: constant `FA` is never used
+  --> src/codegen/src/hppa.rs:79:7
+   |
+79 | const FA: FReg = F0;  // FP accumulator / result
+   |       ^^
+
+warning: constant `FB` is never used
+  --> src/codegen/src/hppa.rs:80:7
+   |
+80 | const FB: FReg = F1;  // FP second operand
+   |       ^^
+
+warning: function `encode_fp_arith` is never used
+   --> src/codegen/src/hppa.rs:495:4
+    |
+495 | fn encode_fp_arith(f_op: u32, fmt: u32, r1: FReg, r2: FReg, t: FReg) -> [u8; 4] {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `encode_fldw` is never used
+   --> src/codegen/src/hppa.rs:552:4
+    |
+552 | fn encode_fldw(base: Reg, offset: i16, dst: FReg) -> [u8; 4] {
+    |    ^^^^^^^^^^^
+
+warning: function `encode_fstw` is never used
+   --> src/codegen/src/hppa.rs:567:4
+    |
+567 | fn encode_fstw(src: FReg, base: Reg, offset: i16) -> [u8; 4] {
+    |    ^^^^^^^^^^^
+
+warning: function `emit_hppa_fp_binop` is never used
+   --> src/codegen/src/hppa.rs:607:4
+    |
+607 | fn emit_hppa_fp_binop(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `build_f64_arith_stub_zero` is never used
+    --> src/codegen/src/hppa.rs:2837:4
+     |
+2837 | fn build_f64_arith_stub_zero() -> Vec<u8> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `encode_4r` is never used
+   --> src/codegen/src/loongarch64/mod.rs:387:4
+    |
+387 | fn encode_4r(opcode: u32, ra: u32, rk: u32, rj: u32, rd: u32) -> [u8; 4] {
+    |    ^^^^^^^^^
+
+warning: function `ss_load_addr` is never used
+    --> src/codegen/src/riscv32.rs:4203:4
+     |
+4203 | fn ss_load_addr(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
+     |    ^^^^^^^^^^^^
+
+warning: function `encode_ld` is never used
+    --> src/codegen/src/s390x.rs:2202:4
+     |
+2202 | fn encode_ld(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+     |    ^^^^^^^^^
+
+warning: function `encode_le` is never used
+    --> src/codegen/src/s390x.rs:2214:4
+     |
+2214 | fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+     |    ^^^^^^^^^
+
+warning: function `encode_ste` is never used
+    --> src/codegen/src/s390x.rs:2220:4
+     |
+2220 | fn encode_ste(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
+     |    ^^^^^^^^^^
+
+warning: constant `FC` is never used
+   --> src/codegen/src/sparc64.rs:415:7
+    |
+415 | const FC: Fpr = Fpr::F4; // FP third scratch / zero register (even for double)
+    |       ^^
+
+warning: constant `FP_FMOVS` is never used
+   --> src/codegen/src/sparc64.rs:586:7
+    |
+586 | const FP_FMOVS: u32 = 0x001; // F32 move
+    |       ^^^^^^^^
+
+warning: constant `FP_FNEGS` is never used
+   --> src/codegen/src/sparc64.rs:587:7
+    |
+587 | const FP_FNEGS: u32 = 0x005; // F32 negate
+    |       ^^^^^^^^
+
+warning: constant `FP_FABSS` is never used
+   --> src/codegen/src/sparc64.rs:588:7
+    |
+588 | const FP_FABSS: u32 = 0x009; // F32 abs
+    |       ^^^^^^^^
+
+warning: constant `FP_FSQRTS` is never used
+   --> src/codegen/src/sparc64.rs:589:7
+    |
+589 | const FP_FSQRTS: u32 = 0x029; // F32 sqrt
+    |       ^^^^^^^^^
+
+warning: constant `FP_FSQRTD` is never used
+   --> src/codegen/src/sparc64.rs:590:7
+    |
+590 | const FP_FSQRTD: u32 = 0x02A; // F64 sqrt
+    |       ^^^^^^^^^
+
+warning: constant `FP_FCMPS` is never used
+   --> src/codegen/src/sparc64.rs:602:7
+    |
+602 | const FP_FCMPS: u32 = 0x051; // F32 compare (FPop2)
+    |       ^^^^^^^^
+
+warning: constant `FP_FCMPD` is never used
+   --> src/codegen/src/sparc64.rs:603:7
+    |
+603 | const FP_FCMPD: u32 = 0x052; // F64 compare (FPop2)
+    |       ^^^^^^^^
+
+warning: constant `FP_FSTOX` is never used
+   --> src/codegen/src/sparc64.rs:605:7
+    |
+605 | const FP_FSTOX: u32 = 0x081; // F32 → i64 (truncate toward zero)
+    |       ^^^^^^^^
+
    Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
-warning: `vuma-ive` (lib) generated 1 warning (run `cargo fix --lib -p vuma-ive` to apply 1 suggestion)
 warning: unused import: `StructAccessNode`
-  --> src/pipeline.rs:52:78
+  --> src/pipeline.rs:52:87
    |
-52 |         Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
-   |                                                                              ^^^^^^^^^^^^^^^^
+52 |         Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
+   |                                                                                       ^^^^^^^^^^^^^^^^
    |
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: `vuma` (lib) generated 1 warning (run `cargo fix --lib -p vuma` to apply 1 suggestion)
-warning: `vuma-codegen` (lib) generated 13 warnings (run `cargo fix --lib -p vuma-codegen` to apply 1 suggestion)
-    Finished `release-fast` profile [optimized] target(s) in 1m 40s
+warning: `vuma-ive` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
+warning: unused variable: `nested_name`
+    --> src/pipeline.rs:9864:75
+     |
+9864 |                         if let vuma_parser::ast::Expr::StructInit { name: nested_name, fields: nested_fields, .. } = field_expr {
+     |                                                                           ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_nested_name`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma` (lib) generated 2 warnings (run `cargo fix --lib -p vuma` to apply 2 suggestions)
+warning: `vuma-codegen` (lib) generated 47 warnings (run `cargo fix --lib -p vuma-codegen` to apply 10 suggestions)
+warning: unused variable: `ds`
+   --> src/bin/compile_dump.rs:186:9
+    |
+186 |     for ds in &ir_program.data_sections {
+    |         ^^ help: if this is intentional, prefix it with an underscore: `_ds`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma` (bin "compile_dump") generated 1 warning (run `cargo fix --bin "compile_dump" -p vuma` to apply 1 suggestion)
+    Finished `release-fast` profile [optimized] target(s) in 1m 47s
