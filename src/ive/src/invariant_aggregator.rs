@@ -1334,16 +1334,24 @@ impl Default for InvariantAggregator {
 // Free function: verify_all
 // ---------------------------------------------------------------------------
 
-/// Convenience function: run verification at the default level
+/// Convenience function: run verification at the PMT level
 /// ([`VerificationLevel::Pmt`] in VUMA 2.0 — the three PMT state
 /// verifiers only) and return the aggregated result.
+///
+/// VUMA 2.0 is PMT-only: this helper explicitly chains
+/// `.with_level(VerificationLevel::Pmt)` so PMT enforcement does not
+/// depend solely on the `InvariantAggregator::new()` default (which is
+/// also `Pmt`). This makes the mandate robust against any future change
+/// to the `new()` default.
 ///
 /// Note: PMT state verification requires the layout registry to be
 /// attached to the [`VerificationInput`] via `with_pmt_layouts(...)`.
 /// If `pmt_layouts` is absent, the verifiers report "layout not found"
 /// for every state operation (a FAIL verdict).
 pub fn verify_all(input: &VerificationInput) -> AggregatedResult {
-    InvariantAggregator::new().verify_all(input)
+    InvariantAggregator::new()
+        .with_level(VerificationLevel::Pmt)
+        .verify_all(input)
 }
 
 // ---------------------------------------------------------------------------
