@@ -1,111 +1,111 @@
 {
-  "timestamp": "2026-07-20 07:33:54 UTC",
+  "timestamp": "2026-07-20 22:01:42 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
-  "total_runs": 29450,
-  "matches": 28426,
+  "total_runs": 29469,
+  "matches": 24422,
   "skipped": 0,
-  "pass_rate": "96.52%",
+  "pass_rate": "82.87%",
   "per_backend": {
     "aarch64": {
-      "total": 1550,
-      "match": 1498,
-      "skipped": 0
-    },
-    "x86_64": {
-      "total": 1550,
-      "match": 1529,
+      "total": 1551,
+      "match": 1514,
       "skipped": 0
     },
     "aarch64_be": {
-      "total": 1550,
-      "match": 1494,
+      "total": 1551,
+      "match": 1510,
       "skipped": 0
     },
-    "riscv64": {
-      "total": 1550,
+    "ppc64": {
+      "total": 1551,
       "match": 1510,
       "skipped": 0
     },
     "mips64": {
-      "total": 1550,
-      "match": 1497,
-      "skipped": 0
-    },
-    "arm32": {
-      "total": 1550,
-      "match": 1499,
-      "skipped": 0
-    },
-    "ppc64": {
-      "total": 1550,
-      "match": 1489,
-      "skipped": 0
-    },
-    "mips64be": {
-      "total": 1550,
-      "match": 1497,
+      "total": 1551,
+      "match": 39,
       "skipped": 0
     },
     "armeb": {
-      "total": 1550,
-      "match": 1497,
+      "total": 1551,
+      "match": 1518,
+      "skipped": 0
+    },
+    "riscv64": {
+      "total": 1551,
+      "match": 1530,
+      "skipped": 0
+    },
+    "x86_64": {
+      "total": 1551,
+      "match": 1550,
+      "skipped": 0
+    },
+    "mips64be": {
+      "total": 1551,
+      "match": 1518,
+      "skipped": 0
+    },
+    "arm32": {
+      "total": 1551,
+      "match": 1519,
       "skipped": 0
     },
     "ppc64le": {
-      "total": 1550,
-      "match": 1489,
-      "skipped": 0
-    },
-    "m68k": {
-      "total": 1550,
-      "match": 1476,
-      "skipped": 0
-    },
-    "sparc64": {
-      "total": 1550,
-      "match": 1504,
-      "skipped": 0
-    },
-    "riscv32": {
-      "total": 1550,
-      "match": 1495,
+      "total": 1551,
+      "match": 1510,
       "skipped": 0
     },
     "loongarch64": {
-      "total": 1550,
+      "total": 1551,
+      "match": 39,
+      "skipped": 0
+    },
+    "s390x": {
+      "total": 1551,
+      "match": 1518,
+      "skipped": 0
+    },
+    "sparc64": {
+      "total": 1551,
+      "match": 1524,
+      "skipped": 0
+    },
+    "hppa": {
+      "total": 1551,
+      "match": 1510,
+      "skipped": 0
+    },
+    "m68k": {
+      "total": 1551,
       "match": 1497,
       "skipped": 0
     },
     "alpha": {
-      "total": 1550,
-      "match": 1492,
+      "total": 1551,
+      "match": 1513,
       "skipped": 0
     },
-    "s390x": {
-      "total": 1550,
-      "match": 1497,
+    "riscv32": {
+      "total": 1551,
+      "match": 1516,
       "skipped": 0
     },
     "x86_32": {
-      "total": 1550,
-      "match": 1497,
-      "skipped": 0
-    },
-    "hppa": {
-      "total": 1550,
-      "match": 1489,
+      "total": 1551,
+      "match": 1518,
       "skipped": 0
     },
     "wasm32": {
-      "total": 1550,
-      "match": 1480,
+      "total": 1551,
+      "match": 69,
       "skipped": 0
     }
   },
   "ive_verification": {
-    "total": 29450,
-    "pass": 29450,
+    "total": 29468,
+    "pass": 29468,
     "fail": 0,
     "pass_rate": "100.00%"
   }
