@@ -40,16 +40,10 @@ struct Cli {
     opt_level: OptLevelArg,
 
     /// Verification level (overrides subcommand default).
-    /// Default is `normal` (strict — all five invariants run).
-    /// `--verification none` is NO LONGER accepted; use `--no-verify`
-    /// to explicitly bypass verification (Wave 19 escape-hatch closure).
-    /// [default: normal]
+    /// VUMA 2.0 is PMT-only — only `pmt` is accepted. The `--no-verify`
+    /// escape hatch has been REMOVED; verification is mandatory.
+    /// [default: pmt]
     verification: VerificationArg,
-
-    /// Explicitly skip all verification (escape hatch).
-    /// This is the ONLY way to bypass verification. A compile-time
-    /// warning is emitted when this flag is used. (Wave 19)
-    no_verify: bool,
 
     /// Strict verification: treat `Inconclusive` verdicts as compilation-
     /// blocking errors (Wave 19). By default `Inconclusive` (unverified
@@ -69,14 +63,6 @@ struct Cli {
     /// Enable runtime memory safety checks (bounds checking, --safe mode)
     safe: bool,
 
-    /// Disable compile-time memory-safety analysis (use-after-free, double-
-    /// free, leak, uninitialized-read detection).  This is an ESCAPE HATCH:
-    /// programs with memory-safety bugs will compile successfully but crash
-    /// or corrupt memory at runtime.  Use only for debugging the analyzer
-    /// itself or for prototyping unsafe code.  A compile-time warning is
-    /// emitted when this flag is set.
-    no_memory_safety: bool,
-
     /// Run performance benchmarks instead of compiling
     bench: bool,
 
@@ -93,74 +79,70 @@ struct Cli {
 }
 
 /// Optimization level CLI argument.
+///
+/// In VUMA 2.0, O3 is **mandatory**. The `--opt-level` flag is retained
+/// for backwards compatibility, but only `O3` is accepted — any other
+/// value (O0, O1, O2) is a hard error. The pipeline runs the full O3
+/// pass set unconditionally regardless of this value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptLevelArg {
-    O0,
-    O1,
-    O2,
     O3,
 }
 
 impl OptLevelArg {
-    /// Parse a value for `--opt-level`.
+    /// Parse a value for `--opt-level`. Only `O3` is accepted.
     fn parse(s: &str) -> Result<Self, String> {
         match s {
-            "O0" => Ok(OptLevelArg::O0),
-            "O1" => Ok(OptLevelArg::O1),
-            "O2" => Ok(OptLevelArg::O2),
             "O3" => Ok(OptLevelArg::O3),
             other => Err(format!(
-                "error: invalid value '{other}' for '--opt-level <OPT_LEVEL>'\n  [possible values: O0, O1, O2, O3]"
+                "error: invalid value '{other}' for '--opt-level <OPT_LEVEL>'\n  \
+                 VUMA 2.0 mandates O3 — only 'O3' is accepted. Lower optimization \
+                 levels (O0/O1/O2) are not supported."
             )),
         }
     }
 }
 
 impl From<OptLevelArg> for OptLevel {
-    fn from(val: OptLevelArg) -> Self {
-        match val {
-            OptLevelArg::O0 => OptLevel::O0,
-            OptLevelArg::O1 => OptLevel::O1,
-            OptLevelArg::O2 => OptLevel::O2,
-            OptLevelArg::O3 => OptLevel::O3,
-        }
+    fn from(_val: OptLevelArg) -> Self {
+        // O3 is mandatory — always map to O3.
+        OptLevel::O3
     }
 }
 
 /// Verification level CLI argument.
 ///
-/// `None` is intentionally NOT a CLI value (Wave 19): the only way to
-/// bypass verification is the explicit `--no-verify` flag, which emits a
-/// compile-time warning. This prevents users from silently disabling
-/// verification via `--verification none`.
+/// VUMA 2.0 is PMT-only — only `pmt` is accepted. The `--no-verify`
+/// escape hatch has been REMOVED; verification is mandatory. The pipeline
+/// always runs `VerificationLevel::Pmt` (the 3 PMT state verifiers) and
+/// the PMT layout registry is always built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerificationArg {
-    Quick,
-    Normal,
-    Exhaustive,
+    Pmt,
 }
 
 impl VerificationArg {
-    /// Parse a value for `--verification`.
+    /// Parse a value for `--verification`. Only `pmt` is accepted.
     fn parse(s: &str) -> Result<Self, String> {
         match s {
-            "quick" => Ok(VerificationArg::Quick),
-            "normal" => Ok(VerificationArg::Normal),
-            "exhaustive" => Ok(VerificationArg::Exhaustive),
+            "pmt" => Ok(VerificationArg::Pmt),
             other => Err(format!(
-                "error: invalid value '{other}' for '--verification <VERIFICATION>'\n  [possible values: quick, normal, exhaustive]"
+                "error: invalid value '{other}' for '--verification <VERIFICATION>'\n  \
+                 VUMA 2.0 mandates PMT — only 'pmt' is accepted. Legacy levels\n  \
+                 (quick/normal/exhaustive) are not supported."
             )),
         }
     }
 }
 
 impl From<VerificationArg> for VerificationLevel {
-    fn from(val: VerificationArg) -> Self {
-        match val {
-            VerificationArg::Quick => VerificationLevel::Quick,
-            VerificationArg::Normal => VerificationLevel::Normal,
-            VerificationArg::Exhaustive => VerificationLevel::Exhaustive,
-        }
+    fn from(_val: VerificationArg) -> Self {
+        // VUMA 2.0: PMT is mandatory. The pipeline-level enum has no
+        // `Pmt` variant, so we return `Normal` (the default) and rely on
+        // the pipeline's Stage 6 mapping `Normal → IveVerificationLevel::Pmt`
+        // (see `src/pipeline.rs::compile_with_path` and
+        // `src/pipeline.rs::compile_with_recovery`).
+        VerificationLevel::Normal
     }
 }
 
@@ -521,21 +503,19 @@ fn print_usage() {
          \x20  compile   Compile to a relocatable object file (ET_REL)\n\
          \x20  disasm    Read a binary file and disassemble it\n\
          \x20  link      Link multiple .vuma files into a single ELF binary\n\
-         \x20  verify    Run IVE 5-invariant verification\n\
+         \x20  verify    Run IVE PMT state verification\n\
          \x20  repl      Interactive REPL: parse expressions and print AST\n\
          \x20  lsp       Start the Language Server (LSP) for IDE/LLM integration\n\
          \x20  pkg       Package manager subcommands\n\
          \x20  help      Print this message or the help of the given subcommand(s)\n\n\
          Options:\n\
-         \x20      --opt-level <OPT_LEVEL>        Optimization level [default: O3] [possible values: O0, O1, O2, O3]\n\
-         \x20      --verification <VERIFICATION>  Verification level [default: normal] [possible values: quick, normal, exhaustive]\n\
-         \x20      --no-verify                    Explicitly skip all verification (escape hatch)\n\
+         \x20      --opt-level <OPT_LEVEL>        Optimization level [mandatory: O3] (only O3 is accepted in VUMA 2.0)\n\
+         \x20      --verification <VERIFICATION>  Verification level [mandatory: pmt] (only pmt is accepted in VUMA 2.0)\n\
          \x20      --strict-verification          Treat Inconclusive verdicts as compilation-blocking errors\n\
          \x20      --debug                        Include debug info in output (alias: --debug-info)\n\
          \x20      --sections                     Emit full ELF section headers in the output binary\n\
          \x20      --repl                         Launch the interactive REPL (shorthand for `vuma repl`)\n\
          \x20      --safe                         Enable runtime memory safety checks\n\
-         \x20      --no-memory-safety             Disable compile-time memory-safety analysis (escape hatch)\n\
          \x20      --bench                        Run performance benchmarks instead of compiling\n\
          \x20  -v, --verbose                     Enable verbose/debug logging\n\
          \x20  -q, --quiet                       Suppress non-error output\n\
@@ -584,15 +564,13 @@ where
         .peekable();
 
     let mut cli = Cli {
-        opt_level: OptLevelArg::O3, // O3 is always on (default since 2026-07)
-        verification: VerificationArg::Normal,
-        no_verify: false,
+        opt_level: OptLevelArg::O3, // O3 is mandatory in VUMA 2.0 (only accepted value)
+        verification: VerificationArg::Pmt, // VUMA 2.0: PMT-only (only accepted value)
         strict_verification: false,
         debug: false,
         sections: false,
         repl: false,
         safe: false,
-        no_memory_safety: false,
         bench: false,
         verbose: false,
         quiet: false,
@@ -649,10 +627,16 @@ fn try_consume_global_flag(
             cli.verification = VerificationArg::parse(&val).map_err(ParseError::Msg)?;
             Ok(true)
         }
+        // VUMA 2.0: `--no-verify` is REMOVED — verification is mandatory.
+        // Reject the flag with a hard error so users learn it's gone
+        // rather than silently ignoring it.
         "--no-verify" => {
-            iter.next();
-            cli.no_verify = true;
-            Ok(true)
+            Err(ParseError::Msg(
+                "error: --no-verify has been removed in VUMA 2.0; \
+                 verification is mandatory (PMT-only). Use --verification pmt \
+                 (the default) to confirm PMT verification is on."
+                    .to_string(),
+            ))
         }
         "--strict-verification" => {
             iter.next();
@@ -679,10 +663,14 @@ fn try_consume_global_flag(
             cli.safe = true;
             Ok(true)
         }
+        // VUMA 2.0: `--no-memory-safety` is REMOVED — memory-safety
+        // analysis is mandatory. Reject the flag with a hard error.
         "--no-memory-safety" => {
-            iter.next();
-            cli.no_memory_safety = true;
-            Ok(true)
+            Err(ParseError::Msg(
+                "error: --no-memory-safety has been removed in VUMA 2.0; \
+                 memory-safety analysis is mandatory."
+                    .to_string(),
+            ))
         }
         "--bench" => {
             iter.next();
@@ -1431,18 +1419,12 @@ fn read_source(path: &PathBuf) -> Result<String, String> {
 
 /// Build a `CompileConfig` from the global CLI flags.
 fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
-    // Wave 19: `--no-verify` is the ONLY way to bypass verification.
-    // Emit a compile-time warning so the bypass is never silent.
-    let verification_level = if cli.no_verify {
-        eprintln!(
-            "warning: --no-verify bypasses all IVE verification. \
-             Memory-safety violations will NOT be detected. \
-             Use only for debugging/testing."
-        );
-        VerificationLevel::None
-    } else {
-        VerificationLevel::from(cli.verification)
-    };
+    // VUMA 2.0 is PMT-only — verification is MANDATORY. The `--no-verify`
+    // escape hatch has been removed; `--verification` accepts only `pmt`.
+    // The pipeline-level `VerificationLevel::Normal` returned by
+    // `VerificationArg::into(VerificationLevel)` is remapped to
+    // `IveVerificationLevel::Pmt` (the 3 state verifiers) at Stage 6.
+    let verification_level = VerificationLevel::from(cli.verification);
 
     CompileConfig {
         target,
@@ -1452,7 +1434,11 @@ fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
         debug_info: cli.debug,
         section_headers: cli.sections,
         runtime_bounds_checks: cli.safe,
-        memory_safety: !cli.no_memory_safety,
+        // VUMA 2.0: memory-safety analysis is MANDATORY — the
+        // `--no-memory-safety` flag has been removed. The pipeline
+        // ignores this field (always runs the analyzer), but we set
+        // `true` here for API consistency.
+        memory_safety: true,
         ..CompileConfig::default()
     }
 }
@@ -1484,10 +1470,14 @@ fn default_output_path(input: &Path) -> PathBuf {
 ///     of this logic — this helper exists to factor out the common path).
 ///
 /// Returns the encoded binary bytes on success.
+///
+/// Note: in VUMA 2.0 the `opt_level` parameter is retained for API
+/// stability but has no effect — the codegen-opt pass always runs because
+/// O3 is mandatory.
 fn compile_to_binary_direct(
     source: &str,
     isa: IsaArg,
-    opt_level: OptLevel,
+    _opt_level: OptLevel,
 ) -> Result<Vec<u8>, String> {
     let backend_kind = BackendKind::from(isa);
 
@@ -1519,8 +1509,10 @@ fn compile_to_binary_direct(
 
     // Step 3b: Run codegen-level IR optimization (Wave 10 proper).
     // Use the actual backend's latency table for per-ISA optimization.
-    // Gated by opt level: O0 skips (matches pipeline.rs behavior).
-    if !matches!(opt_level, OptLevel::O0) {
+    // In VUMA 2.0 O3 is mandatory, so the codegen-opt pass always runs
+    // (the `opt_level` argument is retained for API stability but has no
+    // effect — every path runs the full O3 codegen-opt pass).
+    {
         let backend_for_table = create_backend(backend_kind).map_err(|e| {
             format!("error: cannot create {} backend for latency table: {}", backend_kind.isa_name(), e)
         })?;
@@ -3100,26 +3092,89 @@ mod tests {
         assert!(cli.repl, "--repl flag should be true");
     }
 
-    /// Test 11: Global --opt-level flag works.
+    /// Test 11: Global `--opt-level` flag works.
+    ///
+    /// In VUMA 2.0 O3 is mandatory, so only `O3` is accepted. Lower
+    /// values (O0/O1/O2) are rejected with a hard error.
     #[test]
     fn test_global_opt_level() {
         let cli =
-            parse_cli_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
-        assert_eq!(cli.opt_level, OptLevelArg::O0);
+            parse_cli_from(["vuma", "--opt-level", "O3", "build", "hello.vuma"]).unwrap();
+        assert_eq!(cli.opt_level, OptLevelArg::O3);
+    }
+
+    /// Test 11b: `--opt-level` rejects non-O3 values (O0/O1/O2).
+    #[test]
+    fn test_global_opt_level_rejects_lower() {
+        for bad in ["O0", "O1", "O2"] {
+            let result = parse_cli_from([
+                "vuma",
+                "--opt-level",
+                bad,
+                "build",
+                "hello.vuma",
+            ]);
+            assert!(
+                result.is_err(),
+                "--opt-level {} should be rejected (O3 is mandatory)",
+                bad
+            );
+        }
     }
 
     /// Test 12: Global --verification flag works.
+    ///
+    /// VUMA 2.0: only `pmt` is accepted.
     #[test]
     fn test_global_verification_level() {
         let cli = parse_cli_from([
             "vuma",
             "--verification",
-            "exhaustive",
+            "pmt",
             "build",
             "hello.vuma",
         ])
         .unwrap();
-        assert_eq!(cli.verification, VerificationArg::Exhaustive);
+        assert_eq!(cli.verification, VerificationArg::Pmt);
+    }
+
+    /// Test 12b: `--verification` rejects non-PMT values (quick/normal/exhaustive).
+    #[test]
+    fn test_global_verification_level_rejects_non_pmt() {
+        for bad in ["quick", "normal", "exhaustive", "none"] {
+            let result = parse_cli_from([
+                "vuma",
+                "--verification",
+                bad,
+                "build",
+                "hello.vuma",
+            ]);
+            assert!(
+                result.is_err(),
+                "--verification {} should be rejected (PMT is mandatory)",
+                bad
+            );
+        }
+    }
+
+    /// Test 12c: `--no-verify` is rejected (escape hatch removed in VUMA 2.0).
+    #[test]
+    fn test_no_verify_flag_rejected() {
+        let result = parse_cli_from(["vuma", "--no-verify", "build", "hello.vuma"]);
+        assert!(
+            result.is_err(),
+            "--no-verify must be rejected (removed in VUMA 2.0)"
+        );
+    }
+
+    /// Test 12d: `--no-memory-safety` is rejected (escape hatch removed in VUMA 2.0).
+    #[test]
+    fn test_no_memory_safety_flag_rejected() {
+        let result = parse_cli_from(["vuma", "--no-memory-safety", "build", "hello.vuma"]);
+        assert!(
+            result.is_err(),
+            "--no-memory-safety must be rejected (removed in VUMA 2.0)"
+        );
     }
 
     /// Test 13: Global --debug flag works.
@@ -3134,7 +3189,7 @@ mod tests {
     fn test_defaults() {
         let cli = parse_cli_from(["vuma", "build", "hello.vuma"]).unwrap();
         assert_eq!(cli.opt_level, OptLevelArg::O3);
-        assert_eq!(cli.verification, VerificationArg::Normal);
+        assert_eq!(cli.verification, VerificationArg::Pmt);
         assert!(!cli.debug);
     }
 
@@ -3164,32 +3219,25 @@ mod tests {
     }
 
     /// Test 16: OptLevelArg conversion to pipeline OptLevel.
+    ///
+    /// In VUMA 2.0 O3 is mandatory, so `OptLevelArg::O3` always converts
+    /// to `OptLevel::O3`.
     #[test]
     fn test_opt_level_conversion() {
-        assert_eq!(OptLevel::from(OptLevelArg::O0), OptLevel::O0);
-        assert_eq!(OptLevel::from(OptLevelArg::O1), OptLevel::O1);
-        assert_eq!(OptLevel::from(OptLevelArg::O2), OptLevel::O2);
         assert_eq!(OptLevel::from(OptLevelArg::O3), OptLevel::O3);
     }
 
     /// Test 17: VerificationArg conversion to pipeline VerificationLevel.
+    ///
+    /// VUMA 2.0: only `Pmt` is accepted at the CLI. The conversion
+    /// returns `VerificationLevel::Normal` (the pipeline-level enum has
+    /// no `Pmt` variant); the pipeline remaps `Normal →
+    /// IveVerificationLevel::Pmt` at Stage 6.
     #[test]
     fn test_verification_conversion() {
-        // Note: `VerificationArg::None` was removed in Wave 19 (close
-        // verification escape hatches). The CLI `--verification` arg now
-        // accepts only quick/normal/exhaustive; `VerificationLevel::None`
-        // remains an internal pipeline default but is not user-selectable.
         assert_eq!(
-            VerificationLevel::from(VerificationArg::Quick),
-            VerificationLevel::Quick
-        );
-        assert_eq!(
-            VerificationLevel::from(VerificationArg::Normal),
-            VerificationLevel::Normal
-        );
-        assert_eq!(
-            VerificationLevel::from(VerificationArg::Exhaustive),
-            VerificationLevel::Exhaustive
+            VerificationLevel::from(VerificationArg::Pmt),
+            VerificationLevel::Normal // remapped to Pmt at Stage 6
         );
     }
 
