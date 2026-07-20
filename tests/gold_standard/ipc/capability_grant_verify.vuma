@@ -1,0 +1,31 @@
+// capability_grant_verify — Wave 12b: capability grant + structural verification
+//
+// Exercises the capability_grant builtin (compile-time CapabilityToken minting
+// via ipc::capability::grant_capability) and the channel_send_cap builtin
+// (sends a 64-byte frame with cap_count=1 and the cap_id embedded at [56..64]).
+//
+// The receiver's ChannelRecv codegen sees cap_count=1, reads the 8-byte cap_id
+// from the extended frame, and verifies it is non-zero (structural check: a
+// valid CapabilityToken has a non-zero id field).  A zero id would be rejected
+// with -4 (PermissionDenied); a non-zero id is accepted and the payload is
+// delivered.
+//
+// Flow: parent grants a capability (cap_id = resource_id, non-zero), attaches
+// it to a message carrying 42, and sends.  The child receives, the cap_id
+// passes the structural check, and the child exits with the payload (42).
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x;
+    }
+    cap = capability_grant(7, 3);
+    channel_send_cap(ch, 42, cap);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}
