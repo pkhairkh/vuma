@@ -1508,9 +1508,15 @@ pub fn generate_seccomp_filter(config: &WorkerConfig) -> Vec<u8> {
         filter.extend_from_slice(&[0x15, 0x00, 0x01, 0x00]);
         filter.extend_from_slice(&nr.to_le_bytes());
         // BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
-        filter.extend_from_slice(&[0x06, 0x00, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x00]);
+        // SECCOMP_RET_ALLOW = 0x7fff0000 (kernel uapi: high 16 bits = action).
+        // BUGFIX (audit 2025-07-20): previous code wrote 0x0000007f, which the
+        // kernel interprets as SECCOMP_RET_KILL_THREAD (action 0x0000), so
+        // every "allowed" syscall would actually kill the process.
+        const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+        filter.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]);
+        filter.extend_from_slice(&SECCOMP_RET_ALLOW.to_le_bytes());
     }
-    // BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL)
+    // BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_THREAD = 0x00000000)
     filter.extend_from_slice(&[0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
     filter
 }
@@ -2690,7 +2696,13 @@ impl capability::CapabilitySet {
             resource: parent.resource.clone(),
             permissions: subset_perms,
             delegation_depth: parent.delegation_depth + 1,
-            created_at: 0, // delegate does not yet receive a wall-clock; see grant_capability
+            // BUGFIX (audit 2025-07-20): inherit created_at from the parent.
+            // Previously this was hardcoded to 0, which would cause
+            // verify_capability(now > 0) to fail the `now < created_at`
+            // lower-bound check for any delegated token. Inheriting the
+            // parent's created_at keeps the child's validity window within
+            // the parent's (child cannot outlive its grantor).
+            created_at: parent.created_at,
             expires_at: parent.expires_at,
             signature: [0u8; 32],
         };
@@ -6260,6 +6272,22 @@ mod tests {
             &filter[last + 4..last + 8],
             &[0, 0, 0, 0],
             "default action is SECCOMP_RET_KILL"
+        );
+        // BUGFIX (audit 2025-07-20): verify the SECCOMP_RET_ALLOW constant is
+        // 0x7fff0000, not 0x0000007f. The kernel interprets the high 16 bits
+        // of the return value as the action; 0x0000007f has action 0x0000
+        // (SECCOMP_RET_KILL_THREAD), so a wrong constant turns the allowlist
+        // into a kill-all filter. This test previously only checked the first
+        // and last instructions, so the bug was silent.
+        // The second instruction (after the LD) is the first JEQ; the one
+        // after it (offset 16) is the first RET ALLOW.
+        assert!(filter.len() >= 24, "filter must have at least LD + JEQ + RET_ALLOW");
+        let allow_ret = &filter[16..24];
+        assert_eq!(allow_ret[0], 0x06, "ALLOW instruction must be BPF_RET | BPF_K");
+        assert_eq!(
+            &allow_ret[4..8],
+            &[0x00, 0x00, 0xff, 0x7f],
+            "SECCOMP_RET_ALLOW must be 0x7fff0000 (LE), not 0x0000007f"
         );
     }
 
