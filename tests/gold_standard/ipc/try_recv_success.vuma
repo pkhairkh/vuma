@@ -1,4 +1,10 @@
-// try_recv_success — Non-blocking recv succeeds when message available
+// try_recv_success — Non-blocking recv succeeds when message available.
+//
+// Phase 2a (L1 framing): channel_try_recv now returns the payload
+// value on success and -2 (EAGAIN) when no message is ready. The
+// spin-loop retries while the result is -2 (no data yet), and the
+// success check matches the payload (99) that the child sent.
+//
 // Expected exit code: 99
 fn main() -> i32 {
     ch = channel_open<i32>();
@@ -8,12 +14,12 @@ fn main() -> i32 {
         channel_close(ch);
         return 0;
     }
-    result = 0;
-    while result == 0 {
+    result = 0 - 2;
+    while result == 0 - 2 {
         result = channel_try_recv(ch);
     }
     wait_worker(pid);
     channel_close(ch);
-    if result == 1 { return 99; }
+    if result == 99 { return 99; }
     return 0;
 }

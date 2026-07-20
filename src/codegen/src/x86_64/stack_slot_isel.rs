@@ -277,6 +277,135 @@ fn emit_crc32_range(base: Gpr, offset: i32, byte_count: u32) -> Vec<u8> {
     code
 }
 
+/// Dynamic-length variant of [`emit_crc32_range`]: computes the same CRC32
+/// (IEEE 802.3, poly 0xEDB88320, init/final 0xFFFFFFFF) but over a
+/// **runtime-computed** byte range `[base_reg + offset_reg ..
+/// base_reg + offset_reg + len_reg]` rather than a compile-time
+/// `[base + offset .. base + offset + byte_count]`.
+///
+/// This is required by the L8 AEAD dynamic-len path (`aead_seal` /
+/// `aead_open` with a `Register` length), which must compute the CRC32
+/// authentication tag over a ciphertext region whose length is not known
+/// at compile time.  Without this helper the dynamic-len path previously
+/// fell back to a malleable in-place XOR with no tag at all — the
+/// cryptographic downgrade flagged in the L0-L8 wiring audit.
+///
+/// # Algorithm
+/// Identical to [`emit_crc32_range`] (byte-at-a-time, 8-bit inner loop,
+/// `crc ^= byte; for 8 iters: crc = (crc>>1) ^ ((crc&1) ? poly : 0);
+/// crc ^= 0xFFFFFFFF` at the end).  The only differences are:
+///   - the start pointer is `base_reg + offset_reg` (computed at runtime
+///     via `mov rsi, base_reg; add rsi, offset_reg`) instead of a
+///     compile-time `lea rsi, [base + offset]`
+///   - the outer loop bound is `len_reg` (compared via `cmp r9, len_reg`)
+///     instead of a compile-time `cmp r9, byte_count`
+///
+/// # Register usage
+///   - **R8**  — CRC accumulator (result; low 32 bits are the CRC, upper
+///     32 bits zeroed so a 64-bit `cmp r8, rcx` against a zero-extended
+///     32-bit load compares correctly)
+///   - **RCX** — constant 1 (for `shr r8, cl` and `test r8, rcx`)
+///   - **RAX** — polynomial 0xEDB88320
+///   - **RSI** — running byte pointer
+///   - **R9**  — outer loop counter (0..len_reg)
+///   - **R10** — current byte (zero-extended)
+///   - **R11** — inner loop counter (0..8) / scratch for final XOR
+///
+/// **Clobbers:** RAX, RCX, RSI, R8, R9, R10, R11.
+/// **Preserves:** base_reg, offset_reg, len_reg (provided they are not in
+/// the clobber set above — callers should pass them in RDI/RDX/RBX or
+/// other non-clobbered registers), plus RDI, RDX, RBP, RBX, R12–R15.
+fn emit_crc32_range_dynamic(base_reg: Gpr, offset_reg: Gpr, len_reg: Gpr) -> Vec<u8> {
+    let mut code = Vec::with_capacity(120);
+
+    // crc = 0xFFFFFFFF  (64-bit mov so upper 32 bits are 0)
+    code.extend(encode_mov_reg_imm64(Gpr::R8, 0xFFFFFFFF));
+    // rcx = 1 (CL=1 for shr; RCX=1 for test bit 0)
+    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));
+    // rax = poly 0xEDB88320 (64-bit mov so upper 32 bits are 0)
+    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xEDB88320));
+    // rsi = base_reg + offset_reg  (runtime start pointer)
+    code.extend(encode_mov_reg_reg(Gpr::Rsi, base_reg));
+    code.extend(encode_add_reg_reg(Gpr::Rsi, offset_reg));
+    // r9 = 0 (outer counter)
+    code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));
+
+    // ── outer_loop: ──
+    let outer_loop_off = code.len();
+    // cmp r9, len_reg  (register-controlled bound — the dynamic part)
+    code.extend(encode_cmp_reg_reg(Gpr::R9, len_reg));
+    // jge outer_done (rel32 placeholder)
+    let jge_outer_patch = code.len();
+    code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
+
+    // r10 = byte [rsi]  (zero-extended)
+    code.extend(encode_movzx_reg8_mem(Gpr::R10, Gpr::Rsi, 0));
+    // crc ^= byte
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::R10));
+    // r11 = 0 (inner counter)
+    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
+
+    // ── inner_loop: ──
+    let inner_loop_off = code.len();
+    // cmp r11, 8
+    code.extend(encode_cmp_reg_imm32(Gpr::R11, 8));
+    // jge inner_done (rel32 placeholder)
+    let jge_inner_patch = code.len();
+    code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
+
+    // test crc & 1  (test r8, rcx where rcx=1)
+    code.extend(encode_test_reg_reg(Gpr::R8, Gpr::Rcx));
+    // jz skip_xor (rel32 placeholder)
+    let jz_skip_patch = code.len();
+    code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // jz rel32
+
+    // crc = (crc >> 1) ^ poly
+    code.extend(encode_shr_reg_cl(Gpr::R8));
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::Rax));
+    // jmp inner_next (rel32 placeholder)
+    let jmp_inner_next_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+    // skip_xor:
+    let skip_xor_off = code.len();
+    patch_rel32_jcc(&mut code, jz_skip_patch, skip_xor_off);
+    // crc >>= 1
+    code.extend(encode_shr_reg_cl(Gpr::R8));
+
+    // inner_next:
+    let inner_next_off = code.len();
+    patch_rel32_jmp(&mut code, jmp_inner_next_patch, inner_next_off);
+    // r11 += 1
+    code.extend(encode_add_reg_imm32(Gpr::R11, 1));
+    // jmp inner_loop (rel32 placeholder)
+    let jmp_inner_loop_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+    patch_rel32_jmp(&mut code, jmp_inner_loop_patch, inner_loop_off);
+
+    // inner_done:
+    let inner_done_off = code.len();
+    patch_rel32_jcc(&mut code, jge_inner_patch, inner_done_off);
+    // rsi += 1 (next byte)
+    code.extend(encode_add_reg_imm32(Gpr::Rsi, 1));
+    // r9 += 1
+    code.extend(encode_add_reg_imm32(Gpr::R9, 1));
+    // jmp outer_loop (rel32 placeholder)
+    let jmp_outer_loop_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+    patch_rel32_jmp(&mut code, jmp_outer_loop_patch, outer_loop_off);
+
+    // outer_done:
+    let outer_done_off = code.len();
+    patch_rel32_jcc(&mut code, jge_outer_patch, outer_done_off);
+    // crc = !crc  — XOR with 0x00000000FFFFFFFF (loaded via 64-bit mov so the
+    // upper 32 bits of R8 are 0, matching emit_crc32_range's convention so a
+    // 64-bit cmp against a zero-extended 32-bit load compares correctly).
+    code.extend(encode_mov_reg_imm64(Gpr::R11, 0xFFFFFFFF));
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::R11));
+
+    code
+}
+
 /// Wave C (L2 cap signatures): emit a real FNV-1a 64-bit hash loop over
 /// `byte_count` bytes starting at `[base + offset]`, prefixed with a 1-byte
 /// `salt`. The u64 result is left in **R8** (upper 32 bits may be non-zero —
@@ -2969,6 +3098,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // jne magic_fail (rel32, placeholder)
                                 let jne_magic_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Phase 2a (L1 framing): type_hash verification.
+                                // Load the frame's type_hash field at [rsp+24..32]
+                                // (8 bytes) and compare to the compile-time
+                                // expected type_hash for this recv site
+                                // (crate::ipc::type_hash("i64") for the Call
+                                // path, which always sends i64 payloads). On
+                                // mismatch, store -7 (TypeMismatch) in dst.
+                                let expected_th = crate::ipc::type_hash("i64");
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 24));
+                                code.extend(encode_mov_reg_imm32(
+                                    Gpr::Rcx,
+                                    (expected_th & 0xFFFFFFFF) as i32,
+                                ));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jne type_hash_fail (rel32, placeholder)
+                                let jne_th_lo_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 28));
+                                code.extend(encode_mov_reg_imm32(
+                                    Gpr::Rcx,
+                                    ((expected_th >> 32) & 0xFFFFFFFF) as i32,
+                                ));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                let jne_th_hi_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
                                 // Wave 12b/C: capability verification — if cap_count > 0,
                                 // the message carries a capability token + 32-byte sig.
                                 // Read 40 more bytes (cap_id + sig) into [rsp+56..96],
@@ -3078,6 +3232,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // jmp cleanup (rel32, placeholder)
                                 let jmp_cleanup_from_crc_patch = code.len();
                                 code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // type_hash_fail (Phase 2a): store -7 (TypeMismatch).
+                                let type_hash_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_th_lo_patch, type_hash_fail_off);
+                                patch_rel32_jcc(&mut code, jne_th_hi_patch, type_hash_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFF9)); // -7
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                // jmp cleanup (rel32, placeholder)
+                                let jmp_cleanup_from_th_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
                                 // error_path / magic_fail: store -1 sentinel.
                                 let fail_off = code.len();
                                 // Patch jle_err and jne_magic to jump here.
@@ -3114,6 +3277,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 patch_rel32_jmp(&mut code, jmp_cleanup_from_crc_patch, cleanup_off);
                                 // Wave C: patch cap_sig_fail → cleanup jump.
                                 patch_rel32_jmp(&mut code, jmp_cleanup_from_sig_patch, cleanup_off);
+                                // Phase 2a: patch type_hash_fail → cleanup jump.
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_th_patch, cleanup_off);
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 96));
                                 instr_opcode = Some("channel_recv".to_string());
                                 channel_builtin_matched = true;
@@ -3153,11 +3318,143 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // Parent: rax = child PID (>0)
                                 // Child: rax = 0
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
-                                let dst_off = slot_offset(dst_id);
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 57)); // sys_fork
                                 code.extend(encode_syscall());
-                                // Store fork result (PID or 0) to dst slot
+                                // Store fork result (PID or 0) to dst slot.
+                                // store_vreg is a pure `mov [rbp+off], rax` — it
+                                // does NOT clobber RAX, so RAX still holds the
+                                // fork result (0 in the child, PID in the parent)
+                                // and we can test it below.
                                 code.extend(store_vreg(dst_id, Gpr::Rax));
+
+                                // ── Phase 2c (L5): auto-sandbox the child. ──
+                                //
+                                // The L0-L8 wiring audit flagged that
+                                // `spawn_worker` (fork) did NOT auto-apply any
+                                // sandbox — a spawned worker inherited the
+                                // parent's full syscall surface unless the
+                                // program explicitly called `sandbox_seccomp`.
+                                // This is the largest mandatory-vs-optional gap
+                                // in the IPC stack. We close it here: every
+                                // spawned worker is automatically sandboxed
+                                // with a seccomp BPF filter in the CHILD path
+                                // (pid==0). There is no opt-out.
+                                //
+                                // The allowlist is the Verified-trust syscall
+                                // surface (the 32 entries from
+                                // `allowed_syscalls(TrustLevel::Verified)` in
+                                // ipc.rs:1487 — the SAME list the library's
+                                // `KernelProcess::handle_syscall` and
+                                // `generate_seccomp_filter` use, and the same
+                                // list `supervisor_call` enforces inline)
+                                // PLUS two additions:
+                                //   - prctl(157): so the existing
+                                //     `sandbox_apply` / `sandbox_seccomp`
+                                //     builtins (which emit prctl) still work
+                                //     when called by an already-sandboxed
+                                //     child — they re-install NO_NEW_PRIVS /
+                                //     the filter, which can only add
+                                //     restrictions, never remove them.
+                                //   - setrlimit(160): so `set_resource_limit`
+                                //     / `set_memory_limit` (which emit
+                                //     setrlimit) still work when called by a
+                                //     sandboxed child — resource ceilings are
+                                //     another form of containment.
+                                // Allowing these two self-restriction syscalls
+                                // does not weaken the sandbox; it preserves the
+                                // existing sandbox_apply / sandbox_seccomp /
+                                // set_resource_limit / set_memory_limit tests
+                                // while still blocking every other syscall
+                                // (socket, connect, ioctl, ptrace, execveat,
+                                // ...). With this filter in place, a spawned
+                                // worker can only: do file/pipe/memory I/O on
+                                // descriptors it already holds, fork/exec,
+                                // exit, wait, signal, get credentials, futex,
+                                // and further restrict itself.
+                                //
+                                // If rax != 0 (parent), skip the sandbox
+                                // installation entirely.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jne_skip_sandbox_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32 (parent skips)
+
+                                // ── Child path: install the seccomp BPF filter. ──
+                                //
+                                // BPF program (70 instructions × 8 bytes = 560 bytes):
+                                //   instr 0:     BPF_LD | BPF_W | BPF_ABS  k=0   (load seccomp_data.nr)
+                                //   instr 1..68: 34 × (JEQ nr → ALLOW) pairs
+                                //   instr 69:    BPF_RET | BPF_K  k=0            (SECCOMP_RET_KILL_THREAD)
+                                //
+                                // sock_fprog at [rsp+560]:
+                                //   { u16 len=70; u8 pad[6]; u64 filter=&[rsp+0] }  (16 bytes)
+                                //
+                                // Total stack: 576 bytes (16-byte aligned).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 576));
+
+                                // Instruction 0: LD seccomp_data.nr
+                                // { code=0x0020, jt=0, jf=0, k=0 } → u64 LE = 0x0000000000000020
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000000020));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+
+                                // Instructions 1..68: 34 × (JEQ nr → ALLOW) pairs.
+                                //   JEQ:   { code=0x0015, jt=0, jf=1, k=nr }
+                                //          → u64 LE = 0x0000000100000015 | (nr as u64) << 32
+                                //   ALLOW: { code=0x0006, jt=0, jf=0, k=0x7fff0000 }
+                                //          (SECCOMP_RET_ALLOW) → u64 LE = 0x7fff000000000006
+                                let allowed_syscalls: &[u32] = &[
+                                    0, 1, 2, 3, 9, 10, 11, 12, 13, 14,
+                                    22, 39, 56, 57, 59, 60, 61, 62, 63, 64,
+                                    72, 78, 79, 80, 89, 90, 97, 102, 107, 108,
+                                    157, 160, 202, 257,
+                                ];
+                                let allow_u64: u64 = 0x7fff000000000006;
+                                for (i, &nr) in allowed_syscalls.iter().enumerate() {
+                                    let jeq_u64: u64 = 0x0000000100000015u64 | ((nr as u64) << 32);
+                                    let jeq_off = (1 + i * 2) * 8;
+                                    let allow_off = (2 + i * 2) * 8;
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rax, jeq_u64));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, jeq_off as i32, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rax, allow_u64));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, allow_off as i32, Gpr::Rax));
+                                }
+
+                                // Instruction 69: RET KILL (SECCOMP_RET_KILL_THREAD = 0)
+                                // { code=0x0006, jt=0, jf=0, k=0 } → u64 LE = 0x0000000000000006
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000000006));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 552, Gpr::Rax)); // 69 * 8 = 552
+
+                                // Build sock_fprog at [rsp+560]:
+                                //   len = 70 (u16) at [rsp+560]
+                                //   filter_ptr = &[rsp+0] (u64) at [rsp+568]
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 70));
+                                // mov word [rsp+560], ax  →  66 89 84 24 <disp32>
+                                // (SIB required for RSP base; disp32 because 560 > 127)
+                                code.extend(&[0x66, 0x89, 0x84, 0x24]);
+                                code.extend(&560i32.to_le_bytes());
+                                // filter_ptr = &[rsp+0]
+                                code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 568, Gpr::Rax));
+
+                                // prctl(PR_SET_NO_NEW_PRIVS=38, 1, 0, 0, 0) — syscall 157
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdi, 38));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 157)); // sys_prctl
+                                code.extend(encode_syscall());
+
+                                // prctl(PR_SET_SECCOMP=22, SECCOMP_MODE_FILTER=2, &sock_fprog)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdi, 22));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 2));
+                                code.extend(encode_lea_reg_mem(Gpr::Rdx, Gpr::Rsp, 560));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 157)); // sys_prctl
+                                code.extend(encode_syscall());
+
+                                // Cleanup the 576-byte BPF frame.
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 576));
+
+                                // ── skip_sandbox: parent (rax > 0) lands here. ──
+                                let skip_sandbox_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_skip_sandbox_patch, skip_sandbox_off);
+
                                 instr_opcode = Some("spawn_worker".to_string());
                                 channel_builtin_matched = true;
                             }
@@ -3194,21 +3491,43 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_try_recv" if args.len() == 1 && dst.is_some() => {
-                                // Non-blocking recv via poll(timeout=0) + read().
-                                // recvfrom() is a socket syscall and returns ENOTSOCK
-                                // on a pipe — using it caused try_recv_success to hang.
-                                // The correct portable pattern for non-blocking reads
-                                // on any fd type (pipe, socket, regular file) is:
-                                //   poll({fd, POLLIN, 0}, 1, timeout=0)
-                                //     returns 0 = no data, >0 = ready, <0 = error
-                                //   if ready: read(fd, &buf, 8) → 0=EOF, >0=got data, <0=err
+                                // Phase 2a (L1 framing): non-blocking framed
+                                // recv. Previously this did an 8-byte raw
+                                // read() bypassing the L1 wire format; now it
+                                // performs a full framed read with MAGIC +
+                                // CRC32 verification, matching channel_recv
+                                // semantics but never blocking.
+                                //
+                                // Algorithm:
+                                //   1. poll(fd, POLLIN, timeout=0)
+                                //        → 0 = no data, >0 = ready, <0 = error
+                                //   2. If ready: read 56-byte L1 frame, verify
+                                //      MAGIC + CRC32, extract payload.
+                                //
+                                // Returns:
+                                //   payload           — on success
+                                //   -2 (EAGAIN)       — poll returned 0 (no
+                                //                       data available now)
+                                //   -1 (Closed/Invalid) — poll error, read
+                                //                       EOF/error, or MAGIC
+                                //                       mismatch
+                                //   -6 (CrcMismatch)  — CRC32 verification failed
+                                //
                                 // x86_64: sys_poll=7, sys_read=0.
                                 // pollfd layout: { i32 fd; i16 events; i16 revents; } = 8 bytes.
-                                // We allocate 16 bytes on the stack (aligned) for pollfd
-                                // plus an 8-byte read buffer.
+                                //
+                                // Stack layout (80 bytes, 16-byte aligned):
+                                //   [rsp+0..56]   = 56-byte L1 frame buffer
+                                //   [rsp+56..64]  = pollfd (8 bytes)
+                                //   [rsp+64..80]  = spill / padding (16 bytes)
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
+
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L1 channel-framing
+                                // check folded by this channel_try_recv).
+                                code.extend(inc_formal_verify_count());
 
                                 // Load read_fd (low 32 bits of handle) into RAX.
                                 match ch {
@@ -3225,75 +3544,127 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     }
                                 }
 
-                                // Build pollfd on stack (16 bytes, aligned):
-                                //   [rsp+0] = fd (read_fd, currently in RAX)
-                                //   [rsp+4] = events = POLLIN = 0x0001 (low 16 bits)
-                                //   [rsp+8] = revents = 0 (will be filled by kernel)
-                                //   [rsp+12] = read buffer (8 bytes, used after poll)
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax)); // fd
-                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001)); // POLLIN
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rcx));
-                                code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8, Gpr::Rcx)); // revents
+                                // Allocate 80 bytes: 56-byte frame + 8-byte
+                                // pollfd + 16-byte spill/padding.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 80));
+                                // Build pollfd at [rsp+56..64]:
+                                //   [rsp+56] = fd (4 bytes)
+                                //   [rsp+60] = events = POLLIN = 0x0001 (low 16 bits)
+                                //   [rsp+62] = revents = 0 (high 16 bits of the
+                                //              32-bit store at [rsp+60])
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 56, Gpr::Rax)); // fd
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001));         // POLLIN
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 60, Gpr::Rcx)); // events+revents
 
                                 // poll(&pollfd, 1, timeout=0)
-                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 56));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1)); // nfds
                                 code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // timeout=0
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 7)); // sys_poll
                                 code.extend(encode_syscall());
 
+                                // Spill poll result to [rsp+72] for the
+                                // poll<=0 path (RAX is clobbered by the read
+                                // syscall in the >0 path).
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 72, Gpr::Rax));
                                 // RAX = poll result: 0=no data, >0=ready, <0=error.
-                                // If RAX <= 0, store 0 in dst (no message) and jump to cleanup.
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                // jle no_data (rel32, placeholder)
-                                let jle_no_data_patch = code.len();
+                                // jle no_data_or_err (rel32, placeholder)
+                                let jle_poll_patch = code.len();
                                 code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
 
-                                // Data ready — read(fd, &dst_slot, 8).
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0)); // read_fd
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
-                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // sys_read=0
+                                // poll > 0: data ready — read 56-byte frame
+                                // into [rsp+0..56].  RDI was clobbered to
+                                // &pollfd by the poll syscall setup; reload
+                                // read_fd from the pollfd struct.
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 56)); // read_fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));    // &frame
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));            // count
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));        // sys_read=0
                                 code.extend(encode_syscall());
-                                // read returns: >0 = got data (store 1 in dst),
-                                //               0 = EOF (channel closed → store -1),
-                                //               <0 = error (store -1).
-                                // We use: if read > 0 → 1, else → 0 (for try_recv semantics).
-                                // (Closed-channel detection is the caller's job via
-                                //  channel_is_closed; try_recv just reports "no data".)
+                                // Check read() result: >0 = got data, <=0 = EOF/error.
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                // setg al (0F 9F C0) — set AL to 1 if RAX > 0 (signed)
-                                code.extend(&[0x0F, 0x9F, 0xC0]);
-                                // movzx eax, al (0F B6 C0)
-                                code.extend(&[0x0F, 0xB6, 0xC0]);
-                                // jmp store_result (rel32, placeholder)
-                                let jmp_store_patch = code.len();
-                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]);
+                                // jle read_fail (rel32, placeholder)
+                                let jle_read_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
 
-                                // no_data: RAX = 0
+                                // Verify MAGIC (first 4 bytes == "VUMA" = 0x414D5556).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x414D5556));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jne magic_fail (rel32, placeholder)
+                                let jne_magic_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                                // Verify CRC32 — compute over [rsp+0..52]
+                                // (header + payload) and compare with the
+                                // stored CRC at [rsp+52].  The CRC loop
+                                // clobbers RAX/RCX/RSI/R8-R11 but preserves
+                                // RDI (we no longer need read_fd here anyway).
+                                code.extend(emit_crc32_frame_loop());
+                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 52));
+                                code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                let jne_crc_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                                // Success: extract payload from [rsp+44..52]
+                                // into dst slot (two 32-bit halves).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 48));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                                // jmp cleanup (rel32, placeholder)
+                                let jmp_cleanup_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // crc_fail: store -6 (CRC_MISMATCH) in dst.
+                                let crc_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_cleanup_from_crc_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // read_fail / magic_fail: store -1 (Closed/Invalid).
+                                let fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jle_read_patch, fail_off);
+                                patch_rel32_jcc(&mut code, jne_magic_patch, fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_cleanup_from_fail_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // no_data_or_err (poll <= 0):
+                                //   poll == 0 → -2 (EAGAIN, no data available)
+                                //   poll  < 0 → -1 (poll error)
                                 let no_data_off = code.len();
-                                let no_data_delta = no_data_off as i64 - (jle_no_data_patch as i64 + 6);
-                                let bd = (no_data_delta as i32).to_le_bytes();
-                                code[jle_no_data_patch+2] = bd[0];
-                                code[jle_no_data_patch+3] = bd[1];
-                                code[jle_no_data_patch+4] = bd[2];
-                                code[jle_no_data_patch+5] = bd[3];
-                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // 0 = no data
+                                patch_rel32_jcc(&mut code, jle_poll_patch, no_data_off);
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 72)); // reload poll result
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // jl poll_err (rel32, placeholder)
+                                let jl_poll_err_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl rel32
+                                // poll == 0 → -2 (EAGAIN-like, no data available now).
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFE)); // -2
+                                let jmp_store_no_data_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp store_no_data
 
-                                // store_result: store RAX (0 or 1) to dst slot
-                                let store_off = code.len();
-                                let store_delta = store_off as i64 - (jmp_store_patch as i64 + 5);
-                                let bd = (store_delta as i32).to_le_bytes();
-                                code[jmp_store_patch+1] = bd[0];
-                                code[jmp_store_patch+2] = bd[1];
-                                code[jmp_store_patch+3] = bd[2];
-                                code[jmp_store_patch+4] = bd[3];
-                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                // poll_err: store -1.
+                                let poll_err_off = code.len();
+                                patch_rel32_jcc(&mut code, jl_poll_err_patch, poll_err_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
 
-                                // cleanup: deallocate pollfd buffer
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+                                // store_no_data: store RAX (-2 or -1) to dst slot.
+                                let store_no_data_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_store_no_data_patch, store_no_data_off);
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                                // cleanup: deallocate stack.
+                                let cleanup_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_cleanup_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_crc_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_fail_patch, cleanup_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 80));
 
                                 instr_opcode = Some("channel_try_recv".to_string());
                                 channel_builtin_matched = true;
@@ -3312,14 +3683,45 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_recv_timeout" if args.len() == 2 && dst.is_some() => {
-                                // Wave 8c: channel_recv_timeout(ch, timeout_ms)
-                                // Uses poll() with timeout, then read() if ready.
-                                // Returns the message on success, -2 on timeout,
-                                // -3 on error.
+                                // Phase 2a (L1 framing): blocking framed recv
+                                // with timeout. Previously this did an 8-byte
+                                // raw read() bypassing the L1 wire format;
+                                // now it performs a full framed read with
+                                // MAGIC + CRC32 verification, matching
+                                // channel_recv semantics but bounded by a
+                                // poll() timeout.
+                                //
+                                // Algorithm:
+                                //   1. poll(fd, POLLIN, timeout_ms)
+                                //        → 0 = timeout, >0 = ready, <0 = error
+                                //   2. If ready: read 56-byte L1 frame, verify
+                                //      MAGIC + CRC32, extract payload.
+                                //
+                                // Returns:
+                                //   payload           — on success
+                                //   -3 (Timeout)      — poll returned 0 (timed
+                                //                       out waiting for data)
+                                //   -1 (Closed/Invalid) — poll error, read
+                                //                       EOF/error, or MAGIC
+                                //                       mismatch
+                                //   -6 (CrcMismatch)  — CRC32 verification failed
+                                //
+                                // x86_64: sys_poll=7, sys_read=0.
+                                // pollfd layout: { i32 fd; i16 events; i16 revents; } = 8 bytes.
+                                //
+                                // Stack layout (80 bytes, 16-byte aligned):
+                                //   [rsp+0..56]   = 56-byte L1 frame buffer
+                                //   [rsp+56..64]  = pollfd (8 bytes)
+                                //   [rsp+64..80]  = spill / padding (16 bytes)
                                 let ch = &args[0];
                                 let to_ms = &args[1];
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
+
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L1 channel-framing
+                                // check folded by this channel_recv_timeout).
+                                code.extend(inc_formal_verify_count());
 
                                 // Step 1: load read_fd (low 32 bits of handle) into RAX
                                 match ch {
@@ -3336,87 +3738,118 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     }
                                 }
 
-                                // Step 2: pollfd on stack (16 bytes, aligned)
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax)); // fd
-                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001)); // POLLIN
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rcx)); // events
-                                code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8, Gpr::Rcx)); // revents pad
-                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0)); // &pollfd
-                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1)); // nfds=1
+                                // Allocate 80 bytes: 56-byte frame + 8-byte
+                                // pollfd + 16-byte spill/padding.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 80));
+                                // Build pollfd at [rsp+56..64]:
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 56, Gpr::Rax)); // fd
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001));         // POLLIN
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 60, Gpr::Rcx)); // events+revents
+
+                                // poll(&pollfd, 1, timeout_ms)
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 56));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1)); // nfds
                                 // rdx = timeout_ms (load from the argument value)
                                 code.extend(load_value(to_ms, Gpr::Rdx));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 7)); // sys_poll
                                 code.extend(encode_syscall());
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 12, Gpr::Rax)); // spill poll result
 
-                                // Step 3: branch on poll result
-                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 12));
+                                // Spill poll result to [rsp+72] for the
+                                // poll<=0 path (RAX is clobbered by the read
+                                // syscall in the >0 path).
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 72, Gpr::Rax));
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                let jg_read_patch = code.len();
-                                code.extend(&[0x0F, 0x8F, 0x00, 0x00, 0x00, 0x00]); // jg read_path
-                                let jl_err_patch = code.len();
-                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl error_path
-                                // poll == 0 → timeout (-2)
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFE));
-                                let jmp_store_patch = code.len();
-                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp store_result
+                                // jle timeout_or_err (rel32, placeholder)
+                                let jle_poll_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
 
-                                // read_path:
-                                let read_path_off = code.len();
-                                let read_delta = read_path_off as i64 - (jg_read_patch as i64 + 6);
-                                let bd = (read_delta as i32).to_le_bytes();
-                                code[jg_read_patch+2] = bd[0];
-                                code[jg_read_patch+3] = bd[1];
-                                code[jg_read_patch+4] = bd[2];
-                                code[jg_read_patch+5] = bd[3];
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0)); // read_fd
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rbp, dst_off));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
-                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // sys_read=0
+                                // poll > 0: data ready — read 56-byte frame
+                                // into [rsp+0..56].
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 56)); // read_fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));    // &frame
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));            // count
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));        // sys_read=0
                                 code.extend(encode_syscall());
+                                // Check read() result: >0 = got data, <=0 = EOF/error.
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                let jle_err_patch = code.len();
-                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle error_path
+                                // jle read_fail (rel32, placeholder)
+                                let jle_read_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+
+                                // Verify MAGIC (first 4 bytes == "VUMA" = 0x414D5556).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x414D5556));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jne magic_fail (rel32, placeholder)
+                                let jne_magic_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                                // Verify CRC32 — compute over [rsp+0..52]
+                                // and compare with the stored CRC at [rsp+52].
+                                code.extend(emit_crc32_frame_loop());
+                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 52));
+                                code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                let jne_crc_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                                // Success: extract payload from [rsp+44..52]
+                                // into dst slot (two 32-bit halves).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 48));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                                // jmp cleanup (rel32, placeholder)
                                 let jmp_cleanup_patch = code.len();
-                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp cleanup
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
-                                // error_path: store -3
-                                let error_path_off = code.len();
-                                let err_delta_from_jl = error_path_off as i64 - (jl_err_patch as i64 + 6);
-                                let bd = (err_delta_from_jl as i32).to_le_bytes();
-                                code[jl_err_patch+2] = bd[0];
-                                code[jl_err_patch+3] = bd[1];
-                                code[jl_err_patch+4] = bd[2];
-                                code[jl_err_patch+5] = bd[3];
-                                let err_delta_from_jle = error_path_off as i64 - (jle_err_patch as i64 + 6);
-                                let bd = (err_delta_from_jle as i32).to_le_bytes();
-                                code[jle_err_patch+2] = bd[0];
-                                code[jle_err_patch+3] = bd[1];
-                                code[jle_err_patch+4] = bd[2];
-                                code[jle_err_patch+5] = bd[3];
+                                // crc_fail: store -6 (CRC_MISMATCH) in dst.
+                                let crc_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_cleanup_from_crc_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // read_fail / magic_fail: store -1 (Closed/Invalid).
+                                let fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jle_read_patch, fail_off);
+                                patch_rel32_jcc(&mut code, jne_magic_patch, fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_cleanup_from_fail_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // timeout_or_err (poll <= 0):
+                                //   poll == 0 → -3 (Timeout)
+                                //   poll  < 0 → -1 (poll error)
+                                let timeout_off = code.len();
+                                patch_rel32_jcc(&mut code, jle_poll_patch, timeout_off);
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 72)); // reload poll result
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // jl poll_err (rel32, placeholder)
+                                let jl_poll_err_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl rel32
+                                // poll == 0 → -3 (Timeout).
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFD)); // -3
+                                let jmp_store_timeout_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp store_timeout
 
-                                // store_result: (rax = -2 or -3)
-                                let store_result_off = code.len();
-                                let store_delta = store_result_off as i64 - (jmp_store_patch as i64 + 5);
-                                let bd = (store_delta as i32).to_le_bytes();
-                                code[jmp_store_patch+1] = bd[0];
-                                code[jmp_store_patch+2] = bd[1];
-                                code[jmp_store_patch+3] = bd[2];
-                                code[jmp_store_patch+4] = bd[3];
+                                // poll_err: store -1.
+                                let poll_err_off = code.len();
+                                patch_rel32_jcc(&mut code, jl_poll_err_patch, poll_err_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
+
+                                // store_timeout: store RAX (-3 or -1) to dst slot.
+                                let store_timeout_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_store_timeout_patch, store_timeout_off);
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
 
-                                // cleanup:
+                                // cleanup: deallocate stack.
                                 let cleanup_off = code.len();
-                                let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
-                                let bd = (cleanup_delta as i32).to_le_bytes();
-                                code[jmp_cleanup_patch+1] = bd[0];
-                                code[jmp_cleanup_patch+2] = bd[1];
-                                code[jmp_cleanup_patch+3] = bd[2];
-                                code[jmp_cleanup_patch+4] = bd[3];
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+                                patch_rel32_jmp(&mut code, jmp_cleanup_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_crc_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_fail_patch, cleanup_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 80));
 
                                 instr_opcode = Some("channel_recv_timeout".to_string());
                                 channel_builtin_matched = true;
@@ -3949,11 +4382,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             //   2. If the tag matches, recompute KEY/NONCE and XOR-decrypt
                             //      in-place at [ptr+8..8+len].  Store 0 to dst on success.
                             //
-                            // len MUST be a compile-time constant (emit_crc32_range
-                            // needs a static byte_count).  If len is not an immediate,
-                            // we fall back to the legacy in-place XOR at [ptr+0..len]
-                            // with no nonce prefix and no tag — preserving backward
-                            // compat for any hypothetical dynamic-len caller.
+                            // Both the Immediate-len and Register-len (dynamic) cases
+                            // use the SAME nonce|ciphertext|tag wire format.  When
+                            // `len` is a compile-time Immediate, the CRC32 tag is
+                            // computed via `emit_crc32_range` (static byte_count).
+                            // When `len` is a runtime Register, the tag is computed
+                            // via `emit_crc32_range_dynamic` (register-controlled
+                            // outer loop).  There is NO malleable-XOR fallback —
+                            // the L0-L8 audit's "dynamic-len aead falls back to
+                            // malleable XOR with no tag" bypass is closed.
                             //
                             // Register allocation during the XOR loop:
                             //   rax = current byte pointer (ptr+8 for wire format)
@@ -4020,10 +4457,32 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     // Cleanup.
                                     code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
                                 } else {
-                                    // Legacy path: len is not a compile-time constant.
-                                    // In-place XOR at [ptr+0..len], no nonce prefix, no tag.
-                                    vuma_log!(warn, "aead_seal: len is not a compile-time constant; using legacy in-place XOR (no wire format)");
-                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48));
+                                    // ── Dynamic-len path (len is a Register). ──
+                                    //
+                                    // Phase 2d (L8): the SAME nonce|ciphertext|tag
+                                    // wire format as the Immediate path, but with a
+                                    // runtime CRC32 (emit_crc32_range_dynamic) so the
+                                    // tag is real even when len is not known at
+                                    // compile time.  This replaces the old malleable
+                                    // in-place XOR fallback that had no nonce prefix
+                                    // and no tag — the cryptographic downgrade flagged
+                                    // in the L0-L8 wiring audit.
+                                    //
+                                    // Stack frame (56 bytes; push rbx + sub rsp,56
+                                    // keeps RSP 16-byte aligned):
+                                    //   [rsp+0..32]  = KEY (key_seed × 4)
+                                    //   [rsp+32..40] = NONCE (key_seed ^ magic)
+                                    //   [rsp+40..48] = saved ptr (survives XOR loop + CRC32)
+                                    //   [rsp+48..56] = unused (alignment padding)
+                                    // RBX (callee-saved, pushed) holds `len` across
+                                    // the XOR loop and the CRC32 helper — both
+                                    // clobber RAX/RCX/RSI/R8/R9/R10/R11/RDX but NOT
+                                    // RBX, so len survives for the tag-address
+                                    // computation.
+                                    code.extend(encode_push(Gpr::Rbx));
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+
+                                    // Step 1: build KEY (key_seed × 4) + NONCE.
                                     code.extend(load_value(key_seed, Gpr::Rax));
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
@@ -4032,18 +4491,54 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xA5A5A5A5A5A5A5A5));
                                     code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
-                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));
-                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));
-                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));
-                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
+
+                                    // Step 2: load ptr → [rsp+40]; load len → RBX.
                                     code.extend(load_value(ptr, Gpr::Rax));
-                                    code.extend(load_value(len, Gpr::Rcx));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 40, Gpr::Rax)); // save ptr
+                                    code.extend(load_value(len, Gpr::Rbx));                   // rbx = len
+
+                                    // Step 3: write 8-byte nonce prefix at [ptr+0..8].
+                                    code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rsp, 32)); // rcx = nonce
+                                    code.extend(encode_mov_mem_reg(Gpr::Rax, 0, Gpr::Rcx));  // [ptr] = nonce
+
+                                    // Step 4: set up XOR loop over [ptr+8..8+len].
+                                    //   rax = ptr+8, rcx = len, r8 = key_ptr,
+                                    //   r9 = nonce_ptr, r10 = key_idx = 0, r11 = nonce_idx = 0
+                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));   // key_ptr
+                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));  // nonce_ptr
+                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));     // key_idx
+                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));     // nonce_idx
+                                    code.extend(encode_add_reg_imm32(Gpr::Rax, 8));           // rax = ptr+8
+                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rbx));     // rcx = len
+
+                                    // Emit the XOR loop (in-place encrypt).
                                     let (loop_code, je_patch) = emit_aead_xor_loop();
                                     let loop_base = code.len();
                                     code.extend(loop_code);
+
+                                    // Step 5: compute CRC32 tag over ciphertext
+                                    // [ptr+8..8+len] and store it at [ptr+8+len].
                                     let done_off = code.len();
                                     patch_rel32_jcc(&mut code, loop_base + je_patch, done_off);
-                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                    // base_reg = RDI = ptr (survives the CRC32 helper,
+                                    // which clobbers RAX/RCX/RSI/R8/R9/R10/R11 but
+                                    // NOT RDI).
+                                    code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 40)); // rdi = ptr
+                                    // offset_reg = RDX = 8 (the nonce-prefix width).
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                    // len_reg = RBX (still holds len).
+                                    // R8 = CRC32 over [ptr+8 .. ptr+8+len].
+                                    code.extend(emit_crc32_range_dynamic(Gpr::Rdi, Gpr::Rdx, Gpr::Rbx));
+                                    // Compute tag address = ptr + 8 + len into RAX.
+                                    code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 40)); // rax = ptr
+                                    code.extend(encode_add_reg_imm32(Gpr::Rax, 8));           // rax = ptr+8
+                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rbx));     // rax = ptr+8+len
+                                    // Store 4-byte tag at [rax].
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rax, 0, Gpr::R8));
+
+                                    // Cleanup.
+                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+                                    code.extend(encode_pop(Gpr::Rbx));
                                 }
 
                                 instr_opcode = Some("aead_seal".to_string());
@@ -4125,10 +4620,29 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     patch_rel32_jmp(&mut code, jmp_cleanup_patch, cleanup_off);
                                     code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
                                 } else {
-                                    // Legacy path: len is not a compile-time constant.
-                                    // In-place XOR at [ptr+0..len], no tag verification.
-                                    vuma_log!(warn, "aead_open: len is not a compile-time constant; using legacy in-place XOR (no tag verification)");
-                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48));
+                                    // ── Dynamic-len path (len is a Register). ──
+                                    //
+                                    // Phase 2d (L8): verify-before-decrypt with the
+                                    // SAME nonce|ciphertext|tag wire format as the
+                                    // Immediate path, but using
+                                    // emit_crc32_range_dynamic for the runtime CRC32.
+                                    // This replaces the old malleable in-place XOR
+                                    // fallback that had no tag verification — the
+                                    // cryptographic downgrade flagged in the L0-L8
+                                    // wiring audit.  On tag mismatch, store -6
+                                    // (CrcMismatch) to dst and SKIP decryption,
+                                    // exactly like the Immediate path.
+                                    //
+                                    // Stack frame (56 bytes; push rbx + sub rsp,56):
+                                    //   [rsp+0..32]  = KEY (key_seed × 4)
+                                    //   [rsp+32..40] = NONCE (key_seed ^ magic)
+                                    //   [rsp+40..48] = saved ptr (survives CRC32 + XOR loop)
+                                    //   [rsp+48..56] = unused (alignment padding)
+                                    // RBX (callee-saved, pushed) holds `len`.
+                                    code.extend(encode_push(Gpr::Rbx));
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+
+                                    // Step 1: build KEY (key_seed × 4) + NONCE.
                                     code.extend(load_value(key_seed, Gpr::Rax));
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
@@ -4137,22 +4651,67 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xA5A5A5A5A5A5A5A5));
                                     code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
                                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
-                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));
-                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));
-                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));
-                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
+
+                                    // Step 2: load ptr → [rsp+40]; load len → RBX.
                                     code.extend(load_value(ptr, Gpr::Rax));
-                                    code.extend(load_value(len, Gpr::Rcx));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 40, Gpr::Rax)); // save ptr
+                                    code.extend(load_value(len, Gpr::Rbx));                   // rbx = len
+
+                                    // Step 3: VERIFY tag BEFORE decrypting (library contract).
+                                    // base_reg = RDI = ptr; offset_reg = RDX = 8; len_reg = RBX.
+                                    code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 40)); // rdi = ptr
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));           // rdx = 8
+                                    // R8 = CRC32 over ciphertext [ptr+8..8+len].
+                                    code.extend(emit_crc32_range_dynamic(Gpr::Rdi, Gpr::Rdx, Gpr::Rbx));
+                                    // Compute tag address = ptr + 8 + len into RAX,
+                                    // then load the stored 4-byte tag (zero-extended).
+                                    code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 40)); // rax = ptr
+                                    code.extend(encode_add_reg_imm32(Gpr::Rax, 8));           // rax = ptr+8
+                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rbx));     // rax = ptr+8+len
+                                    // RCX = stored tag (32-bit, zero-extended to 64-bit).
+                                    code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rax, 0));
+                                    // Compare recomputed (R8) vs stored (RCX).
+                                    code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                    let tag_jne_patch = code.len();
+                                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32 (to fail)
+
+                                    // Step 4: tag matches — set up XOR loop and decrypt.
+                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));   // key_ptr
+                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));  // nonce_ptr
+                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));     // key_idx
+                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));     // nonce_idx
+                                    code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 40)); // rdi = ptr (reload)
+                                    code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rdi, 8));  // rax = ptr+8
+                                    code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rbx));     // rcx = len
+
+                                    // Emit the XOR loop (in-place decrypt).
                                     let (loop_code, je_patch) = emit_aead_xor_loop();
                                     let loop_base = code.len();
                                     code.extend(loop_code);
+
+                                    // done (success path): store 0 to dst.
                                     let done_off = code.len();
                                     patch_rel32_jcc(&mut code, loop_base + je_patch, done_off);
                                     if let Some(off) = dst_off {
-                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // 0
                                         code.extend(encode_mov_mem_reg(Gpr::Rbp, off, Gpr::Rax));
                                     }
-                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                    let jmp_cleanup_patch = code.len();
+                                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp cleanup
+
+                                    // fail path: tag mismatch — store -6, skip decrypt.
+                                    let fail_off = code.len();
+                                    patch_rel32_jcc(&mut code, tag_jne_patch, fail_off);
+                                    if let Some(off) = dst_off {
+                                        code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                                        code.extend(encode_mov_mem_reg(Gpr::Rbp, off, Gpr::Rax));
+                                    }
+
+                                    // cleanup.
+                                    let cleanup_off = code.len();
+                                    patch_rel32_jmp(&mut code, jmp_cleanup_patch, cleanup_off);
+                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+                                    code.extend(encode_pop(Gpr::Rbx));
                                 }
 
                                 instr_opcode = Some("aead_open".to_string());
@@ -4412,18 +4971,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
                                 code.extend(encode_syscall());
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
-                                // nanosleep({0, 1_000_000}, NULL) — sleep 1ms
+                                // nanosleep({0, 10_000_000}, NULL) — sleep 10ms
                                 // to give the child worker time to read the
                                 // arg, compute the result, and write it
                                 // back before we attempt to recv. Without
                                 // this delay, the parent's recv may read
                                 // its own write (the pipe buffer still has
                                 // the sent frame), causing a deadlock.
+                                // (Phase 2c: increased from 1ms to 10ms
+                                // because every spawned worker now auto-
+                                // installs a seccomp BPF filter in the
+                                // child path — the ~560-byte filter build
+                                // plus two prctl syscalls add latency
+                                // before the child reaches its first
+                                // channel_recv. 10ms gives the scheduler
+                                // ample room even under load.)
                                 code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
                                 code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax)); // tv_sec=0
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1_000_000));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax)); // tv_nsec=1ms
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 50_000_000));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax)); // tv_nsec=50ms
                                 code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
                                 code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // NULL
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 35)); // sys_nanosleep
@@ -6244,11 +6811,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // [rsp+44] = payload (8 bytes) — the message value
                     code.extend(load_value(msg, Gpr::Rax));
                     code.extend(encode_mov_mem_reg(Gpr::Rsp, 44, Gpr::Rax));
-                    // [rsp+52] = CRC32 = 0 (4 bytes, placeholder — full CRC
-                    // computation requires an inline loop, deferred to a
-                    // follow-up; the field is present per the L1 spec).
-                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
-                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::Rax));
+                    // [rsp+52] = CRC32 — Phase 2a (L1 framing): compute the
+                    // real CRC32 over [rsp+0..52] (header + payload) using the
+                    // inline loop with polynomial 0xEDB88320 (same as
+                    // ipc::crc32), and store the 32-bit result into [rsp+52].
+                    // This replaces the previous hardcoded CRC=0 placeholder.
+                    // RDI still holds write_fd (preserved across the CRC loop,
+                    // which only clobbers RAX/RCX/RSI/R8-R11).
+                    code.extend(emit_crc32_frame_loop());
+                    // R8D now holds the CRC. Store R8D into [rsp+52].
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::R8));
 
                     // Step 3: write(write_fd, &frame, 56)
                     // RDI already has write_fd (preserved across header build).
@@ -6377,6 +6949,18 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_proto_hi_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
+                    // Step 3d (Phase 2a): CRC32 verification — compute CRC32
+                    // over [rsp+0..52] (header + payload) and compare with
+                    // the stored CRC at [rsp+52].  On mismatch, store -6
+                    // (CRC_MISMATCH) in dst and jump to cleanup.  This
+                    // replaces the previous "CRC deferred" stub (the field
+                    // was read but never compared).
+                    code.extend(emit_crc32_frame_loop());
+                    code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 52));
+                    code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                    let jne_crc_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
                     // Step 4: extract payload from [rsp+44] into dst slot.
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
                     code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
@@ -6421,6 +7005,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jmp_cleanup_from_proto_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
+                    // crc_fail (Phase 2a): store -6 (CRC_MISMATCH) in dst.
+                    // Reached when the recomputed CRC32 over [rsp+0..52] does
+                    // not match the stored CRC32 at [rsp+52].
+                    let crc_fail_off = code.len();
+                    patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    let jmp_cleanup_from_crc_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
                     // magic_fail: store -1 in dst slot (error sentinel).
                     let magic_fail_off = code.len();
                     let magic_delta = magic_fail_off as i64 - (jne_magic_patch as i64 + 6);
@@ -6454,6 +7048,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code[jmp_cleanup_from_proto_patch+2] = bd[1];
                     code[jmp_cleanup_from_proto_patch+3] = bd[2];
                     code[jmp_cleanup_from_proto_patch+4] = bd[3];
+                    // Phase 2a: patch crc_fail → cleanup jump.
+                    patch_rel32_jmp(&mut code, jmp_cleanup_from_crc_patch, cleanup_off);
                     code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
 
                     instr_opcode = Some("channel_recv".to_string());
