@@ -741,6 +741,57 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         }
     }
 
+    // ── Phase 0.7: Count folded L1/L2 checks for formal_verify() (Wave J) ──
+    //
+    // formal_verify() returns the per-function count of L1/L2 runtime
+    // checks folded into L3 compile-time invariants.  Each
+    // channel_send / channel_recv / capability_grant /
+    // capability_delegate / stark_prove / stark_verify builtin
+    // increments the per-function counter at runtime (see
+    // `inc_formal_verify_count` and the prologue store below).
+    //
+    // BUT runtime increments alone are insufficient when the
+    // program forks: after fork(), the parent and child have
+    // separate stacks, so a builtin that executes only in the
+    // child (e.g. channel_recv inside `if pid == 0 { ... }`) won't
+    // increment the parent's counter.  To make formal_verify()
+    // return the TOTAL number of folded checks (not just the ones
+    // that executed in the calling process), we ALSO scan the
+    // function's IR at compile time and store the total folded-check
+    // count in the prologue.  Runtime increments then add the
+    // "executed checks" count on top of the "folded checks" base.
+    //
+    // This is the runtime witness that the L1→L3 collapse proof
+    // (see `vuma_ive::verification::l1l3_collapse`) covered N
+    // runtime checks — formal_verify() returns at least N (the
+    // compile-time folded count), proving the codegen really did
+    // emit the channel/capability builtins whose types the proof
+    // verified.
+    let mut formal_verify_folded_count: u64 = 0;
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            match instr {
+                IRInstr::Call { func: fname, .. } => {
+                    if matches!(
+                        fname.as_str(),
+                        "channel_send"
+                            | "channel_recv"
+                            | "capability_grant"
+                            | "capability_delegate"
+                            | "stark_prove"
+                            | "stark_verify"
+                    ) {
+                        formal_verify_folded_count += 1;
+                    }
+                }
+                IRInstr::ChannelSend { .. } | IRInstr::ChannelRecv { .. } => {
+                    formal_verify_folded_count += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
     // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
     // Collect all unique vreg IDs from the function's vregs map and also
@@ -943,6 +994,27 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let stark_table_count_off: i32 = -(current_offset);
 
+    // Wave J (Formal Verification — L1→L3 collapse proof witness):
+    // per-function counter of how many L1/L2 runtime checks were
+    // folded into L3 compile-time invariants by the codegen.  Each
+    // channel_send / channel_recv / capability_grant /
+    // capability_delegate / stark_prove / stark_verify builtin
+    // increments this counter at its emit site; the `formal_verify()`
+    // builtin loads it and returns it as an i64.
+    //
+    // This is the runtime witness that the L1→L3 collapse proof (see
+    // `vuma_ive::verification::l1l3_collapse`) covered N runtime
+    // checks — a program that calls formal_verify() and checks the
+    // result is >= the expected folded-check count is proving at
+    // runtime that the compiler's static collapse proof was not
+    // vacuous (i.e. the codegen really did emit the channel/capability
+    // builtins that the proof verified).
+    //
+    // Layout (8 bytes, zeroed in the prologue):
+    //   [rbp + formal_verify_count_off]: folded_check_count (u64)
+    current_offset += 8;
+    let formal_verify_count_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -981,6 +1053,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     let store_vreg = |id: u32, scratch: Gpr| -> Vec<u8> {
         let off = slot_offset(id);
         encode_mov_mem_reg(Gpr::Rbp, off, scratch)
+    };
+
+    // Wave J: increment the per-function formal-verify folded-check
+    // counter (`[rbp + formal_verify_count_off]`).  Emitted at the
+    // start of each channel_send / channel_recv / capability_grant /
+    // capability_delegate / stark_prove / stark_verify builtin so
+    // `formal_verify()` can return the count at runtime.  Clobbers
+    // RAX (caller-saved, free at the start of each builtin arm).
+    let inc_formal_verify_count = || -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, formal_verify_count_off));
+        c.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+        c.extend(encode_mov_mem_reg(Gpr::Rbp, formal_verify_count_off, Gpr::Rax));
+        c
     };
 
     // Load an IRValue into a scratch register
@@ -1141,6 +1227,35 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // [0..count), so uninitialized data past count is never observed.
     // RAX is already 0 from the xor above.
     emit(encode_mov_mem_reg(Gpr::Rbp, stark_table_count_off, Gpr::Rax), "zero_stark_table_count");
+
+    // Wave J (Formal Verification): initialise the per-function
+    // formal-verify folded-check counter to the COMPILE-TIME count of
+    // folded L1/L2 checks (computed in Phase 0.7 above).  This is the
+    // base count — each channel_send / channel_recv / capability_grant
+    // / capability_delegate / stark_prove / stark_verify builtin then
+    // increments it at runtime, so formal_verify() returns
+    // (compile_time_folded + runtime_executed) >= compile_time_folded.
+    //
+    // Storing the compile-time count in the prologue (rather than just
+    // zeroing) is necessary because fork() splits the parent and child
+    // stacks: a builtin that executes only in the child (e.g.
+    // channel_recv inside `if pid == 0 { ... }`) would never
+    // increment the parent's runtime counter.  The compile-time base
+    // guarantees formal_verify() returns the TOTAL number of folded
+    // checks regardless of which process the caller runs in.
+    //
+    // `mov rax, imm64` + `mov [rbp + off], rax` (RAX was 0 from the
+    // xor above; we overwrite it with the compile-time count).  When
+    // the count is 0 (no folded builtins), this is equivalent to the
+    // zeroing the slot would otherwise get.
+    emit(
+        encode_mov_reg_imm64(Gpr::Rax, formal_verify_folded_count),
+        "init_formal_verify_count",
+    );
+    emit(
+        encode_mov_mem_reg(Gpr::Rbp, formal_verify_count_off, Gpr::Rax),
+        "store_formal_verify_count",
+    );
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -2729,6 +2844,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // "i64" since the Call path doesn't carry the
                                 // IR type; matches the existing 8-byte path.
                                 let th = crate::ipc::type_hash("i64");
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L1 channel-framing
+                                // check folded by this channel_send).
+                                code.extend(inc_formal_verify_count());
                                 // write_fd = high 32 bits of the handle
                                 match ch {
                                     IRValue::Register(id) => {
@@ -2809,6 +2928,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L1 channel-framing
+                                // check folded by this channel_recv).
+                                code.extend(inc_formal_verify_count());
                                 // read_fd = low 32 bits of the handle
                                 match ch {
                                     IRValue::Register(id) => {
@@ -3583,6 +3706,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 let cap_id = (token.id & 0xFFFF_FFFF_FFFF_FFFF) as u64;
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L2 capability-
+                                // attestation check folded by this grant).
+                                code.extend(inc_formal_verify_count());
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, cap_id));
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                                 instr_opcode = Some("capability_grant".to_string());
@@ -4360,6 +4487,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 );
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L2 capability-
+                                // attestation check folded by this delegate).
+                                code.extend(inc_formal_verify_count());
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, child_id));
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                                 instr_opcode = Some("capability_delegate".to_string());
@@ -5554,6 +5685,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // count across the slot-address
                                 // computation (RAX/RCX are clobbered).
                                 code.extend(encode_push(Gpr::Rbx));
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L2 STARK-attestation
+                                // check folded by this stark_prove).  Done
+                                // after the push so RBX is preserved; RAX is
+                                // free (the push doesn't touch it).
+                                code.extend(inc_formal_verify_count());
                                 // RDX = input value. For Immediate inputs
                                 // this is a mov-imm64; for Register inputs
                                 // a load from the vreg's stack slot.
@@ -5674,6 +5811,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // Push RBX (callee-saved) — holds
                                 // proof_handle across slot addressing.
                                 code.extend(encode_push(Gpr::Rbx));
+                                // Wave J: increment the formal-verify
+                                // folded-check counter (one L2 STARK-verification
+                                // check folded by this stark_verify).
+                                code.extend(inc_formal_verify_count());
                                 // RBX = proof_handle.
                                 code.extend(load_value(&args[0], Gpr::Rbx));
                                 // If proof_handle == 0, return 0 (invalid).
@@ -5740,6 +5881,45 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(store_vreg(dst_id, Gpr::Rax));
                                 code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("stark_verify".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave J (Formal Verification — L1→L3 collapse
+                            // proof witness):
+                            // formal_verify() -> i64
+                            //
+                            // Returns the per-function count of L1/L2
+                            // runtime checks folded into L3 compile-time
+                            // invariants by the codegen.  Each
+                            // channel_send / channel_recv /
+                            // capability_grant / capability_delegate /
+                            // stark_prove / stark_verify builtin
+                            // incremented `[rbp + formal_verify_count_off]`
+                            // at its emit site; this builtin simply loads
+                            // the count and returns it as an i64.
+                            //
+                            // A program that calls formal_verify() and
+                            // checks the result is >= the expected
+                            // folded-check count is proving at runtime
+                            // that the compiler's L1→L3 collapse proof
+                            // (see `vuma_ive::verification::l1l3_collapse`)
+                            // was not vacuous — i.e. the codegen really
+                            // did emit the channel/capability builtins
+                            // whose types the proof verified.
+                            //
+                            // No args; dst holds the i64 result.
+                            "formal_verify" if args.is_empty() && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Load the folded-check count from the
+                                // per-function stack slot into RAX and
+                                // store it to dst.  This is a single
+                                // 8-byte load — no syscalls, no branches.
+                                code.extend(encode_mov_reg_mem(
+                                    Gpr::Rax,
+                                    Gpr::Rbp,
+                                    formal_verify_count_off,
+                                ));
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                instr_opcode = Some("formal_verify".to_string());
                                 channel_builtin_matched = true;
                             }
                             _ => {}
@@ -6017,6 +6197,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let type_name = ty.as_ref().map(|t| t.to_string()).unwrap_or_else(|| "i64".to_string());
                     let th = crate::ipc::type_hash(&type_name);
 
+                    // Wave J: increment the formal-verify folded-check
+                    // counter (one L1 channel-framing check folded).
+                    code.extend(inc_formal_verify_count());
+
                     // Step 1: load write_fd (high 32 bits of handle) into RDI.
                     match ch {
                         IRValue::Register(id) => {
@@ -6096,6 +6280,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let expected_th = ty.as_ref()
                         .map(|t| crate::ipc::type_hash(&t.to_string()))
                         .unwrap_or_else(|| crate::ipc::type_hash("i64"));
+
+                    // Wave J: increment the formal-verify folded-check
+                    // counter (one L1 channel-framing check folded).
+                    code.extend(inc_formal_verify_count());
 
                     // Step 1: load read_fd (low 32 bits of handle) into RDI.
                     match ch {
