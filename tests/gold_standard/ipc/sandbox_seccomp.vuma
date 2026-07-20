@@ -1,0 +1,24 @@
+// sandbox_seccomp — Wave 17c extended: verify BPF filter is installed.
+//
+// The child calls sandbox_seccomp() which installs a seccomp BPF filter
+// allowing only read(0), write(1), exit(60), exit_group(231). After
+// installation, the child calls return 1 — which compiles to exit_group(1),
+// an ALLOWED syscall. If the filter is installed correctly, the child
+// exits 1.
+//
+// If the filter has a bug (e.g., the old wrong SECCOMP_RET_ALLOW constant
+// 0x0000007f which the kernel interprets as KILL), the child would be
+// killed by SIGSYS on the exit_group call, and wait_worker would return
+// a different status (SIGSYS = 31, so WEXITSTATUS would be 0 or the
+// process would appear killed by signal 31).
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    pid = spawn_worker();
+    if pid == 0 {
+        sandbox_seccomp();
+        return 1;
+    }
+    status = wait_worker(pid);
+    return status;
+}

@@ -2866,6 +2866,106 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("sandbox_apply".to_string());
                                 channel_builtin_matched = true;
                             }
+                            // Wave 17c (extended): sandbox_seccomp()
+                            // Installs a seccomp BPF filter that allows only
+                            // read(0), write(1), exit(60), exit_group(231) and
+                            // kills the process on any other syscall. This is
+                            // the REAL sandbox — sandbox_apply alone only sets
+                            // NO_NEW_PRIVS without filtering syscalls.
+                            //
+                            // The BPF program is 9 instructions (72 bytes):
+                            //   0: LD seccomp_data.nr
+                            //   1: JEQ 0 (read)   → ALLOW
+                            //   3: JEQ 1 (write)  → ALLOW
+                            //   5: JEQ 60 (exit)  → ALLOW
+                            //   7: JEQ 231 (exit_group) → ALLOW
+                            //   9: KILL
+                            //
+                            // Wire layout on stack (88 bytes total, 16-aligned):
+                            //   [rsp+0..72)   BPF program (9 × 8-byte sock_filter)
+                            //   [rsp+72..88)  sock_fprog { u16 len=9; pad[6]; ptr }
+                            //
+                            // prctl(PR_SET_NO_NEW_PRIVS=38, 1)
+                            // prctl(PR_SET_SECCOMP=22, SECCOMP_MODE_FILTER=2, &sock_fprog)
+                            "sandbox_seccomp" if args.is_empty() => {
+                                let mut code_local = Vec::new();
+
+                                // Step 1: allocate 88 bytes on stack for BPF prog + sock_fprog.
+                                code_local.extend(encode_sub_reg_imm32(Gpr::Rsp, 96)); // round up to 96 for 16-byte align
+
+                                // Step 2: write the 9 BPF instructions (each 8 bytes).
+                                // Instruction 0: BPF_LD | BPF_W | BPF_ABS, k=0 (offsetof seccomp_data.nr)
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000000020));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                // Instruction 1: BPF_JMP | BPF_JEQ | BPF_K, jt=0, jf=1, k=0 (read)
+                                // sock_filter: { u16 code=0x0015, u8 jt=0, u8 jf=1, u32 k=0 }
+                                // LE bytes: 15 00 01 00 00 00 00 00 → as u64 = 0x0000000000010015
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000010015));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                // Instruction 2: BPF_RET | BPF_K, SECCOMP_RET_ALLOW=0x7fff0000
+                                // 06 00 00 00 00 00 ff 7f → as u64 = 0x7fff000000000006
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x7fff000000000006));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                // Instruction 3: JEQ 1 (write)
+                                // 15 00 01 00 01 00 00 00 → as u64 = 0x0000000100010015
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000100010015));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                // Instruction 4: RET ALLOW
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x7fff000000000006));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                                // Instruction 5: JEQ 60 (exit)
+                                // 15 00 01 00 3C 00 00 00 → as u64 = 0x0000003C00010015
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000003C00010015));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 40, Gpr::Rax));
+                                // Instruction 6: RET ALLOW
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x7fff000000000006));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 48, Gpr::Rax));
+                                // Instruction 7: JEQ 231 (exit_group)
+                                // 15 00 01 00 E7 00 00 00 → as u64 = 0x000000E700010015
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x000000E700010015));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 56, Gpr::Rax));
+                                // Instruction 8: RET ALLOW
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x7fff000000000006));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 64, Gpr::Rax));
+                                // Instruction 9: RET KILL (0x00000000)
+                                // 06 00 00 00 00 00 00 00 → as u64 = 0x0000000000000006
+                                code_local.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000000000000006));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 72, Gpr::Rax));
+
+                                // Step 3: build sock_fprog at [rsp+80].
+                                // struct sock_fprog { unsigned short len; [6 pad]; struct sock_filter *filter; }
+                                // len = 10 (we have 10 instructions: 0=LD, 1-8=JEQ+ALLOW pairs, 9=KILL)
+                                // Wait — let me recount: 0=LD, 1=JEQ read, 2=ALLOW, 3=JEQ write, 4=ALLOW,
+                                // 5=JEQ exit, 6=ALLOW, 7=JEQ exit_group, 8=ALLOW, 9=KILL = 10 instructions.
+                                // len = 10
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rax, 10));
+                                // Store len as u16 at [rsp+80] (low 16 bits of RAX)
+                                // mov word [rsp+80], ax = 66 89 44 24 50
+                                code_local.extend(&[0x66, 0x89, 0x44, 0x24, 0x50]);
+                                // Store &filter (pointer to [rsp+0]) at [rsp+88]
+                                code_local.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code_local.extend(encode_mov_mem_reg(Gpr::Rsp, 88, Gpr::Rax));
+
+                                // Step 4: prctl(PR_SET_NO_NEW_PRIVS=38, 1)
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rdi, 38));
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rsi, 1));
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rax, 157));
+                                code_local.extend(encode_syscall());
+
+                                // Step 5: prctl(PR_SET_SECCOMP=22, SECCOMP_MODE_FILTER=2, &sock_fprog)
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rdi, 22));
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rsi, 2));
+                                code_local.extend(encode_lea_reg_mem(Gpr::Rdx, Gpr::Rsp, 80));
+                                code_local.extend(encode_mov_reg_imm32(Gpr::Rax, 157));
+                                code_local.extend(encode_syscall());
+
+                                // Step 6: cleanup
+                                code_local.extend(encode_add_reg_imm32(Gpr::Rsp, 96));
+
+                                code.extend(code_local);
+                                instr_opcode = Some("sandbox_seccomp".to_string());
+                                channel_builtin_matched = true;
+                            }
                             // Wave 18b: set_resource_limit(resource, limit)
                             // setrlimit(resource, &rlimit) — sys_setrlimit=160.
                             // rlimit struct: { rlim_cur: u64, rlim_max: u64 } = 16 bytes.
