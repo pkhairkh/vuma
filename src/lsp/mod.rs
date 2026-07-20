@@ -1949,7 +1949,12 @@ fn format_type(ty: &Type) -> String {
         // the catch-all `Display` impl) so the element type is itself run
         // through `format_type` and picks up the f32/f64 hover enrichment
         // for FP element types like `Channel<f32>`.
-        Type::Channel(inner) => format!("Channel<{}>", format_type(inner)),
+        // Wave 89-90 (Session Types): if a session type is attached, render
+        // it alongside the payload type.
+        Type::Channel { inner, session_type } => match session_type {
+            Some(st) => format!("Channel<{}, {}>", format_type(inner), st),
+            None => format!("Channel<{}>", format_type(inner)),
+        },
         other => other.to_string(),
     }
 }
@@ -2388,15 +2393,22 @@ mod tests {
     fn test_format_type_channel() {
         // Channel<i32> — the canonical i32-message IPC channel.
         assert_eq!(
-            format_type(&Type::Channel(Box::new(Type::BDBase("i32".to_string())))),
+            format_type(&Type::Channel {
+                inner: Box::new(Type::BDBase("i32".to_string())),
+                session_type: None,
+            }),
             "Channel<i32>"
         );
         // Nested Channel<Channel<T>> — verifies the inner type is itself
         // run through format_type (recursion), not just `Display::to_string`.
         assert_eq!(
-            format_type(&Type::Channel(Box::new(Type::Channel(
-                Box::new(Type::BDBase("u8".to_string()))
-            )))),
+            format_type(&Type::Channel {
+                inner: Box::new(Type::Channel {
+                    inner: Box::new(Type::BDBase("u8".to_string())),
+                    session_type: None,
+                }),
+                session_type: None,
+            }),
             "Channel<Channel<u8>>"
         );
     }

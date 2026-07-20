@@ -1,0 +1,21 @@
+// stark_proof — Wave 93-94: zk-STARK proof generation.
+//
+// The stark_prove(input) builtin generates a zero-knowledge STARK proof
+// attesting that the prover knows a witness satisfying the arithmetic
+// constraints over `input`. The proof is opaque bytes; the builtin
+// returns a pointer-sized proof handle (an index into the IPC layer's
+// proof table). A non-zero handle means "proof generated".
+//
+// This test calls stark_prove(42) and checks that the returned handle
+// is non-zero (i.e. a proof was generated). The placeholder builtin
+// stores 1 to dst; a future wave will replace this with a real FRI-
+// based prover that writes proof bytes to a runtime-allocated buffer.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    proof = stark_prove(42);
+    if proof != 0 {
+        return 1;
+    }
+    return 0;
+}

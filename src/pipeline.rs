@@ -8346,7 +8346,13 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
         // are opaque IPC handles — pointer-sized — but we preserve the inner
         // payload type via `ScgType::Channel` so downstream stages can
         // recover it when lowering send/recv operations.
-        Some(vuma_parser::ast::Type::Channel(inner)) => {
+        //
+        // Wave 89-90 (Session Types): the `session_type` field on the AST
+        // node is dropped here — ScgType::Channel currently carries only
+        // the payload type. A future SCG extension could add a session-
+        // type slot to ScgType::Channel to thread the protocol through to
+        // the IVE linear-type checker (Wave 95).
+        Some(vuma_parser::ast::Type::Channel { inner, .. }) => {
             // `inner: &Box<Type>` (match ergonomics on `&Option<Type>`).
             // Recursively bridge the payload type so ScgType::Channel
             // carries the inner type for downstream type-checking.
@@ -8387,7 +8393,9 @@ fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRTy
         // Wave 1c: `Channel<T>` → `IRType::Channel` (pointer-sized opaque
         // capability handle; inner payload type carried for type-checking
         // only).
-        Type::Channel(inner) => {
+        // Wave 89-90 (Session Types): session_type field is dropped here;
+        // IRType::Channel doesn't carry protocol info yet.
+        Type::Channel { inner, .. } => {
             vuma_codegen::ir::IRType::Channel(Box::new(bridge_type_to_ir_type(inner)))
         }
         _ => vuma_codegen::ir::IRType::U64,
@@ -8409,7 +8417,8 @@ fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
         // Wave 1c: `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit) —
         // same as Ptr.
-        Type::Channel(_) => 8,
+        // Wave 89-90: session_type field doesn't affect size.
+        Type::Channel { .. } => 8,
         Type::Array { element, size } => bridge_type_size(element) * (*size as u64),
         _ => 8,
     }
@@ -8442,7 +8451,8 @@ fn bridge_type_size_with_layouts(
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
         // Wave 1c: `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit).
-        Type::Channel(_) => 8,
+        // Wave 89-90: session_type field doesn't affect size.
+        Type::Channel { .. } => 8,
         Type::Array { element, size } => {
             bridge_type_size_with_layouts(element, layout_sizes) * (*size as u64)
         }
@@ -8465,7 +8475,8 @@ fn bridge_type_align(ty: &vuma_parser::ast::Type) -> u64 {
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
         // Wave 1c: `Channel<T>` alignment is pointer-sized (8 on 64-bit, 4 on
         // 32-bit) — same as Ptr.
-        Type::Channel(_) => 8,
+        // Wave 89-90: session_type field doesn't affect alignment.
+        Type::Channel { .. } => 8,
         Type::Array { element, .. } => bridge_type_align(element),
         _ => 8,
     }

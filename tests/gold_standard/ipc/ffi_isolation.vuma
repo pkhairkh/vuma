@@ -1,0 +1,29 @@
+// ffi_isolation — Wave 25-32: FFI process isolation (extern "process" ABI)
+//
+// Exercises the process_call builtin, which marshals a cross-process function
+// call via a channel (send arg, recv result).  This is the runtime that backs
+// `extern "process" fn` declarations (recognized in scg_to_ir.rs as the
+// FfiEnvelope lowering path).
+//
+// The child acts as the isolated FFI server: it recv's an argument, doubles
+// it, and sends the result back.  The parent calls process_call(ch, 21) which
+// sends 21 and recvs 42, then returns 42.  A crash in the child process would
+// NOT crash the parent — the parent would get a recv error instead of a
+// payload, demonstrating process-level isolation.
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        arg = channel_recv(ch);
+        result = arg * 2;
+        channel_send(ch, result);
+        channel_close(ch);
+        return 0;
+    }
+    r = process_call(ch, 21);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return r;
+}

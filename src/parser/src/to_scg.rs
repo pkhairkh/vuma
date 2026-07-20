@@ -3459,7 +3459,8 @@ impl AstToScg {
             Some(Type::State(_)) => 8,
             Some(Type::Ref { .. }) => 8,
             // Wave 1b: `Channel<T>` is a pointer-sized channel handle.
-            Some(Type::Channel(_)) => 8,
+            // Wave 89-90: session_type field doesn't change the handle size.
+            Some(Type::Channel { .. }) => 8,
             None => 8,
         }
     }
@@ -3479,7 +3480,8 @@ impl AstToScg {
             Type::State(_) => 8,
             Type::Ref { .. } => 8,
             // Wave 1b: `Channel<T>` is a pointer-sized channel handle.
-            Type::Channel(_) => 8,
+            // Wave 89-90: session_type field doesn't change the handle size.
+            Type::Channel { .. } => 8,
         }
     }
 

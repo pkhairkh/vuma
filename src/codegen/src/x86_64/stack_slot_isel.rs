@@ -3983,6 +3983,39 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("channel_open_remote".to_string());
                                 channel_builtin_matched = true;
                             }
+                            // Wave 93-94 (zk-STARK):
+                            // stark_prove(input) -> u64
+                            //
+                            // Generates a zero-knowledge STARK proof attesting
+                            // that the prover knows a witness satisfying the
+                            // arithmetic constraints over `input`. The proof
+                            // itself is opaque bytes; this builtin returns a
+                            // pointer-sized proof handle (an index into the
+                            // IPC layer's proof table — see
+                            // `vuma_codegen::ipc::StarkProof`).
+                            //
+                            // Placeholder implementation: stores `1` to dst
+                            // (a non-zero handle meaning "proof generated").
+                            // A future wave will replace this with a real
+                            // FRI-based prover that writes the proof bytes
+                            // to a runtime-allocated buffer and returns the
+                            // buffer index. The placeholder is sufficient
+                            // to exercise the IR-level StarkProof path and
+                            // the IPC-layer proof-verification logic.
+                            "stark_prove" if args.len() == 1 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                // "Use" the input — load it into RAX so the
+                                // arg vreg is referenced (matters for DCE
+                                // and the linear-type checker).
+                                code.extend(load_value(&args[0], Gpr::Rax));
+                                // Discard the input (RAX) and store 1 as
+                                // the placeholder proof handle.
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                instr_opcode = Some("stark_prove".to_string());
+                                channel_builtin_matched = true;
+                            }
                             _ => {}
                         }
                     }
@@ -4826,6 +4859,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                     instr_opcode = Some("channel_recv_result".to_string());
                     code
+                }
+
+                // StarkProof { input, dst, constraints } — Wave 93-94.
+                // IR-level zk-STARK proof generation. The dedicated IRInstr
+                // arm is a stub (currently unreachable from surface syntax,
+                // like the other IRInstr::Channel* arms — the Call-form
+                // `stark_prove(input)` builtin intercepted earlier in this
+                // function is the active path). Emits nothing here; if this
+                // arm is ever reached, the backend will fall through with
+                // an empty `encoded` Vec (which the outer loop skips, just
+                // like Phi/VectorOp). A future wave can lower this to a
+                // real proof-table allocation.
+                IRInstr::StarkProof { input, dst, constraints: _ } => {
+                    let _ = (input, dst); // suppress unused-variable warnings
+                    instr_opcode = Some("stark_proof".to_string());
+                    Vec::new()
                 }
             };
 

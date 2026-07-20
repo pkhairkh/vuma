@@ -250,6 +250,12 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
         IRInstr::ChannelClose { ch } => IRInstr::ChannelClose {
             ch: ch.clone(),
         },
+        // Wave 93-94: substitute the public input of a STARK proof.
+        IRInstr::StarkProof { input, dst, constraints } => IRInstr::StarkProof {
+            input: sv(input),
+            dst: sv(dst),
+            constraints: constraints.clone(),
+        },
     }
 }
 
@@ -440,7 +446,9 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::ChannelRecv { .. }
         | IRInstr::ChannelRecvTimeout { .. }
         | IRInstr::ChannelRecvResult { .. }
-        | IRInstr::ChannelClose { .. } => true,
+        | IRInstr::ChannelClose { .. }
+        // Wave 93-94: StarkProof allocates a proof buffer (side-effecting).
+        | IRInstr::StarkProof { .. } => true,
         IRInstr::BinOp { op, .. } => matches!(
             op,
             BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem

@@ -6640,7 +6640,9 @@ impl Backend for RiscV32Backend {
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
+                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
+                    // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                    | IRInstr::StarkProof { .. } => Vec::new(),
                 };
 
                 if !encoded.is_empty() {
@@ -6706,6 +6708,8 @@ impl Backend for RiscV32Backend {
                         IRInstr::ChannelSend { .. } => "channel_send",
                         IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvResult { .. } => "channel_recv",
                         IRInstr::ChannelClose { .. } => "channel_close",
+                        // Wave 93-94: zk-STARK proof generation.
+                        IRInstr::StarkProof { .. } => "stark_prove",
                     };
 
                     // For FP Cast instructions, populate reads/writes with
