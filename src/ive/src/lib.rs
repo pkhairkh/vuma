@@ -69,6 +69,8 @@ pub mod escape;
 pub mod constant_time;
 /// CT2: Information-flow type checker (security-label lattice).
 pub mod information_flow;
+/// CT4: Refinement type checker (predicate-based subtyping).
+pub mod refinement;
 /// FFI Safety Verifier (Wave 10) — proves states are not read after
 /// invalidation by a non-pure foreign call.
 pub mod ffi;
