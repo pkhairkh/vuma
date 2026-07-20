@@ -1457,6 +1457,52 @@ fn default_output_path(input: &Path) -> PathBuf {
     dir.join(format!("{}.o", stem))
 }
 
+/// Run PMT state verification on a parsed AST (VUMA 2.0 — MANDATORY gate).
+///
+/// The direct AST→codegen paths (`compile_to_binary_direct`, `cmd_emit`,
+/// `cmd_compile`) bypass the canonical `compile_with_path` /
+/// `compile_with_recovery` pipeline, so they do NOT inherit the Stage 6
+/// IVE PMT gate. This helper closes that gap: it builds the semantic SCG
+/// from the AST, attaches the PMT layout registry, runs the 3 PMT state
+/// verifiers (state_read / state_write / state_transform) via
+/// `InvariantAggregator` at the `Pmt` level, and returns `Err` if the
+/// overall verdict is `Fail`. `Inconclusive` and `NoChecks` are
+/// non-blocking (matching `compile_with_path`'s default non-strict
+/// behaviour). This guarantees that no CLI subcommand can emit a binary
+/// for a PMT-violating program.
+fn verify_pmt_on_ast(program: &vuma_parser::Program) -> Result<(), String> {
+    use vuma::pipeline::build_pmt_layout_specs;
+    use vuma_ive::{
+        InvariantAggregator, OverallVerdict,
+        VerificationLevel as IveVerificationLevel,
+        verification::VerificationInput,
+    };
+
+    // Build the semantic SCG (required input for the IVE PMT verifiers).
+    let mut converter = vuma_parser::AstToScg::new();
+    let scg = match converter.convert(program) {
+        Ok(s) => s,
+        Err(e) => {
+            // AST→SCG failure is a hard error — we cannot verify a
+            // program whose SCG we cannot build.
+            return Err(format!("PMT verification: AST→SCG failed: {}", e));
+        }
+    };
+
+    let pmt_layouts = build_pmt_layout_specs(program);
+    let aggregator = InvariantAggregator::new().with_level(IveVerificationLevel::Pmt);
+    let input = VerificationInput::from_scg(scg).with_pmt_layouts(pmt_layouts);
+    let result = aggregator.verify_all(&input);
+    if result.overall == OverallVerdict::Fail {
+        return Err(format!(
+            "PMT state verification FAILED: {} invariant(s) violated \
+             (use `vuma verify` for details)",
+            result.summary.failed
+        ));
+    }
+    Ok(())
+}
+
 /// Compile VUMA source to a binary for the given ISA, using the direct
 /// AST → codegen SCG → IR → backend.encode_program path.
 ///
@@ -1473,7 +1519,8 @@ fn default_output_path(input: &Path) -> PathBuf {
 ///
 /// Note: in VUMA 2.0 the `opt_level` parameter is retained for API
 /// stability but has no effect — the codegen-opt pass always runs because
-/// O3 is mandatory.
+/// O3 is mandatory. PMT state verification ALWAYS runs (via
+/// [`verify_pmt_on_ast`]) before codegen — there is no bypass.
 fn compile_to_binary_direct(
     source: &str,
     isa: IsaArg,
@@ -1497,6 +1544,12 @@ fn compile_to_binary_direct(
         }
     }
     let program = parse_result.value.unwrap();
+
+    // Step 1b: PMT state verification (VUMA 2.0 — MANDATORY gate).
+    // The direct path bypasses `compile_with_path`'s Stage 6 IVE gate,
+    // so we run PMT verification explicitly here. A `Fail` verdict is a
+    // hard error — no binary is emitted for a PMT-violating program.
+    verify_pmt_on_ast(&program)?;
 
     // Step 2: Bridge parser AST → codegen SCG.
     let codegen_scg = bridge_ast_to_codegen_scg(&program);
@@ -1884,11 +1937,11 @@ fn cmd_run(
 /// `vuma check <file>` — Parse + SCG + BD inference + IVE verification only.
 fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     let source = read_source(file)?;
-    let mut config = make_config(cli, CompileTarget::Linux);
-    // check mode: always run verification, don't skip
-    if config.verification_level == VerificationLevel::None {
-        config.verification_level = VerificationLevel::Normal;
-    }
+    let config = make_config(cli, CompileTarget::Linux);
+    // VUMA 2.0: verification is MANDATORY — `make_config` always returns
+    // `VerificationLevel::Normal` (which the pipeline remaps to
+    // `IveVerificationLevel::Pmt`). There is no `None` bypass to guard
+    // against anymore.
 
     // Run the full compile — the check command doesn't save the binary,
     // it just verifies the program compiles and passes verification.
@@ -1951,6 +2004,12 @@ fn cmd_emit(
         }
     }
     let program = parse_result.value.unwrap();
+
+    // Step 1b: PMT state verification (VUMA 2.0 — MANDATORY gate).
+    // `vuma emit` uses the direct AST→codegen path, bypassing the
+    // canonical pipeline's Stage 6 IVE gate. Run PMT verification
+    // explicitly here so no PMT-violating program can be emitted.
+    verify_pmt_on_ast(&program)?;
 
     // Step 2: Bridge parser AST → codegen SCG.
     let codegen_scg = bridge_ast_to_codegen_scg(&program);
@@ -2086,6 +2145,12 @@ fn cmd_compile(
         }
     }
     let program = parse_result.value.unwrap();
+
+    // Step 1b: PMT state verification (VUMA 2.0 — MANDATORY gate).
+    // `vuma compile` uses the direct AST→codegen path, bypassing the
+    // canonical pipeline's Stage 6 IVE gate. Run PMT verification
+    // explicitly here so no PMT-violating program can be compiled.
+    verify_pmt_on_ast(&program)?;
 
     // Step 2: Bridge parser AST → codegen SCG (with extern awareness).
     let codegen_scg = bridge_ast_to_codegen_scg(&program);

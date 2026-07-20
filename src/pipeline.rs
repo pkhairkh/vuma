@@ -156,6 +156,13 @@ impl fmt::Display for CompileTarget {
 }
 
 /// Optimization level.
+///
+/// In VUMA 2.0, O3 is **mandatory** — every pipeline path runs the full
+/// O3 pass set unconditionally (see `run_ir_pipeline` / `run_scg_transforms`).
+/// The `O0`/`O1`/`O2` variants are retained for API stability and
+/// serialised display, but the CLI rejects every non-O3 value and
+/// `OptLevel::default()` returns `O3` so that any code path that forgets
+/// to set the level explicitly still gets the mandatory O3 behaviour.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
 )]
@@ -165,9 +172,12 @@ pub enum OptLevel {
     /// Basic optimisations (DCE, constant folding).
     O1,
     /// Full optimisations (DCE, CSE, constant folding, inlining).
-    #[default]
     O2,
     /// Aggressive optimisations (O2 + inlining of larger functions).
+    ///
+    /// This is the VUMA 2.0 default — O3 is mandatory and every pipeline
+    /// path runs the full O3 pass set regardless of this value.
+    #[default]
     O3,
 }
 
@@ -183,12 +193,19 @@ impl fmt::Display for OptLevel {
 }
 
 /// Verification thoroughness level.
+///
+/// VUMA 2.0 is PMT-only and verification is **MANDATORY** — there is no
+/// `None`/"skip verification" variant. Every level maps to
+/// `IveVerificationLevel::Pmt` (the 3 PMT state verifiers) at the IVE
+/// stage, and the IVE gate is a hard compile error on `Fail`. The
+/// `Quick`/`Normal`/`Exhaustive`/`Modular`/`ConstantTime`/`Hardened`
+/// variants are retained for API stability and for the `--verification`
+/// flag's error messages, but they all collapse to PMT state verification
+/// in the pipeline. The `#[default]` is `Normal` (which maps to `Pmt`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
 )]
 pub enum VerificationLevel {
-    /// Skip verification entirely.
-    None,
     /// Quick: only cheap syntactic checks.
     Quick,
     /// Normal: all five invariant checks.
@@ -207,7 +224,6 @@ pub enum VerificationLevel {
 impl fmt::Display for VerificationLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VerificationLevel::None => write!(f, "none"),
             VerificationLevel::Quick => write!(f, "quick"),
             VerificationLevel::Normal => write!(f, "normal"),
             VerificationLevel::Exhaustive => write!(f, "exhaustive"),
@@ -5025,14 +5041,17 @@ pub fn compile_with_path(
         t.elapsed().as_millis() as u64,
     ));
 
-    // ── Stage 6: IVE Verification ─────────────────────────────────────
+    // ── Stage 6: IVE Verification (VUMA 2.0 — MANDATORY) ─────────────
+    // There is no `VerificationLevel::None` escape hatch: PMT state
+    // verification ALWAYS runs. The only short-circuit is `Quick` mode
+    // on a region-less program (no allocations to verify), which mirrors
+    // the original intent of `Quick` (cheap syntactic checks).
     let t = Instant::now();
-    let verification = if config.verification_level != VerificationLevel::None
-        && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
-        // VUMA 2.0 is PMT-only: every non-None pipeline verification
-        // level maps to `IveVerificationLevel::Pmt` (the 3 PMT state
-        // verifiers only — the 5 legacy pointer invariants are skipped
-        // because pointer syntax is a hard parse error in VUMA 2.0).
+    let verification = if !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
+        // VUMA 2.0 is PMT-only: every pipeline verification level maps
+        // to `IveVerificationLevel::Pmt` (the 3 PMT state verifiers only
+        // — the 5 legacy pointer invariants are skipped because pointer
+        // syntax is a hard parse error in VUMA 2.0).
         let ive_level = match config.verification_level {
             VerificationLevel::Quick
             | VerificationLevel::Normal
@@ -5040,7 +5059,6 @@ pub fn compile_with_path(
             | VerificationLevel::Modular
             | VerificationLevel::ConstantTime
             | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
-            VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new()
             .with_level(ive_level)
@@ -5842,6 +5860,47 @@ pub fn compile_modules(
     };
     timings.push(("merge-asts".to_string(), t.elapsed().as_millis() as u64));
 
+    // ── Stage 2b: IVE PMT Verification (VUMA 2.0 — MANDATORY) ─────────
+    // `vuma link` MUST run PMT state verification — there is no
+    // `VerificationLevel::None` escape hatch in VUMA 2.0. This mirrors
+    // the Stage 6 gate in `compile_with_path` / `compile_with_recovery`:
+    // build the semantic SCG from the merged AST, attach the PMT layout
+    // registry, run the 3 PMT state verifiers (state_read / state_write
+    // / state_transform) via `InvariantAggregator` at `Pmt` level, and
+    // refuse to emit a binary on `Fail` (hard gate). `Inconclusive` is
+    // only blocking under `--strict-verification`.
+    let t = Instant::now();
+    let pmt_scg = match ast_to_scg(&merged_ast) {
+        Ok(s) => s,
+        Err(e) => {
+            errors.push(VumaError::AstToScg { message: format!("{}", e) });
+            return Err(errors);
+        }
+    };
+    let pmt_layouts = build_pmt_layout_specs(&merged_ast);
+    let aggregator = InvariantAggregator::new()
+        .with_level(IveVerificationLevel::Pmt)
+        .with_max_paths(config.ive_max_paths)
+        .with_max_path_length(config.ive_max_path_length);
+    let ive_input = vuma_ive::verification::VerificationInput::from_scg(pmt_scg.clone())
+        .with_pmt_layouts(pmt_layouts);
+    let verification = aggregator.verify_all(&ive_input);
+    timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
+    if verification.overall == OverallVerdict::Fail {
+        errors.push(VumaError::Verification { result: verification });
+        return Err(errors);
+    }
+    if config.strict_verification && verification.overall == OverallVerdict::Inconclusive {
+        errors.push(VumaError::Verification { result: verification });
+        return Err(errors);
+    }
+    // Hold onto the verification result so it can be surfaced in the
+    // final `CompilationOutput`. The semantic SCG built above is also
+    // reused as the `CompilationOutput.scg` (Stage 7 below) instead of
+    // rebuilding it best-effort.
+    let verification = Some(verification);
+    let scg = pmt_scg;
+
     // ── Stage 3: Bridge merged AST → codegen SCG ──────────────────────
     let t = Instant::now();
     let codegen_scg = bridge_ast_to_codegen_scg(&merged_ast);
@@ -5970,22 +6029,11 @@ pub fn compile_modules(
     let code_words = count_text_section_instructions(&binary);
     timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
 
-    // ── Stage 7: Best-effort semantic SCG (for CompilationOutput.scg) ─
-    // The direct codegen path bypasses the semantic SCG; this is a
-    // best-effort construction so callers that introspect
-    // CompilationOutput.scg get a non-empty graph when the merged AST
-    // happens to be SCG-compatible. Failures are logged and an empty
-    // SCG is returned (mirrors compile_with_path's MSG soft-failure
-    // behavior at Stage 5).
-    let scg = match ast_to_scg(&merged_ast) {
-        Ok(s) => s,
-        Err(_e) => {
-            vuma_log!(warn,
-                "compile_modules: semantic SCG construction failed (non-fatal): {:?}", _e
-            );
-            SCG::new()
-        }
-    };
+    // ── Stage 7: Semantic SCG ─────────────────────────────────────────
+    // The semantic SCG was already built in Stage 2b for IVE PMT
+    // verification and is reused here as `CompilationOutput.scg`
+    // (previously this was a best-effort rebuild — now it is the same
+    // graph the verifiers saw, so introspection and verification agree).
 
     if !errors.is_empty() {
         return Err(errors);
@@ -5995,7 +6043,7 @@ pub fn compile_modules(
         binary,
         scg,
         msg: MSG::new(),
-        verification: None,
+        verification,
         stage_timings: timings,
         ir_function_count,
         ir_instruction_count,
@@ -6181,14 +6229,17 @@ pub fn compile_with_recovery(
     };
     timings.push(("msg-construction".to_string(), t.elapsed().as_millis() as u64));
 
-    // ── Stage 6: IVE Verification ─────────────────────────────────────
+    // ── Stage 6: IVE Verification (VUMA 2.0 — MANDATORY) ─────────────
+    // There is no `VerificationLevel::None` escape hatch: PMT state
+    // verification ALWAYS runs. The only short-circuit is `Quick` mode
+    // on a region-less program (no allocations to verify), which mirrors
+    // the original intent of `Quick` (cheap syntactic checks).
     let t = Instant::now();
-    let verification = if config.verification_level != VerificationLevel::None
-        && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
-        // VUMA 2.0 is PMT-only: every non-None pipeline verification
-        // level maps to `IveVerificationLevel::Pmt` (the 3 PMT state
-        // verifiers only — the 5 legacy pointer invariants are skipped
-        // because pointer syntax is a hard parse error in VUMA 2.0).
+    let verification = if !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
+        // VUMA 2.0 is PMT-only: every pipeline verification level maps
+        // to `IveVerificationLevel::Pmt` (the 3 PMT state verifiers only
+        // — the 5 legacy pointer invariants are skipped because pointer
+        // syntax is a hard parse error in VUMA 2.0).
         let ive_level = match config.verification_level {
             VerificationLevel::Quick
             | VerificationLevel::Normal
@@ -6196,7 +6247,6 @@ pub fn compile_with_recovery(
             | VerificationLevel::Modular
             | VerificationLevel::ConstantTime
             | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
-            VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new()
             .with_level(ive_level)
@@ -6717,11 +6767,18 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
         Err(e) => return Err(vec![e]),
     };
 
-    // ── Stage 3: SCG Transforms (lightweight — no verification) ──
+    // ── Stage 3: SCG Transforms ───────────────────────────────────────
+    // VUMA 2.0: verification is mandatory, but `run_scg_transforms`
+    // itself does not run IVE — the `verification_level` field is only
+    // consulted by the IVE stage (which `compile_to_wasm` does not
+    // invoke; Wasm is a sandboxed target and PMT verification is the
+    // caller's responsibility). We use `Normal` (the default, which
+    // maps to `Pmt` in the pipeline) rather than the removed `None`
+    // variant so the config is well-formed.
     let _ = run_scg_transforms(&mut scg, &CompileConfig {
         target: CompileTarget::Wasm32,
         opt_level: OptLevel::O3,
-        verification_level: VerificationLevel::None,
+        verification_level: VerificationLevel::Normal,
         strict_verification: false,
         ive_max_paths: 64,
         ive_max_path_length: 256,
@@ -7105,23 +7162,25 @@ mod tests {
         assert!(result.is_ok(), "O3 compilation should succeed");
     }
 
-    /// Test 4: Compile with verification disabled.
+    /// Test 4: Verification is MANDATORY — there is no `None` bypass.
+    /// VUMA 2.0 removed `VerificationLevel::None`; every compile runs
+    /// the 3 PMT state verifiers. This test confirms that even an empty
+    /// program (no state ops) produces a non-`None` verification result
+    /// (it may be `NoChecks` for a region-less program, but it is never
+    /// silently skipped).
     #[test]
-    fn test_compile_no_verification() {
+    fn test_compile_verification_always_runs() {
         let source = r#"
             fn main() {
             }
         "#;
-        let config = CompileConfig {
-            verification_level: VerificationLevel::None,
-            ..CompileConfig::default()
-        };
+        let config = CompileConfig::default(); // verification_level: Normal
         let result = compile(source, &config);
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(
-            output.verification.is_none(),
-            "Verification should be skipped"
+            output.verification.is_some(),
+            "VUMA 2.0: verification must always run (no None bypass)"
         );
     }
 
@@ -7608,7 +7667,7 @@ mod tests {
         "#;
         let config = CompileConfig {
             memory_safety: false, // VUMA 2.0: ignored — pass always runs.
-            verification_level: VerificationLevel::None,
+            verification_level: VerificationLevel::Normal,
             ..CompileConfig::default()
         };
         let result = compile(source, &config);

@@ -1304,12 +1304,21 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
     // map if the program has no `layout` items).
     let pmt_layouts = pipeline::build_pmt_layout_specs(&ast);
 
-    // Stage 5: IVE Verification (non-fatal)
-    if config.verification_level != VerificationLevel::None {
-        // VUMA 2.0 is PMT-only: every non-None pipeline verification
-        // level maps to `IveVerificationLevel::Pmt` (the 3 state
-        // verifiers only — the 5 legacy pointer invariants are skipped
-        // because pointer syntax is a hard parse error in VUMA 2.0).
+    // Stage 5: IVE Verification (VUMA 2.0 — MANDATORY, hard gate on Fail)
+    // There is no `VerificationLevel::None` escape hatch: PMT state
+    // verification ALWAYS runs. The previous implementation discarded the
+    // `AggregatedResult` (`let _ = aggregator.verify_all(...)`), which
+    // silently swallowed PMT violations for any caller of `run_frontend`
+    // that did not re-run the aggregator itself. Now the `Fail` verdict
+    // is a hard error: `run_frontend` returns `FrontendResult::Err` so
+    // no caller can observe a PMT-violating program as if it were clean.
+    // `Inconclusive` is surfaced as a non-blocking diagnostic (matching
+    // `compile_with_path`'s default, non-strict behaviour).
+    {
+        // VUMA 2.0 is PMT-only: every pipeline verification level maps
+        // to `IveVerificationLevel::Pmt` (the 3 state verifiers only —
+        // the 5 legacy pointer invariants are skipped because pointer
+        // syntax is a hard parse error in VUMA 2.0).
         let ive_level = match config.verification_level {
             VerificationLevel::Quick
             | VerificationLevel::Normal
@@ -1317,13 +1326,27 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
             | VerificationLevel::Modular
             | VerificationLevel::ConstantTime
             | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
-            VerificationLevel::None => unreachable!(),
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);
         let input =
             vuma_ive::verification::VerificationInput::from_scg(scg.clone())
                 .with_pmt_layouts(pmt_layouts.clone());
-        let _ = aggregator.verify_all(&input);
+        let result = aggregator.verify_all(&input);
+        if result.overall == vuma_ive::OverallVerdict::Fail {
+            return FrontendResult::Err {
+                diagnostics: vec![VumaDiagnostic::new(
+                    "E020",
+                    DiagnosticSeverity::Error,
+                    format!(
+                        "PMT state verification FAILED: {} invariant(s) violated \
+                         (use `vuma verify` for details)",
+                        result.summary.failed
+                    ),
+                    "ive-verification",
+                    DiagnosticSourceLocation::unknown(),
+                )],
+            };
+        }
     }
 
     // Stage 6: SCG Transforms
