@@ -1,35 +1,66 @@
-// driver_isolation — Wave 49-64: driver isolation via driver_register + driver_call.
+// driver_isolation — Wave 49-64 / Wave F: driver isolation via
+// driver_register + driver_call + irq_dispatch.
 //
-// The driver_register(irq, handler_ptr) builtin mints a driver ID via a
-// compile-time AtomicU64 counter. The driver_call(driver_id, cmd) builtin
-// dispatches a command to a driver via a channel: it sends `cmd` as a
-// framed L1 message on the channel whose handle is `driver_id`, then
-// receives the framed result.
+// Wave F replaces the previous compile-time AtomicU64 counter in
+// driver_register with a REAL per-function IRQ routing table on the
+// stack: 8 slots × 16 bytes each = 128 bytes, each slot holding a
+// (irq:u64, handler_ptr:u64) pair.  driver_register(irq, handler_ptr)
+// writes the next free slot and returns the 1-based driver_id.
+//
+// irq_dispatch(vector) linearly scans the table for a matching irq and,
+// if found, calls the handler via an indirect `call r10` and returns
+// the handler's i64 result.  If no match, returns -7
+// (IrqNotRegistered, matching the library's IpcError::IrqNotRegistered
+// — the same sentinel DriverWorker::handle_irq returns when the vector
+// is not in config.irq_vectors).
+//
+// driver_call(driver_id, cmd) is the existing channel-based command-
+// dispatch path (sends cmd as a framed L1 message, recvs the framed
+// result) — kept unchanged.
 //
 // Flow:
 //   1. Parent opens a channel and forks a worker.
 //   2. The child (the "driver handler") recvs a cmd, computes cmd + 21,
 //      and sends the result back.
-//   3. The parent registers a driver (exercise the builtin) and then
-//      calls driver_call(ch, 21) which sends 21 and recvs 42.
-//   4. The parent returns 42.
+//   3. The parent:
+//        a. Registers a driver with IRQ 7 and a real handler function.
+//        b. irq_dispatch(7) → calls my_handler → returns 42.
+//        c. irq_dispatch(99) → no match → returns -7.
+//        d. driver_call(ch, 21) → sends 21, recvs 42.
+//   4. The parent verifies all three paths and exits 42 on success.
 //
 // Expected exit code: 42
+fn my_handler() -> i64 {
+    return 42;
+}
 fn main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {
-        // Child: act as the driver handler.
+        // Child: act as the driver handler (channel-based command path).
         cmd = channel_recv(ch);
         result = cmd + 21;
         channel_send(ch, result);
         channel_close(ch);
         return 0;
     }
-    // Parent: register a driver, then call it.
-    drv = driver_register(7, 0);
-    r = driver_call(ch, 21);
+    // Parent: register a driver with IRQ 7 and a real handler function.
+    drv = driver_register(7, my_handler);
+    // Dispatch the IRQ — should call my_handler and return 42.
+    r = irq_dispatch(7);
+    // Dispatch an unregistered IRQ — should return -7 (IrqNotRegistered).
+    r2 = irq_dispatch(99);
+    // Channel-based driver call (existing command-dispatch path).
+    r3 = driver_call(ch, 21);
     wait_worker(pid);
     channel_close(ch);
-    return r as i32;
+    // Verify: irq_dispatch(7) == 42, irq_dispatch(99) == -7, driver_call == 42.
+    if r == 42 {
+        if r2 == -7 {
+            if r3 == 42 {
+                return 42;
+            }
+        }
+    }
+    return 0;
 }
