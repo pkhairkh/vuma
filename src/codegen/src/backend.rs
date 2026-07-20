@@ -3485,7 +3485,7 @@ impl Backend for AArch64Backend {
         // external (undefined) callees (e.g. libc functions, or functions
         // declared in `extern "C"` blocks). They get emitted as SHN_UNDEF
         // entries in `.symtab` so the system linker can resolve them.
-        let external_symbols: Vec<String> = Vec::new();
+        let mut external_symbols: Vec<String> = Vec::new();
         let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
@@ -3582,7 +3582,13 @@ impl Backend for AArch64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // External symbol — point to the FFI return-0 stub
+                        // External symbol — record the name for the .symtab
+                        // appendix (so the system linker can resolve it) and
+                        // point the BL at the FFI return-0 stub as a runtime
+                        // fallback so the emitted binary is still executable.
+                        if !external_symbols.contains(&reloc.symbol) {
+                            external_symbols.push(reloc.symbol.clone());
+                        }
                         let target_addr = ffi_stub_offset as i64;
                         let bl_addr = abs_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;

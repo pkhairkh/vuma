@@ -266,7 +266,9 @@ fn test_mips64_abi_target_info() {
     assert!(info.has_link_register(), "MIPS uses $31 ($ra) as link register");
     assert!(info.has_hardwired_zero(), "MIPS has $0 (zero)");
     assert!(info.has_branch_delay_slots(), "MIPS has branch delay slots");
-    assert_eq!(info.endianness(), Endianness::Big);
+    // Mips64Backend::new() is little-endian by default (mips64el); a separate
+    // Mips64Be backend exists for big-endian.  See backend.rs:1800.
+    assert_eq!(info.endianness(), Endianness::Little);
     validate_cc_info(info);
 }
 
@@ -1111,7 +1113,11 @@ fn test_wasm32_atomic_cas() {
     );
     let af = allocated.unwrap();
 
-    // Check that the Wasm32 backend generates atomic cmpxchg opcodes
+    // Check that the Wasm32 backend generates atomic cmpxchg opcodes.
+    // The Wasm32 backend bundles the entire function body into a single
+    // "wasm_body" AllocatedInstruction (to preserve exact byte offsets for
+    // call-relocation patching), so we first check the opcode strings and
+    // then fall back to disassembling the encoded bytes.
     let all_opcodes: Vec<String> = af.blocks.iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
@@ -1119,9 +1125,22 @@ fn test_wasm32_atomic_cas() {
     let all_opcodes_str = all_opcodes.join(" ");
 
     // Wasm32 should emit some form of atomic cmpxchg instruction
-    let has_atomic = all_opcodes_str.contains("cmpxchg")
+    let mut has_atomic = all_opcodes_str.contains("cmpxchg")
         || all_opcodes_str.contains("atomic")
         || all_opcodes_str.contains("cas");
+
+    // Fallback: disassemble the encoded body bytes.  The Wasm32 disassembler
+    // decodes each opcode and produces mnemonic strings like
+    // "atomic.rmw.cmpxchg align=... offset=...".
+    if !has_atomic {
+        if let Ok(bytes) = backend.encode_function(&af) {
+            let lines = backend.disassemble(&bytes, 0x400000);
+            let disasm_text = lines.join("\n").to_lowercase();
+            has_atomic = disasm_text.contains("cmpxchg")
+                || disasm_text.contains("atomic");
+        }
+    }
+
     assert!(
         has_atomic,
         "Wasm32: CAS function should contain atomic cmpxchg opcodes, \
@@ -1290,17 +1309,32 @@ fn test_wasm32_fp_conversion() {
     );
     let af = allocated.unwrap();
 
-    // Wasm32 should emit conversion opcodes
+    // Wasm32 should emit conversion opcodes.  The Wasm32 backend bundles the
+    // entire function body into a single "wasm_body" AllocatedInstruction
+    // (to preserve exact byte offsets for call-relocation patching), so we
+    // first check the opcode strings and then fall back to disassembling the
+    // encoded bytes (which yields mnemonics like "f64.convert_i64_s" and
+    // "i64.trunc_f64_s").
     let all_opcodes: Vec<String> = af.blocks.iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
     let all_opcodes_str = all_opcodes.join(" ");
 
-    let has_conv = all_opcodes_str.contains("convert")
+    let mut has_conv = all_opcodes_str.contains("convert")
         || all_opcodes_str.contains("trunc")
         || all_opcodes_str.contains("inttofloat")
         || all_opcodes_str.contains("floattoint");
+
+    if !has_conv {
+        if let Ok(bytes) = backend.encode_function(&af) {
+            let lines = backend.disassemble(&bytes, 0x400000);
+            let disasm_text = lines.join("\n").to_lowercase();
+            has_conv = disasm_text.contains("convert")
+                || disasm_text.contains("trunc");
+        }
+    }
+
     assert!(
         has_conv,
         "Wasm32: FP conversion should contain convert/trunc opcodes, got: {:?}",

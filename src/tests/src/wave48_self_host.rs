@@ -658,6 +658,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// default. See TASKS.md Wave 48 [BOOT-SELF] for the Task 7-d
 /// resolution write-up.
 #[cfg(target_arch = "x86_64")]
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_wave48_bootstrap_self_host() {
     let workspace_root = workspace_root();
@@ -950,6 +951,7 @@ fn execute_elf_bytes(elf_bytes: &[u8], args: &[&str]) -> Result<String, String> 
 /// which uses allocate() + *(ptr+off)=val + syscall(64) + free() + while.
 /// The emitted a.out must print "Hi" and exit 0.
 #[cfg(target_arch = "x86_64")]
+#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_p6_bootstrap_self_host_hello2() {
     let workspace_root = workspace_root();

@@ -2166,27 +2166,33 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
-    // p_filesz = page-aligned text size (code + headers). QEMU needs this
-    // for mmap. p_offset=0 means the LOAD segment starts at the beginning
-    // of the file (covering the ELF header + phdrs + code).
-    let text_memsz = (text_offset + text_size).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    // p_filesz covers exactly the file bytes in this segment (ELF header +
+    // phdrs + code). p_memsz is page-aligned up so QEMU can mmap a whole
+    // page; the tail (memsz - filesz) is zero-filled in memory.  Setting
+    // p_filesz to the page-aligned value would claim file content past EOF
+    // (ELF spec: p_offset + p_filesz must be <= file size).
+    let text_filesz = text_offset + text_size;
+    let text_memsz = text_filesz.div_ceil(PAGE_SIZE) * PAGE_SIZE;
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
     elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr (page-aligned; p_offset=0 requires alignment)
     elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_filesz (cover header + padding + code)
-    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&text_filesz.to_le_bytes()); // p_filesz (actual file content: header + code)
+    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_memsz (page-aligned; zero-filled tail in memory)
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
     // --- Program Header 2: LOAD (PF_R | PF_W) — .bss / stack ---
+    // BSS-only segment: no initialised file content (p_filesz=0), the kernel
+    // zero-fills p_memsz bytes at load time.  This matches the AArch64 ELF
+    // builder and satisfies p_offset + p_filesz <= file_size.
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&data_size.to_le_bytes()); // p_filesz (write zeros so QEMU can mmap)
-    elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialised data — BSS-only)
+    elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages, zero-filled)
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
     // --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
@@ -2239,9 +2245,9 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
 
     // Section 2: .bss (SHT_NOBITS, SHF_ALLOC | SHF_WRITE).
-    // The data segment has p_filesz = data_size but the file does not actually
-    // contain those bytes (the loader zero-fills the page); use SHT_NOBITS to
-    // accurately reflect that there is no real file content for this section.
+    // The data segment is BSS-only (p_filesz=0, p_memsz=data_size); the
+    // loader zero-fills the page at runtime.  SHT_NOBITS accurately
+    // reflects that there is no real file content for this section.
     elf.extend_from_slice(&7u32.to_le_bytes()); // sh_name (offset 7 in .shstrtab)
     elf.extend_from_slice(&SHT_NOBITS.to_le_bytes()); // sh_type
     elf.extend_from_slice(&(SHF_ALLOC | SHF_WRITE).to_le_bytes()); // sh_flags

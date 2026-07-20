@@ -647,10 +647,12 @@ fn test_elf_validation_mips64() {
     let backend = Mips64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
+    // Mips64Backend::new() is little-endian by default (mips64el); a separate
+    // Mips64BeBackend exists for big-endian.  See backend.rs:1800.
     validate_elf_for_backend(
         &elf_bytes,
         ELFCLASS64,
-        ELFDATA2MSB,
+        ELFDATA2LSB,
         EM_MIPS,
         "mips64",
     );

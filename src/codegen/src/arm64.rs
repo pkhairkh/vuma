@@ -1948,16 +1948,19 @@ impl Instruction {
                 src_64,
                 dst_double,
             } => {
-                // SCVTF: float data-processing (1 source) encoding.
-                // AArch64: sf 00 11110 type 1 rmode opcode 000000 Rn Rd
-                // For SCVTF: rmode=00, opcode=010
-                // Base: 0x1E620000 (bit 21=1 for float data-processing)
-                // sf (bit 31) = src_64 (1 for 64-bit int source)
-                // type (bits 23:22) = dst_double ? 01 (double) : 00 (single)
+                // SCVTF (integer to floating-point):
+                //   sf 0 0 11110 type 1 1 opcode 0 00000 Rn 00000 Rd
+                //   bits 31: sf | 30-29: 00 | 28-24: 11110 | 23-22: type
+                //   bit 21: 1 | bit 20: 1 | 19-16: opcode=0010 | bit 15: 0
+                //   14-10: Rn | 9-5: 00000 (fixed) | 4-0: Rd
+                // Base: 0x1E620000 (type=01 double; for single, bit 22=0)
+                // NOTE: Rn is at bits[14:10] (NOT bits[9:5] as in most
+                // register-register encodings). The decoder reads Rn from
+                // bits[14:10] via `(word >> 10) & 0x1F`.
                 Ok(0x1E620000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
-                    | (rn.encoding() << 5)
+                    | (rn.encoding() << 10)
                     | rd.encoding())
             }
 
@@ -1974,11 +1977,14 @@ impl Instruction {
                 dst_64,
                 src_double,
             } => {
-                // G7: Base 0x1E380000 (rmode=11, opcode=1000), Rn at [9:5]
+                // FCVTZS (floating-point to signed integer):
+                //   sf 0 0 11110 type 1 1 opcode 0 00000 Rn 00000 Rd
+                //   Base 0x1E380000 (rmode=11, opcode=1000).
+                //   Rn at bits[14:10] (NOT [9:5]).
                 Ok(0x1E380000u32
                     | ((*dst_64 as u32) << 31)
                     | ((*src_double as u32) << 22)
-                    | (rn.encoding() << 5)
+                    | (rn.encoding() << 10)
                     | rd.encoding())
             }
 
@@ -1995,12 +2001,13 @@ impl Instruction {
                 src_64,
                 dst_double,
             } => {
-                // UCVTF: same as SCVTF but opcode=011 (unsigned).
-                // Base: 0x1E630000 (bit 21=1 for float data-processing)
+                // UCVTF (unsigned integer to floating-point):
+                //   Same layout as SCVTF but opcode=0011.
+                //   Base: 0x1E630000. Rn at bits[14:10].
                 Ok(0x1E630000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
-                    | (rn.encoding() << 5)
+                    | (rn.encoding() << 10)
                     | rd.encoding())
             }
 
@@ -2017,11 +2024,13 @@ impl Instruction {
                 dst_64,
                 src_double,
             } => {
-                // G7: Base 0x1E390000 (rmode=11, opcode=1001), Rn at [9:5]
+                // FCVTZU (floating-point to unsigned integer):
+                //   Same layout as FCVTZS but opcode=1001.
+                //   Base: 0x1E390000. Rn at bits[14:10].
                 Ok(0x1E390000u32
                     | ((*dst_64 as u32) << 31)
                     | ((*src_double as u32) << 22)
-                    | (rn.encoding() << 5)
+                    | (rn.encoding() << 10)
                     | rd.encoding())
             }
 
@@ -3123,13 +3132,19 @@ impl Instruction {
         }
 
         // ---- FCVT (single <-> double): Floating-point data-processing (1-source) ----
-        //   FCVT Dd, Sn (to_double=true):  base 0x1EE20000 (bit 18 = 0)
-        //   FCVT Sd, Dn (to_double=false): base 0x1EE60000 (bit 18 = 1)
-        // Variable bits: 18 (to_double discriminator), 9-5 (Rn), 4-0 (Rd).
-        // Fixed-bit mask: 0xFFFBFC00; both variants AND down to 0x1EE20000.
-        if (word & 0xFFFBFC00) == 0x1EE20000 {
-            let to_double = ((word >> 18) & 0x1) == 0;
-            // Rn is at bits[9:5] for FCVT (see encoder at arm64.rs:1932).
+        //   FCVT Dd, Sn (to_double=true):  base 0x1E22C000 (type=00, opc=000101)
+        //   FCVT Sd, Dn (to_double=false): base 0x1E624000 (type=01, opc=000100)
+        // Variable bits: 22 (type / to_double discriminator), 15 (opc bit 0,
+        //   also a to_double discriminator), 9-5 (Rn), 4-0 (Rd).
+        // Fixed-bit mask: 0xFFBF7C00; both variants AND down to 0x1E224000.
+        // (Previous decoder expected 0x1EE20000 which used type=11 half-
+        //  precision and did not match the corrected encoder; the encoder
+        //  was fixed to use the binutils-verified 0x1E22C000/0x1E624000
+        //  bases but the decoder was not updated to match.)
+        if (word & 0xFFBF7C00) == 0x1E224000 {
+            // to_double = bit 15 is set (opc=000101 for Dd,Sn) — equivalently
+            // bit 22 is clear (type=00 single source).
+            let to_double = ((word >> 15) & 0x1) == 1;
             let rn_reg = Register::from_encoding(rn)?;
             let rd_reg = Register::from_encoding(rd)?;
             return Some(Instruction::FCVT {
