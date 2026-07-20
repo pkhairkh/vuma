@@ -1,19 +1,32 @@
-// supervisor — Wave 41-48: kernel/user split via supervisor_call.
+// supervisor — Wave 41-48: kernel/user split with capability-gated dispatch.
 //
-// The supervisor_call(nr, arg) builtin is a real syscall gate: it emits
-// the `syscall` instruction with the syscall number in RAX and the
-// argument in RDI. This is the kernel/user transition point — user-mode
-// code invokes supervisor_call to enter the kernel.
+// supervisor_call(nr, arg) is a real kernel/user trap — NOT a raw syscall.
+// Before executing the `syscall` instruction, it checks `nr` against the
+// Verified-trust syscall allowlist (the same list the library's
+// KernelProcess::handle_syscall and generate_seccomp_filter use, from
+// allowed_syscalls(TrustLevel::Verified) in ipc.rs:1487).
 //
-// This test calls supervisor_call(39, 0) which is sys_getpid on x86_64.
-// The kernel returns the process's PID (> 0) in RAX. The test exits 1
-// if the PID is positive (i.e. the syscall gate worked).
+// If `nr` is in the allowlist, the syscall executes and the kernel result
+// is returned. If `nr` is NOT in the allowlist, the call is DENIED:
+// returns -4 (PermissionDenied) WITHOUT executing the syscall. This is
+// the syscall-as-IPC pattern: user -> capability check -> dispatch ->
+// kernel handler.
+//
+// Flow:
+//   1. supervisor_call(39, 0) — sys_getpid (nr=39 is in the Verified
+//      allowlist). The kernel returns the PID (> 0).
+//   2. supervisor_call(999, 0) — nr=999 is NOT in the allowlist.
+//      Returns -4 (PermissionDenied) without executing the syscall.
+//   3. If pid > 0 AND denied == -4, both paths work correctly -> exit 1.
 //
 // Expected exit code: 1
 fn main() -> i32 {
-    pid = supervisor_call(39, 0);  // sys_getpid
+    pid = supervisor_call(39, 0);  // sys_getpid (allowed)
+    denied = supervisor_call(999, 0);  // forbidden -> -4
     if pid > 0 {
-        return 1;
+        if denied == -4 {
+            return 1;
+        }
     }
     return 0;
 }
