@@ -139,26 +139,31 @@ fn instr_opcode_override(instr: &IRInstr) -> Option<(&'static str, Vec<PhysicalR
             )),
             _ => None,
         },
-        // AtomicLoad lowers to a plain load (LdD/LdW/etc.) — dbar/LL cause
-        // SIGILL on QEMU user-mode, and QEMU user-mode is single-threaded so
-        // plain loads are safe.  The opcode carries "ld." so tests can
-        // confirm a real load is emitted (not a no-op).
+        // AtomicLoad lowers to `dbar 0` + plain load (LdD/LdW/etc.) + `dbar 0`.
+        // The full LL/SC sequence is overkill for a plain atomic load (LL is
+        // for read-modify-write patterns); a dbar fence before the load gives
+        // acquire semantics, and a dbar after gives a full sequentially
+        // consistent load.  The opcode carries "dbar" so tests can confirm a
+        // real fence is emitted (not a no-op).
         IRInstr::AtomicLoad { .. } => Some((
-            "ld.d atomic_load",
+            "dbar ld.d dbar atomic_load",
             vec![gpr_s0],
             vec![gpr_s0],
         )),
-        // AtomicStore lowers to a plain store (StD/StW/etc.) for the same
-        // QEMU-compatibility reason.
+        // AtomicStore lowers to `dbar 0` + plain store (StD/StW/etc.) + `dbar 0`
+        // for the same memory-ordering reason.  The opcode carries "dbar" so
+        // tests can confirm a real fence is emitted.
         IRInstr::AtomicStore { .. } => Some((
-            "st.d atomic_store",
+            "dbar st.d dbar atomic_store",
             vec![gpr_s0, gpr_s1],
             vec![gpr_s0, gpr_s1],
         )),
         // AtomicCas lowers to a real LL.D/SC.D loop (load-linked /
-        // store-conditional).  No dbar (QEMU SIGILL).
+        // store-conditional) with `dbar 0` fences before and after.  The
+        // opcode carries "dbar", "ll.d", and "sc.d" so tests can confirm the
+        // full atomic sequence is emitted.
         IRInstr::AtomicCas { .. } => Some((
-            "ll.d sc.d atomic_cas",
+            "dbar ll.d sc.d dbar atomic_cas",
             vec![gpr_s0, gpr_s2, gpr_s3],
             vec![gpr_s0, gpr_s1],
         )),
@@ -1836,13 +1841,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // for 64-bit types (I64/U64/Ptr/Func) we use the .D variants.
 
                 IRInstr::AtomicLoad { dst, addr, ty } => {
-                    // Plain load — dbar causes SIGILL on QEMU user-mode.
-                    // QEMU user-mode is single-threaded so plain loads are safe.
+                    // Acquire-pattern atomic load: `dbar 0` (acquire fence) +
+                    // plain load + `dbar 0` (full fence).  On real
+                    // multi-threaded LoongArch hardware, the leading dbar
+                    // establishes acquire ordering; the trailing dbar makes
+                    // the load sequentially consistent.  On QEMU user-mode
+                    // (single-threaded), dbar is a no-op-equivalent hint
+                    // (encoding 0x38700000) and does not trap.
+                    //
                     // Type-aware: use the correct load width so we don't read
                     // past the end of the atomic cell (which would corrupt
                     // adjacent memory for I8/I16/I32 atomics).
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
+                    // Leading dbar 0 (acquire fence)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Load address into S0
                     code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
                     // Type-dispatched plain load from [S0 + 0]
@@ -1869,15 +1882,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         let off = code.len() - 4;
                         code[off..off + 4].copy_from_slice(&unsigned_load.encode());
                     }
+                    // Trailing dbar 0 (full fence)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Store result to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
 
                 IRInstr::AtomicStore { value, addr, ty } => {
-                    // Plain store — dbar causes SIGILL on QEMU user-mode.
-                    // Type-aware: use the correct store width.
+                    // Release-pattern atomic store: `dbar 0` (release fence) +
+                    // plain store + `dbar 0` (full fence).  Type-aware: use
+                    // the correct store width.
                     let mut code = Vec::new();
+                    // Leading dbar 0 (release fence)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Load address into S1, value into S0
                     code.extend(encode_load_value(addr, S1, fp, &vreg_slots));
                     code.extend(encode_load_value(value, S0, fp, &vreg_slots));
@@ -1889,11 +1907,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         _ => Instruction::StD { rd: S0, rj: S1, imm12: 0 },
                     };
                     code.extend_from_slice(&store.encode());
+                    // Trailing dbar 0 (full fence)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     code
                 }
 
                 IRInstr::AtomicCas { dst, addr, expected, desired, ty: _ } => {
-                    // Proper CAS using LL/SC (Load-Link/Store-Conditional).
+                    // Proper CAS using LL/SC (Load-Link/Store-Conditional)
+                    // wrapped in `dbar 0` fences for sequential consistency.
                     // LoongArch64 sc.d overwrites rd with success/failure flag,
                     // so we must reload desired on each retry.
                     //
@@ -1916,13 +1937,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
 
+                    // Leading dbar 0 (full fence before CAS loop)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+
                     // Load address into S2
                     code.extend(encode_load_value(addr, S2, fp, &vreg_slots));
                     // Load expected into S3
                     code.extend(encode_load_value(expected, S3, fp, &vreg_slots));
-
-                    // No dbar — QEMU user-mode SIGILL on dbar.
-                    // QEMU user-mode is single-threaded so LL/SC without fences is safe.
 
                     // ll.d S0, S2, 0  (load-linked)
                     code.extend_from_slice(&Instruction::LlD { rd: S0, rj: S2, imm14: 0 }.encode());
@@ -1952,7 +1973,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let beq_off = -(reload_instr_count + 3);
                     code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: beq_off }.encode());
 
-                    // No dbar — QEMU user-mode SIGILL.
+                    // Trailing dbar 0 (full fence after CAS loop)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
 
                     // Store old value (S0) to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));

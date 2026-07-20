@@ -505,7 +505,6 @@ fn make_add_scg() -> Scg {
 // Test 1: SHA256d VUMA source parses successfully
 // ===========================================================================
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_vuma_parses_all_backends() {
     // The SHA256d program must parse regardless of which backend we target.
@@ -531,7 +530,6 @@ fn test_sha256d_vuma_parses_all_backends() {
 // Test 2: SHA256d compiles through framework pipeline (ARM64)
 // ===========================================================================
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_compiles_via_framework_arm64() {
     // Verify the SHA256d source compiles through the framework's
@@ -1022,7 +1020,6 @@ mod x86_64_execution {
 // Test 8: SHA256d SCG construction — verify SCG structure
 // ===========================================================================
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_scg_structure() {
     let source = include_str!("../../../examples/sha256d.vuma");
@@ -1421,7 +1418,6 @@ fn test_atomic_ops_pipeline_all_backends() {
     }
 }
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_atomic_ops_vuma_source_parses() {
     // Test that the spinlock.vuma example (which uses atomic operations)
@@ -1442,7 +1438,6 @@ fn test_atomic_ops_vuma_source_parses() {
     );
 }
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_atomic_ops_vuma_pipeline() {
     // Verify the spinlock program goes through the full pipeline.

@@ -726,34 +726,73 @@ impl Instruction {
             let sd = (d_bit << 4) | vd; // Sd = D:Vd
             let sm = (m_bit << 4) | vm; // Sm = M:Vm
             match (op2, sz, op) {
-                (0b1000, 0, 0) => {
-                    // VCVT.F32.S32 Sd, Sm
+                // ── int → float (op2 = 0b1000) ──
+                // Per ARM ARM A8.6.30 VCVT (between fp and integer, A1):
+                //   op (bit 7) selects signedness: 1 = signed, 0 = unsigned
+                //   sz (bit 8) selects destination width: 0 = f32, 1 = f64
+                // Verified against QEMU-arm-static: `encode_vcvt_f32_s32`
+                //   produces 0xEEB80AC0 (op=1, sz=0) and decodes as
+                //   `vcvt.f32.s32`; `encode_vcvt_f32_u32` produces
+                //   0xEEB80A40 (op=0, sz=0) and decodes as `vcvt.f32.u32`.
+                (0b1000, 0, 1) => {
+                    // VCVT.F32.S32 Sd, Sm  (signed int → f32)
                     return Ok(Instruction::VcvtF32S32 { sd, sm, cond });
                 }
-                (0b1000, 0, 1) => {
-                    // VCVT.F32.U32 Sd, Sm
+                (0b1000, 0, 0) => {
+                    // VCVT.F32.U32 Sd, Sm  (unsigned int → f32)
                     return Ok(Instruction::VcvtF32U32 { sd, sm, cond });
                 }
-                (0b1101, 0, 0) => {
-                    // VCVT.S32.F32 Sd, Sm
+                (0b1000, 1, 1) => {
+                    // VCVT.F64.S32 Dd, Sm  (signed int → f64)
+                    return Ok(Instruction::VcvtF64S32 { dd: sd, sm, cond });
+                }
+                (0b1000, 1, 0) => {
+                    // VCVT.F64.U32 Dd, Sm  (unsigned int → f64)
+                    return Ok(Instruction::VcvtF64U32 { dd: sd, sm, cond });
+                }
+                // ── float → int (op2 distinguishes signed/unsigned) ──
+                //   op2 = 0b1101 = signed,  op2 = 0b1100 = unsigned
+                //   sz (bit 8) selects source width: 0 = f32, 1 = f64
+                // Verified against QEMU-arm-static: `encode_vcvt_s32_f32`
+                //   produces 0xEEBD0AC0 (op2=1101, sz=0) → `vcvt.s32.f32`;
+                //   `encode_vcvt_u32_f32` produces 0xEEBC0AC0 (op2=1100,
+                //   sz=0) → `vcvt.u32.f32`.
+                (0b1101, 0, _) => {
+                    // VCVT.S32.F32 Sd, Sm  (f32 → signed int, truncate)
                     return Ok(Instruction::VcvtS32F32 { sd, sm, cond });
                 }
-                (0b1101, 0, 1) => {
-                    // VCVT.U32.F32 Sd, Sm
+                (0b1100, 0, _) => {
+                    // VCVT.U32.F32 Sd, Sm  (f32 → unsigned int, truncate)
                     return Ok(Instruction::VcvtU32F32 { sd, sm, cond });
                 }
-                (0b0110, 1, 0) => {
-                    // VCVT.F64.F32 Dd, Sm  (Dd = D:Vd, Sm = M:Vm)
+                (0b1101, 1, _) => {
+                    // VCVT.S32.F64 Sd, Dm  (f64 → signed int, truncate)
+                    return Ok(Instruction::VcvtS32F64 { sd, dm: sm, cond });
+                }
+                (0b1100, 1, _) => {
+                    // VCVT.U32.F64 Sd, Dm  (f64 → unsigned int, truncate)
+                    return Ok(Instruction::VcvtU32F64 { sd, dm: sm, cond });
+                }
+                // ── float → float (op2 = 0b0111) ──
+                //   sz (bit 8) selects SOURCE width: 0 = f32 source (→ f64
+                //   dest = VCVT.F64.F32), 1 = f64 source (→ f32 dest =
+                //   VCVT.F32.F64).
+                // Verified against QEMU-arm-static: `encode_vcvt_f64_f32`
+                //   produces 0xEEB70AC0 (op2=0111, sz=0) and decodes as
+                //   `vcvt.f64.f32`; `encode_vcvt_f32_f64` produces
+                //   0xEEB70BC0 (op2=0111, sz=1) and decodes as `vcvt.f32.f64`.
+                (0b0111, 0, _) => {
+                    // VCVT.F64.F32 Dd, Sm  (f32 → f64, widen)
                     return Ok(Instruction::VcvtF64F32 { dd: sd, sm, cond });
                 }
-                (0b0110, 0, 0) => {
-                    // VCVT.F32.F64 Sd, Dm  (Sd = D:Vd, Dm = M:Vm)
+                (0b0111, 1, _) => {
+                    // VCVT.F32.F64 Sd, Dm  (f64 → f32, narrow)
                     return Ok(Instruction::VcvtF32F64 { sd, dm: sm, cond });
                 }
                 _ => {
-                    // Other (op2, sz, op) combinations (e.g. VCVT.F64.U32,
-                    // VCVT.S32.F64) are not emitted by the current codegen;
-                    // fall through to the unknown-encoding error below.
+                    // Other (op2, sz, op) combinations are not emitted by
+                    // the current codegen; fall through to the unknown-
+                    // encoding error below.
                 }
             }
         }
