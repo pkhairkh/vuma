@@ -1560,9 +1560,9 @@ impl TargetInfo for Mips64TargetInfo {
         alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
-        // MIPS64 N64 ABI is big-endian (qemu-mips64).  The ELF builder
-        // (`build_mips64_elf_2seg`) emits ELFDATA2MSB to match.
-        Endianness::Big
+        // MIPS64 N64 ABI — little-endian variant (qemu-mips64el).
+        // The `mips64be` wrapper handles big-endian for qemu-mips64.
+        Endianness::Little
     }
     fn has_registers(&self) -> bool {
         true
