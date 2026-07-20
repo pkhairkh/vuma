@@ -98,28 +98,30 @@ extern "C" {
     fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32;  // codegen.vuma
     fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32;  // codegen.vuma (Wave 52)
     fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32;  // elf.vuma
+    fn __vuma_load_u8(addr: Address) -> u64;
+    fn __vuma_store_u8(addr: Address, val: u64);
 }
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
-    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
+    __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
+    __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
 }
 fn load_u64(ptr: Address, offset: u32) -> u64 {
-    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
-    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
-    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
-    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    b0: u64 = __vuma_load_u8(ptr + offset); b1: u64 = __vuma_load_u8(ptr + offset + 1);
+    b2: u64 = __vuma_load_u8(ptr + offset + 2); b3: u64 = __vuma_load_u8(ptr + offset + 3);
+    b4: u64 = __vuma_load_u8(ptr + offset + 4); b5: u64 = __vuma_load_u8(ptr + offset + 5);
+    b6: u64 = __vuma_load_u8(ptr + offset + 6); b7: u64 = __vuma_load_u8(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 fn store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
 }
 fn load_u32(ptr: Address, offset: u32) -> u32 {
-    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
-    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    b0: u32 = __vuma_load_u8(ptr + offset); b1: u32 = __vuma_load_u8(ptr + offset + 1);
+    b2: u32 = __vuma_load_u8(ptr + offset + 2); b3: u32 = __vuma_load_u8(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
@@ -165,12 +167,12 @@ fn store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val:
 // Check if a substring matches a keyword
 fn match_keyword(src: Address, start: u32, len: u32, k1: u32, k2: u32, k3: u32, k4: u32, k5: u32, k6: u32) -> u32 {
     if len != 6 { return 0; }
-    if *(src + start) != k1 { return 0; }
-    if *(src + start + 1) != k2 { return 0; }
-    if *(src + start + 2) != k3 { return 0; }
-    if *(src + start + 3) != k4 { return 0; }
-    if *(src + start + 4) != k5 { return 0; }
-    if *(src + start + 5) != k6 { return 0; }
+    if __vuma_load_u8(src + start) != k1 { return 0; }
+    if __vuma_load_u8(src + start + 1) != k2 { return 0; }
+    if __vuma_load_u8(src + start + 2) != k3 { return 0; }
+    if __vuma_load_u8(src + start + 3) != k4 { return 0; }
+    if __vuma_load_u8(src + start + 4) != k5 { return 0; }
+    if __vuma_load_u8(src + start + 5) != k6 { return 0; }
     return 1;
 }
 
@@ -182,7 +184,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
     
     while pos < src_len {
         if count >= max_tokens { return count; }
-        c: u32 = *(src + pos);
+        c: u32 = __vuma_load_u8(src + pos);
         
         // Skip whitespace
         if is_space(c) == 1 { pos = pos + 1; continue; }
@@ -190,9 +192,9 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
         // Skip line comments (//)
         if c == 47 {
             if pos + 1 < src_len {
-                if *(src + pos + 1) == 47 {
+                if __vuma_load_u8(src + pos + 1) == 47 {
                     while pos < src_len {
-                        if *(src + pos) == 10 { break; }
+                        if __vuma_load_u8(src + pos) == 10 { break; }
                         pos = pos + 1;
                     }
                     continue;
@@ -205,7 +207,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             start: u32 = pos;
             pos = pos + 1;
             while pos < src_len {
-                ch: u32 = *(src + pos);
+                ch: u32 = __vuma_load_u8(src + pos);
                 if ch == 34 { pos = pos + 1; break; }  // closing quote
                 if ch == 92 {  // backslash escape
                     pos = pos + 1;
@@ -225,14 +227,14 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             start = pos;
             pos = pos + 1;
             if pos < src_len {
-                if *(src + pos) == 92 {  // escape
+                if __vuma_load_u8(src + pos) == 92 {  // escape
                     pos = pos + 1;
                     if pos < src_len { pos = pos + 1; }
                 } else {
                     pos = pos + 1;
                 }
                 if pos < src_len {
-                    if *(src + pos) == 39 { pos = pos + 1; }  // closing quote
+                    if __vuma_load_u8(src + pos) == 39 { pos = pos + 1; }  // closing quote
                 }
             }
             len = pos - start;
@@ -245,7 +247,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
         if is_alpha(c) == 1 {
             start = pos;
             while pos < src_len {
-                c = *(src + pos);
+                c = __vuma_load_u8(src + pos);
                 if is_alnum(c) == 0 { break; }
                 pos = pos + 1;
             }
@@ -254,69 +256,69 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             
             // Keyword matching (by length then first char)
             if len == 2 {
-                f: u32 = *(src + start);
-                s: u32 = *(src + start + 1);
+                f: u32 = __vuma_load_u8(src + start);
+                s: u32 = __vuma_load_u8(src + start + 1);
                 if f == 102 { if s == 110 { ttype = 10; } }      // fn
                 else { if f == 105 { if s == 102 { ttype = 12; } } }  // if
                 else { if f == 97 { if s == 115 { ttype = 31; } } }   // as
                 else { if f == 105 { if s == 110 { ttype = 32; } } }  // in
             }
             if len == 3 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 108 {  // l → let
-                    if *(src + start + 1) == 101 { if *(src + start + 2) == 116 { ttype = 11; } }
+                    if __vuma_load_u8(src + start + 1) == 101 { if __vuma_load_u8(src + start + 2) == 116 { ttype = 11; } }
                 }
                 else { if f == 102 {  // f → for
-                    if *(src + start + 1) == 111 { if *(src + start + 2) == 114 { ttype = 15; } }
+                    if __vuma_load_u8(src + start + 1) == 111 { if __vuma_load_u8(src + start + 2) == 114 { ttype = 15; } }
                 }}
                 else { if f == 109 {  // m → mut
-                    if *(src + start + 1) == 117 { if *(src + start + 2) == 116 { ttype = 26; } }
+                    if __vuma_load_u8(src + start + 1) == 117 { if __vuma_load_u8(src + start + 2) == 116 { ttype = 26; } }
                 }}
                 else { if f == 112 {  // p → pub
-                    if *(src + start + 1) == 117 { if *(src + start + 2) == 98 { ttype = 28; } }
+                    if __vuma_load_u8(src + start + 1) == 117 { if __vuma_load_u8(src + start + 2) == 98 { ttype = 28; } }
                 }}
                 else { if f == 110 {  // n → new
-                    if *(src + start + 1) == 101 { if *(src + start + 2) == 119 { ttype = 29; } }
+                    if __vuma_load_u8(src + start + 1) == 101 { if __vuma_load_u8(src + start + 2) == 119 { ttype = 29; } }
                 }}
             }
             if len == 4 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 101 {  // e → else, enum
-                    if *(src + start + 1) == 108 {  // el → else
-                        if *(src + start + 2) == 115 { if *(src + start + 3) == 101 { ttype = 13; } }
+                    if __vuma_load_u8(src + start + 1) == 108 {  // el → else
+                        if __vuma_load_u8(src + start + 2) == 115 { if __vuma_load_u8(src + start + 3) == 101 { ttype = 13; } }
                     }
-                    else { if *(src + start + 1) == 110 {  // en → enum
-                        if *(src + start + 2) == 117 { if *(src + start + 3) == 109 { ttype = 21; } }
+                    else { if __vuma_load_u8(src + start + 1) == 110 {  // en → enum
+                        if __vuma_load_u8(src + start + 2) == 117 { if __vuma_load_u8(src + start + 3) == 109 { ttype = 21; } }
                     }}
                 }
                 else { if f == 116 {  // t → true
-                    if *(src + start + 1) == 114 { if *(src + start + 2) == 117 { if *(src + start + 3) == 101 { ttype = 29; } } }
+                    if __vuma_load_u8(src + start + 1) == 114 { if __vuma_load_u8(src + start + 2) == 117 { if __vuma_load_u8(src + start + 3) == 101 { ttype = 29; } } }
                 }}
                 else { if f == 119 {  // w → wait
-                    if *(src + start + 1) == 97 { if *(src + start + 2) == 105 { if *(src + start + 3) == 116 { ttype = 33; } } }
+                    if __vuma_load_u8(src + start + 1) == 97 { if __vuma_load_u8(src + start + 2) == 105 { if __vuma_load_u8(src + start + 3) == 116 { ttype = 33; } } }
                 }}
             }
             if len == 5 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 119 {  // w → while
-                    if *(src + start + 1) == 104 { if *(src + start + 2) == 105 { if *(src + start + 3) == 108 { if *(src + start + 4) == 101 { ttype = 14; } } } }
+                    if __vuma_load_u8(src + start + 1) == 104 { if __vuma_load_u8(src + start + 2) == 105 { if __vuma_load_u8(src + start + 3) == 108 { if __vuma_load_u8(src + start + 4) == 101 { ttype = 14; } } } }
                 }
                 else { if f == 98 {  // b → break
-                    if *(src + start + 1) == 114 { if *(src + start + 2) == 101 { if *(src + start + 3) == 97 { if *(src + start + 4) == 107 { ttype = 18; } } } }
+                    if __vuma_load_u8(src + start + 1) == 114 { if __vuma_load_u8(src + start + 2) == 101 { if __vuma_load_u8(src + start + 3) == 97 { if __vuma_load_u8(src + start + 4) == 107 { ttype = 18; } } } }
                 }}
                 else { if f == 99 {  // c → const, catch
-                    if *(src + start + 1) == 111 { if *(src + start + 2) == 110 { if *(src + start + 3) == 115 { if *(src + start + 4) == 116 { ttype = 25; } } } }
-                    else { if *(src + start + 1) == 97 { if *(src + start + 2) == 116 { if *(src + start + 3) == 99 { if *(src + start + 4) == 104 { ttype = 34; } } } } }
+                    if __vuma_load_u8(src + start + 1) == 111 { if __vuma_load_u8(src + start + 2) == 110 { if __vuma_load_u8(src + start + 3) == 115 { if __vuma_load_u8(src + start + 4) == 116 { ttype = 25; } } } }
+                    else { if __vuma_load_u8(src + start + 1) == 97 { if __vuma_load_u8(src + start + 2) == 116 { if __vuma_load_u8(src + start + 3) == 99 { if __vuma_load_u8(src + start + 4) == 104 { ttype = 34; } } } } }
                 }}
                 else { if f == 102 {  // f → false
-                    if *(src + start + 1) == 97 { if *(src + start + 2) == 108 { if *(src + start + 3) == 115 { if *(src + start + 4) == 101 { ttype = 30; } } } }
+                    if __vuma_load_u8(src + start + 1) == 97 { if __vuma_load_u8(src + start + 2) == 108 { if __vuma_load_u8(src + start + 3) == 115 { if __vuma_load_u8(src + start + 4) == 101 { ttype = 30; } } } }
                 }}
                 else { if f == 119 {  // w → where
-                    if *(src + start + 1) == 104 { if *(src + start + 2) == 101 { if *(src + start + 3) == 114 { if *(src + start + 4) == 101 { ttype = 32; } } } }
+                    if __vuma_load_u8(src + start + 1) == 104 { if __vuma_load_u8(src + start + 2) == 101 { if __vuma_load_u8(src + start + 3) == 114 { if __vuma_load_u8(src + start + 4) == 101 { ttype = 32; } } } }
                 }}
             }
             if len == 6 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 114 {  // r → return
                     if match_keyword(src, start, len, 114, 101, 116, 117, 114, 110) == 1 { ttype = 16; }
                 }
@@ -338,52 +340,52 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             // (match_keyword is hardcoded for len==6, so use the inline
             //  char-by-char pattern like "continue"/"sizeof" above.)
             if len == 7 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 115 {  // s → syscall
-                    if *(src + start + 1) == 121 { if *(src + start + 2) == 115 { if *(src + start + 3) == 99 { if *(src + start + 4) == 97 { if *(src + start + 5) == 108 { if *(src + start + 6) == 108 { ttype = 37; } } } } } }
+                    if __vuma_load_u8(src + start + 1) == 121 { if __vuma_load_u8(src + start + 2) == 115 { if __vuma_load_u8(src + start + 3) == 99 { if __vuma_load_u8(src + start + 4) == 97 { if __vuma_load_u8(src + start + 5) == 108 { if __vuma_load_u8(src + start + 6) == 108 { ttype = 37; } } } } } }
                 }
             }
             // "match" = 5 chars
             if len == 5 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 109 {  // m → match
-                    if *(src + start + 1) == 97 { if *(src + start + 2) == 116 { if *(src + start + 3) == 99 { if *(src + start + 4) == 104 { ttype = 17; } } } }
+                    if __vuma_load_u8(src + start + 1) == 97 { if __vuma_load_u8(src + start + 2) == 116 { if __vuma_load_u8(src + start + 3) == 99 { if __vuma_load_u8(src + start + 4) == 104 { ttype = 17; } } } }
                 }
             }
             // "trait" = 5 chars
             if len == 5 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 116 {  // t → trait
-                    if *(src + start + 1) == 114 { if *(src + start + 2) == 97 { if *(src + start + 3) == 105 { if *(src + start + 4) == 116 { ttype = 33; } } } }
+                    if __vuma_load_u8(src + start + 1) == 114 { if __vuma_load_u8(src + start + 2) == 97 { if __vuma_load_u8(src + start + 3) == 105 { if __vuma_load_u8(src + start + 4) == 116 { ttype = 33; } } } }
                 }
             }
             // "region" = 6 chars
             if len == 6 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 114 {  // r → region (not return)
-                    if *(src + start + 1) == 101 { if *(src + start + 2) == 103 { if *(src + start + 3) == 105 { if *(src + start + 4) == 111 { if *(src + start + 5) == 110 { ttype = 34; } } } } }
+                    if __vuma_load_u8(src + start + 1) == 101 { if __vuma_load_u8(src + start + 2) == 103 { if __vuma_load_u8(src + start + 3) == 105 { if __vuma_load_u8(src + start + 4) == 111 { if __vuma_load_u8(src + start + 5) == 110 { ttype = 34; } } } } }
                 }
             }
             // "continue" = 8 chars
             if len == 8 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 99 {  // c → continue
-                    if *(src + start + 1) == 111 { if *(src + start + 2) == 110 { if *(src + start + 3) == 116 { if *(src + start + 4) == 105 { if *(src + start + 5) == 110 { if *(src + start + 6) == 117 { if *(src + start + 7) == 101 { ttype = 19; } } } } } } }
+                    if __vuma_load_u8(src + start + 1) == 111 { if __vuma_load_u8(src + start + 2) == 110 { if __vuma_load_u8(src + start + 3) == 116 { if __vuma_load_u8(src + start + 4) == 105 { if __vuma_load_u8(src + start + 5) == 110 { if __vuma_load_u8(src + start + 6) == 117 { if __vuma_load_u8(src + start + 7) == 101 { ttype = 19; } } } } } } }
                 }
             }
             // "async" = 5 chars
             if len == 5 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 97 {  // a → async
-                    if *(src + start + 1) == 115 { if *(src + start + 2) == 121 { if *(src + start + 3) == 110 { if *(src + start + 4) == 99 { ttype = 35; } } } }
+                    if __vuma_load_u8(src + start + 1) == 115 { if __vuma_load_u8(src + start + 2) == 121 { if __vuma_load_u8(src + start + 3) == 110 { if __vuma_load_u8(src + start + 4) == 99 { ttype = 35; } } } }
                 }
             }
             // "await" = 5 chars (already handled above as "wait", fix)
             // "sizeof" = 6 chars
             if len == 6 {
-                f = *(src + start);
+                f = __vuma_load_u8(src + start);
                 if f == 115 {  // s → sizeof
-                    if *(src + start + 1) == 105 { if *(src + start + 2) == 122 { if *(src + start + 3) == 101 { if *(src + start + 4) == 111 { if *(src + start + 5) == 102 { ttype = 36; } } } } }
+                    if __vuma_load_u8(src + start + 1) == 105 { if __vuma_load_u8(src + start + 2) == 122 { if __vuma_load_u8(src + start + 3) == 101 { if __vuma_load_u8(src + start + 4) == 111 { if __vuma_load_u8(src + start + 5) == 102 { ttype = 36; } } } } }
                 }
             }
             
@@ -398,11 +400,11 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             val: u64 = 0;
             // Check for hex prefix 0x
             if c == 48 && pos + 1 < src_len {
-                next_c: u32 = *(src + pos + 1);
+                next_c: u32 = __vuma_load_u8(src + pos + 1);
                 if next_c == 120 || next_c == 88 {  // 'x' or 'X'
                     pos = pos + 2;
                     while pos < src_len {
-                        c = *(src + pos);
+                        c = __vuma_load_u8(src + pos);
                         if is_hex(c) == 0 { break; }
                         if c >= 48 && c <= 57 { val = val * 16 + (c - 48); }
                         else { if c >= 97 { val = val * 16 + (c - 87); } else { val = val * 16 + (c - 55); } }
@@ -416,7 +418,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             }
             // Decimal
             while pos < src_len {
-                c = *(src + pos);
+                c = __vuma_load_u8(src + pos);
                 if is_digit(c) == 0 { break; }
                 val = val * 10 + (c - 48);
                 pos = pos + 1;
@@ -434,7 +436,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
         
         // Two-char operators
         if pos + 1 < src_len {
-            c2: u32 = *(src + pos + 1);
+            c2: u32 = __vuma_load_u8(src + pos + 1);
             // == (46)
             if c == 61 && c2 == 61 { ttype = 46; len = 2; pos = pos + 1; }
             // != (47)
@@ -531,27 +533,27 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
 // argument provided) or when argv[1] is too long for the buffer. The caller
 // owns `buf` and frees it with __vuma_free(buf, 256).
 fn write_fallback_path(buf: Address) {
-    *(buf + 0) = 119;   // w
-    *(buf + 1) = 111;   // o
-    *(buf + 2) = 109;   // m
-    *(buf + 3) = 98;    // b
-    *(buf + 4) = 47;    // /
-    *(buf + 5) = 108;   // l
-    *(buf + 6) = 97;    // a
-    *(buf + 7) = 110;   // n
-    *(buf + 8) = 103;   // g
-    *(buf + 9) = 47;    // /
-    *(buf + 10) = 104;  // h
-    *(buf + 11) = 101;  // e
-    *(buf + 12) = 108;  // l
-    *(buf + 13) = 108;  // l
-    *(buf + 14) = 111;  // o
-    *(buf + 15) = 46;   // .
-    *(buf + 16) = 118;  // v
-    *(buf + 17) = 117;  // u
-    *(buf + 18) = 109;  // m
-    *(buf + 19) = 97;   // a
-    *(buf + 20) = 0;    // NUL
+    __vuma_store_u8(buf + 0, 119);   // w
+    __vuma_store_u8(buf + 1, 111);   // o
+    __vuma_store_u8(buf + 2, 109);   // m
+    __vuma_store_u8(buf + 3, 98);    // b
+    __vuma_store_u8(buf + 4, 47);    // /
+    __vuma_store_u8(buf + 5, 108);   // l
+    __vuma_store_u8(buf + 6, 97);    // a
+    __vuma_store_u8(buf + 7, 110);   // n
+    __vuma_store_u8(buf + 8, 103);   // g
+    __vuma_store_u8(buf + 9, 47);    // /
+    __vuma_store_u8(buf + 10, 104);  // h
+    __vuma_store_u8(buf + 11, 101);  // e
+    __vuma_store_u8(buf + 12, 108);  // l
+    __vuma_store_u8(buf + 13, 108);  // l
+    __vuma_store_u8(buf + 14, 111);  // o
+    __vuma_store_u8(buf + 15, 46);   // .
+    __vuma_store_u8(buf + 16, 118);  // v
+    __vuma_store_u8(buf + 17, 117);  // u
+    __vuma_store_u8(buf + 18, 109);  // m
+    __vuma_store_u8(buf + 19, 97);   // a
+    __vuma_store_u8(buf + 20, 0);    // NUL
 }
 
 // Resolve the source file path. Returns a heap-allocated NUL-terminated
@@ -578,7 +580,7 @@ fn input_path() -> Address {
     argv1_ptr: Address = load_u64(argv, 8);
     // Measure the NUL-terminated string length.
     len: u32 = 0;
-    while *(argv1_ptr + len) != 0 {
+    while __vuma_load_u8(argv1_ptr + len) != 0 {
         len = len + 1;
     }
     // Defensive: if the path is too long for our buffer, fall back.
@@ -589,10 +591,10 @@ fn input_path() -> Address {
     // Copy argv[1] into the buffer and NUL-terminate.
     i: u32 = 0;
     while i < len {
-        *(buf + i) = *(argv1_ptr + i);
+        __vuma_store_u8(buf + i, __vuma_load_u8(argv1_ptr + i));
         i = i + 1;
     }
-    *(buf + len) = 0;
+    __vuma_store_u8(buf + len, 0);
     return buf;
 }
 
@@ -618,11 +620,11 @@ fn read_file_into(path: Address, buf: Address, cap: i64) -> i64 {
 // locate the entry function by hash. Caller frees with __vuma_free(ptr, 5).
 fn main_str() -> Address {
     p = __vuma_alloc(5);
-    *(p + 0) = 109;  // m
-    *(p + 1) = 97;   // a
-    *(p + 2) = 105;  // i
-    *(p + 3) = 110;  // n
-    *(p + 4) = 0;    // NUL
+    __vuma_store_u8(p + 0, 109);  // m
+    __vuma_store_u8(p + 1, 97);   // a
+    __vuma_store_u8(p + 2, 105);  // i
+    __vuma_store_u8(p + 3, 110);  // n
+    __vuma_store_u8(p + 4, 0);    // NUL
     return p;
 }
 
@@ -631,16 +633,16 @@ fn main_str() -> Address {
 // can dispatch IR_CALL targets. Caller frees with __vuma_free(ptr, 10).
 fn print_int_str() -> Address {
     p = __vuma_alloc(10);
-    *(p + 0) = 112;   // p
-    *(p + 1) = 114;   // r
-    *(p + 2) = 105;   // i
-    *(p + 3) = 110;   // n
-    *(p + 4) = 116;   // t
-    *(p + 5) = 95;    // _
-    *(p + 6) = 105;   // i
-    *(p + 7) = 110;   // n
-    *(p + 8) = 116;   // t
-    *(p + 9) = 0;     // NUL
+    __vuma_store_u8(p + 0, 112);   // p
+    __vuma_store_u8(p + 1, 114);   // r
+    __vuma_store_u8(p + 2, 105);   // i
+    __vuma_store_u8(p + 3, 110);   // n
+    __vuma_store_u8(p + 4, 116);   // t
+    __vuma_store_u8(p + 5, 95);    // _
+    __vuma_store_u8(p + 6, 105);   // i
+    __vuma_store_u8(p + 7, 110);   // n
+    __vuma_store_u8(p + 8, 116);   // t
+    __vuma_store_u8(p + 9, 0);     // NUL
     return p;
 }
 
@@ -655,63 +657,63 @@ fn print_int_str() -> Address {
 // "allocate" (8 chars + NUL = 9 bytes).
 fn allocate_str() -> Address {
     p = __vuma_alloc(9);
-    *(p + 0) = 97;    // a
-    *(p + 1) = 108;   // l
-    *(p + 2) = 108;   // l
-    *(p + 3) = 111;   // o
-    *(p + 4) = 99;    // c
-    *(p + 5) = 97;    // a
-    *(p + 6) = 116;   // t
-    *(p + 7) = 101;   // e
-    *(p + 8) = 0;     // NUL
+    __vuma_store_u8(p + 0, 97);    // a
+    __vuma_store_u8(p + 1, 108);   // l
+    __vuma_store_u8(p + 2, 108);   // l
+    __vuma_store_u8(p + 3, 111);   // o
+    __vuma_store_u8(p + 4, 99);    // c
+    __vuma_store_u8(p + 5, 97);    // a
+    __vuma_store_u8(p + 6, 116);   // t
+    __vuma_store_u8(p + 7, 101);   // e
+    __vuma_store_u8(p + 8, 0);     // NUL
     return p;
 }
 
 // "free" (4 chars + NUL = 5 bytes).
 fn free_str() -> Address {
     p = __vuma_alloc(5);
-    *(p + 0) = 102;   // f
-    *(p + 1) = 114;   // r
-    *(p + 2) = 101;   // e
-    *(p + 3) = 101;   // e
-    *(p + 4) = 0;     // NUL
+    __vuma_store_u8(p + 0, 102);   // f
+    __vuma_store_u8(p + 1, 114);   // r
+    __vuma_store_u8(p + 2, 101);   // e
+    __vuma_store_u8(p + 3, 101);   // e
+    __vuma_store_u8(p + 4, 0);     // NUL
     return p;
 }
 
 // "__vuma_alloc" (12 chars + NUL = 13 bytes).
 fn vuma_alloc_str() -> Address {
     p = __vuma_alloc(13);
-    *(p + 0) = 95;    // _
-    *(p + 1) = 95;    // _
-    *(p + 2) = 118;   // v
-    *(p + 3) = 117;   // u
-    *(p + 4) = 109;   // m
-    *(p + 5) = 97;    // a
-    *(p + 6) = 95;    // _
-    *(p + 7) = 97;    // a
-    *(p + 8) = 108;   // l
-    *(p + 9) = 108;   // l
-    *(p + 10) = 111;  // o
-    *(p + 11) = 99;   // c
-    *(p + 12) = 0;    // NUL
+    __vuma_store_u8(p + 0, 95);    // _
+    __vuma_store_u8(p + 1, 95);    // _
+    __vuma_store_u8(p + 2, 118);   // v
+    __vuma_store_u8(p + 3, 117);   // u
+    __vuma_store_u8(p + 4, 109);   // m
+    __vuma_store_u8(p + 5, 97);    // a
+    __vuma_store_u8(p + 6, 95);    // _
+    __vuma_store_u8(p + 7, 97);    // a
+    __vuma_store_u8(p + 8, 108);   // l
+    __vuma_store_u8(p + 9, 108);   // l
+    __vuma_store_u8(p + 10, 111);  // o
+    __vuma_store_u8(p + 11, 99);   // c
+    __vuma_store_u8(p + 12, 0);    // NUL
     return p;
 }
 
 // "__vuma_free" (11 chars + NUL = 12 bytes).
 fn vuma_free_str() -> Address {
     p = __vuma_alloc(12);
-    *(p + 0) = 95;    // _
-    *(p + 1) = 95;    // _
-    *(p + 2) = 118;   // v
-    *(p + 3) = 117;   // u
-    *(p + 4) = 109;   // m
-    *(p + 5) = 97;    // a
-    *(p + 6) = 95;    // _
-    *(p + 7) = 102;   // f
-    *(p + 8) = 114;   // r
-    *(p + 9) = 101;   // e
-    *(p + 10) = 101;  // e
-    *(p + 11) = 0;    // NUL
+    __vuma_store_u8(p + 0, 95);    // _
+    __vuma_store_u8(p + 1, 95);    // _
+    __vuma_store_u8(p + 2, 118);   // v
+    __vuma_store_u8(p + 3, 117);   // u
+    __vuma_store_u8(p + 4, 109);   // m
+    __vuma_store_u8(p + 5, 97);    // a
+    __vuma_store_u8(p + 6, 95);    // _
+    __vuma_store_u8(p + 7, 102);   // f
+    __vuma_store_u8(p + 8, 114);   // r
+    __vuma_store_u8(p + 9, 101);   // e
+    __vuma_store_u8(p + 10, 101);  // e
+    __vuma_store_u8(p + 11, 0);    // NUL
     return p;
 }
 
@@ -721,12 +723,12 @@ fn vuma_free_str() -> Address {
 // executable after the ELF write completes.
 fn output_path() -> Address {
     p = __vuma_alloc(6);
-    *(p + 0) = 97;    // a
-    *(p + 1) = 46;    // .
-    *(p + 2) = 111;   // o
-    *(p + 3) = 117;   // u
-    *(p + 4) = 116;   // t
-    *(p + 5) = 0;     // NUL
+    __vuma_store_u8(p + 0, 97);    // a
+    __vuma_store_u8(p + 1, 46);    // .
+    __vuma_store_u8(p + 2, 111);   // o
+    __vuma_store_u8(p + 3, 117);   // u
+    __vuma_store_u8(p + 4, 116);   // t
+    __vuma_store_u8(p + 5, 0);     // NUL
     return p;
 }
 
