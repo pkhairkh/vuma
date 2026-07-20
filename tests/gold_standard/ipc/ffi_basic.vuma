@@ -1,0 +1,32 @@
+// ffi_basic — Wave 25-32: FFI process isolation via process_call.
+//
+// The process_call(fn_name, arg) builtin marshals a foreign-function call
+// across a process boundary via a channel: it sends `arg` as a framed L1
+// message on the channel whose handle is `fn_name`, then receives the
+// framed result and extracts the payload.
+//
+// Flow:
+//   1. Parent opens a channel and forks a worker.
+//   2. The child (the "FFI server") recvs an arg, computes arg + 21, and
+//      sends the result back.
+//   3. The parent calls process_call(ch, 21) which sends 21 and recvs 42.
+//   4. The parent returns 42.
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child: act as the FFI process server.
+        arg = channel_recv(ch);
+        result = arg + 21;
+        channel_send(ch, result);
+        channel_close(ch);
+        return 0;
+    }
+    // Parent: process_call sends arg, recvs result.
+    r = process_call(ch, 21);
+    wait_worker(pid);
+    channel_close(ch);
+    return r as i32;
+}

@@ -4677,6 +4677,121 @@ fn ss_emit_slot_addr(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     }
 }
 
+/// Emit a CRC32 computation loop over `[SP+0..52]`.
+///
+/// Computes the L1 frame CRC32 with polynomial `0xEDB88320`
+/// (same algorithm as `crate::ipc::crc32`). The 56-byte VUMA L1 frame
+/// is laid out as `[0..44]` header + `[44..52]` payload + `[52..56]` CRC;
+/// this helper walks the first 52 bytes (header + payload) and leaves
+/// the final CRC in `T5` (low 32 bits; upper 32 bits are zeroed via
+/// `SLLI 32 ; SRLI 32` so a 64-bit `cmp` against the stored 32-bit CRC
+/// compares cleanly).
+///
+/// Register usage (all caller-saved temps — `A0`-`A7` are preserved,
+/// which lets the caller keep `write_fd`/`read_fd` live across the loop):
+///   `T0` — byte pointer (init `SP`, increments by 1 each outer iter)
+///   `T1` — outer byte counter (init 52, decrements to 0)
+///   `T2` — current byte (zero-extended via `LBU`)
+///   `T3` — inner bit counter (init 8 per byte)
+///   `T4` — polynomial `0xEDB88320`
+///   `T5` — running CRC (init `0xFFFFFFFF`; final `!crc`)
+///   `T6` — temp for the `crc & 1` bit test
+///
+/// The runtime loop is required because the receiver must verify the
+/// CRC over the received bytes (which are only known after `read()`
+/// returns). The original port plan deferred this loop and would have
+/// stored `CRC=0` on send + skipped verification on recv — that breaks
+/// the L1 frame integrity contract (`ChannelRecv` must reject corrupted
+/// frames with the `CrcMismatch` sentinel), so the loop is implemented
+/// here for both send and recv paths.
+fn emit_riscv64_crc32_frame_loop() -> Vec<u8> {
+    let mut code = Vec::new();
+    // T5 = 0xFFFFFFFF (initial CRC)
+    code.extend(ss_load_imm(Gpr::T5, 0xFFFF_FFFF));
+    // T4 = 0xEDB88320 (polynomial)
+    code.extend(ss_load_imm(Gpr::T4, 0xEDB8_8320));
+    // T0 = SP (byte pointer)
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Sp, imm: 0 }.encode());
+    // T1 = 52 (outer byte counter)
+    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 52 }.encode());
+
+    // outer_loop_start:
+    let outer_loop_start = code.len();
+    // BEQ T1, zero, outer_done (placeholder, patched below)
+    code.extend(Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: 0 }.encode());
+    let outer_beq_pos = code.len() - 4;
+    // T2 = byte at [T0] (zero-extended)
+    code.extend(Instruction::Lbu { rd: Gpr::T2, rs1: Gpr::T0, imm: 0 }.encode());
+    // T5 ^= T2
+    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T2 }.encode());
+    // T3 = 8 (inner bit counter)
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 8 }.encode());
+
+    // inner_loop_start:
+    let inner_loop_start = code.len();
+    // BEQ T3, zero, inner_done (placeholder, patched below)
+    code.extend(Instruction::Beq { rs1: Gpr::T3, rs2: Gpr::Zero, offset: 0 }.encode());
+    let inner_beq_pos = code.len() - 4;
+    // T6 = T5 & 1
+    code.extend(Instruction::Andi { rd: Gpr::T6, rs1: Gpr::T5, imm: 1 }.encode());
+    // T5 >>= 1
+    code.extend(Instruction::Srli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 1 }.encode());
+    // BEQ T6, zero, skip_xor (placeholder, patched below)
+    code.extend(Instruction::Beq { rs1: Gpr::T6, rs2: Gpr::Zero, offset: 0 }.encode());
+    let skip_xor_beq_pos = code.len() - 4;
+    // T5 ^= T4 (apply polynomial)
+    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T4 }.encode());
+    // skip_xor_target:
+    let skip_xor_target = code.len() as i32;
+    let skip_xor_offset = skip_xor_target - (skip_xor_beq_pos as i32);
+    let skip_xor_patched = Instruction::Beq {
+        rs1: Gpr::T6, rs2: Gpr::Zero, offset: skip_xor_offset,
+    };
+    code[skip_xor_beq_pos..skip_xor_beq_pos + 4].copy_from_slice(&skip_xor_patched.encode());
+    // T3 -= 1
+    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: -1 }.encode());
+    // unconditional branch back to inner_loop_start
+    let inner_back_offset = (inner_loop_start as i32) - (code.len() as i32);
+    code.extend(Instruction::Beq {
+        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: inner_back_offset,
+    }.encode());
+
+    // inner_done: patch the inner BEQ to jump here.
+    let inner_done_target = code.len() as i32;
+    let inner_beq_offset = inner_done_target - (inner_beq_pos as i32);
+    let inner_beq_patched = Instruction::Beq {
+        rs1: Gpr::T3, rs2: Gpr::Zero, offset: inner_beq_offset,
+    };
+    code[inner_beq_pos..inner_beq_pos + 4].copy_from_slice(&inner_beq_patched.encode());
+
+    // T0 += 1 (advance byte pointer)
+    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    // T1 -= 1 (decrement outer counter)
+    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -1 }.encode());
+    // unconditional branch back to outer_loop_start
+    let outer_back_offset = (outer_loop_start as i32) - (code.len() as i32);
+    code.extend(Instruction::Beq {
+        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: outer_back_offset,
+    }.encode());
+
+    // outer_done: patch the outer BEQ to jump here.
+    let outer_done_target = code.len() as i32;
+    let outer_beq_offset = outer_done_target - (outer_beq_pos as i32);
+    let outer_beq_patched = Instruction::Beq {
+        rs1: Gpr::T1, rs2: Gpr::Zero, offset: outer_beq_offset,
+    };
+    code[outer_beq_pos..outer_beq_pos + 4].copy_from_slice(&outer_beq_patched.encode());
+
+    // Final: T5 = !T5 (XOR with all-1s = NOT)
+    code.extend(Instruction::Xori { rd: Gpr::T5, rs1: Gpr::T5, imm: -1 }.encode());
+    // Zero-extend: clear upper 32 bits for clean 64-bit comparison with
+    // a 32-bit loaded CRC value.
+    code.extend(Instruction::Slli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 32 }.encode());
+    code.extend(Instruction::Srli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 32 }.encode());
+
+    code
+}
+
 impl Backend for RiscV64Backend {
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         &self.target_info
@@ -5585,31 +5700,88 @@ impl Backend for RiscV64Backend {
                                 true
                             }
                             ("channel_send", 2, _) => {
+                                // Wave 15a: framed L1 write — builds a 56-byte
+                                // frame (44-byte header + 8-byte payload + 4-byte
+                                // CRC32) and writes it to the pipe.  This is the
+                                // riscv64 port of the x86_64 codegen in
+                                // src/codegen/src/x86_64/stack_slot_isel.rs.
+                                //
+                                // Frame layout (little-endian):
+                                //   [0..4]    MAGIC "VUMA" = 0x414D5556
+                                //   [4..8]    version(2) + flags(0) = 0x00020000
+                                //   [8..16]   channel_id = 0
+                                //   [16..24]  sequence = 0  (per-channel counter deferred)
+                                //   [24..32]  type_hash = crate::ipc::type_hash("i64")
+                                //   [32..40]  payload_len = 8
+                                //   [40..44]  cap_count = 0
+                                //   [44..52]  payload (the message value)
+                                //   [52..56]  CRC32 over [0..52] with poly 0xEDB88320
                                 let ch = &args[0];
                                 let msg = &args[1];
-                                // t0 = full channel handle (64 bits).
+                                // Compute type_hash at compile time. Default
+                                // "i64" since the Call path doesn't carry the
+                                // IR type; matches the existing 8-byte path.
+                                let th = crate::ipc::type_hash("i64");
+
+                                // Step 1: load full channel handle into T0 and
+                                // extract write_fd (high 32 bits, zero-extended)
+                                // into A0. We do this BEFORE the CRC loop so
+                                // the loop can freely clobber T0-T6 while A0
+                                // holds the write_fd across the computation.
                                 code.extend(ss_load_value(ch, &vreg_stack_slots, Gpr::T0));
-                                // a0 = write_fd = high 32 bits (zero-extended).
                                 code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                // Allocate 16 bytes of scratch on SP
-                                // (keeps 16-byte alignment for ecall).  Store
-                                // the 8-byte message there and pass its
-                                // address to write().
-                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
-                                // t1 = msg value.
-                                code.extend(ss_load_value(msg, &vreg_stack_slots, Gpr::T1));
-                                // [SP] = msg
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T1, imm: 0 }.encode());
-                                // a1 = SP (buf)
-                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());
-                                // a2 = 8 (count)
-                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode());
-                                // a7 = 64 (sys_write)
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode());
+
+                                // Step 2: allocate the 56-byte frame on the
+                                // stack (16-byte alignment preserved: 56 % 16
+                                // == 8, but Linux RISC-V syscalls don't
+                                // require SP alignment for the ecall itself).
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -56 }.encode());
+
+                                // [SP+0] = MAGIC "VUMA" = 0x414D5556 (LE dword)
+                                code.extend(ss_load_imm(Gpr::T0, 0x414D_5556));
+                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 0 }.encode());
+                                // [SP+4] = version(2) + flags(0) = 0x00020000
+                                code.extend(ss_load_imm(Gpr::T0, 0x0002_0000));
+                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 4 }.encode());
+                                // [SP+8] = channel_id = 0 (8 bytes)
+                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 8 }.encode());
+                                // [SP+16] = sequence = 0 (8 bytes) — per-channel
+                                // runtime counter deferred; compile-time 0 for now.
+                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 16 }.encode());
+                                // [SP+24] = type_hash (8 bytes, compile-time constant)
+                                code.extend(ss_load_imm(Gpr::T0, th as i64));
+                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 24 }.encode());
+                                // [SP+32] = payload_len = 8 (8 bytes)
+                                code.extend(ss_load_imm(Gpr::T0, 8));
+                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 32 }.encode());
+                                // [SP+40] = cap_count = 0 (4 bytes)
+                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 40 }.encode());
+                                // [SP+44] = payload (8 bytes) — the message value
+                                code.extend(ss_load_value(msg, &vreg_stack_slots, Gpr::T0));
+                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 44 }.encode());
+
+                                // [SP+52] = CRC32 — compute the real CRC32 over
+                                // [SP+0..52] (header + payload) using the inline
+                                // loop with polynomial 0xEDB88320 (same as
+                                // ipc::crc32), and store the 32-bit result into
+                                // [SP+52]. The runtime loop clobbers T0-T6 but
+                                // preserves A0 (write_fd).
+                                code.extend(emit_riscv64_crc32_frame_loop());
+                                // T5 now holds the CRC (low 32 bits, upper 32 = 0).
+                                // Store T5's low 32 bits into [SP+52].
+                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::T5, imm: 52 }.encode());
+
+                                // Step 3: write(write_fd, &frame, 56).
+                                // A0 already has write_fd (preserved across CRC loop).
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());  // buf = SP
+                                code.extend(ss_load_imm(Gpr::A2, 56));  // count = 56
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode());  // sys_write
                                 code.extend(Instruction::Ecall.encode());
-                                // Restore SP.
-                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
-                                // write() returns the byte count (8) on
+
+                                // Deallocate the frame.
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 56 }.encode());
+
+                                // write() returns the byte count (56) on
                                 // success — store it for callers that inspect
                                 // the call's nominal return value.
                                 if let Some(d) = dst {
@@ -5621,26 +5793,136 @@ impl Backend for RiscV64Backend {
                                 true
                             }
                             ("channel_recv", 1, true) => {
+                                // Wave 15a: framed L1 read — reads a 56-byte
+                                // frame, verifies MAGIC, type_hash, and CRC32,
+                                // then extracts the 8-byte payload into dst.
+                                // This is the riscv64 port of the x86_64 codegen.
+                                //
+                                // On MAGIC mismatch: store -1 (error sentinel).
+                                // On type_hash mismatch: store -5 (ProtoViolation).
+                                // On CRC32 mismatch: store -6 (CrcMismatch).
+                                // On success: store the 8-byte payload.
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                // t0 = full channel handle.
+                                let expected_th = crate::ipc::type_hash("i64");
+
+                                // Step 1: load full channel handle into T0 and
+                                // extract read_fd (low 32 bits, zero-extended)
+                                // into A0. Done BEFORE allocating the frame so
+                                // A0 holds read_fd across the read() call.
                                 code.extend(ss_load_value(ch, &vreg_stack_slots, Gpr::T0));
-                                // a0 = read_fd = low 32 bits, zero-extended.
-                                //   SLLI t0, t0, 32 ; SRLI a0, t0, 32
-                                //   (T0 is preserved across syscalls per the
-                                //   Linux RISC-V ABI, but we don't need T0
-                                //   again — write the result into a0 via T0.)
                                 code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
                                 code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                // a1 = &dst_slot — read() writes the message
-                                // directly into the destination vreg slot.
-                                code.extend(ss_emit_slot_addr(Gpr::A1, dst_offset));
-                                // a2 = 8 (count)
-                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode());
-                                // a7 = 63 (sys_read)
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 63 }.encode());
+
+                                // Step 2: allocate 56-byte frame buffer.
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -56 }.encode());
+
+                                // Step 3: read(read_fd, &frame, 56).
+                                // A0 already has read_fd.
+                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());  // buf = SP
+                                code.extend(ss_load_imm(Gpr::A2, 56));  // count = 56
+                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 63 }.encode());  // sys_read
                                 code.extend(Instruction::Ecall.encode());
+
+                                // Step 4: verify MAGIC ([SP+0] == 0x414D5556).
+                                // LWU zero-extends; ss_load_imm also zero-extends
+                                // for values with bit 31 set, so the 64-bit
+                                // comparison is clean.
+                                code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::Sp, imm: 0 }.encode());
+                                code.extend(ss_load_imm(Gpr::T1, 0x414D_5556));
+                                code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::T1, offset: 0 }.encode());  // placeholder, patched to magic_fail
+                                let bne_magic_pos = code.len() - 4;
+
+                                // Step 5: verify type_hash ([SP+24] == expected_th, 8 bytes).
+                                // Compare low 32 bits at [SP+24], high 32 bits at [SP+28].
+                                code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::Sp, imm: 24 }.encode());
+                                code.extend(ss_load_imm(Gpr::T1, (expected_th & 0xFFFF_FFFF) as i64));
+                                code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::T1, offset: 0 }.encode());  // placeholder, patched to th_fail
+                                let bne_th_lo_pos = code.len() - 4;
+                                code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::Sp, imm: 28 }.encode());
+                                code.extend(ss_load_imm(Gpr::T1, ((expected_th >> 32) & 0xFFFF_FFFF) as i64));
+                                code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::T1, offset: 0 }.encode());  // placeholder, patched to th_fail
+                                let bne_th_hi_pos = code.len() - 4;
+
+                                // Step 6: verify CRC32 — compute CRC over
+                                // [SP+0..52] (header + payload) using the inline
+                                // loop with polynomial 0xEDB88320, then compare
+                                // with the stored CRC at [SP+52]. On mismatch,
+                                // jump to crc_fail.
+                                code.extend(emit_riscv64_crc32_frame_loop());
+                                // T5 = computed CRC (zero-extended to 64 bits).
+                                // Load stored CRC from [SP+52] (zero-extended).
+                                code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::Sp, imm: 52 }.encode());
+                                code.extend(Instruction::Bne { rs1: Gpr::T5, rs2: Gpr::T0, offset: 0 }.encode());  // placeholder, patched to crc_fail
+                                let bne_crc_pos = code.len() - 4;
+
+                                // Step 7: extract payload from [SP+44] into dst slot.
+                                code.extend(Instruction::Ld { rd: Gpr::T0, rs1: Gpr::Sp, imm: 44 }.encode());
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                // Jump to cleanup (skip error sentinels).
+                                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());  // placeholder
+                                let jmp_cleanup_pos = code.len() - 4;
+
+                                // magic_fail: store -1 (error sentinel) in dst.
+                                let magic_fail_target = code.len() as i32;
+                                let magic_offset = magic_fail_target - (bne_magic_pos as i32);
+                                let magic_patched = Instruction::Bne {
+                                    rs1: Gpr::T0, rs2: Gpr::T1, offset: magic_offset,
+                                };
+                                code[bne_magic_pos..bne_magic_pos + 4].copy_from_slice(&magic_patched.encode());
+                                code.extend(ss_load_imm(Gpr::T0, -1));
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());  // placeholder
+                                let jmp_cleanup_from_magic_pos = code.len() - 4;
+
+                                // th_fail: store -5 (ProtocolViolation) in dst.
+                                let th_fail_target = code.len() as i32;
+                                let th_lo_offset = th_fail_target - (bne_th_lo_pos as i32);
+                                let th_lo_patched = Instruction::Bne {
+                                    rs1: Gpr::T0, rs2: Gpr::T1, offset: th_lo_offset,
+                                };
+                                code[bne_th_lo_pos..bne_th_lo_pos + 4].copy_from_slice(&th_lo_patched.encode());
+                                let th_hi_offset = th_fail_target - (bne_th_hi_pos as i32);
+                                let th_hi_patched = Instruction::Bne {
+                                    rs1: Gpr::T0, rs2: Gpr::T1, offset: th_hi_offset,
+                                };
+                                code[bne_th_hi_pos..bne_th_hi_pos + 4].copy_from_slice(&th_hi_patched.encode());
+                                code.extend(ss_load_imm(Gpr::T0, -5));
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());  // placeholder
+                                let jmp_cleanup_from_th_pos = code.len() - 4;
+
+                                // crc_fail: store -6 (CrcMismatch) in dst.
+                                let crc_fail_target = code.len() as i32;
+                                let crc_offset = crc_fail_target - (bne_crc_pos as i32);
+                                let crc_patched = Instruction::Bne {
+                                    rs1: Gpr::T5, rs2: Gpr::T0, offset: crc_offset,
+                                };
+                                code[bne_crc_pos..bne_crc_pos + 4].copy_from_slice(&crc_patched.encode());
+                                code.extend(ss_load_imm(Gpr::T0, -6));
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                // Fall through to cleanup.
+
+                                // cleanup: deallocate frame.
+                                let cleanup_target = code.len() as i32;
+                                let cleanup_offset_from_success = cleanup_target - (jmp_cleanup_pos as i32);
+                                let success_jmp_patched = Instruction::Jal {
+                                    rd: Gpr::Zero, offset: cleanup_offset_from_success,
+                                };
+                                code[jmp_cleanup_pos..jmp_cleanup_pos + 4].copy_from_slice(&success_jmp_patched.encode());
+                                let cleanup_offset_from_magic = cleanup_target - (jmp_cleanup_from_magic_pos as i32);
+                                let magic_jmp_patched = Instruction::Jal {
+                                    rd: Gpr::Zero, offset: cleanup_offset_from_magic,
+                                };
+                                code[jmp_cleanup_from_magic_pos..jmp_cleanup_from_magic_pos + 4].copy_from_slice(&magic_jmp_patched.encode());
+                                let cleanup_offset_from_th = cleanup_target - (jmp_cleanup_from_th_pos as i32);
+                                let th_jmp_patched = Instruction::Jal {
+                                    rd: Gpr::Zero, offset: cleanup_offset_from_th,
+                                };
+                                code[jmp_cleanup_from_th_pos..jmp_cleanup_from_th_pos + 4].copy_from_slice(&th_jmp_patched.encode());
+
+                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 56 }.encode());
                                 true
                             }
                             ("channel_close", 1, _) => {
@@ -5687,7 +5969,12 @@ impl Backend for RiscV64Backend {
                                 code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());
                                 code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());
                                 code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());
-                                code.extend(ss_load_imm(Gpr::A7, 2601));
+                                // sys_wait4 on riscv64 = 260 (asm-generic). The
+                                // prior code used 2601, which qemu-user reports
+                                // as "Unknown syscall 2601" and returns -ENOSYS,
+                                // causing wait_worker() to silently return 0
+                                // instead of the child's exit status.
+                                code.extend(ss_load_imm(Gpr::A7, 260));
                                 code.extend(Instruction::Ecall.encode());
                                 code.extend(Instruction::Ld { rd: Gpr::A0, rs1: Gpr::Sp, imm: 0 }.encode());
                                 code.extend(Instruction::Srli { rd: Gpr::A0, rs1: Gpr::A0, shamt: 8 }.encode());

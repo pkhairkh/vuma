@@ -1,0 +1,28 @@
+// framed_roundtrip_aarch64 — Wave 10d: verify L1 framed channel round-trip
+// on the aarch64 backend.
+//
+// Sends 42 as i64 through a framed channel (44-byte header + 8-byte payload
+// + 4-byte CRC32 = 56 bytes per message) and verifies the receiver deframes
+// and extracts the correct value.  The MAGIC header ("VUMA" = 0x414D5556),
+// cap_count, and CRC32 (polynomial 0xEDB88320) are all verified on receive;
+// any mismatch would cause the -1 / -6 error sentinel to be stored instead
+// of the payload.
+//
+// Direction: child sends, parent receives.  This avoids wait_worker, which
+// on QEMU-aarch64 7.2 returns 0 (sys_wait4 = syscall 2601 is not recognized
+// by QEMU).  The parent reads the framed message directly from the pipe and
+// returns the extracted payload as its exit code.
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i64>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 42);
+        channel_close(ch);
+        return 0;
+    }
+    x = channel_recv(ch);
+    channel_close(ch);
+    return x as i32;
+}
