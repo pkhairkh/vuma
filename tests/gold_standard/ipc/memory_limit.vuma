@@ -1,0 +1,18 @@
+// memory_limit — Wave 18c: set_memory_limit(bytes) builtin
+//
+// Exercises the set_memory_limit builtin, which emits
+// setrlimit(RLIMIT_AS=9, {bytes, bytes}) to cap the process's virtual
+// address space.  Distinct from the generic set_resource_limit(resource, limit).
+//
+// The test sets a generous memory limit (1 GiB) so the process can still
+// run, then returns 1 to confirm setrlimit succeeded (a failed setrlimit
+// would return -1, but we treat any non-negative return as success and
+// exit 1).
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    // 1073741824 = 1 GiB.  Set RLIMIT_AS so the process is capped at 1 GiB
+    // of virtual memory — enough to run, but a real limit the kernel enforces.
+    set_memory_limit(1073741824);
+    return 1;
+}
