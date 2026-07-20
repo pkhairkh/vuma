@@ -250,6 +250,19 @@ fn payload_type(payload: &NodePayload) -> NodeType {
         NodePayload::Match(_) => NodeType::Match,
         NodePayload::ConstantTime(_) => NodeType::ConstantTime,
         NodePayload::Syscall(_) => NodeType::Effect,
+        NodePayload::StateInit(_) => NodeType::StateInit,
+        NodePayload::StateRead(_) => NodeType::StateRead,
+        NodePayload::StateWrite(_) => NodeType::StateWrite,
+        NodePayload::StateTransform(_) => NodeType::StateTransform,
+        NodePayload::ForeignConsume(_) => NodeType::ForeignConsume,
+        NodePayload::ArenaNew(_) => NodeType::ArenaNew,
+        NodePayload::ArenaAlloc(_) => NodeType::ArenaAlloc,
+        NodePayload::ArenaGrow(_) => NodeType::ArenaGrow,
+        NodePayload::ArenaFree(_) => NodeType::ArenaFree,
+        NodePayload::ChannelOpen(_) => NodeType::ChannelOpen,
+        NodePayload::ChannelSend(_) => NodeType::ChannelSend,
+        NodePayload::ChannelRecv(_) => NodeType::ChannelRecv,
+        NodePayload::ChannelClose(_) => NodeType::ChannelClose,
     }
 }
 
