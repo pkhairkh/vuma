@@ -277,6 +277,77 @@ fn emit_crc32_range(base: Gpr, offset: i32, byte_count: u32) -> Vec<u8> {
     code
 }
 
+/// Wave C (L2 cap signatures): emit a real FNV-1a 64-bit hash loop over
+/// `byte_count` bytes starting at `[base + offset]`, prefixed with a 1-byte
+/// `salt`. The u64 result is left in **R8** (upper 32 bits may be non-zero —
+/// callers must compare with a 64-bit load, not a zero-extended 32-bit load).
+///
+/// Algorithm (matches `ipc::capability::fnv1a_64` + the salt-prefix scheme in
+/// `ipc::capability::compute_signature`):
+///   - `hash = 0xcbf29ce484222325`  (FNV-1a 64-bit offset basis)
+///   - `hash ^= salt;  hash *= 0x100000001b3`  (FNV-1a 64-bit prime)
+///   - for each byte: `hash ^= byte;  hash *= 0x100000001b3`
+///
+/// All arithmetic is wrapping (u64), matching the library's
+/// `wrapping_mul` / `^=` semantics.
+///
+/// Register usage (all caller-saved; RDI is preserved so the caller's
+/// read_fd in RDI survives — matching the emit_crc32_range convention):
+///   - **R8**  — hash accumulator (result)
+///   - **R11** — FNV prime 0x100000001b3 (loaded once via 64-bit mov)
+///   - **RAX** — current byte (zero-extended)
+///   - **RCX** — outer loop counter (0..byte_count)
+///   - **RSI** — running byte pointer
+///   - **R9, R10** — unused but listed as clobbered for consistency with
+///     `emit_crc32_range` (callers must not rely on them surviving)
+fn emit_fnv1a_64_loop(base: Gpr, offset: i32, byte_count: u32, salt: u8) -> Vec<u8> {
+    let mut code = Vec::with_capacity(120);
+
+    // r8 = FNV-1a offset basis = 0xcbf29ce484222325
+    code.extend(encode_mov_reg_imm64(Gpr::R8, 0xcbf29ce484222325));
+    // r11 = FNV-1a prime = 0x100000001b3
+    code.extend(encode_mov_reg_imm64(Gpr::R11, 0x100000001b3));
+    // rsi = &buffer[0]  (base + offset)
+    code.extend(encode_lea_reg_mem(Gpr::Rsi, base, offset));
+    // rcx = 0 (loop counter)
+    code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
+
+    // hash ^= salt  (salt is 0..=3, fits in a sign-extended imm32 without
+    // corrupting the upper 32 bits of R8).
+    code.extend(encode_xor_reg_imm32(Gpr::R8, salt as i32));
+    // hash *= prime  (wrapping imul)
+    code.extend(encode_imul_reg_reg(Gpr::R8, Gpr::R11));
+
+    // ── loop: ──
+    let loop_off = code.len();
+    // cmp rcx, byte_count
+    code.extend(encode_cmp_reg_imm32(Gpr::Rcx, byte_count as i32));
+    // jge done (rel32 placeholder)
+    let jge_patch = code.len();
+    code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
+
+    // rax = byte [rsi]  (zero-extended)
+    code.extend(encode_movzx_reg8_mem(Gpr::Rax, Gpr::Rsi, 0));
+    // hash ^= byte
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::Rax));
+    // hash *= prime
+    code.extend(encode_imul_reg_reg(Gpr::R8, Gpr::R11));
+    // rsi += 1 (next byte)
+    code.extend(encode_add_reg_imm32(Gpr::Rsi, 1));
+    // rcx += 1
+    code.extend(encode_add_reg_imm32(Gpr::Rcx, 1));
+    // jmp loop (rel32 placeholder)
+    let jmp_loop_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+    patch_rel32_jmp(&mut code, jmp_loop_patch, loop_off);
+
+    // done:
+    let done_off = code.len();
+    patch_rel32_jcc(&mut code, jge_patch, done_off);
+
+    code
+}
+
 /// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
 /// match arms below to decide between the integer and SSE codegen paths.
 fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
@@ -475,6 +546,68 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // the SSE path. See `infer_fp_vregs` above for the full rule set.
     let (fp_vregs, fp_vregs_f32) = infer_fp_vregs(func);
 
+    // ── Phase 0.5: Scan for capability_grant calls (Wave C: L2 cap sigs) ──
+    //
+    // The recv side must recompute the FNV-1a×4 capability signature over
+    // the same `signature_input` byte vector the grant used.  Since the
+    // grant's args (resource_id, perms) are compile-time immediates in the
+    // IR, we can extract them here and compute the sig_input + sig at
+    // compile time.  These are embedded as immediates in the prologue so
+    // that BOTH the parent (which calls grant + send_cap) and the child
+    // (which only calls recv, after fork) have the sig_input available on
+    // their stack.
+    //
+    // If the function has no capability_grant, these stay `None` and the
+    // recv side skips the signature check (no cap frames are expected).
+    let mut cap_grant_sig: Option<[u8; 32]> = None;
+    let mut cap_grant_sig_input: Option<Vec<u8>> = None;
+    'grant_search: for block in &func.blocks {
+        for instr in &block.instructions {
+            if let IRInstr::Call { func: fname, args, .. } = instr {
+                if fname == "capability_grant" && args.len() == 2 {
+                    let resource_id = match &args[0] {
+                        IRValue::Immediate(v) => *v as u64,
+                        _ => continue,
+                    };
+                    let perms_raw = match &args[1] {
+                        IRValue::Immediate(v) => *v as u64,
+                        _ => continue,
+                    };
+                    let resource = crate::ipc::capability::Resource::Channel(resource_id);
+                    let perms = crate::ipc::capability::MemoryPermissions {
+                        read: (perms_raw & 1) != 0,
+                        write: (perms_raw & 2) != 0,
+                        execute: (perms_raw & 4) != 0,
+                        ..Default::default()
+                    };
+                    let token = crate::ipc::capability::grant_capability(
+                        resource_id as u128, 1, 1, resource, perms,
+                        0, 0, 3600, b"vuma_dev_signing_key",
+                    );
+                    // Reconstruct signature_input inline — ipc::capability::signature_input
+                    // is module-private, so we duplicate its logic here.  The
+                    // byte layout MUST match signature_input() in ipc.rs.
+                    let signing_key = b"vuma_dev_signing_key";
+                    let mut sig_input = Vec::with_capacity(256);
+                    sig_input.extend_from_slice(signing_key);
+                    sig_input.extend_from_slice(&token.id.to_le_bytes());
+                    sig_input.extend_from_slice(&token.source_pid.to_le_bytes());
+                    sig_input.extend_from_slice(&token.target_pid.to_le_bytes());
+                    sig_input.extend_from_slice(&token.created_at.to_le_bytes());
+                    sig_input.extend_from_slice(&token.expires_at.to_le_bytes());
+                    sig_input.push(token.delegation_depth);
+                    sig_input.push(if token.permissions.read { 1 } else { 0 });
+                    sig_input.push(if token.permissions.write { 1 } else { 0 });
+                    sig_input.push(if token.permissions.execute { 1 } else { 0 });
+                    sig_input.extend_from_slice(&token.resource.encode());
+                    cap_grant_sig = Some(token.signature);
+                    cap_grant_sig_input = Some(sig_input);
+                    break 'grant_search;
+                }
+            }
+        }
+    }
+
     // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
     // Collect all unique vreg IDs from the function's vregs map and also
@@ -575,6 +708,27 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // Zeroed in the prologue (state=Closed, count=0).
     current_offset += 8;
     let cb_state_off: i32 = -(current_offset);
+
+    // Wave C (L2 cap signatures): reserve per-function stack slots for the
+    // compile-time capability signature and signature_input.  These are
+    // populated in the prologue (so both parent and child after fork see
+    // them) from the first capability_grant call's compile-time params.
+    //   cap_sig_off          (32 bytes): the 32-byte FNV-1a×4 signature
+    //   cap_siginput_off     (160 bytes): the signature_input byte vector
+    //     (padded to a multiple of 8; 148 bytes for the default grant +
+    //     4 bytes padding = 152, but we reserve 160 for headroom if the
+    //     signing key or resource encode ever grows)
+    //   cap_siginput_len_off (8 bytes): the sig_input length (u64)
+    //
+    // channel_send_cap reads cap_sig_off to append the signature to the
+    // frame.  channel_recv reads cap_siginput_off + cap_siginput_len_off
+    // to recompute FNV-1a×4 and compare to the received signature.
+    current_offset += 32;
+    let cap_sig_off: i32 = -(current_offset);
+    current_offset += 160;
+    let cap_siginput_off: i32 = -(current_offset);
+    current_offset += 8;
+    let cap_siginput_len_off: i32 = -(current_offset);
 
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
@@ -707,6 +861,47 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // Wave 22/65-72: zero the circuit-breaker state slot (state=Closed=0,
     // count=0). RAX is already zero from the xor above.
     emit(encode_mov_mem_reg(Gpr::Rbp, cb_state_off, Gpr::Rax), "zero_cb_state");
+
+    // Wave C (L2 cap signatures): populate the per-function cap sig slots
+    // from the first capability_grant call's compile-time params.  This runs
+    // in the prologue (not at the grant site) so that BOTH the parent (which
+    // calls grant + send_cap) and the child (which only calls recv, after
+    // fork) have the sig + sig_input on their stack.  If the function has no
+    // capability_grant, the slots stay zeroed (from the RAX=0 above) and the
+    // recv side skips the sig check.
+    if let (Some(sig), Some(sig_input)) = (cap_grant_sig.as_ref(), cap_grant_sig_input.as_ref()) {
+        // Store the 32-byte signature into cap_sig_off (4 × 8-byte stores).
+        for i in 0..4 {
+            let chunk = u64::from_le_bytes([
+                sig[i * 8], sig[i * 8 + 1], sig[i * 8 + 2], sig[i * 8 + 3],
+                sig[i * 8 + 4], sig[i * 8 + 5], sig[i * 8 + 6], sig[i * 8 + 7],
+            ]);
+            emit(encode_mov_reg_imm64(Gpr::Rax, chunk), "cap_sig_imm");
+            emit(encode_mov_mem_reg(Gpr::Rbp, cap_sig_off + (i as i32) * 8, Gpr::Rax), "cap_sig_store");
+        }
+        // Store the sig_input bytes into cap_siginput_off, padded to a
+        // multiple of 8 with zeros.  The slot is 160 bytes; we only write
+        // ceil(sig_input.len() / 8) * 8 bytes (the rest stays zeroed from
+        // the prologue zeroing above — but since the slot was NOT zeroed
+        // by the xor above, we must zero the tail explicitly if the padded
+        // length is less than 160.  In practice the slot is freshly
+        // allocated stack space (sub rsp, frame_size) and its contents are
+        // indeterminate, so we write the full padded length and rely on
+        // the FNV loop only reading sig_input.len() bytes.
+        let padded_len = (sig_input.len() + 7) & !7;
+        for i in 0..(padded_len / 8) {
+            let mut chunk_bytes = [0u8; 8];
+            let start = i * 8;
+            let end = (start + 8).min(sig_input.len());
+            chunk_bytes[..end - start].copy_from_slice(&sig_input[start..end]);
+            let chunk = u64::from_le_bytes(chunk_bytes);
+            emit(encode_mov_reg_imm64(Gpr::Rax, chunk), "cap_siginput_imm");
+            emit(encode_mov_mem_reg(Gpr::Rbp, cap_siginput_off + (i as i32) * 8, Gpr::Rax), "cap_siginput_store");
+        }
+        // Store the sig_input length into cap_siginput_len_off.
+        emit(encode_mov_reg_imm64(Gpr::Rax, sig_input.len() as u64), "cap_siginput_len_imm");
+        emit(encode_mov_mem_reg(Gpr::Rbp, cap_siginput_len_off, Gpr::Rax), "cap_siginput_len_store");
+    }
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -2367,8 +2562,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_recv" if args.len() == 1 && dst.is_some() => {
-                                // Wave 10b: framed read — reads a 56-byte L1
-                                // frame, verifies MAGIC, extracts payload.
+                                // Wave 10b/C: framed read — reads a 56-byte L1
+                                // frame (header+payload+CRC), verifies MAGIC,
+                                // and if cap_count > 0 reads 40 more bytes
+                                // (cap_id + 32-byte FNV-1a×4 signature) and
+                                // verifies the signature (Wave C).
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
@@ -2386,8 +2584,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                                     }
                                 }
-                                // Allocate 56-byte frame buffer.
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                                // Allocate 96-byte frame buffer (56 header+payload+CRC
+                                // + 40 cap_id+sig).  Even when cap_count == 0 we
+                                // allocate 96 to keep the cleanup uniform (the extra
+                                // 40 bytes are unused in that case).  Wave C: the old
+                                // code allocated only 56 and then wrote cap_id at
+                                // [rsp+56] — a stack buffer overflow; this fixes it.
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 96));
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
@@ -2404,23 +2607,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // jne magic_fail (rel32, placeholder)
                                 let jne_magic_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
-                                // Wave 12b: capability verification — if cap_count > 0,
-                                // the message carries a capability token.  Read the
-                                // 8-byte cap_id from the extended frame section
-                                // ([rsp+56..64]) by issuing a second read() for 8
-                                // bytes, then verify the cap_id is non-zero
-                                // (structural check: a valid CapabilityToken has a
-                                // non-zero id field; a zero id means the token is
-                                // absent/forged → PermissionDenied).
+                                // Wave 12b/C: capability verification — if cap_count > 0,
+                                // the message carries a capability token + 32-byte sig.
+                                // Read 40 more bytes (cap_id + sig) into [rsp+56..96],
+                                // verify cap_id != 0 (structural check), then verify
+                                // the FNV-1a×4 signature (Wave C: real crypto check).
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
                                 // je cap_skip (cap_count == 0 → no cap to verify)
                                 let je_cap_skip_patch = code.len();
                                 code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
-                                // cap_count > 0: read 8 more bytes (the cap_id) into [rsp+56].
-                                // RDI still holds read_fd (preserved across the first read).
+                                // cap_count > 0: read 40 more bytes (cap_id + 32-byte sig)
+                                // into [rsp+56..96].  RDI still holds read_fd (preserved
+                                // across the first read — the CRC32 / FNV loops only use
+                                // caller-saved RAX/RCX/RSI/R8-R11).
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 56));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 40));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
                                 code.extend(encode_syscall());
                                 // Verify cap_id ([rsp+56]) is non-zero.
@@ -2433,9 +2635,48 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // je cap_fail (cap_id == 0 → PermissionDenied).
                                 let jne_cap_patch = code.len();
                                 code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32 (placeholder, patched to cap_fail below)
-                                // cap_ok: cap_id is valid (non-zero) → fall through to CRC check.
+                                // cap_ok: cap_id is valid (non-zero) → verify the sig.
                                 let cap_ok_off = code.len();
                                 patch_rel32_jcc(&mut code, jne_cap_ok_patch, cap_ok_off);
+
+                                // Wave C: L2 capability signature verification.
+                                // Recompute FNV-1a×4 over the sig_input (stored at
+                                // [rbp + cap_siginput_off]) with 4 salt bytes (0,1,2,3),
+                                // and compare each 8-byte lane to the received
+                                // signature at [rsp+64..96].  If any lane mismatches,
+                                // jump to cap_sig_fail (-4 = PermissionDenied).
+                                //
+                                // This is a real byte-by-byte FNV-1a computation in
+                                // emitted x86_64 code (emit_fnv1a_64_loop), NOT a
+                                // library call.  The sig_input was embedded in the
+                                // prologue from the same compile-time grant params
+                                // the sender used, so both parent (sender) and child
+                                // (receiver, after fork) compute the same expected sig.
+                                let mut cap_sig_fail_patches: Vec<usize> = Vec::new();
+                                if let Some(ref sig_input) = cap_grant_sig_input {
+                                    let sig_input_len = sig_input.len() as u32;
+                                    for lane in 0u8..4 {
+                                        // Compute FNV-1a over [rbp + cap_siginput_off,
+                                        // len=sig_input_len] with salt=lane.  Result in
+                                        // R8.  Clobbers RAX, RCX, RSI, R9, R10, R11.
+                                        code.extend(emit_fnv1a_64_loop(
+                                            Gpr::Rbp, cap_siginput_off, sig_input_len, lane,
+                                        ));
+                                        // Load received sig[lane*8..lane*8+8] from
+                                        // [rsp + 64 + lane*8] into RCX (64-bit load —
+                                        // the FNV result's upper 32 bits are meaningful).
+                                        code.extend(encode_mov_reg_mem(
+                                            Gpr::Rcx, Gpr::Rsp, 64 + (lane as i32) * 8,
+                                        ));
+                                        // Compare computed (R8) to received (RCX).
+                                        code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                        // jne cap_sig_fail (rel32, placeholder)
+                                        let jne_sig_patch = code.len();
+                                        code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                        cap_sig_fail_patches.push(jne_sig_patch);
+                                    }
+                                }
+
                                 // cap_skip: cap_count == 0 → no cap to verify.
                                 let cap_skip_off = code.len();
                                 patch_rel32_jcc(&mut code, je_cap_skip_patch, cap_skip_off);
@@ -2456,6 +2697,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
                                 // jmp cleanup (rel32, placeholder)
                                 let jmp_cleanup_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // cap_sig_fail (Wave C): store -4 (PermissionDenied).
+                                let cap_sig_fail_off = code.len();
+                                for patch in &cap_sig_fail_patches {
+                                    patch_rel32_jcc(&mut code, *patch, cap_sig_fail_off);
+                                }
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFC)); // -4
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                // jmp cleanup (rel32, placeholder)
+                                let jmp_cleanup_from_sig_patch = code.len();
                                 code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
                                 // crc_fail (Wave 10b): store -6 (CRC_MISMATCH) sentinel.
                                 let crc_fail_off = code.len();
@@ -2499,7 +2750,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code[jmp_cleanup_patch+4] = bd[3];
                                 // Wave 10b: patch crc_fail → cleanup jump.
                                 patch_rel32_jmp(&mut code, jmp_cleanup_from_crc_patch, cleanup_off);
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+                                // Wave C: patch cap_sig_fail → cleanup jump.
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_sig_patch, cleanup_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 96));
                                 instr_opcode = Some("channel_recv".to_string());
                                 channel_builtin_matched = true;
                             }
@@ -3040,18 +3293,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("set_memory_limit".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 12b: capability_grant(resource_id, perms) -> u64
+                            // Wave 12b / Wave C: capability_grant(resource_id, perms) -> u64
                             // Mints a CapabilityToken at compile time via
                             // ipc::capability::grant_capability and returns its
                             // id (low 64 bits of the u128) as an immediate.  The
                             // caller passes this id to channel_send_cap(ch, msg, cap_id)
                             // to attach the capability to a framed message.
                             //
-                            // This is a compile-time operation: the token is
-                            // minted in the compiler and only its 64-bit id is
-                            // materialised in the emitted code (the full 160-byte
-                            // token is not embedded inline — the structural
-                            // verification on recv checks the id field).
+                            // Wave C: the 32-byte FNV-1a×4 signature and the
+                            // signature_input byte vector are NOT embedded here
+                            // at the grant site.  They are embedded in the
+                            // PROLOGUE (see Phase 0.5 + prologue code above) so
+                            // that both the parent (which calls grant + send_cap)
+                            // and the child (which only calls recv, after fork)
+                            // have them available on their stack.  This grant
+                            // site only materialises the 64-bit cap_id.
                             "capability_grant" if args.len() == 2 && dst.is_some() => {
                                 // Extract resource_id and perms as compile-time
                                 // constants (they must be immediates for the
@@ -3093,16 +3349,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("capability_grant".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 12b: channel_send_cap(ch, msg, cap_id) —
+                            // Wave 12b / Wave C: channel_send_cap(ch, msg, cap_id) —
                             // Like channel_send but attaches a capability token
-                            // (cap_count=1).  The frame is extended to 64 bytes:
+                            // (cap_count=1).  The frame is 96 bytes:
                             //   [0..44)   header (cap_count field at [40..44] = 1)
                             //   [44..52)  payload (8 bytes)
                             //   [52..56)  CRC32 (over [0..52])
                             //   [56..64)  capability id (8 bytes)
+                            //   [64..96)  32-byte FNV-1a×4 signature (Wave C)
                             // The receiver (ChannelRecv) reads 56 bytes, sees
-                            // cap_count=1, reads 8 more bytes, and verifies the
-                            // cap_id is non-zero (structural check).
+                            // cap_count=1, reads 40 more bytes (cap_id + sig),
+                            // checks cap_id != 0, then recomputes FNV-1a×4 over
+                            // the signature_input and compares to the received
+                            // sig (Wave C: real signature verification).
                             "channel_send_cap" if args.len() == 3 => {
                                 let ch = &args[0];
                                 let msg = &args[1];
@@ -3122,8 +3381,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                                     }
                                 }
-                                // Build 64-byte frame on stack.
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 64));
+                                // Build 96-byte frame on stack (64 header+payload+CRC+cap_id
+                                // + 32-byte signature).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 96));
                                 // [rsp+0] = MAGIC
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x414D5556));
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax));
@@ -3162,12 +3422,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // capability section.
                                 code.extend(load_value(cap, Gpr::Rax));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 56, Gpr::Rax));
-                                // write(write_fd, &frame, 64)
+                                // [rsp+64..96] = 32-byte FNV-1a×4 signature (Wave C).
+                                // Copy from the per-function cap_sig_off slot
+                                // (populated in the prologue from the compile-time
+                                // grant params).  4 × 8-byte loads + stores.
+                                for i in 0..4 {
+                                    code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, cap_sig_off + (i as i32) * 8));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 64 + (i as i32) * 8, Gpr::Rax));
+                                }
+                                // write(write_fd, &frame, 96)
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 64));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 96));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
                                 code.extend(encode_syscall());
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 64));
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 96));
                                 instr_opcode = Some("channel_send_cap".to_string());
                                 channel_builtin_matched = true;
                             }
