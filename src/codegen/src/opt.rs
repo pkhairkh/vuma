@@ -2649,8 +2649,26 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
 }
 
 /// Compute a structural hash of a function for ICF.
-/// Includes instruction types AND operands (immediates and call targets)
-/// to prevent unsound merging of semantically different functions.
+///
+/// Includes instruction types AND semantically-relevant operands:
+///   - immediates (full value — two `return 0` / `return 1` functions
+///     MUST hash differently, or ICF will wrongly merge them and
+///     corrupt call sites),
+///   - call targets (so `fn a(){foo()}` ≠ `fn b(){bar()}`),
+///   - alloc sizes, field offsets, type tags,
+///   - terminator operands (return values, branch conditions, switch
+///     discriminants and case values).
+///
+/// Vreg IDs are NOT stable across functions (they're assigned by
+/// `alloc_vreg` in declaration order, which can differ between two
+/// functions with the same shape but different constant paths), so
+/// vregs are folded in via their Debug repr. This makes the hash
+/// conservative: two functions with the same body shape but different
+/// vreg-numbering will hash differently and NOT be merged — a missed
+/// optimization, but never a miscompile. The alternative (normalizing
+/// vregs by SSA-renumber) would risk merging functions that differ
+/// only in a constant, which is the unsound failure this function
+/// previously had.
 fn compute_function_hash(func: &IRFunction) -> String {
     let mut parts = Vec::new();
     parts.push(format!("p{}", func.params.len()));
@@ -2674,7 +2692,10 @@ fn compute_function_hash(func: &IRFunction) -> String {
                 IRInstr::Cast { dst, src, .. } => format!("cast:{:?}:{:?}", dst, src),
                 IRInstr::Offset { dst, base, offset } => format!("offset:{:?}:{:?}:{:?}", dst, base, offset),
                 IRInstr::Select { dst, cond, .. } => format!("select:{:?}:{:?}", dst, cond),
-                IRInstr::Ret { .. } => "ret".to_string(),
+                // CRITICAL: include the returned values — `return 0` ≠ `return 1`.
+                // Previously this was just "ret", which made ICF merge `fn ok(){return 0}`
+                // with `fn fail(){return 1}`, corrupting every call site of `fail`.
+                IRInstr::Ret { values } => format!("ret:{:?}", values),
                 IRInstr::Branch { .. } => "branch".to_string(),
                 IRInstr::CondBranch { .. } => "condbranch".to_string(),
                 IRInstr::Free { .. } => "free".to_string(),
@@ -2690,10 +2711,14 @@ fn compute_function_hash(func: &IRFunction) -> String {
             });
         }
         parts.push(match &block.terminator {
+            // CRITICAL: include terminator operands. Return values,
+            // branch conditions, and switch discriminants are all
+            // semantically significant — two functions that return
+            // different constants must NOT merge.
             IRTerminator::Jump(_) => "jmp".to_string(),
-            IRTerminator::Branch { .. } => "br".to_string(),
-            IRTerminator::Return(_) => "ret".to_string(),
-            IRTerminator::TailCall { .. } => "tailcall".to_string(),
+            IRTerminator::Branch { cond, .. } => format!("br:{:?}", cond),
+            IRTerminator::Return(vals) => format!("ret:{:?}", vals),
+            IRTerminator::TailCall { func, args } => format!("tailcall:{}:{}", func, args.len()),
             IRTerminator::Unreachable => "unreachable".to_string(),
             _ => "otherterm".to_string(),
         });

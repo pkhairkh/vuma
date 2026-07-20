@@ -1,22 +1,53 @@
-// fault_tolerance — Wave 65-72: fault tolerance via circuit_breaker_call.
+// fault_tolerance — Wave 22 + 65-72: circuit breaker with a real
+// Closed/Open/HalfOpen state machine.
 //
-// The circuit_breaker_call(fn_ptr, max_retries) builtin retries a failing
-// function up to max_retries times. The function (whose address is in
-// fn_ptr) is invoked via an indirect `call r10`. If the function returns
-// 0 (success), the breaker returns 0 (not tripped). If all max_retries
-// attempts fail (return non-zero), the breaker trips and returns 1.
+// circuit_breaker_call(fn_ptr, threshold) calls fn_ptr ONCE (not a retry
+// loop) and drives a per-function state machine matching the library
+// CircuitBreaker (ipc.rs):
+//   - Closed:  calls proceed; each failure increments the count; when
+//              count STRICTLY EXCEEDS threshold the breaker trips to Open.
+//   - Open:    calls are REJECTED (short-circuit return 1, fn_ptr is
+//              NOT invoked). This is the fault-isolation boundary.
+//   - HalfOpen: one probe call is allowed; success closes the breaker,
+//              a single failure re-opens it.
+// circuit_breaker_reset() transitions Open -> HalfOpen (no-op otherwise).
+// circuit_breaker_state() returns 0=Closed, 1=Open, 2=HalfOpen.
 //
-// Flow:
-//   1. Define a `fail` function that always returns 1 (failure).
-//   2. Call circuit_breaker_call(fail, 3) — retries fail() 3 times.
-//   3. All 3 attempts fail (return 1), so the breaker trips and returns 1.
-//   4. The test exits 1 (breaker tripped).
+// Flow (threshold = 2):
+//   1. fail() always returns 1.
+//   2. circuit_breaker_call(fail, 2): Closed, fail returns 1, count=1,
+//      1 > 2? no -> stay Closed, return 0.
+//   3. circuit_breaker_call(fail, 2): Closed, fail returns 1, count=2,
+//      2 > 2? no -> stay Closed, return 0.
+//   4. circuit_breaker_call(fail, 2): Closed, fail returns 1, count=3,
+//      3 > 2? YES -> trip to Open, return 1.
+//   5. circuit_breaker_state() == 1 (Open).
+//   6. circuit_breaker_call(fail, 2): Open -> short-circuit return 1,
+//      fail() is NOT called.
+//   7. circuit_breaker_reset(): Open -> HalfOpen, return 0.
+//   8. circuit_breaker_state() == 2 (HalfOpen).
+//   9. ok() always returns 0.
+//  10. circuit_breaker_call(ok, 2): HalfOpen, ok returns 0 ->
+//      record_success -> Closed, return 0.
+//  11. circuit_breaker_state() == 0 (Closed).
+//  12. Exit with the final state (0 = Closed = success).
 //
-// Expected exit code: 1
+// Expected exit code: 0
 fn fail() -> i64 {
     return 1;
 }
+fn ok() -> i64 {
+    return 0;
+}
 fn main() -> i32 {
-    r = circuit_breaker_call(fail, 3);
-    return r as i32;
+    r = circuit_breaker_call(fail, 2);
+    r = circuit_breaker_call(fail, 2);
+    r = circuit_breaker_call(fail, 2);
+    s = circuit_breaker_state();
+    r = circuit_breaker_call(fail, 2);
+    r = circuit_breaker_reset();
+    s = circuit_breaker_state();
+    r = circuit_breaker_call(ok, 2);
+    s = circuit_breaker_state();
+    return s as i32;
 }
