@@ -1938,10 +1938,19 @@ impl Instruction {
             // ---- SCVTF (signed integer to float) ----
             // Encoding format (Floating-point conversion from integer):
             //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=10 [21:20]
-            //   opcode=0010 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //   opcode=0010 [19:16] 0 [15] 00000 [14:10] Rn [9:5] Rd [4:0]
             //
             //   sf = src_64 (1 for 64-bit int source, 0 for 32-bit)
             //   type = dst_double (01 for double, 00 for single)
+            //
+            // NOTE: The Rn field is at bits[9:5] (the standard register
+            // position), NOT bits[14:10] as a literal reading of the ARM
+            // ARM "sf 0 0 11110 type 1 1 opcode 0 0 Rn 0 0 0 0 0 Rd"
+            // notation might suggest. The bits[14:10] field is the fixed
+            // `00000` constant. Empirically verified on QEMU 10.0.11:
+            // encodings with non-zero bits[14:10] are UNALLOCATED and raise
+            // SIGILL. See also FMOV_DX/FCVT which correctly place Rn at
+            // bits[9:5].
             Instruction::SCVTF {
                 rd,
                 rn,
@@ -1950,24 +1959,19 @@ impl Instruction {
             } => {
                 // SCVTF (integer to floating-point):
                 //   sf 0 0 11110 type 1 1 opcode 0 00000 Rn 00000 Rd
-                //   bits 31: sf | 30-29: 00 | 28-24: 11110 | 23-22: type
-                //   bit 21: 1 | bit 20: 1 | 19-16: opcode=0010 | bit 15: 0
-                //   14-10: Rn | 9-5: 00000 (fixed) | 4-0: Rd
-                // Base: 0x1E620000 (type=01 double; for single, bit 22=0)
-                // NOTE: Rn is at bits[14:10] (NOT bits[9:5] as in most
-                // register-register encodings). The decoder reads Rn from
-                // bits[14:10] via `(word >> 10) & 0x1F`.
+                //   Base: 0x1E620000 (type=01 double; for single, bit 22=0)
+                //   Rn at bits[9:5] (standard register position).
                 Ok(0x1E620000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
             // ---- FCVTZS (float to signed integer) ----
             // Encoding format (Floating-point conversion from integer):
             //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=11 [21:20]
-            //   opcode=1000 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //   opcode=1000 [19:16] 0 [15] 00000 [14:10] Rn [9:5] Rd [4:0]
             //
             //   sf = dst_64 (1 for 64-bit int destination, 0 for 32-bit)
             //   type = src_double (01 for double, 00 for single)
@@ -1980,18 +1984,18 @@ impl Instruction {
                 // FCVTZS (floating-point to signed integer):
                 //   sf 0 0 11110 type 1 1 opcode 0 00000 Rn 00000 Rd
                 //   Base 0x1E380000 (rmode=11, opcode=1000).
-                //   Rn at bits[14:10] (NOT [9:5]).
+                //   Rn at bits[9:5] (standard register position).
                 Ok(0x1E380000u32
                     | ((*dst_64 as u32) << 31)
                     | ((*src_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
             // ---- UCVTF (unsigned integer to float) ----
             // Encoding format (Floating-point conversion from integer):
             //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=10 [21:20]
-            //   opcode=0011 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //   opcode=0011 [19:16] 0 [15] 00000 [14:10] Rn [9:5] Rd [4:0]
             //
             //   sf = src_64 (1 for 64-bit int source, 0 for 32-bit)
             //   type = dst_double (01 for double, 00 for single)
@@ -2003,18 +2007,18 @@ impl Instruction {
             } => {
                 // UCVTF (unsigned integer to floating-point):
                 //   Same layout as SCVTF but opcode=0011.
-                //   Base: 0x1E630000. Rn at bits[14:10].
+                //   Base: 0x1E630000. Rn at bits[9:5].
                 Ok(0x1E630000u32
                     | ((*src_64 as u32) << 31)
                     | ((*dst_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
             // ---- FCVTZU (float to unsigned integer) ----
             // Encoding format (Floating-point conversion from integer):
             //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=11 [21:20]
-            //   opcode=1001 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //   opcode=1001 [19:16] 0 [15] 00000 [14:10] Rn [9:5] Rd [4:0]
             //
             //   sf = dst_64 (1 for 64-bit int destination, 0 for 32-bit)
             //   type = src_double (01 for double, 00 for single)
@@ -2026,11 +2030,11 @@ impl Instruction {
             } => {
                 // FCVTZU (floating-point to unsigned integer):
                 //   Same layout as FCVTZS but opcode=1001.
-                //   Base: 0x1E390000. Rn at bits[14:10].
+                //   Base: 0x1E390000. Rn at bits[9:5].
                 Ok(0x1E390000u32
                     | ((*dst_64 as u32) << 31)
                     | ((*src_double as u32) << 22)
-                    | (rn.encoding() << 10)
+                    | (rn.encoding() << 5)
                     | rd.encoding())
             }
 
@@ -3081,14 +3085,23 @@ impl Instruction {
         }
 
         // ---- Floating-point conversion (integer <-> float) ----
-        // Encoding family: sf 00 11110 type rmode opcode 0 Rn 00000 Rd
-        // Variable bits: 31 (sf), 22 (low bit of type), 14-10 (Rn), 4-0 (Rd).
-        // Fixed-bit mask: 0x7FBF83E0.
+        // Encoding family: sf 00 11110 type rmode opcode 0 00000 Rn Rd
+        // Variable bits: 31 (sf), 22 (low bit of type), 9-5 (Rn), 4-0 (Rd).
+        // Fixed-bit mask: 0x7FBFFC00.
         //   SCVTF  base 0x1E220000 (rmode=10, opcode=0010): signed int -> float
         //   UCVTF  base 0x1E230000 (rmode=10, opcode=0011): unsigned int -> float
         //   FCVTZS base 0x1E380000 (rmode=11, opcode=1000): float -> signed int
         //   FCVTZU base 0x1E390000 (rmode=11, opcode=1001): float -> unsigned int
-        let fp_conv_masked = word & 0x7FBF83E0;
+        //
+        // NOTE: Rn is at bits[9:5] (the standard register position),
+        // NOT bits[14:10]. The bits[14:10] field is the fixed `00000`
+        // constant. The earlier decoder read Rn from bits[14:10] which
+        // silently parsed UNALLOCATED encodings (those with non-zero
+        // bits[14:10]) as if they had Rn=0. After the encoder was fixed
+        // to write Rn at bits[9:5], the decoder must read from the same
+        // position. Verified on QEMU 10.0.11: instructions with non-zero
+        // bits[14:10] raise SIGILL.
+        let fp_conv_masked = word & 0x7FBFFC00;
         if fp_conv_masked == 0x1E220000
             || fp_conv_masked == 0x1E230000
             || fp_conv_masked == 0x1E380000
@@ -3096,11 +3109,11 @@ impl Instruction {
         {
             let sf = (word >> 31) & 0x1;
             let type_low = (word >> 22) & 0x1;
-            // For these encodings the Rn field is bits[14:10] (see encoder at
-            // arm64.rs:1848+); pull it directly rather than using the `rn`
-            // local (which is bits[9:5] and applies to register-register ops).
-            let rn_field = (word >> 10) & 0x1F;
-            let rn_reg = Register::from_encoding(rn_field)?;
+            // Rn is at bits[9:5] — the standard register position shared
+            // with the decoder's `rn` local extracted at the top of
+            // `decode`. We reuse `rn` directly rather than re-extracting
+            // from a different bit position.
+            let rn_reg = Register::from_encoding(rn)?;
             let rd_reg = Register::from_encoding(rd)?;
             return Some(match fp_conv_masked {
                 0x1E220000 => Instruction::SCVTF {
@@ -5547,6 +5560,75 @@ mod tests {
         assert_eq!(format!("{}", instrs[0]), "fcvtzu w2, s3");
     }
 
+    // ---- Regression: SCVTF/FCVTZS/UCVTF/FCVTZU Rn field position ----
+    // Earlier code mistakenly placed Rn at bits[14:10] (which is the fixed
+    // `00000` constant field) instead of bits[9:5] (the standard register
+    // position). This produced UNALLOCATED encodings for any non-zero Rn
+    // and caused SIGILL on aarch64 hardware/QEMU (e.g., fp_bench.vuma).
+    // Verified empirically on QEMU 10.0.11: encodings with non-zero
+    // bits[14:10] are UNALLOCATED. See worklog entry for fix-aarch64-fp-crash.
+    #[test]
+    fn test_fp_conversion_rn_position() {
+        // SCVTF D0, X9 (signed int64 → f64). Rn=9 must land at bits[9:5].
+        let scvtf = Instruction::SCVTF {
+            rd: Register::X0,
+            rn: Register::X9,
+            src_64: true,
+            dst_double: true,
+        };
+        let enc = scvtf.encode().unwrap();
+        // 0x9E620000 | (1<<31) | (1<<22) | (9<<5) | 0 = 0x9E620120
+        assert_eq!(enc, 0x9E620120);
+        // bits[14:10] (the fixed field) must be zero
+        assert_eq!((enc >> 10) & 0x1F, 0, "bits[14:10] must be zero");
+        // bits[9:5] (Rn) must equal 9
+        assert_eq!((enc >> 5) & 0x1F, 9, "bits[9:5] must hold Rn=9");
+        // round-trip via decoder
+        let decoded = Instruction::decode(enc).expect("SCVTF should decode");
+        assert_eq!(format!("{}", decoded), "scvtf d0, x9");
+
+        // FCVTZS X0, D9 (f64 → int64). Rn=9 must land at bits[9:5].
+        let fcvtzs = Instruction::FCVTZS {
+            rd: Register::X0,
+            rn: Register::X9,
+            dst_64: true,
+            src_double: true,
+        };
+        let enc = fcvtzs.encode().unwrap();
+        // 0x1E380000 | (1<<31) | (1<<22) | (9<<5) | 0 = 0x9E780120
+        assert_eq!(enc, 0x9E780120);
+        assert_eq!((enc >> 10) & 0x1F, 0, "bits[14:10] must be zero");
+        assert_eq!((enc >> 5) & 0x1F, 9, "bits[9:5] must hold Rn=9");
+        let decoded = Instruction::decode(enc).expect("FCVTZS should decode");
+        assert_eq!(format!("{}", decoded), "fcvtzs x0, d9");
+
+        // UCVTF D0, X9. Rn=9 must land at bits[9:5].
+        let ucvtf = Instruction::UCVTF {
+            rd: Register::X0,
+            rn: Register::X9,
+            src_64: true,
+            dst_double: true,
+        };
+        let enc = ucvtf.encode().unwrap();
+        // 0x1E630000 | (1<<31) | (1<<22) | (9<<5) | 0 = 0x9E630120
+        assert_eq!(enc, 0x9E630120);
+        assert_eq!((enc >> 10) & 0x1F, 0, "bits[14:10] must be zero");
+        assert_eq!((enc >> 5) & 0x1F, 9, "bits[9:5] must hold Rn=9");
+
+        // FCVTZU X0, D9. Rn=9 must land at bits[9:5].
+        let fcvtzu = Instruction::FCVTZU {
+            rd: Register::X0,
+            rn: Register::X9,
+            dst_64: true,
+            src_double: true,
+        };
+        let enc = fcvtzu.encode().unwrap();
+        // 0x1E390000 | (1<<31) | (1<<22) | (9<<5) | 0 = 0x9E790120
+        assert_eq!(enc, 0x9E790120);
+        assert_eq!((enc >> 10) & 0x1F, 0, "bits[14:10] must be zero");
+        assert_eq!((enc >> 5) & 0x1F, 9, "bits[9:5] must hold Rn=9");
+    }
+
     // ---- Test 22: Cast — FCVT (float↔float width change) instruction selection ----
     #[test]
     fn select_cast_float_to_float() {
@@ -5998,7 +6080,9 @@ mod tests {
         };
         assert_eq!(format!("{}", fmov_dx), "fmov d8, x0");
         let fmov_enc = fmov_dx.encode().unwrap();
-        assert_eq!(fmov_enc, 0x9E670000 | (0u32 << 10) | 8);
+        // FMOV D8, X0: base 0x9E670000 | (Rn=0 << 5) | (vd=8)
+        // Rn at bits[9:5] (standard register position) — same as SCVTF/FCVTZS.
+        assert_eq!(fmov_enc, 0x9E670000 | (0u32 << 5) | 8);
 
         // CNT V8.8B, V8.8B: count bits per byte
         let cnt = Instruction::CNT { vd: 8, vn: 8 };
@@ -6033,7 +6117,9 @@ mod tests {
         };
         assert_eq!(format!("{}", fmov_xd), "fmov x0, d8");
         let fmov_xd_enc = fmov_xd.encode().unwrap();
-        assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 10) | 0);
+        // FMOV X0, D8: base 0x9E6F0000 | (vn=8 << 5) | (rd=0)
+        // Vn at bits[9:5] (standard register position).
+        assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 5) | 0);
     }
 
     // ── NEON SIMD Encoder Tests (Wave 29) ──────────────────────────────
