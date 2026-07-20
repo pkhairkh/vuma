@@ -819,6 +819,33 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let irq_table_count_off: i32 = -(current_offset);
 
+    // Wave G (Hot Reload — real hot-swap state machine): per-function module
+    // version table + entry-count slot.  This is the codegen-side analogue of
+    // the library HotSwapManager (ipc.rs:3569), which tracks
+    // `active_versions: HashMap<String,u32>` and validates:
+    //   - new_version > old_version (else ProtocolViolation)
+    //   - active_versions[name] == old_version (else concurrent-swap race,
+    //     ProtocolViolation)
+    // The previous codegen implementation of hot_swap_trigger just wrote an
+    // 8-byte module_id to /tmp/vuma_hotswap.bin — no version tracking, no
+    // validation, no rollback.  This is replaced by a REAL per-function stack
+    // table that hot_swap_register / hot_swap_trigger / hot_swap_rollback
+    // scan and mutate at runtime.
+    //
+    // Layout (8 entries × 16 bytes = 128 bytes):
+    //   [rbp + hotswap_table_off +  i*16 + 0]: module_id (u64)
+    //   [rbp + hotswap_table_off +  i*16 + 8]: version    (u64, active version)
+    //   [rbp + hotswap_table_count_off      ]: count      (u64, # filled slots)
+    //
+    // Zeroed in the prologue so each function starts with an empty table.
+    // The 128-byte table data itself is left uninitialized — readers only
+    // touch slots [0..count), so uninitialized data past count is never
+    // observed.
+    current_offset += 128;
+    let hotswap_table_off: i32 = -(current_offset);
+    current_offset += 8;
+    let hotswap_table_count_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -1001,6 +1028,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // as a defensive sentinel (irq=0 cannot match any real vector >= 1).
     emit(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax), "xor_rax_zero_irq");
     emit(encode_mov_mem_reg(Gpr::Rbp, irq_table_count_off, Gpr::Rax), "zero_irq_table_count");
+
+    // Wave G (Hot Reload): zero the per-function hot-swap version-table count
+    // slot so each function starts with an empty module-version table
+    // (count = 0).  The 128-byte table data itself is left uninitialized —
+    // hot_swap_register / hot_swap_trigger / hot_swap_rollback only touch
+    // slots [0..count), so uninitialized data past count is never observed.
+    // RAX is already 0 from the xor above.
+    emit(encode_mov_mem_reg(Gpr::Rbp, hotswap_table_count_off, Gpr::Rax), "zero_hotswap_table_count");
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -4789,50 +4824,326 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("circuit_breaker_state".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 73-80 (Hot Reloading):
-                            // hot_swap_trigger(module_id) -> i64
+                            // Wave 73-80 / Wave G (Hot Reloading — real hot-swap
+                            // state machine):
+                            // hot_swap_register(module_id, version) -> u64
                             //
-                            // Writes an 8-byte swap request (the module_id)
-                            // to /tmp/vuma_hotswap.bin. Mirrors checkpoint_save
-                            // but uses a distinct path so the hot-swap daemon
-                            // can poll for swap requests independently of
-                            // checkpoint state. Returns 1 on success.
-                            "hot_swap_trigger" if args.len() == 1 => {
-                                let value = &args[0];
-                                // Build the path "/tmp/vuma_hotswap.bin\0" on stack.
-                                // 22 bytes + null = 23 bytes; round up to 32 for alignment.
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 32));
-                                // "/tmp/vum" = 0x6D75762F706D742F
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
-                                // "a_hotswa" = 0x617773746F685F61
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x617773746F685F61));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                // "p.bin\0\0\0" = 0x0000006E69622E70
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x0000006E69622E70));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
-                                // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
-                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x241));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0o644));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
-                                code.extend(encode_syscall());
-                                // RAX = fd. Save to [rsp+24].
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
-                                // write(fd, &value, 8) — store value at [rsp+8].
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 24));
-                                code.extend(load_value(value, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                            // Registers (module_id, version) in the next free
+                            // slot of the per-function hot-swap version table
+                            // at [rbp + hotswap_table_off].  Mirrors the
+                            // library HotSwapManager (ipc.rs:3569) seeding of
+                            // active_versions[name] = version.  Returns:
+                            //   1 — registered (new entry added)
+                            //   0 — already registered (module_id exists) OR
+                            //       table full (8 entries already)
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = module_id (survives scan)
+                            //   R8  = version              (caller-saved, preserved across scan)
+                            //   RCX = count (loop bound)
+                            //   RAX = loop index i
+                            //   R10 = slot address for current iteration
+                            //   RDX = scratch (module_id at current slot)
+                            "hot_swap_register" if args.len() == 2 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Push RBX (callee-saved) — we use it for
+                                // module_id, which must survive the scan.
+                                code.extend(encode_push(Gpr::Rbx));
+                                // Load args into preserved registers.
+                                code.extend(load_value(&args[0], Gpr::Rbx));  // RBX = module_id
+                                code.extend(load_value(&args[1], Gpr::R8));   // R8  = version
+                                // RCX = count (loop bound).
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, hotswap_table_count_off));
+                                // RAX = i = 0 (loop index).
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // ── loop_start ──
+                                let loop_start_off = code.len();
+                                // cmp rax, rcx  (i vs count)
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jae not_found (rel32 placeholder) — i >= count, no match
+                                let jae_not_found_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32
+                                // Compute slot address: R10 = table_base + i*16.
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, hotswap_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));  // RDX = i
+                                // RDX *= 16 via four add rdx,rdx.
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rdx));  // R10 = slot_addr
+                                // Load module_id from [slot+0] into RDX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::R10, 0));
+                                // cmp rdx, rbx  (slot's module_id vs arg module_id)
+                                code.extend(encode_cmp_reg_reg(Gpr::Rdx, Gpr::Rbx));
+                                // je already_registered (rel32 placeholder) — match
+                                let je_already_reg_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                // Increment i and continue loop.
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                // jmp loop_start (rel32 placeholder)
+                                let jmp_loop_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── not_found: try to register ──
+                                let not_found_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_not_found_patch, not_found_off);
+                                // RAX == count here.  If table full (count >= 8),
+                                // return 0.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 8));
+                                // jae full (rel32 placeholder)
+                                let jae_full_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32
+                                // Compute slot address: R10 = table_base + RAX*16.
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, hotswap_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));  // RDX = count
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rdx));  // R10 = slot_addr
+                                // Store (module_id, version) at [slot+0] and [slot+8].
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 0, Gpr::Rbx));  // module_id
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 8, Gpr::R8));   // version
+                                // Increment count (RAX = count + 1) and store back.
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, hotswap_table_count_off, Gpr::Rax));
+                                // Return 1 (registered).
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
-                                code.extend(encode_syscall());
-                                // close(fd)
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 24));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
-                                code.extend(encode_syscall());
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 32));
+                                // jmp done (rel32 placeholder)
+                                let jmp_done_from_reg_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── already_registered: return 0 ──
+                                let already_reg_off = code.len();
+                                patch_rel32_jcc(&mut code, je_already_reg_patch, already_reg_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // RAX = 0
+                                // jmp done (rel32 placeholder)
+                                let jmp_done_from_ar_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── full: return 0 ──
+                                let full_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_full_patch, full_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // RAX = 0
+                                // ── done: store rax to dst, pop rbx ──
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_loop_patch, loop_start_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_reg_patch, done_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_ar_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
+                                instr_opcode = Some("hot_swap_register".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 73-80 / Wave G (Hot Reloading — real hot-swap
+                            // state machine):
+                            // hot_swap_trigger(module_id, old_version, new_version) -> i64
+                            //
+                            // Validates and applies a hot-swap (version
+                            // upgrade) for `module_id`.  Mirrors the library
+                            // HotSwapManager::perform_swap (ipc.rs:3569):
+                            //   1. Validate new_version > old_version
+                            //      (else ProtocolViolation = -5).
+                            //   2. Scan the per-function table for module_id:
+                            //      - not found: auto-register the module at
+                            //        new_version (first-swap seeding), return 1.
+                            //      - found: verify stored_version == old_version
+                            //        (else concurrent-swap race → -5), then
+                            //        update stored_version to new_version,
+                            //        return 1.
+                            // No file I/O — the table is purely in-memory on
+                            // the stack, matching the library's in-memory
+                            // active_versions HashMap.  (The previous
+                            // implementation wrote an 8-byte module_id to
+                            // /tmp/vuma_hotswap.bin with no version checking
+                            // and no rollback — that file write is removed.)
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = module_id (survives scan)
+                            //   R8  = old_version (caller-saved, preserved across scan)
+                            //   R9  = new_version (caller-saved, preserved across scan)
+                            //   RCX = count (loop bound)
+                            //   RAX = loop index i
+                            //   R10 = slot address for current iteration
+                            //   RDX = scratch (module_id / stored_version)
+                            "hot_swap_trigger" if args.len() == 3 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Push RBX (callee-saved) — we use it for
+                                // module_id, which must survive the scan.
+                                code.extend(encode_push(Gpr::Rbx));
+                                // Load args into preserved registers.
+                                code.extend(load_value(&args[0], Gpr::Rbx));  // RBX = module_id
+                                code.extend(load_value(&args[1], Gpr::R8));   // R8  = old_version
+                                code.extend(load_value(&args[2], Gpr::R9));   // R9  = new_version
+                                // ── Validate new_version > old_version ──
+                                // cmp r9, r8  (new - old); jbe protocol_violation
+                                // (jump if new <= old, unsigned — versions are u64).
+                                code.extend(encode_cmp_reg_reg(Gpr::R9, Gpr::R8));
+                                let jbe_pv_patch = code.len();
+                                code.extend(&[0x0F, 0x86, 0x00, 0x00, 0x00, 0x00]); // jbe rel32
+                                // ── Scan table for module_id ──
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, hotswap_table_count_off));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // ── loop_start ──
+                                let loop_start_off = code.len();
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                let jae_not_found_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32
+                                // R10 = table_base + i*16
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, hotswap_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));  // RDX = i
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rdx));  // R10 = slot_addr
+                                // Load module_id from [slot+0] into RDX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::R10, 0));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rdx, Gpr::Rbx));
+                                let je_found_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                let jmp_loop_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── not_found: auto-register at new_version ──
+                                let not_found_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_not_found_patch, not_found_off);
+                                // RAX == count.  If table full, return -5
+                                // (ProtocolViolation — cannot seed new module).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 8));
+                                let jae_pv_full_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32
+                                // R10 = table_base + RAX*16
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, hotswap_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));  // RDX = count
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rdx));  // R10 = slot_addr
+                                // Store (module_id, new_version) at [slot+0]/[slot+8].
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 0, Gpr::Rbx));  // module_id
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 8, Gpr::R9));   // new_version
+                                // Increment count, store back.
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, hotswap_table_count_off, Gpr::Rax));
+                                // Return 1 (success).
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                let jmp_done_from_autoreg_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── found: validate stored_version == old_version ──
+                                let found_off = code.len();
+                                patch_rel32_jcc(&mut code, je_found_patch, found_off);
+                                // Load stored_version from [R10+8] into RDX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::R10, 8));
+                                // cmp rdx, r8  (stored - old_version); jne race
+                                code.extend(encode_cmp_reg_reg(Gpr::Rdx, Gpr::R8));
+                                let jne_race_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Versions match — update stored_version to new_version.
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 8, Gpr::R9));
+                                // Return 1 (success).
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                let jmp_done_from_ok_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── protocol_violation: return -5 ──
+                                // 0xFFFFFFFFFFFFFFFB = -5 as i64
+                                let pv_off = code.len();
+                                patch_rel32_jcc(&mut code, jbe_pv_patch, pv_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFB));
+                                let jmp_done_from_pv_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── race: return -5 (concurrent-swap race) ──
+                                let race_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_race_patch, race_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFB));
+                                let jmp_done_from_race_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── pv_full: return -5 (table full, cannot seed) ──
+                                let pv_full_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_pv_full_patch, pv_full_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFB));
+                                // Fall through to done.
+                                // ── done: store rax to dst, pop rbx ──
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_loop_patch, loop_start_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_autoreg_patch, done_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_ok_patch, done_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_pv_patch, done_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_race_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("hot_swap_trigger".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 73-80 / Wave G (Hot Reloading — real hot-swap
+                            // state machine):
+                            // hot_swap_rollback(module_id, old_version) -> i64
+                            //
+                            // Rolls back the active version of `module_id` to
+                            // `old_version`.  Mirrors the library
+                            // HotSwapManager::rollback (ipc.rs:3569): restores
+                            // active_versions[name] = old_version.  Returns:
+                            //   1  — rolled back successfully
+                            //   -3 — WorkerNotFound (module_id not in table),
+                            //        matching the library's IpcError::WorkerNotFound
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = module_id (survives scan)
+                            //   R8  = old_version (caller-saved, preserved across scan)
+                            //   RCX = count (loop bound)
+                            //   RAX = loop index i
+                            //   R10 = slot address for current iteration
+                            //   RDX = scratch (module_id at current slot)
+                            "hot_swap_rollback" if args.len() == 2 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Push RBX (callee-saved) — we use it for
+                                // module_id, which must survive the scan.
+                                code.extend(encode_push(Gpr::Rbx));
+                                code.extend(load_value(&args[0], Gpr::Rbx));  // RBX = module_id
+                                code.extend(load_value(&args[1], Gpr::R8));   // R8  = old_version
+                                // RCX = count, RAX = i = 0.
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, hotswap_table_count_off));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // ── loop_start ──
+                                let loop_start_off = code.len();
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                let jae_not_found_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32
+                                // R10 = table_base + i*16
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, hotswap_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));  // RDX = i
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rdx));  // R10 = slot_addr
+                                // Load module_id from [slot+0] into RDX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::R10, 0));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rdx, Gpr::Rbx));
+                                let je_found_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                let jmp_loop_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── not_found: return -3 (WorkerNotFound) ──
+                                let not_found_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_not_found_patch, not_found_off);
+                                // 0xFFFFFFFFFFFFFFFD = -3 as i64
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFD));
+                                let jmp_done_from_nf_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── found: restore stored_version to old_version ──
+                                let found_off = code.len();
+                                patch_rel32_jcc(&mut code, je_found_patch, found_off);
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 8, Gpr::R8));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                // Fall through to done.
+                                // ── done: store rax to dst, pop rbx ──
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_loop_patch, loop_start_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_nf_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
+                                instr_opcode = Some("hot_swap_rollback".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 81-88 (Distributed Channels):
