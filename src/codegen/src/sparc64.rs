@@ -3245,7 +3245,7 @@ fn emit_instr(
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-        | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelClose { .. } => {}
+        | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. } => {}
     }
 }
 

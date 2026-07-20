@@ -402,6 +402,12 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(ch, from, to);
                     sub(dst, from, to);
                 }
+                // Wave 8b: renumber ch, value dst, and err_dst.
+                IRInstr::ChannelRecvResult { ch, dst, err_dst, .. } => {
+                    sub(ch, from, to);
+                    sub(dst, from, to);
+                    sub(err_dst, from, to);
+                }
                 IRInstr::ChannelClose { ch } => sub(ch, from, to),
             }
         }
