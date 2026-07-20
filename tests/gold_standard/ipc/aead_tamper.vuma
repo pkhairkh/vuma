@@ -1,0 +1,32 @@
+// aead_tamper — Wave D (L8): verify that aead_open DETECTS ciphertext
+// tampering via the CRC32 tag and refuses to decrypt.
+//
+// The parent seals an 8-byte plaintext, then corrupts one ciphertext
+// byte BEFORE calling aead_open.  aead_open recomputes the CRC32 over
+// the (now-corrupted) ciphertext, compares it to the stored tag, finds
+// a mismatch, and returns -6 (CrcMismatch sentinel) WITHOUT decrypting.
+// The buffer is left in its corrupted-ciphertext state — the original
+// plaintext is NOT restored.
+//
+// This mirrors the library CryptoState::decrypt contract: "Verifies the
+// trailing 4-byte CRC32 tag against the ciphertext *before* running the
+// inverse XOR — so a tampered frame is rejected without ever revealing
+// decrypted bytes to the caller."
+//
+// Expected exit code: 1 (tamper detected — aead_open returned -6)
+fn main() -> i32 {
+    // 64-byte buffer (need >= 20 bytes: 8 nonce + 8 ciphertext + 4 tag).
+    buf = shared_memory_open(64);
+    // Plaintext at offset 8 (offset 0 reserved for the nonce prefix).
+    shared_memory_write(buf, 8, 4702111234474983745); // 0x4141414141414141
+    // Seal: nonce at [0..8], ciphertext at [8..16], tag at [16..20].
+    aead_seal(buf, 8, 90);
+    // Tamper: corrupt ciphertext byte 0 (at buf+8).  This changes the
+    // ciphertext, so the stored CRC32 tag no longer matches.
+    shared_memory_write(buf, 8, 0);
+    // Open should detect the tag mismatch and return -6, leaving the
+    // buffer as corrupted ciphertext (NOT decrypting it).
+    r = aead_open(buf, 8, 90);
+    if r == -6 { return 1; }  // CrcMismatch detected — tamper caught
+    return 0;
+}

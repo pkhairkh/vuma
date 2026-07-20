@@ -348,6 +348,75 @@ fn emit_fnv1a_64_loop(base: Gpr, offset: i32, byte_count: u32, salt: u8) -> Vec<
     code
 }
 
+/// Wave D (L8 AEAD): emit the XOR stream-cipher loop shared by `aead_seal`
+/// and `aead_open`.  XORs `rcx` bytes starting at `[rax]` in-place with
+///   key_stream[i] = KEY[i % 32] ^ NONCE[i % 8]
+/// where KEY is the 32-byte key at `[r8]` and NONCE is the 8-byte nonce at
+/// `[r9]`.  The XOR is symmetric, so the same loop both encrypts (seal) and
+/// decrypts (open).
+///
+/// # Preconditions (caller must set up before calling)
+///   - **RAX** = start pointer (the first byte to XOR — `ptr + 8` for the
+///     wire-format ciphertext region).
+///   - **RCX** = byte count (loop counter; decremented to 0).
+///   - **R8**  = pointer to the 32-byte KEY.
+///   - **R9**  = pointer to the 8-byte NONCE.
+///   - **R10** = 0 (key index, wraps mod 32).
+///   - **R11** = 0 (nonce index, wraps mod 8).
+///
+/// # Postconditions
+///   - **RAX** += original RCX (now points one past the last XOR'd byte).
+///   - **RCX** = 0.
+///   - R8, R9 preserved (pointers not modified).  R10, R11 left at their
+///     final wrapped values (callers do not rely on these).
+///
+/// # Returns
+///   The byte offset (within the returned `Vec`) of the `je done` patch
+///   site.  The caller MUST patch this rel32 (via [`patch_rel32_jcc`]) to
+///   the absolute offset of the after-loop continuation within the outer
+///   `code` buffer.  The absolute patch offset is `code.len()` (before
+///   extending) + the returned offset.
+fn emit_aead_xor_loop() -> (Vec<u8>, usize) {
+    let mut code = Vec::with_capacity(64);
+
+    // ── loop: ──
+    let loop_start = code.len();
+    // cmp rcx, 0
+    code.extend(encode_cmp_reg_imm32(Gpr::Rcx, 0));
+    // je done (rel32, placeholder)
+    let je_done_patch = code.len();
+    code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+
+    // dl = key[r10]  (movzx edx, byte [r8 + r10])
+    //   REX: W=0,R=0(edx),X=1(r10 ext),B=1(r8 ext) = 0x43
+    //   0F B6 = movzx r32, r/m8 ; ModRM 14 = (mod=00,reg=010,SIB) ; SIB 10 = (r10,r8)
+    code.extend(&[0x43, 0x0F, 0xB6, 0x14, 0x10]);
+    // dl ^= nonce[r11]  (xor dl, byte [r9 + r11])
+    //   REX 0x43 ; opcode 32 (xor r32, r/m8) ; ModRM 14 ; SIB 19 = (r11,r9)
+    code.extend(&[0x43, 0x32, 0x14, 0x19]);
+    // xor byte [rax], dl  (30 10)
+    code.extend(&[0x30, 0x10]);
+    // inc rax  (48 FF C0)
+    code.extend(&[0x48, 0xFF, 0xC0]);
+    // dec rcx  (48 FF C9)
+    code.extend(&[0x48, 0xFF, 0xC9]);
+    // inc r10  (49 FF C2)
+    code.extend(&[0x49, 0xFF, 0xC2]);
+    // r10 %= 32: and r10, 0x1F  (49 83 E2 1F)
+    code.extend(&[0x49, 0x83, 0xE2, 0x1F]);
+    // inc r11  (49 FF C3)
+    code.extend(&[0x49, 0xFF, 0xC3]);
+    // r11 %= 8: and r11, 0x07  (49 83 E3 07)
+    code.extend(&[0x49, 0x83, 0xE3, 0x07]);
+    // jmp loop_start (rel32)
+    let jmp_back = code.len();
+    let back_delta = loop_start as i64 - (jmp_back as i64 + 5);
+    let bd = (back_delta as i32).to_le_bytes();
+    code.extend(&[0xE9, bd[0], bd[1], bd[2], bd[3]]);
+
+    (code, je_done_patch)
+}
+
 /// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
 /// match arms below to decide between the integer and SSE codegen paths.
 fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
@@ -3555,131 +3624,241 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("channel_recv_proto".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_seed)
-                            // and aead_open(ptr, len, key_seed)
+                            // Wave D (L8 AEAD): aead_seal(ptr, len, key_seed) and
+                            // aead_open(ptr, len, key_seed) — REAL wire format.
                             //
-                            // UPGRADED from single-byte XOR to a real XOR stream
-                            // cipher matching the library's CryptoState key_stream:
-                            //   key_stream[i] = KEY[i % 32] ^ NONCE[i % 8]
-                            // where KEY is a 32-byte key derived from key_seed
-                            // (repeated 4x as u64 LE) and NONCE is an 8-byte
-                            // value derived from key_seed (the low 64 bits, mixed).
+                            // The buffer now carries the library CryptoState wire
+                            // layout:  nonce(8B) | ciphertext(N bytes) | tag(4B).
+                            // The caller MUST place the plaintext at [ptr+8..8+len]
+                            // (leaving 8 bytes for the nonce prefix) and allocate
+                            // at least len+12 bytes.
                             //
-                            // This is symmetric (seal == open) and matches the
-                            // library's wire format. The previous single-byte XOR
-                            // was a Caesar-cipher-grade toy; this version uses a
-                            // 32-byte key space (256 bits) and an 8-byte nonce,
-                            // making it a genuine (if not cryptographically
-                            // vetted) stream cipher.
+                            // aead_seal:
+                            //   1. Derive KEY (32B, key_seed×4) and NONCE (8B,
+                            //      key_seed ^ 0xA5A5A5A5A5A5A5A5).
+                            //   2. Write the 8-byte nonce prefix at [ptr+0..8].
+                            //   3. XOR-encrypt in-place at [ptr+8..8+len]:
+                            //      ciphertext[i] = plaintext[i] ^ (KEY[i%32] ^ NONCE[i%8]).
+                            //   4. Compute CRC32 (poly 0xEDB88320) over the ciphertext
+                            //      [ptr+8..8+len] via emit_crc32_range and store the
+                            //      4-byte tag at [ptr+8+len..8+len+4].
                             //
-                            // Register allocation during the loop:
-                            //   rax = ptr (current byte position)
+                            // aead_open:
+                            //   1. Compute CRC32 over [ptr+8..8+len] and compare to
+                            //      the stored tag at [ptr+8+len].  If mismatch, store
+                            //      -6 (CrcMismatch sentinel, matching IpcError::CrcMismatch)
+                            //      to dst and SKIP decryption — the library's "verify
+                            //      first" contract means we never decrypt unverified data.
+                            //   2. If the tag matches, recompute KEY/NONCE and XOR-decrypt
+                            //      in-place at [ptr+8..8+len].  Store 0 to dst on success.
+                            //
+                            // len MUST be a compile-time constant (emit_crc32_range
+                            // needs a static byte_count).  If len is not an immediate,
+                            // we fall back to the legacy in-place XOR at [ptr+0..len]
+                            // with no nonce prefix and no tag — preserving backward
+                            // compat for any hypothetical dynamic-len caller.
+                            //
+                            // Register allocation during the XOR loop:
+                            //   rax = current byte pointer (ptr+8 for wire format)
                             //   rcx = remaining byte count
-                            //   r8  = key_ptr (points to 32-byte key on stack)
-                            //   r9  = nonce_ptr (points to 8-byte nonce on stack)
+                            //   r8  = key_ptr (32-byte key on stack)
+                            //   r9  = nonce_ptr (8-byte nonce on stack)
                             //   r10 = key_index (0..31, wraps)
                             //   r11 = nonce_index (0..7, wraps)
                             //   dl  = key_stream byte (key[i%32] ^ nonce[i%8])
-                            "aead_seal" | "aead_open" if args.len() == 3 => {
+                            //   rdi = ptr (preserved across emit_crc32_range, which
+                            //      clobbers RAX/RCX/RSI/R9/R10/R11 but NOT RDI)
+                            "aead_seal" if args.len() == 3 => {
                                 let ptr = &args[0];
                                 let len = &args[1];
                                 let key_seed = &args[2];
 
-                                // Step 1: build 32-byte key + 8-byte nonce on stack (40 bytes).
-                                // KEY = key_seed repeated 4x as u64 LE (32 bytes).
-                                // NONCE = key_seed mixed: (key_seed ^ 0xDEADBEEFCAFEBABE) as u64 (8 bytes).
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48)); // 48 for 16-align
-                                // Load key_seed into RAX.
-                                code.extend(load_value(key_seed, Gpr::Rax));
-                                // Store key_seed 4 times at [rsp+0..32]
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
-                                // NONCE = key_seed ^ 0xDEADBEEFCAFEBABE, store at [rsp+32..40]
-                                // xor rax, 0xDEADBEEFCAFEBABE
-                                code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xDEADBEEFCAFEBABE));
-                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx)); // xor rax, rcx
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                                if let Some(len_imm) = len.as_immediate() {
+                                    let len_u32 = len_imm as u32;
+                                    let tag_off = 8i32.wrapping_add(len_imm as i32);
 
-                                // Step 2: set up loop registers.
-                                // r8 = key_ptr = rsp (points to 32-byte key)
-                                code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));
-                                // r9 = nonce_ptr = rsp+32 (points to 8-byte nonce)
-                                code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));
-                                // r10 = key_index = 0
-                                code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));
-                                // r11 = nonce_index = 0
-                                code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
-                                // rax = ptr
-                                code.extend(load_value(ptr, Gpr::Rax));
-                                // rcx = len (byte count)
-                                code.extend(load_value(len, Gpr::Rcx));
+                                    // Step 1: 48-byte stack frame:
+                                    //   [rsp+0..32]  = KEY (key_seed × 4)
+                                    //   [rsp+32..40] = NONCE (key_seed ^ magic)
+                                    //   [rsp+40..48] = saved ptr (survives loop)
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48));
+                                    code.extend(load_value(key_seed, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xA5A5A5A5A5A5A5A5));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
 
-                                // Loop body:
-                                //   if (rcx == 0) goto done
-                                //   dl = key[r10]   (movzx dl, byte [r8 + r10])
-                                //   dl ^= nonce[r11] (xor dl, byte [r9 + r11])
-                                //   xor byte [rax], dl
-                                //   rax++; rcx--
-                                //   r10 = (r10 + 1) % 32
-                                //   r11 = (r11 + 1) % 8
-                                //   goto loop
-                                let loop_start = code.len();
-                                // cmp rcx, 0
-                                code.extend(encode_cmp_reg_imm32(Gpr::Rcx, 0));
-                                // je done (rel32, placeholder)
-                                let je_done_patch = code.len();
-                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                    // Step 2: load ptr, save it, write nonce prefix at [ptr+0..8].
+                                    code.extend(load_value(ptr, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 40, Gpr::Rax)); // save ptr
+                                    code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rsp, 32)); // rcx = nonce
+                                    code.extend(encode_mov_mem_reg(Gpr::Rax, 0, Gpr::Rcx));  // [ptr] = nonce
 
-                                // dl = key[r10]  (movzx edx, byte [r8 + r10])
-                                //   REX: W=0,R=0(edx not ext),X=1(r10 ext),B=1(r8 ext) = 0x43
-                                //   0F B6 = movzx r32, r/m8
-                                //   ModRM: mod=00, reg=010(edx), rm=100(SIB) = 0x14
-                                //   SIB: scale=00, index=010(r10), base=000(r8) = 0x10
-                                //   Wait — SIB index field for r10 is 010, but with REX.X=1 it becomes r10.
-                                //   SIB base field for r8 is 000, but with REX.B=1 it becomes r8.
-                                //   So: 43 0F B6 14 10
-                                code.extend(&[0x43, 0x0F, 0xB6, 0x14, 0x10]);
-                                // dl ^= nonce[r11]  (xor dl, byte [r9 + r11])
-                                //   REX: W=0,R=0(edx),X=1(r11 ext),B=1(r9 ext) = 0x43
-                                //   32 = xor r8/r32, r/m8  (opcode 30 is xor r/m8, r8; 32 is xor r32, r/m8)
-                                //   We want: dl = dl ^ [r9+r11], so opcode 32 (xor r32, r/m8), reg=edx(010)
-                                //   ModRM: mod=00, reg=010, rm=100(SIB) = 0x14
-                                //   SIB: scale=00, index=011(r11), base=001(r9) = 0x19
-                                //   So: 43 32 14 19
-                                code.extend(&[0x43, 0x32, 0x14, 0x19]);
-                                // xor byte [rax], dl  (30 10)
-                                code.extend(&[0x30, 0x10]);
-                                // inc rax  (48 FF C0)
-                                code.extend(&[0x48, 0xFF, 0xC0]);
-                                // dec rcx  (48 FF C9)
-                                code.extend(&[0x48, 0xFF, 0xC9]);
-                                // inc r10  (49 FF C2)
-                                code.extend(&[0x49, 0xFF, 0xC2]);
-                                // r10 %= 32: and r10, 0x1F  (49 83 E2 1F)
-                                code.extend(&[0x49, 0x83, 0xE2, 0x1F]);
-                                // inc r11  (49 FF C3)
-                                code.extend(&[0x49, 0xFF, 0xC3]);
-                                // r11 %= 8: and r11, 0x07  (49 83 E3 07)
-                                code.extend(&[0x49, 0x83, 0xE3, 0x07]);
-                                // jmp loop_start (rel32)
-                                let jmp_back = code.len();
-                                let back_delta = loop_start as i64 - (jmp_back as i64 + 5);
-                                let bd = (back_delta as i32).to_le_bytes();
-                                code.extend(&[0xE9, bd[0], bd[1], bd[2], bd[3]]);
+                                    // Step 3: set up XOR loop over [ptr+8..8+len].
+                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));   // key_ptr
+                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));  // nonce_ptr
+                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));     // key_idx
+                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));     // nonce_idx
+                                    code.extend(encode_add_reg_imm32(Gpr::Rax, 8));           // rax = ptr+8
+                                    code.extend(load_value(len, Gpr::Rcx));                   // rcx = len
 
-                                // done: cleanup
-                                let done_off = code.len();
-                                let done_delta = done_off as i64 - (je_done_patch as i64 + 6);
-                                let bd = (done_delta as i32).to_le_bytes();
-                                code[je_done_patch+2] = bd[0];
-                                code[je_done_patch+3] = bd[1];
-                                code[je_done_patch+4] = bd[2];
-                                code[je_done_patch+5] = bd[3];
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                    // Emit the XOR loop (in-place encrypt).
+                                    let (loop_code, je_patch) = emit_aead_xor_loop();
+                                    let loop_base = code.len();
+                                    code.extend(loop_code);
+
+                                    // done: compute CRC32 tag and store it.
+                                    let done_off = code.len();
+                                    patch_rel32_jcc(&mut code, loop_base + je_patch, done_off);
+                                    // RDI = ptr (survives emit_crc32_range).
+                                    code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 40));
+                                    // R8 = CRC32 over [ptr+8..8+len].
+                                    code.extend(emit_crc32_range(Gpr::Rdi, 8, len_u32));
+                                    // Store 4-byte tag at [ptr+8+len].
+                                    code.extend(encode_mov_mem32_reg32(Gpr::Rdi, tag_off, Gpr::R8));
+
+                                    // Cleanup.
+                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                } else {
+                                    // Legacy path: len is not a compile-time constant.
+                                    // In-place XOR at [ptr+0..len], no nonce prefix, no tag.
+                                    vuma_log!(warn, "aead_seal: len is not a compile-time constant; using legacy in-place XOR (no wire format)");
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48));
+                                    code.extend(load_value(key_seed, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xA5A5A5A5A5A5A5A5));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));
+                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));
+                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));
+                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
+                                    code.extend(load_value(ptr, Gpr::Rax));
+                                    code.extend(load_value(len, Gpr::Rcx));
+                                    let (loop_code, je_patch) = emit_aead_xor_loop();
+                                    let loop_base = code.len();
+                                    code.extend(loop_code);
+                                    let done_off = code.len();
+                                    patch_rel32_jcc(&mut code, loop_base + je_patch, done_off);
+                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                }
 
                                 instr_opcode = Some("aead_seal".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            "aead_open" if args.len() == 3 => {
+                                let ptr = &args[0];
+                                let len = &args[1];
+                                let key_seed = &args[2];
+                                // aead_open returns 0 on success, -6 (CrcMismatch) on tag mismatch.
+                                let dst_off: Option<i32> = dst.as_ref()
+                                    .and_then(|d| d.as_register())
+                                    .map(|id| slot_offset(id));
+
+                                if let Some(len_imm) = len.as_immediate() {
+                                    let len_u32 = len_imm as u32;
+                                    let tag_off = 8i32.wrapping_add(len_imm as i32);
+
+                                    // Step 1: 48-byte stack frame (KEY + NONCE + saved ptr).
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48));
+                                    code.extend(load_value(key_seed, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xA5A5A5A5A5A5A5A5));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+
+                                    // Step 2: load ptr, save to [rsp+40].
+                                    code.extend(load_value(ptr, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 40, Gpr::Rax));
+
+                                    // Step 3: VERIFY tag BEFORE decrypting (library contract).
+                                    // RDI = ptr (survives emit_crc32_range).
+                                    code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 40));
+                                    // R8 = CRC32 over ciphertext [ptr+8..8+len].
+                                    code.extend(emit_crc32_range(Gpr::Rdi, 8, len_u32));
+                                    // RCX = stored tag from [ptr+8+len] (zero-extended to 64-bit).
+                                    code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rdi, tag_off));
+                                    // Compare recomputed (R8) vs stored (RCX).
+                                    code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                    let tag_jne_patch = code.len();
+                                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32 (to fail)
+
+                                    // Step 4: tag matches — set up XOR loop and decrypt.
+                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));   // key_ptr
+                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));  // nonce_ptr
+                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));     // key_idx
+                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));     // nonce_idx
+                                    code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rdi, 8));  // rax = ptr+8
+                                    code.extend(load_value(len, Gpr::Rcx));                   // rcx = len
+
+                                    // Emit the XOR loop (in-place decrypt).
+                                    let (loop_code, je_patch) = emit_aead_xor_loop();
+                                    let loop_base = code.len();
+                                    code.extend(loop_code);
+
+                                    // done (success path): store 0 to dst.
+                                    let done_off = code.len();
+                                    patch_rel32_jcc(&mut code, loop_base + je_patch, done_off);
+                                    if let Some(off) = dst_off {
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // 0
+                                        code.extend(encode_mov_mem_reg(Gpr::Rbp, off, Gpr::Rax));
+                                    }
+                                    let jmp_cleanup_patch = code.len();
+                                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp cleanup
+
+                                    // fail path: tag mismatch — store -6, skip decrypt.
+                                    let fail_off = code.len();
+                                    patch_rel32_jcc(&mut code, tag_jne_patch, fail_off);
+                                    if let Some(off) = dst_off {
+                                        code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                                        code.extend(encode_mov_mem_reg(Gpr::Rbp, off, Gpr::Rax));
+                                    }
+
+                                    // cleanup.
+                                    let cleanup_off = code.len();
+                                    patch_rel32_jmp(&mut code, jmp_cleanup_patch, cleanup_off);
+                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                } else {
+                                    // Legacy path: len is not a compile-time constant.
+                                    // In-place XOR at [ptr+0..len], no tag verification.
+                                    vuma_log!(warn, "aead_open: len is not a compile-time constant; using legacy in-place XOR (no tag verification)");
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48));
+                                    code.extend(load_value(key_seed, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xA5A5A5A5A5A5A5A5));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+                                    code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));
+                                    code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));
+                                    code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));
+                                    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
+                                    code.extend(load_value(ptr, Gpr::Rax));
+                                    code.extend(load_value(len, Gpr::Rcx));
+                                    let (loop_code, je_patch) = emit_aead_xor_loop();
+                                    let loop_base = code.len();
+                                    code.extend(loop_code);
+                                    let done_off = code.len();
+                                    patch_rel32_jcc(&mut code, loop_base + je_patch, done_off);
+                                    if let Some(off) = dst_off {
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rbp, off, Gpr::Rax));
+                                    }
+                                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+                                }
+
+                                instr_opcode = Some("aead_open".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 19-21 (L6 Checkpoint): checkpoint_save(value)
