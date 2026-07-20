@@ -1,0 +1,28 @@
+// protocol_invalid — Wave 14b: protocol state machine, invalid transition
+//
+// Exercises the REJECTION path of channel_recv_proto(ch, expected_state).
+// The child sends one message.  The parent calls recv_proto(ch, 0) which
+// succeeds (proto_state was 0, advances to 1).  Then the parent calls
+// recv_proto(ch, 0) AGAIN — but proto_state is now 1, not 0.  The FSM
+// detects the invalid transition (expected 0, actual 1) and returns -5
+// (ProtocolViolation) WITHOUT recv'ing.
+//
+// The parent checks: if the second recv_proto returned -5, exit 99
+// (confirming the protocol violation was detected).  Otherwise exit 0.
+//
+// Expected exit code: 99
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 42);
+        channel_close(ch);
+        return 0;
+    }
+    a = channel_recv_proto(ch, 0);
+    b = channel_recv_proto(ch, 0);
+    status = wait_worker(pid);
+    channel_close(ch);
+    if b == (0 - 5) { return 99; }
+    return 0;
+}
