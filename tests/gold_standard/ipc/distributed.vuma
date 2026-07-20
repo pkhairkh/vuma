@@ -1,19 +1,31 @@
-// distributed — Wave 81-88: distributed channels via channel_open_remote.
+// distributed — Wave 81-88 / Wave H: distributed channels via channel_open_remote.
 //
-// The channel_open_remote(addr, port) builtin creates a loopback
-// socketpair (mock remote channel). The addr and port args are accepted
-// for ABI compatibility with the real remote-channel API but the
-// implementation uses AF_UNIX socketpair (always loopback). Returns a
-// 64-bit channel handle: low 32 bits = sv[0], high 32 bits = sv[1].
+// The channel_open_remote(addr, port) builtin now performs a REAL TCP
+// connect() over the network: it creates an AF_INET / SOCK_STREAM socket
+// via socket() (syscall 41), builds a sockaddr_in (sin_family=AF_INET,
+// sin_port=htons(port), sin_addr=addr), and calls connect() (syscall 42).
+// On success it returns the connected fd; on failure it returns 0.
 //
-// This test opens a "remote" channel and exits 1 if the handle is
-// non-zero (i.e. the socketpair succeeded).
+// This replaces the previous loopback socketpair(AF_UNIX) mock which always
+// succeeded and ignored addr/port entirely.
+//
+// TEST: connecting to 0.0.0.0:1 — the kernel rejects this (0.0.0.0 is not
+// a valid connect() destination, and port 1 is closed regardless).  A real
+// TCP connect() therefore fails and channel_open_remote returns 0.  The
+// previous socketpair mock would always succeed (return a non-zero handle)
+// and would fail this test.
 //
 // Expected exit code: 1
 fn main() -> i32 {
-    ch = channel_open_remote(0x7F000001, 8080);
-    if ch != 0 {
+    // Real TCP connect to 0.0.0.0:1 — this always fails because 0.0.0.0
+    // is not a valid connect() destination and port 1 is closed.
+    ch = channel_open_remote(0, 1);
+    if ch == 0 {
+        // connect() failed — proves real network connect() was attempted
+        // (the old socketpair mock would have succeeded and returned nonzero).
         return 1;
     }
+    // If connect() "succeeded" here, that's wrong — we connected to
+    // 0.0.0.0:1 which should be impossible for real TCP.
     return 0;
 }
