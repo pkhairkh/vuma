@@ -110,23 +110,26 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     use vuma_scg::SCGPass;
     let _ = vuma_scg::InterproceduralAllocFlow::new().run(&mut scg);
 
-    // Wave 2: Run SCG-level O2 transforms BEFORE IVE verification and IR
-    // building, mirroring `compile_with_path` Stage 7 (which runs at the
-    // config's opt_level). The O2 config constructed here is also reused
-    // for `run_ir_pipeline` below so the entire post-IR-build O2 pipeline
-    // uses one consistent config (matching the production compile path).
-    let o2_config = CompileConfig {
+    // Wave 2: Run SCG-level O3 transforms BEFORE IVE verification and IR
+    // building, mirroring `compile_with_path` Stage 7. In VUMA 2.0 O3 is
+    // mandatory, so `run_scg_transforms` always runs the full O3 SCG pass
+    // set (DCE, const-fold, CSE, inlining, LICM, strength reduction,
+    // tail-call detection, dead-region elimination). The config
+    // constructed here is also reused for `run_ir_pipeline` below so the
+    // entire post-IR-build O3 pipeline uses one consistent config
+    // (matching the production compile path).
+    let o3_config = CompileConfig {
         target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
         opt_level,
         verification_level: VerificationLevel::Normal,
         // Wave 5: Disable inlining so functions referenced via GetAddress
-        // (function pointers) survive the O2 pipeline. Without this, simple
+        // (function pointers) survive the O3 pipeline. Without this, simple
         // functions like `fn my_handler(x: u64) -> u64 { return x + 1; }`
         // get inlined into their callers, and GetAddress can't find them.
         inline_threshold: 0,
         ..Default::default()
     };
-    let _ = run_scg_transforms(&mut scg, &o2_config);
+    let _ = run_scg_transforms(&mut scg, &o3_config);
 
     // Optionally run IVE verification (non-fatal — report to stderr).
     // Skip verification for programs marked with "// ive_skip" in the
@@ -135,8 +138,8 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     // for computation but never free it — the leak is intentional and
     // not the focus of the test).
     //
-    // Wave 2: IVE now verifies the O2-optimized SCG (run_scg_transforms
-    // was already applied above at O2). The previous local O0 config +
+    // Wave 2: IVE now verifies the O3-optimized SCG (run_scg_transforms
+    // was already applied above at O3). The previous local O0 config +
     // redundant O0 run_scg_transforms call have been removed so there is
     // a single consistent SCG state. Wave 7 double-checks IVE
     // correctness on the optimized SCG.
@@ -186,18 +189,18 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     for ds in &ir_program.data_sections {
     }
 
-    // Wave 2: Run the full post-IR-build O2 pipeline via the shared
+    // Wave 2: Run the full post-IR-build O3 pipeline via the shared
     // `run_ir_pipeline` helper (same path as `compile_with_path`). This
     // runs Wave 34 lowering (monomorphize, closures, switches, tail-calls,
     // loop-normalize), Wave 36 bv_verify, the Wave 10 syscall allowlist,
     // Stage 8b codegen-opt with the REAL backend latency table, and Wave
     // 32 escape+effects/SROA. Previously compile_dump only ran
     // `run_optimizations` (IR-level opts, default latency table) — skipping
-    // ~half the production O2 pipeline. A syscall-allowlist violation or
+    // ~half the production O3 pipeline. A syscall-allowlist violation or
     // bv_verify abort (none currently fatal) becomes a compile error here
     // (test marked CE) — triaged in Waves 3-5.
     let mut timings: Vec<(String, u64)> = Vec::new();
-    let ir_program = run_ir_pipeline(ir_program, &o2_config, kind, &mut timings)
+    let ir_program = run_ir_pipeline(ir_program, &o3_config, kind, &mut timings)
         .map_err(|e| format!("ir_pipeline: {:?}", e))?;
 
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
@@ -226,7 +229,7 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         .collect();
     // Wave 5: Collect all function names from the AST so the backend can
     // distinguish function symbols (text) from data symbols (bss).
-    // Functions removed by the O2 optimizer but still referenced via
+    // Functions removed by the O3 optimizer but still referenced via
     // GetAddress must not be classified as data symbols.
     let function_names: std::collections::HashSet<String> = ast.items.iter()
         .filter_map(|item| match item {
@@ -351,23 +354,30 @@ fn main() {
     // `VerificationLevel::Pmt` and the PMT layout registry is always
     // built (cheap — empty map if no `layout` items).
     let mut verify = false;
-    let mut opt_level = OptLevel::O3; // O3 is always on (default since 2026-07)
+    // O3 is **mandatory** in VUMA 2.0 — the `--opt-level` flag is retained
+    // for backwards compatibility, but only `O3` is accepted. The pipeline
+    // runs the full O3 pass set unconditionally regardless of this value.
+    let mut opt_level = OptLevel::O3;
     let positional: Vec<String> = args.iter().skip(1).filter(|a| {
         if *a == "--verify" { verify = true; false }
         else if a.starts_with("--opt-level=") {
             let val = &a["--opt-level=".len()..];
             opt_level = match val {
-                "O0" => OptLevel::O0,
-                "O1" => OptLevel::O1,
-                "O2" => OptLevel::O2,
                 "O3" => OptLevel::O3,
-                _ => { eprintln!("error: invalid opt-level '{}'; use O0|O1|O2|O3", val); std::process::exit(1); }
+                _ => {
+                    eprintln!(
+                        "error: invalid opt-level '{}'; VUMA 2.0 mandates O3 \
+                         (only O3 is accepted; O0/O1/O2 are not supported)",
+                        val
+                    );
+                    std::process::exit(1);
+                }
             };
             false
         } else { true }
     }).cloned().collect();
     if positional.len() < 2 {
-        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--opt-level=O0|O1|O2|O3]");
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify] [--opt-level=O3]");
         std::process::exit(1);
     }
     let path = &positional[0];

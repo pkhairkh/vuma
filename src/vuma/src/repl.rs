@@ -56,7 +56,9 @@ use std::time::Instant;
 
 use vuma_ive::verification::VerificationEngine;
 use vuma_ive::verification::VerificationInput;
-use vuma_ive::{AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAggregator};
+use vuma_ive::{
+    AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAggregator, VerificationLevel,
+};
 use vuma_parser::ast::{Expr, Item, Lit, Stmt, Type as AstType};
 use vuma_parser::to_scg::AstToScg;
 use vuma_parser::{offset_to_location, ParseError, Parser, Span};
@@ -753,6 +755,8 @@ const VALID_TARGETS: &[&str] = &[
 impl VumaRepl {
     /// Create a new REPL instance.
     pub fn new() -> Self {
+        // VUMA 2.0: PMT is mandatory — the REPL's aggregator runs at
+        // the PMT level (the 3 state verifiers only).
         Self {
             session_source: String::new(),
             target: "aarch64".to_string(),
@@ -761,7 +765,7 @@ impl VumaRepl {
             converter: AstToScg::new(),
             inference_engine: InferenceEngine::new(),
             _verification_engine: VerificationEngine::new(),
-            aggregator: InvariantAggregator::new(),
+            aggregator: InvariantAggregator::new().with_level(VerificationLevel::Pmt),
             history: Vec::new(),
             history_cursor: 0,
             profile: ReplProfile::default(),
@@ -774,10 +778,15 @@ impl VumaRepl {
 
     /// Create a REPL with verbose IVE output.
     pub fn with_verbose() -> Self {
+        // VUMA 2.0: PMT is mandatory — explicitly set the level on the
+        // verbose REPL too (default `InvariantAggregator::new()` already
+        // uses PMT, but we set it explicitly for clarity).
         Self {
             inference_engine: InferenceEngine::new().with_verbose(true),
             _verification_engine: VerificationEngine::new().with_verbose(true),
-            aggregator: InvariantAggregator::new().with_verbose(true),
+            aggregator: InvariantAggregator::new()
+                .with_level(VerificationLevel::Pmt)
+                .with_verbose(true),
             ..Self::new()
         }
     }
