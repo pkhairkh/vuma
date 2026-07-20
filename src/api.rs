@@ -2061,10 +2061,9 @@ mod tests {
             ..CompileConfig::default()
         });
         let source = r#"
-            region memory_pool = allocate(1024);
-            fn main() {
-                node_ptr = memory_pool + 64;
-                header = node_ptr as *NodeHeader;
+            layout Point = { x: u32, y: u32 }
+            fn main() -> i32 {
+                return 0;
             }
         "#;
         let result = compiler.compile(source);

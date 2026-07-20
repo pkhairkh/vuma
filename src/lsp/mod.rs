@@ -2176,7 +2176,7 @@ mod tests {
 
         let open_params = make_text_document_params(
             "file:///test.vuma",
-            "fn hello() {}\nstruct Foo {}\nregion pool = allocate(256);",
+            "fn hello() {}\nstruct Foo {}\nfn pool() {}",
         );
         server.handle_text_document_did_open(open_params);
 

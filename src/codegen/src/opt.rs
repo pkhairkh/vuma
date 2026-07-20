@@ -1275,6 +1275,14 @@ fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
             cost = cost.saturating_add(inline_cost(instr));
         }
     }
+    // Per-call-argument overhead: models the register-allocator pressure
+    // each argument adds at the call site (live-range for the arg, plus
+    // the call setup), and the work the inliner has to do to remap each
+    // parameter vreg.  Without this, a function with 8 cheap Add ops and
+    // 1 constant arg would cost 8 - 3 = 5 (under the O2 threshold of 8),
+    // but the call-site setup for the argument is real work that the
+    // cost model must account for.
+    cost = cost.saturating_add((args.len() as u32).saturating_mul(2));
     // Savings: each constant argument reduces cost (will be constant-folded).
     // This models the fact that `fn add(x, y) { x + y }` called with
     // `add(3, 4)` becomes `3 + 4` which folds to `7` — the entire function
