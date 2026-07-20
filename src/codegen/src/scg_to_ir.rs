@@ -911,6 +911,12 @@ pub struct IRBuilder {
     /// by each state-typed allocation's layout size (aligned to 16 bytes).
     /// Reset to 0 at the start of `main`.
     next_state_offset: u32,
+    /// Wave 89-90 (Session Types): set of vregs that hold channel handles
+    /// (produced by `channel_open<T>()`). Tracked so the IVE linear-type
+    /// checker (Wave 95) can identify channel-typed vregs and verify their
+    /// open/send/recv/close lifecycle. The session-type protocol itself
+    /// (if any) is not yet threaded through here — only the vreg identity.
+    channel_handle_vregs: std::collections::HashSet<u32>,
 }
 
 /// Backward-compatible alias.
@@ -936,6 +942,7 @@ impl IRBuilder {
             state_vars: std::collections::HashSet::new(),
             pmt_buffer_vreg: None,
             next_state_offset: 0,
+            channel_handle_vregs: std::collections::HashSet::new(),
         }
     }
 
@@ -985,6 +992,10 @@ impl IRBuilder {
         self.vreg_types.clear();
         self.fn_var_types.clear();
         self.fn_var_types.extend(func.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        // Wave 89-90: reset the channel-handle vreg set per function so
+        // vreg IDs from a previous function don't leak into the linear-
+        // type checker's view of this function's channels.
+        self.channel_handle_vregs.clear();
         // Count the number of Load statements in this function's body.
         // Used by lower_access to decide whether to infer load width from
         // the function's return type (safe only for single-load functions
@@ -4203,6 +4214,42 @@ impl IRBuilder {
         let is_extern_final = call.is_extern
             || call.func.starts_with("process_")
             || call.func.starts_with("extern_process_");
+
+        // Wave 89-90 (Session Types): recognize session-typed channel
+        // operations. A `channel_open<T>()` call whose `T` is a
+        // `ScgType::Channel(inner)` may carry an optional session-type
+        // protocol on its AST node (Type::Channel { session_type, .. }).
+        // The pipeline currently drops the session_type when bridging to
+        // ScgType::Channel (see pipeline.rs:bridge_type_to_codegen_scg),
+        // so this code path is reached only for plain untyped channels.
+        //
+        // Minimal handling (mirroring the `extern "process"` ABI pattern
+        // above): if the call is a session-typed channel operation, we
+        // tag the destination vreg with the channel's IRType so downstream
+        // passes (IVE linear-type checker, Wave 95) can recover the
+        // payload type and verify the send/recv protocol order. The
+        // session-type protocol itself is not yet threaded through the
+        // SCG (a future SCG extension would add a `session_type` slot to
+        // ScgType::Channel); for now, the IRType::Channel carries the
+        // payload type and the IVE checker treats any channel as
+        // untyped (allowing arbitrary send/recv order).
+        if call.func == "channel_open" {
+            if let Some(IRValue::Register(vreg)) = &dst {
+                // Default to Channel<I64> — the Call-form path doesn't
+                // carry the type parameter (the parser drops it before
+                // SCG lowering for channel_open). This matches the
+                // existing channel_recv/channel_send lowering which
+                // assumes i64 payloads.
+                self.vreg_types.insert(
+                    *vreg,
+                    crate::ir::IRType::Channel(Box::new(crate::ir::IRType::I64)),
+                );
+                // Track that this vreg is a channel handle so the linear
+                // checker (Wave 95) can include it in the channel-lifecycle
+                // verification set.
+                self.channel_handle_vregs.insert(*vreg);
+            }
+        }
 
         ir_func.current_block().push(IRInstruction::Call {
             dst: dst.clone(),

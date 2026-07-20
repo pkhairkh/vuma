@@ -3613,14 +3613,23 @@ impl<'src> Parser<'src> {
         // keyword is registered in the lexer keyword table (mapped to
         // `TokenKind::Channel`). We intercept it here, *before* the
         // BDBase/`expect_name` path, so that `Channel<i32>` is parsed as
-        // `Type::Channel(Box<i32>)` rather than falling through to
-        // `Type::Generic { name: "Channel", ... }`.
+        // `Type::Channel { inner: Box<i32>, session_type: None }` rather
+        // than falling through to `Type::Generic { name: "Channel", ... }`.
+        //
+        // Wave 89-90 (Session Types): the parser leaves `session_type`
+        // as `None` here — surface syntax for session-typed channels
+        // (e.g. `Channel<i32, Send<i32, End>>`) is a future parser
+        // extension; the AST node carries the field so downstream passes
+        // (IVE linear-type checker) can attach protocols programmatically.
         if self.at(TokenKind::Channel) {
             self.advance(); // consume 'Channel'
             self.expect(TokenKind::Lt)?;
             let inner = self.parse_type()?;
             self.expect_gt_closing_generic()?;
-            return Ok(Type::Channel(Box::new(inner)));
+            return Ok(Type::Channel {
+                inner: Box::new(inner),
+                session_type: None,
+            });
         }
 
         // Named type (BDBase) or Generic type: `Name<T, ...>`

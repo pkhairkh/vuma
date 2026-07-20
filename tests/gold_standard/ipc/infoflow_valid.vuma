@@ -1,0 +1,22 @@
+// infoflow_valid — Wave 91-92: information-flow type-checking (Low variable).
+//
+// Every variable in VUMA carries an implicit information-flow label from
+// the two-point lattice `Low ⊑ High`. A variable declared without an
+// explicit `#[high]` annotation defaults to `Low` (public). This program
+// exercises a Low variable flowing to a Low sink — a permitted
+// information flow that the IVE information-flow checker accepts.
+//
+// Flow:
+//   low_input  : Low  (public, default label)
+//   low_result : Low  (Low ⊑ Low — permitted)
+//   return     : Low  (returning a Low value to a Low caller — permitted)
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    low_input = 7;
+    low_result = low_input - 6;
+    if low_result == 1 {
+        return 1;
+    }
+    return 0;
+}

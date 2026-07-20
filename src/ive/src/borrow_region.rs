@@ -300,6 +300,123 @@ pub fn all_linear_valid(results: &[LinearVerification]) -> bool {
     results.iter().all(|r| r.valid)
 }
 
+// ── Wave 95: Linear-type checking for use-once variables ─────────────
+//
+// A linear variable is one that must be used EXACTLY ONCE — using it
+// twice is a linear-type violation (a "double-use" akin to a use-after-
+// move in Rust). This is distinct from the channel-lifecycle checker
+// above (`verify_linear_channels`): that one tracks Open→Use→Close
+// state transitions on channel handles, whereas this checker counts
+// the number of USE events per variable and flags any variable that
+// exceeds its declared use-count.
+//
+// Concrete use-cases in VUMA:
+// - A session-typed channel endpoint (Wave 89-90) is linear: each
+//   Send/Recv operation CONSUMES the endpoint and produces a new one
+//   with the protocol tail. Using the same endpoint twice without
+//   re-binding is a protocol violation.
+// - A STARK proof handle (Wave 93-94) is linear: it may be verified
+//   exactly once (the verifier consumes the proof).
+// - A `unique` pointer (hypothetical future VUMA feature) is linear:
+//   it may be dereferenced once before being freed.
+
+/// Wave 95: A linear-type annotation on a variable.
+///
+/// `Linear` variables must be used exactly once. `Unlimited` variables
+/// may be used any number of times (the default for ordinary VUMA
+/// variables).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinearType {
+    /// The variable is linear: it must be used exactly once. A second
+    /// use is a linear violation (double-use). Zero uses is also a
+    /// violation (linear leak — the value was never consumed).
+    Linear,
+    /// The variable is unrestricted: it may be used zero or more times.
+    /// This is the default for ordinary VUMA variables (ints, pointers,
+    /// structs).
+    #[default]
+    Unlimited,
+}
+
+impl LinearType {
+    /// Returns `true` if this variable is subject to the use-once rule.
+    pub fn is_linear(self) -> bool {
+        matches!(self, LinearType::Linear)
+    }
+}
+
+/// Wave 95: A single observed use of a variable (a read or write).
+///
+/// Multiple uses of the same `vreg` form a use-list; the linear-type
+/// checker counts the uses and flags any `Linear` vreg with >1 use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearUse {
+    /// The virtual register being used.
+    pub vreg: u32,
+    /// The SCG node ID where this use occurs (for error reporting).
+    pub at_node: usize,
+    /// A short description of the use site (e.g. "channel_send",
+    /// "stark_verify", "load"). Included in error messages.
+    pub site: &'static str,
+}
+
+/// Wave 95: Check that each linear-typed variable is used at most once.
+///
+/// For each `Linear` vreg in `linear_vregs`, count the number of uses
+/// in `uses`. If a linear vreg is used more than once, emit a
+/// [`LinearVerification`] with `valid: false` describing the violation.
+/// (Zero uses of a linear variable is NOT flagged here — that's a
+/// "linear leak", which is a warning rather than an error, and is
+/// already covered by the channel-lifecycle checker for channel
+/// handles.)
+///
+/// `uses` — the ordered list of variable uses observed during SCG
+///   traversal. Order does not matter for this check (it counts uses,
+///   not their sequence).
+/// `linear_vregs` — the set of vregs that are declared `Linear`.
+///
+/// Returns one `LinearVerification` per double-use violation found
+/// (empty Vec = all linear variables used at most once).
+pub fn linear_check(
+    uses: &[LinearUse],
+    linear_vregs: &std::collections::HashSet<u32>,
+) -> Vec<LinearVerification> {
+    use std::collections::HashMap;
+    // Count uses per linear vreg. Non-linear vregs are skipped (they
+    // may be used any number of times).
+    let mut counts: HashMap<u32, Vec<&LinearUse>> = HashMap::new();
+    for u in uses {
+        if linear_vregs.contains(&u.vreg) {
+            counts.entry(u.vreg).or_default().push(u);
+        }
+    }
+    let mut results = Vec::new();
+    for (vreg, uses_list) in counts {
+        if uses_list.len() > 1 {
+            // Linear violation: this vreg was used more than once.
+            let sites: Vec<&str> = uses_list.iter().map(|u| u.site).collect();
+            let nodes: Vec<usize> = uses_list.iter().map(|u| u.at_node).collect();
+            results.push(LinearVerification {
+                valid: false,
+                error: Some(format!(
+                    "linear vreg {} used {} times (linear variables must be used exactly once); \
+                     use sites: {:?} at nodes {:?}",
+                    vreg,
+                    uses_list.len(),
+                    sites,
+                    nodes
+                )),
+            });
+        }
+    }
+    results
+}
+
+/// Wave 95: Returns true if all linear-check results are valid.
+pub fn all_linear_check_valid(results: &[LinearVerification]) -> bool {
+    results.iter().all(|r| r.valid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,5 +698,82 @@ mod tests {
         let results = verify_linear_channels(&events);
         assert_eq!(results.len(), 1);
         assert!(results[0].error.as_ref().unwrap().contains("linear leak"));
+    }
+
+    // ── Wave 95: linear_check (use-once) tests ──
+
+    fn lu(vreg: u32, at_node: usize, site: &'static str) -> LinearUse {
+        LinearUse { vreg, at_node, site }
+    }
+
+    fn linset(vregs: &[u32]) -> std::collections::HashSet<u32> {
+        vregs.iter().copied().collect()
+    }
+
+    #[test]
+    fn test_linear_check_single_use_is_valid() {
+        // A linear vreg used exactly once → no violation.
+        let uses = vec![lu(0, 10, "channel_send")];
+        let results = linear_check(&uses, &linset(&[0]));
+        assert!(results.is_empty(), "single use of linear vreg should be valid");
+    }
+
+    #[test]
+    fn test_linear_check_double_use_is_violation() {
+        // A linear vreg used twice → violation.
+        let uses = vec![
+            lu(0, 10, "channel_send"),
+            lu(0, 20, "channel_send"),
+        ];
+        let results = linear_check(&uses, &linset(&[0]));
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].valid);
+        assert!(results[0].error.as_ref().unwrap().contains("used 2 times"));
+    }
+
+    #[test]
+    fn test_linear_check_unlimited_vreg_unrestricted() {
+        // A non-linear vreg used multiple times → no violation.
+        let uses = vec![
+            lu(1, 10, "load"),
+            lu(1, 20, "load"),
+            lu(1, 30, "load"),
+        ];
+        let results = linear_check(&uses, &linset(&[0])); // vreg 1 not in set
+        assert!(results.is_empty(), "non-linear vreg may be used any number of times");
+    }
+
+    #[test]
+    fn test_linear_check_zero_uses_is_not_flagged() {
+        // A linear vreg declared but never used → no violation here.
+        // (Linear leak is handled by verify_linear_channels for channels;
+        // this checker only flags double-uses.)
+        let uses: Vec<LinearUse> = vec![];
+        let results = linear_check(&uses, &linset(&[0, 1, 2]));
+        assert!(results.is_empty(), "zero uses is not a double-use violation");
+    }
+
+    #[test]
+    fn test_linear_check_multiple_violations() {
+        // Two linear vregs each used twice → two violations.
+        let uses = vec![
+            lu(0, 10, "send"),
+            lu(0, 20, "send"),
+            lu(1, 30, "recv"),
+            lu(1, 40, "recv"),
+        ];
+        let results = linear_check(&uses, &linset(&[0, 1]));
+        assert_eq!(results.len(), 2);
+        assert!(all_linear_check_valid(&[].to_vec()) == true);
+        assert!(!all_linear_check_valid(&results));
+    }
+
+    #[test]
+    fn test_linear_type_default_is_unlimited() {
+        // The default LinearType is Unlimited (ordinary variables).
+        let lt = LinearType::default();
+        assert_eq!(lt, LinearType::Unlimited);
+        assert!(!lt.is_linear());
+        assert!(LinearType::Linear.is_linear());
     }
 }

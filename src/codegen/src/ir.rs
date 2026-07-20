@@ -103,6 +103,90 @@ pub enum IRType {
     Channel(Box<IRType>),
 }
 
+// ---------------------------------------------------------------------------
+// Session Types (Wave 89-90) — IR-side mirror of `ast::SessionType`
+// ---------------------------------------------------------------------------
+
+/// Wave 89-90: IR-side mirror of the AST `SessionType` enum.
+///
+/// This is a codegen-local copy of [`vuma_parser::ast::SessionType`]; it
+/// exists so the codegen crate can refer to session-type protocols without
+/// taking a dependency on the parser crate (which would create a cycle).
+/// The pipeline bridges `ast::SessionType` → `ir::SessionType` when it
+/// lowers a `Type::Channel { session_type: Some(_), .. }` annotation.
+///
+/// Like the AST version, this describes a linear send/recv protocol. The
+/// IR itself does not yet carry session types per-instruction — the
+/// `Option<Box<SessionType>>` lives on the `IRType::Channel` payload
+/// conceptually and is consumed by the IVE linear-type checker (Wave 95).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionType {
+    /// Send a value of the given IRType, then continue with `continuation`.
+    Send(IRType, Box<SessionType>),
+    /// Receive a value of the given IRType, then continue with `continuation`.
+    Recv(IRType, Box<SessionType>),
+    /// Terminal: no further operations allowed on this endpoint.
+    End,
+    /// Recursion marker (`μ`) — loop back to the enclosing recursive binder.
+    Recurse,
+}
+
+impl fmt::Display for SessionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionType::Send(ty, cont) => write!(f, "Send<{}, {}>", ty, cont),
+            SessionType::Recv(ty, cont) => write!(f, "Recv<{}, {}>", ty, cont),
+            SessionType::End => write!(f, "End"),
+            SessionType::Recurse => write!(f, "Recurse"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Information-Flow Security Labels (Wave 91-92) — IR-side mirror
+// ---------------------------------------------------------------------------
+
+/// Wave 91-92: IR-side mirror of the AST `SecurityLabel` enum.
+///
+/// Two-point information-flow lattice: `Low ⊑ High`. The AST
+/// `vuma_parser::ast::SecurityLabel` carries the same two variants; the
+/// IR keeps a separate copy so the codegen crate doesn't depend on the
+/// parser crate (which would create a cycle). The runtime-side
+/// `vuma_codegen::ipc::SecurityLabel` is a richer four-point lattice
+/// (Public < Internal < Secret < TopSecret) used for capability
+/// attestation — this IR-side `SecurityLabel` is the simpler form used
+/// for compile-time information-flow type-checking on user variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SecurityLabel {
+    /// Low-sensitivity: public, may flow anywhere.
+    #[default]
+    Low,
+    /// High-sensitivity: secret, may NOT flow to a `Low` sink.
+    High,
+}
+
+impl SecurityLabel {
+    /// Information-flow lattice: `self` may flow to `target` iff
+    /// `self <= target`. `Low → High` is permitted; `High → Low` is a leak.
+    pub fn can_flow_to(self, target: SecurityLabel) -> bool {
+        self <= target
+    }
+
+    /// Least upper bound of two labels.
+    pub fn join(self, other: SecurityLabel) -> SecurityLabel {
+        if self >= other { self } else { other }
+    }
+}
+
+impl fmt::Display for SecurityLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecurityLabel::Low => write!(f, "Low"),
+            SecurityLabel::High => write!(f, "High"),
+        }
+    }
+}
+
 impl IRType {
     /// Returns `true` if this is an integer type (signed or unsigned).
     pub fn is_integer(&self) -> bool {
@@ -1767,6 +1851,44 @@ pub enum IRInstr {
         /// Optional message type (selects backend load width + type_hash).
         ty: Option<IRType>,
     },
+
+    /// Wave 93-94: zk-STARK proof generation.
+    ///
+    /// `dst = stark_prove(input, constraints)` — generates a zero-knowledge
+    /// STARK proof attesting that the prover knows a witness satisfying the
+    /// given arithmetic constraints over `input`. The proof is opaque
+    /// bytes; the verifier (a separate `stark_verify` builtin, not yet
+    /// added) checks the proof against the same constraint set.
+    ///
+    /// **IR semantics:** the `input` vreg holds the public input value
+    /// (e.g. a channel handle whose ownership is being proven). The
+    /// `constraints` are a compile-time-known list of constraint
+    /// coefficients (e.g. polynomial evaluations over the witness
+    /// domain). The `dst` vreg receives a pointer-sized proof handle
+    /// (the actual proof bytes live in a runtime-allocated buffer; the
+    /// handle is an index into the proof table maintained by the IPC
+    /// layer — see [`crate::ipc::StarkProof`]).
+    ///
+    /// **Backend lowering (x86_64):** the Call-form `stark_prove(input)`
+    /// builtin (intercepted in `x86_64/stack_slot_isel.rs`'s Call-form
+    /// isel) is the active path — it stores `1` to `dst` as a placeholder
+    /// proof handle (a non-zero handle means "proof generated"). The
+    /// dedicated `IRInstr::StarkProof` arm is for the future SCG-
+    /// NodePayload path (currently unreachable from surface syntax, like
+    /// the other `IRInstr::Channel*` arms).
+    ///
+    /// **Effects:** allocates a proof buffer (side-effecting for DCE/LICM).
+    /// Defines `dst`; reads `input`.
+    StarkProof {
+        /// Public input value being proven about (e.g. a channel handle).
+        input: IRValue,
+        /// Destination register (receives a pointer-sized proof handle).
+        dst: IRValue,
+        /// Compile-time constraint coefficients (e.g. polynomial
+        /// evaluations over the witness domain). Empty for the
+        /// placeholder builtin path.
+        constraints: Vec<u64>,
+    },
 }
 
 /// Wave 8b: error discriminants returned by [`IRInstr::ChannelRecvResult`].
@@ -1842,6 +1964,8 @@ impl IRInstr {
                 r.extend(err_dst.as_register());
                 r
             }
+            // Wave 93-94: StarkProof defines the proof-handle dst.
+            IRInstr::StarkProof { dst, .. } => dst.as_register().into_iter().collect(),
             IRInstr::Store { .. }
             | IRInstr::Free { .. }
             | IRInstr::Ret { .. }
@@ -1946,6 +2070,8 @@ impl IRInstr {
             // Wave 8b: ChannelRecvResult reads the channel handle.
             IRInstr::ChannelRecvResult { ch, .. } => ch.as_register().into_iter().collect(),
             IRInstr::ChannelClose { ch } => ch.as_register().into_iter().collect(),
+            // Wave 93-94: StarkProof reads the public input.
+            IRInstr::StarkProof { input, .. } => input.as_register().into_iter().collect(),
         }
     }
 }
@@ -2111,6 +2237,15 @@ impl fmt::Display for IRInstr {
                     dst, err_dst, ch, t
                 ),
                 None => write!(f, "({}, {}) = channel_recv_result {}", dst, err_dst, ch),
+            },
+            // Wave 93-94: zk-STARK proof generation.
+            IRInstr::StarkProof { input, dst, constraints } => {
+                if constraints.is_empty() {
+                    write!(f, "{} = stark_prove {}", dst, input)
+                } else {
+                    let cs: Vec<String> = constraints.iter().map(|c| c.to_string()).collect();
+                    write!(f, "{} = stark_prove {}, [{}]", dst, input, cs.join(", "))
+                }
             },
         }
     }

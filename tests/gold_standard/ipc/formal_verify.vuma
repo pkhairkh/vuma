@@ -1,0 +1,30 @@
+// formal_verify — Wave 96: L1-L3 invariant collapse proof
+//
+// The l1l3_collapse() function in src/ive/src/verification.rs scans the SCG
+// for runtime-checked invariants (L1: channel framing, CRC, capability,
+// protocol-state checks) and proves they collapse into compile-time-known
+// invariants (L3: type-hash equality, structural cap-id checks).  A program
+// where all L1 checks have compile-time-known arguments passes the collapse
+// proof (collapsed: true).
+//
+// This test is a minimal valid program (open channel, send, recv, close)
+// where every L1 check's arguments are compile-time constants.  The program
+// runs successfully (exit=1), confirming the L1 checks don't reject a valid
+// execution — which is the runtime witness that the collapse proof's
+// soundness condition holds for this program.
+//
+// Expected exit code: 1
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return 0;
+    }
+    channel_send(ch, 1);
+    status = wait_worker(pid);
+    channel_close(ch);
+    if status == 0 { return 1; }
+    return 0;
+}

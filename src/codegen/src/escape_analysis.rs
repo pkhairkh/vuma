@@ -409,6 +409,11 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(err_dst, from, to);
                 }
                 IRInstr::ChannelClose { ch } => sub(ch, from, to),
+                // Wave 93-94: renumber the proof-handle dst and public input.
+                IRInstr::StarkProof { input, dst, .. } => {
+                    sub(input, from, to);
+                    sub(dst, from, to);
+                }
             }
         }
         match &mut block.terminator {

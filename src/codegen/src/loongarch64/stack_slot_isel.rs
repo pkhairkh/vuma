@@ -1947,7 +1947,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── Channel operations (Wave 1d / Task 2a) ──
                 // Backend lowering not yet implemented; emit no bytes.
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
+                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
+                // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                | IRInstr::StarkProof { .. } => Vec::new(),
             };
 
             if !code.is_empty() {
