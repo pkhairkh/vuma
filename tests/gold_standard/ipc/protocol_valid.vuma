@@ -1,0 +1,29 @@
+// protocol_valid — Wave 14b: protocol state machine, valid transition sequence
+//
+// Exercises the channel_recv_proto(ch, expected_state) builtin, which
+// implements the L4 protocol state machine.  Before recv'ing, the builtin
+// verifies the channel's proto_state equals expected_state.  On success it
+// advances proto_state (+= 1), so the next recv_proto must declare the next
+// state.
+//
+// Valid sequence: the child sends two messages.  The parent recv_proto's
+// with expected_state=0 (first message), then expected_state=1 (second
+// message).  Both match the advancing proto_state, so both succeed and the
+// parent returns 50 (10 + 40).
+//
+// Expected exit code: 50
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 10);
+        channel_send(ch, 40);
+        channel_close(ch);
+        return 0;
+    }
+    a = channel_recv_proto(ch, 0);
+    b = channel_recv_proto(ch, 1);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return (a + b);
+}
