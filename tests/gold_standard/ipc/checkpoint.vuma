@@ -1,8 +1,27 @@
-// checkpoint — Wave 19-21: verify checkpoint_save/restore roundtrip.
+// checkpoint — Wave 19-21: real Checkpoint wire format with integrity hash.
 //
-// The parent calls checkpoint_save(42424242) to write the value to
-// /tmp/vuma_checkpoint.bin, then calls checkpoint_restore() to read
-// it back. If the round-trip preserves the value, exit 1.
+// checkpoint_save(value) now persists a 96-byte record mirroring the
+// library Checkpoint struct:
+//   [0..8]   magic 0x434B50544F494E54 ("CHECKPNT")
+//   [8..16]  pid (0)
+//   [16..24] timestamp (0)
+//   [24..32] channel_id (0)
+//   [32..40] sequence (the saved value)
+//   [40..48] protocol_state tag (0 = Idle)
+//   [48..52] integrity_hash: CRC32 over [24..48] (poly 0xEDB88320)
+//   [52..96] reserved (zeroed)
+//
+// checkpoint_restore() reads the record, verifies the magic AND the
+// integrity hash, and returns the sequence value. On any failure
+// (file missing, short read, bad magic, hash mismatch) it returns -1.
+//
+// Flow:
+//   1. checkpoint_save(42424242) — writes the 96-byte record with a
+//      real CRC32 integrity hash stamped over the channel record.
+//   2. checkpoint_restore() — reads it back, verifies magic + hash,
+//      returns 42424242 on success.
+//   3. If v == 42424242, the round-trip preserved the value AND the
+//      integrity hash verified — exit 1.
 //
 // Expected exit code: 1
 fn main() -> i32 {

@@ -168,7 +168,24 @@ fn patch_rel32_jmp(code: &mut Vec<u8>, patch_off: usize, target_off: usize) {
 /// The caller is responsible for storing R8D (the CRC) into `[rsp+52]` on
 /// the send side, or comparing R8D with `[rsp+52]` on the receive side.
 fn emit_crc32_frame_loop() -> Vec<u8> {
-    let mut code = Vec::with_capacity(80);
+    // Backwards-compatible wrapper: CRC32 over the 52-byte framed channel
+    // header+payload at [rsp]. Delegates to the generalized helper.
+    emit_crc32_range(Gpr::Rsp, 0, 52)
+}
+
+/// Emit a standalone CRC32 (IEEE 802.3, poly 0xEDB88320, init/final 0xFFFFFFFF)
+/// computation over `byte_count` bytes starting at `[base + offset]`.
+///
+/// The result is left in the low 32 bits of **R8** (upper 32 bits zeroed,
+/// so a 64-bit `cmp r8, rcx` against a zero-extended 32-bit load compares
+/// correctly). Clobbers RAX, RCX, RSI, R9, R10, R11.
+///
+/// This is the same algorithm as the framed-channel `emit_crc32_frame_loop`
+/// but parameterized over the base register, offset, and byte count so it
+/// can be reused by the L6 checkpoint integrity hash (Wave 19-21) and any
+/// other caller that needs a CRC32 over an arbitrary memory range.
+fn emit_crc32_range(base: Gpr, offset: i32, byte_count: u32) -> Vec<u8> {
+    let mut code = Vec::with_capacity(90);
 
     // crc = 0xFFFFFFFF  (64-bit mov so upper 32 bits are 0)
     code.extend(encode_mov_reg_imm64(Gpr::R8, 0xFFFFFFFF));
@@ -176,15 +193,15 @@ fn emit_crc32_frame_loop() -> Vec<u8> {
     code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));
     // rax = poly 0xEDB88320 (64-bit mov so upper 32 bits are 0)
     code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xEDB88320));
-    // rsi = &frame[0]
-    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+    // rsi = &buffer[0]  (base + offset)
+    code.extend(encode_lea_reg_mem(Gpr::Rsi, base, offset));
     // r9 = 0 (outer counter)
     code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));
 
     // ── outer_loop: ──
     let outer_loop_off = code.len();
-    // cmp r9, 52
-    code.extend(encode_cmp_reg_imm32(Gpr::R9, 52));
+    // cmp r9, byte_count
+    code.extend(encode_cmp_reg_imm32(Gpr::R9, byte_count as i32));
     // jge outer_done (rel32 placeholder)
     let jge_outer_patch = code.len();
     code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
@@ -3398,145 +3415,191 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             // Wave 19-21 (L6 Checkpoint): checkpoint_save(value)
-                            // Writes an 8-byte value to /tmp/vuma_checkpoint.bin.
-                            // Uses open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644) +
-                            // write(fd, &value, 8) + close(fd).
-                            // The Checkpoint struct in ipc.rs implements full
-                            // state serialization (channels + integrity hash);
-                            // this inline builtin persists a single value.
+                            //
+                            // Persists a real Checkpoint wire-format record to
+                            // /tmp/vuma_checkpoint.bin — NOT a bare 8-byte value.
+                            // The 96-byte record mirrors the library Checkpoint
+                            // struct (ipc.rs: Checkpoint { pid, channels, timestamp,
+                            // integrity_hash }) so that checkpoint_restore can
+                            // verify integrity on read-back.
+                            //
+                            // Wire layout (96 bytes, all little-endian):
+                            //   [ 0.. 8] magic 0x434B50544F494E54 ("CHECKPNT")
+                            //            — identifies a valid checkpoint file
+                            //   [ 8..16] pid (0 — userspace; kernel fills in
+                            //            a real deployment; not covered by hash)
+                            //   [16..24] timestamp (0 — same)
+                            //   [24..32] channel_id (0 — single-channel checkpoint)
+                            //   [32..40] sequence (the caller's `value` — the
+                            //            restorable userspace state)
+                            //   [40..48] protocol_state tag (0 = Idle)
+                            //   [48..52] integrity_hash: CRC32 (poly 0xEDB88320,
+                            //            init/final 0xFFFFFFFF) over [24..48] —
+                            //            the 24-byte channel record. This is a
+                            //            single-lane simplification of the
+                            //            library's 8-lane compute_integrity_hash,
+                            //            applied to the single-channel case.
+                            //   [52..96] reserved (zeroed; for future multi-channel
+                            //            / 8-lane hash extension)
+                            //
+                            // The integrity hash is computed in emitted code via
+                            // emit_crc32_range(Rsp, 24, 24) — the same CRC32
+                            // primitive L1 uses for frame integrity, so save and
+                            // restore agree byte-for-byte.
                             "checkpoint_save" if args.len() == 1 => {
                                 let value = &args[0];
-                                // Build the path "/tmp/vuma_checkpoint.bin" on stack.
-                                // 21 bytes including null terminator.
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 32));
-                                // Store the path string as immediate bytes.
-                                // "/tmp/vuma_checkpoint.bin\0"
-                                // = 2F 74 6D 70 2F 76 75 6D 61 5F 63 68 65 63 6B 70 6F 69 6E 74 2E 62 69 6E 00
-                                // Pack as u64 immediates:
-                                // [0..8]:  "/tmp/vum" = 0x6D75762F706D742F
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F));
+                                // Layout: [0..32] path, [32..128] checkpoint record (96 bytes).
+                                // Total stack: 128 bytes (16-byte aligned).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 128));
+                                // ── Build the path "/tmp/vuma_checkpoint.bin\0" at [rsp+0..25] ──
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F)); // "/tmp/vum"
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
-                                // [8..16]: "a_checkp" = 0x706B6365635F6161
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x706B6365635F6161));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x706B636568635F61)); // "a_checkp"
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                // [16..24]: "oint.bin" = 0x6E69622E746E696F
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6E69622E746E696F));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6E69622E746E696F)); // "oint.bin"
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
-                                // [24]: null terminator = 0
                                 code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
-                                // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
-                                // sys_open=2, O_WRONLY=1, O_CREAT=64(0x40), O_TRUNC=512(0x200)
-                                // flags = 1|0x40|0x200 = 0x241
-                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x241));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0o644));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
-                                code.extend(encode_syscall());
-                                // RAX = fd. Save to [rsp+28] (4 bytes).
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 28, Gpr::Rax));
-                                // write(fd, &value, 8) — store value at [rsp+29..37]
-                                // Actually, put value right after the path. Use [rsp+8] as
-                                // the value buffer (overwrite the path, which we don't need).
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28)); // fd
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax)); // null terminator
+                                // ── Build the 96-byte checkpoint record at [rsp+32..128] ──
+                                let rec = 32; // record base offset
+                                // [rec+0..8] = magic 0x434B50544F494E54 ("CHECKPNT")
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x434B50544F494E54));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + 0, Gpr::Rax));
+                                // [rec+8..16] = pid = 0
+                                // [rec+16..24] = timestamp = 0
+                                // (zero both in one 8-byte store, then zero [rec+24..32] separately)
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + 8, Gpr::Rax));  // pid=0
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + 16, Gpr::Rax)); // timestamp=0
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + 24, Gpr::Rax)); // channel_id=0
+                                // [rec+32..40] = sequence = value (the caller's data)
                                 code.extend(load_value(value, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_write
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + 32, Gpr::Rax));
+                                // [rec+40..48] = protocol_state tag = 0 (Idle)
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + 40, Gpr::Rax));
+                                // [rec+48..52] = integrity_hash = CRC32 over [rec+24 .. rec+48]
+                                // (the 24-byte channel record: channel_id+sequence+state).
+                                // emit_crc32_range reads from [base+offset], so base=Rsp, offset=rec+24, len=24.
+                                code.extend(emit_crc32_range(Gpr::Rsp, rec + 24, 24));
+                                // R8 now holds the CRC32 (low 32 bits). Store to [rec+48..52].
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, rec + 48, Gpr::R8));
+                                // [rec+52..96] = reserved = 0 (44 bytes). Zero in 8-byte chunks.
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                for off in (52..96).step_by(8) {
+                                    code.extend(encode_mov_mem_reg(Gpr::Rsp, rec + off, Gpr::Rax));
+                                }
+                                // ── open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644) ──
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x241)); // O_WRONLY|O_CREAT|O_TRUNC
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0o644));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 2)); // sys_open
                                 code.extend(encode_syscall());
-                                // close(fd)
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
+                                // RAX = fd. Save to [rsp+24] (reuse path tail, path no longer needed).
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
+                                // ── write(fd, &record, 96) ──
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 24)); // fd
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, rec));   // &record
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 96));            // 96 bytes
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));             // sys_write
+                                code.extend(encode_syscall());
+                                // ── close(fd) ──
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 24));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 3)); // sys_close
                                 code.extend(encode_syscall());
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 32));
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 128));
                                 instr_opcode = Some("checkpoint_save".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 19-21 (L6 Checkpoint): checkpoint_restore() -> u64
-                            // Reads an 8-byte value from /tmp/vuma_checkpoint.bin.
+                            // Wave 19-21 (L6 Checkpoint): checkpoint_restore() -> i64
+                            //
+                            // Reads the 96-byte Checkpoint wire-format record
+                            // from /tmp/vuma_checkpoint.bin, verifies the magic
+                            // and the integrity hash, and returns the restored
+                            // sequence value. On any failure (file missing,
+                            // short read, bad magic, hash mismatch — i.e.
+                            // corruption or tampering) returns -1
+                            // (0xFFFFFFFFFFFFFFFF) to signal that the
+                            // checkpoint is invalid and must not be trusted.
+                            // This mirrors the library restore_state() which
+                            // returns Err(IpcError::CheckpointIntegrityFailed)
+                            // on hash mismatch.
                             "checkpoint_restore" if args.is_empty() && dst.is_some() => {
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 let dst_off = slot_offset(dst_id);
-                                // Build path on stack
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 32));
+                                // Layout: [0..32] path, [32..128] record buffer (96 bytes).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 128));
+                                // ── Build the path at [rsp+0..25] ──
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6D75762F706D742F));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x706B6365635F6161));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x706B636568635F61)); // "a_checkp"
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6E69622E746E696F));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0x6E69622E746E696F)); // "oint.bin"
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
                                 code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
-                                // open(path, O_RDONLY=0)
+                                let rec = 32; // record base offset
+                                // ── open(path, O_RDONLY=0) ──
                                 code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
-                                code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // O_RDONLY=0
+                                code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // O_RDONLY
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 2)); // sys_open
                                 code.extend(encode_syscall());
-                                // BUGFIX (audit 2025-07-20): check open() return.
-                                // If RAX < 0 (file missing, permission denied), store 0
-                                // in dst and skip to cleanup. Previously the code would
-                                // proceed to read() with fd=-1, which returns -1, and
-                                // then load garbage from the path-string buffer.
+                                // If RAX < 0 (file missing/permission), jump to fail_path.
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
                                 let open_jle_patch = code.len();
                                 code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
-                                // RAX = fd (>= 0). Save to [rsp+28].
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 28, Gpr::Rax));
-                                // read(fd, &buf, 8) — use [rsp+8] as buffer
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
-                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 8));
+                                // RAX = fd (>= 0). Save to [rsp+24].
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 24, Gpr::Rax));
+                                // ── read(fd, &record, 96) ──
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 24));
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, rec));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 96));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
                                 code.extend(encode_syscall());
-                                // BUGFIX: check read() return. If RAX <= 0 (EOF or
-                                // error), the buffer at [rsp+8] was not written by
-                                // the kernel — it still holds the path string bytes.
-                                // Store 0 in dst and jump to cleanup.
-                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
-                                let read_jle_patch = code.len();
-                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
-                                // read succeeded (RAX > 0) — load the 8 bytes from
-                                // [rsp+8] into dst slot.
-                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 8));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
-                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 12));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
-                                // close(fd)
-                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 28));
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
+                                // If RAX < 96 (short read / EOF / error), jump to fail_path
+                                // (the record is incomplete — cannot verify integrity).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 96));
+                                let read_jl_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl rel32
+                                // ── close(fd) ──
+                                code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 24));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 3)); // sys_close
                                 code.extend(encode_syscall());
+                                // ── Verify magic: [rec+0..8] == 0x434B50544F494E54 ──
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, rec + 0));
+                                code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0x434B50544F494E54));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                let magic_jne_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32 (to fail)
+                                // ── Verify integrity hash ──
+                                // Recompute CRC32 over [rec+24 .. rec+48] (24 bytes) into R8.
+                                code.extend(emit_crc32_range(Gpr::Rsp, rec + 24, 24));
+                                // Load stored hash from [rec+48..52] into ECX (zero-extends to RCX).
+                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, rec + 48));
+                                // Compare recomputed (R8) vs stored (RCX).
+                                code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                let hash_jne_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32 (to fail)
+                                // ── Integrity OK: load the sequence value from [rec+32..40] ──
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, rec + 32));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                                 // jmp cleanup
-                                let jmp_cleanup_patch = code.len();
+                                let jmp_ok_patch = code.len();
                                 code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
-                                // fail_path (open or read failed): store 0 in dst.
+                                // ── fail_path: store -1 (0xFFFFFFFFFFFFFFFF) to signal integrity failure ──
                                 let fail_off = code.len();
-                                let open_delta = fail_off as i64 - (open_jle_patch as i64 + 6);
-                                let bd = (open_delta as i32).to_le_bytes();
-                                code[open_jle_patch+2] = bd[0];
-                                code[open_jle_patch+3] = bd[1];
-                                code[open_jle_patch+4] = bd[2];
-                                code[open_jle_patch+5] = bd[3];
-                                let read_delta = fail_off as i64 - (read_jle_patch as i64 + 6);
-                                let bd = (read_delta as i32).to_le_bytes();
-                                code[read_jle_patch+2] = bd[0];
-                                code[read_jle_patch+3] = bd[1];
-                                code[read_jle_patch+4] = bd[2];
-                                code[read_jle_patch+5] = bd[3];
-                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                                patch_rel32_jcc(&mut code, open_jle_patch, fail_off);
+                                patch_rel32_jcc(&mut code, read_jl_patch, fail_off);
+                                patch_rel32_jcc(&mut code, magic_jne_patch, fail_off);
+                                patch_rel32_jcc(&mut code, hash_jne_patch, fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
 
-                                // cleanup: deallocate path buffer
+                                // ── cleanup: deallocate stack ──
                                 let cleanup_off = code.len();
-                                let cleanup_delta = cleanup_off as i64 - (jmp_cleanup_patch as i64 + 5);
-                                let bd = (cleanup_delta as i32).to_le_bytes();
-                                code[jmp_cleanup_patch+1] = bd[0];
-                                code[jmp_cleanup_patch+2] = bd[1];
-                                code[jmp_cleanup_patch+3] = bd[2];
-                                code[jmp_cleanup_patch+4] = bd[3];
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 32));
+                                patch_rel32_jmp(&mut code, jmp_ok_patch, cleanup_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 128));
                                 instr_opcode = Some("checkpoint_restore".to_string());
                                 channel_builtin_matched = true;
                             }
