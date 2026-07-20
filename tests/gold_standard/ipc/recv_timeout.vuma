@@ -1,14 +1,24 @@
-// recv_timeout — recv with 100ms timeout on empty channel returns -2 (TIMEOUT)
-// Expected exit code: 88
+// recv_timeout — recv with 100ms timeout on empty channel returns -3 (Timeout).
 //
-// Wave 8c: channel_recv_timeout(ch, ms) uses poll() with a timeout.
-// On an empty channel with no sender, poll() returns 0 after the timeout
-// expires, and the builtin writes the sentinel -2 into the destination.
-// The program checks for -2 and exits 88 to signal "timeout detected".
+// Phase 2a (L1 framing): channel_recv_timeout now performs a full
+// framed read with MAGIC + CRC32 verification, bounded by a poll()
+// timeout. On an empty channel with no sender, poll() returns 0 after
+// the timeout expires, and the builtin writes the sentinel -3 into
+// the destination. The program checks for -3 and exits 88 to signal
+// "timeout detected".
+//
+// Sentinel conventions (Phase 2a):
+//   -1 = Closed/Invalid (poll error, read EOF/error, or MAGIC mismatch)
+//   -2 = EAGAIN   (channel_try_recv only — no data right now)
+//   -3 = Timeout  (channel_recv_timeout only — poll timed out)
+//   -6 = CrcMismatch (CRC32 verification failed)
+//   -7 = TypeMismatch (channel_recv only — type_hash mismatch)
+//
+// Expected exit code: 88
 fn main() -> i32 {
     ch = channel_open<i32>();
     x = channel_recv_timeout(ch, 100);
     channel_close(ch);
-    if x == 0 - 2 { return 88; }
+    if x == 0 - 3 { return 88; }
     return x;
 }

@@ -1,8 +1,16 @@
-// try_recv — Non-blocking recv returns 0 on empty channel
+// try_recv — Non-blocking recv returns -2 (EAGAIN) on empty channel.
+//
+// Phase 2a (L1 framing): channel_try_recv now performs a full framed
+// read with MAGIC + CRC32 verification. On an empty channel poll()
+// returns 0, so try_recv returns -2 (EAGAIN-like sentinel). The
+// previous implementation returned 0 on no data; the new behaviour
+// distinguishes "no data right now" (-2) from "got a payload" (the
+// payload value itself, which can legitimately be 0).
+//
 // Expected exit code: 77
 fn main() -> i32 {
     ch = channel_open<i32>();
     result = channel_try_recv(ch);
-    if result == 0 { return 77; }
+    if result == 0 - 2 { return 77; }
     return result;
 }
