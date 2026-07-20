@@ -2002,11 +2002,20 @@ impl<'src> Parser<'src> {
         }
 
         self.expect(TokenKind::RBrace)?;
-        Ok(Stmt::Match(MatchStmt {
+        let match_stmt = MatchStmt {
             subject,
             arms,
             span: Span::new(start, self.current.span.end),
-        }))
+        };
+        // Wave 8b: validate the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+        // form.  The Ok/Err arms are parsed by `parse_match_pattern` (via the
+        // OkKw/ErrKw keywords) into MatchPattern::Enum; here we confirm the
+        // subject is `channel_recv(...)` and that exactly one Ok-binding and
+        // one Err-binding are present, so the pipeline's fallible-recv
+        // lowering can fire.  Malformed Ok/Err usage is reported as a parse
+        // error so the user gets early feedback.
+        Self::validate_match_channel_recv_ok_err(&match_stmt)?;
+        Ok(Stmt::Match(match_stmt))
     }
 
     /// Parse a match pattern.
@@ -2148,6 +2157,88 @@ impl<'src> Parser<'src> {
                 self.current.span,
             )),
         }
+    }
+
+    /// Wave 8b: validate the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+    /// form, where Ok/Err arms are matched against a `channel_recv` subject.
+    ///
+    /// This is the parser-side recognition of the fallible channel-recv match
+    /// construct (Wave 8b).  When the subject is `channel_recv(...)`:
+    ///   - exactly two arms MUST be present,
+    ///   - one arm MUST be `Ok(<ident>)` (a binding, not a bare `Ok`),
+    ///   - the other arm MUST be `Err(<ident>)` (a binding, not a bare `Err`),
+    ///   - no guards are permitted on either arm (the dispatch is purely on
+    ///     the recv result discriminant).
+    ///
+    /// Any other match form (non-`channel_recv` subject, or Ok/Err used with
+    /// a different subject) is left untouched and falls through to the
+    /// generic Switch / complex-pattern lowering.
+    fn validate_match_channel_recv_ok_err(match_stmt: &MatchStmt) -> Result<(), ParseError> {
+        // Only applies when the subject is `channel_recv(...)`.
+        let is_channel_recv_subject = match &match_stmt.subject {
+            Expr::Call { callee, .. } => matches!(callee.as_ref(),
+                Expr::Var { name, .. } if name == "channel_recv"),
+            _ => false,
+        };
+        if !is_channel_recv_subject {
+            return Ok(());
+        }
+        // Subject is channel_recv(...) → enforce the Ok/Err two-arm form.
+        if match_stmt.arms.len() != 2 {
+            return Err(ParseError::new(
+                String::from("match channel_recv(ch) requires exactly two arms: Ok(v) and Err(e)"),
+                match_stmt.span,
+                ParseErrorKind::UnexpectedToken,
+            ));
+        }
+        let mut saw_ok_binding = false;
+        let mut saw_err_binding = false;
+        for arm in &match_stmt.arms {
+            if arm.guard.is_some() {
+                return Err(ParseError::new(
+                    String::from("match channel_recv(ch) arms may not carry guards"),
+                    arm.span,
+                    ParseErrorKind::UnexpectedToken,
+                ));
+            }
+            match &arm.pattern {
+                MatchPattern::Enum { name, binding, .. } if name == "Ok" => {
+                    if binding.is_none() {
+                        return Err(ParseError::new(
+                            String::from("Ok arm of match channel_recv(ch) must bind a value: Ok(v)"),
+                            arm.span,
+                            ParseErrorKind::UnexpectedToken,
+                        ));
+                    }
+                    saw_ok_binding = true;
+                }
+                MatchPattern::Enum { name, binding, .. } if name == "Err" => {
+                    if binding.is_none() {
+                        return Err(ParseError::new(
+                            String::from("Err arm of match channel_recv(ch) must bind a value: Err(e)"),
+                            arm.span,
+                            ParseErrorKind::UnexpectedToken,
+                        ));
+                    }
+                    saw_err_binding = true;
+                }
+                _ => {
+                    return Err(ParseError::new(
+                        String::from("match channel_recv(ch) arms must be Ok(v) and Err(e)"),
+                        arm.span,
+                        ParseErrorKind::UnexpectedToken,
+                    ));
+                }
+            }
+        }
+        if !(saw_ok_binding && saw_err_binding) {
+            return Err(ParseError::new(
+                String::from("match channel_recv(ch) requires both an Ok(v) arm and an Err(e) arm"),
+                match_stmt.span,
+                ParseErrorKind::UnexpectedToken,
+            ));
+        }
+        Ok(())
     }
 
     /// `return` [<expr>] `;`

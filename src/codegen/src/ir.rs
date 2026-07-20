@@ -1742,6 +1742,61 @@ pub enum IRInstr {
         /// Maximum time to block, in milliseconds.  0 means non-blocking.
         timeout_ms: u64,
     },
+
+    /// Wave 8b: fallible channel receive that produces BOTH a value and an
+    /// error code, for lowering `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
+    ///
+    /// On success `dst` receives the 8-byte message payload and `err_dst`
+    /// is written `0` (Ok).  On failure `dst` is written `0` and `err_dst`
+    /// receives a [`ChannelError`] discriminant as an `i64`:
+    ///   - `1` = [`ChannelError::Closed`]
+    ///   - `2` = [`ChannelError::Timeout`]
+    ///   - `3` = [`ChannelError::PermissionDenied`]
+    ///   - `4` = [`ChannelError::InvalidHandle`]
+    ///   - `5` = [`ChannelError::CrcMismatch`]
+    ///   - `6` = [`ChannelError::ProtocolViolation`]
+    ///
+    /// **Effects:** performs I/O (may block).  Defines both `dst` and `err_dst`.
+    ChannelRecvResult {
+        /// Channel handle (opaque capability).
+        ch: IRValue,
+        /// Destination register (receives the message payload on Ok).
+        dst: IRValue,
+        /// Error-code register (receives 0 on Ok, a ChannelError discriminant on Err).
+        err_dst: IRValue,
+        /// Optional message type (selects backend load width + type_hash).
+        ty: Option<IRType>,
+    },
+}
+
+/// Wave 8b: error discriminants returned by [`IRInstr::ChannelRecvResult`].
+///
+/// The numeric values are stable on the wire: backends emit them as `i64`
+/// into the `err_dst` slot of `ChannelRecvResult`, and the `match` arm for
+/// `Err(e)` compares against these constants.  They MUST NOT be renumbered
+/// without bumping the L1 framing version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i64)]
+pub enum ChannelError {
+    /// The channel was closed by the peer or the runtime.  `err_dst` = 1.
+    Closed = 1,
+    /// A bounded recv timed out before a message arrived.  `err_dst` = 2.
+    Timeout = 2,
+    /// The message carried a capability that failed verification.  `err_dst` = 3.
+    PermissionDenied = 3,
+    /// The channel handle does not refer to a live channel.  `err_dst` = 4.
+    InvalidHandle = 4,
+    /// The L1 frame's CRC32 did not match the computed checksum.  `err_dst` = 5.
+    CrcMismatch = 5,
+    /// The received type_hash violated the protocol state machine.  `err_dst` = 6.
+    ProtocolViolation = 6,
+}
+
+impl ChannelError {
+    /// Returns the wire discriminant stored in `err_dst`.
+    pub fn as_i64(self) -> i64 {
+        self as i64
+    }
 }
 
 impl IRInstr {
@@ -1781,6 +1836,12 @@ impl IRInstr {
             IRInstr::ChannelOpen { dst, .. }
             | IRInstr::ChannelRecv { dst, .. }
             | IRInstr::ChannelRecvTimeout { dst, .. } => dst.as_register().into_iter().collect(),
+            // Wave 8b: ChannelRecvResult defines BOTH the value dst and the err_dst.
+            IRInstr::ChannelRecvResult { dst, err_dst, .. } => {
+                let mut r = dst.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(err_dst.as_register());
+                r
+            }
             IRInstr::Store { .. }
             | IRInstr::Free { .. }
             | IRInstr::Ret { .. }
@@ -1882,6 +1943,8 @@ impl IRInstr {
             }
             IRInstr::ChannelRecv { ch, .. } => ch.as_register().into_iter().collect(),
             IRInstr::ChannelRecvTimeout { ch, .. } => ch.as_register().into_iter().collect(),
+            // Wave 8b: ChannelRecvResult reads the channel handle.
+            IRInstr::ChannelRecvResult { ch, .. } => ch.as_register().into_iter().collect(),
             IRInstr::ChannelClose { ch } => ch.as_register().into_iter().collect(),
         }
     }
@@ -2039,6 +2102,15 @@ impl fmt::Display for IRInstr {
             IRInstr::ChannelRecvTimeout { ch, dst, ty, timeout_ms } => match ty {
                 Some(t) => write!(f, "{} = channel_recv_timeout {}, {} ({})", dst, ch, timeout_ms, t),
                 None => write!(f, "{} = channel_recv_timeout {}, {}", dst, ch, timeout_ms),
+            },
+            // Wave 8b: fallible recv producing (value, err) pair.
+            IRInstr::ChannelRecvResult { ch, dst, err_dst, ty } => match ty {
+                Some(t) => write!(
+                    f,
+                    "({}, {}) = channel_recv_result {} ({})",
+                    dst, err_dst, ch, t
+                ),
+                None => write!(f, "({}, {}) = channel_recv_result {}", dst, err_dst, ch),
             },
         }
     }

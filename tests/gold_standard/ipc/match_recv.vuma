@@ -1,0 +1,29 @@
+// match_recv — Wave 8b: match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }
+//
+// Exercises the first-class fallible-recv match lowering:
+//   - The parser recognises `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+//     (validated by `validate_match_channel_recv_ok_err`).
+//   - The pipeline emits `ScgStatement::ChannelRecvResult` (binding `v` to the
+//     payload vreg, `e` to the ChannelError-discriminant vreg) followed by a
+//     `ControlNode::If` on `e == 0` dispatching to the two arm bodies.
+//   - The x86_64 backend lowers `IRInstr::ChannelRecvResult` to a framed recv
+//     that writes both vregs in one pass.
+//
+// Happy path: the child sends 42; the parent's recv succeeds (err_dst == 0),
+// the Ok arm fires, `v` is bound to the 8-byte payload (42), and the parent
+// returns v (= 42).
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 42);
+        channel_close(ch);
+        return 0;
+    }
+    match channel_recv(ch) {
+        Ok(v) => { return v; }
+        Err(e) => { return (0 - e); }
+    }
+}

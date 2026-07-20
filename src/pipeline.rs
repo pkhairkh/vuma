@@ -50,7 +50,7 @@ use vuma_codegen::{
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
         Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
-        ChannelOpenStmt, ChannelSendStmt, ChannelRecvStmt, ChannelCloseStmt,
+        ChannelOpenStmt, ChannelSendStmt, ChannelRecvStmt, ChannelCloseStmt, ChannelRecvResultStmt,
     },
     CastKind as CodegenCastKind, CodegenError, DataSectionKind,
 };
@@ -8762,6 +8762,111 @@ fn emit_foreign_consume_markers(
     }
 }
 
+/// Wave 8b: result of recognising `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
+///
+/// Produced by [`try_match_channel_recv_result`].  The pipeline emits a
+/// [`ScgStatement::ChannelRecvResult`] binding `ok_binding` (the Ok arm's
+/// `v`) to the payload vreg and `err_binding` (the Err arm's `e`) to the
+/// ChannelError-discriminant vreg, followed by a `ControlNode::If` on
+/// `err_binding == 0` dispatching to the two flattened arm bodies.
+struct ChannelRecvMatch {
+    /// The flattened channel-handle expression (operand of `channel_recv(ch)`).
+    channel_expr: ScgExpr,
+    /// The Ok arm's binding name (e.g. `v`) — receives the payload on success.
+    ok_binding: String,
+    /// The Err arm's binding name (e.g. `e`) — receives the ChannelError discriminant on failure.
+    err_binding: String,
+    /// Flattened Ok-arm body statements.
+    ok_body: Vec<ScgStatement>,
+    /// Flattened Err-arm body statements.
+    err_body: Vec<ScgStatement>,
+}
+
+/// Wave 8b: detect the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+/// pattern and lower it to a [`ChannelRecvMatch`] ready for emission as
+/// `ScgStatement::ChannelRecvResult` + `ControlNode::If`.
+///
+/// Returns `None` if `match_stmt` is not exactly this form (so the generic
+/// Switch / complex-pattern fallback path handles it).
+///
+/// Recognition rules (all must hold):
+///   - `match_stmt.subject` is `Expr::Call { callee: Var("channel_recv"), args: [ch] }`
+///   - `match_stmt.arms.len() == 2`
+///   - one arm's pattern is `MatchPattern::Enum { name: "Ok", binding: Some(v) }`
+///   - the other arm's pattern is `MatchPattern::Enum { name: "Err", binding: Some(e) }`
+///
+/// The channel-handle expression `ch` is flattened into `pre_stmts` (so any
+/// nested sub-expressions are evaluated before the recv).  The two arm bodies
+/// are each flattened into their own `Vec<ScgStatement>`.
+fn try_match_channel_recv_result(
+    match_stmt: &vuma_parser::ast::MatchStmt,
+    ctx: &mut BridgeCtx,
+    pre_stmts: &mut Vec<ScgStatement>,
+) -> Option<ChannelRecvMatch> {
+    use vuma_parser::ast::{Expr, MatchPattern};
+
+    // Subject must be `channel_recv(ch)`.
+    let ch_expr = match &match_stmt.subject {
+        Expr::Call { callee, args, .. } => {
+            let is_channel_recv = matches!(callee.as_ref(),
+                Expr::Var { name, .. } if name == "channel_recv");
+            if !is_channel_recv || args.len() != 1 {
+                return None;
+            }
+            &args[0]
+        }
+        _ => return None,
+    };
+
+    // Exactly two arms: one Ok(v), one Err(e).
+    if match_stmt.arms.len() != 2 {
+        return None;
+    }
+    let mut ok_arm: Option<&vuma_parser::ast::MatchArm> = None;
+    let mut err_arm: Option<&vuma_parser::ast::MatchArm> = None;
+    for arm in &match_stmt.arms {
+        match &arm.pattern {
+            MatchPattern::Enum { name, binding: Some(_), .. } if name == "Ok" => {
+                if ok_arm.is_some() { return None; }
+                ok_arm = Some(arm);
+            }
+            MatchPattern::Enum { name, binding: Some(_), .. } if name == "Err" => {
+                if err_arm.is_some() { return None; }
+                err_arm = Some(arm);
+            }
+            _ => return None, // any other pattern → not this form
+        }
+    }
+    let ok_arm = ok_arm?;
+    let err_arm = err_arm?;
+
+    let ok_binding = match &ok_arm.pattern {
+        MatchPattern::Enum { binding: Some(b), .. } => b.clone(),
+        _ => unreachable!(),
+    };
+    let err_binding = match &err_arm.pattern {
+        MatchPattern::Enum { binding: Some(b), .. } => b.clone(),
+        _ => unreachable!(),
+    };
+
+    // Flatten the channel-handle expression (may emit pre-statements).
+    let channel_expr = flatten_expr(ch_expr, pre_stmts, ctx);
+
+    // Flatten each arm body into its own statement list.
+    let mut ok_body: Vec<ScgStatement> = Vec::new();
+    let _ = flatten_expr(&ok_arm.body, &mut ok_body, ctx);
+    let mut err_body: Vec<ScgStatement> = Vec::new();
+    let _ = flatten_expr(&err_arm.body, &mut err_body, ctx);
+
+    Some(ChannelRecvMatch {
+        channel_expr,
+        ok_binding,
+        err_binding,
+        ok_body,
+        err_body,
+    })
+}
+
 /// This is the core of the bridge: it recursively decomposes nested
 /// expressions into a sequence of simple computation nodes, each operating
 /// on at most two operands and producing one result. This preserves the
@@ -9821,6 +9926,25 @@ pub fn flatten_expr(
             }
         }
 
+        // ── Wave 8b: Block expression (used in match arm bodies) ──
+        // `{ stmt; stmt; expr }` — flatten each statement into `stmts` (via
+        // `bridge_stmt_to_scg`), then flatten the optional trailing
+        // expression.  The block's value is the trailing expression's value
+        // (or 0 / unit if absent).  This is what makes
+        // `match channel_recv(ch) { Ok(v) => { return 7; }, Err(e) => { return 99; } }`
+        // lower correctly: the block's `return` statement flows into the
+        // arm's ScgStatement list and becomes an `IRInstr::Ret`.
+        Expr::Block { statements, trailing_expr, .. } => {
+            for s in statements {
+                let sub = bridge_stmt_to_scg(s, ctx);
+                stmts.extend(sub);
+            }
+            match trailing_expr {
+                Some(tail) => flatten_expr(tail, stmts, ctx),
+                None => ScgExpr::Int(0),
+            }
+        }
+
         // ── Fallback for unsupported expression types ──
         // Log a warning instead of silently returning 0. This makes
         // unsupported constructs visible during compilation.
@@ -10643,6 +10767,48 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         // which is better than silently dropping the whole match.
         PStmt::Match(match_stmt) => {
             let mut pre_stmts = Vec::new();
+
+            // ── Wave 8b: `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }` ──
+            // First-class lowering of the fallible channel-recv match form.
+            // We detect the subject `channel_recv(ch)` (an Expr::Call whose
+            // callee is Var("channel_recv") with exactly one argument) and
+            // exactly two arms whose patterns are `Ok(v)` and `Err(e)`
+            // (MatchPattern::Enum with name "Ok"/"Err" and a binding).
+            //
+            // This lowers to:
+            //   1. ScgStatement::ChannelRecvResult { channel: ch, dst: v, err_dst: e, ty: I64 }
+            //      — emits IRInstr::ChannelRecvResult, writing both the
+            //        payload vreg (bound to `v`) and the error discriminant
+            //        vreg (bound to `e`).
+            //   2. ControlNode::If { cond: (e == 0), then_body: ok_body, else_body: Some(err_body) }
+            //      — dispatches to the Ok arm when err_dst == 0, else the Err arm.
+            //
+            // The Ok arm's `v` resolves to the payload vreg; the Err arm's
+            // `e` resolves to the ChannelError discriminant (1=Closed,
+            // 3=PermissionDenied, 5=CrcMismatch, 6=ProtocolViolation, ...).
+            if let Some(crr) = try_match_channel_recv_result(match_stmt, ctx, &mut pre_stmts) {
+                // crr carries the two arm bodies + the ch/ok_binding/err_binding.
+                // Emit the ChannelRecvResult statement (binds v + e to their vregs).
+                pre_stmts.push(ScgStatement::ChannelRecvResult(ChannelRecvResultStmt {
+                    channel: crr.channel_expr,
+                    dst: crr.ok_binding.clone(),
+                    err_dst: crr.err_binding.clone(),
+                    ty: ScgType::I64,
+                }));
+                // Emit the dispatching if/else on err_dst == 0.
+                let cond = ScgExpr::BinOp {
+                    op: BinOpKind::Eq,
+                    lhs: Box::new(ScgExpr::Var(crr.err_binding.clone())),
+                    rhs: Box::new(ScgExpr::Int(0)),
+                };
+                pre_stmts.push(ScgStatement::Control(ControlNode::If {
+                    cond,
+                    then_body: crr.ok_body,
+                    else_body: Some(crr.err_body),
+                }));
+                return pre_stmts;
+            }
+
             let discriminant = flatten_expr(&match_stmt.subject, &mut pre_stmts, ctx);
 
             let mut switch_arms: Vec<SwitchArm> = Vec::new();

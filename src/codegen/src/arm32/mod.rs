@@ -7076,7 +7076,7 @@ impl Backend for Arm32Backend {
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     crate::ir::IRInstr::ChannelOpen { .. } | crate::ir::IRInstr::ChannelSend { .. }
-                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelClose { .. } => Vec::new(),
+                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::ChannelClose { .. } => Vec::new(),
                 };
 
                 let encoded_len = encoded.len() as u64;

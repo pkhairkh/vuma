@@ -612,6 +612,8 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::ChannelSend(_) => {}
                 ScgStatement::ChannelRecv(_) => {}
                 ScgStatement::ChannelClose(_) => {}
+                // Wave 8b: fallible recv — no heap/stack allocation to track.
+                ScgStatement::ChannelRecvResult(_) => {}
             }
         }
     }
