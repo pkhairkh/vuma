@@ -20,20 +20,22 @@ extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
     fn __vuma_free(addr: Address, size: i64);
     fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn __vuma_load_u8(addr: Address) -> u64;
+    fn __vuma_store_u8(addr: Address, val: u64);
 }
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
-    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
+    __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
+    __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
 }
 fn store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
 }
 fn store_u16(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
 }
 
 // ELF64 constants
@@ -66,13 +68,13 @@ fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bs
 
     // ── ELF Header (64 bytes) ──
     // e_ident[0..3]: magic 0x7F 'E' 'L' 'F'
-    *(buf + 0) = 0x7F; *(buf + 1) = 0x45; *(buf + 2) = 0x4C; *(buf + 3) = 0x46;
+    __vuma_store_u8(buf + 0, 0x7F); __vuma_store_u8(buf + 1, 0x45); __vuma_store_u8(buf + 2, 0x4C); __vuma_store_u8(buf + 3, 0x46);
     // e_ident[4]: EI_CLASS = 2 (ELFCLASS64)
-    *(buf + 4) = 2;
+    __vuma_store_u8(buf + 4, 2);
     // e_ident[5]: EI_DATA = 1 (ELFDATA2LSB, little-endian)
-    *(buf + 5) = 1;
+    __vuma_store_u8(buf + 5, 1);
     // e_ident[6]: EI_VERSION = 1
-    *(buf + 6) = 1;
+    __vuma_store_u8(buf + 6, 1);
     // e_ident[7..15]: padding (zeros)
     // e_type: ET_EXEC = 2
     store_u16(buf, 16, 2);
@@ -122,7 +124,7 @@ fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bs
     code_offset: u32 = header_size;
     i: u32 = 0;
     while i < code_size {
-        *(buf + code_offset + i) = *(code + i) & 255;
+        __vuma_store_u8(buf + code_offset + i, __vuma_load_u8(code + i) & 255);
         i = i + 1;
     }
 
