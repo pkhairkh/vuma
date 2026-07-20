@@ -799,6 +799,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let cap_siginput_len_off: i32 = -(current_offset);
 
+    // Wave F (Driver Isolation — IRQ routing): per-function IRQ routing
+    // table + entry-count slot.  driver_register(irq, handler_ptr) writes
+    // (irq, handler_ptr) pairs into the next free slot; irq_dispatch(vector)
+    // linear-scans the table for a matching irq and calls the handler via
+    // an indirect `call r10`.  Mirrors the library DriverWorker
+    // (ipc.rs:4365): config.irq_vectors is the list of vectors the driver
+    // handles, handle_irq(vector) returns WorkerNotRunning if not running,
+    // IrqNotRegistered(vector) if the vector is not in irq_vectors, else Ok.
+    //
+    // Layout (8 entries × 16 bytes = 128 bytes):
+    //   [rbp + irq_table_off +  i*16 + 0]: irq         (u64)
+    //   [rbp + irq_table_off +  i*16 + 8]: handler_ptr (u64)
+    //   [rbp + irq_table_count_off      ]: count       (u64, # filled slots)
+    //
+    // Zeroed in the prologue so each function starts with an empty table.
+    current_offset += 128;
+    let irq_table_off: i32 = -(current_offset);
+    current_offset += 8;
+    let irq_table_count_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -971,6 +991,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         emit(encode_mov_reg_imm64(Gpr::Rax, sig_input.len() as u64), "cap_siginput_len_imm");
         emit(encode_mov_mem_reg(Gpr::Rbp, cap_siginput_len_off, Gpr::Rax), "cap_siginput_len_store");
     }
+
+    // Wave F (IRQ routing): zero the per-function IRQ table count slot
+    // so each function starts with an empty routing table (count = 0).
+    // The 128-byte table data itself is uninitialized, but irq_dispatch
+    // only reads slots [0..count), so uninitialized data past count is
+    // never observed.  RAX may have been clobbered by the Wave C block
+    // above, so re-zero it here.  Also zero the first entry's irq field
+    // as a defensive sentinel (irq=0 cannot match any real vector >= 1).
+    emit(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax), "xor_rax_zero_irq");
+    emit(encode_mov_mem_reg(Gpr::Rbp, irq_table_count_off, Gpr::Rax), "zero_irq_table_count");
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -4285,31 +4315,185 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("supervisor_call".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 49-64 (Driver Isolation):
+                            // Wave 49-64 / Wave F (Driver Isolation):
                             // driver_register(irq, handler_ptr) -> u64
                             //
-                            // Mints a driver ID via a compile-time counter
-                            // (an AtomicU64 incremented per call). The IRQ
-                            // and handler_ptr are recorded but the returned
-                            // ID is the small integer counter value (1, 2,
-                            // 3, ...). This models a driver registry where
-                            // each registered driver gets a unique ID.
+                            // Populates the per-function IRQ routing table
+                            // at [rbp + irq_table_off] with a real
+                            // (irq, handler_ptr) entry.  The table has 8
+                            // slots × 16 bytes; the entry count lives at
+                            // [rbp + irq_table_count_off].  This is NOT a
+                            // compile-time counter — it is a real per-
+                            // function stack structure that irq_dispatch
+                            // scans at runtime to route IRQs to handlers.
+                            //
+                            // Mirrors the library DriverWorker
+                            // (ipc.rs:4365): config.irq_vectors is the
+                            // list of vectors the driver handles, and
+                            // handle_irq(vector) checks membership.
+                            //
+                            // Returns the 1-based driver ID (count + 1)
+                            // on success, or 0 if the table is full
+                            // (8 drivers already registered).  The ID is
+                            // the slot index + 1, NOT a global counter.
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = count
+                            //   RCX = irq            (caller-saved)
+                            //   RDX = handler_ptr    (caller-saved)
+                            //   RAX, R10 = scratch for slot address
                             "driver_register" if args.len() == 2 && dst.is_some() => {
-                                use std::sync::atomic::{AtomicU64, Ordering};
-                                static DRIVER_COUNTER: AtomicU64 = AtomicU64::new(1);
-                                let driver_id = DRIVER_COUNTER.fetch_add(1, Ordering::SeqCst);
-                                // "Use" the args (irq and handler_ptr) by
-                                // loading them into scratch registers —
-                                // they're conceptually recorded in the
-                                // driver registry, but for the test we
-                                // only need the ID.
-                                code.extend(load_value(&args[0], Gpr::Rcx));
-                                code.extend(load_value(&args[1], Gpr::Rdx));
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
-                                let dst_off = slot_offset(dst_id);
-                                code.extend(encode_mov_reg_imm64(Gpr::Rax, driver_id));
-                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                // Push RBX (callee-saved) — we use it for
+                                // the count, which must survive across the
+                                // slot-address computation.
+                                code.extend(encode_push(Gpr::Rbx));
+                                // Load args into caller-saved regs (preserved
+                                // across the count load and slot computation).
+                                code.extend(load_value(&args[0], Gpr::Rcx));  // RCX = irq
+                                code.extend(load_value(&args[1], Gpr::Rdx));  // RDX = handler_ptr
+                                // Load current count from per-function slot.
+                                code.extend(encode_mov_reg_mem(Gpr::Rbx, Gpr::Rbp, irq_table_count_off));
+                                // If count >= 8, the table is full → return 0.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rbx, 8));
+                                let jae_full_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32 (table_full)
+                                // Compute slot address: R10 = table_base + count*16.
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, irq_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx));  // RAX = count
+                                // RAX *= 16 via four left-shift-by-1 (add rax,rax).
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rax));  // R10 = slot_addr
+                                // Store (irq, handler_ptr) at [slot+0] and [slot+8].
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 0, Gpr::Rcx));  // [slot+0] = irq
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 8, Gpr::Rdx));  // [slot+8] = handler_ptr
+                                // Increment count and store back.
+                                code.extend(encode_add_reg_imm32(Gpr::Rbx, 1));  // RBX = count + 1
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, irq_table_count_off, Gpr::Rbx));
+                                // Return driver_id = count + 1 (1-based).
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx));  // RAX = count + 1
+                                // jmp done (rel32, placeholder)
+                                let jmp_done_from_ok_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // table_full: return 0.
+                                let table_full_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_full_patch, table_full_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // RAX = 0
+                                // done: store rax to dst, pop rbx.
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_done_from_ok_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("driver_register".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave F (Driver Isolation — IRQ routing):
+                            // irq_dispatch(vector) -> i64
+                            //
+                            // Scans the per-function IRQ routing table
+                            // (populated by driver_register) for an entry
+                            // whose irq field matches `vector`.  If a match
+                            // is found, the corresponding handler_ptr is
+                            // called via an indirect `call r10` and the
+                            // handler's i64 return value is returned.  If
+                            // no match is found after scanning all entries,
+                            // returns -7 (IrqNotRegistered, matching the
+                            // library's IpcError::IrqNotRegistered at
+                            // ipc.rs — same sentinel DriverWorker::handle_irq
+                            // returns when the vector is not in
+                            // config.irq_vectors).
+                            //
+                            // This is the IRQ→driver routing path: a real
+                            // linear scan over a real per-function stack
+                            // table, ending in a real indirect call.  NO
+                            // stubs, NO compile-time shortcuts.
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = vector (survives the indirect call)
+                            //   RCX = count (loop bound)
+                            //   RAX = loop index i
+                            //   R10 = slot address for current iteration
+                            //   RDX = scratch (irq at current slot)
+                            //
+                            // Stack alignment: push rbx makes rsp 8 mod 16;
+                            // sub rsp,8 before the indirect call makes it
+                            // 0 mod 16 (aligned).  add rsp,8 after restores.
+                            "irq_dispatch" if args.len() == 1 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Push RBX (callee-saved) — we use it to
+                                // hold `vector` across the indirect call
+                                // (the call clobbers RCX, RDX, RDI, RSI,
+                                // R8–R11, RAX).
+                                code.extend(encode_push(Gpr::Rbx));
+                                // RBX = vector (the IRQ to dispatch).
+                                code.extend(load_value(&args[0], Gpr::Rbx));
+                                // RCX = count (loop bound).
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, irq_table_count_off));
+                                // RAX = i = 0 (loop index).
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // ── loop_start ──
+                                let loop_start_off = code.len();
+                                // cmp rax, rcx  (i vs count)
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jae not_found (rel32, placeholder) — i >= count, no match
+                                let jae_not_found_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae rel32
+                                // Compute slot address: R10 = table_base + i*16.
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, irq_table_off));
+                                // RDX = i (temporarily; we still have i in RAX).
+                                code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));
+                                // RDX *= 16 via four add rdx,rdx.
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *8
+                                code.extend(encode_add_reg_reg(Gpr::Rdx, Gpr::Rdx));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rdx));  // R10 = slot_addr
+                                // Load irq from [slot+0] into RDX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::R10, 0));
+                                // cmp rdx, rbx  (slot's irq vs vector)
+                                code.extend(encode_cmp_reg_reg(Gpr::Rdx, Gpr::Rbx));
+                                // je found (rel32, placeholder)
+                                let je_found_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                // Increment i and continue loop.
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                // jmp loop_start (rel32, placeholder)
+                                let jmp_loop_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── not_found: return -7 (IrqNotRegistered) ──
+                                let not_found_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_not_found_patch, not_found_off);
+                                // 0xFFFFFFFFFFFFFFF9 = -7 as i64
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFF9));
+                                // jmp done (rel32, placeholder)
+                                let jmp_done_from_nf_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── found: call the handler ──
+                                let found_off = code.len();
+                                patch_rel32_jcc(&mut code, je_found_patch, found_off);
+                                // Load handler_ptr from [slot+8] into R10
+                                // (clobbers slot_addr but we no longer need it).
+                                code.extend(encode_mov_reg_mem(Gpr::R10, Gpr::R10, 8));
+                                // sub rsp, 8 (align for call)
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                // xor rax, rax (variadic count = 0 — no XMM args)
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                // call r10 (41 FF D2) — indirect call to handler
+                                code.extend(&[0x41, 0xFF, 0xD2]);
+                                // add rsp, 8 (restore alignment)
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                // RAX now holds the handler's i64 return value.
+                                // Fall through to done.
+                                // ── done: store rax to dst, pop rbx ──
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_loop_patch, loop_start_off);
+                                patch_rel32_jmp(&mut code, jmp_done_from_nf_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
+                                instr_opcode = Some("irq_dispatch".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 49-64 (Driver Isolation):
