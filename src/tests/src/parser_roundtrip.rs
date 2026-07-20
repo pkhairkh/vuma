@@ -125,42 +125,50 @@ fn test_function_with_params() {
 }
 
 // ===========================================================================
-// Test 3: Memory operations (allocate, deref, free)
+// Test 3: Memory operations (PMT — state_new, state.field, no free)
 // ===========================================================================
+//
+// VUMA 2.0 PMT-only port: V1.0 `allocate`/`*buf`/`free` is rejected by
+// the parser. The PMT equivalent uses `state_new(Layout)` for allocation,
+// `state.field` for typed access (read or write), and *no* `free` (state
+// lifetimes are scoped to the owning variable).
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_memory_operations() {
     let source = r#"
+        layout Cell = { v: i32 }
         fn use_mem() {
-            buf = allocate(64);
-            val = *buf;
-            free(buf);
+            let buf = state_new(Cell);
+            buf.v = 42;
+            val = buf.v;
         }
     "#;
 
     let program = parse(source);
 
-    // Should have one function with statements for allocate, deref, and free.
-    assert_eq!(program.items.len(), 1);
-    match &program.items[0] {
-        vuma_parser::Item::FnDef(fndef) => {
-            assert_eq!(fndef.name, "use_mem");
-            // Body should have at least 3 statements (allocate, deref-assign, free).
-            assert!(
-                fndef.body.statements.len() >= 3,
-                "use_mem should have allocate, deref, and free statements (got {})",
-                fndef.body.statements.len()
-            );
-        }
-        other => panic!("expected FnDef, got {:?}", other),
-    }
+    // Should have the layout declaration + the function.
+    assert_eq!(program.items.len(), 2);
+    let fndef = program
+        .items
+        .iter()
+        .find_map(|item| match item {
+            vuma_parser::Item::FnDef(f) => Some(f),
+            _ => None,
+        })
+        .expect("expected a FnDef");
+    assert_eq!(fndef.name, "use_mem");
+    // Body should have at least 3 statements (state_new, write, read).
+    assert!(
+        fndef.body.statements.len() >= 3,
+        "use_mem should have state_new, field-write, and field-read statements (got {})",
+        fndef.body.statements.len()
+    );
 
     let (_, scg) = parse_and_convert(source);
     assert_scg_valid(&scg);
-    // SCG should reflect allocation and deallocation.
+    // SCG should reflect allocation. PMT has no `free`, so no Deallocation
+    // node is produced (state lifetimes are scoped).
     assert_has_node_type(&scg, NodeType::Allocation, "Allocation");
-    assert_has_node_type(&scg, NodeType::Deallocation, "Deallocation");
 }
 
 // ===========================================================================
@@ -298,53 +306,62 @@ fn test_bitwise_ops() {
 }
 
 // ===========================================================================
-// Test 8: Pointer arithmetic — *(buf + offset)
+// Test 8: State-field access at non-zero offset (PMT — replaces *(buf + offset))
 // ===========================================================================
+//
+// VUMA 2.0 PMT-only port: V1.0 `*(buf + offset)` is rejected by the parser.
+// The PMT equivalent uses `state.field` on a layout whose fields are at
+// fixed offsets — `offset` becomes a named field of the layout.
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_pointer_arithmetic() {
     let source = r#"
+        layout Pair = { a: i32, b: i32 }
         fn ptr_arith() {
-            buf = allocate(64);
+            let buf = state_new(Pair);
             offset = 4;
-            val = *(buf + offset);
-            free(buf);
+            buf.b = 99;
+            val = buf.b;
         }
     "#;
 
     let program = parse(source);
 
-    assert_eq!(program.items.len(), 1);
-    match &program.items[0] {
-        vuma_parser::Item::FnDef(fndef) => {
-            assert_eq!(fndef.name, "ptr_arith");
-            // Should have statements for allocate, offset assign, deref, and free.
-            assert!(
-                fndef.body.statements.len() >= 3,
-                "ptr_arith should have multiple statements, got {}",
-                fndef.body.statements.len()
-            );
-        }
-        other => panic!("expected FnDef, got {:?}", other),
-    }
+    // Should have the layout declaration + the function.
+    assert_eq!(program.items.len(), 2);
+    let fndef = program
+        .items
+        .iter()
+        .find_map(|item| match item {
+            vuma_parser::Item::FnDef(f) => Some(f),
+            _ => None,
+        })
+        .expect("expected a FnDef");
+    assert_eq!(fndef.name, "ptr_arith");
+    // Should have statements for state_new, offset assign, field-write, and field-read.
+    assert!(
+        fndef.body.statements.len() >= 3,
+        "ptr_arith should have multiple statements, got {}",
+        fndef.body.statements.len()
+    );
 
     let (_, scg) = parse_and_convert(source);
     assert_scg_valid(&scg);
+    // PMT state_new produces an Allocation node. PMT has no `free`, so
+    // no Deallocation node is produced.
     assert_has_node_type(&scg, NodeType::Allocation, "Allocation");
-    assert_has_node_type(&scg, NodeType::Deallocation, "Deallocation");
 }
 
 // ===========================================================================
-// Test 9: SHA256d full program parse
+// Test 9: SHA256d full program parse (PMT port)
 // ===========================================================================
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn test_sha256d_parse() {
-    // This is the complete sha256d.vuma program. We verify that it parses
-    // without errors and produces a valid AST with the expected number of
-    // function definitions, and that the AST → SCG conversion succeeds.
+    // This is the complete sha256d.vuma program (PMT port). We verify that
+    // it parses without errors and produces a valid AST with the expected
+    // number of function definitions, and that the AST → SCG conversion
+    // succeeds.
     let source = include_str!("../../../examples/sha256d.vuma");
 
     let program = parse(source);
@@ -379,9 +396,10 @@ fn test_sha256d_parse() {
     // Round-trip through SCG.
     let (_, scg) = parse_and_convert(source);
     assert_scg_valid(&scg);
-    // The SHA256d program uses allocate/free heavily.
+    // The PMT SHA256d program uses state_new heavily — verify the SCG
+    // reflects at least one Allocation. (PMT has no `free`, so no
+    // Deallocation node is produced.)
     assert_has_node_type(&scg, NodeType::Allocation, "Allocation");
-    assert_has_node_type(&scg, NodeType::Deallocation, "Deallocation");
 }
 
 // ===========================================================================

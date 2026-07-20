@@ -77,6 +77,12 @@ const FN_CVT_S: u32 = 0x20; // cvt.*.s  (cvt.s.d / cvt.s.w / cvt.s.l)
 const FN_CVT_D: u32 = 0x21; // cvt.*.d  (cvt.d.s / cvt.d.w / cvt.d.l)
 const FN_CVT_W: u32 = 0x24; // cvt.*.w  (cvt.w.s / cvt.w.d)
 const FN_CVT_L: u32 = 0x25; // cvt.*.l  (cvt.l.s / cvt.l.d)
+// COP1 function codes for FP truncate (round-toward-zero) instructions.
+// These are emitted by the Cast lowering for FloatToInt / FloatToUInt
+// (per the comment in `mips64/mod.rs`, TRUNC.L.D is preferred over
+// CVT.L.D because it always rounds toward zero regardless of FCSR).
+const FN_TRUNC_W: u32 = 0x0D; // trunc.*.w  (trunc.w.d / trunc.w.s)
+const FN_TRUNC_L: u32 = 0x09; // trunc.*.l  (trunc.l.d / trunc.l.s)
 
 const FN_ADD: u32 = 0x20;
 const FN_ADDU: u32 = 0x21;
@@ -741,6 +747,20 @@ impl Instruction {
                         fs: fpr_from_bits(fs_bits),
                     }),
                     (FMT_D, FN_CVT_L) => Ok(Instruction::CvtLD {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    // FP truncate (round-toward-zero) instructions.
+                    // Emitted by the Cast lowering for FloatToInt / FloatToUInt
+                    // — recognised here so the chunk-based opcode recovery
+                    // produces "trunc.l.d" / "trunc.w.d" instead of falling
+                    // back to "mips64".  (The FP-conversion regression test
+                    // accepts "trunc" as a conversion mnemonic.)
+                    (FMT_D, FN_TRUNC_L) => Ok(Instruction::TruncLD {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_D, FN_TRUNC_W) => Ok(Instruction::TruncWD {
                         fd: fpr_from_bits(fd_bits),
                         fs: fpr_from_bits(fs_bits),
                     }),

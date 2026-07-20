@@ -495,6 +495,12 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::Allocation(alloc) => {
                     match alloc {
                         AllocationNode::Stack { name, size, .. } => {
+                            // VUMA 2.0 PMT-only: `state_new(Layout)` zero-initialises
+                            // the backing buffer, so the allocation itself counts as a
+                            // (zero) write. Record a synthetic non-read access so the
+                            // uninitialised-read check (`has_read && !has_write`) does
+                            // not false-positive on PMT programs that read a state
+                            // field without an explicit `state.field = v` first.
                             allocations.insert(
                                 name.clone(),
                                 AllocationInfo {
@@ -502,7 +508,7 @@ impl MemorySafetyAnalyzer {
                                     size: Some(*size),
                                     line: None,
                                     frees: Vec::new(),
-                                    accesses: Vec::new(),
+                                    accesses: vec![AccessInfo { is_read: false }],
                                     is_returned: false,
                                 },
                             );
@@ -515,7 +521,7 @@ impl MemorySafetyAnalyzer {
                                     size: None, // Dynamic size
                                     line: None,
                                     frees: Vec::new(),
-                                    accesses: Vec::new(),
+                                    accesses: vec![AccessInfo { is_read: false }],
                                     is_returned: false,
                                 },
                             );

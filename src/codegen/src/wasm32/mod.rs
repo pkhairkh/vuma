@@ -2034,9 +2034,20 @@ fn infer_wasm_type(val: &IRValue, vreg_types: &HashMap<u32, WasmType>) -> WasmTy
 }
 
 /// Result of lowering an IR function to Wasm bytecode:
-/// `(body, type, call_relocations)` where each relocation is
-/// `(byte_offset, func_name)`.
-type LoweredWasmFunction = (WasmFuncBody, WasmFuncType, Vec<(usize, String)>);
+/// `(body, type, call_relocations, per_instr)` where:
+/// - each relocation is `(byte_offset, func_name)`
+/// - `per_instr` is a list of `(mnemonic, encoded_bytes)` for each emitted
+///   `WasmInstr`, in emission order.  This lets `allocate_registers` expose
+///   one `AllocatedInstruction` per Wasm instruction so downstream consumers
+///   (including the regression test-suite, which scans the opcode list for
+///   "cmpxchg" / "convert" / "trunc" / etc.) can see the individual mnemonic
+///   strings instead of a single opaque "wasm_body" blob.
+type LoweredWasmFunction = (
+    WasmFuncBody,
+    WasmFuncType,
+    Vec<(usize, String)>,
+    Vec<(String, Vec<u8>)>,
+);
 
 /// Lower an IR function to Wasm bytecode, returning the function body,
 /// type, and a list of call relocations that must be patched during
@@ -2219,9 +2230,20 @@ fn lower_function(
     // Encode all instructions to bytecode and compute call relocations.
     let mut body_bytes = Vec::new();
     let mut call_relocations: Vec<(usize, String)> = Vec::new();
+    let mut per_instr: Vec<(String, Vec<u8>)> = Vec::with_capacity(ctx.instrs.len());
     for (i, instr) in ctx.instrs.iter().enumerate() {
         let offset_before = body_bytes.len();
         instr.encode(&mut body_bytes);
+
+        // Record the per-instruction (mnemonic, encoded_bytes) pair so that
+        // `allocate_registers` can expose one `AllocatedInstruction` per
+        // Wasm instruction (instead of a single opaque "wasm_body" blob).
+        // The mnemonic uses the `Display` impl from `disasm.rs`, which
+        // produces strings like "i32.atomic.rmw.cmpxchg align=2 offset=0",
+        // "f64.convert_i32_s", "i32.trunc_f64_s", etc. — letting downstream
+        // tests scan the opcode list for "cmpxchg" / "convert" / "trunc".
+        let instr_bytes = body_bytes[offset_before..].to_vec();
+        per_instr.push((format!("{}", instr), instr_bytes));
 
         // If this is a Call with an unresolved placeholder, record a relocation.
         if let WasmInstr::Call(idx) = instr {
@@ -2237,13 +2259,16 @@ fn lower_function(
     }
     // Append the implicit end byte for the function body
     body_bytes.push(0x0B);
+    // Also expose the trailing 0x0B (end) as its own AllocatedInstruction so
+    // the per-instruction list concatenates to the full body_bytes.
+    per_instr.push(("end".to_string(), vec![0x0B]));
 
     let func_body = WasmFuncBody {
         locals: ctx.locals,
         body: body_bytes,
     };
 
-    Ok((func_body, func_type, call_relocations))
+    Ok((func_body, func_type, call_relocations, per_instr))
 }
 
 /// Lower a single IR instruction.
@@ -3734,22 +3759,32 @@ impl Backend for Wasm32Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Wasm has no registers — map virtual regs to locals.
         // We lower the IR function to Wasm bytecode here.
-        let (func_body, func_type, call_relocs) =
+        let (func_body, func_type, call_relocs, per_instr) =
             lower_function(func).map_err(|e| BackendError::RegisterAllocFailed {
                 isa: "wasm32",
                 reason: e.to_string(),
             })?;
 
-        // Build an AllocatedFunction with the body bytes as a single instruction
-        // and Wasm-specific metadata stored in typed fields.
-        // Store the body bytes as a single instruction to preserve
-        // exact byte offsets for call relocation patching.
-        let instructions = vec![AllocatedInstruction {
-            opcode: "wasm_body".to_string(),
-            reads: vec![],
-            writes: vec![],
-            encoded: func_body.body.clone(),
-        }];
+        // Build an AllocatedFunction with one AllocatedInstruction per emitted
+        // Wasm instruction.  Each instruction's `opcode` is the human-readable
+        // mnemonic from `disasm.rs`'s `Display` impl (e.g. "i32.atomic.rmw.
+        // cmpxchg align=2 offset=0", "f64.convert_i32_s", "i32.trunc_f64_s",
+        // "end").  This lets downstream consumers — including the regression
+        // test-suite, which scans the opcode list for "cmpxchg" / "convert" /
+        // "trunc" / etc. — see the individual Wasm instructions instead of a
+        // single opaque "wasm_body" blob.
+        //
+        // The concatenation of every `encoded` field equals `func_body.body`,
+        // so byte-offset-based call relocations remain valid.
+        let instructions: Vec<AllocatedInstruction> = per_instr
+            .into_iter()
+            .map(|(mnemonic, bytes)| AllocatedInstruction {
+                opcode: mnemonic,
+                reads: vec![],
+                writes: vec![],
+                encoded: bytes,
+            })
+            .collect();
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
@@ -4563,6 +4598,24 @@ impl Backend for Wasm32Backend {
             kind: WasmExportKind::Function,
             index: start_func_idx,
         });
+
+        // ── Start section (Wasm section ID 8) ─────────────────────────
+        // The Wasm Start section names a function that the runtime
+        // automatically invokes once the module is instantiated.  _start has
+        // signature () -> () (see `start_type_idx` above), which is the
+        // signature the Wasm spec requires for the start function.  Setting
+        // it here causes `WasmModuleBuilder::encode` to emit a Start section
+        // immediately after the Export section and before the Element
+        // section, which is the canonical position required by the spec
+        // (sections must appear in ascending ID order).
+        //
+        // The previously-ignored regression tests
+        // `test_wasm_start_section_set` and
+        // `test_compile_to_wasm_valid_module` (in `src/tests/src/
+        // wasm_validation.rs`) verify the presence and validity of this
+        // section; the in-crate `wasm_target_tests::test_compile_to_wasm_*
+        // tests likewise assert `found_start_section`.
+        module.set_start(start_func_idx);
 
         // ── Export _vuma_main for test harness ───────────────────
         // This function calls main() and returns the result as an i32.

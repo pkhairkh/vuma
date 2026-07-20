@@ -73,9 +73,9 @@ const SAMPLE_VUMA_PROGRAMS: &[&str] = &[
 /// Hand-written memory-operation programs (replaces
 /// `arb_memory_program`).
 const SAMPLE_MEMORY_PROGRAMS: &[&str] = &[
-    "region r1 = allocate(64);\nfn main() {\n    ptr = r1 + 64;\n}\n",
-    "region buf = allocate(128);\nfn main() {\n    ptr = buf + 0;\n}\n",
-    "region big = allocate(512);\nfn main() {\n    ptr = big + 64;\n}\n",
+    "layout Cell1 = { v: i32 }\nfn main() {\n    let p = state_new(Cell1);\n    p.v = 42;\n}\n",
+    "layout Cell2 = { v: i32 }\nfn main() {\n    let p = state_new(Cell2);\n    p.v = 0;\n}\n",
+    "layout Cell3 = { v: i32 }\nfn main() {\n    let p = state_new(Cell3);\n    p.v = 64;\n}\n",
 ];
 
 /// Hand-written function-call programs (replaces `arb_call_program`).
@@ -343,7 +343,6 @@ fn prop_parser_roundtrip_no_errors() {
     }
 }
 
-#[ignore = "VUMA 2.0 PMT-only: uses V1.0 pointer syntax (allocate/free/*ptr) — needs PMT port"]
 #[test]
 fn prop_parser_memory_program() {
     for &program in SAMPLE_MEMORY_PROGRAMS {
