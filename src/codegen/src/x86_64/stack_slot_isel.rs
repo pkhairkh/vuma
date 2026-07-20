@@ -542,6 +542,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let seq_counter_off: i32 = -(current_offset);
 
+    // Wave 14b: reserve an 8-byte stack slot for the per-function protocol
+    // state machine counter.  Zeroed in the prologue (state = 0 = Idle).
+    // channel_recv_proto(ch, expected_state) verifies proto_state == expected
+    // before recv'ing, and advances proto_state on success.  A mismatch
+    // (wrong message order) → -5 (ProtocolViolation).
+    current_offset += 8;
+    let proto_state_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -668,6 +676,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // at this point) as a scratch.
     emit(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax), "xor_rax_zero");
     emit(encode_mov_mem_reg(Gpr::Rbp, seq_counter_off, Gpr::Rax), "zero_seq_counter");
+    // Wave 14b: zero the protocol-state slot (state = 0 = Idle).
+    emit(encode_mov_mem_reg(Gpr::Rbp, proto_state_off, Gpr::Rax), "zero_proto_state");
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -2955,6 +2965,122 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_syscall());
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 64));
                                 instr_opcode = Some("channel_send_cap".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave 14b: channel_recv_proto(ch, expected_state) -> i64
+                            // A protocol-state-machine-aware framed recv.  Before
+                            // recv'ing, verifies the channel's proto_state
+                            // (stored at [rbp + proto_state_off]) equals
+                            // expected_state.  If mismatch → -5 (ProtocolViolation),
+                            // no recv performed.  If match → does the framed recv
+                            // (MAGIC + cap + CRC + type_hash checks), and on
+                            // success advances proto_state (+= 1) so the next
+                            // recv_proto call must declare the next state.
+                            //
+                            // This is the runtime enforcement of the L4 protocol
+                            // state machine: a program that calls recv_proto in
+                            // the wrong order (e.g. recv_proto(ch, 0) twice) gets
+                            // -5 on the second call.
+                            "channel_recv_proto" if args.len() == 2 && dst.is_some() => {
+                                let ch = &args[0];
+                                let expected_state = &args[1];
+                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
+                                let dst_off = slot_offset(dst_id);
+                                // Step 1: verify proto_state == expected_state.
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, proto_state_off));
+                                code.extend(load_value(expected_state, Gpr::Rcx));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // jne proto_violation (rel32, placeholder)
+                                let jne_proto_violation_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Step 2: load read_fd (low 32 bits of handle).
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+                                // Step 3: 56-byte frame + read().
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                                code.extend(encode_syscall());
+                                // read() <= 0 → -1 (closed)
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jle_closed_patch = code.len();
+                                code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+                                // MAGIC check
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x414D5556));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                let jne_magic_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // CRC32 check
+                                code.extend(emit_crc32_frame_loop());
+                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 52));
+                                code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                let jne_crc_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Success: extract payload, advance proto_state.
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 48));
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                                // proto_state += 1 (advance the FSM).
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, proto_state_off));
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, proto_state_off, Gpr::Rax));
+                                let jmp_ok_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // proto_violation: store -5, skip recv.  NOTE: the
+                                // proto-state check happens BEFORE the 56-byte frame
+                                // is allocated, so this path must NOT execute the
+                                // `add rsp, 56` cleanup — it jumps directly past it.
+                                let proto_violation_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_proto_violation_patch, proto_violation_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFB)); // -5
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_from_pv_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32 (to end, past cleanup)
+                                // closed
+                                let closed_off = code.len();
+                                patch_rel32_jcc(&mut code, jle_closed_patch, closed_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_from_closed_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // magic_fail
+                                let magic_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_magic_patch, magic_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFF)); // -1
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_from_magic_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // crc_fail
+                                let crc_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                // cleanup: deallocate frame (only reached by paths that
+                                // actually allocated the 56-byte frame — NOT the
+                                // proto_violation path, which skips recv entirely).
+                                let cleanup_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_ok_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_from_closed_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_from_magic_patch, cleanup_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+                                // end: proto_violation path jumps here (no frame to dealloc).
+                                let end_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_from_pv_patch, end_off);
+                                instr_opcode = Some("channel_recv_proto".to_string());
                                 channel_builtin_matched = true;
                             }
                             // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_byte)
