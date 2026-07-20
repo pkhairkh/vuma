@@ -117,6 +117,34 @@ use super::{
 ///     strictly safer and is the only way to recover the FP type when the
 ///     IR has dropped it (e.g. `nan: f64 = 0.0 / 0.0`).
 ///
+/// Patch a conditional-jump rel32 placeholder (6-byte Jcc: 0x0F <cc> <rel32>)
+/// so it jumps to `target_off`.  `patch_off` is the byte offset of the Jcc
+/// instruction inside `code`; the rel32 field lives at `patch_off + 2`.
+///
+/// Used by the `ChannelRecvResult` codegen (Wave 8b) to back-patch the
+/// magic / cap / proto / closed fall-through branches once the fail-path
+/// offsets are known.
+fn patch_rel32_jcc(code: &mut Vec<u8>, patch_off: usize, target_off: usize) {
+    let rel = (target_off as i64 - (patch_off as i64 + 6)) as i32;
+    let bd = rel.to_le_bytes();
+    code[patch_off + 2] = bd[0];
+    code[patch_off + 3] = bd[1];
+    code[patch_off + 4] = bd[2];
+    code[patch_off + 5] = bd[3];
+}
+
+/// Patch an unconditional `jmp rel32` placeholder (5-byte E9 <rel32>) so it
+/// jumps to `target_off`.  `patch_off` is the byte offset of the jmp inside
+/// `code`; the rel32 field lives at `patch_off + 1`.
+fn patch_rel32_jmp(code: &mut Vec<u8>, patch_off: usize, target_off: usize) {
+    let rel = (target_off as i64 - (patch_off as i64 + 5)) as i32;
+    let bd = rel.to_le_bytes();
+    code[patch_off + 1] = bd[0];
+    code[patch_off + 2] = bd[1];
+    code[patch_off + 3] = bd[2];
+    code[patch_off + 4] = bd[3];
+}
+
 /// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
 /// match arms below to decide between the integer and SSE codegen paths.
 fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
@@ -3398,6 +3426,136 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                     let _ = dst_id; // already used via dst_off
                     instr_opcode = Some("channel_recv_timeout".to_string());
+                    code
+                }
+
+                // ChannelRecvResult { ch, dst, err_dst, ty } — Wave 8b.
+                // Fallible framed recv: produces (value, err) where err is a
+                // ChannelError discriminant (0 = Ok).  This is the codegen
+                // target for `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
+                //
+                // On success:  dst <- payload,  err_dst <- 0
+                // On magic fail:     dst <- 0, err_dst <- 1 (Closed)
+                // On cap_count fail: dst <- 0, err_dst <- 3 (PermissionDenied)
+                // On type_hash fail: dst <- 0, err_dst <- 6 (ProtocolViolation)
+                IRInstr::ChannelRecvResult { ch, dst, err_dst, ty } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_off = slot_offset(dst_id);
+                    let err_id = err_dst.as_register().unwrap_or(0);
+                    let err_off = slot_offset(err_id);
+                    let expected_th = ty.as_ref()
+                        .map(|t| crate::ipc::type_hash(&t.to_string()))
+                        .unwrap_or_else(|| crate::ipc::type_hash("i64"));
+
+                    // Step 1: load read_fd (low 32 bits of handle) into RDI.
+                    match ch {
+                        IRValue::Register(id) => {
+                            let off = slot_offset(*id);
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rbp, off));
+                        }
+                        _ => {
+                            code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                            code.extend(load_value(ch, Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                            code.extend(encode_mov_reg32_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                            code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                        }
+                    }
+
+                    // Step 2: 56-byte frame buffer on stack.
+                    code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                    code.extend(encode_syscall());
+
+                    // If read() returned <= 0 (RAX), the peer closed the pipe
+                    // → Closed(1).  Otherwise proceed.
+                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                    let jle_closed_patch = code.len();
+                    code.extend(&[0x0F, 0x8E, 0x00, 0x00, 0x00, 0x00]); // jle rel32
+
+                    // Step 3: verify MAGIC (0x414D5556).
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x414D5556));
+                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    let jne_magic_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                    // Step 3b: cap_count == 0 check (Wave 12b structural).
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
+                    code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                    let jne_cap_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                    // Step 3c: type_hash check (Wave 14b structural).
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 24));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, (expected_th & 0xFFFFFFFF) as i32));
+                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    let jne_proto_lo_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 28));
+                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, ((expected_th >> 32) & 0xFFFFFFFF) as i32));
+                    code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    let jne_proto_hi_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                    // Success path: dst <- payload ([rsp+44], 8 bytes); err_dst <- 0.
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                    code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 48));
+                    code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // err_dst = 0
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, err_off, Gpr::Rax));
+                    let jmp_ok_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // cap_fail: err_dst <- 3 (PermissionDenied), dst <- 0.
+                    let cap_fail_off = code.len();
+                    patch_rel32_jcc(&mut code, jne_cap_patch, cap_fail_off);
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 3));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, err_off, Gpr::Rax));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    let jmp_cap_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // proto_fail: err_dst <- 6 (ProtocolViolation), dst <- 0.
+                    let proto_fail_off = code.len();
+                    patch_rel32_jcc(&mut code, jne_proto_lo_patch, proto_fail_off);
+                    patch_rel32_jcc(&mut code, jne_proto_hi_patch, proto_fail_off);
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 6));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, err_off, Gpr::Rax));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    let jmp_proto_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // magic_fail: err_dst <- 1 (Closed), dst <- 0.
+                    let magic_fail_off = code.len();
+                    patch_rel32_jcc(&mut code, jne_magic_patch, magic_fail_off);
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 1));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, err_off, Gpr::Rax));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                    // closed (read returned <= 0): err_dst <- 1 (Closed), dst <- 0.
+                    let closed_off = code.len();
+                    patch_rel32_jcc(&mut code, jle_closed_patch, closed_off);
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 1));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, err_off, Gpr::Rax));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                    // cleanup: deallocate frame.
+                    let cleanup_off = code.len();
+                    patch_rel32_jmp(&mut code, jmp_ok_cleanup_patch, cleanup_off);
+                    patch_rel32_jmp(&mut code, jmp_cap_cleanup_patch, cleanup_off);
+                    patch_rel32_jmp(&mut code, jmp_proto_cleanup_patch, cleanup_off);
+                    code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+
+                    instr_opcode = Some("channel_recv_result".to_string());
                     code
                 }
             };

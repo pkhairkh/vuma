@@ -240,6 +240,13 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             ty: ty.clone(),
             timeout_ms: *timeout_ms,
         },
+        // Wave 8b: substitute both value dst and err_dst of the fallible recv.
+        IRInstr::ChannelRecvResult { ch, dst, err_dst, ty } => IRInstr::ChannelRecvResult {
+            ch: ch.clone(),
+            dst: dst.clone(),
+            err_dst: err_dst.clone(),
+            ty: ty.clone(),
+        },
         IRInstr::ChannelClose { ch } => IRInstr::ChannelClose {
             ch: ch.clone(),
         },
@@ -432,6 +439,7 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. }
         | IRInstr::ChannelRecvTimeout { .. }
+        | IRInstr::ChannelRecvResult { .. }
         | IRInstr::ChannelClose { .. } => true,
         IRInstr::BinOp { op, .. } => matches!(
             op,

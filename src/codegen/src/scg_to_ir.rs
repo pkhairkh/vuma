@@ -302,6 +302,15 @@ pub enum ScgStatement {
     /// Wave 2b: channel close — `channel_close(ch)`.
     /// Lowers to `IRInstr::ChannelClose`.
     ChannelClose(ChannelCloseStmt),
+    /// Wave 8b: fallible channel recv — the SCG-side lowering target for
+    /// `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
+    ///
+    /// Performs a framed recv that writes BOTH the 8-byte payload (into
+    /// `dst`) and a [`crate::ir::ChannelError`] discriminant (into
+    /// `err_dst`: 0 = Ok, nonzero = Err).  The surrounding
+    /// `ControlNode::If` on `err_dst == 0` dispatches to the Ok / Err arms.
+    /// Lowers to [`IRInstr::ChannelRecvResult`].
+    ChannelRecvResult(ChannelRecvResultStmt),
 }
 
 /// Wave 5: a foreign-consume marker. Marks `state_var` as consumed by a
@@ -365,6 +374,29 @@ pub struct ChannelRecvStmt {
 pub struct ChannelCloseStmt {
     /// Channel handle expression.
     pub channel: ScgExpr,
+}
+
+/// Wave 8b: fallible channel-recv statement.
+///
+/// The SCG-side representation of the recv half of
+/// `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.  The pipeline
+/// emits this statement (binding `dst` to the Ok-arm's `v` and `err_dst`
+/// to the Err-arm's `e`) followed by a `ControlNode::If` on `err_dst == 0`
+/// that dispatches to the two arm bodies.
+///
+/// Lowers to [`IRInstr::ChannelRecvResult`], which each backend lowers to
+/// a framed recv that writes both the payload and a [`crate::ir::ChannelError`]
+/// discriminant (0 = Ok).
+#[derive(Debug, Clone)]
+pub struct ChannelRecvResultStmt {
+    /// Channel handle expression.
+    pub channel: ScgExpr,
+    /// Destination variable name (receives the 8-byte payload on Ok; 0 on Err).
+    pub dst: String,
+    /// Error-variable name (receives 0 on Ok; a ChannelError discriminant on Err).
+    pub err_dst: String,
+    /// Message type (selects backend load width + type_hash for protocol check).
+    pub ty: ScgType,
 }
 
 /// Control-flow node.
@@ -1592,6 +1624,13 @@ impl IRBuilder {
             }
             ScgStatement::ChannelClose(cc) => {
                 self.lower_channel_close(cc, ir_func, names)?;
+            }
+            // Wave 8b: fallible recv — emits IRInstr::ChannelRecvResult,
+            // writing both the payload vreg and the err-discriminant vreg.
+            // The surrounding ControlNode::If (emitted by the pipeline)
+            // branches on err_dst == 0 to dispatch the Ok / Err arms.
+            ScgStatement::ChannelRecvResult(crr) => {
+                self.lower_channel_recv_result(crr, ir_func, names)?;
             }
         }
         Ok(())
@@ -4548,6 +4587,45 @@ impl IRBuilder {
         Ok(())
     }
 
+    /// Wave 8b: lower a fallible `ChannelRecvResult` statement to
+    /// [`IRInstr::ChannelRecvResult`].
+    ///
+    /// Allocates TWO fresh vregs — one for the payload (`dst`, bound to the
+    /// Ok-arm's `v`) and one for the error discriminant (`err_dst`, bound to
+    /// the Err-arm's `e`) — registers them under their user-visible names,
+    /// and emits the single `ChannelRecvResult` IR instruction.  The
+    /// surrounding `ControlNode::If` on `err_dst == 0` (emitted by the
+    /// pipeline) then dispatches to the Ok / Err arm bodies.
+    ///
+    /// The backend codegen (`x86_64/stack_slot_isel.rs`) lowers this IR
+    /// instruction to a framed recv that writes both vregs in one pass:
+    /// on success `dst <- payload`, `err_dst <- 0`; on any failure
+    /// (closed pipe, magic mismatch, capability rejection, protocol
+    /// violation) `dst <- 0`, `err_dst <- ChannelError discriminant`.
+    fn lower_channel_recv_result(
+        &mut self,
+        crr: &ChannelRecvResultStmt,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let ch = self.resolve_expr(&crr.channel, names, ir_func)?;
+        // Allocate the payload vreg and bind it to the Ok-arm's variable.
+        let dst_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &crr.dst));
+        names.insert(crr.dst.clone(), dst_vreg);
+        // Allocate the error-discriminant vreg and bind it to the Err-arm's variable.
+        let err_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::named(err_vreg, &crr.err_dst));
+        names.insert(crr.err_dst.clone(), err_vreg);
+        ir_func.current_block().push(IRInstruction::ChannelRecvResult {
+            ch,
+            dst: IRValue::Register(dst_vreg),
+            err_dst: IRValue::Register(err_vreg),
+            ty: Some(crr.ty.to_ir_type()),
+        });
+        Ok(())
+    }
+
     // =======================================================================
     // Helpers
     // =======================================================================
@@ -5138,6 +5216,13 @@ impl IRBuilder {
             ScgStatement::ChannelClose(cc) => {
                 // Uses the channel handle (consumed).
                 Self::expr_uses(&cc.channel, &mut uses);
+            },
+            // Wave 8b: fallible recv defines BOTH the value dst and the err_dst,
+            // and uses the channel handle.
+            ScgStatement::ChannelRecvResult(crr) => {
+                defs.insert(crr.dst.clone());
+                defs.insert(crr.err_dst.clone());
+                Self::expr_uses(&crr.channel, &mut uses);
             },
         }
 

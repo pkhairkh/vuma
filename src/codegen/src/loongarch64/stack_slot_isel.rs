@@ -1947,7 +1947,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── Channel operations (Wave 1d / Task 2a) ──
                 // Backend lowering not yet implemented; emit no bytes.
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
+                | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. } => Vec::new(),
             };
 
             if !code.is_empty() {
