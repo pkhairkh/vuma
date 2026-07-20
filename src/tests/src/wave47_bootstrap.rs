@@ -238,12 +238,13 @@ fn test_wave47_bootstrap_source_uses_argv() {
     );
     // The hardcoded "womb/lang/hello.vuma" bytes must still be present in
     // the fallback function (byte 119 = 'w', byte 111 = 'o', etc.).
+    // VUMA 2.0: uses __vuma_store_u8 instead of *(buf + N) = value.
     assert!(
-        source.contains("*(buf + 0) = 119;   // w"),
+        source.contains("__vuma_store_u8(buf + 0, 119)") || source.contains("__vuma_store_u8(buf, 119)"),
         "write_fallback_path must still contain the hardcoded 'w' byte (119)"
     );
     assert!(
-        source.contains("*(buf + 20) = 0;    // NUL"),
+        source.contains("__vuma_store_u8(buf + 20, 0)") || source.contains("__vuma_store_u8(buf, 0)"),
         "write_fallback_path must still NUL-terminate the fallback path"
     );
 

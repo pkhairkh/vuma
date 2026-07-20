@@ -3715,6 +3715,35 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__vuma_store_u64".to_string(), code));
     }
 
+    // Phase 3d: __vuma_load_u8(addr: u64) -> u64
+    // Loads a single byte from an arbitrary memory address (zero-extended).
+    // Used by the PMT-ported bootstrap (womb/lang/*.vuma) for byte-level
+    // buffer access in place of the V1.0 `*ptr` deref syntax.
+    // Encoding: movzx eax, byte [rdi] ; ret = 0F B6 07 C3 (4 bytes)
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x0F, 0xB6, 0x07]); // movzx eax, byte [rdi]
+        code.extend(&[0xC3]);             // ret
+        stubs.push(("__vuma_load_u8".to_string(), code));
+    }
+
+    // Phase 3d: __vuma_store_u8(addr: u64, val: u64)
+    // Stores the low byte of `val` to an arbitrary memory address.
+    // Used by the PMT-ported bootstrap (womb/lang/*.vuma) for byte-level
+    // buffer writes in place of the V1.0 `*(ptr + off) = val` syntax.
+    // Encoding: mov byte [rdi], sil ; ret
+    //   88 /r = mov r/m8, r8. ModRM = mod(2)+reg(3)+r/m(3).
+    //   r/m = rdi = 111, reg = sil = 110 (requires REX to access SIL),
+    //   mod = 00 (no displacement). ModRM = 00_110_111 = 0x37.
+    //   Total: 40 88 37 C3 (4 bytes).
+    {
+        let mut code = Vec::new();
+        code.extend(&[0x40]);             // REX (enable SIL)
+        code.extend(&[0x88, 0x37]);       // mov byte [rdi], sil
+        code.extend(&[0xC3]);             // ret
+        stubs.push(("__vuma_store_u8".to_string(), code));
+    }
+
     stubs
 }
 

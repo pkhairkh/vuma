@@ -8,42 +8,44 @@ extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
     fn __vuma_free(addr: Address, size: i64);
     fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn __vuma_load_u8(addr: Address) -> u64;
+    fn __vuma_store_u8(addr: Address, val: u64);
 }
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
-    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
+    __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
+    __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
 }
 fn load_u64(ptr: Address, offset: u32) -> u64 {
-    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
-    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
-    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
-    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    b0: u64 = __vuma_load_u8(ptr + offset); b1: u64 = __vuma_load_u8(ptr + offset + 1);
+    b2: u64 = __vuma_load_u8(ptr + offset + 2); b3: u64 = __vuma_load_u8(ptr + offset + 3);
+    b4: u64 = __vuma_load_u8(ptr + offset + 4); b5: u64 = __vuma_load_u8(ptr + offset + 5);
+    b6: u64 = __vuma_load_u8(ptr + offset + 6); b7: u64 = __vuma_load_u8(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 fn store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
 }
 fn load_u32(ptr: Address, offset: u32) -> u32 {
-    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
-    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    b0: u32 = __vuma_load_u8(ptr + offset); b1: u32 = __vuma_load_u8(ptr + offset + 1);
+    b2: u32 = __vuma_load_u8(ptr + offset + 2); b3: u32 = __vuma_load_u8(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
 // Append a byte to the code buffer
 fn emit_byte(code: Address, pos: u32, b: u32) {
-    *(code + pos) = b & 255;
+    __vuma_store_u8(code + pos, b & 255);
 }
 
 // Append a 32-bit immediate (little-endian)
 fn emit_u32(code: Address, pos: u32, val: u32) {
-    *(code + pos) = val & 255;
-    *(code + pos + 1) = (val >> 8) & 255;
-    *(code + pos + 2) = (val >> 16) & 255;
-    *(code + pos + 3) = (val >> 24) & 255;
+    __vuma_store_u8(code + pos, val & 255);
+    __vuma_store_u8(code + pos + 1, (val >> 8) & 255);
+    __vuma_store_u8(code + pos + 2, (val >> 16) & 255);
+    __vuma_store_u8(code + pos + 3, (val >> 24) & 255);
 }
 
 // ── x86_64 instruction encoders ──
