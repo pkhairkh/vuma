@@ -266,9 +266,9 @@ fn test_mips64_abi_target_info() {
     assert!(info.has_link_register(), "MIPS uses $31 ($ra) as link register");
     assert!(info.has_hardwired_zero(), "MIPS has $0 (zero)");
     assert!(info.has_branch_delay_slots(), "MIPS has branch delay slots");
-    // Mips64Backend::new() is little-endian by default (mips64el); a separate
-    // Mips64Be backend exists for big-endian.  See backend.rs:1800.
-    assert_eq!(info.endianness(), Endianness::Little);
+    // Mips64Backend::new() emits a big-endian ELF (ELFDATA2MSB, qemu-mips64).
+    // The Mips64BeBackend wrapper is retained as an explicit BE alias.
+    assert_eq!(info.endianness(), Endianness::Big);
     validate_cc_info(info);
 }
 

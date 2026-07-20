@@ -2,14 +2,23 @@
 //!
 //! **Wave 49 — wrapper pattern documentation.**
 //!
-//! `mips64be` is a thin wrapper around the little-endian `Mips64Backend`
+//! `mips64be` is a thin wrapper around the `Mips64Backend`
 //! (field `inner: Mips64Backend`, constructed via `Mips64Backend::new_be()`)
 //! that produces big-endian MIPS64 ELF binaries for `qemu-mips64`. It
 //! delegates `target_info` and `allocate_registers` to `self.inner.*`,
 //! then **byte-swaps each 4-byte instruction word LE→BE** inside
 //! `encode_function`, `return_stub`, `trampoline`, and the executable
-//! `PT_LOAD` segment of `encode_program`. The ELF64 header / PHDR fields
-//! are also flipped via `swap_le_elf_to_be`.
+//! `PT_LOAD` segment of `encode_program`.
+//!
+//! ## Parent-endianness note (post p3b-elf-endianness)
+//!
+//! The parent `Mips64Backend` now emits a **big-endian ELF header**
+//! (`ELFDATA2MSB`, all multi-byte header & PHDR fields in BE) — see
+//! `build_mips64_elf_2seg` in `mips64/mod.rs`.  This wrapper therefore no
+//! longer swaps the ELF header or program-header fields (the parent's
+//! output is already in the correct byte order); it only swaps the 32-bit
+//! fixed-width instruction words in the executable `PT_LOAD` segment from
+//! LE (the parent encoder's `word.to_le_bytes()`) to BE.
 //!
 //! ## MIPS endianness & instruction encoding
 //!
@@ -61,69 +70,37 @@ impl Default for Mips64BeBackend {
 }
 
 #[inline]
-fn swap_u16(buf: &mut [u8], off: usize) { buf.swap(off, off + 1); }
-#[inline]
 fn swap_u32(buf: &mut [u8], off: usize) { buf.swap(off, off + 3); buf.swap(off + 1, off + 2); }
-#[inline]
-fn swap_u64(buf: &mut [u8], off: usize) {
-    buf.swap(off, off + 7); buf.swap(off + 1, off + 6);
-    buf.swap(off + 2, off + 5); buf.swap(off + 3, off + 4);
-}
 
-/// Convert a little-endian MIPS64 ELF to big-endian, in place.
-fn swap_le_elf_to_be(elf: &mut [u8]) {
+/// Swap the 32-bit fixed-width MIPS instruction words in the executable
+/// `PT_LOAD` segment(s) from little-endian (the parent encoder's
+/// `word.to_le_bytes()`) to big-endian, in place.
+///
+/// The ELF header & program-header fields are **not touched** — the parent
+/// `Mips64Backend::encode_program` already emits them in big-endian byte
+/// order (ELFDATA2MSB).  Only the instruction stream needs re-serialising
+/// because every MIPS instruction encoder in `mips64/mod.rs` writes
+/// `word.to_le_bytes()`.
+///
+/// All PHDR fields are read as big-endian (matching the parent's output).
+fn swap_le_instructions_to_be(elf: &mut [u8]) {
     if elf.len() < 64 { return; }
 
-    // 0. Read PHDR offsets BEFORE swapping — the bytes are still LE here.
-    //    (Reading them after the header-field swaps below would interpret
-    //    already-BE bytes as LE, giving huge wrong offsets and skipping
-    //    the PHDR swap loop entirely.)
-    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
-    let phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
-    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+    // Read PHDR table layout from the (already big-endian) ELF header.
+    let phoff = u64::from_be_bytes(elf[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_be_bytes(elf[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_be_bytes(elf[56..58].try_into().unwrap()) as usize;
     let header_end = phoff + phnum * phentsize;
 
-    // 1. EI_DATA: ELFDATA2LSB (1) → ELFDATA2MSB (2)
-    elf[5] = 2;
-
-    // 2. ELF header fields (offset 16+)
-    swap_u16(elf, 16); // e_type
-    swap_u16(elf, 18); // e_machine
-    swap_u32(elf, 20); // e_version
-    swap_u64(elf, 24); // e_entry
-    swap_u64(elf, 32); // e_phoff
-    swap_u64(elf, 40); // e_shoff
-    swap_u32(elf, 48); // e_flags
-    swap_u16(elf, 52); // e_ehsize
-    swap_u16(elf, 54); // e_phentsize
-    swap_u16(elf, 56); // e_phnum
-    swap_u16(elf, 58); // e_shentsize
-    swap_u16(elf, 60); // e_shnum
-    swap_u16(elf, 62); // e_shstrndx
-
-    // 3. Program headers (each 56 bytes at e_phoff)
-    for i in 0..phnum {
-        let base = phoff + i * phentsize;
-        if base + phentsize > elf.len() { break; }
-        swap_u32(elf, base);      // p_type
-        swap_u32(elf, base + 4);  // p_flags
-        swap_u64(elf, base + 8);  // p_offset
-        swap_u64(elf, base + 16); // p_vaddr
-        swap_u64(elf, base + 24); // p_paddr
-        swap_u64(elf, base + 32); // p_filesz
-        swap_u64(elf, base + 40); // p_memsz
-        swap_u64(elf, base + 48); // p_align
-    }
-
-    // 4. Swap all 4-byte instruction words in the executable LOAD segment(s).
-    //    The first LOAD segment typically has p_offset=0 (includes ELF header
-    //    + PHDRs). We must NOT re-flip those header bytes — they're already
-    //    in BE order after the per-field swaps above. Start flipping from
-    //    header_end onward, and only inside segments with PF_X set.
+    // Swap all 4-byte instruction words in the executable LOAD segment(s).
+    // The first LOAD segment typically has p_offset=0 (includes ELF header
+    // + PHDRs). We must NOT re-flip those header bytes — they're already
+    // in BE order. Start flipping from header_end onward, and only inside
+    // segments with PF_X set.
     let mut off = phoff;
     for _ in 0..phnum {
         if off + phentsize > elf.len() { break; }
-        // Read PHDR fields AFTER the per-field swap above (so they're now BE).
+        // Read PHDR fields as big-endian (parent emits BE headers/PHDRs).
         let p_flags  = u32::from_be_bytes(elf[off + 4..off + 8].try_into().unwrap());
         let p_offset = u64::from_be_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
         let p_filesz = u64::from_be_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
@@ -153,8 +130,10 @@ impl Backend for Mips64BeBackend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
+        // The parent emits a big-endian ELF header but little-endian
+        // instruction words.  Only the instruction stream needs swapping.
         let mut elf = self.inner.encode_program(program)?;
-        swap_le_elf_to_be(&mut elf);
+        swap_le_instructions_to_be(&mut elf);
         Ok(elf)
     }
 

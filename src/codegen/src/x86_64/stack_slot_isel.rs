@@ -3670,15 +3670,143 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 channel_builtin_matched = true;
                             }
                             "channel_is_closed" if args.len() == 1 && dst.is_some() => {
-                                // Check if the write end of the pipe is still open
-                                // Use poll() with 0 timeout on the read_fd
-                                // poll(&pollfd, 1, 0) — if POLLHUP, the write end is closed
+                                // Phase 2e (L0): real closed-channel detection.
+                                //
+                                // Previously this returned constant 0 (the
+                                // audit at "Analysis: L0-L8 Wiring" flagged it
+                                // as a no-op placeholder — the real
+                                // implementation should use poll() with a
+                                // POLLHUP check).  This replaces that
+                                // placeholder with a real check.
+                                //
+                                // Algorithm: use poll(fd, POLLIN, 0) (sys_poll=7)
+                                // on the read_fd (low 32 bits of the handle) and
+                                // inspect revents.  On a Linux pipe:
+                                //   - poll returns <0
+                                //       → error (treat as closed; return 1)
+                                //   - poll returns 0
+                                //       → no events pending (not closed, no data;
+                                //         return 0)
+                                //   - poll returns >0
+                                //       → check revents:
+                                //           POLLHUP  (0x10) → write end closed
+                                //                              (return 1)
+                                //           POLLERR  (0x08) → error condition
+                                //                              (return 1)
+                                //           POLLNVAL (0x20) → invalid fd (e.g.
+                                //                              channel already
+                                //                              closed; return 1)
+                                //           POLLIN   (0x01) → data available,
+                                //                              not closed
+                                //                              (return 0)
+                                //
+                                // Note: when the pipe's write end is closed but
+                                // data is still queued, poll returns POLLIN |
+                                // POLLHUP.  We treat POLLHUP as authoritative
+                                // (return 1) — the channel IS closed, even if
+                                // there is unread data.  This matches the
+                                // task spec: "If poll returns >0 with
+                                // POLLHUP/POLLERR set, the channel is closed →
+                                // return 1."
+                                //
+                                // (We do NOT use the alternative recv(fd, buf,
+                                // 1, MSG_PEEK|MSG_DONTWAIT) approach because
+                                // pipes are not sockets — recv() on a pipe
+                                // returns -ENOTSOCK, which would always be
+                                // reported as "closed".  poll() is the correct
+                                // primitive for pipe fds.)
+                                //
+                                // Stack layout (24 bytes, 16-byte aligned):
+                                //   [rsp+0..8]   = pollfd { i32 fd; i16 events; i16 revents; }
+                                //   [rsp+8..16]  = poll return value spill (i64)
+                                //   [rsp+16..24] = padding (8 bytes)
                                 let ch = &args[0];
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
-                                // For simplicity: return 0 (not closed) — real implementation
-                                // would use poll() with POLLHUP check
+                                let dst_off = slot_offset(dst_id);
+
+                                // Load read_fd (low 32 bits of handle) into RAX.
+                                match ch {
+                                    IRValue::Register(id) => {
+                                        let off = slot_offset(*id);
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, off));
+                                    }
+                                    _ => {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+                                        code.extend(load_value(ch, Gpr::Rax));
+                                        code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                        code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 0));
+                                        code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+                                    }
+                                }
+
+                                // Allocate 24 bytes: pollfd (8) + spill (8) + padding (8).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 24));
+                                // Build pollfd at [rsp+0..8]:
+                                //   fd (i32) at [rsp+0]
+                                //   events = POLLIN (0x0001) at [rsp+4] (i16)
+                                //   revents = 0 at [rsp+6] (i16, written by kernel)
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 0, Gpr::Rax)); // fd
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 0x0001));         // POLLIN
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rcx)); // events + revents (revents=0)
+
+                                // poll(&pollfd, 1, 0)
+                                code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rsi, 1));  // nfds=1
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 0));  // timeout=0 (non-blocking)
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 7));  // sys_poll
+                                code.extend(encode_syscall());
+
+                                // Spill poll return to [rsp+8] (we'll reload it
+                                // after the revents check clobbers RAX).
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 8, Gpr::Rax));
+
+                                // if poll < 0 → closed (return 1).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jl_closed_patch = code.len();
+                                code.extend(&[0x0F, 0x8C, 0x00, 0x00, 0x00, 0x00]); // jl rel32
+
+                                // if poll == 0 → not closed (return 0).
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let je_not_closed_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+
+                                // poll > 0 → check revents at [rsp+6] (i16).
+                                // movzx eax, word [rsp+6]  →  0F B7 44 24 06
+                                code.extend(&[0x0F, 0xB7, 0x44, 0x24, 0x06]);
+                                // Mask with POLLHUP|POLLERR|POLLNVAL
+                                //   POLLHUP  = 0x0010 (write end closed)
+                                //   POLLERR  = 0x0008 (error condition)
+                                //   POLLNVAL = 0x0020 (invalid fd — e.g. the
+                                //   channel was already closed; poll returns
+                                //   POLLNVAL rather than -EBADF on Linux)
+                                // = 0x38.
+                                code.extend(encode_and_reg_imm32(Gpr::Rax, 0x38));
+                                // If non-zero → closed.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                let jne_closed_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
+                                // POLLIN set (or other non-error event) → not
+                                // closed (return 0).
+                                let not_closed_off = code.len();
+                                patch_rel32_jcc(&mut code, je_not_closed_patch, not_closed_off);
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));
-                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_cleanup_from_nc_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // closed: return 1 (poll < 0 OR POLLHUP/POLLERR).
+                                let closed_off = code.len();
+                                patch_rel32_jcc(&mut code, jl_closed_patch, closed_off);
+                                patch_rel32_jcc(&mut code, jne_closed_patch, closed_off);
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                                // cleanup: deallocate 24 bytes.
+                                let cleanup_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_nc_patch, cleanup_off);
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 24));
+
                                 instr_opcode = Some("channel_is_closed".to_string());
                                 channel_builtin_matched = true;
                             }
@@ -4278,8 +4406,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
                                     }
                                 }
-                                // Step 3: 56-byte frame + read().
-                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 56));
+                                // Step 3: 96-byte frame (56 header+payload+CRC
+                                // + 40 cap_id+sig).  Even when cap_count == 0 we
+                                // allocate 96 to keep the cleanup uniform (the
+                                // extra 40 bytes are unused in that case).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 96));
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
@@ -4300,6 +4431,91 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
                                 let jne_crc_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Phase 2b (L2): capability verification — if
+                                // cap_count > 0, the message carries a capability
+                                // token + 32-byte FNV-1a×4 signature.  Read 40
+                                // more bytes (cap_id + sig) into [rsp+56..96],
+                                // verify cap_id != 0 (structural check), then
+                                // verify the FNV-1a×4 signature (real crypto
+                                // check).  Previously channel_recv_proto silently
+                                // dropped any capability attached to the message
+                                // — this closes that L2 bypass (audit item L2
+                                // from "Analysis: L0-L8 Wiring").  The check
+                                // mirrors the channel_recv Call path (Wave C)
+                                // byte-for-byte.
+                                code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // je cap_skip (cap_count == 0 → no cap to verify)
+                                let je_cap_skip_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                // cap_count > 0: read 40 more bytes (cap_id +
+                                // 32-byte sig) into [rsp+56..96].  RDI still
+                                // holds read_fd (preserved across the first
+                                // read — the CRC32 / FNV loops only use
+                                // caller-saved RAX/RCX/RSI/R8-R11).
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 56));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, 40));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 0)); // sys_read
+                                code.extend(encode_syscall());
+                                // Verify cap_id ([rsp+56]) is non-zero.
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 56));
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
+                                // jne cap_ok (cap_id != 0 → valid structural token)
+                                let jne_cap_ok_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // cap_id == 0 → forged/invalid token → cap_fail
+                                // (-4 = PermissionDenied).
+                                let je_cap_fail_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32 (placeholder)
+                                // cap_ok: cap_id is valid (non-zero) → verify the sig.
+                                let cap_ok_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_cap_ok_patch, cap_ok_off);
+                                // Phase 2b (L2): real FNV-1a×4 capability
+                                // signature verification — mirrors
+                                // channel_recv (Wave C).  Recompute FNV-1a over
+                                // the sig_input stored at [rbp + cap_siginput_off]
+                                // with 4 salt bytes (0,1,2,3), and compare each
+                                // 8-byte lane to the received signature at
+                                // [rsp+64..96].  If any lane mismatches, jump to
+                                // cap_sig_fail (-4 = PermissionDenied).  This is
+                                // a real byte-by-byte FNV-1a computation in
+                                // emitted x86_64 code (emit_fnv1a_64_loop), NOT a
+                                // library call.  The sig_input was embedded in
+                                // the prologue from the same compile-time grant
+                                // params the sender used, so both parent and
+                                // child (after fork) compute the same expected
+                                // sig.  If the function has no capability_grant
+                                // (cap_grant_sig_input is None), the FNV check is
+                                // skipped — matching channel_recv's behavior.
+                                let mut cap_sig_fail_patches: Vec<usize> = Vec::new();
+                                if let Some(ref sig_input) = cap_grant_sig_input {
+                                    let sig_input_len = sig_input.len() as u32;
+                                    for lane in 0u8..4 {
+                                        // Compute FNV-1a over [rbp +
+                                        // cap_siginput_off, len=sig_input_len]
+                                        // with salt=lane.  Result in R8.
+                                        // Clobbers RAX, RCX, RSI, R8, R11.
+                                        code.extend(emit_fnv1a_64_loop(
+                                            Gpr::Rbp, cap_siginput_off, sig_input_len, lane,
+                                        ));
+                                        // Load received sig[lane*8..lane*8+8]
+                                        // from [rsp + 64 + lane*8] into RCX
+                                        // (64-bit load — the FNV result's upper
+                                        // 32 bits are meaningful).
+                                        code.extend(encode_mov_reg_mem(
+                                            Gpr::Rcx, Gpr::Rsp, 64 + (lane as i32) * 8,
+                                        ));
+                                        // Compare computed (R8) to received (RCX).
+                                        code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                        // jne cap_sig_fail (rel32, placeholder)
+                                        let jne_sig_patch = code.len();
+                                        code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                        cap_sig_fail_patches.push(jne_sig_patch);
+                                    }
+                                }
+                                // cap_skip: cap_count == 0 → no cap to verify.
+                                let cap_skip_off = code.len();
+                                patch_rel32_jcc(&mut code, je_cap_skip_patch, cap_skip_off);
                                 // Success: extract payload, advance proto_state.
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
@@ -4311,10 +4527,23 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, proto_state_off, Gpr::Rax));
                                 let jmp_ok_patch = code.len();
                                 code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // cap_fail / cap_sig_fail (Phase 2b): store -4
+                                // (PermissionDenied) — capability token was
+                                // either structurally invalid (cap_id == 0) or
+                                // failed the FNV-1a×4 signature check.
+                                let cap_fail_off = code.len();
+                                for patch in &cap_sig_fail_patches {
+                                    patch_rel32_jcc(&mut code, *patch, cap_fail_off);
+                                }
+                                patch_rel32_jcc(&mut code, je_cap_fail_patch, cap_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFC)); // -4
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                let jmp_from_cap_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
                                 // proto_violation: store -5, skip recv.  NOTE: the
-                                // proto-state check happens BEFORE the 56-byte frame
+                                // proto-state check happens BEFORE the 96-byte frame
                                 // is allocated, so this path must NOT execute the
-                                // `add rsp, 56` cleanup — it jumps directly past it.
+                                // `add rsp, 96` cleanup — it jumps directly past it.
                                 let proto_violation_off = code.len();
                                 patch_rel32_jcc(&mut code, jne_proto_violation_patch, proto_violation_off);
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFB)); // -5
@@ -4341,13 +4570,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
                                 code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                                 // cleanup: deallocate frame (only reached by paths that
-                                // actually allocated the 56-byte frame — NOT the
+                                // actually allocated the 96-byte frame — NOT the
                                 // proto_violation path, which skips recv entirely).
                                 let cleanup_off = code.len();
                                 patch_rel32_jmp(&mut code, jmp_ok_patch, cleanup_off);
+                                patch_rel32_jmp(&mut code, jmp_from_cap_patch, cleanup_off);
                                 patch_rel32_jmp(&mut code, jmp_from_closed_patch, cleanup_off);
                                 patch_rel32_jmp(&mut code, jmp_from_magic_patch, cleanup_off);
-                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 96));
                                 // end: proto_violation path jumps here (no frame to dealloc).
                                 let end_off = code.len();
                                 patch_rel32_jmp(&mut code, jmp_from_pv_patch, end_off);

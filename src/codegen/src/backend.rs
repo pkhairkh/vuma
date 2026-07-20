@@ -1560,7 +1560,9 @@ impl TargetInfo for Mips64TargetInfo {
         alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
-        Endianness::Little
+        // MIPS64 N64 ABI is big-endian (qemu-mips64).  The ELF builder
+        // (`build_mips64_elf_2seg`) emits ELFDATA2MSB to match.
+        Endianness::Big
     }
     fn has_registers(&self) -> bool {
         true
@@ -3912,7 +3914,7 @@ mod tests {
         assert_eq!(info.elf_machine_type(), 8);
         assert!(info.has_branch_delay_slots()); // THE defining feature
         assert!(info.has_hardwired_zero());
-        assert_eq!(info.endianness(), Endianness::Little);
+        assert_eq!(info.endianness(), Endianness::Big);
         assert_eq!(info.calling_convention_name(), "n64");
         validate_target_info(&info);
     }
