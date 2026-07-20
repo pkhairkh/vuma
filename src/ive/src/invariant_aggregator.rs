@@ -1328,6 +1328,182 @@ pub fn verify_all(input: &VerificationInput) -> AggregatedResult {
 }
 
 // ---------------------------------------------------------------------------
+// Wave 96: 5→3 invariant reduction (5to3)
+// ---------------------------------------------------------------------------
+
+/// Wave 96: The 5→3 invariant reduction (5to3).
+///
+/// VUMA's five core invariants (Liveness, Exclusivity, Interpretation,
+/// Origin, Cleanup) collapse into THREE compile-time invariants under
+/// the L1-L3 collapse theorem (see `verification::l1l3_collapse`):
+///
+///   1. **Resource Safety** = Liveness ∪ Cleanup
+///      (every acquired resource is eventually released AND every
+///      requested resource is eventually provided — together they
+///      guarantee no leaks and no deadlocks).
+///
+///   2. **Access Safety** = Exclusivity ∪ Interpretation
+///      (at most one owner for exclusive resources AND every read
+///      interprets data under the correct BD — together they guarantee
+///      no data races and no type confusion).
+///
+///   3. **Provenance Safety** = Origin
+///      (every datum has a well-defined provenance — unchanged by the
+///      collapse; origin is already a single-invariant property that
+///      subsumes the data-trust boundary).
+///
+/// The 5to3 reduction is sound: if all five original invariants hold,
+/// then all three collapsed invariants hold. The converse is NOT
+/// true in general (the collapse loses information about WHICH of the
+/// two original invariants in each pair failed), but for the purposes
+/// of compile-time verification, the three-way partition is sufficient
+/// to gate codegen on (a program that fails any of the three collapsed
+/// invariants is rejected).
+///
+/// The reduction is used by the L1L3 collapse proof to simplify the
+/// final verdict: instead of reporting five separate invariant
+/// outcomes, the aggregator can report three (one per collapsed
+/// category), which is easier for downstream tooling (compilers,
+/// IDEs, security review dashboards) to consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CollapsedInvariant {
+    /// Resource Safety = Liveness ∪ Cleanup.
+    ResourceSafety,
+    /// Access Safety = Exclusivity ∪ Interpretation.
+    AccessSafety,
+    /// Provenance Safety = Origin.
+    ProvenanceSafety,
+}
+
+impl CollapsedInvariant {
+    /// Returns the three collapsed invariant kinds in canonical order.
+    pub fn all() -> &'static [CollapsedInvariant; 3] {
+        &[
+            CollapsedInvariant::ResourceSafety,
+            CollapsedInvariant::AccessSafety,
+            CollapsedInvariant::ProvenanceSafety,
+        ]
+    }
+
+    /// Returns the human-readable label for this collapsed invariant.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CollapsedInvariant::ResourceSafety => "resource_safety",
+            CollapsedInvariant::AccessSafety => "access_safety",
+            CollapsedInvariant::ProvenanceSafety => "provenance_safety",
+        }
+    }
+
+    /// Maps a five-core `InvariantKind` to its collapsed three-core
+    /// equivalent. Returns `None` for the extended kinds (ConstantTime,
+    /// Interprocedural, Modular, PMT) which are NOT part of the 5→3
+    /// reduction.
+    pub fn from_five(kind: InvariantKind) -> Option<CollapsedInvariant> {
+        match kind {
+            InvariantKind::Liveness | InvariantKind::Cleanup => {
+                Some(CollapsedInvariant::ResourceSafety)
+            }
+            InvariantKind::Exclusivity | InvariantKind::Interpretation => {
+                Some(CollapsedInvariant::AccessSafety)
+            }
+            InvariantKind::Origin => Some(CollapsedInvariant::ProvenanceSafety),
+            // Extended kinds are not part of the 5→3 reduction.
+            InvariantKind::ConstantTime
+            | InvariantKind::Interprocedural
+            | InvariantKind::Modular
+            | InvariantKind::Pmt => None,
+        }
+    }
+}
+
+impl fmt::Display for CollapsedInvariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Wave 96: Result of the 5→3 invariant reduction.
+///
+/// Maps each of the five core invariants to one of the three collapsed
+/// invariants, and records whether each collapsed invariant is
+/// satisfied (i.e. both of its constituent five-core invariants
+/// passed).
+#[derive(Debug, Clone)]
+pub struct FiveToThreeReduction {
+    /// For each of the three collapsed invariants, whether it is
+    /// satisfied (true) or violated (false). Indexed by
+    /// `CollapsedInvariant::all()` order.
+    pub collapsed: [bool; 3],
+    /// The number of five-core invariants that were folded into the
+    /// three collapsed invariants (always 5 for a complete reduction).
+    pub folded: usize,
+    /// Human-readable summary.
+    pub summary: String,
+}
+
+/// Wave 96: Perform the 5→3 invariant reduction.
+///
+/// Given the per-invariant pass/fail status of the five core
+/// invariants (in canonical order: Liveness, Exclusivity,
+/// Interpretation, Origin, Cleanup — the order returned by
+/// `InvariantKind::all()`), compute the three collapsed invariants
+/// and their pass/fail status.
+///
+/// A collapsed invariant is satisfied iff BOTH of its constituent
+/// five-core invariants are satisfied:
+///   - ResourceSafety = Liveness ∧ Cleanup
+///   - AccessSafety = Exclusivity ∧ Interpretation
+///   - ProvenanceSafety = Origin (single invariant, identity)
+///
+/// `five_results` — slice of (kind, passed) pairs for the five core
+/// invariants. Invariants not present in the slice are treated as
+/// "unverified" (collapsed invariant = false).
+pub fn reduce_5to3<I>(five_results: I) -> FiveToThreeReduction
+where
+    I: IntoIterator<Item = (InvariantKind, bool)>,
+{
+    use std::collections::HashMap;
+    let map: HashMap<InvariantKind, bool> = five_results.into_iter().collect();
+    let mut collapsed = [false; 3];
+    let mut seen = [false; 3];
+    let mut folded = 0;
+    for &kind in InvariantKind::all() {
+        if let Some(&passed) = map.get(&kind) {
+            folded += 1;
+            if let Some(c) = CollapsedInvariant::from_five(kind) {
+                let idx = match c {
+                    CollapsedInvariant::ResourceSafety => 0,
+                    CollapsedInvariant::AccessSafety => 1,
+                    CollapsedInvariant::ProvenanceSafety => 2,
+                };
+                // A collapsed invariant is satisfied iff ALL of its
+                // constituents are satisfied. First-encounter sets
+                // the value; subsequent encounters AND with it.
+                if !seen[idx] {
+                    collapsed[idx] = passed;
+                    seen[idx] = true;
+                } else {
+                    collapsed[idx] = collapsed[idx] && passed;
+                }
+            }
+        }
+    }
+    let summary = format!(
+        "5→3 reduction: folded {} five-core invariants into three collapsed invariants \
+         (resource_safety={}, access_safety={}, provenance_safety={})",
+        folded,
+        collapsed[0],
+        collapsed[1],
+        collapsed[2]
+    );
+    FiveToThreeReduction {
+        collapsed,
+        folded,
+        summary,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

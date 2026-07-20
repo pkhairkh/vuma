@@ -1540,7 +1540,169 @@ pub enum Type {
     /// Wave 1b: `Channel<T>` — a typed channel endpoint carrying values
     /// of type `T`. Surface syntax: `Channel<i32>`, `Channel<*u8>`, etc.
     /// The inner type is the message payload type.
-    Channel(Box<Type>),
+    ///
+    /// Wave 89-90 (Session Types): the optional `session_type` field
+    /// carries a session-typed protocol specification (e.g.
+    /// `Send<i32, Recv<bool, End>>`). When `None`, the channel is
+    /// untyped (the legacy behaviour). When `Some(_)`, the channel is
+    /// session-typed and the linear-type checker (Wave 95) will verify
+    /// that send/recv operations follow the declared protocol order.
+    Channel {
+        /// The message payload type carried by the channel.
+        inner: Box<Type>,
+        /// Optional session-type protocol annotation (Wave 89-90).
+        /// `None` for plain untyped channels; `Some(_)` for session-typed
+        /// channels whose send/recv order is checked at compile time.
+        /// Boxed to break the Type ↔ SessionType size recursion.
+        session_type: Option<Box<SessionType>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Session Types (Wave 89-90)
+// ---------------------------------------------------------------------------
+
+/// Wave 89-90: Session type for a channel endpoint.
+///
+/// A session type is a linear protocol describing the sequence of
+/// send/recv operations a channel endpoint must perform. The type
+/// system enforces that operations follow the declared order: e.g. a
+/// channel typed `Send<i32, Recv<bool, End>>` must `send` an `i32`
+/// first, then `recv` a `bool`, then stop.
+///
+/// This mirrors the binary session-type calculus of Honda et al. The
+/// `Recurse` variant is the recursion variable (for `μ`-bound protocols);
+/// a full implementation would pair it with a `Rec` variant carrying the
+/// recursive body, but for the AST-level annotation this single variant
+/// is sufficient to mark a protocol as recursive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionType {
+    /// Send a value of `Type`, then continue with the inner session.
+    /// The `Type` is boxed to break the Type ↔ SessionType size recursion
+    /// (Type::Channel carries an Option<SessionType>).
+    Send(Box<Type>, Box<SessionType>),
+    /// Receive a value of `Type`, then continue with the inner session.
+    /// The `Type` is boxed to break the Type ↔ SessionType size recursion.
+    Recv(Box<Type>, Box<SessionType>),
+    /// Terminal: no further operations allowed.
+    End,
+    /// Recursion marker (`μ`) — the protocol loops back to the enclosing
+    /// `Rec` binder. Stored without a body for AST-level annotation; the
+    /// type-checker treats encountering `Recurse` as "continue the loop".
+    Recurse,
+}
+
+impl std::fmt::Display for SessionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionType::Send(ty, cont) => write!(f, "Send<{}, {}>", ty, cont),
+            SessionType::Recv(ty, cont) => write!(f, "Recv<{}, {}>", ty, cont),
+            SessionType::End => write!(f, "End"),
+            SessionType::Recurse => write!(f, "Recurse"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Information-Flow Types (Wave 91-92)
+// ---------------------------------------------------------------------------
+
+/// Wave 91-92: Security label for information-flow control.
+///
+/// A two-point lattice: `Low ⊑ High`. Information may flow from a `Low`
+/// source to a `High` sink (e.g. writing a public value into a secret
+/// variable is safe), but NOT from a `High` source to a `Low` sink
+/// (writing a secret into a public variable is an information leak).
+///
+/// This is the simplest non-trivial information-flow lattice. The
+/// runtime-side mirror (`vuma_codegen::ipc::SecurityLabel`) extends this
+/// to a four-point lattice (Public < Internal < Secret < TopSecret) for
+/// capability attestation; the AST keeps the two-point form because
+/// surface-level annotations only need to distinguish "unclassified"
+/// from "classified" data — finer-grained compartments are an
+/// inference-time concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SecurityLabel {
+    /// Low-sensitivity data: public, may flow anywhere.
+    #[default]
+    Low,
+    /// High-sensitivity data: secret, may NOT flow to a `Low` sink.
+    High,
+}
+
+impl SecurityLabel {
+    /// Information-flow lattice: `self` may flow to `target` iff
+    /// `self <= target`. Returns `true` for `Low → High`,
+    /// `false` for `High → Low` (the leak case).
+    pub fn can_flow_to(self, target: SecurityLabel) -> bool {
+        self <= target
+    }
+
+    /// Least upper bound: `Low.join(High) == High`, `High.join(High) == High`.
+    /// Used when combining data from two sources (the result carries the
+    /// more restrictive label).
+    pub fn join(self, other: SecurityLabel) -> SecurityLabel {
+        if self >= other { self } else { other }
+    }
+}
+
+impl std::fmt::Display for SecurityLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SecurityLabel::Low => write!(f, "Low"),
+            SecurityLabel::High => write!(f, "High"),
+        }
+    }
+}
+
+/// Wave 91-92: Information-flow annotation attached to a variable or
+/// expression.
+///
+/// Carries a [`SecurityLabel`] and an optional declassification reason.
+/// When `label == High` and `declassified == None`, the value may NOT
+/// flow to a `Low` sink. When `declassified == Some(reason)`, the value
+/// has been explicitly declassified (a deliberate, auditable leak) and
+/// may flow anywhere — the reason string is preserved for security
+/// review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InformationFlow {
+    /// The security label of the annotated value.
+    pub label: SecurityLabel,
+    /// Optional declassification reason. `Some(_)` means the value has
+    /// been explicitly downgraded from `High` to `Low` (a deliberate
+    /// leak); the string is the auditor-visible justification.
+    pub declassified: Option<String>,
+}
+
+impl InformationFlow {
+    /// Construct a non-declassified annotation with the given label.
+    pub fn new(label: SecurityLabel) -> Self {
+        Self { label, declassified: None }
+    }
+
+    /// Construct a declassified annotation (label becomes `Low`, with
+    /// the given reason recorded for audit).
+    pub fn declassified(reason: impl Into<String>) -> Self {
+        Self {
+            label: SecurityLabel::Low,
+            declassified: Some(reason.into()),
+        }
+    }
+
+    /// Returns `true` if this value may flow to a sink with `target_label`.
+    /// A declassified value may flow anywhere.
+    pub fn can_flow_to(&self, target_label: SecurityLabel) -> bool {
+        self.declassified.is_some() || self.label.can_flow_to(target_label)
+    }
+}
+
+impl std::fmt::Display for InformationFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.declassified {
+            Some(reason) => write!(f, "{}[declassify: {}]", self.label, reason),
+            None => write!(f, "{}", self.label),
+        }
+    }
 }
 
 impl std::fmt::Display for Type {
@@ -1569,7 +1731,12 @@ impl std::fmt::Display for Type {
             Type::BdAnnot { name } => write!(f, "#bd({})", name),
             Type::State(inner) => write!(f, "State<{}>", inner),
             Type::Ref { state, field } => write!(f, "Ref<{}, {}>", state, field),
-            Type::Channel(inner) => write!(f, "Channel<{}>", inner),
+            Type::Channel { inner, session_type } => {
+                match session_type {
+                    Some(st) => write!(f, "Channel<{}, {}>", inner, st),
+                    None => write!(f, "Channel<{}>", inner),
+                }
+            }
         }
     }
 }

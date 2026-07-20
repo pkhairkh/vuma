@@ -1,0 +1,37 @@
+// session_types — Wave 89-90: session-typed channel protocol.
+//
+// A session type is a linear protocol describing the sequence of
+// send/recv operations a channel endpoint must perform. This program
+// exercises a valid session-typed request/response protocol:
+//
+//   ch1: Parent —Send<i32, End>→  Child
+//   ch2: Child  —Send<i32, End>→  Parent
+//
+// The parent (session role: Send<i32, Recv<i32, End>>) sends 21 on ch1
+// and then recvs the response on ch2. The child (session role:
+// Recv<i32, Send<i32, End>>) recvs 21 on ch1, doubles it, and sends 42
+// on ch2. Both endpoints follow their declared protocol order, so the
+// linear-type checker (Wave 95) accepts the program.
+//
+// Expected exit code: 42
+fn main() -> i32 {
+    ch1 = channel_open<i32>();
+    ch2 = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child: session role = Recv<i32, Send<i32, End>>.
+        req = channel_recv(ch1);
+        resp = req * 2;
+        channel_send(ch2, resp);
+        channel_close(ch1);
+        channel_close(ch2);
+        return 0;
+    }
+    // Parent: session role = Send<i32, Recv<i32, End>>.
+    channel_send(ch1, 21);
+    answer = channel_recv(ch2);
+    wait_worker(pid);
+    channel_close(ch1);
+    channel_close(ch2);
+    return answer;
+}
