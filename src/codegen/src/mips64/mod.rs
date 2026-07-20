@@ -1705,9 +1705,9 @@ impl Instruction {
 /// - Segment 1: LOAD RX — `.text` section (code)
 /// - Segment 2: LOAD RW — `.data` / BSS (writable memory for stack/data)
 ///
-/// All ELF header & program-header fields are written in big-endian byte
-/// order (ELFDATA2MSB), matching the `qemu-mips64` emulator and the
-/// `Mips64TargetInfo::endianness() == Endianness::Big` declaration. The
+/// All ELF header & program-header fields are written in little-endian byte
+/// order (ELFDATA2LSB), matching the `qemu-mips64el` emulator. The
+/// `Mips64TargetInfo::endianness() == Endianness::Little` declaration. The
 /// 32-bit fixed-width MIPS instruction words in `code` are still emitted
 /// in little-endian byte order (each encoder writes `word.to_le_bytes()`);
 /// the `mips64be` wrapper byte-swaps them to BE for `qemu-mips64`.
@@ -1735,33 +1735,33 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
     elf.push(2); // ELFCLASS64
-    elf.push(2); // ELFDATA2MSB (big-endian — qemu-mips64)
+    elf.push(1); // ELFDATA2LSB (little-endian — qemu-mips64el)
     elf.push(1); // EV_CURRENT
     elf.push(3); // ELFOSABI_LINUX
     elf.push(0); // padding
     elf.extend_from_slice(&[0u8; 7]); // padding
 
-    // --- ELF header fields (big-endian) ---
-    elf.extend_from_slice(&2u16.to_be_bytes()); // e_type = ET_EXEC
-    elf.extend_from_slice(&8u16.to_be_bytes()); // e_machine = EM_MIPS
-    elf.extend_from_slice(&1u32.to_be_bytes()); // e_version
-    elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
-    elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
+    // --- ELF header fields (little-endian — qemu-mips64el) ---
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&8u16.to_le_bytes()); // e_machine = EM_MIPS
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
     // e_flags: EF_MIPS_ARCH_64 = 0x60000000 (MIPS64 ISA, N64 ABI implied by ELFCLASS64)
-    elf.extend_from_slice(&0x60000000u32.to_be_bytes()); // e_flags: EF_MIPS_ARCH_64
+    elf.extend_from_slice(&0x60000000u32.to_le_bytes()); // e_flags: EF_MIPS_ARCH_64
     // Note: For N64 ABI (ELFCLASS64), no ABI flag is needed.
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
-    elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
-    elf.extend_from_slice(&2u16.to_be_bytes()); // e_phnum = 2 (LOAD + GNU_STACK)
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2 (LOAD + GNU_STACK)
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
-    elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_offset = 0 (include ELF header in LOAD segment)
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header in LOAD segment)
     elf.extend_from_slice(&base_addr.to_be_bytes()); // p_vaddr = base_addr (include ELF header)
     elf.extend_from_slice(&base_addr.to_be_bytes()); // p_paddr = base_addr
     elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_filesz (headers + code)
@@ -1774,11 +1774,11 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // p_flags = PF_R | PF_W (6), all offsets/sizes zero, p_align = 0x10.
     elf.extend_from_slice(&0x6474e551u32.to_be_bytes()); // p_type = PT_GNU_STACK
     elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_offset
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_vaddr
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_paddr
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_filesz
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_memsz
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
     elf.extend_from_slice(&0x10u64.to_be_bytes()); // p_align
 
     // --- .text section ---
