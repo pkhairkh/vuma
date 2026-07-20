@@ -71,6 +71,8 @@ pub mod constant_time;
 pub mod information_flow;
 /// CT4: Refinement type checker (predicate-based subtyping).
 pub mod refinement;
+/// CT1: Session type checker (compile-time protocol verification).
+pub mod session_type;
 /// FFI Safety Verifier (Wave 10) — proves states are not read after
 /// invalidation by a non-pure foreign call.
 pub mod ffi;
