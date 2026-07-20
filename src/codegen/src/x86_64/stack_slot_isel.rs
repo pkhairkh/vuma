@@ -2776,6 +2776,27 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("set_resource_limit".to_string());
                                 channel_builtin_matched = true;
                             }
+                            // Wave 18c: set_memory_limit(bytes) — emits
+                            // setrlimit(RLIMIT_AS=9, {bytes, bytes}) to cap the
+                            // process's virtual-memory address space.  Distinct
+                            // from the generic set_resource_limit(resource, limit):
+                            // this builtin is specifically for RLIMIT_AS (the
+                            // memory-limit enforcement point of L5 sandboxing).
+                            "set_memory_limit" if args.len() == 1 => {
+                                // rdi = RLIMIT_AS = 9
+                                code.extend(encode_mov_reg_imm32(Gpr::Rdi, 9));
+                                // Build rlimit struct: { rlim_cur=bytes, rlim_max=bytes }
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 16));
+                                code.extend(load_value(&args[0], Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax)); // rlim_cur
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax)); // rlim_max
+                                code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 160)); // sys_setrlimit
+                                code.extend(encode_syscall());
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 16));
+                                instr_opcode = Some("set_memory_limit".to_string());
+                                channel_builtin_matched = true;
+                            }
                             // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_byte)
                             // XOR stream cipher — XORs each byte at ptr[0..len]
                             // with key_byte. Symmetric: seal and open are the
