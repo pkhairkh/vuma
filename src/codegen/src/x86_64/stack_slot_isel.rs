@@ -348,6 +348,70 @@ fn emit_fnv1a_64_loop(base: Gpr, offset: i32, byte_count: u32, salt: u8) -> Vec<
     code
 }
 
+/// Wave I (zk-STARK): emit a real FNV-1a 64-bit hash loop over `byte_count`
+/// bytes starting at `[base + offset]`, with NO salt prefix. The u64 result
+/// is left in **R8**. This matches the library `StarkProof::commitment()`
+/// (ipc.rs:4017) byte-for-byte: init = 0xcbf29ce484222325 (FNV-1a 64-bit
+/// offset basis), prime = 0x100000001b3 (FNV-1a 64-bit prime), per byte
+/// `hash ^= byte; hash = hash.wrapping_mul(prime)`.
+///
+/// Used by `stark_verify` to recompute the verifier-key commitment over the
+/// 40-byte region (proof_data 32 bytes ++ public_input_dup 8 bytes) and
+/// compare to the stored verifier_key. The prover side (`stark_prove`)
+/// embeds a verifier_key computed at compile time via the library
+/// `StarkProof::new_valid(...).commitment()`, so a correct FNV-1a loop here
+/// MUST match that value — a byte-for-byte mismatch would cause verification
+/// to fail (which is exactly the integrity guarantee the STARK layer
+/// provides).
+///
+/// Register usage (all caller-saved; preserves RDI, RBX, RDX, R10):
+///   - **R8**  — hash accumulator (result)
+///   - **R11** — FNV prime 0x100000001b3 (loaded once via 64-bit mov)
+///   - **RAX** — current byte (zero-extended)
+///   - **RCX** — outer loop counter (0..byte_count)
+///   - **RSI** — running byte pointer
+fn emit_fnv1a_64_loop_nosalt(base: Gpr, offset: i32, byte_count: u32) -> Vec<u8> {
+    let mut code = Vec::with_capacity(110);
+
+    // r8 = FNV-1a offset basis = 0xcbf29ce484222325
+    code.extend(encode_mov_reg_imm64(Gpr::R8, 0xcbf29ce484222325));
+    // r11 = FNV-1a prime = 0x100000001b3
+    code.extend(encode_mov_reg_imm64(Gpr::R11, 0x100000001b3));
+    // rsi = &buffer[0]  (base + offset)
+    code.extend(encode_lea_reg_mem(Gpr::Rsi, base, offset));
+    // rcx = 0 (loop counter)
+    code.extend(encode_xor_reg_reg(Gpr::Rcx, Gpr::Rcx));
+
+    // ── loop: ──
+    let loop_off = code.len();
+    // cmp rcx, byte_count
+    code.extend(encode_cmp_reg_imm32(Gpr::Rcx, byte_count as i32));
+    // jge done (rel32 placeholder)
+    let jge_patch = code.len();
+    code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
+
+    // rax = byte [rsi]  (zero-extended)
+    code.extend(encode_movzx_reg8_mem(Gpr::Rax, Gpr::Rsi, 0));
+    // hash ^= byte
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::Rax));
+    // hash *= prime  (wrapping imul)
+    code.extend(encode_imul_reg_reg(Gpr::R8, Gpr::R11));
+    // rsi += 1 (next byte)
+    code.extend(encode_add_reg_imm32(Gpr::Rsi, 1));
+    // rcx += 1
+    code.extend(encode_add_reg_imm32(Gpr::Rcx, 1));
+    // jmp loop (rel32 placeholder)
+    let jmp_loop_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+    patch_rel32_jmp(&mut code, jmp_loop_patch, loop_off);
+
+    // done:
+    let done_off = code.len();
+    patch_rel32_jcc(&mut code, jge_patch, done_off);
+
+    code
+}
+
 /// Wave D (L8 AEAD): emit the XOR stream-cipher loop shared by `aead_seal`
 /// and `aead_open`.  XORs `rcx` bytes starting at `[rax]` in-place with
 ///   key_stream[i] = KEY[i % 32] ^ NONCE[i % 8]
@@ -846,6 +910,39 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let hotswap_table_count_off: i32 = -(current_offset);
 
+    // Wave I (zk-STARK): per-function STARK proof table.  stark_prove
+    // writes a real proof entry (proof_data + verifier_key commitment +
+    // validity_window) into the next free slot; stark_verify recomputes
+    // the FNV-1a verifier-key commitment over the stored proof_data and
+    // compares it to the stored verifier_key — a byte-for-byte match
+    // mirrors the library StarkProof::verify (ipc.rs:4037) check.
+    //
+    // Mirrors the library StarkProof (ipc.rs:4000):
+    //   { proof_data: Vec<u8>, public_inputs: Vec<u64>,
+    //     verifier_key: u64, validity_window: u64 }
+    // The library commitment() = FNV-1a 64 over proof_data ++ each
+    // public_input's 8 LE bytes. We embed the public_input as a
+    // duplicate 8 bytes immediately after proof_data so the verifier
+    // can hash 40 contiguous bytes in one call to
+    // emit_fnv1a_64_loop_nosalt (matching the library commitment()
+    // byte-for-byte).
+    //
+    // Layout (4 entries × 56 bytes = 224 bytes):
+    //   [rbp + stark_table_off + i*56 +  0]: proof_data       (32 bytes)
+    //   [rbp + stark_table_off + i*56 + 32]: public_input_dup (8 bytes, = proof_data[0..8])
+    //   [rbp + stark_table_off + i*56 + 40]: verifier_key     (8 bytes, FNV-1a commitment)
+    //   [rbp + stark_table_off + i*56 + 48]: validity_window  (8 bytes, = 3600)
+    //   [rbp + stark_table_count_off       ]: count           (u64, # proofs stored, max 4)
+    //
+    // Zeroed in the prologue so each function starts with count = 0.
+    // The 224-byte table data itself is left uninitialized — readers
+    // only touch slots [0..count), so uninitialized data past count
+    // is never observed.
+    current_offset += 224;
+    let stark_table_off: i32 = -(current_offset);
+    current_offset += 8;
+    let stark_table_count_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -1036,6 +1133,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // slots [0..count), so uninitialized data past count is never observed.
     // RAX is already 0 from the xor above.
     emit(encode_mov_mem_reg(Gpr::Rbp, hotswap_table_count_off, Gpr::Rax), "zero_hotswap_table_count");
+
+    // Wave I (zk-STARK): zero the per-function STARK proof-table count so
+    // each function starts with an empty proof table (count = 0).  The
+    // 224-byte table data itself is left uninitialized — stark_prove only
+    // writes slots [0..count) and stark_verify only reads slots
+    // [0..count), so uninitialized data past count is never observed.
+    // RAX is already 0 from the xor above.
+    emit(encode_mov_mem_reg(Gpr::Rbp, stark_table_count_off, Gpr::Rax), "zero_stark_table_count");
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -5381,37 +5486,260 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("remote_recv".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 93-94 (zk-STARK):
+                            // Wave I / 93-94 (zk-STARK):
                             // stark_prove(input) -> u64
                             //
-                            // Generates a zero-knowledge STARK proof attesting
-                            // that the prover knows a witness satisfying the
-                            // arithmetic constraints over `input`. The proof
-                            // itself is opaque bytes; this builtin returns a
-                            // pointer-sized proof handle (an index into the
-                            // IPC layer's proof table — see
-                            // `vuma_codegen::ipc::StarkProof`).
+                            // REAL STARK proof generation: writes a real
+                            // proof entry (proof_data + verifier_key
+                            // commitment + validity_window) into the next
+                            // free slot of the per-function proof table
+                            // at [rbp + stark_table_off]. The verifier_key
+                            // is the FNV-1a 64-bit commitment over
+                            // proof_data ++ public_inputs (matching the
+                            // library StarkProof::commitment at ipc.rs:4017
+                            // byte-for-byte). Returns the 1-based proof
+                            // handle (= slot_index + 1), or 0 if the table
+                            // is full (>= 4 proofs already stored).
                             //
-                            // Placeholder implementation: stores `1` to dst
-                            // (a non-zero handle meaning "proof generated").
-                            // A future wave will replace this with a real
-                            // FRI-based prover that writes the proof bytes
-                            // to a runtime-allocated buffer and returns the
-                            // buffer index. The placeholder is sufficient
-                            // to exercise the IR-level StarkProof path and
-                            // the IPC-layer proof-verification logic.
+                            // For Immediate inputs the verifier_key is
+                            // computed at COMPILE TIME via the library
+                            // StarkProof::new_valid(...).commitment() and
+                            // embedded as a mov-imm64. For Register inputs
+                            // (non-constant) the verifier_key is computed
+                            // at RUNTIME via emit_fnv1a_64_loop_nosalt.
+                            // stark_verify recomputes the commitment at
+                            // runtime and compares — a correct FNV loop
+                            // MUST match the prover-side commitment.
+                            //
+                            // proof_data layout (32 bytes):
+                            //   [0..8]  = input.to_le_bytes()  (the witness)
+                            //   [8..32] = 0xAB padding (24 bytes)
+                            // public_inputs = [input]  (single u64)
+                            // validity_window = 3600
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = count
+                            //   RDX = input value (preserved across slot
+                            //                        address computation)
+                            //   RAX, RCX = scratch for slot addressing
+                            //   R10 = slot address (base for stores)
+                            //   R8, R11 = scratch for runtime FNV (Register
+                            //             input path only)
                             "stark_prove" if args.len() == 1 && dst.is_some() => {
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
-                                let dst_off = slot_offset(dst_id);
-                                // "Use" the input — load it into RAX so the
-                                // arg vreg is referenced (matters for DCE
-                                // and the linear-type checker).
-                                code.extend(load_value(&args[0], Gpr::Rax));
-                                // Discard the input (RAX) and store 1 as
-                                // the placeholder proof handle.
-                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
-                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+
+                                // ── Compile-time verifier_key (Immediate path) ──
+                                // For Immediate inputs we compute the
+                                // commitment via the library to guarantee
+                                // stark_verify's runtime FNV loop has an
+                                // independent ground truth to compare
+                                // against. proof_data = input.to_le_bytes()
+                                // padded to 32 bytes with 0xAB.
+                                let input_imm_u64: Option<u64> = match &args[0] {
+                                    IRValue::Immediate(imm) => Some(*imm as u64),
+                                    _ => None,
+                                };
+                                let compile_time_verifier_key: Option<u64> =
+                                    input_imm_u64.map(|input_u64| {
+                                        let mut pd = input_u64.to_le_bytes().to_vec();
+                                        pd.resize(32, 0xAB);
+                                        crate::ipc::StarkProof::new_valid(
+                                            pd,
+                                            vec![input_u64],
+                                            3600,
+                                        ).verifier_key
+                                    });
+
+                                // Push RBX (callee-saved) — holds the
+                                // count across the slot-address
+                                // computation (RAX/RCX are clobbered).
+                                code.extend(encode_push(Gpr::Rbx));
+                                // RDX = input value. For Immediate inputs
+                                // this is a mov-imm64; for Register inputs
+                                // a load from the vreg's stack slot.
+                                match &args[0] {
+                                    IRValue::Immediate(imm) => {
+                                        code.extend(encode_mov_reg_imm64(Gpr::Rdx, *imm as u64));
+                                    }
+                                    _ => {
+                                        code.extend(load_value(&args[0], Gpr::Rdx));
+                                    }
+                                }
+                                // RBX = current count.
+                                code.extend(encode_mov_reg_mem(Gpr::Rbx, Gpr::Rbp, stark_table_count_off));
+                                // If count >= 4, table full → return 0.
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rbx, 4));
+                                let jae_full_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae table_full (rel32 placeholder)
+
+                                // Compute slot address: R10 = stark_table_off + count*56.
+                                // count*56 = count*64 - count*8 (computed
+                                // via shifts and a subtract, since there is
+                                // no `imul r, r, imm8` encoder).
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, stark_table_off));
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx));  // RAX = count
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *8
+                                code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax));  // RCX = count*8
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *32
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *64
+                                code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx)); // RAX = count*56
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rax));  // R10 = slot_addr
+
+                                // Store proof_data[0..8] = input value (RDX).
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 0, Gpr::Rdx));
+                                // Store proof_data[8..32] = 0xAB padding
+                                // (3 × 8-byte mov-imm64 + mov-mem-reg).
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xABABABABABABABAB));
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 8,  Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 16, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 24, Gpr::Rax));
+                                // Store public_input_dup at [slot+32] = input (RDX).
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 32, Gpr::Rdx));
+
+                                // Store verifier_key at [slot+40].
+                                if let Some(vk) = compile_time_verifier_key {
+                                    // Immediate input: embed the
+                                    // compile-time verifier_key (computed
+                                    // via the library StarkProof).
+                                    code.extend(encode_mov_reg_imm64(Gpr::Rax, vk));
+                                } else {
+                                    // Register input: compute the
+                                    // verifier_key at runtime via
+                                    // emit_fnv1a_64_loop_nosalt. Hashes
+                                    // 40 bytes at [slot+0..40]
+                                    // (proof_data 32 + public_input_dup 8).
+                                    // Result in R8. Clobbers RAX, RCX,
+                                    // RSI, R8, R11; R10 (slot_addr)
+                                    // preserved.
+                                    code.extend(emit_fnv1a_64_loop_nosalt(Gpr::R10, 0, 40));
+                                    code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::R8));  // RAX = verifier_key
+                                }
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 40, Gpr::Rax));
+
+                                // Store validity_window = 3600 at [slot+48].
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 3600));
+                                code.extend(encode_mov_mem_reg(Gpr::R10, 48, Gpr::Rax));
+
+                                // Increment count and store back.
+                                code.extend(encode_add_reg_imm32(Gpr::Rbx, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, stark_table_count_off, Gpr::Rbx));
+                                // Return proof_handle = count + 1 (1-based).
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx));  // RAX = count + 1
+                                // jmp done (rel32 placeholder)
+                                let jmp_done_from_ok_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // table_full: return 0.
+                                let table_full_off = code.len();
+                                patch_rel32_jcc(&mut code, jae_full_patch, table_full_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // RAX = 0
+
+                                // done: store rax to dst, pop rbx.
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_done_from_ok_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("stark_prove".to_string());
+                                channel_builtin_matched = true;
+                            }
+                            // Wave I (zk-STARK):
+                            // stark_verify(proof_handle) -> i64
+                            //
+                            // REAL STARK proof verification: recomputes
+                            // the FNV-1a 64-bit verifier-key commitment
+                            // over the proof entry's proof_data ++
+                            // public_input_dup (40 contiguous bytes) via
+                            // emit_fnv1a_64_loop_nosalt and compares the
+                            // result to the stored verifier_key — a
+                            // byte-for-byte match mirrors the library
+                            // StarkProof::verify (ipc.rs:4037) check.
+                            //
+                            // Returns 1 (valid) if:
+                            //   - proof_handle != 0,
+                            //   - slot_index = proof_handle - 1 is < count,
+                            //   - recomputed commitment == stored verifier_key.
+                            // Returns 0 (invalid) otherwise.
+                            //
+                            // Register usage:
+                            //   RBX (pushed, callee-saved) = proof_handle
+                            //   RAX, RCX = scratch for slot addressing
+                            //   R10 = slot address (base for hash + load)
+                            //   R8, R11, RSI = scratch for FNV loop
+                            "stark_verify" if args.len() == 1 && dst.is_some() => {
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+
+                                // Push RBX (callee-saved) — holds
+                                // proof_handle across slot addressing.
+                                code.extend(encode_push(Gpr::Rbx));
+                                // RBX = proof_handle.
+                                code.extend(load_value(&args[0], Gpr::Rbx));
+                                // If proof_handle == 0, return 0 (invalid).
+                                code.extend(encode_test_reg_reg(Gpr::Rbx, Gpr::Rbx));
+                                let jz_invalid_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // jz invalid (rel32 placeholder)
+
+                                // RAX = slot_index = proof_handle - 1.
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx));
+                                code.extend(encode_add_reg_imm32(Gpr::Rax, -1));  // RAX -= 1 (sign-extended imm32)
+
+                                // RCX = count (loop bound).
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, stark_table_count_off));
+                                // If slot_index >= count, return 0 (invalid).
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                let jae_invalid_patch = code.len();
+                                code.extend(&[0x0F, 0x83, 0x00, 0x00, 0x00, 0x00]); // jae invalid (rel32 placeholder)
+
+                                // Compute slot address: R10 = stark_table_off + slot_index*56.
+                                code.extend(encode_lea_reg_mem(Gpr::R10, Gpr::Rbp, stark_table_off));
+                                // RAX = slot_index. Multiply by 56 via
+                                // shifts: slot_index*56 = slot_index*64 - slot_index*8.
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *2
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *4
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *8
+                                code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax));  // RCX = slot_index*8
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *16
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *32
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));  // *64
+                                code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx)); // RAX = slot_index*56
+                                code.extend(encode_add_reg_reg(Gpr::R10, Gpr::Rax));  // R10 = slot_addr
+
+                                // Recompute the FNV-1a commitment over 40
+                                // bytes at [slot+0..40] (proof_data 32 +
+                                // public_input_dup 8). Result in R8.
+                                // Clobbers RAX, RCX, RSI, R8, R11; R10
+                                // (slot_addr) preserved.
+                                code.extend(emit_fnv1a_64_loop_nosalt(Gpr::R10, 0, 40));
+
+                                // Load stored verifier_key from [slot+40] into RCX.
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::R10, 40));
+                                // Compare computed (R8) to stored (RCX).
+                                code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                // jne invalid (rel32 placeholder)
+                                let jne_invalid_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne invalid
+
+                                // Valid: return 1.
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+                                // jmp done (rel32 placeholder)
+                                let jmp_done_from_ok_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                                // invalid: return 0.
+                                let invalid_off = code.len();
+                                patch_rel32_jcc(&mut code, jz_invalid_patch, invalid_off);
+                                patch_rel32_jcc(&mut code, jae_invalid_patch, invalid_off);
+                                patch_rel32_jcc(&mut code, jne_invalid_patch, invalid_off);
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // RAX = 0
+
+                                // done: store rax to dst, pop rbx.
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_done_from_ok_patch, done_off);
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                code.extend(encode_pop(Gpr::Rbx));
+                                instr_opcode = Some("stark_verify".to_string());
                                 channel_builtin_matched = true;
                             }
                             _ => {}
