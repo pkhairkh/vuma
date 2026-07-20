@@ -5026,7 +5026,7 @@ pub fn compile_with_path(
         && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
         let ive_level = match config.verification_level {
             VerificationLevel::Quick => IveVerificationLevel::Quick,
-            VerificationLevel::Normal => IveVerificationLevel::Normal,
+            VerificationLevel::Normal => IveVerificationLevel::Pmt,
             VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
             VerificationLevel::Modular => IveVerificationLevel::Modular,
             VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
@@ -6172,7 +6172,7 @@ pub fn compile_with_recovery(
         && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
         let ive_level = match config.verification_level {
             VerificationLevel::Quick => IveVerificationLevel::Quick,
-            VerificationLevel::Normal => IveVerificationLevel::Normal,
+            VerificationLevel::Normal => IveVerificationLevel::Pmt,
             VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
             VerificationLevel::Modular => IveVerificationLevel::Modular,
             VerificationLevel::ConstantTime => IveVerificationLevel::ConstantTime,
@@ -7030,10 +7030,9 @@ mod tests {
     #[test]
     fn test_compile_simple_allocation() {
         let source = r#"
-            region memory_pool = allocate(1024);
-            fn main() {
-                node_ptr = memory_pool + 64;
-                header = node_ptr as *NodeHeader;
+            layout Point = { x: u32, y: u32 }
+            fn main() -> i32 {
+                return 0;
             }
         "#;
         let config = CompileConfig {
@@ -7089,10 +7088,12 @@ mod tests {
     #[test]
     fn test_compile_aggressive_optimisation() {
         let source = r#"
-            region buf = allocate(256);
-            fn process() {
-                node_ptr = buf + 64;
-                header = node_ptr as *NodeHeader;
+            layout Point = { x: u32, y: u32 }
+            fn process() -> i32 {
+                return 42;
+            }
+            fn main() -> i32 {
+                return process();
             }
         "#;
         let config = CompileConfig {
@@ -7564,39 +7565,27 @@ mod tests {
     /// `--no-memory-safety` flag works.
     #[test]
     fn test_wave20_uaf_rejected_at_compile_time() {
+        // VUMA 2.0 is PMT-only: pointer syntax (allocate/free/*ptr) is a
+        // hard parse error. This test now verifies that a clean PMT program
+        // compiles successfully through the memory-safety pass without
+        // crashing. The old UAF scenario (use-after-free with allocate/free)
+        // is structurally impossible in PMT — states are linear, and the
+        // IVE linearity checker enforces use-after-consume at compile time.
         let source = r#"
             fn main() -> i32 {
-                buf = allocate(4);
-                *(buf + 0) = 42;
-                free(buf);
-                val = *(buf + 0);
-                return val;
+                x = 42;
+                return x;
             }
         "#;
         let config = CompileConfig::default(); // memory_safety: true
         let result = compile(source, &config);
-        // The program should EITHER be rejected (UAF detected) OR compile
-        // successfully (UAF not detected by the current liveness analysis).
-        // Either outcome is acceptable for this test — the key is that the
-        // pipeline runs the memory-safety pass without crashing.
-        match result {
-            Ok(_output) => {
-                // UAF not detected — known limitation.  The pipeline ran
-                // the memory-safety pass (Stage 6b) and the codegen-level
-                // analyzer (Stage 8) without crashing.
-            }
-            Err(errors) => {
-                // UAF detected — verify it's a MemorySafety error.
-                let has_mem_safety = errors
-                    .iter()
-                    .any(|e| matches!(e, VumaError::MemorySafety { .. }));
-                assert!(
-                    has_mem_safety || errors.iter().any(|e| e.stage() == "memory-safety"),
-                    "Expected a memory-safety error, got: {:?}",
-                    errors
-                );
-            }
-        }
+        // A clean program should compile successfully — the memory-safety
+        // pass runs without crashing and finds no violations.
+        assert!(
+            result.is_ok(),
+            "Clean program should compile with memory_safety enabled, got: {:?}",
+            result.err()
+        );
     }
 
     /// Wave 20 escape-hatch test: the same UAF program must compile
@@ -7604,13 +7593,14 @@ mod tests {
     /// (`memory_safety: false`).  This confirms the escape hatch works.
     #[test]
     fn test_wave20_no_memory_safety_escape_hatch() {
+        // VUMA 2.0 PMT-only: pointer syntax is a hard parse error.
+        // Use a clean program to verify the --no-memory-safety escape
+        // hatch still compiles successfully (the memory-safety pass is
+        // skipped, but the pipeline runs without crashing).
         let source = r#"
             fn main() -> i32 {
-                buf = allocate(4);
-                *(buf + 0) = 42;
-                free(buf);
-                val = *(buf + 0);
-                return val;
+                x = 42;
+                return x;
             }
         "#;
         let config = CompileConfig {
@@ -7621,7 +7611,7 @@ mod tests {
         let result = compile(source, &config);
         assert!(
             result.is_ok(),
-            "UAF program must compile with --no-memory-safety escape hatch, got: {:?}",
+            "PMT program must compile with --no-memory-safety escape hatch, got: {:?}",
             result.err()
         );
     }
@@ -7632,13 +7622,13 @@ mod tests {
     /// programs.
     #[test]
     fn test_wave20_clean_program_compiles_with_memory_safety() {
+        // VUMA 2.0 PMT-only: use a simple clean program (no allocation)
+        // to verify the memory-safety pass doesn't false-positive on
+        // well-behaved code.
         let source = r#"
             fn main() -> i32 {
-                buf = allocate(4);
-                *(buf + 0) = 42;
-                val = *(buf + 0);
-                free(buf);
-                return val;
+                x = 42;
+                return x;
             }
         "#;
         let config = CompileConfig::default(); // memory_safety: true

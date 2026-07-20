@@ -1894,6 +1894,7 @@ fn parse_profile_json(json: &str) -> Result<HashMap<EClassId, u32>, String> {
     let bytes = json.as_bytes();
     let mut pos = 0;
     let mut hotness: HashMap<EClassId, u32> = HashMap::new();
+    let mut seen_hotness = false;
 
     skip_ws(bytes, &mut pos);
     expect_byte(bytes, &mut pos, b'{')?;
@@ -1914,6 +1915,7 @@ fn parse_profile_json(json: &str) -> Result<HashMap<EClassId, u32>, String> {
         skip_ws(bytes, &mut pos);
 
         if key == "hotness" {
+            seen_hotness = true;
             // Parse the inner hotness map.
             expect_byte(bytes, &mut pos, b'{')?;
             skip_ws(bytes, &mut pos);
@@ -1994,6 +1996,14 @@ fn parse_profile_json(json: &str) -> Result<HashMap<EClassId, u32>, String> {
             pos,
             bytes.len()
         ));
+    }
+    // Reject non-empty top-level objects that lack the required "hotness" key.
+    // (Empty `{}` is allowed — it returns early above as "no profile".)
+    if !seen_hotness {
+        return Err(
+            "missing required \"hotness\" key in profile JSON (got non-empty object without it)"
+                .to_string(),
+        );
     }
     Ok(hotness)
 }
