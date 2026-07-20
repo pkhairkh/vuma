@@ -252,7 +252,7 @@ fn test_e2e_cor_pipeline() {
     "#;
 
     let config = vuma::pipeline::CompileConfig {
-        verification_level: vuma::pipeline::VerificationLevel::None,
+        verification_level: vuma::pipeline::VerificationLevel::Normal,
         ..vuma::pipeline::CompileConfig::default()
     };
     let result = vuma::pipeline::compile(source, &config);

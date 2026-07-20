@@ -1211,7 +1211,7 @@ fn compile_example_for_backend(
         let config = CompileConfig {
             target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
             opt_level: OptLevel::O1,
-            verification_level: VerificationLevel::None,
+            verification_level: VerificationLevel::Normal,
             ..CompileConfig::default()
         };
         let _ = run_scg_transforms(&mut scg, &config);
