@@ -1,20 +1,31 @@
-// formal_verify — Wave 96: L1-L3 invariant collapse proof
+// formal_verify — Wave 96/J: L1→L3 invariant collapse proof witness
 //
 // The l1l3_collapse() function in src/ive/src/verification.rs scans the SCG
 // for runtime-checked invariants (L1: channel framing, CRC, capability,
-// protocol-state checks) and proves they collapse into compile-time-known
-// invariants (L3: type-hash equality, structural cap-id checks).  A program
-// where all L1 checks have compile-time-known arguments passes the collapse
-// proof (collapsed: true).
+// protocol-state checks) and verifies they collapse into compile-time-known
+// invariants (L3: type-hash equality, structural cap-id checks).  It REALLY
+// verifies type consistency across send/recv on the same channel (a send
+// declaring i32 followed by a recv declaring i64 on the same channel is a
+// type-safety hole the collapse proof must reject) and REALLY returns
+// collapsed:false on failure.
 //
-// This test is a minimal valid program (open channel, send, recv, close)
-// where every L1 check's arguments are compile-time constants.  The program
-// runs successfully (exit=1), confirming the L1 checks don't reject a valid
-// execution — which is the runtime witness that the collapse proof's
-// soundness condition holds for this program.
+// The `formal_verify()` codegen builtin (src/codegen/src/x86_64/stack_slot_isel.rs)
+// returns the per-function count of L1/L2 runtime checks folded into L3
+// compile-time invariants by the codegen.  Each channel_send / channel_recv /
+// capability_grant / capability_delegate / stark_prove / stark_verify builtin
+// increments a per-function counter at its emit site; formal_verify() loads
+// the count and returns it as an i64.
+//
+// This test program does a channel send+recv (2 L1 checks folded), then
+// calls formal_verify() and checks the returned count is >= 2.  If the
+// codegen really emitted the channel_send and channel_recv builtins (each
+// incrementing the counter), formal_verify() returns 2 and the test exits 1.
+// If the codegen skipped either builtin (or formal_verify() is a stub that
+// always returns 0 or 1), the test exits 0 — failing the gold standard.
 //
 // Expected exit code: 1
 fn main() -> i32 {
+    // The program does a channel send+recv (2 L1 checks folded).
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {
@@ -25,6 +36,13 @@ fn main() -> i32 {
     channel_send(ch, 1);
     status = wait_worker(pid);
     channel_close(ch);
-    if status == 0 { return 1; }
+    // formal_verify() returns the count of L1 checks folded (should be >= 2:
+    // one for the send, one for the recv).
+    folded = formal_verify();
+    if status == 0 {
+        if folded >= 2 {
+            return 1;
+        }
+    }
     return 0;
 }
