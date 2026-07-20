@@ -145,6 +145,121 @@ fn patch_rel32_jmp(code: &mut Vec<u8>, patch_off: usize, target_off: usize) {
     code[patch_off + 4] = bd[3];
 }
 
+/// Wave 10b: emit an inline CRC32 loop over the 52 bytes at `[rsp+0..52]`
+/// (the L1 frame header + payload, excluding the trailing 4-byte CRC field)
+/// and leave the result in **R8** (64-bit, with the meaningful CRC in the
+/// low 32 bits = R8D).
+///
+/// Implements the same algorithm as [`crate::ipc::crc32`]:
+///   - `crc = 0xFFFFFFFF`
+///   - for each byte: `crc ^= byte; for 8 iters: crc = (crc>>1) ^ (poly if crc&1 else 0)`
+///   - `crc = !crc`
+///
+/// Register usage (all caller-saved; RDI is preserved so the caller's
+/// write_fd / read_fd in RDI survives):
+///   - **R8**  — CRC accumulator (result; low 32 bits are the CRC)
+///   - **RCX** — constant 1 (used for `shr r8, cl` and `test r8, rcx`)
+///   - **RAX** — polynomial 0xEDB88320 (loaded via 64-bit `mov` so upper 32 = 0)
+///   - **RSI** — running byte pointer (starts at `[rsp]`, incremented per byte)
+///   - **R9**  — outer loop counter (0..52)
+///   - **R10** — current byte (zero-extended)
+///   - **R11** — inner loop counter (0..8)
+///
+/// The caller is responsible for storing R8D (the CRC) into `[rsp+52]` on
+/// the send side, or comparing R8D with `[rsp+52]` on the receive side.
+fn emit_crc32_frame_loop() -> Vec<u8> {
+    let mut code = Vec::with_capacity(80);
+
+    // crc = 0xFFFFFFFF  (64-bit mov so upper 32 bits are 0)
+    code.extend(encode_mov_reg_imm64(Gpr::R8, 0xFFFFFFFF));
+    // rcx = 1 (CL=1 for shr; RCX=1 for test bit 0)
+    code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));
+    // rax = poly 0xEDB88320 (64-bit mov so upper 32 bits are 0)
+    code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xEDB88320));
+    // rsi = &frame[0]
+    code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
+    // r9 = 0 (outer counter)
+    code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));
+
+    // ── outer_loop: ──
+    let outer_loop_off = code.len();
+    // cmp r9, 52
+    code.extend(encode_cmp_reg_imm32(Gpr::R9, 52));
+    // jge outer_done (rel32 placeholder)
+    let jge_outer_patch = code.len();
+    code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
+
+    // r10 = byte [rsi]  (zero-extended)
+    code.extend(encode_movzx_reg8_mem(Gpr::R10, Gpr::Rsi, 0));
+    // crc ^= byte
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::R10));
+    // r11 = 0 (inner counter)
+    code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
+
+    // ── inner_loop: ──
+    let inner_loop_off = code.len();
+    // cmp r11, 8
+    code.extend(encode_cmp_reg_imm32(Gpr::R11, 8));
+    // jge inner_done (rel32 placeholder)
+    let jge_inner_patch = code.len();
+    code.extend(&[0x0F, 0x8D, 0x00, 0x00, 0x00, 0x00]); // jge rel32
+
+    // test crc & 1  (test r8, rcx where rcx=1)
+    code.extend(encode_test_reg_reg(Gpr::R8, Gpr::Rcx));
+    // jz skip_xor (rel32 placeholder)
+    let jz_skip_patch = code.len();
+    code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // jz rel32
+
+    // crc = (crc >> 1) ^ poly
+    code.extend(encode_shr_reg_cl(Gpr::R8));
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::Rax));
+    // jmp inner_next (rel32 placeholder)
+    let jmp_inner_next_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+    // skip_xor:
+    let skip_xor_off = code.len();
+    patch_rel32_jcc(&mut code, jz_skip_patch, skip_xor_off);
+    // crc >>= 1
+    code.extend(encode_shr_reg_cl(Gpr::R8));
+
+    // inner_next:
+    let inner_next_off = code.len();
+    patch_rel32_jmp(&mut code, jmp_inner_next_patch, inner_next_off);
+    // r11 += 1
+    code.extend(encode_add_reg_imm32(Gpr::R11, 1));
+    // jmp inner_loop (rel32 placeholder)
+    let jmp_inner_loop_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+    patch_rel32_jmp(&mut code, jmp_inner_loop_patch, inner_loop_off);
+
+    // inner_done:
+    let inner_done_off = code.len();
+    patch_rel32_jcc(&mut code, jge_inner_patch, inner_done_off);
+    // rsi += 1 (next byte)
+    code.extend(encode_add_reg_imm32(Gpr::Rsi, 1));
+    // r9 += 1
+    code.extend(encode_add_reg_imm32(Gpr::R9, 1));
+    // jmp outer_loop (rel32 placeholder)
+    let jmp_outer_loop_patch = code.len();
+    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+    patch_rel32_jmp(&mut code, jmp_outer_loop_patch, outer_loop_off);
+
+    // outer_done:
+    let outer_done_off = code.len();
+    patch_rel32_jcc(&mut code, jge_outer_patch, outer_done_off);
+    // crc = !crc  — XOR with 0x00000000FFFFFFFF (loaded via 64-bit mov so the
+    // upper 32 bits of R11 are 0).  This keeps R8's upper 32 bits at 0 so that
+    // a 64-bit `cmp r8, rcx` on the recv side (where RCX was loaded via a
+    // 32-bit `mov ecx, [mem]` which zero-extends) compares equal when the CRCs
+    // match.  (Using `not r8` would set the upper 32 bits to 0xFFFFFFFF and
+    // break the 64-bit comparison.)
+    code.extend(encode_mov_reg_imm64(Gpr::R11, 0xFFFFFFFF));
+    code.extend(encode_xor_reg_reg(Gpr::R8, Gpr::R11));
+
+    code
+}
+
 /// The returned set is consulted by the `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`Call`
 /// match arms below to decide between the integer and SSE codegen paths.
 fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
@@ -420,6 +535,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         vreg_stack_slots.insert(id, -(current_offset));
     }
 
+    // Wave 10a: reserve an 8-byte stack slot for the per-function channel
+    // sequence counter.  Zeroed in the prologue so the first ChannelSend
+    // emits sequence=0, the second sequence=1, etc.  This replaces the
+    // previous hardcoded `[rsp+16] = sequence = 0`.
+    current_offset += 8;
+    let seq_counter_off: i32 = -(current_offset);
+
     // Round up to ensure proper stack alignment for calls.
     // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
     // No callee-saved pushes (ISel uses only caller-saved regs).
@@ -540,6 +662,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     if frame_size > 0 {
         emit(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32), "sub_rsp");
     }
+
+    // Wave 10a: zero the per-function channel sequence counter slot so the
+    // first ChannelSend starts at sequence=0.  Uses RAX (caller-saved, free
+    // at this point) as a scratch.
+    emit(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax), "xor_rax_zero");
+    emit(encode_mov_mem_reg(Gpr::Rbp, seq_counter_off, Gpr::Rax), "zero_seq_counter");
 
     // Push callee-saved registers.
     // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
@@ -2148,10 +2276,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // [rsp+4] = version(2) + flags(0) = 0x00020000
                                 code.extend(encode_mov_reg_imm32(Gpr::Rax, 0x00020000));
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 4, Gpr::Rax));
-                                // [rsp+8] = channel_id = 0, [rsp+16] = sequence = 0
+                                // [rsp+8] = channel_id = 0 (8 bytes)
                                 code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
-                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                // [rsp+16] = sequence — Wave 10a: load the per-function
+                                // sequence counter from [rbp + seq_counter_off], write it
+                                // into the frame, then increment + store back so the next
+                                // ChannelSend on any channel uses the next sequence number.
+                                code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rbp, seq_counter_off));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rcx));
+                                code.extend(encode_add_reg_imm32(Gpr::Rcx, 1));
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, seq_counter_off, Gpr::Rcx));
                                 // [rsp+24] = type_hash
                                 code.extend(encode_mov_reg_imm64(Gpr::Rax, th));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
@@ -2165,9 +2300,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // [rsp+44] = payload (8 bytes)
                                 code.extend(load_value(msg, Gpr::Rax));
                                 code.extend(encode_mov_mem_reg(Gpr::Rsp, 44, Gpr::Rax));
-                                // [rsp+52] = CRC32 = 0 (placeholder)
-                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
-                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::Rax));
+                                // [rsp+52] = CRC32 — Wave 10b: compute the real CRC32 over
+                                // [rsp+0..52] (header + payload) using the inline loop with
+                                // polynomial 0xEDB88320 (same as ipc::crc32), and store the
+                                // 32-bit result into [rsp+52].  This replaces the previous
+                                // hardcoded CRC=0 placeholder.
+                                code.extend(emit_crc32_frame_loop());
+                                // R8 now holds the CRC (low 32 bits = R8D). Store R8D into [rsp+52].
+                                code.extend(encode_mov_mem32_reg32(Gpr::Rsp, 52, Gpr::R8));
                                 // write(write_fd, &frame, 56)
                                 code.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 0));
                                 code.extend(encode_mov_reg_imm32(Gpr::Rdx, 56));
@@ -2229,6 +2369,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
                                 let jne_cap_patch = code.len();
                                 code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+                                // Wave 10b: CRC32 verification — compute CRC32 over
+                                // [rsp+0..52] (header + payload) and compare with the
+                                // stored CRC at [rsp+52].  On mismatch, jump to the
+                                // fail path (storing -6 = CRC_MISMATCH sentinel).
+                                code.extend(emit_crc32_frame_loop());
+                                // R8D = computed CRC.  Load stored CRC from [rsp+52] into ECX.
+                                code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 52));
+                                code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                                let jne_crc_patch = code.len();
+                                code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
                                 // Extract payload from [rsp+44] into dst slot.
                                 code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 44));
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
@@ -2236,6 +2386,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
                                 // jmp cleanup (rel32, placeholder)
                                 let jmp_cleanup_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // crc_fail (Wave 10b): store -6 (CRC_MISMATCH) sentinel.
+                                let crc_fail_off = code.len();
+                                patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFA)); // -6
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                                // jmp cleanup (rel32, placeholder)
+                                let jmp_cleanup_from_crc_patch = code.len();
                                 code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
                                 // error_path / magic_fail: store -1 sentinel.
                                 let fail_off = code.len();
@@ -2269,6 +2427,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 code[jmp_cleanup_patch+2] = bd[1];
                                 code[jmp_cleanup_patch+3] = bd[2];
                                 code[jmp_cleanup_patch+4] = bd[3];
+                                // Wave 10b: patch crc_fail → cleanup jump.
+                                patch_rel32_jmp(&mut code, jmp_cleanup_from_crc_patch, cleanup_off);
                                 code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
                                 instr_opcode = Some("channel_recv".to_string());
                                 channel_builtin_matched = true;
@@ -3489,6 +3649,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_cap_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
+                    // Step 3b2 (Wave 10b): CRC32 verification — compute CRC32 over
+                    // [rsp+0..52] and compare with the stored CRC at [rsp+52].
+                    // On mismatch, err_dst <- 5 (CrcMismatch), dst <- 0.
+                    code.extend(emit_crc32_frame_loop());
+                    code.extend(encode_mov_reg32_mem(Gpr::Rcx, Gpr::Rsp, 52));
+                    code.extend(encode_cmp_reg_reg(Gpr::R8, Gpr::Rcx));
+                    let jne_crc_patch = code.len();
+                    code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
+
                     // Step 3c: type_hash check (Wave 14b structural).
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 24));
                     code.extend(encode_mov_reg_imm32(Gpr::Rcx, (expected_th & 0xFFFFFFFF) as i32));
@@ -3519,6 +3688,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
                     code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                     let jmp_cap_cleanup_patch = code.len();
+                    code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+
+                    // crc_fail (Wave 10b): err_dst <- 5 (CrcMismatch), dst <- 0.
+                    let crc_fail_off = code.len();
+                    patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
+                    code.extend(encode_mov_reg_imm64(Gpr::Rax, 5));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, err_off, Gpr::Rax));
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    let jmp_crc_cleanup_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
                     // proto_fail: err_dst <- 6 (ProtocolViolation), dst <- 0.
@@ -3552,6 +3731,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let cleanup_off = code.len();
                     patch_rel32_jmp(&mut code, jmp_ok_cleanup_patch, cleanup_off);
                     patch_rel32_jmp(&mut code, jmp_cap_cleanup_patch, cleanup_off);
+                    patch_rel32_jmp(&mut code, jmp_crc_cleanup_patch, cleanup_off);
                     patch_rel32_jmp(&mut code, jmp_proto_cleanup_patch, cleanup_off);
                     code.extend(encode_add_reg_imm32(Gpr::Rsp, 56));
 
