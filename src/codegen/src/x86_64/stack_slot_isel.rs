@@ -4198,22 +4198,90 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             // Wave 41-48 (Kernel/User Split):
                             // supervisor_call(nr, arg) -> i64
                             //
-                            // A real syscall gate: emits the `syscall`
-                            // instruction with the syscall number in RAX
-                            // and the argument in RDI. This is the
-                            // kernel/user transition point — user-mode
-                            // code invokes supervisor_call to enter the
-                            // kernel (or the hypervisor's trap handler).
+                            // A real kernel/user trap with capability-gated
+                            // dispatch — NOT a raw syscall. User-mode code
+                            // invokes supervisor_call to enter the kernel;
+                            // the builtin first checks `nr` against the
+                            // Verified-trust syscall allowlist (the same
+                            // list the library's KernelProcess::handle_syscall
+                            // and generate_seccomp_filter use, from
+                            // allowed_syscalls(TrustLevel::Verified) in
+                            // ipc.rs:1487). If `nr` is NOT in the allowlist,
+                            // the call is DENIED: return -4
+                            // (PermissionDenied) WITHOUT executing the
+                            // syscall instruction. This is the syscall-as-IPC
+                            // pattern: user → capability check → dispatch →
+                            // kernel handler.
+                            //
+                            // The allowlist is embedded inline as a series of
+                            // `cmp rbx, <nr>; je allowed` checks (32 entries
+                            // for the Verified trust level). A linear scan is
+                            // O(allowlist_size) per call — acceptable for the
+                            // small fixed list. The kernel itself (TrustLevel::
+                            // Kernel) allows all 512 syscalls and does not go
+                            // through this gate.
                             "supervisor_call" if args.len() == 2 && dst.is_some() => {
-                                // rax = syscall number
-                                code.extend(load_value(&args[0], Gpr::Rax));
-                                // rdi = arg
+                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
+                                // Push RBX (callee-saved) — we need it to
+                                // preserve `nr` across the allowlist scan
+                                // (the syscall itself clobbers RCX and R11).
+                                code.extend(encode_push(Gpr::Rbx));
+                                // rbx = syscall number (nr)
+                                code.extend(load_value(&args[0], Gpr::Rbx));
+                                // rdi = arg (set up now; survives the scan
+                                // because the scan only uses RBX/RAX/flags)
                                 code.extend(load_value(&args[1], Gpr::Rdi));
-                                // syscall
+                                // ── Capability check: scan the Verified ──
+                                // ── allowlist for `nr`. If found, jump  ──
+                                // ── to `allowed`. If not found, fall     ──
+                                // ── through to `denied`.                 ──
+                                // The Verified allowlist (ipc.rs:1487):
+                                //   0,1,2,3,9,10,11,12,13,14,22,39,56,57,
+                                //   59,60,61,62,63,64,72,78,79,80,89,90,97,
+                                //   102,107,108,202,257
+                                // Each entry: cmp rbx, <nr>; je allowed
+                                let allowed_syscalls: &[u32] = &[
+                                    0, 1, 2, 3, 9, 10, 11, 12, 13, 14,
+                                    22, 39, 56, 57, 59, 60, 61, 62, 63, 64,
+                                    72, 78, 79, 80, 89, 90, 97, 102, 107, 108,
+                                    202, 257,
+                                ];
+                                // Collect the patch sites for all the je
+                                // instructions; they all target `allowed`.
+                                let mut je_patches: Vec<usize> = Vec::new();
+                                for &nr in allowed_syscalls {
+                                    // cmp rbx, nr  (48 81 FB <imm32>)
+                                    code.extend(encode_cmp_reg_imm32(Gpr::Rbx, nr as i32));
+                                    // je allowed (rel32, placeholder)
+                                    let je_patch = code.len();
+                                    code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+                                    je_patches.push(je_patch);
+                                }
+                                // ── denied: nr not in allowlist ──
+                                // Store -4 (PermissionDenied) to dst, skip syscall.
+                                // 0xFFFFFFFFFFFFFFFC = -4 as i64
+                                code.extend(encode_mov_reg_imm64(Gpr::Rax, 0xFFFFFFFFFFFFFFFC));
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                // jmp done (rel32, placeholder)
+                                let jmp_done_from_denied_patch = code.len();
+                                code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
+                                // ── allowed: nr is in the allowlist ──
+                                // Execute the real kernel trap.
+                                let allowed_off = code.len();
+                                for &je_patch in &je_patches {
+                                    patch_rel32_jcc(&mut code, je_patch, allowed_off);
+                                }
+                                // rax = rbx (syscall number — restore into RAX
+                                // which the syscall instruction reads)
+                                code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rbx));
+                                // syscall (the kernel/user transition)
                                 code.extend(encode_syscall());
                                 // Store result (RAX) to dst.
-                                let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
                                 code.extend(store_vreg(dst_id, Gpr::Rax));
+                                // ── done: pop rbx and return ──
+                                let done_off = code.len();
+                                patch_rel32_jmp(&mut code, jmp_done_from_denied_patch, done_off);
+                                code.extend(encode_pop(Gpr::Rbx));
                                 instr_opcode = Some("supervisor_call".to_string());
                                 channel_builtin_matched = true;
                             }
