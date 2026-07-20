@@ -1,14 +1,56 @@
-// hot_swap — Wave 73-80: hot reloading via hot_swap_trigger.
+// hot_swap — Wave 73-80 / Wave G: real hot-swap state machine.
 //
-// The hot_swap_trigger(module_id) builtin writes an 8-byte swap request
-// (the module_id) to /tmp/vuma_hotswap.bin. Mirrors checkpoint_save but
-// uses a distinct path so the hot-swap daemon can poll for swap requests
-// independently of checkpoint state.
+// Replaces the previous stub that wrote an 8-byte module_id to
+// /tmp/vuma_hotswap.bin with no version checking and no rollback.
+// The new implementation maintains a per-function module-version
+// table on the stack (8 entries × 16 bytes = [module_id:u64,
+// version:u64]) — the codegen analogue of the library
+// HotSwapManager (ipc.rs:3569) active_versions HashMap.
 //
-// This test triggers a swap for module_id=42 and exits 1 on success.
+//   hot_swap_register(module_id, version) -> u64
+//       1 = registered, 0 = already registered or table full
+//   hot_swap_trigger(module_id, old_version, new_version) -> i64
+//       1  = swap applied (validates new > old AND active == old)
+//       -5 = ProtocolViolation (new <= old, OR concurrent-swap race)
+//   hot_swap_rollback(module_id, old_version) -> i64
+//       1  = rolled back (active version restored to old)
+//       -3 = WorkerNotFound (module_id not registered)
+//
+// This test exercises all six paths of the state machine:
+//   1. register(42, 1)            -> 1   (registered)
+//   2. trigger(42, 1, 2)          -> 1   (valid swap v1 -> v2)
+//   3. trigger(42, 1, 3)          -> -5  (race: active is now 2, not 1)
+//   4. trigger(42, 2, 1)          -> -5  (new_version <= old_version)
+//   5. rollback(42, 1)            -> 1   (rolled back to v1)
+//   6. rollback(99, 1)            -> -3  (unregistered module)
 //
 // Expected exit code: 1
 fn main() -> i32 {
-    hot_swap_trigger(42);
-    return 1;
+    // Register a module at version 1
+    r1 = hot_swap_register(42, 1);
+    // Swap from v1 to v2 — should succeed (return 1)
+    r2 = hot_swap_trigger(42, 1, 2);
+    // Swap from v1 to v3 — should fail (concurrent-swap race: active is now 2, not 1) -> -5
+    r3 = hot_swap_trigger(42, 1, 3);
+    // Swap from v2 to v1 — should fail (new_version <= old_version) -> -5
+    r4 = hot_swap_trigger(42, 2, 1);
+    // Rollback to v1 — should succeed (return 1)
+    r5 = hot_swap_rollback(42, 1);
+    // Rollback unregistered module — should fail -> -3
+    r6 = hot_swap_rollback(99, 1);
+    // Verify all paths
+    if r1 == 1 {
+        if r2 == 1 {
+            if r3 == -5 {
+                if r4 == -5 {
+                    if r5 == 1 {
+                        if r6 == -3 {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
 }
