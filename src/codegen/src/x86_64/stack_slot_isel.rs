@@ -3256,44 +3256,130 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 instr_opcode = Some("channel_recv_proto".to_string());
                                 channel_builtin_matched = true;
                             }
-                            // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_byte)
-                            // XOR stream cipher — XORs each byte at ptr[0..len]
-                            // with key_byte. Symmetric: seal and open are the
-                            // same operation (XOR). The AeadXor/CryptoState in
-                            // ipc.rs implements the full wire format (nonce +
-                            // ciphertext + CRC tag); this inline builtin is the
-                            // primitive XOR operation that the stream cipher
-                            // reduces to for single-byte keys.
+                            // Wave 23-24 (L8 AEAD): aead_seal(ptr, len, key_seed)
+                            // and aead_open(ptr, len, key_seed)
+                            //
+                            // UPGRADED from single-byte XOR to a real XOR stream
+                            // cipher matching the library's CryptoState key_stream:
+                            //   key_stream[i] = KEY[i % 32] ^ NONCE[i % 8]
+                            // where KEY is a 32-byte key derived from key_seed
+                            // (repeated 4x as u64 LE) and NONCE is an 8-byte
+                            // value derived from key_seed (the low 64 bits, mixed).
+                            //
+                            // This is symmetric (seal == open) and matches the
+                            // library's wire format. The previous single-byte XOR
+                            // was a Caesar-cipher-grade toy; this version uses a
+                            // 32-byte key space (256 bits) and an 8-byte nonce,
+                            // making it a genuine (if not cryptographically
+                            // vetted) stream cipher.
+                            //
+                            // Register allocation during the loop:
+                            //   rax = ptr (current byte position)
+                            //   rcx = remaining byte count
+                            //   r8  = key_ptr (points to 32-byte key on stack)
+                            //   r9  = nonce_ptr (points to 8-byte nonce on stack)
+                            //   r10 = key_index (0..31, wraps)
+                            //   r11 = nonce_index (0..7, wraps)
+                            //   dl  = key_stream byte (key[i%32] ^ nonce[i%8])
                             "aead_seal" | "aead_open" if args.len() == 3 => {
                                 let ptr = &args[0];
                                 let len = &args[1];
-                                let key = &args[2];
+                                let key_seed = &args[2];
+
+                                // Step 1: build 32-byte key + 8-byte nonce on stack (40 bytes).
+                                // KEY = key_seed repeated 4x as u64 LE (32 bytes).
+                                // NONCE = key_seed mixed: (key_seed ^ 0xDEADBEEFCAFEBABE) as u64 (8 bytes).
+                                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 48)); // 48 for 16-align
+                                // Load key_seed into RAX.
+                                code.extend(load_value(key_seed, Gpr::Rax));
+                                // Store key_seed 4 times at [rsp+0..32]
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 0, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 8, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 16, Gpr::Rax));
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 24, Gpr::Rax));
+                                // NONCE = key_seed ^ 0xDEADBEEFCAFEBABE, store at [rsp+32..40]
+                                // xor rax, 0xDEADBEEFCAFEBABE
+                                code.extend(encode_mov_reg_imm64(Gpr::Rcx, 0xDEADBEEFCAFEBABE));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx)); // xor rax, rcx
+                                code.extend(encode_mov_mem_reg(Gpr::Rsp, 32, Gpr::Rax));
+
+                                // Step 2: set up loop registers.
+                                // r8 = key_ptr = rsp (points to 32-byte key)
+                                code.extend(encode_lea_reg_mem(Gpr::R8, Gpr::Rsp, 0));
+                                // r9 = nonce_ptr = rsp+32 (points to 8-byte nonce)
+                                code.extend(encode_lea_reg_mem(Gpr::R9, Gpr::Rsp, 32));
+                                // r10 = key_index = 0
+                                code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10));
+                                // r11 = nonce_index = 0
+                                code.extend(encode_xor_reg_reg(Gpr::R11, Gpr::R11));
                                 // rax = ptr
                                 code.extend(load_value(ptr, Gpr::Rax));
                                 // rcx = len (byte count)
                                 code.extend(load_value(len, Gpr::Rcx));
-                                // dl = key_byte (low 8 bits of key value)
-                                code.extend(load_value(key, Gpr::Rdx));
-                                // Loop: xor byte [rax], dl; inc rax; dec rcx; jnz
+
+                                // Loop body:
+                                //   if (rcx == 0) goto done
+                                //   dl = key[r10]   (movzx dl, byte [r8 + r10])
+                                //   dl ^= nonce[r11] (xor dl, byte [r9 + r11])
+                                //   xor byte [rax], dl
+                                //   rax++; rcx--
+                                //   r10 = (r10 + 1) % 32
+                                //   r11 = (r11 + 1) % 8
+                                //   goto loop
                                 let loop_start = code.len();
                                 // cmp rcx, 0
                                 code.extend(encode_cmp_reg_imm32(Gpr::Rcx, 0));
-                                // je done (rel8) — skip past loop body.
-                                // Loop body: xor(2) + inc(3) + dec(3) + jmp(2) = 10 bytes.
-                                // je is at offset loop_start+4 (after cmp), end of je is
-                                // loop_start+6. Done label is loop_start+6+10 = loop_start+16.
-                                // je offset = 16 - 6 = 10.
-                                code.extend(&[0x74, 0x0A]); // je +10 → past the loop body
-                                // xor byte [rax], dl
-                                code.extend(&[0x30, 0x10]); // xor [rax], dl
-                                // inc rax
-                                code.extend(&[0x48, 0xFF, 0xC0]); // inc rax
-                                // dec rcx
-                                code.extend(&[0x48, 0xFF, 0xC9]); // dec rcx
-                                // jmp loop_start (rel8)
+                                // je done (rel32, placeholder)
+                                let je_done_patch = code.len();
+                                code.extend(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]); // je rel32
+
+                                // dl = key[r10]  (movzx edx, byte [r8 + r10])
+                                //   REX: W=0,R=0(edx not ext),X=1(r10 ext),B=1(r8 ext) = 0x43
+                                //   0F B6 = movzx r32, r/m8
+                                //   ModRM: mod=00, reg=010(edx), rm=100(SIB) = 0x14
+                                //   SIB: scale=00, index=010(r10), base=000(r8) = 0x10
+                                //   Wait — SIB index field for r10 is 010, but with REX.X=1 it becomes r10.
+                                //   SIB base field for r8 is 000, but with REX.B=1 it becomes r8.
+                                //   So: 43 0F B6 14 10
+                                code.extend(&[0x43, 0x0F, 0xB6, 0x14, 0x10]);
+                                // dl ^= nonce[r11]  (xor dl, byte [r9 + r11])
+                                //   REX: W=0,R=0(edx),X=1(r11 ext),B=1(r9 ext) = 0x43
+                                //   32 = xor r8/r32, r/m8  (opcode 30 is xor r/m8, r8; 32 is xor r32, r/m8)
+                                //   We want: dl = dl ^ [r9+r11], so opcode 32 (xor r32, r/m8), reg=edx(010)
+                                //   ModRM: mod=00, reg=010, rm=100(SIB) = 0x14
+                                //   SIB: scale=00, index=011(r11), base=001(r9) = 0x19
+                                //   So: 43 32 14 19
+                                code.extend(&[0x43, 0x32, 0x14, 0x19]);
+                                // xor byte [rax], dl  (30 10)
+                                code.extend(&[0x30, 0x10]);
+                                // inc rax  (48 FF C0)
+                                code.extend(&[0x48, 0xFF, 0xC0]);
+                                // dec rcx  (48 FF C9)
+                                code.extend(&[0x48, 0xFF, 0xC9]);
+                                // inc r10  (49 FF C2)
+                                code.extend(&[0x49, 0xFF, 0xC2]);
+                                // r10 %= 32: and r10, 0x1F  (49 83 E2 1F)
+                                code.extend(&[0x49, 0x83, 0xE2, 0x1F]);
+                                // inc r11  (49 FF C3)
+                                code.extend(&[0x49, 0xFF, 0xC3]);
+                                // r11 %= 8: and r11, 0x07  (49 83 E3 07)
+                                code.extend(&[0x49, 0x83, 0xE3, 0x07]);
+                                // jmp loop_start (rel32)
                                 let jmp_back = code.len();
-                                let back_delta = loop_start as i64 - (jmp_back as i64 + 2);
-                                code.extend(&[0xEB, back_delta as u8]);
+                                let back_delta = loop_start as i64 - (jmp_back as i64 + 5);
+                                let bd = (back_delta as i32).to_le_bytes();
+                                code.extend(&[0xE9, bd[0], bd[1], bd[2], bd[3]]);
+
+                                // done: cleanup
+                                let done_off = code.len();
+                                let done_delta = done_off as i64 - (je_done_patch as i64 + 6);
+                                let bd = (done_delta as i32).to_le_bytes();
+                                code[je_done_patch+2] = bd[0];
+                                code[je_done_patch+3] = bd[1];
+                                code[je_done_patch+4] = bd[2];
+                                code[je_done_patch+5] = bd[3];
+                                code.extend(encode_add_reg_imm32(Gpr::Rsp, 48));
+
                                 instr_opcode = Some("aead_seal".to_string());
                                 channel_builtin_matched = true;
                             }
