@@ -67,6 +67,8 @@ pub mod constraint;
 pub mod debt;
 pub mod escape;
 pub mod constant_time;
+/// CT2: Information-flow type checker (security-label lattice).
+pub mod information_flow;
 /// FFI Safety Verifier (Wave 10) — proves states are not read after
 /// invalidation by a non-pure foreign call.
 pub mod ffi;
