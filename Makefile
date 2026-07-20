@@ -25,9 +25,9 @@ FEATURES      ?=
 # Phony targets
 # ============================================================================
 .PHONY: all build check test bench doc fmt clippy \
-        x86-64-run riscv64-run \
-        clean install verify-examples \
-        setup toolchain
+	x86-64-run riscv64-run \
+	clean install verify-examples \
+	setup toolchain
 
 # ============================================================================
 # Default: build + test
@@ -40,15 +40,15 @@ all: build test
 
 ## build: Compile the entire workspace (debug mode)
 build:
-        $(CARGO) build --workspace
+	$(CARGO) build --workspace
 
 ## check: Type-check the workspace without producing artifacts
 check:
-        $(CARGO) check --workspace
+	$(CARGO) check --workspace
 
 ## check-fast: Type-check only the core crates (skip slow ones)
 check-fast:
-        $(CARGO) check -p vuma -p vuma-scg -p vuma-ive -p vuma-bd
+	$(CARGO) check -p vuma -p vuma-scg -p vuma-ive -p vuma-bd
 
 # ============================================================================
 # Testing
@@ -56,19 +56,46 @@ check-fast:
 
 ## test: Run all workspace tests
 test:
-        $(CARGO) test --workspace
+	$(CARGO) test --workspace
 
 ## test-verbose: Run all workspace tests with full output
 test-verbose:
-        $(CARGO) test --workspace -- --nocapture
+	$(CARGO) test --workspace -- --nocapture
 
 ## test-single CRATE=<crate>: Run tests for a single crate
 test-single:
-        $(CARGO) test -p $(CRATE)
+	$(CARGO) test -p $(CRATE)
 
 ## test-doc: Run doc tests across the workspace
 test-doc:
-        $(CARGO) test --workspace --doc
+	$(CARGO) test --workspace --doc
+
+## test-ipc: Run all gold-standard IPC .vuma tests on x86_64 and report pass/fail.
+## Compiles each tests/gold_standard/ipc/*.vuma with compile_dump, runs the
+## resulting binary, and checks the exit code against the // Expected exit code
+## comment in each file.  Prints a summary line per test and a final tally.
+test-ipc:
+	@echo "=== VUMA IPC gold-standard test suite (x86_64) ==="
+	@cd /home/z/vuma-review && \
+	pass=0; fail=0; fail_list=""; \
+	for vuma in tests/gold_standard/ipc/*.vuma; do \
+		name=$$(basename "$$vuma" .vuma); \
+		expected=$$(grep -m1 'Expected exit code' "$$vuma" | sed 's/.*Expected exit code[: ]*//' | grep -oE '^[0-9]+' | head -1); \
+		bin=/tmp/vuma_ipc_$${name}.bin; \
+		./target/debug/compile_dump "$$vuma" "$$bin" x86_64 > /dev/null 2>&1; \
+		if [ $$? -ne 0 ]; then \
+			echo "  FAIL  $$name (compile error)"; fail=$$((fail+1)); fail_list="$$fail_list $$name"; \
+		else \
+			"$$bin" < /dev/null > /dev/null 2>&1; rc=$$?; \
+			if [ "$$rc" = "$$expected" ]; then \
+				echo "  PASS  $$name (exit=$$rc)"; pass=$$((pass+1)); \
+			else \
+				echo "  FAIL  $$name (exit=$$rc, expected $$expected)"; fail=$$((fail+1)); fail_list="$$fail_list $$name"; \
+			fi; \
+		fi; \
+	done; \
+	echo "=== Summary: $$pass passed, $$fail failed ==="; \
+	if [ $$fail -gt 0 ]; then echo "Failed:$$fail_list"; exit 1; fi
 
 # ============================================================================
 # Benchmarking
@@ -76,11 +103,11 @@ test-doc:
 
 ## bench: Run all benchmarks
 bench:
-        $(CARGO) bench --workspace
+	$(CARGO) bench --workspace
 
 ## bench-single CRATE=<crate>: Run benchmarks for a single crate
 bench-single:
-        $(CARGO) bench -p $(CRATE)
+	$(CARGO) bench -p $(CRATE)
 
 # ============================================================================
 # Documentation
@@ -88,15 +115,15 @@ bench-single:
 
 ## doc: Build workspace documentation (no dependencies)
 doc:
-        $(CARGO) doc --workspace --no-deps
+	$(CARGO) doc --workspace --no-deps
 
 ## doc-open: Build documentation and open in browser
 doc-open:
-        $(CARGO) doc --workspace --no-deps --open
+	$(CARGO) doc --workspace --no-deps --open
 
 ## doc-private: Build documentation including private items
 doc-private:
-        $(CARGO) doc --workspace --no-deps --document-private-items
+	$(CARGO) doc --workspace --no-deps --document-private-items
 
 # ============================================================================
 # Code quality
@@ -104,19 +131,19 @@ doc-private:
 
 ## fmt: Auto-format all Rust source files
 fmt:
-        $(CARGO) fmt --all
+	$(CARGO) fmt --all
 
 ## fmt-check: Check formatting without making changes (CI-friendly)
 fmt-check:
-        $(CARGO) fmt --all -- --check
+	$(CARGO) fmt --all -- --check
 
 ## clippy: Run Clippy lints with deny-warnings
 clippy:
-        $(CARGO) clippy --workspace -- -D warnings
+	$(CARGO) clippy --workspace -- -D warnings
 
 ## clippy-fix: Auto-fix Clippy warnings where possible
 clippy-fix:
-        $(CARGO) clippy --workspace --fix --allow-dirty
+	$(CARGO) clippy --workspace --fix --allow-dirty
 
 ## lint: Run all code-quality checks (fmt + clippy)
 lint: fmt-check clippy
@@ -127,11 +154,11 @@ lint: fmt-check clippy
 
 ## clean: Remove all build artifacts
 clean:
-        $(CARGO) clean
+	$(CARGO) clean
 
 ## clean-doc: Remove generated documentation
 clean-doc:
-        rm -rf target/doc
+	rm -rf target/doc
 
 # ============================================================================
 # Install
@@ -139,11 +166,11 @@ clean-doc:
 
 ## install: Build in release mode and install to PREFIX
 install: build-release
-        $(CARGO) install --path . --root $(PREFIX) --locked
+	$(CARGO) install --path . --root $(PREFIX) --locked
 
 ## build-release: Compile the workspace in release mode
 build-release:
-        $(CARGO) build --workspace --release
+	$(CARGO) build --workspace --release
 
 # ============================================================================
 # Setup / toolchain
@@ -151,13 +178,13 @@ build-release:
 
 ## setup: Install required toolchain, components, and targets
 setup: toolchain
-        $(RUSTUP) component add rustfmt clippy
-        $(RUSTUP) target add aarch64-unknown-linux-gnu
-        $(RUSTUP) target add aarch64-unknown-none
+	$(RUSTUP) component add rustfmt clippy
+	$(RUSTUP) target add aarch64-unknown-linux-gnu
+	$(RUSTUP) target add aarch64-unknown-none
 
 ## toolchain: Install the pinned nightly toolchain
 toolchain:
-        $(RUSTUP) toolchain install nightly
+	$(RUSTUP) toolchain install nightly
 
 # ============================================================================
 # Miscellaneous
@@ -169,28 +196,28 @@ toolchain:
 
 ## x86-64-run: Run x86_64 target in QEMU
 x86-64-run:
-        qemu-system-x86_64 -drive format=raw,file=target/x86_64-unknown-none/release/vuma-x86_64.bin -serial stdio
+	qemu-system-x86_64 -drive format=raw,file=target/x86_64-unknown-none/release/vuma-x86_64.bin -serial stdio
 
 ## riscv64-run: Run RISC-V 64 target in QEMU (virt machine)
 riscv64-run:
-        qemu-system-riscv64 -machine virt -nographic -bios default -kernel target/riscv64gc-unknown-none-elf/release/vuma-riscv64
+	qemu-system-riscv64 -machine virt -nographic -bios default -kernel target/riscv64gc-unknown-none-elf/release/vuma-riscv64
 
 ## verify-examples: List all example programs
 verify-examples:
-        @echo "Verifying example programs..."
-        @for f in examples/*.vuma; do echo "  $$f"; done
+	@echo "Verifying example programs..."
+	@for f in examples/*.vuma; do echo "  $$f"; done
 
 ## help: Show this help message
 help:
-        @echo "VUMA Build System"
-        @echo "================="
-        @echo ""
-        @echo "Usage: make <target>"
-        @echo ""
-        @echo "Targets:"
-        @grep -E '^## ' $(MAKEFILE_LIST) | sort | \
-                awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
-                sed 's/^## //'
+	@echo "VUMA Build System"
+	@echo "================="
+	@echo ""
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Targets:"
+	@grep -E '^## ' $(MAKEFILE_LIST) | sort | \
+		awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
+		sed 's/^## //'
 
 # FFI Wave 6 tests — real extern calls (aarch64 has ffi_stub, runs cleanly;
 # x86_64 compiles but needs libc linking to run).

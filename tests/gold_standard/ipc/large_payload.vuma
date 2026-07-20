@@ -1,0 +1,43 @@
+// large_payload — Wave 16a: multi-message framed channel with CRC verification
+//
+// Exercises the L1 framing + CRC32 verification on a larger payload: the
+// child sends 10 framed messages (each 56 bytes with MAGIC + type_hash +
+// sequence + CRC32), and the parent receives all 10 in order, verifying
+// that each frame's CRC passes and the payloads arrive correctly.
+//
+// The parent sums all 10 received values (0+1+2+...+9 = 45) and exits 45.
+// A single CRC mismatch would cause a recv to return -6, breaking the sum.
+//
+// Expected exit code: 45
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 0);
+        channel_send(ch, 1);
+        channel_send(ch, 2);
+        channel_send(ch, 3);
+        channel_send(ch, 4);
+        channel_send(ch, 5);
+        channel_send(ch, 6);
+        channel_send(ch, 7);
+        channel_send(ch, 8);
+        channel_send(ch, 9);
+        channel_close(ch);
+        return 0;
+    }
+    s = 0;
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    s = s + channel_recv(ch);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return s;
+}
