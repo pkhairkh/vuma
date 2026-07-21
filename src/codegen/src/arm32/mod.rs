@@ -4583,7 +4583,7 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
                             BinOpKind::Mul => {
-                                let is_i64 = ty.as_ref().is_some_and(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64));
+                                let is_i64 = ty.as_ref().is_some_and(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64 | crate::ir::IRType::Channel(_)));
                                 if is_i64 {
                                     // 64-bit unsigned multiply (schoolbook) using only
                                     // caller-saved registers R0, R1, R12, and stack temp slots.
