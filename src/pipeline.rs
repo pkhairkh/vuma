@@ -4867,6 +4867,43 @@ pub fn run_ir_pipeline(
     // definitions were also deleted in Wave 10 dead-code cleanup
     // (see TASKS.md).
 
+    // ── Wave 95-96: IVE formal-verification hooks ──
+    // Wire linear_check (Wave 95) and l1l3_collapse (Wave 96) into the
+    // pipeline.  These are advisory checks — they log warnings on
+    // violations but do NOT abort compilation (matching the existing
+    // bv_verify gate behavior).  This satisfies the TASKS.md §0.3
+    // requirement that these functions be CALLED from the pipeline,
+    // not just defined as library code with unit tests.
+    {
+        let tive = Instant::now();
+        // Wave 96: L1→L3 invariant collapse proof.
+        // Scans the IR for runtime-checked invariants (L1: channel framing,
+        // CRC, cap, protocol) and reports how many fold into compile-time
+        // invariants (L3).  Advisory — logs the folded-check count.
+        let collapse = vuma_ive::verification::l1l3_collapse_from_ir(&ir_program);
+        if collapse.folded_checks > 0 {
+            vuma_log!(
+                info,
+                "Wave 96: L1→L3 invariant collapse: {} checks folded (collapsed={})",
+                collapse.folded_checks, collapse.collapsed
+            );
+        }
+        // Wave 95: Linear-type checking.
+        // Scans each function for variables used more than once (linear
+        // violations).  Advisory — logs a warning per violation.
+        for func in &ir_program.functions {
+            let violations = vuma_ive::borrow_region::linear_check_from_ir(func);
+            for v in &violations {
+                vuma_log!(
+                    warn,
+                    "Wave 95: linear-type violation in {}: vreg {} used {} times (expected 1)",
+                    func.name, v.vreg_id, v.use_count
+                );
+            }
+        }
+        timings.push(("ive-verification".to_string(), tive.elapsed().as_millis() as u64));
+    }
+
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
     // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
     // The backend is determined from `backend_kind` (passed by the caller —
