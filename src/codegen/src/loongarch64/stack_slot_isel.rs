@@ -1798,19 +1798,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Select { dst, cond, true_val, false_val, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Use branchless maskeqz/masknez:
-                    //   maskeqz S0, false_val, cond  →  S0 = (cond == 0) ? false_val : 0
-                    //   masknez S1, true_val, cond   →  S1 = (cond != 0) ? true_val : 0
-                    //   or S0, S0, S1               →  S0 = result
+                    // Branch-based select using beqz:
+                    //   S0 = false_val
+                    //   S1 = true_val
+                    //   S2 = cond
+                    //   beqz S2, +2     ; if cond==0, skip the `or` (jump 2 words = 8 bytes ahead)
+                    //   or  S0, S1, $r0 ; cond!=0: S0 = true_val
+                    //   st.d S0, fp, dst
+                    // If cond==0: S0 stays as false_val (beqz skips the or).
+                    // If cond!=0: S0 = true_val (or executes).
                     code.extend(encode_load_value(false_val, S0, fp, &vreg_slots));
                     code.extend(encode_load_value(true_val, S1, fp, &vreg_slots));
                     code.extend(encode_load_value(cond, S2, fp, &vreg_slots));
-                    // maskeqz S0, S0, S2: if cond==0, S0=false_val; else S0=0
-                    code.extend_from_slice(&Instruction::Maskeqz { rd: S0, rj: S0, rk: S2 }.encode());
-                    // masknez S1, S1, S2: if cond!=0, S1=true_val; else S1=0
-                    code.extend_from_slice(&Instruction::Masknez { rd: S1, rj: S1, rk: S2 }.encode());
-                    // or S0, S0, S1: merge
-                    code.extend_from_slice(&Instruction::Or { rd: S0, rj: S0, rk: S1 }.encode());
+                    // beqz S2, +2 (skip 1 instruction = 4 bytes = the `or` below)
+                    code.extend_from_slice(&Instruction::Beqz { rj: S2, offs21: 2 }.encode());
+                    // or S0, S1, $r0: S0 = S1 | 0 = true_val
+                    code.extend_from_slice(&Instruction::Or { rd: S0, rj: S1, rk: Gpr::R0 }.encode());
                     // Store result
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
@@ -2090,7 +2093,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                 // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-                | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => Vec::new(),
+                | IRInstr::StarkProof { .. } => Vec::new(),
+                // ── CallIndirect (Wave 49: driver_call) ──
+                // Lower an indirect call: load args into $a0-$a5, load the
+                // function pointer into a scratch register, then `jirl $ra,
+                // scratch, 0` (jump indirect, save return addr in $ra). The
+                // callee returns in $a0, which we store to the dst slot.
+                // This matches the riscv64 `jalr ra, t0, 0` pattern and
+                // enables driver_isolation on loongarch64.
+                IRInstr::CallIndirect { dst, func_ptr, args } => {
+                    let mut code = Vec::new();
+                    let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+                    for (i, arg) in args.iter().take(arg_regs.len()).enumerate() {
+                        code.extend(encode_load_value(arg, arg_regs[i], fp, &vreg_slots));
+                    }
+                    // Load func_ptr into S1 (caller-saved scratch, not an arg reg).
+                    code.extend(encode_load_value(func_ptr, S1, fp, &vreg_slots));
+                    // jirl $ra, S1, 0  — call S1, save return addr in $ra
+                    code.extend_from_slice(&Instruction::Jirl { rd: Gpr::Ra, rj: S1, offs16: 0 }.encode());
+                    // Store return value ($a0) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        code.extend(encode_store_to_vreg(Gpr::A0, dst_id, fp, &vreg_slots));
+                    }
+                    code
+                }
             };
 
             if !code.is_empty() {
