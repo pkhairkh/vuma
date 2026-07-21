@@ -1478,13 +1478,25 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_mov_reg_imm32(Gpr::Rcx, n as i32));
                                         code.extend(encode_shl_reg_cl(Gpr::Rax));
                                         code.extend(store_vreg_lo(dst_id, Gpr::Rax));
-                                    } else {
-                                        // n >= 32: already handled by is_shl_32 / is_shl_large
-                                        // Fall through to generic 32-bit path
+                                    } else if n == 32 {
+                                        // Shl by 32: result.hi = lhs.lo, result.lo = 0
                                         code.extend(load_value(lhs, Gpr::Rax));
-                                        code.extend(load_value(rhs, Gpr::Rcx));
+                                        code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                    } else if n > 32 && n < 64 {
+                                        // Shl by n>32: result.hi = lhs.lo << (n-32), result.lo = 0
+                                        code.extend(load_value(lhs, Gpr::Rax));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, (n - 32) as i32));
                                         code.extend(encode_shl_reg_cl(Gpr::Rax));
-                                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                                        code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                    } else {
+                                        // n >= 64: result = 0
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                        code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                                     }
                                 } else {
                                     // Variable shift count: fall back to 32-bit only
@@ -2308,12 +2320,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_movzx_reg16(Gpr::Rax, Gpr::Rax));
                                     }
                                     Some(IRType::U32) | Some(IRType::I32) => {
-                                        // AND EAX, 0xFFFFFFFF (clears nothing on 32-bit,
-                                        // but ensures the value is treated as unsigned 32)
-                                        code.extend(encode_and_reg_imm32(Gpr::Rax, -1));
+                                        // On x86_32, EAX is already 32-bit — no AND needed.
+                                        // The ZExt just means the high word of the
+                                        // 64-bit stack slot must be zeroed.
                                     }
                                     _ => {}
                                 }
+                            }
+                            // For I32→I64 ZExt: store low word, then zero high word.
+                            // This is critical — without zeroing the high word,
+                            // the 64-bit value contains garbage in the upper 32 bits.
+                            if src_is_32bit_int && !dst_is_32bit_int {
+                                code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                                result_in_slot = true;
                             }
                         }
                         CastKind::SExt => {
