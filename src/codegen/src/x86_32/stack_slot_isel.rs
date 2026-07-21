@@ -1957,15 +1957,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     // low_cmp always uses unsigned SETcc
                                     // (the low words are compared as unsigned
                                     // because they're the lower 32 bits).
+                                    //
+                                    // CRITICAL: for SLe/SGe, the high-word
+                                    // comparison must use STRICT Less/Greater
+                                    // (not LessEqual/GreaterEqual). The algorithm
+                                    // is: result = high_lt | (high_eq & low_le).
+                                    // If high_cc were LessEqual, then when both
+                                    // high words are equal (the common case),
+                                    // high_cmp=1 would make the result always 1,
+                                    // ignoring the low-word comparison. This caused
+                                    // is_closed = (56 <= 0) = true on x86_32,
+                                    // making channel_recv always return -1.
                                     let (high_cc, low_cc) = match kind {
                                         CmpKind::SLt => (Cc::Less, Cc::Below),
-                                        CmpKind::SLe => (Cc::LessEqual, Cc::BelowEqual),
+                                        CmpKind::SLe => (Cc::Less, Cc::BelowEqual),
                                         CmpKind::SGt => (Cc::Greater, Cc::Above),
-                                        CmpKind::SGe => (Cc::GreaterEqual, Cc::AboveEqual),
+                                        CmpKind::SGe => (Cc::Greater, Cc::AboveEqual),
                                         CmpKind::ULt => (Cc::Below, Cc::Below),
-                                        CmpKind::ULe => (Cc::BelowEqual, Cc::BelowEqual),
+                                        CmpKind::ULe => (Cc::Below, Cc::BelowEqual),
                                         CmpKind::UGt => (Cc::Above, Cc::Above),
-                                        CmpKind::UGe => (Cc::AboveEqual, Cc::AboveEqual),
+                                        CmpKind::UGe => (Cc::Above, Cc::AboveEqual),
                                         _ => unreachable!(),
                                     };
                                     // Step 1: Compare high words.
