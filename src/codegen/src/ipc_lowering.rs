@@ -276,9 +276,10 @@ fn alloc_state_slots(func: &mut IRFunction, ctx: &mut LowerContext, needs: &Need
 ///
 /// Returns true if a builtin was expanded (and the block was possibly split).
 fn split_block_at_first_ipc(func: &mut IRFunction, ctx: &mut LowerContext, bi: usize) -> bool {
-    // Find the first IPC builtin Call in this block.
+    // Find the first IPC builtin Call OR ChannelRecvResult in this block.
     let split_idx = func.blocks[bi].instructions.iter().position(|instr| {
         matches!(instr, IRInstr::Call { func, .. } if is_ipc_builtin(func))
+            || matches!(instr, IRInstr::ChannelRecvResult { .. })
     });
     let Some(idx) = split_idx else { return false; };
 
@@ -294,12 +295,18 @@ fn split_block_at_first_ipc(func: &mut IRFunction, ctx: &mut LowerContext, bi: u
             std::cmp::Ordering::Greater => post_instrs.push(instr),
         }
     }
-    let IRInstr::Call { dst, func: fname, args, is_extern: _ } = call_instr.unwrap() else {
-        unreachable!("position() verified this is a Call")
-    };
 
-    // Expand the builtin.
-    let expansion = expand_builtin(ctx, &fname, &args, dst.as_ref());
+    // Expand the instruction — handle both Call (IPC builtin) and
+    // ChannelRecvResult (IR instruction that also needs ipc_lowering).
+    let expansion = match call_instr.unwrap() {
+        IRInstr::Call { dst, func: fname, args, is_extern: _ } => {
+            expand_builtin(ctx, &fname, &args, dst.as_ref())
+        }
+        IRInstr::ChannelRecvResult { ch, dst, err_dst, .. } => {
+            expand_channel_recv_result(ctx, &ch, &dst, &err_dst)
+        }
+        _ => unreachable!("position() verified this is a Call or ChannelRecvResult"),
+    };
 
     // Rebuild block bi.
     let block = &mut func.blocks[bi];
@@ -864,7 +871,158 @@ fn build_crc32_loop_blocks(
     (vec![header_blk, body_blk, inner_header_blk, inner_body_blk, inner_exit_blk, exit_blk], cont)
 }
 
-/// channel_recv(ch) -> i64
+/// Wave 8b: Expand `IRInstr::ChannelRecvResult` into a fallible framed recv
+/// that writes BOTH the payload (`dst`) and the error discriminant
+/// (`err_dst`).  This is the single-path lowering for the
+/// `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }` construct —
+/// it runs on ALL backends via `ipc_lowering`, producing the same IR
+/// sequence regardless of backend.
+///
+/// On success:  `dst` ← payload, `err_dst` ← 0 (Ok)
+/// On closed:   `dst` ← 0,      `err_dst` ← 1 (Closed)
+/// On CRC fail: `dst` ← 0,      `err_dst` ← 5 (CrcMismatch)
+///
+/// Uses `Select` instructions for the dual-output dispatch (no extra block
+/// splitting beyond what the CRC32 loop already requires).
+fn expand_channel_recv_result(
+    ctx: &mut LowerContext,
+    ch: &IRValue,
+    dst: &IRValue,
+    err_dst: &IRValue,
+) -> Expansion {
+    let ch = ch.clone();
+    let dst = dst.clone();
+    let err_dst = err_dst.clone();
+
+    let frame = ctx.new_vreg();
+    let read_fd = ctx.new_vreg();
+    let read_ret = ctx.new_vreg();
+    let is_closed = ctx.new_vreg();
+    let magic = ctx.new_vreg();
+    let magic_ok = ctx.new_vreg();
+    let stored_crc = ctx.new_vreg();
+    let computed_crc = ctx.new_vreg();
+    let crc_match = ctx.new_vreg();
+    let payload = ctx.new_vreg();
+
+    // CRC loop state slots.
+    let crc_slot = ctx.new_vreg();
+    let i_slot = ctx.new_vreg();
+    let j_slot = ctx.new_vreg();
+
+    // Select temporaries for dual-output dispatch.
+    let ok_payload = ctx.new_vreg(); // payload if ok, else 0
+    let ok_err = ctx.new_vreg();     // 0 if ok, else error code
+    let final_payload = ctx.new_vreg();
+    let final_err = ctx.new_vreg();
+
+    let pre = vec![
+        // Alloc frame
+        IRInstr::Alloc { dst: frame.clone(), size: 56 },
+        // read_fd = ch & 0xFFFFFFFF
+        IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
+        // read(read_fd, frame, 56)
+        IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
+        // is_closed = (read_ret <= 0)
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // Load MAGIC from frame[0]
+        IRInstr::Load { dst: magic.clone(), addr: frame.clone(), offset: 0, ty: IRType::I32 },
+        // magic_ok = (magic == 0x414D5556)
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: magic_ok.clone(), lhs: magic, rhs: IRValue::Immediate(0x414D5556), ty: Some(IRType::I32) },
+        // Load stored CRC from frame[52]
+        IRInstr::Load { dst: stored_crc.clone(), addr: frame.clone(), offset: 52, ty: IRType::I32 },
+        // Load payload from frame[44]
+        IRInstr::Load { dst: payload.clone(), addr: frame.clone(), offset: 44, ty: IRType::I64 },
+        // CRC loop state: crc = 0xFFFFFFFF, i = 0
+        IRInstr::Alloc { dst: crc_slot.clone(), size: 8 },
+        IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
+        IRInstr::Alloc { dst: j_slot.clone(), size: 8 },
+        IRInstr::Store { value: IRValue::Immediate(-1), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
+    ];
+
+    // Build the CRC32 loop blocks. After the loop, compute crc_match and
+    // dispatch to the continuation with both dst and err_dst written.
+    let (mut new_blocks, cont_label) = build_crc32_loop_blocks(
+        ctx, frame.clone(), crc_slot, i_slot, j_slot,
+        CRC32PostAction::StoreToReg { dst: computed_crc.clone() },
+    );
+
+    // The CRC loop exits to a block that stores the computed CRC to
+    // `computed_crc`.  We need to add the comparison + Select logic to
+    // the LAST new block (the continuation block that jumps to cont_label).
+    //
+    // Find the last block (the one with Jump(cont_label)).
+    if let Some(last_blk) = new_blocks.last_mut() {
+        // crc_match = (computed_crc == stored_crc)  [as I32, both ZExt'd to I64]
+        last_blk.instructions.push(IRInstr::Cmp {
+            kind: CmpKind::Eq,
+            dst: crc_match.clone(),
+            lhs: computed_crc.clone(),
+            rhs: stored_crc.clone(),
+            ty: Some(IRType::I32),
+        });
+
+        // ok_payload = Select(crc_match, payload, 0)
+        //   — if CRC matches, use payload; else 0
+        last_blk.instructions.push(IRInstr::Select {
+            dst: ok_payload.clone(),
+            cond: crc_match.clone(),
+            true_val: payload.clone(),
+            false_val: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
+        });
+
+        // ok_err = Select(crc_match, 0, 5)
+        //   — if CRC matches, err=0 (Ok); else err=5 (CrcMismatch)
+        last_blk.instructions.push(IRInstr::Select {
+            dst: ok_err.clone(),
+            cond: crc_match,
+            true_val: IRValue::Immediate(0),
+            false_val: IRValue::Immediate(5),
+            ty: Some(IRType::I64),
+        });
+
+        // final_payload = Select(is_closed, 0, ok_payload)
+        //   — if closed, payload=0; else use ok_payload (which is payload if CRC ok, else 0)
+        last_blk.instructions.push(IRInstr::Select {
+            dst: final_payload.clone(),
+            cond: is_closed.clone(),
+            true_val: IRValue::Immediate(0),
+            false_val: ok_payload,
+            ty: Some(IRType::I64),
+        });
+
+        // final_err = Select(is_closed, 1, ok_err)
+        //   — if closed, err=1 (Closed); else use ok_err (0 if CRC ok, 5 if CRC fail)
+        last_blk.instructions.push(IRInstr::Select {
+            dst: final_err.clone(),
+            cond: is_closed,
+            true_val: IRValue::Immediate(1),
+            false_val: ok_err,
+            ty: Some(IRType::I64),
+        });
+
+        // Write to dst and err_dst
+        last_blk.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs: final_payload,
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
+        });
+        last_blk.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: err_dst,
+            lhs: final_err,
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
+        });
+    }
+
+    Expansion { pre, new_blocks, cont_label: Some(cont_label) }
+}
+
 ///
 /// Reads a 56-byte L1 frame, verifies MAGIC, verifies CRC32 via a runtime
 /// loop, and extracts the payload. On any failure (read error, MAGIC
