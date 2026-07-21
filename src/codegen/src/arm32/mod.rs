@@ -8397,9 +8397,35 @@ impl Backend for Arm32Backend {
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     crate::ir::IRInstr::ChannelOpen { .. } | crate::ir::IRInstr::ChannelSend { .. }
-                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::CallIndirect { .. } | crate::ir::IRInstr::ChannelClose { .. }
+                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::ChannelClose { .. }
                 // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
                 | crate::ir::IRInstr::StarkProof { .. } => Vec::new(),
+
+                // Wave 49: CallIndirect — indirect call through func_ptr.
+                // arm32 codegen: load args into r0-r3, load func_ptr into
+                // ip (r12), BLX IP. Store r0 to dst.
+                crate::ir::IRInstr::CallIndirect { dst, func_ptr, args } => {
+                    let mut code = Vec::new();
+                    // Load args into r0-r3 (ARM EABI calling convention)
+                    let arg_regs = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
+                    for (i, arg) in args.iter().take(arg_regs.len()).enumerate() {
+                        code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                    }
+                    // Load func_ptr into r12 (IP — intra-procedure scratch register)
+                    code.extend(ss_load_value(func_ptr, &vreg_stack_slots, Gpr::R12));
+                    // BLX R12 — branch with link and exchange to the address in R12
+                    // Encoding: 0x312FFF3F (BLX Rm: cond=AL, 0001 0010 1111 1111 1111 0011 Rm)
+                    // R12 = 1100, so: 1110 0001 0010 1111 1111 1111 0011 1100
+                    // = E1 2F FF 3C
+                    code.extend(&[0x3C, 0xFF, 0x2F, 0xE1]); // LE: BLX R12
+                    // Store return value (R0) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                    }
+                    code
+                }
                 };
 
                 let encoded_len = encoded.len() as u64;
