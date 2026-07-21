@@ -1361,7 +1361,7 @@ fn translate_hppa(generic_nr: u32) -> Option<u32> {
         216 => Some(163),  // mremap
         220 => Some(120),  // clone
         221 => Some(11),  // execve
-        222 => Some(90),  // mmap
+        222 => Some(192),  // mmap2 (m68k uses mmap2=192, NOT old mmap=90)
         226 => Some(125),  // mprotect
         227 => Some(144),  // msync
         228 => Some(150),  // mlock
