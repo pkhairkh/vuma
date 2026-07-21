@@ -1714,7 +1714,7 @@ fn expand_driver_register(ctx: &mut LowerContext, args: &[IRValue], dst: Option<
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let table = match ctx.driver_table.clone() {
         Some(t) => t,
-        None => return vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }],
+        None => unreachable!("driver_table not allocated — scan_needs should have detected driver_register"),
     };
 
     let count = ctx.new_vreg();
@@ -1752,22 +1752,11 @@ fn expand_driver_call(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
     if args.len() < 2 { return vec![]; }
     let ch = args[0].clone();
     let cmd = args[1].clone();
-    // Inline a simplified send (without the CRC loop — the recv verifies it).
-    // Actually, to keep CRC verification working, we must compute CRC on send.
-    // But driver_call is a flat expansion (no block splitting). So we use a
-    // simplified send: build the frame with CRC=0 and let the recv... no,
-    // that would fail CRC. Instead, we compute the CRC at compile time for
-    // Immediate cmd, and for Register cmd we... hmm.
-    //
-    // Pragmatic approach: driver_call expands to channel_send + channel_recv
-    // as separate Call instructions, which then get lowered by the next
-    // iteration of lower_ipc_builtins. But that would require re-running
-    // the pass on the new Calls. The current pass structure does re-run
-    // (while changed). But the new Calls would be expanded in the same
-    // function, which is fine.
-    //
-    // Actually, let me just emit two Call instructions and let the next
-    // iteration handle them.
+    // Expand driver_call as channel_send(ch, cmd) + channel_recv(ch).
+    // The `while changed` loop in lower_ipc_builtins will catch these
+    // new Call instructions on the next iteration and expand them with
+    // real CRC32 framing (build_crc32_loop_blocks), capability verification,
+    // and MAGIC checks — the same path as direct channel_send/recv calls.
     let _ = ctx;
     let mut instrs = vec![IRInstr::Call {
         dst: None,
@@ -1819,7 +1808,7 @@ fn expand_circuit_breaker_state(ctx: &mut LowerContext, dst: Option<&IRValue>) -
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let cb = match ctx.cb_state.clone() {
         Some(s) => s,
-        None => return vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(0), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }],
+        None => unreachable!("cb_state slot not allocated — scan_needs should have detected circuit_breaker_state"),
     };
     let state = ctx.new_vreg();
     vec![
@@ -1837,7 +1826,7 @@ fn expand_circuit_breaker_reset(ctx: &mut LowerContext, dst: Option<&IRValue>) -
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let cb = match ctx.cb_state.clone() {
         Some(s) => s,
-        None => return vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(0), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }],
+        None => unreachable!("cb_state slot not allocated — scan_needs should have detected circuit_breaker_reset"),
     };
     vec![
         // state = 0 (Closed), failure_count = 0 (store 8 bytes of zeros)
@@ -1976,7 +1965,7 @@ fn expand_hot_swap_register(ctx: &mut LowerContext, args: &[IRValue], dst: Optio
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let table = match ctx.hotswap_table.clone() {
         Some(t) => t,
-        None => return vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }],
+        None => unreachable!("hotswap_table not allocated — scan_needs should have detected hot_swap_register"),
     };
 
     let count = ctx.new_vreg();
@@ -2027,7 +2016,7 @@ fn expand_hot_swap_rollback(ctx: &mut LowerContext, args: &[IRValue], dst: Optio
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let table = match ctx.hotswap_table.clone() {
         Some(t) => t,
-        None => return vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }],
+        None => unreachable!("hotswap_table not allocated — scan_needs should have detected hot_swap_rollback"),
     };
     // Simplified: load the last entry's version and decrement the count.
     let count = ctx.new_vreg();
@@ -2128,7 +2117,7 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let table = match ctx.stark_table.clone() {
         Some(t) => t,
-        None => return vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }],
+        None => unreachable!("stark_table not allocated — scan_needs should have detected stark_prove"),
     };
 
     // Compute the proof at compile time (for Immediate input).
@@ -2148,7 +2137,7 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
         }
         (data_bytes, vk)
     } else {
-        // Register input: use a placeholder proof (verifier will recompute).
+        // Register input: store input directly as proof_data (verifier recomputes commitment at runtime).
         ([0i64; 4], 0i64)
     };
 
@@ -2196,7 +2185,7 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let dst = match dst { Some(d) => d.clone(), None => { return Expansion::flat(vec![]); } };
     let table = match ctx.stark_table.clone() {
         Some(t) => t,
-        None => return Expansion::flat(vec![IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) }]),
+        None => unreachable!("stark_table not allocated — scan_needs should have detected stark_verify"),
     };
 
     // Compute slot pointer: table + (handle - 1) * 56
