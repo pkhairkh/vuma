@@ -3170,8 +3170,15 @@ pub fn dead_store_eliminate(
                 continue;
             }
 
-            let (store_addr_i, _store_val_i) = match &block.instructions[i] {
-                IRInstr::Store { addr, value, .. } => (addr, value),
+            // Capture the base address, byte offset, and access size of
+            // store i.  The access size is derived from the store's IR
+            // type via `size_of`.  These are needed to decide whether a
+            // later store to the SAME base vreg at a DIFFERENT offset
+            // actually overwrites our bytes (see the overlap check below).
+            let (store_addr_i, store_off_i, store_size_i) = match &block.instructions[i] {
+                IRInstr::Store { addr, offset, ty, .. } => {
+                    (addr, *offset as i64, crate::ir::size_of(ty) as i64)
+                }
                 _ => continue,
             };
 
@@ -3185,14 +3192,43 @@ pub fn dead_store_eliminate(
                         if may_alias_combined(&aa, provenance, store_addr_i, load_addr) => {
                             break;
                         }
-                    IRInstr::Store { addr: store_addr_j, .. } => {
-                        // A later store to the same address overwrites ours.
-                        // If our store's value hasn't been read between i and j,
-                        // it's dead. We check exact address equality first
-                        // (strongest condition), then fall back to alias analysis.
+                    IRInstr::Store { addr: store_addr_j, offset: store_off_j, ty: store_ty_j, .. } => {
+                        // A later store to the same address overwrites ours
+                        // ONLY if its byte range overlaps (or covers) ours.
+                        // Two stores to the same base vreg at DIFFERENT
+                        // offsets do NOT overwrite each other — this is the
+                        // common case when initialising a multi-field struct
+                        // or IPC frame buffer (e.g. channel_send writes 10
+                        // fields at offsets 0,4,8,...,52 of the same Alloc'd
+                        // buffer).  The old code compared only the `addr`
+                        // IRValue and incorrectly treated every subsequent
+                        // same-base store as a full overwrite, eliminating
+                        // all but the last store and corrupting the buffer.
                         if store_addr_i == store_addr_j {
-                            // Same address: our store is definitely overwritten.
-                            is_dead = true;
+                            let off_j = *store_off_j as i64;
+                            let size_j = crate::ir::size_of(store_ty_j) as i64;
+                            // Byte range i: [store_off_i, store_off_i + store_size_i)
+                            // Byte range j: [off_j, off_j + size_j)
+                            let overlaps = store_off_i < off_j + size_j
+                                && off_j < store_off_i + store_size_i;
+                            if !overlaps {
+                                // Non-overlapping byte ranges: the later
+                                // store writes different bytes.  Continue
+                                // scanning for a store that truly overwrites
+                                // ours.
+                                continue;
+                            }
+                            // Overlapping.  Only mark as dead if the later
+                            // store fully covers our byte range (j's range
+                            // is a superset of i's).
+                            let fully_covered = off_j <= store_off_i
+                                && off_j + size_j >= store_off_i + store_size_i;
+                            if fully_covered {
+                                is_dead = true;
+                                break;
+                            }
+                            // Partial overlap: can't prove our store is
+                            // fully killed.  Stop scanning (conservative).
                             break;
                         }
                         // Different addresses: if they MAY alias, we can't
