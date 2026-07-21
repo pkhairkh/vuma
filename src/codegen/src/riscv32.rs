@@ -4454,6 +4454,7 @@ fn is_8byte_type(ty: Option<&IRType>) -> bool {
     matches!(
         ty,
         Some(IRType::F64) | Some(IRType::I64) | Some(IRType::U64)
+        | Some(IRType::Channel(_))
     )
 }
 
@@ -5095,7 +5096,7 @@ impl Backend for RiscV32Backend {
                         // (unknown) — the IR builder does not always propagate
                         // the declared u64 type from `let x: u64 = ...` to the
                         // BinOp's `ty` field. See Task 7-C (cluster F).
-                        let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64))
+                        let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)))
                             || ty.is_none();
                         let is_shl_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
                             && matches!(op, BinOpKind::Shl);
@@ -5225,6 +5226,32 @@ impl Backend for RiscV32Backend {
                                 code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                             }
                             _ => {
+                                // I64 Add/Sub: paired-word arithmetic (ADD low, ADDC/SLT high).
+                                // RV32 has no 64-bit ADD; we must add the low words with
+                                // carry, then add the high words with carry-in. This is
+                                // required for the channel handle 'Add(handle, 0)' copy
+                                // and pointer arithmetic on I64 values.
+                                if is_64bit && matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                                    if matches!(op, BinOpKind::Add) {
+                                        // Low: T0 = T0 + T1
+                                        code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        // Carry: if T0 < T1 (unsigned), carry=1. SLTU T4, T0, T1
+                                        code.extend(Instruction::Sltu { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        // High: T2 = T2 + T3 + carry
+                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
+                                    } else {
+                                        // Sub: T0 = T0 - T1; borrow = (T0 > T1_before) = T1 > T0_result
+                                        // Simpler: T0 = T0 - T1; T4 = (T0 > T1) ? 1 : 0 (borrow)
+                                        code.extend(Instruction::Sltu { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                        code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
+                                    }
+                                    code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                                } else {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
                                 match op {
@@ -5247,6 +5274,7 @@ impl Backend for RiscV32Backend {
                                     | BinOpKind::Ror | BinOpKind::Rol => unreachable!(),
                                 }
                                 code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                }
                             }
                         }
                         } // close else block for is_shl_32/is_shr_32
@@ -6303,7 +6331,7 @@ impl Backend for RiscV32Backend {
                         // Check result_types first; fall back to parsing the
                         // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
                         let is_64bit_ret = func.result_types.first()
-                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64 | crate::ir::IRType::F64))
+                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64 | crate::ir::IRType::F64 | crate::ir::IRType::Channel(_)))
                             .unwrap_or_else(|| {
                                 if let Some(open) = func.name.rfind('(') {
                                     if let Some(close) = func.name.rfind(')') {
