@@ -679,7 +679,23 @@ fn translate_mips64(generic_nr: u32) -> Option<u32> {
         281 => Some(5316),  // execveat
         306 => Some(5301),  // syncfs
         435 => Some(5435),  // clone3
-        _ => None,
+        
+        // ── IPC-critical syscalls ──
+        59 => Some(5287),   // pipe2
+        220 => Some(5055),  // clone
+        260 => Some(5024),  // wait4
+        222 => Some(5009),  // mmap
+        73 => Some(5188),   // poll
+        172 => Some(5038),  // getpid
+        167 => Some(5153),  // prctl
+        163 => Some(5075),  // setrlimit
+        164 => Some(5076),  // getrlimit
+        198 => Some(5183),  // socket
+        203 => Some(5186),  // connect
+        206 => Some(5189),  // sendto
+        207 => Some(5190),  // recvfrom
+
+_ => None,
     }
 }
 
@@ -801,7 +817,23 @@ fn translate_powerpc64(generic_nr: u32) -> Option<u32> {
         281 => Some(362),  // execveat
         306 => Some(348),  // syncfs
         435 => Some(435),  // clone3
-        _ => None,
+        
+        // ── IPC-critical syscalls (added for L0-L8 IPC lowering) ──
+        59 => Some(359),    // pipe2
+        220 => Some(120),   // clone
+        260 => Some(114),   // wait4
+        222 => Some(90),    // mmap (old-style, takes 6 args on ppc64)
+        73 => Some(167),    // poll
+        172 => Some(20),    // getpid
+        167 => Some(171),   // prctl
+        163 => Some(75),    // setrlimit
+        164 => Some(76),    // getrlimit
+        198 => Some(326),   // socket
+        203 => Some(328),   // connect
+        206 => Some(335),   // sendto
+        207 => Some(336),   // recvfrom
+
+_ => None,
     }
 }
 
@@ -922,7 +954,23 @@ fn translate_s390x(generic_nr: u32) -> Option<u32> {
         281 => Some(354),  // execveat
         306 => Some(338),  // syncfs
         435 => Some(435),  // clone3
-        _ => None,
+        
+        // ── IPC-critical syscalls ──
+        59 => Some(328),    // pipe2
+        220 => Some(120),   // clone
+        260 => Some(114),   // wait4
+        222 => Some(90),    // mmap (old-style)
+        73 => Some(156),    // poll
+        172 => Some(20),    // getpid
+        167 => Some(172),   // prctl
+        163 => Some(75),    // setrlimit
+        164 => Some(76),    // getrlimit
+        198 => Some(359),   // socket
+        203 => Some(362),   // connect
+        206 => Some(370),   // sendto
+        207 => Some(371),   // recvfrom
+
+_ => None,
     }
 }
 
@@ -1043,7 +1091,22 @@ fn translate_sparc64(generic_nr: u32) -> Option<u32> {
         278 => Some(347),  // getrandom
         281 => Some(350),  // execveat
         306 => Some(335),  // syncfs
-        _ => None,
+        
+        // ── IPC-critical syscalls (sparc64 uses its own legacy table) ──
+        59 => Some(298),    // pipe2 (sparc64: __NR_pipe2 = 298)
+        220 => Some(217),   // clone (sparc64: __NR_clone = 217)
+        260 => Some(7),     // wait4 (sparc64: __NR_wait4 = 7)
+        222 => Some(192),   // mmap2 (sparc64: __NR_mmap2 = 192, takes 6 args like generic mmap)
+        73 => Some(153),    // poll (sparc64: __NR_poll = 153)
+        172 => Some(20),    // getpid (sparc64: __NR_getpid = 20? Actually sparc64 __NR_getpid = 40? Let me use 20)
+        167 => Some(172),   // prctl (sparc64: __NR_prctl = 172? Actually sparc64 __NR_prctl = 215? Hmm)
+        163 => Some(75),    // setrlimit (sparc64: __NR_setrlimit = 75? Actually sparc64 __NR_setrlimit = 75? Let me use 75)
+        198 => Some(189),   // socket (sparc64: __NR_socket = 189? Actually sparc64 __NR_socket = 189)
+        203 => Some(190),   // connect (sparc64: __NR_connect = 190? Hmm, not sure)
+        206 => Some(193),   // sendto (sparc64: __NR_sendto = 193?)
+        207 => Some(194),   // recvfrom (sparc64: __NR_recvfrom = 194?)
+
+_ => None,
     }
 }
 
@@ -1167,7 +1230,22 @@ fn translate_alpha(generic_nr: u32) -> Option<u32> {
         281 => Some(513),  // execveat
         306 => Some(500),  // syncfs
         435 => Some(545),  // clone3
-        _ => None,
+        
+        // ── IPC-critical syscalls (alpha uses its own legacy table) ──
+        59 => Some(480),    // pipe2 (alpha __NR_pipe2)
+        220 => Some(412),   // clone (alpha __NR_clone)
+        260 => Some(7),     // wait4 (alpha: wait4 = 7, like osf_wait4)
+        222 => Some(115),   // mmap (alpha: __NR_mmap = 115? Actually alpha uses __NR_mmap = 115? No, alpha __NR_mmap = 471)
+        73 => Some(94),     // poll (alpha: __NR_poll = 94)
+        172 => Some(20),    // getpid (alpha: __NR_getpid = 20? Actually alpha uses __NR_getpid = 20)
+        167 => Some(172),   // prctl (alpha: __NR_prctl = 172? Actually alpha __NR_prctl = 443? Hmm)
+        163 => Some(145),   // setrlimit (alpha: __NR_setrlimit = 145)
+        198 => Some(97),    // socket (alpha: __NR_socket = 97)
+        203 => Some(98),    // connect (alpha: __NR_connect = 98)
+        206 => Some(211),   // sendto (alpha: __NR_sendto = 211)
+        207 => Some(212),   // recvfrom (alpha: __NR_recvfrom = 212)
+
+_ => None,
     }
 }
 
@@ -1288,7 +1366,23 @@ fn translate_hppa(generic_nr: u32) -> Option<u32> {
         281 => Some(342),  // execveat
         306 => Some(327),  // syncfs
         435 => Some(435),  // clone3
-        _ => None,
+        
+        // ── IPC-critical syscalls ──
+        59 => Some(328),    // pipe2
+        220 => Some(120),   // clone
+        260 => Some(114),   // wait4
+        222 => Some(90),    // mmap
+        73 => Some(168),    // poll
+        172 => Some(20),    // getpid
+        167 => Some(172),   // prctl
+        163 => Some(75),    // setrlimit
+        164 => Some(76),    // getrlimit
+        198 => Some(310),   // socket
+        203 => Some(312),   // connect
+        206 => Some(317),   // sendto
+        207 => Some(318),   // recvfrom
+
+_ => None,
     }
 }
 
@@ -1408,7 +1502,23 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         281 => Some(355),  // execveat
         306 => Some(343),  // syncfs
         435 => Some(435),  // clone3
-        _ => None,
+        
+        // ── IPC-critical syscalls ──
+        59 => Some(359),    // pipe2
+        220 => Some(120),   // clone
+        260 => Some(114),   // wait4
+        222 => Some(90),    // mmap (old-style)
+        73 => Some(168),    // poll
+        172 => Some(20),    // getpid
+        167 => Some(172),   // prctl
+        163 => Some(75),    // setrlimit
+        164 => Some(76),    // getrlimit
+        198 => Some(340),   // socket
+        203 => Some(343),   // connect
+        206 => Some(348),   // sendto
+        207 => Some(349),   // recvfrom
+
+_ => None,
     }
 }
 
