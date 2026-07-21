@@ -471,6 +471,8 @@ fn translate_x86_32(generic_nr: u32) -> Option<u32> {
         55 => Some(95),    // fchown
         56 => Some(295),   // openat
         57 => Some(6),     // close
+        59 => Some(331),    // pipe2 (i386)
+        7 => Some(168),     // poll (i386)
         62 => Some(19),    // lseek
         78 => Some(305),   // readlinkat
         79 => Some(300),   // newfstatat
@@ -514,6 +516,8 @@ fn translate_x86_32(generic_nr: u32) -> Option<u32> {
         155 => Some(132),  // getpgid
         156 => Some(147),  // getsid
         157 => Some(66),   // setsid
+        160 => Some(75),    // setrlimit (i386)
+        167 => Some(172),   // prctl (i386)
         163 => Some(76),   // getrlimit
         164 => Some(75),   // setrlimit
         165 => Some(77),   // getrusage
@@ -552,6 +556,7 @@ fn translate_x86_32(generic_nr: u32) -> Option<u32> {
         233 => Some(219),  // madvise
         // ── Misc ──
         260 => Some(114),  // wait4
+        277 => Some(354),   // seccomp (i386)
         261 => Some(340),  // prlimit64
         278 => Some(355),  // getrandom
         281 => Some(356),  // execveat
