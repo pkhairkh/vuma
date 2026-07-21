@@ -1057,7 +1057,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // to the regular SHL EAX,CL path (masked to 5 bits → 0),
                     // which silently returns `out_idx` instead of packing it
                     // into the high word. See Task 7-C (cluster F).
-                    let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64))
+                    let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)))
                         || ty.is_none();
                     // Extract lhs register ID for 64-bit paired-word operations.
                     // If lhs is not a Register, use 0 (high word will be loaded
@@ -1874,7 +1874,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // compare the low words (always unsigned).  This
                         // matches the standard 64-bit comparison algorithm.
                         let is_64bit_int = matches!(ty,
-                            Some(IRType::I64) | Some(IRType::U64)
+                            Some(IRType::I64) | Some(IRType::U64) | Some(IRType::Channel(_))
                         );
                         if is_64bit_int {
                             // 64-bit integer comparison.
@@ -2020,7 +2020,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Select { dst, cond, true_val, false_val, ty, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    let is_i64 = ty.as_ref().is_some_and(|t| matches!(t, IRType::I64 | IRType::U64));
+                    let is_i64 = ty.as_ref().is_some_and(|t| matches!(t, IRType::I64 | IRType::U64 | IRType::Channel(_)));
                     if is_i64 {
                         // 64-bit Select: CMOV only operates on 32-bit registers,
                         // so we must select BOTH the low and high 32-bit words.
