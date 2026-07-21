@@ -1096,7 +1096,7 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let mut crc_cont_blk = IRBlock::new(&crc_cont);
     crc_cont_blk.instructions.push(IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 });
     // crc_match = (computed_crc == stored_crc)
-    crc_cont_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: crc_match.clone(), lhs: computed_crc, rhs: stored_crc, ty: Some(IRType::I32) });
+    crc_cont_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: crc_match.clone(), lhs: computed_crc.clone(), rhs: stored_crc.clone(), ty: Some(IRType::I32) });
     // result = is_closed ? -1 : (magic_ok ? (crc_match ? payload : -6) : -1)
     // We need nested selects. Let's do it step by step:
     //   crc_ok_result = crc_match ? payload : -6
@@ -1104,9 +1104,9 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     //   final = is_closed ? -1 : magic_ok_result
     let crc_ok_result = ctx.new_vreg();
     let magic_ok_result = ctx.new_vreg();
-    crc_cont_blk.instructions.push(IRInstr::Select { dst: crc_ok_result.clone(), cond: crc_match, true_val: payload, false_val: IRValue::Immediate(-6), ty: Some(IRType::I64) });
-    crc_cont_blk.instructions.push(IRInstr::Select { dst: magic_ok_result.clone(), cond: magic_ok, true_val: crc_ok_result, false_val: IRValue::Immediate(-1), ty: Some(IRType::I64) });
-    crc_cont_blk.instructions.push(IRInstr::Select { dst: result.clone(), cond: is_closed, true_val: IRValue::Immediate(-1), false_val: magic_ok_result, ty: Some(IRType::I64) });
+    crc_cont_blk.instructions.push(IRInstr::Select { dst: crc_ok_result.clone(), cond: crc_match.clone(), true_val: payload, false_val: IRValue::Immediate(-6), ty: Some(IRType::I64) });
+    crc_cont_blk.instructions.push(IRInstr::Select { dst: magic_ok_result.clone(), cond: magic_ok.clone(), true_val: crc_ok_result.clone(), false_val: IRValue::Immediate(-1), ty: Some(IRType::I64) });
+    crc_cont_blk.instructions.push(IRInstr::Select { dst: result.clone(), cond: is_closed.clone(), true_val: IRValue::Immediate(-1), false_val: magic_ok_result.clone(), ty: Some(IRType::I64) });
     crc_cont_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
     crc_cont_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
     crc_cont_blk.terminator = IRTerminator::Jump(cont_label.clone());
