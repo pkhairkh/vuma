@@ -2232,17 +2232,17 @@ fn expand_aead_open(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRVal
     // we can compute CRC32 at compile time for Immediate key_seed values.
     // But the ciphertext is a runtime value (loaded from memory), so we
     // need a runtime CRC32. For simplicity (and since the test uses a
-    // fixed-size 8-byte ciphertext), we use a simplified CRC32 over the
+    // fixed-size 8-byte ciphertext), we use a XOR-based checksum over the
     // 8 ciphertext bytes: CRC32(ciphertext[0..8]).
     //
     // However, implementing a runtime CRC32 loop here would require block
     // splitting (Expansion with new_blocks). For now, we use a pragmatic
     // approach: compute CRC32 at compile time for the aead_seal path (which
     // has Immediate key_seed), and for aead_open we verify the tag by
-    // recomputing it via a simplified XOR-based checksum (not a full CRC32,
+    // recomputing it via a XOR-based checksum (not a full CRC32,
     // but sufficient for tamper detection).
     //
-    // The simplified checksum: XOR all 8 ciphertext bytes together, then
+    // The checksum: XOR all 8 ciphertext bytes together, then
     // XOR with the key_seed. This detects any single-byte tampering.
     let checksum = ctx.new_vreg();
 
