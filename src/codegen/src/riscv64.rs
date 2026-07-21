@@ -8389,9 +8389,33 @@ impl Backend for RiscV64Backend {
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::CallIndirect { .. } | IRInstr::ChannelClose { .. }
+                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                     // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
                     | IRInstr::StarkProof { .. } => Vec::new(),
+
+                    // Wave 49: CallIndirect — indirect call through func_ptr.
+                    // riscv64 codegen: load args into a0-a5, load func_ptr
+                    // into t0, JALR ra, t0, 0. Store a0 to dst.
+                    IRInstr::CallIndirect { dst, func_ptr, args } => {
+                        let mut code = Vec::new();
+                        // Load args into a0-a5 (riscv64 calling convention)
+                        let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+                        for (i, arg) in args.iter().take(arg_regs.len()).enumerate() {
+                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                        }
+                        // Load func_ptr into t0 (caller-saved temp)
+                        code.extend(ss_load_value(func_ptr, &vreg_stack_slots, Gpr::T0));
+                        // JALR ra, t0, 0 — call t0, save return addr in ra
+                        // Encoding: 0x000280e7 (JALR x1, x5, 0)
+                        code.extend(&[0xe7, 0x80, 0x02, 0x00]); // LE: 0x000280e7
+                        // Store return value (a0) to dst's stack slot
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                        }
+                        code
+                    }
                 };
 
                 if !encoded.is_empty() {

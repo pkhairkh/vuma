@@ -2233,7 +2233,39 @@ impl Emitter {
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+            | IRInstr::StarkProof { .. } => {}
+            // Wave 49: CallIndirect — indirect call through func_ptr vreg.
+            // aarch64 codegen: load func_ptr into X16, BLR X16.
+            IRInstr::CallIndirect { dst, func_ptr, args } => {
+                // Load args into X0-X7 (aarch64 calling convention)
+                for (i, arg) in args.iter().enumerate() {
+                    if i >= 8 { break; }
+                    let arg_reg = match i {
+                        0 => Register::X0, 1 => Register::X1,
+                        2 => Register::X2, 3 => Register::X3,
+                        4 => Register::X4, 5 => Register::X5,
+                        6 => Register::X6, _ => Register::X7,
+                    };
+                    let src_reg = self.resolve_reg(arg)?;
+                    if src_reg != arg_reg {
+                        self.emit_instruction(Instruction::MOV { rd: arg_reg, rm: src_reg })?;
+                    }
+                }
+                // Load func_ptr into X16 (IP0, caller-saved, not an arg reg)
+                let fp_reg = self.resolve_reg(func_ptr)?;
+                if fp_reg != Register::X16 {
+                    self.emit_instruction(Instruction::MOV { rd: Register::X16, rm: fp_reg })?;
+                }
+                // BLR X16 — branch with link to register
+                self.emit_instruction(Instruction::BLR { rn: Register::X16 })?;
+                // Store return value (X0) to dst's stack slot
+                if let Some(d) = dst {
+                    let dst_reg = self.resolve_reg(d)?;
+                    if dst_reg != Register::X0 {
+                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: Register::X0 })?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -5382,7 +5414,39 @@ impl Emitter {
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+            | IRInstr::StarkProof { .. } => {}
+            // Wave 49: CallIndirect — indirect call through func_ptr vreg.
+            // aarch64 codegen: load func_ptr into X16, BLR X16.
+            IRInstr::CallIndirect { dst, func_ptr, args } => {
+                // Load args into X0-X7 (aarch64 calling convention)
+                for (i, arg) in args.iter().enumerate() {
+                    if i >= 8 { break; }
+                    let arg_reg = match i {
+                        0 => Register::X0, 1 => Register::X1,
+                        2 => Register::X2, 3 => Register::X3,
+                        4 => Register::X4, 5 => Register::X5,
+                        6 => Register::X6, _ => Register::X7,
+                    };
+                    let src_reg = self.resolve_reg(arg)?;
+                    if src_reg != arg_reg {
+                        self.emit_instruction(Instruction::MOV { rd: arg_reg, rm: src_reg })?;
+                    }
+                }
+                // Load func_ptr into X16 (IP0, caller-saved, not an arg reg)
+                let fp_reg = self.resolve_reg(func_ptr)?;
+                if fp_reg != Register::X16 {
+                    self.emit_instruction(Instruction::MOV { rd: Register::X16, rm: fp_reg })?;
+                }
+                // BLR X16 — branch with link to register
+                self.emit_instruction(Instruction::BLR { rn: Register::X16 })?;
+                // Store return value (X0) to dst's stack slot
+                if let Some(d) = dst {
+                    let dst_reg = self.resolve_reg(d)?;
+                    if dst_reg != Register::X0 {
+                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: Register::X0 })?;
+                    }
+                }
+            }
         }
         Ok(())
     }
