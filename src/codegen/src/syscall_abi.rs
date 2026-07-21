@@ -1546,6 +1546,7 @@ fn translate_arm32(generic_nr: u32) -> Option<u32> {
         56 => Some(322),    // openat (ARM_EABI: __NR_openat = 322)
         22 => Some(22),     // pipe (ARM: pipe = 22; pipe2 = 359)
         59 => Some(359),    // pipe2
+        25 => Some(55),     // fcntl (ARM_EABI: __NR_fcntl = 55)
         // ── Process ──
         93 => Some(1),      // exit
         94 => Some(248),    // exit_group
@@ -1561,7 +1562,8 @@ fn translate_arm32(generic_nr: u32) -> Option<u32> {
         214 => Some(45),    // brk
         // ── Time ──
         101 => Some(162),   // nanosleep
-        73 => Some(168),    // poll
+        7 => Some(168),     // poll (ARM_EABI: __NR_poll = 168)
+        73 => Some(336),    // ppoll (ARM_EABI: __NR_ppoll = 336)
         // ── Resource limits ──
         163 => Some(75),    // setrlimit
         164 => Some(76),    // getrlimit
