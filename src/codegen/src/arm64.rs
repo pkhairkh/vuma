@@ -1781,7 +1781,11 @@ impl Instruction {
             // BLR Xn: 1101_0111_0000_11111_000000_Rn_00001
             // Base = 0xD63F0001
             Instruction::BLR { rn } => {
-                Ok(0xD63F0001u32 | (rn.encoding() << 5))
+                // BLR Xn: 1101 0110 0011 1111 0000 00nn nnn0 0000
+                // Base = 0xD63F0000 (low 5 bits MUST be 0 — bit 0 set is UNDEF).
+                // The previous 0xD63F0001 encoding caused SIGILL on aarch64
+                // whenever CallIndirect (Wave 49 driver_isolation) emitted BLR.
+                Ok(0xD63F0000u32 | (rn.encoding() << 5))
             }
 
             // ---- RET ----
