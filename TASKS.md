@@ -36,40 +36,143 @@ these backends unless the wave's "Target backends" line explicitly narrows it.
 | **loongarch64** | `src/codegen/src/loongarch64/` | `qemu-loongarch64-static` | nr in a7, args in a0–a5, return in a0 (asm-generic) |
 
 Other backends in `src/codegen/src/` (alpha, hppa, m68k, mips64, ppc64,
-ppc64le, riscv32, s390x, sparc64, wasm32, x86_32) are **stubs** — do NOT
-touch them unless a wave explicitly says so.
+ppc64le, riscv32, s390x, sparc64, wasm32, x86_32) are **secondary** —
+they inherit IPC via the shared lowering pass (§0.3) but are not QEMU-gated
+by individual wave DoDs unless explicitly stated.
 
-### 0.3 The two IPC codegen paths (CRITICAL)
+### 0.3 The single IPC codegen path (NON-NEGOTIABLE)
 
-The compiler has **two** paths from IPC builtin calls to machine code:
+#### 0.3.1 Current state (the problem)
 
-1. **x86_64 inline path** — `src/codegen/src/x86_64/stack_slot_isel.rs`
-   recognises `"channel_send"` / `"channel_recv"` / etc. by name in the
-   Call-form instruction selector and emits inline x86_64 machine code
-   directly.  This path has real CRC32, type_hash, capability, and
-   protocol-state verification.
+As of the audit on 2026-07-21, the compiler has **two** divergent IPC
+codegen paths, and they disagree:
 
-2. **Non-x86_64 IR-lowering path** — `src/pipeline.rs` calls
-   `vuma_codegen::ipc_lowering::lower_ipc_builtins()` for every backend
-   **except** x86_64.  This pass rewrites IPC `Call` instructions into
-   generic `Syscall` / `Store` / `Load` / `BinOp` IR **before** the
-   backend's instruction selector runs.  The backend then emits that
-   generic IR.
+1. **x86_64 + riscv64 inline path** — `src/pipeline.rs:4805` has a
+   `has_inline_ipc` guard that skips `ipc_lowering` for these two
+   backends. Their instruction selectors (`x86_64/stack_slot_isel.rs`,
+   `riscv64.rs`) recognise IPC builtins by name and emit real inline
+   machine code (CRC32 loop, capability verification, protocol FSM, etc.).
 
-**Anti-stub rule (NON-NEGOTIABLE):** The non-x86_64 path
-(`src/codegen/src/ipc_lowering.rs`) MUST NOT contain stubs.  Specifically:
-- `return 0` / `return 1` / `return 2` constant returns are forbidden for
-  any builtin whose x86_64 counterpart does real work (circuit_breaker,
-  formal_verify, stark_prove, etc.).
-- `// TODO: real CRC32 loop`, `// simplified`, `// placeholder` are
-  forbidden in shipped code paths.  If a feature is genuinely deferred,
-  it MUST be marked `#[cfg(feature = "stub-ipc")]` and the stub-ipc
-  feature MUST NOT be in the default build.
-- The inline codegen that backends (aarch64/riscv64/arm32) have in their
-  own instruction selectors is **dead code** if `ipc_lowering` rewrites
-  the Call first.  Either (a) make `ipc_lowering` emit real IR for the
-  feature, or (b) skip `ipc_lowering` for that builtin and let the
-  backend's inline handler run.  Do NOT leave both paths half-implemented.
+2. **aarch64 + arm32 + loongarch64 + all secondary backends** — these
+   run `ipc_lowering::lower_ipc_builtins()` which rewrites IPC `Call`
+   instructions into generic `Syscall`/`Store`/`Load`/`BinOp` IR *before*
+   the backend's instruction selector runs. This path has **12 stub
+   functions** that return constant `0`/`1`/`2` (circuit_breaker_call,
+   formal_verify, stark_prove, aead_open, etc.) and **hardcodes
+   `CRC32 = 0`** with an explicit `// TODO: real CRC32 loop` comment.
+
+The aarch64 (`emit.rs`) and arm32 (`arm32/mod.rs`) backends **also** have
+inline IPC handlers, but those handlers are **dead code** — `ipc_lowering`
+rewrites the Call first, so the inline code never executes. This is exactly
+the "both paths half-implemented" failure mode.
+
+#### 0.3.2 The mandated architecture: ONE path (Option A)
+
+**All IPC L0–L8 builtins MUST be lowered through the single shared
+`src/codegen/src/ipc_lowering.rs` pass for ALL backends, including x86_64.**
+
+Concretely:
+
+1. **Delete the `has_inline_ipc` skip** in `src/pipeline.rs`. The
+   `lower_ipc_builtins()` pass MUST run unconditionally for every
+   `BackendKind`. Machine-checkable:
+   ```
+   rg 'has_inline_ipc' src/pipeline.rs   # MUST return 0 matches
+   rg 'BackendKind::X86_64.*\|.*BackendKind::RiscV64' src/pipeline.rs | grep -i inline   # MUST return 0
+   ```
+
+2. **`ipc_lowering.rs` is the single source of truth** for IPC codegen.
+   Every builtin in `is_ipc_builtin()` MUST have a real (non-stub)
+   `expand_*` implementation that emits `IRInstr` sequences. The x86_64
+   inline code in `stack_slot_isel.rs` becomes the **reference
+   implementation** — the IR that `ipc_lowering` emits MUST produce
+   byte-for-byte identical wire frames (same MAGIC, same type_hash, same
+   CRC32, same cap_id layout, same sequence counter).
+
+3. **The backend instruction selectors** (`x86_64/stack_slot_isel.rs`,
+   `riscv64.rs`, `emit.rs`, `arm32/mod.rs`, `loongarch64/stack_slot_isel.rs`)
+   MUST NOT recognise IPC builtins by name in their Call-form isel. The
+   inline `"channel_send" if args.len() == ...` arms are **dead code**
+   once `ipc_lowering` runs unconditionally and MUST be deleted to avoid
+   drift. Machine-checkable:
+   ```
+   rg '"channel_send" if args\.len' src/codegen/src/x86_64/stack_slot_isel.rs   # MUST return 0
+   rg '"channel_send" if args\.len' src/codegen/src/riscv64.rs                   # MUST return 0
+   rg '\("channel_send",' src/codegen/src/emit.rs                                # MUST return 0
+   rg '\("channel_send",' src/codegen/src/arm32/mod.rs                           # MUST return 0
+   ```
+   (The `IRInstr::ChannelSend { .. }` arms in each backend's isel stay —
+   those handle the IR that `ipc_lowering` emits, which is correct. Only
+   the Call-form name-matching arms are deleted.)
+
+4. **No stubs.** Every `expand_*` function MUST emit real IR. Forbidden
+   patterns (machine-checkable):
+   ```
+   rg 'Immediate\(0\),' src/codegen/src/ipc_lowering.rs | grep -v '//' | grep -iE 'cap_count|crc32|channel_id|sequence|reserved'   # zeros in frame fields are OK; constant-return stubs are NOT
+   rg -c 'lhs: IRValue::Immediate\([012]\),' src/codegen/src/ipc_lowering.rs   # MUST be 0 (no constant-return stubs)
+   rg -c 'TODO|FIXME|simplified|placeholder|not yet' src/codegen/src/ipc_lowering.rs   # MUST be 0
+   ```
+
+5. **Wire-frame compatibility.** The 56-byte L1 frame layout (MAGIC
+   `0x414D5556` at [0..4], version at [4..8], channel_id at [8..16],
+   sequence at [16..24], type_hash at [24..32], payload_len at [32..36],
+   cap_count at [36..40], reserved at [40..44], payload at [44..52],
+   CRC32 at [52..56]) MUST be identical across all backends. The
+   `expand_channel_send` IR MUST store the same field values as the
+   x86_64 inline code did. Verify with the `framed_send_recv.vuma` test
+   on all 5 backends — the receiver's CRC verification MUST pass.
+
+#### 0.3.3 Per-layer requirements for `ipc_lowering.rs`
+
+| Layer | Builtins | Requirement |
+|-------|----------|-------------|
+| **L0** | `channel_open`, `channel_close`, `spawn_worker`, `wait_worker`, `kill_worker` | Real `pipe2`/`clone`/`wait4`/`kill` syscalls via `IRInstr::Syscall`. Already done — verify no stubs. |
+| **L1** | `channel_send`, `channel_recv`, `channel_try_recv`, `channel_recv_timeout`, `channel_is_closed` | 56-byte frame build + CRC32 verification. **CRC32 MUST be a real IR loop** (not `Immediate(0)`). Sequence counter MUST increment (not hardcoded 0). |
+| **L2** | `capability_grant`, `channel_send_cap`, `capability_delegate` | `capability_grant` mints token at compile time (calls `ipc::capability::grant_capability`). `channel_send_cap` writes cap_id to frame [56..64]. `channel_recv` verifies cap_id ≠ 0 when cap_count > 0. |
+| **L3** | `shared_memory_open`, `shared_memory_read`, `shared_memory_write` | Real `mmap` syscall + `Load`/`Store`. Already done — verify. |
+| **L4** | `channel_recv_proto` | MUST verify `proto_state == expected_state` before recv (Cmp + CondBranch). MUST advance proto_state on success. **MUST NOT just call `expand_channel_recv` ignoring `expected_state`.** |
+| **L5** | `sandbox_apply`, `sandbox_seccomp`, `set_resource_limit`, `set_memory_limit` | Real `prctl` + `seccomp` + `setrlimit` syscalls. `sandbox_apply` MUST NOT be `return 0`. |
+| **L6** | `checkpoint_save`, `checkpoint_restore` | Real file I/O (`open` + `write`/`read` + `close`). Must use the `Checkpoint` struct wire format. |
+| **L7** | `circuit_breaker_call`, `circuit_breaker_reset`, `circuit_breaker_state`, `hot_swap_register`, `hot_swap_trigger`, `hot_swap_rollback` | `circuit_breaker_call` MUST emit a real retry loop (not `return 0`). `hot_swap_register`/`rollback` MUST NOT be `return 1`. Per-function state slots via `Alloc` + `Store`/`Load`. |
+| **L8** | `aead_seal`, `aead_open`, `stark_prove`, `stark_verify`, `formal_verify` | `aead_open` MUST emit real XOR loop (not `return 0`). `stark_prove`/`verify` MUST use the proof table (not `return 1`). `formal_verify` MUST count folded checks (not `return 2`). |
+| **Extra** | `supervisor_call`, `driver_register`, `driver_call`, `irq_dispatch`, `process_call`, `channel_open_remote`, `remote_send`, `remote_recv` | Real syscalls (socket/connect/sendto/recvfrom) + channel-based dispatch. No stubs. |
+
+#### 0.3.4 Why Option A (not B)
+
+Option A (single `ipc_lowering` path) was chosen over Option B (all 5
+backends inline) because:
+
+- **Less work**: 12 stub functions to fix in one file vs. ~100 inline
+  handlers to write across 3 backends (loongarch64 has 0, arm32 has 7,
+  aarch64 has 13).
+- **Structural homogeneity**: one `expand_*` function per builtin = one
+  IR sequence = all backends emit identical wire frames. Option B gives
+  5 separate implementations with 5 chances for drift (already
+  happening: x86_64 and riscv64 cap checks differ).
+- **Future backends free**: a new backend only needs correct
+  `Syscall`/`Store`/`Load` IR emission — IPC comes for free.
+- **Machine-checkable**: `rg 'has_inline_ipc' src/pipeline.rs` = 0 and
+  `rg 'Immediate\([012]\),' src/codegen/src/ipc_lowering.rs` = 0 are
+  hard structural checks. Option B has no equivalent single check.
+
+The cost: x86_64's well-tested inline CRC32/cap/proto code is retired
+(preserved as the reference that `ipc_lowering` must match). The 43 IPC
+gold-standard tests on x86_64 will catch any IR-path regression.
+
+#### 0.3.5 Migration order (binding)
+
+The migration to the single-path architecture MUST happen in this order:
+
+1. **Wave 0-prep** (before any feature wave): Fix all 12 stubs in
+   `ipc_lowering.rs` so every `expand_*` emits real IR. Delete the
+   `has_inline_ipc` skip in `src/pipeline.rs`. Delete the Call-form
+   IPC arms in x86_64 + riscv64 isels. Verify all 43 IPC tests pass on
+   x86_64 via the IR path. This is the **gating step** — no feature
+   waves proceed until this is green.
+
+2. **Per-wave DoD** (Waves 10–96): every wave's DoD includes
+   "passes on all 5 backends via QEMU" AND the machine-checkable
+   `rg` commands from §0.3.2.
 
 ### 0.4 Process rules
 
@@ -490,20 +593,23 @@ Stage Summary:
 
 ## Wave 10: Runtime Encapsulation L1 — Integrate Framing into Channel
 
-**Spec refs:** §12, §46, §47 · **Target backends:** all 5 (x86_64 inline + 4 via ipc_lowering)
+**Spec refs:** §12, §46, §47 · **Target backends:** all 5 (single `ipc_lowering` path — see §0.3.2)
 
-### 10a — Integrate framing into ChannelSend (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+### 10a — Integrate framing into ChannelSend (single path)
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: build 56-byte frame (MAGIC + version + channel_id + sequence + type_hash + payload_len + cap_count + payload + CRC32), `write()` 56 bytes
-2. **Non-x86_64** (`ipc_lowering.rs`): `expand_channel_send` must emit the SAME 56-byte frame via `Alloc` + `Store` + `Syscall`. MUST compute real CRC32 (not hardcoded 0). MUST use per-function sequence counter (not hardcoded 0).
-3. CRC32 polynomial `0xEDB88320` — either inline loop (x86_64) or IR loop (non-x86_64)
+1. `expand_channel_send` MUST emit IR that builds the 56-byte frame: MAGIC (0x414D5556) at [0..4], version (0x00020000) at [4..8], channel_id at [8..16], sequence at [16..24], type_hash (via `crate::ipc::type_hash`) at [24..32], payload_len (8) at [32..36], cap_count (0) at [36..40], reserved at [40..44], payload at [44..52], CRC32 at [52..56].
+2. CRC32 MUST be a real IR loop over bytes [0..52] with polynomial `0xEDB88320` (NOT `Immediate(0)`). Emit via `Alloc` + byte-loop `Load`/`Xor`/`Shr`/`Store`.
+3. Sequence counter MUST increment per send (per-function `Alloc` slot, `Load`+`Add`+`Store`), NOT hardcoded `Immediate(0)`.
+4. `write(write_fd, &frame, 56)` via `IRInstr::Syscall` (nr 1 on x86_64, 64 on asm-generic).
+5. This IR runs for ALL 5 backends (x86_64 included, per §0.3.2).
 
-### 10b — Integrate framing + CRC verification into ChannelRecv (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+### 10b — Integrate framing + CRC verification into ChannelRecv (single path)
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: read 56 bytes, verify MAGIC, cap_count, CRC32 (inline loop), type_hash; extract payload. On CRC mismatch → -6 (CRC_MISMATCH).
-2. **Non-x86_64**: `expand_channel_recv` MUST verify MAGIC, CRC32, type_hash via IR instructions (Cmp + CondBranch). MUST NOT be a stub that only checks `read() <= 0`.
+1. `expand_channel_recv` MUST emit IR that: `read(read_fd, &frame, 56)`, verifies MAGIC (Cmp + CondBranch), verifies CRC32 (real IR loop over [0..52], Cmp with [52..56], on mismatch store -6 = CRC_MISMATCH), verifies type_hash, extracts payload.
+2. MUST NOT be a stub that only checks `read() <= 0`.
+3. This IR runs for ALL 5 backends.
 
 ### 10c — Serialization for primitive types
 **Files:** `src/codegen/src/ipc.rs`
@@ -512,18 +618,18 @@ Stage Summary:
 2. `deserialize_value(bytes, ty) -> IRValue`
 3. Round-trip tests for all primitives
 
-### 10d — Port framed channels to aarch64 + riscv64 + arm32 + loongarch64
-**Files:** `src/codegen/src/ipc_lowering.rs` (the shared non-x86_64 path)
+### 10d — Verify framed channels on all 5 backends via QEMU
+**Files:** `tests/gold_standard/ipc/framed_send_recv.vuma`
 
-1. The `ipc_lowering` pass MUST emit real framed IR for all 4 non-x86_64 backends
-2. Verify via QEMU: `framed_send_recv.vuma` → exit 42 on all 4
+1. `framed_send_recv.vuma` → exit 42 on x86_64, aarch64, riscv64, arm32, loongarch64 (all via the single `ipc_lowering` path)
+2. The same IR serves all backends — no per-backend inline code
 
 **DoD (Wave 10):**
 - [ ] `cargo build --workspace` succeeds
-- [ ] Channel messages are framed (header + CRC + type hash) on **all 5 backends**
+- [ ] Channel messages are framed (header + CRC + type hash) on **all 5 backends** via the single `ipc_lowering` path
 - [ ] CRC mismatch detected (returns -6) on all 5 backends
-- [ ] `rg '0xEDB88320' src/codegen/src/x86_64/stack_slot_isel.rs` ≥1 match
-- [ ] `rg '0xEDB88320|crc32' src/codegen/src/ipc_lowering.rs` ≥1 match (non-x86_64 path has real CRC)
+- [ ] `rg '0xEDB88320|crc32' src/codegen/src/ipc_lowering.rs` ≥1 (real CRC32 in the single path)
+- [ ] `rg -c 'Immediate\(0\).*crc\|crc.*Immediate\(0\)' src/codegen/src/ipc_lowering.rs` = 0 (no hardcoded CRC=0)
 - [ ] `framed_send_recv.vuma` → exit 42 on all 5 backends
 - [ ] NO `// TODO: real CRC32 loop` or `// simplified` in `ipc_lowering.rs`
 
@@ -582,12 +688,12 @@ Stage Summary:
 4. Set `HAS_CAPS` flag if capabilities present
 
 ### 12b — Verify capabilities on receive (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `capability_grant(resource_id, perms)` builtin — mints token at compile time via `ipc::capability::grant_capability`, returns cap_id
-2. **x86_64**: `channel_send_cap(ch, msg, cap_id)` builtin — 64-byte frame (56 + 8-byte cap section), cap_count=1, cap_id at [rsp+56]
-3. **x86_64**: `ChannelRecv` — when cap_count > 0, read 8-byte cap_id, verify non-zero (structural check). Zero → PermissionDenied (-4).
-4. **Non-x86_64** (`ipc_lowering.rs`): `expand_channel_send_cap` MUST write the cap_id to the frame (not ignore it). `expand_channel_recv` MUST read + verify cap_id (not skip it).
+1. `capability_grant(resource_id, perms)` builtin — mints token at compile time via `ipc::capability::grant_capability`, returns cap_id (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `channel_send_cap(ch, msg, cap_id)` builtin — 64-byte frame (56 + 8-byte cap section), cap_count=1, cap_id at [rsp+56] (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+3. `ChannelRecv` — when cap_count > 0, read 8-byte cap_id, verify non-zero (structural check). Zero → PermissionDenied (-4). (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+4. `expand_channel_send_cap` in `ipc_lowering.rs` MUST write the cap_id to the frame [56..64] (not ignore it). `expand_channel_recv` MUST read + verify cap_id ≠ 0 when cap_count > 0 (not skip it).
 
 ### 12c — Capability delegation chain
 **Files:** `src/codegen/src/capability.rs`, `src/codegen/src/x86_64/stack_slot_isel.rs`
@@ -624,12 +730,12 @@ Stage Summary:
 3. `revoke_memory(window) -> Result<()>`
 
 ### 13b — Implement shared memory on all backends
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `shared_memory_open(size)`: `mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0)` (nr 9 on x86_64, 222 on asm-generic)
 2. `shared_memory_read(ptr, offset)`: load 8 bytes from `ptr + offset`
 3. `shared_memory_write(ptr, offset, value)`: store 8 bytes to `ptr + offset`
-4. **Non-x86_64**: `expand_shared_memory_open/read/write` must emit real mmap/Load/Store IR
+4. `expand_shared_memory_open/read/write` in `ipc_lowering.rs` must emit real mmap/Load/Store IR (this is the single path for all 5 backends)
 
 ### 13c — Memory window permissions enforcement
 **Files:** `src/codegen/src/ipc.rs`
@@ -663,10 +769,10 @@ Stage Summary:
 4. `channel_protocol_check(state, type_hash) -> Result<ProtocolState, ProtocolError>`
 
 ### 14b — Integrate protocol check into ChannelRecv (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `channel_recv_proto(ch, expected_state)` builtin — verifies per-function proto_state == expected_state before recv; on success advances proto_state (+= 1). Mismatch → -5 (ProtocolViolation).
-2. **Non-x86_64** (`ipc_lowering.rs`): `expand_channel_recv_proto` MUST verify the state (Cmp + CondBranch), NOT just call `expand_channel_recv` ignoring `expected_state`.
+1. `channel_recv_proto(ch, expected_state)` builtin — verifies per-function proto_state == expected_state before recv; on success advances proto_state (+= 1). Mismatch → -5 (ProtocolViolation). (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_channel_recv_proto` in `ipc_lowering.rs` MUST verify `proto_state == expected_state` (Cmp + CondBranch) before recv, and advance proto_state on success. MUST NOT just call `expand_channel_recv` ignoring `expected_state`.
 
 ### 14c — Protocol state machine tests
 **Files:** `tests/gold_standard/ipc/protocol_valid.vuma`, `tests/gold_standard/ipc/protocol_invalid.vuma`
@@ -764,10 +870,10 @@ Stage Summary:
 2. `SECCOMP_RET_KILL` for disallowed syscalls
 
 ### 17c — Apply seccomp filter (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `sandbox_apply()` builtin — `prctl(PR_SET_NO_NEW_PRIVS=38, 1)` + `seccomp(SECCOMP_SET_MODE_FILTER=1, 0, &prog)` (nr 317)
-2. **Non-x86_64**: `expand_sandbox_apply` must emit both prctl + seccomp syscalls (not just prctl)
+1. `sandbox_apply()` builtin — `prctl(PR_SET_NO_NEW_PRIVS=38, 1)` + `seccomp(SECCOMP_SET_MODE_FILTER=1, 0, &prog)` (nr 317) (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_sandbox_apply` in `ipc_lowering.rs` must emit both prctl + seccomp syscalls (not just prctl, not `return 0`)
 3. `sandbox_seccomp()` builtin — installs the BPF filter
 
 ### 17d — Worker sandbox test
@@ -793,16 +899,16 @@ Stage Summary:
 2. Map to `setrlimit` resources: RLIMIT_CPU=0, RLIMIT_AS=9, RLIMIT_NOFILE=7, RLIMIT_NPROC=6
 
 ### 18b — Enforce CPU limit (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `set_resource_limit(resource, limit)` builtin — `setrlimit(resource, {limit, limit})` (nr 160)
-2. **Non-x86_64**: `expand_set_resource_limit` must emit real setrlimit syscall
+2. `expand_set_resource_limit` in `ipc_lowering.rs` must emit real setrlimit syscall
 
 ### 18c — Enforce memory limit (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `set_memory_limit(bytes)` builtin — `setrlimit(RLIMIT_AS=9, {bytes, bytes})` (distinct from generic `set_resource_limit`)
-2. **Non-x86_64**: `expand_set_memory_limit` must emit real setrlimit
+2. `expand_set_memory_limit` in `ipc_lowering.rs` must emit real setrlimit(RLIMIT_AS=9)
 
 ### 18d — Resource limit test
 **Files:** `tests/gold_standard/ipc/resource_limit.vuma`, `tests/gold_standard/ipc/memory_limit.vuma`
@@ -827,13 +933,13 @@ Stage Summary:
 2. `Checkpoint::encode() -> Vec<u8>`, `Checkpoint::decode(bytes) -> Result<Self>`
 
 ### 19b — Implement checkpoint_save (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `checkpoint_save(state)` builtin — serialize state to `/tmp/vuma_checkpoint.bin` via `open`+`write`
-2. **Non-x86_64**: `expand_checkpoint_save` must emit real file I/O (Alloc + Syscall open/write/close)
+1. `checkpoint_save(state)` builtin — serialize state to `/tmp/vuma_checkpoint.bin` via `open`+`write` (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_checkpoint_save` in `ipc_lowering.rs` must emit real file I/O (Alloc + Syscall open/write/close) using the Checkpoint struct wire format
 
 ### 19c — Implement checkpoint_restore (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `checkpoint_restore()` builtin — read from `/tmp/vuma_checkpoint.bin`, return state
 
@@ -860,7 +966,7 @@ Stage Summary:
 2. `WorkerWatcher`: tracks worker health, restarts on crash
 
 ### 20b — Implement crash detection (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `wait_worker` with `WUNTRACED|WCONTINUED` flags — detect SIGSEGV/SIGABRT
 2. Extract `WTERMSIG(status)` to identify crash cause
@@ -934,10 +1040,10 @@ Stage Summary:
 4. Wire format: `nonce(8) | ciphertext(len) | tag(4=CRC32 of nonce+ciphertext)`
 
 ### 23b — Implement aead_seal (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `aead_seal(ptr, len, key)` builtin — XOR each byte with key byte (stream cipher)
-2. **Non-x86_64**: `expand_aead_seal` must emit real XOR loop via IR (not a stub)
+1. `aead_seal(ptr, len, key)` builtin — XOR each byte with key byte (stream cipher) (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_aead_seal` in `ipc_lowering.rs` must emit real XOR loop via IR (not a stub). `expand_aead_open` must also emit the real XOR loop (not `return 0`).
 
 ### 23c — Implement aead_open (all backends)
 1. Symmetric: `aead_open(ptr, len, key)` — same XOR operation
@@ -984,10 +1090,10 @@ Stage Summary:
 3. `rg 'extern.*process|FfiEnvelope|process_call' src/codegen/src/scg_to_ir.rs` ≥1 match
 
 ### 25b — Implement `process_call` builtin (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `process_call(ch, arg)` — marshals arg via `channel_send(ch, arg)`, waits for reply via `channel_recv(ch)`, returns reply
-2. **Non-x86_64**: `expand_process_call` must emit real channel_send + channel_recv (not a stub)
+2. `expand_process_call` in `ipc_lowering.rs` must emit real channel_send + channel_recv (not a stub)
 
 ### 25c — FFI worker lifecycle
 **Files:** `src/codegen/src/ipc.rs`
@@ -1011,7 +1117,7 @@ Stage Summary:
 ## Wave 26: FFI Seccomp Isolation
 
 ### 26a–26d — Sandboxed FFI worker + test
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`, `tests/gold_standard/ipc/`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2), `tests/gold_standard/ipc/`
 
 1. FFI workers get `sandbox_apply()` + `set_memory_limit()` before running foreign code
 2. `ffi_sandbox.vuma` — FFI worker sandboxed, can't do forbidden syscall. Exit 1.
@@ -1072,7 +1178,7 @@ Stage Summary:
 4. `rg 'fn delegate_capability' src/codegen/src/capability.rs` ≥1 match of REAL code
 
 ### 33b — `capability_delegate` builtin (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `capability_delegate(parent_id, resource_id, perms)` — calls `delegate_capability` at compile time, returns child cap_id
 
@@ -1139,10 +1245,10 @@ Stage Summary:
 2. `KernelCapability`: gates which syscalls a user process may make
 
 ### 41b — Implement `supervisor_call` builtin (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `supervisor_call(nr, arg)` — emits a real syscall gate (`syscall` instruction with nr in RAX, arg in RDI). Capability-gated: checks a per-function allowlist before executing.
-2. **Non-x86_64**: `expand_supervisor_call` must emit a real syscall (not `return 0`). MUST implement the capability gate (Verified allowlist) — not just a raw syscall.
+1. `supervisor_call(nr, arg)` — emits a real syscall gate (`syscall` instruction with nr in RAX, arg in RDI). Capability-gated: checks a per-function allowlist before executing. (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_supervisor_call` in `ipc_lowering.rs` must emit a real syscall (not `return 0`). MUST implement the capability gate (Verified allowlist) — not just a raw syscall.
 
 ### 41c — Kernel/user gate codegen
 1. Before executing the syscall, check `nr` against a compile-time allowlist. If not allowed → return -4 (PermissionDenied).
@@ -1155,7 +1261,7 @@ Stage Summary:
 **DoD (Wave 41):**
 - [ ] `supervisor.vuma` → exit 1 on all 5 backends
 - [ ] `rg 'supervisor_call' src/codegen/src/ipc_lowering.rs` ≥1 match
-- [ ] Non-x86_64 `expand_supervisor_call` is NOT a `return 0` stub
+- [ ] `expand_supervisor_call` in `ipc_lowering.rs` is NOT a `return 0` stub
 
 ---
 
@@ -1186,11 +1292,11 @@ Stage Summary:
 2. `driver_register(irq, handler_ptr) -> driver_id` builtin
 
 ### 49b — Implement `driver_register` + `driver_call` (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
 1. `driver_register(irq, handler)` — mints a driver ID (compile-time counter), registers handler
 2. `driver_call(driver_id, cmd)` — dispatches to the driver via channel_send + channel_recv
-3. **Non-x86_64**: `expand_driver_call` must emit real channel_send + channel_recv (not a stub)
+3. `expand_driver_call` in `ipc_lowering.rs` must emit real channel_send + channel_recv (not a stub)
 
 ### 49c — MMIO capability enforcement
 1. `mmio_cap(mmio_base, mmio_size)` — grants access to a memory-mapped IO region
@@ -1227,7 +1333,7 @@ Stage Summary:
 ## Waves 57–64: Zero-Cap Workers, Plugins, Sandboxed Parsers, Sandboxed Crypto
 
 ### 57a–64d — Sandbox architecture + zero-cap workers + plugins
-**Files:** `src/codegen/src/ipc.rs`, `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`, `tests/`
+**Files:** `src/codegen/src/ipc.rs`, `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2), `tests/`
 
 1. `zero_cap_worker()` — spawn a worker with zero capabilities (only exit allowed)
 2. `plugin_load(name)` — load a sandboxed plugin
@@ -1254,10 +1360,10 @@ Stage Summary:
 2. State transitions: Closed→Open (on `threshold` failures), Open→HalfOpen (after `reset_timeout`), HalfOpen→Closed (on success) or HalfOpen→Open (on failure)
 
 ### 65b — Implement `circuit_breaker_call` (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `circuit_breaker_call(fn_ptr, max_retries)` — real indirect `call r10` with retry loop. On failure, increment failure_count; on threshold reached, open the breaker.
-2. **Non-x86_64**: `expand_circuit_breaker_call` MUST emit a real retry loop (not `return 0`). MUST track failure state per-function.
+1. `circuit_breaker_call(fn_ptr, max_retries)` — real indirect `call r10` with retry loop. On failure, increment failure_count; on threshold reached, open the breaker. (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_circuit_breaker_call` in `ipc_lowering.rs` MUST emit a real retry loop (not `return 0`). MUST track failure state per-function via Alloc + Store/Load.
 
 ### 65c — Circuit breaker state builtins
 1. `circuit_breaker_state() -> i64` (0=Closed, 1=Open, 2=HalfOpen)
@@ -1271,7 +1377,7 @@ Stage Summary:
 **DoD (Wave 65):**
 - [ ] `fault_tolerance.vuma` → exit 1 on all 5 backends
 - [ ] `rg 'circuit_breaker' src/codegen/src/ipc_lowering.rs` ≥1 match
-- [ ] Non-x86_64 `expand_circuit_breaker_call` is NOT a `return 0` stub
+- [ ] `expand_circuit_breaker_call` in `ipc_lowering.rs` is NOT a `return 0` stub
 
 ---
 
@@ -1304,10 +1410,10 @@ Stage Summary:
 3. State machine: `Idle → Swapping → Verified → Active` or `Swapping → RolledBack`
 
 ### 73b — Implement `hot_swap_trigger` (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `hot_swap_trigger(module_id, old_version, new_version)` — validates version monotonicity, writes swap request to state table, returns 1 on success or -5 on violation
-2. **Non-x86_64**: `expand_hot_swap_trigger` must emit real version comparison (Cmp + Select), not `return 1`
+1. `hot_swap_trigger(module_id, old_version, new_version)` — validates version monotonicity, writes swap request to state table, returns 1 on success or -5 on violation (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_hot_swap_trigger` in `ipc_lowering.rs` must emit real version comparison (Cmp + Select), not `return 1`
 
 ### 73c — Hot-swap register + rollback
 1. `hot_swap_register(module_id, initial_version)` — register a module for hot-swapping
@@ -1321,7 +1427,7 @@ Stage Summary:
 **DoD (Wave 73):**
 - [ ] `hot_swap.vuma` → exit 1 on all 5 backends
 - [ ] `rg 'hot_swap_trigger|hot_swap_register' src/codegen/src/ipc_lowering.rs` ≥2 matches
-- [ ] Non-x86_64 `expand_hot_swap_register` / `expand_hot_swap_rollback` are NOT `return 1` stubs
+- [ ] `expand_hot_swap_register` / `expand_hot_swap_rollback` in `ipc_lowering.rs` are NOT `return 1` stubs
 
 ---
 
@@ -1351,10 +1457,10 @@ Stage Summary:
 2. `channel_open_remote(addr, port) -> u64` — opens a TCP socketpair (or loopback mock)
 
 ### 81b — Implement `channel_open_remote` (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `channel_open_remote(addr, port)` — `socket(AF_INET, SOCK_STREAM)`, `connect(addr, port)`, return handle
-2. **Non-x86_64**: `expand_channel_open_remote` must emit real socket+connect syscalls (not a stub)
+1. `channel_open_remote(addr, port)` — `socket(AF_INET, SOCK_STREAM)`, `connect(addr, port)`, return handle (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_channel_open_remote` in `ipc_lowering.rs` must emit real socket+connect syscalls (not a stub)
 
 ### 81c — Remote send/recv
 1. `remote_send(handle, msg)` — `send(socket, &msg, 8, 0)`
@@ -1509,10 +1615,10 @@ Stage Summary:
 3. `StarkProof::commitment(&self) -> u64` — recomputes the commitment for verification
 
 ### 93b — Implement `stark_prove` builtin (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `stark_prove(input)` — embeds proof_data + verifier_key in a per-function proof table, returns 1-based proof handle
-2. **Non-x86_64**: `expand_stark_prove` must emit real proof-table storage (Alloc + Store), NOT `return 1`
+1. `stark_prove(input)` — embeds proof_data + verifier_key in a per-function proof table, returns 1-based proof handle (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_stark_prove` in `ipc_lowering.rs` must emit real proof-table storage (Alloc + Store), NOT `return 1`
 
 ### 93c — Proof table management
 1. Per-function proof table (max 4 entries), each 56 bytes (proof_data[32] + verifier_key[8] + public_input[8] + validity_window[8])
@@ -1525,17 +1631,17 @@ Stage Summary:
 **DoD (Wave 93):**
 - [ ] `stark_proof.vuma` → exit 1 on all 5 backends
 - [ ] `rg 'StarkProof|zk_stark' src/codegen/src/ir.rs` ≥1 match
-- [ ] Non-x86_64 `expand_stark_prove` is NOT a `return 1` stub
+- [ ] `expand_stark_prove` in `ipc_lowering.rs` is NOT a `return 1` stub
 
 ---
 
 ## Wave 94: STARK Proof Verification
 
 ### 94a — Implement `stark_verify` builtin (all backends)
-**Files:** `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/ipc_lowering.rs`
+**Files:** `src/codegen/src/ipc_lowering.rs` (the single IPC path — see §0.3.2)
 
-1. **x86_64**: `stark_verify(proof_handle)` — recomputes FNV-1a commitment over stored proof_data ++ public_input (40 bytes), compares with stored verifier_key. Returns 1 on match, 0 on mismatch.
-2. **Non-x86_64**: `expand_stark_verify` must emit a real FNV-1a loop + Cmp (not `return 1`)
+1. `stark_verify(proof_handle)` — recomputes FNV-1a commitment over stored proof_data ++ public_input (40 bytes), compares with stored verifier_key. Returns 1 on match, 0 on mismatch. (implemented in `ipc_lowering.rs` — the single path for all 5 backends per §0.3.2)
+2. `expand_stark_verify` in `ipc_lowering.rs` must emit a real FNV-1a loop + Cmp (not `return 1`)
 
 ### 94b — STARK tamper test
 **Files:** `tests/gold_standard/ipc/stark_tamper.vuma`
@@ -1544,7 +1650,7 @@ Stage Summary:
 
 **DoD (Wave 94):**
 - [ ] `stark_tamper.vuma` → exit 1 on all 5 backends (tamper detected)
-- [ ] Non-x86_64 `expand_stark_verify` is NOT a `return 1` stub
+- [ ] `expand_stark_verify` in `ipc_lowering.rs` is NOT a `return 1` stub
 
 ---
 
@@ -1653,15 +1759,23 @@ Each criterion is checked by a command that inspects **emitted code** or
 ## Phase 0 (Cleanup)
 - [ ] No `.vuma` test has stripped-body md5 = `ec6eb67ebb89132ebe877b0fa017dbb7`
 
+## §0.3 Single-path architecture (gating — must pass before any feature wave)
+- [ ] `rg 'has_inline_ipc' src/pipeline.rs` = **0** (the skip is deleted)
+- [ ] `rg -c 'lhs: IRValue::Immediate\([012]\),' src/codegen/src/ipc_lowering.rs` = **0** (no constant-return stubs)
+- [ ] `rg -c 'TODO|FIXME|simplified|placeholder|not yet' src/codegen/src/ipc_lowering.rs` = **0**
+- [ ] `rg '"channel_send" if args\.len' src/codegen/src/x86_64/stack_slot_isel.rs` = **0** (Call-form inline arm deleted)
+- [ ] `rg '"channel_send" if args\.len' src/codegen/src/riscv64.rs` = **0** (Call-form inline arm deleted)
+- [ ] `rg '\("channel_send",' src/codegen/src/emit.rs` = **0** (aarch64 dead inline deleted)
+- [ ] `rg '\("channel_send",' src/codegen/src/arm32/mod.rs` = **0** (arm32 dead inline deleted)
+- [ ] `rg '0xEDB88320|crc32' src/codegen/src/ipc_lowering.rs` ≥1 (real CRC32 in the single path)
+- [ ] All 43 IPC gold-standard tests pass on x86_64 via the IR path (after `has_inline_ipc` deletion)
+
 ## Phase 1 (Waves 1–24)
 - [ ] `rg 'enum ChannelError' src/codegen/src/ir.rs` ≥1
 - [ ] `rg 'ChannelRecvResult' src/codegen/src/ir.rs` ≥1
 - [ ] `rg 'Ok.*Err|match.*channel_recv' src/parser/src/parser.rs` ≥1 (real code)
-- [ ] `rg '0xEDB88320' src/codegen/src/x86_64/stack_slot_isel.rs` ≥1
-- [ ] `rg '0xEDB88320|crc32' src/codegen/src/ipc_lowering.rs` ≥1 (non-x86_64 has real CRC)
-- [ ] `rg 'type_hash|0x414D5556' src/codegen/src/emit.rs` ≥1 (aarch64)
-- [ ] `rg 'type_hash|0x414D5556' src/codegen/src/riscv64.rs` ≥1
-- [ ] `rg 'type_hash|0x414D5556' src/codegen/src/arm32/mod.rs` ≥1
+- [ ] `rg '0xEDB88320|crc32' src/codegen/src/ipc_lowering.rs` ≥1 (CRC32 in the single path)
+- [ ] `rg 'type_hash' src/codegen/src/ipc_lowering.rs` ≥1 (type_hash in the single path)
 - [ ] `rg 'type_hash|0x414D5556' src/codegen/src/loongarch64/stack_slot_isel.rs` ≥1
 - [ ] `rg 'ipc|channel_send|recv_timeout' Makefile` ≥1
 - [ ] NO `// TODO: real CRC32 loop` or `// simplified` in `ipc_lowering.rs`
