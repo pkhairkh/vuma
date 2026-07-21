@@ -2190,10 +2190,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let alloc_off = alloc_offsets.get(&dst_id).copied().unwrap_or(-(frame_size as i32));
-                    // lea rax, [rbp + alloc_off]  (alloc_off is negative)
+                    // lea eax, [ebp + alloc_off]  (alloc_off is negative)
                     code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, alloc_off));
-                    // Store the pointer into dst's stack slot
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    // Store the 32-bit pointer into the LOW word of dst's 64-bit slot
+                    code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                    // ZERO the HIGH word — critical on 32-bit backends where
+                    // pointers are 32-bit but vregs are 64-bit. Without this,
+                    // I64 arithmetic on the pointer (e.g. frame + i in the
+                    // CRC32 loop) produces a garbage 64-bit address because
+                    // the high word contains stack garbage.
+                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                    code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                     code
                 }
 
