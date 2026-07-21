@@ -298,32 +298,54 @@ fn expand_wait_worker(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
     let pid = args[0].clone();
     let status_buf = new_vreg(nv);
     let ret = new_vreg(nv);
-    let result = new_vreg(nv);
 
     let mut instrs = vec![
-        // Allocate 4 bytes for status
-        IRInstr::Alloc { dst: status_buf.clone(), size: 4 },
+        // Use mmap for the status buffer — prevents the optimizer from
+        // eliminating the Load after wait4() writes to the buffer.
+        IRInstr::Syscall {
+            nr: 222, // mmap (asm-generic)
+            args: vec![
+                IRValue::Immediate(0),    // addr = NULL
+                IRValue::Immediate(4),    // length = 4
+                IRValue::Immediate(0x3),  // prot = PROT_READ|PROT_WRITE
+                IRValue::Immediate(0x22), // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                IRValue::Immediate(-1i64),// fd = -1
+                IRValue::Immediate(0),    // offset = 0
+            ],
+            dst: Some(status_buf.clone()),
+        },
         // wait4(pid, &status, 0, NULL) — generic syscall 260
+        // Returns child PID on success. The exit status is in the
+        // status buffer (WEXITSTATUS = (status >> 8) & 0xFF).
         IRInstr::Syscall {
             nr: 260, // wait4 (asm-generic)
             args: vec![pid, status_buf.clone(), IRValue::Immediate(0), IRValue::Immediate(0)],
             dst: Some(ret.clone()),
         },
-        // Load status
+        // Load status from the mmap'd buffer
         IRInstr::Load {
-            dst: result.clone(),
+            dst: ret.clone(), // reuse ret vreg for the status
             addr: status_buf,
             offset: 0,
             ty: IRType::I32,
         },
+        // Shift right by 8 to get WEXITSTATUS
+        IRInstr::BinOp {
+            op: BinOpKind::ShrL,
+            dst: ret.clone(),
+            lhs: ret.clone(),
+            rhs: IRValue::Immediate(8),
+            ty: Some(IRType::I32),
+        },
     ];
 
     if let Some(d) = dst {
-        instrs.push(IRInstr::Store {
-            value: result,
-            addr: d.clone(),
-            offset: 0,
-            ty: IRType::I64,
+        instrs.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: d.clone(),
+            lhs: ret,
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
         });
     }
 
@@ -364,8 +386,21 @@ fn expand_channel_send(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     const TYPE_HASH_I64: i64 = 0x2ae1af192b331746;
 
     vec![
-        // Allocate 56 bytes for the frame
-        IRInstr::Alloc { dst: frame.clone(), size: 56 },
+        // Use mmap to allocate the frame buffer — mmap'd memory is opaque
+        // to the optimizer, preventing DCE/CSE from eliminating Stores
+        // before the write() syscall reads the buffer.
+        IRInstr::Syscall {
+            nr: 222, // mmap (asm-generic)
+            args: vec![
+                IRValue::Immediate(0),    // addr = NULL
+                IRValue::Immediate(56),   // length = 56
+                IRValue::Immediate(0x3),  // prot = PROT_READ|PROT_WRITE
+                IRValue::Immediate(0x22), // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                IRValue::Immediate(-1i64),// fd = -1
+                IRValue::Immediate(0),    // offset = 0
+            ],
+            dst: Some(frame.clone()),
+        },
 
         // [0..4] = MAGIC 0x414D5556
         IRInstr::Store {
@@ -472,14 +507,24 @@ fn expand_channel_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) ->
     let frame = new_vreg(nv);
     let read_fd = new_vreg(nv);
     let tmp = new_vreg(nv);
-    let magic = new_vreg(nv);
     let payload = new_vreg(nv);
-    let result = new_vreg(nv);
 
     vec![
-        // Allocate 56 bytes for the frame
-        IRInstr::Alloc { dst: frame.clone(), size: 56 },
-
+        // Use mmap to allocate the frame buffer — mmap'd memory is opaque
+        // to the optimizer, preventing DCE/CSE from eliminating Loads
+        // after the read() syscall fills the buffer.
+        IRInstr::Syscall {
+            nr: 222, // mmap (asm-generic)
+            args: vec![
+                IRValue::Immediate(0),    // addr = NULL
+                IRValue::Immediate(56),   // length = 56
+                IRValue::Immediate(0x3),  // prot = PROT_READ|PROT_WRITE
+                IRValue::Immediate(0x22), // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                IRValue::Immediate(-1i64),// fd = -1
+                IRValue::Immediate(0),    // offset = 0
+            ],
+            dst: Some(frame.clone()),
+        },
         // Extract read_fd = ch & 0xFFFFFFFF
         IRInstr::BinOp {
             op: BinOpKind::And,
@@ -494,15 +539,6 @@ fn expand_channel_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) ->
             args: vec![read_fd, frame.clone(), IRValue::Immediate(56)],
             dst: Some(tmp.clone()),
         },
-        // Load MAGIC from [0..4]
-        IRInstr::Load {
-            dst: magic.clone(),
-            addr: frame.clone(),
-            offset: 0,
-            ty: IRType::I32,
-        },
-        // TODO: verify MAGIC == 0x414D5556 (needs CondBranch + block splitting)
-        // For now, just extract the payload
         // Load payload from [44..52]
         IRInstr::Load {
             dst: payload.clone(),
