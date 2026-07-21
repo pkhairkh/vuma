@@ -1369,15 +1369,11 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, ctx: &mu
         IRInstr::Store { value: read_fd.clone(), addr: pollfd.clone(), offset: 0, ty: IRType::I32 },
         IRInstr::Store { value: IRValue::Immediate(1), addr: pollfd.clone(), offset: 4, ty: IRType::I16 },
     ]);
+    // Use poll (asm-generic nr 7) with a millisecond timeout (3rd arg).
+    // poll(struct pollfd *fds, nfds_t nfds, int timeout_ms)
+    // Returns >0 if data available, 0 on timeout, -1 on error.
     instrs.extend(vec![
-        IRInstr::Alloc { dst: ts.clone(), size: 16 },
-        IRInstr::BinOp { op: BinOpKind::SDiv, dst: tv_sec.clone(), lhs: timeout_ms.clone(), rhs: IRValue::Immediate(1000), ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: tmp.clone(), lhs: tv_sec.clone(), rhs: IRValue::Immediate(1000), ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Sub, dst: rem.clone(), lhs: timeout_ms, rhs: tmp, ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: tv_nsec.clone(), lhs: rem, rhs: IRValue::Immediate(1_000_000), ty: Some(IRType::I64) },
-        IRInstr::Store { value: tv_sec, addr: ts.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Store { value: tv_nsec, addr: ts.clone(), offset: 8, ty: IRType::I64 },
-        IRInstr::Syscall { nr: 73, args: vec![pollfd.clone(), IRValue::Immediate(1), ts, IRValue::Immediate(0)], dst: Some(poll_ret) },
+        IRInstr::Syscall { nr: 7, args: vec![pollfd.clone(), IRValue::Immediate(1), timeout_ms], dst: Some(poll_ret.clone()) },
     ]);
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
