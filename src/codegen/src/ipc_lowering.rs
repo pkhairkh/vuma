@@ -1866,21 +1866,13 @@ fn expand_irq_dispatch(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         IRInstr::Load { dst: handler_ptr.clone(), addr: table.clone(), offset: 8, ty: IRType::I64 },
         // irq_match = (slot_irq == vector)
         IRInstr::Cmp { kind: CmpKind::Eq, dst: irq_match.clone(), lhs: slot_irq, rhs: vector, ty: Some(IRType::I64) },
-        // Call the handler (indirect call via handler_ptr).
-        // The Call instruction with the handler as a function name won't work
-        // for indirect calls. Instead, we use a Call with the handler_ptr
-        // as a register-based function pointer. The backend's Call handler
-        // resolves Register callee addresses to indirect calls.
-        // For now, if irq matches, call the handler; else return -7.
-        // We use Select to choose between the call result and -7.
-        // Note: the actual indirect call is emitted by the backend when it
-        // sees Call with a non-string callee. Here we emit a Call to
-        // handler_ptr (which is a vreg holding the function address).
-        IRInstr::Call {
+        // Call the handler via IRInstr::CallIndirect (indirect call through
+        // the handler_ptr vreg).  The x86_64 backend lowers this to
+        // `call r10` (FF D2 with REX.B).  Other backends lower to BLR/JALR.
+        IRInstr::CallIndirect {
             dst: Some(call_result.clone()),
-            func: handler_ptr.to_string(),  // This won't work as a string — need special handling
+            func_ptr: handler_ptr,
             args: vec![],
-            is_extern: false,
         },
         // result = irq_match ? call_result : -7
         IRInstr::Select { dst: result.clone(), cond: irq_match, true_val: call_result, false_val: IRValue::Immediate(-7), ty: Some(IRType::I64) },

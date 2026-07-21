@@ -414,6 +414,12 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(input, from, to);
                     sub(dst, from, to);
                 }
+                // Wave 49: renumber func_ptr + args of indirect call.
+                IRInstr::CallIndirect { dst, func_ptr, args, .. } => {
+                    if let Some(d) = dst { sub(d, from, to); }
+                    sub(func_ptr, from, to);
+                    for a in args { sub(a, from, to); }
+                }
             }
         }
         match &mut block.terminator {

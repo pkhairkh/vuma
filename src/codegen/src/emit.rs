@@ -2233,7 +2233,7 @@ impl Emitter {
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } => {}
+            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
         }
         Ok(())
     }
@@ -5382,7 +5382,7 @@ impl Emitter {
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } => {}
+            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
         }
         Ok(())
     }
