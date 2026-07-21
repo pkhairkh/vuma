@@ -3423,7 +3423,41 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                 // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-                | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => Vec::new(),
+                | IRInstr::StarkProof { .. } => Vec::new(),
+                // ── CallIndirect (Wave 49: driver_call) ──
+                // Lower an indirect call: load args into stack (i386 ABI:
+                // args pushed right-to-left), load func_ptr into EAX, 
+                // CALL EAX, clean up stack, store return value.
+                IRInstr::CallIndirect { dst, func_ptr, args } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_ref().map(|d| d.as_register().unwrap_or(0)).unwrap_or(0);
+                    // i386 calling convention: push args right-to-left onto stack.
+                    // Max 6 args supported via register passing on i386 (but we
+                    // use stack pushing for simplicity — same as cdecl ABI).
+                    let num_args = args.len();
+                    // Push args right-to-left
+                    for arg in args.iter().rev() {
+                        code.extend(load_value(arg, Gpr::Rax));
+                        code.extend(encode_push(Gpr::Rax));
+                    }
+                    // Load func_ptr into EAX
+                    code.extend(load_value(func_ptr, Gpr::Rax));
+                    // CALL EAX — use indirect call encoding: FF D0
+                    code.extend_from_slice(&[0xFF, 0xD0]); // CALL EAX
+                    // Clean up stack: ADD ESP, num_args*4
+                    if num_args > 0 {
+                        let cleanup = (num_args * 4) as i32;
+                        if cleanup >= -128 && cleanup <= 127 {
+                            code.extend_from_slice(&[0x83, 0xC4, cleanup as u8]); // ADD ESP, imm8
+                        } else {
+                            code.extend_from_slice(&[0x81, 0xC4]);
+                            code.extend_from_slice(&cleanup.to_le_bytes()); // ADD ESP, imm32
+                        }
+                    }
+                    // Store return value (EAX) to dst's stack slot
+                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    code
+                }
             };
 
             if !encoded.is_empty() {
