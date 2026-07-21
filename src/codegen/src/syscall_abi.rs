@@ -545,7 +545,7 @@ fn translate_x86_32(generic_nr: u32) -> Option<u32> {
         216 => Some(163),  // mremap
         220 => Some(120),  // clone
         221 => Some(11),   // execve
-        222 => Some(90),   // mmap
+        222 => Some(192),  // mmap2 (i386: old_mmap=90 takes struct*, mmap2=192 takes 6 args)
         226 => Some(125),  // mprotect
         227 => Some(144),  // msync
         228 => Some(150),  // mlock
