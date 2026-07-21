@@ -1263,14 +1263,21 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&Instruction::AddD { rd: S0, rj: S0, rk: S2 }.encode());
                         }
                     }
-                    // Load from address
+                    // Load from address.
+                    //
+                    // `ld.w` sign-extends and `ld.wu` zero-extends; both produce
+                    // the same low 32 bits. We use `ld.wu` for both I32 and U32
+                    // so that 64-bit `Cmp::Eq` on 32-bit frame fields (CRC32
+                    // accumulators, MAGIC 0x414D5556, type hashes) matches the
+                    // zero-extending behavior of every other backend (x86_64
+                    // `movl`, aarch64 `ldr w`, arm32 `ldr`, riscv64 `lwu`).
+                    // Code needing sign-extension emits an explicit `SExt` cast.
                     let load_inst = match ty {
                         IRType::I8 => Instruction::LdB { rd: S0, rj: S0, imm12: 0 },
                         IRType::U8 => Instruction::LdBu { rd: S0, rj: S0, imm12: 0 },
                         IRType::I16 => Instruction::LdH { rd: S0, rj: S0, imm12: 0 },
                         IRType::U16 => Instruction::LdHu { rd: S0, rj: S0, imm12: 0 },
-                        IRType::I32 => Instruction::LdW { rd: S0, rj: S0, imm12: 0 },
-                        IRType::U32 => Instruction::LdWu { rd: S0, rj: S0, imm12: 0 },
+                        IRType::I32 | IRType::U32 => Instruction::LdWu { rd: S0, rj: S0, imm12: 0 },
                         _ => Instruction::LdD { rd: S0, rj: S0, imm12: 0 },
                     };
                     code.extend_from_slice(&load_inst.encode());
@@ -1454,9 +1461,23 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     match kind {
                         CastKind::ZExt => {
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
-                            // Zero-extend lower 32 bits: slli.d + srli.d clears upper 32 bits
-                            code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: 32 }.encode());
-                            code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                            // Zero-extend based on the SOURCE type width.
+                            // For I8/I16, `ld.b`/`ld.h` sign-extend to 64 bits,
+                            // which leaks high bits into XOR/CRC operations.
+                            // Fix: shift left to clear high bits, then shift
+                            // right (logical) to zero-extend. This is the
+                            // single most common cross-backend CRC32 bug.
+                            let (shl, shr) = match from_ty.as_ref() {
+                                Some(IRType::I8) | Some(IRType::U8) => (56, 56),
+                                Some(IRType::I16) | Some(IRType::U16) => (48, 48),
+                                _ => (32, 32),  // I32 → I64
+                            };
+                            code.extend_from_slice(
+                                &Instruction::SlliD { rd: S0, rj: S0, imm8: shl }.encode(),
+                            );
+                            code.extend_from_slice(
+                                &Instruction::SrliD { rd: S0, rj: S0, imm8: shr }.encode(),
+                            );
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         CastKind::SExt => {
