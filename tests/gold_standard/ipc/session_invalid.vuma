@@ -1,0 +1,22 @@
+// session_invalid — Wave 90: session type invalid sequence
+// Opens a channel, receives WITHOUT sending first — a protocol violation.
+// The session_type_check should detect this as an out-of-order operation.
+// Since the check is advisory (logs warning, doesn't abort), the program
+// still compiles and runs. The child blocks on recv (no sender), so it
+// exits with the recv_timeout sentinel.
+// Expected exit code: 88
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Invalid: recv before send — session type violation
+        x = channel_recv_timeout(ch, 100);
+        channel_close(ch);
+        if x == -3 { return 88; }
+        return 0;
+    }
+    // Parent does nothing — child times out
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}

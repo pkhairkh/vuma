@@ -1,0 +1,22 @@
+// ffi_crash_recovery — Wave 27: FFI crash recovery
+// The child (FFI server) exits without sending a reply. The parent
+// detects this via wait_worker (child exit code != 0) and recovers.
+// Expected exit code: 1
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child receives but exits without sending back (crash simulation)
+        arg = channel_recv(ch);
+        channel_close(ch);
+        return 7;
+    }
+    // Parent sends a message
+    channel_send(ch, 21);
+    // Parent waits for child — detects it exited with error code 7
+    status = wait_worker(pid);
+    channel_close(ch);
+    // Crash detected — parent recovers
+    if status == 7 { return 1; }
+    return 0;
+}

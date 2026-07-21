@@ -1,0 +1,18 @@
+// session_valid — Wave 89: session type valid sequence
+// A channel is opened, a message is sent then received — a valid protocol.
+// The session_type_check in the pipeline (verify_session_types_from_ir)
+// scans the IR and verifies the channel operations follow a valid order.
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x;
+    }
+    channel_send(ch, 42);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}

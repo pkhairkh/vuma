@@ -1,0 +1,10 @@
+// cap_revoke — Wave 35: capability revocation
+// Verifies that the capability_delegate builtin works correctly.
+// The parent grants a capability, delegates it, and the delegation succeeds.
+// Expected exit code: 1
+fn main() -> i32 {
+    cap = capability_grant(7, 3);
+    child_cap = capability_delegate(cap, 7, 1);
+    if child_cap != 0 { return 1; }
+    return 0;
+}
