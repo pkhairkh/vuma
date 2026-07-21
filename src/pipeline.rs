@@ -5242,6 +5242,63 @@ pub fn compile_with_path(
     }
     timings.push(("scg-transforms".to_string(), t.elapsed().as_millis() as u64));
 
+    // ── Stage 7b: L1→L3 Invariant Collapse Proof ──────────────────────
+    // Calls the real type-consistency verifier on the optimized SCG.
+    // Non-fatal: logs the result as info/warn but does not block compilation.
+    {
+        let t_collapse = Instant::now();
+        let collapse = vuma_ive::verification::l1l3_collapse(&scg);
+        if collapse.collapsed {
+            vuma_log!(info,
+                "L1->L3 collapse: folded {} L1 checks and {} L2 checks",
+                collapse.l1_checks_folded, collapse.l2_checks_folded
+            );
+        } else {
+            vuma_log!(warn,
+                "L1->L3 collapse FAILURE: {}", collapse.summary
+            );
+        }
+        timings.push(("l1l3-collapse".to_string(), t_collapse.elapsed().as_millis() as u64));
+    }
+
+    // ── Stage 7c: Linear Channel Discipline Check ─────────────────────
+    // Verifies that every channel opened is eventually closed (linear
+    // discipline), and that channels are not used after close.
+    // Non-fatal: logs violations as warnings.
+    {
+        let t_linear = Instant::now();
+        let mut events: Vec<vuma_ive::borrow_region::ChannelEvent> = Vec::new();
+        for (i, node) in scg.nodes().enumerate() {
+            match &node.payload {
+                vuma_scg::node::NodePayload::ChannelOpen(_) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Open, at_node: i,
+                    });
+                }
+                vuma_scg::node::NodePayload::ChannelSend(_) | vuma_scg::node::NodePayload::ChannelRecv(_) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Use, at_node: i,
+                    });
+                }
+                vuma_scg::node::NodePayload::ChannelClose(_) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Close, at_node: i,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let results = vuma_ive::borrow_region::verify_linear_channels(&events);
+        if !vuma_ive::borrow_region::all_linear_valid(&results) {
+            for r in &results {
+                if !r.valid {
+                    vuma_log!(warn, "Linear channel violation: {}", r.error.as_deref().unwrap_or("unknown"));
+                }
+            }
+        }
+        timings.push(("linear-check".to_string(), t_linear.elapsed().as_millis() as u64));
+    }
+
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
     let t = Instant::now();
     // NOTE: The canonical pipeline now uses the DIRECT AST→codegen SCG
@@ -6354,6 +6411,63 @@ pub fn compile_with_recovery(
         }
     }
     timings.push(("scg-transforms".to_string(), t.elapsed().as_millis() as u64));
+
+    // ── Stage 7b: L1→L3 Invariant Collapse Proof ──────────────────────
+    // Calls the real type-consistency verifier on the optimized SCG.
+    // Non-fatal: logs the result as info/warn but does not block compilation.
+    {
+        let t_collapse = Instant::now();
+        let collapse = vuma_ive::verification::l1l3_collapse(&scg);
+        if collapse.collapsed {
+            vuma_log!(info,
+                "L1->L3 collapse: folded {} L1 checks and {} L2 checks",
+                collapse.l1_checks_folded, collapse.l2_checks_folded
+            );
+        } else {
+            vuma_log!(warn,
+                "L1->L3 collapse FAILURE: {}", collapse.summary
+            );
+        }
+        timings.push(("l1l3-collapse".to_string(), t_collapse.elapsed().as_millis() as u64));
+    }
+
+    // ── Stage 7c: Linear Channel Discipline Check ─────────────────────
+    // Verifies that every channel opened is eventually closed (linear
+    // discipline), and that channels are not used after close.
+    // Non-fatal: logs violations as warnings.
+    {
+        let t_linear = Instant::now();
+        let mut events: Vec<vuma_ive::borrow_region::ChannelEvent> = Vec::new();
+        for (i, node) in scg.nodes().enumerate() {
+            match &node.payload {
+                vuma_scg::node::NodePayload::ChannelOpen(_) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Open, at_node: i,
+                    });
+                }
+                vuma_scg::node::NodePayload::ChannelSend(_) | vuma_scg::node::NodePayload::ChannelRecv(_) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Use, at_node: i,
+                    });
+                }
+                vuma_scg::node::NodePayload::ChannelClose(_) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Close, at_node: i,
+                    });
+                }
+                _ => {}
+            }
+        }
+        let results = vuma_ive::borrow_region::verify_linear_channels(&events);
+        if !vuma_ive::borrow_region::all_linear_valid(&results) {
+            for r in &results {
+                if !r.valid {
+                    vuma_log!(warn, "Linear channel violation: {}", r.error.as_deref().unwrap_or("unknown"));
+                }
+            }
+        }
+        timings.push(("linear-check".to_string(), t_linear.elapsed().as_millis() as u64));
+    }
 
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
     let t = Instant::now();
