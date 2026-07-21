@@ -4583,22 +4583,72 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
                             BinOpKind::Mul => {
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                                // MUL R0, R0, R1 → Rd=R0, Rn=0, Rs=R1, Rm=R0
-                                code.extend_from_slice(&encode_mul(
-                                    Condition::Al, false,
-                                    Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
-                                ));
-                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                                // Zero the high word — 32-bit MUL only produces a 32-bit
-                                // result, but stack slots are 8 bytes. Without clearing
-                                // the high word, subsequent 64-bit operations (e.g. pointer
-                                // arithmetic) read garbage from the high word.
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                                )); // MOV R1, #0
-                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                let is_i64 = ty.as_ref().is_some_and(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64));
+                                if is_i64 {
+                                    // 64-bit unsigned multiply (schoolbook) using only
+                                    // caller-saved registers R0, R1, R12, and stack temp slots.
+                                    //
+                                    // 64×64→64 multiply (low 64 bits of the 128-bit product):
+                                    //   result_lo = (lhs_lo * rhs_lo)_lo
+                                    //   result_hi = (lhs_lo * rhs_lo)_hi
+                                    //            + (lhs_hi * rhs_lo)_lo
+                                    //            + (lhs_lo * rhs_hi)_lo
+                                    //
+                                    // We spill intermediate values to stack temp slots at
+                                    // R11-100..R11-120 (offsets -100 to -120 from FP).
+                                    code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, lhs, &vreg_stack_slots));
+                                    code.extend(ss_store_to_slot(Gpr::R0, -100)); // lhs_lo
+                                    code.extend(ss_store_to_slot(Gpr::R1, -104)); // lhs_hi
+                                    code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, rhs, &vreg_stack_slots));
+                                    code.extend(ss_store_to_slot(Gpr::R0, -108)); // rhs_lo
+                                    code.extend(ss_store_to_slot(Gpr::R1, -112)); // rhs_hi
+
+                                    // Step 1: UMULL R1(hi), R0(lo) = lhs_lo * rhs_lo
+                                    code.extend(ss_load_from_slot(Gpr::R0, -100)); // lhs_lo
+                                    code.extend(ss_load_from_slot(Gpr::R12, -108)); // rhs_lo
+                                    // UMULL R1(hi), R0(lo), Rs=R12, Rm=R0  → R1:R0 = R0 * R12
+                                    code.extend_from_slice(&encode_umull(Condition::Al, false, Gpr::R1.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(), Gpr::R0.encoding()));
+                                    code.extend(ss_store_to_slot(Gpr::R0, -116)); // result_lo
+                                    code.extend(ss_store_to_slot(Gpr::R1, -120)); // result_hi
+
+                                    // Step 2: result_hi += (lhs_hi * rhs_lo)_lo
+                                    code.extend(ss_load_from_slot(Gpr::R0, -104)); // lhs_hi
+                                    code.extend(ss_load_from_slot(Gpr::R12, -108)); // rhs_lo
+                                    code.extend_from_slice(&encode_umull(Condition::Al, false, Gpr::R1.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(), Gpr::R0.encoding()));
+                                    // R0 = low word of (lhs_hi * rhs_lo)
+                                    code.extend(ss_load_from_slot(Gpr::R12, -120)); // result_hi
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_ADD, false, Gpr::R12.encoding(), Gpr::R12.encoding(), Gpr::R0.encoding()));
+                                    code.extend(ss_store_to_slot(Gpr::R12, -120)); // store result_hi
+
+                                    // Step 3: result_hi += (lhs_lo * rhs_hi)_lo
+                                    code.extend(ss_load_from_slot(Gpr::R0, -100)); // lhs_lo
+                                    code.extend(ss_load_from_slot(Gpr::R12, -112)); // rhs_hi
+                                    code.extend_from_slice(&encode_umull(Condition::Al, false, Gpr::R1.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(), Gpr::R0.encoding()));
+                                    code.extend(ss_load_from_slot(Gpr::R12, -120)); // result_hi
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_ADD, false, Gpr::R12.encoding(), Gpr::R12.encoding(), Gpr::R0.encoding()));
+
+                                    // Final: R0 = result_lo, R12 = result_hi
+                                    code.extend(ss_load_from_slot(Gpr::R0, -116));
+                                    code.extend(ss_store_64(Gpr::R0, Gpr::R12, dst_offset));
+                                } else {
+                                    // 32-bit multiply (I32 or untyped): MUL R0, R0, R1, zero-high.
+                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                    // MUL R0, R0, R1 → Rd=R0, Rn=0, Rs=R1, Rm=R0
+                                    code.extend_from_slice(&encode_mul(
+                                        Condition::Al, false,
+                                        Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
+                                    ));
+                                    code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                    // Zero the high word — 32-bit MUL only produces a 32-bit
+                                    // result, but stack slots are 8 bytes. Without clearing
+                                    // the high word, subsequent 64-bit operations (e.g. pointer
+                                    // arithmetic) read garbage from the high word.
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                    )); // MOV R1, #0
+                                    code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                }
                             }
                             BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
                                 // 64-bit bitwise op: load both words of lhs and rhs,

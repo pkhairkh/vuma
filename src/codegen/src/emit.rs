@@ -1860,28 +1860,34 @@ impl Emitter {
 
             IRInstr::GetAddress { dst, name } => {
                 let rd = self.resolve_reg(dst)?;
-                // Emit a call to __vuma_getaddr to resolve the symbol at runtime.
-                // Move name hash to X0 as the argument.
-                let name_hash = name
-                    .chars()
-                    .fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
-                self.emit_load_immediate(Register::X0, name_hash as i64)?;
-                let bl_word_idx = self.code.len();
-                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
-                self.call_relocs.push(CallRelocation {
-                    text_byte_offset: bl_byte_offset,
-                    target_func: "__vuma_getaddr".to_string(),
-                });
+                // Emit MOVZ/MOVK sequence to load the 64-bit absolute address
+                // of `name` into a register, with an R_VUMA_GETADDR relocation
+                // so encode_program can patch the 4 immediates with the
+                // function's absolute address (0x400000 + func_offset).
+                //
+                // This matches the stack-slot GetAddress path (line ~4946) and
+                // the x86_64 path (mov rax, imm64 + R_X86_64_64). The previous
+                // implementation emitted `BL __vuma_getaddr` — a call to a
+                // runtime stub that does NOT exist, causing SIGILL on aarch64
+                // when driver_isolation used a function pointer (Wave 49).
+                //
+                // We use X9 as the scratch register (matching the stack-slot
+                // path), then MOV X9 → rd if needed.
+                let reloc_offset = (self.code.len() as u64) * 4;
+                // emit_load_immediate emits MOVZ + up to 3 MOVK for a 64-bit
+                // value; we pass 0x1111111111111111 as a placeholder so the
+                // encoder emits all 4 instructions (MOVZ + 3 MOVK), giving
+                // encode_program 16 bytes to patch.
+                self.emit_load_immediate(Register::X9, 0x1111111111111111)?;
                 self.relocations.push(RelocationEntry {
-                    offset: bl_byte_offset,
-                    symbol: "__vuma_getaddr".to_string(),
-                    reloc_type: "R_AARCH64_CALL26".to_string(),
+                    offset: reloc_offset,
+                    symbol: name.clone(),
+                    reloc_type: "R_VUMA_GETADDR".to_string(),
                 });
-                self.emit_instruction(Instruction::BL { offset: 0 })?;
-                if rd != Register::X0 {
+                if rd != Register::X9 {
                     self.emit_instruction(Instruction::MOV {
                         rd,
-                        rm: Register::X0,
+                        rm: Register::X9,
                     })?;
                 }
             }

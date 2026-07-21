@@ -3509,7 +3509,18 @@ impl Backend for AArch64Backend {
                             None
                         });
                     if let Some(target_offset) = target_offset {
-                        let abs_addr = 0x400000u64 + target_offset as u64;
+                        // The code blob (`all_code`) is placed at file offset
+                        // `text_offset` (= 0xe8 = ELF header + 3 phdrs) in the
+                        // final ELF, with VirtAddr = base_addr + text_offset =
+                        // 0x4000e8. So the absolute virtual address of a
+                        // function at `target_offset` within `all_code` is:
+                        //   0x400000 + 0xe8 + target_offset = 0x4000e8 + target_offset
+                        // The previous code used `0x400000 + target_offset`
+                        // which pointed into the ELF header, causing CallIndirect
+                        // (Wave 49 driver_isolation) to jump to address 0 and
+                        // SIGILL. This fix adds the text_offset (0xe8).
+                        const TEXT_OFFSET: u64 = 64 + 3 * 56; // = 0xe8
+                        let abs_addr = 0x400000u64 + TEXT_OFFSET + target_offset as u64;
                         // Patch 4 instructions at abs_offset..abs_offset+16
                         if abs_offset + 16 <= all_code.len() {
                             // MOVZ X9, #imm16 (bits 0-15)
