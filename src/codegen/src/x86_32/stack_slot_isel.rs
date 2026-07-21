@@ -1106,7 +1106,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                         code.extend(store_mem_zero(dst_off + 4));
-                    } else if is_64bit && matches!(rhs, IRValue::Immediate(n) if *n > 32 && *n < 64) {
+                    } else if is_64bit && matches!(rhs, IRValue::Immediate(n) if *n > 32 && *n < 64)
+                        && matches!(op, BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA)
+                    {
                         // 64-bit shift by N > 32 (immediate): cross-word shift
                         let n = if let IRValue::Immediate(n) = rhs { *n } else { 0 };
                         let shift = (n - 32) as u32;
@@ -3341,7 +3343,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     );
                     // Save EBX (callee-saved, outermost).
                     code.extend(encode_push(Gpr::Rbx));
-                    // i386 syscall arg registers (args 1-5).
+                    // i386 syscall arg registers (args 1-6).
+                    // i386 ABI: args in EBX, ECX, EDX, ESI, EDI, EBP.
+                    // EBP is the frame pointer, so we save/restore it when
+                    // a 6th arg is needed (e.g. mmap2 which takes 6 args).
                     let syscall_arg_regs =
                         [Gpr::Rbx, Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi];
                     let num_reg_args = args.len().min(syscall_arg_regs.len());
@@ -3351,10 +3356,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     for (i, arg) in args.iter().take(num_reg_args).enumerate() {
                         code.extend(load_value(arg, syscall_arg_regs[i]));
                     }
+                    // 6th arg: save EBP, load arg6 into EBP, syscall, restore EBP.
+                    // This is required for mmap2 (6 args). EBP is the frame
+                    // pointer — the kernel saves it before using it for the
+                    // syscall arg, but we must restore it after to keep our
+                    // stack frame intact.
+                    let has_6th_arg = args.len() > 5;
+                    if has_6th_arg {
+                        code.extend(encode_push(Gpr::Rbp));
+                        if let Some(arg6) = args.get(5) {
+                            code.extend(load_value(arg6, Gpr::Rbp));
+                        }
+                    }
                     // MOV EAX, nr  (syscall number)
                     code.extend(encode_mov_reg_imm32(Gpr::Rax, native_nr as i32));
                     // INT 0x80
                     code.extend(encode_syscall());
+                    // Restore EBP before storing result (store_vreg uses EBP-based addressing)
+                    if has_6th_arg {
+                        code.extend(encode_pop(Gpr::Rbp));
+                    }
                     // Store return value (EAX) to dst's stack slot.
                     // On x86_32, syscall return values are 32-bit (EAX).
                     // The vreg is 64-bit (two 32-bit words). We must store
