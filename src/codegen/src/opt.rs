@@ -256,6 +256,12 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             dst: sv(dst),
             constraints: constraints.clone(),
         },
+        // Wave 49: substitute func_ptr + args of indirect call.
+        IRInstr::CallIndirect { dst, func_ptr, args } => IRInstr::CallIndirect {
+            dst: dst.clone(),
+            func_ptr: sv(func_ptr),
+            args: args.iter().map(sv).collect(),
+        },
     }
 }
 

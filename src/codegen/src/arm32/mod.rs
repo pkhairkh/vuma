@@ -8397,7 +8397,7 @@ impl Backend for Arm32Backend {
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     crate::ir::IRInstr::ChannelOpen { .. } | crate::ir::IRInstr::ChannelSend { .. }
-                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::ChannelClose { .. }
+                    | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::CallIndirect { .. } | crate::ir::IRInstr::ChannelClose { .. }
                 // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
                 | crate::ir::IRInstr::StarkProof { .. } => Vec::new(),
                 };

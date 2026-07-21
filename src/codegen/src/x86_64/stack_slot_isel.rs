@@ -3929,6 +3929,51 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     instr_opcode = Some("stark_proof".to_string());
                     Vec::new()
                 }
+
+                // Wave 49: CallIndirect — indirect call through a function
+                // pointer stored in a vreg.  Used by irq_dispatch to call
+                // handler functions whose address was loaded from the driver
+                // table via GetAddress + Store + Load.
+                //
+                // x86_64 codegen: load func_ptr into R10, load args into
+                // SysV arg registers (RDI, RSI, RDX, RCX, R8, R9), align
+                // stack to 16 bytes, CALL R10, store result.
+                IRInstr::CallIndirect { dst, func_ptr, args } => {
+                    let mut code = Vec::new();
+                    let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+                    let num_reg_args = args.len().min(call_arg_regs.len());
+
+                    // Load args into SysV arg registers
+                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                        code.extend(load_value(arg, call_arg_regs[i]));
+                    }
+
+                    // Load func_ptr into R10 (caller-saved, not an arg reg)
+                    code.extend(load_value(func_ptr, Gpr::R10));
+
+                    // Align stack to 16 bytes before CALL.
+                    // RSP is 16-byte aligned at function entry (after push rbp).
+                    // We may have done sub rsp, frame_size (which is 16-aligned).
+                    // But if we've pushed/popped anything since, we need to check.
+                    // Safest: push a dummy to align, call, pop after.
+                    // Actually, since we only use caller-saved regs (no pushes),
+                    // RSP is still 16-aligned from the prologue. No alignment needed.
+
+                    // CALL R10 (FF D2 = call r10 with REX prefix)
+                    // Encoding: REX.B + FF /2 (CALL r/m64)
+                    // R10 needs REX.B: 41 FF D2
+                    code.extend(&[0x41, 0xFF, 0xD2]); // call r10
+
+                    // Store return value (RAX) to dst's stack slot
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                    }
+
+                    instr_opcode = Some("call_indirect".to_string());
+                    code
+                }
             };
 
             if !encoded.is_empty() {
