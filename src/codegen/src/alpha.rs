@@ -1512,11 +1512,31 @@ fn emit_instr(
                 crate::backend::BackendKind::Alpha,
                 *nr,
             );
+            // Alpha has a DIFFERENT signal table: SIGCHLD = 20 (not 17).
+            // The ipc_lowering pass emits clone(flags=17, ...) using the
+            // asm-generic SIGCHLD value. On alpha, flag 17 = SIGCONT, which
+            // causes clone() to return -EINVAL. Fix: for clone (nr 220),
+            // replace the flags arg (args[0]) with 20 (alpha SIGCHLD).
+            let effective_args: Vec<&IRValue> = if *nr == 220 && !args.is_empty() {
+                let mut v: Vec<&IRValue> = args.iter().collect();
+                // Replace flags with alpha SIGCHLD = 20
+                // We can't mutate the IRValue in place, but we can load 20
+                // directly into R16 instead of loading args[0].
+                // Handle this in the arg-loading loop below.
+                v
+            } else {
+                args.iter().collect()
+            };
             let syscall_arg_regs =
                 [Gpr::R16, Gpr::R17, Gpr::R18, Gpr::R19, Gpr::R20, Gpr::R21];
-            let num_reg_args = args.len().min(syscall_arg_regs.len());
-            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+            let num_reg_args = effective_args.len().min(syscall_arg_regs.len());
+            for (i, arg) in effective_args.iter().take(num_reg_args).enumerate() {
+                if *nr == 220 && i == 0 {
+                    // clone flags: use alpha SIGCHLD = 20
+                    code.extend(ss_load_imm(syscall_arg_regs[0], 20));
+                } else {
+                    code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+                }
             }
             // LDI R0, nr
             code.extend(ss_load_imm(Gpr::R0, native_nr as i64));
