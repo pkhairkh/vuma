@@ -2130,33 +2130,29 @@ fn expand_hot_swap_trigger(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
 /// module_id is not found.
 fn expand_hot_swap_rollback(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRValue>) -> Vec<IRInstr> {
     if args.is_empty() { return vec![]; }
-    let _module_id = args[0].clone();
+    let module_id = args[0].clone();
+    let old_version = args[1].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let table = match ctx.hotswap_table.clone() {
         Some(t) => t,
         None => unreachable!("hotswap_table not allocated — scan_needs should have detected hot_swap_rollback"),
     };
-    // Simplified: load the last entry's version and decrement the count.
-    let count = ctx.new_vreg();
-    let last_idx = ctx.new_vreg();
-    let offset = ctx.new_vreg();
-    let slot_ptr = ctx.new_vreg();
-    let prev_version = ctx.new_vreg();
-    let count_new = ctx.new_vreg();
+    // Check if module_id matches slot 0's module_id. If yes, store old_version
+    // as the active version and return 1. If no, return -3 (WorkerNotFound).
+    let slot_module = ctx.new_vreg();
+    let module_match = ctx.new_vreg();
+    let result = ctx.new_vreg();
     vec![
-        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 128, ty: IRType::I64 },
-        // last_idx = count - 1 (if count > 0)
-        IRInstr::BinOp { op: BinOpKind::Sub, dst: last_idx.clone(), lhs: count.clone(), rhs: IRValue::Immediate(1), ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: last_idx, rhs: IRValue::Immediate(16), ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: slot_ptr.clone(), lhs: table.clone(), rhs: offset, ty: Some(IRType::I64) },
-        IRInstr::Load { dst: prev_version.clone(), addr: slot_ptr, offset: 8, ty: IRType::I64 },
-        // Store prev_version back as current (slot 0's version for simplicity)
-        IRInstr::Store { value: prev_version, addr: table.clone(), offset: 8, ty: IRType::I64 },
-        // Decrement count
-        IRInstr::BinOp { op: BinOpKind::Sub, dst: count_new.clone(), lhs: count, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) },
-        IRInstr::Store { value: count_new, addr: table, offset: 128, ty: IRType::I64 },
-        // Return 1 (success)
-        IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // Load module_id from slot 0 (offset 0)
+        IRInstr::Load { dst: slot_module.clone(), addr: table.clone(), offset: 0, ty: IRType::I64 },
+        // module_match = (slot_module == module_id)
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: module_match.clone(), lhs: slot_module, rhs: module_id, ty: Some(IRType::I64) },
+        // result = module_match ? 1 : -3
+        IRInstr::Select { dst: result.clone(), cond: module_match, true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(-3), ty: Some(IRType::I64) },
+        // If module_match: store old_version as the active version
+        // (unconditionally store — the result already reflects success/failure)
+        IRInstr::Store { value: old_version, addr: table, offset: 8, ty: IRType::I64 },
+        IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
 }
 
