@@ -1,0 +1,18 @@
+// cap_flow — Wave 34: capability flow verification
+// Verifies that capability tokens flow correctly between processes.
+// The parent grants a capability, sends with it, and the child receives.
+// Expected exit code: 42
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        x = channel_recv(ch);
+        channel_close(ch);
+        return x;
+    }
+    cap = capability_grant(7, 3);
+    channel_send_cap(ch, 42, cap);
+    status = wait_worker(pid);
+    channel_close(ch);
+    return status;
+}

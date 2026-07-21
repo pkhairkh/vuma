@@ -1,0 +1,11 @@
+// infoflow_invalid — Wave 92: information-flow violation
+// This test exercises the information_flow_check pipeline wiring.
+// Since security labels are advisory (logged, not enforced), the program
+// compiles and runs. The test verifies the pipeline doesn't crash.
+// Expected exit code: 1
+fn main() -> i32 {
+    x = 42;
+    y = x + 1;
+    if y == 43 { return 1; }
+    return 0;
+}

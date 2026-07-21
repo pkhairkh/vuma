@@ -1,0 +1,13 @@
+// linear_invalid — Wave 95: linear-type violation
+// This test exercises the linear_check pipeline wiring.
+// Variables are used multiple times (linear violations), but since
+// linear_check is advisory (logs warnings, doesn't abort), the program
+// still compiles and runs. The test verifies the pipeline doesn't crash.
+// Expected exit code: 1
+fn main() -> i32 {
+    x = 10;
+    y = x + 1;
+    z = x + 2;
+    if y + z == 23 { return 1; }
+    return 0;
+}
