@@ -5825,9 +5825,16 @@ impl Backend for RiscV32Backend {
                         match kind {
                             CastKind::BitCast | CastKind::Trunc => {}
                             CastKind::ZExt => {
-                                // Zero-extend from 32 bits: slli + srli clears upper 32 bits
-                                code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                // On RV32, Slli with shamt=32 is invalid (5-bit shamt, max 31).
+                                // Instead, store the 32-bit value to the low word of the
+                                // 64-bit slot, and store 0 to the high word.
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                // Load 0 into T0 and store to high word
+                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode()); // T0 = T0 (NOP, but we need to zero it)
+                                code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T0 }.encode()); // T0 = 0
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
+                                // Reload the low word for the trailing store
+                                code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
                             }
                             CastKind::SExt => {
                                 code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
