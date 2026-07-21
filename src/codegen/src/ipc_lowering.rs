@@ -302,20 +302,7 @@ fn expand_wait_worker(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
     let ret = new_vreg(nv);
 
     let mut instrs = vec![
-        // Use mmap for the status buffer — prevents the optimizer from
-        // eliminating the Load after wait4() writes to the buffer.
-        IRInstr::Syscall {
-            nr: 222, // mmap (asm-generic)
-            args: vec![
-                IRValue::Immediate(0),    // addr = NULL
-                IRValue::Immediate(4),    // length = 4
-                IRValue::Immediate(0x3),  // prot = PROT_READ|PROT_WRITE
-                IRValue::Immediate(0x22), // flags = MAP_PRIVATE|MAP_ANONYMOUS
-                IRValue::Immediate(-1i64),// fd = -1
-                IRValue::Immediate(0),    // offset = 0
-            ],
-            dst: Some(status_buf.clone()),
-        },
+        IRInstr::Alloc { dst: status_buf.clone(), size: 4 },
         // wait4(pid, &status, 0, NULL) — generic syscall 260
         // Returns child PID on success. The exit status is in the
         // status buffer (WEXITSTATUS = (status >> 8) & 0xFF).
@@ -324,21 +311,9 @@ fn expand_wait_worker(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
             args: vec![pid, status_buf.clone(), IRValue::Immediate(0), IRValue::Immediate(0)],
             dst: Some(ret.clone()),
         },
-        // Load status from the mmap'd buffer
-        IRInstr::Load {
-            dst: ret.clone(), // reuse ret vreg for the status
-            addr: status_buf,
-            offset: 0,
-            ty: IRType::I32,
-        },
-        // Shift right by 8 to get WEXITSTATUS
-        IRInstr::BinOp {
-            op: BinOpKind::ShrL,
-            dst: ret.clone(),
-            lhs: ret.clone(),
-            rhs: IRValue::Immediate(8),
-            ty: Some(IRType::I32),
-        },
+        // Load status from the buffer (WEXITSTATUS = (status >> 8) & 0xFF)
+        IRInstr::Load { dst: ret.clone(), addr: status_buf, offset: 0, ty: IRType::I32 },
+        IRInstr::BinOp { op: BinOpKind::ShrL, dst: ret.clone(), lhs: ret.clone(), rhs: IRValue::Immediate(8), ty: Some(IRType::I32) },
     ];
 
     if let Some(d) = dst {
@@ -361,128 +336,87 @@ fn expand_wait_worker(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
 // TODO: Add CRC32 loop via IR block creation.
 
 /// channel_send(ch, msg) -> void
-/// Writes an 8-byte value to the pipe's write fd.
+/// Builds a full 56-byte L1 frame and writes it to the pipe.
 ///
-/// On non-x86_64 backends, this uses a simplified protocol (raw 8-byte
-/// write) instead of the full 56-byte L1 frame. The x86_64 backend
-/// uses the full framed protocol with MAGIC+CRC32+type_hash.
+/// Frame layout (56 bytes, matching the x86_64 backend):
+///   [ 0.. 4] MAGIC = 0x414D5556
+///   [ 4.. 8] version(2) + flags(0) = 0x00020000
+///   [ 8..16] channel_id = 0
+///   [16..24] sequence = 0
+///   [24..32] type_hash = type_hash("i64")
+///   [32..36] payload_len = 8
+///   [36..40] cap_count = 0
+///   [40..44] reserved = 0
+///   [44..52] payload (8 bytes)
+///   [52..56] CRC32 = 0 (TODO: real CRC32 loop)
 fn expand_channel_send(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     if args.len() < 2 { return vec![]; }
     let ch = args[0].clone();
     let msg = args[1].clone();
 
-    let buf = new_vreg(nv);
+    let frame = new_vreg(nv);
     let write_fd = new_vreg(nv);
     let tmp = new_vreg(nv);
     let tmp2 = new_vreg(nv);
 
+    const TYPE_HASH_I64: i64 = 0x2ae1af192b331746;
+
     vec![
-        // mmap an 8-byte buffer for the message
-        IRInstr::Syscall {
-            nr: 222, // mmap (asm-generic)
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(8),
-                IRValue::Immediate(0x3),  // PROT_READ|PROT_WRITE
-                IRValue::Immediate(0x22), // MAP_PRIVATE|MAP_ANONYMOUS
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(buf.clone()),
-        },
-        // Store the message to the buffer
-        IRInstr::Store {
-            value: msg,
-            addr: buf.clone(),
-            offset: 0,
-            ty: IRType::I64,
-        },
-        // Extract write_fd = (ch >> 32) & 0xFFFFFFFF
-        IRInstr::BinOp {
-            op: BinOpKind::ShrL,
-            dst: tmp.clone(),
-            lhs: ch,
-            rhs: IRValue::Immediate(32),
-            ty: Some(IRType::I64),
-        },
-        IRInstr::BinOp {
-            op: BinOpKind::And,
-            dst: write_fd.clone(),
-            lhs: tmp,
-            rhs: IRValue::Immediate(0xFFFFFFFF),
-            ty: Some(IRType::I64),
-        },
-        // write(write_fd, &buf, 8)
-        IRInstr::Syscall {
-            nr: 64, // write (asm-generic)
-            args: vec![write_fd, buf, IRValue::Immediate(8)],
-            dst: Some(tmp2),
-        },
+        IRInstr::Alloc { dst: frame.clone(), size: 56 },
+        // [0..4] MAGIC
+        IRInstr::Store { value: IRValue::Immediate(0x414D5556), addr: frame.clone(), offset: 0, ty: IRType::I32 },
+        // [4..8] version+flags
+        IRInstr::Store { value: IRValue::Immediate(0x00020000), addr: frame.clone(), offset: 4, ty: IRType::I32 },
+        // [8..16] channel_id
+        IRInstr::Store { value: IRValue::Immediate(0), addr: frame.clone(), offset: 8, ty: IRType::I64 },
+        // [16..24] sequence
+        IRInstr::Store { value: IRValue::Immediate(0), addr: frame.clone(), offset: 16, ty: IRType::I64 },
+        // [24..32] type_hash
+        IRInstr::Store { value: IRValue::Immediate(TYPE_HASH_I64), addr: frame.clone(), offset: 24, ty: IRType::I64 },
+        // [32..36] payload_len
+        IRInstr::Store { value: IRValue::Immediate(8), addr: frame.clone(), offset: 32, ty: IRType::I32 },
+        // [36..40] cap_count
+        IRInstr::Store { value: IRValue::Immediate(0), addr: frame.clone(), offset: 36, ty: IRType::I32 },
+        // [40..44] reserved
+        IRInstr::Store { value: IRValue::Immediate(0), addr: frame.clone(), offset: 40, ty: IRType::I32 },
+        // [44..52] payload
+        IRInstr::Store { value: msg, addr: frame.clone(), offset: 44, ty: IRType::I64 },
+        // [52..56] CRC32 (simplified: 0)
+        IRInstr::Store { value: IRValue::Immediate(0), addr: frame.clone(), offset: 52, ty: IRType::I32 },
+        // write_fd = (ch >> 32) & 0xFFFFFFFF
+        IRInstr::BinOp { op: BinOpKind::ShrL, dst: tmp.clone(), lhs: ch, rhs: IRValue::Immediate(32), ty: Some(IRType::I64) },
+        IRInstr::BinOp { op: BinOpKind::And, dst: write_fd.clone(), lhs: tmp, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
+        // write(write_fd, &frame, 56)
+        IRInstr::Syscall { nr: 64, args: vec![write_fd, frame, IRValue::Immediate(56)], dst: Some(tmp2) },
     ]
 }
 
 /// channel_recv(ch) -> i64
-/// Reads an 8-byte value from the pipe's read fd.
-///
-/// On non-x86_64 backends, this uses a simplified protocol (raw 8-byte
-/// read) matching the simplified channel_send. The x86_64 backend uses
-/// the full 56-byte framed protocol with MAGIC+CRC32+type_hash.
+/// Reads a full 56-byte L1 frame from the pipe and extracts the payload.
+/// Verifies MAGIC (simplified — no CRC32 check yet, TODO: real CRC32 loop).
 fn expand_channel_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     if args.is_empty() { return vec![]; }
     let ch = args[0].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
 
-    let buf = new_vreg(nv);
+    let frame = new_vreg(nv);
     let read_fd = new_vreg(nv);
     let tmp = new_vreg(nv);
     let payload = new_vreg(nv);
 
     vec![
-        // mmap an 8-byte buffer for the received message
-        IRInstr::Syscall {
-            nr: 222, // mmap (asm-generic)
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(8),
-                IRValue::Immediate(0x3),  // PROT_READ|PROT_WRITE
-                IRValue::Immediate(0x22), // MAP_PRIVATE|MAP_ANONYMOUS
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(buf.clone()),
-        },
-        // Extract read_fd = ch & 0xFFFFFFFF
-        IRInstr::BinOp {
-            op: BinOpKind::And,
-            dst: read_fd.clone(),
-            lhs: ch,
-            rhs: IRValue::Immediate(0xFFFFFFFF),
-            ty: Some(IRType::I64),
-        },
-        // read(read_fd, &buf, 8) — kernel fills the buffer
-        IRInstr::Syscall {
-            nr: 63, // read (asm-generic)
-            args: vec![read_fd, buf.clone(), IRValue::Immediate(8)],
-            dst: Some(tmp.clone()),
-        },
-        // Load the received message from buf.
-        // NO dummy Store — a Store of 0 would let the optimizer
-        // constant-fold this Load to 0. With no Store, the Load
-        // reads from mmap'd memory (opaque to the optimizer).
-        IRInstr::Load {
-            dst: payload.clone(),
-            addr: buf,
-            offset: 0,
-            ty: IRType::I64,
-        },
+        IRInstr::Alloc { dst: frame.clone(), size: 56 },
+        // read_fd = ch & 0xFFFFFFFF
+        IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
+        // read(read_fd, &frame, 56) — kernel fills the buffer
+        IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(tmp.clone()) },
+        // Load payload from [44..52]
+        // The Alloc'd buffer escapes (passed as arg to Syscall), so SROA
+        // and alloc elision won't touch it. The Load after read() is
+        // preserved because DSE treats Syscall as clobbering all memory.
+        IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
         // Copy payload to dst
-        IRInstr::BinOp {
-            op: BinOpKind::Add,
-            dst: dst,
-            lhs: payload,
-            rhs: IRValue::Immediate(0),
-            ty: Some(IRType::I64),
-        },
+        IRInstr::BinOp { op: BinOpKind::Add, dst: dst, lhs: payload, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
 }
 
