@@ -1670,8 +1670,11 @@ fn emit_instr(
         IRInstr::Syscall { nr, args, dst } => {
             // m68k Linux syscall: args in D1-D5, nr in D0,
             // `trap #0`, result in D0.
-            // Translate VUMA-generic (asm-generic) syscall number to the
-            // backend's native numbering. TODO(P1-b): per-arch table.
+            // m68k has only 5 arg registers (D1-D5). The 6th arg (if any)
+            // is passed on the stack at 4(%sp). This affects mmap2 which
+            // takes 6 args: (addr, length, prot, flags, fd, offset).
+            // The offset (6th arg) is always 0 for anonymous mmap, so we
+            // push 0 onto the stack before the trap.
             let native_nr = crate::syscall_abi::translate_or_warn(
                 crate::backend::BackendKind::M68k,
                 *nr,
@@ -1682,10 +1685,26 @@ fn emit_instr(
             for (i, arg) in args.iter().take(num_reg_args).enumerate() {
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
+            // If there are more than 5 args, push the 6th onto the stack.
+            // m68k Linux passes the 6th syscall arg at 4(%sp).
+            if args.len() > 5 {
+                // PEA (push effective address) of the 6th arg value.
+                // Simpler: MOVE.L #imm, -(SP) for immediates, or
+                // MOVE.L value, -(SP) for registers.
+                if let Some(arg6) = args.get(5) {
+                    code.extend(ss_load_value(arg6, vreg_stack_slots, Gpr::D0));
+                    // MOVE.L D0, -(SP)  — push D0 onto stack
+                    code.extend_from_slice(&[0x2F, 0x00]); // 0x2F00 = MOVE.L D0, -(SP)
+                }
+            }
             // MOVEQ #nr, D0  (or ss_load_imm for large numbers)
             code.extend(ss_load_imm(Gpr::D0, native_nr as i64));
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
+            // Clean up stack if we pushed the 6th arg: ADDQ.L #4, SP
+            if args.len() > 5 {
+                code.extend_from_slice(&[0x58, 0x8F]); // 0x588F = ADDQ.L #4, SP
+            }
             // Store result (D0) to dst's stack slot
             if let Some(d) = dst {
                 let dst_id = d.as_register().unwrap_or(0);
