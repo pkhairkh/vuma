@@ -4809,7 +4809,14 @@ pub fn run_ir_pipeline(
         // that is more complete (real CRC32, type_hash, cap sigs, etc.)
         if backend_kind != vuma_codegen::backend::BackendKind::X86_64 {
             for func in &mut ir_program.functions {
+                eprintln!("[DEBUG ipc_lowering] func={} before: {} instrs", func.name, func.blocks.iter().map(|b| b.instructions.len()).sum::<usize>());
                 vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
+                eprintln!("[DEBUG ipc_lowering] func={} after:  {} instrs", func.name, func.blocks.iter().map(|b| b.instructions.len()).sum::<usize>());
+                for b in &func.blocks {
+                    for i in &b.instructions {
+                        eprintln!("[DEBUG ipc_lowering]   {:?}", i);
+                    }
+                }
             }
         }
         timings.push(("ipc-lowering".to_string(), tipc.elapsed().as_millis() as u64));
