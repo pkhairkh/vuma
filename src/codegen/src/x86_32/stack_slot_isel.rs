@@ -3326,10 +3326,28 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_mov_reg_imm32(Gpr::Rax, native_nr as i32));
                     // INT 0x80
                     code.extend(encode_syscall());
-                    // Store return value (EAX) to dst's stack slot
+                    // Store return value (EAX) to dst's stack slot.
+                    // On x86_32, syscall return values are 32-bit (EAX).
+                    // The vreg is 64-bit (two 32-bit words). We must store
+                    // the low word AND zero the high word, otherwise the
+                    // high word contains garbage from a previous operation.
+                    // This is critical: I64 Cmp on the return value (e.g.,
+                    // read_ret <= 0) compares the high word first — if it's
+                    // garbage (e.g., 0xFFFFFFFF), a successful read returning
+                    // 56 bytes would be interpreted as a negative I64 value,
+                    // causing is_closed=true and recv returning -1.
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
-                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                        // Sign-extend or zero-extend based on the return value.
+                        // Linux i386 syscalls return -ERRNO on error (negative
+                        // i32) or a positive value on success. For I64
+                        // correctness, we sign-extend: if EAX is negative
+                        // (error), the high word should be 0xFFFFFFFF; if
+                        // positive, 0x00000000.
+                        // CDQ instruction: sign-extends EAX into EDX.
+                        code.extend(&[0x99]); // CDQ
+                        code.extend(store_vreg_hi(dst_id, Gpr::Rdx));
                     }
                     // Restore EBX
                     code.extend(encode_pop(Gpr::Rbx));
