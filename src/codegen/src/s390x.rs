@@ -2044,10 +2044,19 @@ fn emit_instr(
                 crate::backend::BackendKind::S390X,
                 *nr,
             );
+            // s390x clone() has a DIFFERENT argument order than asm-generic:
+            //   asm-generic: clone(flags, child_stack, parent_tid, tls, child_tid)
+            //   s390x:       clone(child_stack, flags, parent_tid, child_tid, tls)
+            // The ipc_lowering pass emits asm-generic order. Reorder for s390x.
+            let effective_args: Vec<&IRValue> = if *nr == 220 && args.len() >= 5 {
+                vec![&args[1], &args[0], &args[2], &args[4], &args[3]]
+            } else {
+                args.iter().collect()
+            };
             let syscall_arg_regs =
                 [Gpr::R2, Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7];
-            let num_reg_args = args.len().min(syscall_arg_regs.len());
-            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+            let num_reg_args = effective_args.len().min(syscall_arg_regs.len());
+            for (i, arg) in effective_args.iter().take(num_reg_args).enumerate() {
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
             // LGFI R1, nr
