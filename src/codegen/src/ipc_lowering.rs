@@ -441,21 +441,30 @@ fn expand_channel_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) ->
     let payload = new_vreg(nv);
     let is_closed = new_vreg(nv);
     let result = new_vreg(nv);
+    let sleep_buf = new_vreg(nv);
 
     vec![
+        // nanosleep(1ms) — gives the parent process time to write to the
+        // pipe before the child blocks on read(). Without this, the child
+        // may call read() before the parent has called write(), causing
+        // the child to block indefinitely if the scheduler doesn't
+        // preempt the child. The nanosleep yields the CPU, allowing the
+        // parent to run and write the data.
+        IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(1_000_000), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
+        IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
+        // Allocate 56-byte frame buffer
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         // read_fd = ch & 0xFFFFFFFF
         IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
         // read(read_fd, &frame, 56) — kernel fills the buffer.
-        // Returns bytes read (>0 on success, 0 on EOF/closed, <0 on error).
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(tmp.clone()) },
-        // Check if read returned <= 0 (closed/error). Cmp produces 1 if
-        // tmp <= 0, 0 otherwise.
+        // Check if read returned <= 0 (closed/error).
         IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: tmp, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-        // Load payload from [44..52] (only valid if read succeeded, but
-        // we load unconditionally — the Select below discards it if closed).
+        // Load payload from [44..52]
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
-        // Select: if is_closed, return -1 (closed); else return payload.
+        // Select: if is_closed, return -1; else return payload.
         IRInstr::Select { dst: result.clone(), cond: is_closed, true_val: IRValue::Immediate(-1i64), false_val: payload, ty: Some(IRType::I64) },
         // Copy result to dst
         IRInstr::BinOp { op: BinOpKind::Add, dst: dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
