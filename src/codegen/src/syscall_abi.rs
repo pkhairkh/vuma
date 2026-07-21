@@ -101,6 +101,7 @@ pub fn vuma_generic_name(nr: u32) -> Option<&'static str> {
         55 => Some("fchown"),
         56 => Some("openat"),
         57 => Some("close"),
+        59 => Some("pipe2"),
         62 => Some("lseek"),
         78 => Some("readlinkat"),
         79 => Some("newfstatat"),
@@ -149,6 +150,7 @@ pub fn vuma_generic_name(nr: u32) -> Option<&'static str> {
         164 => Some("setrlimit"),
         165 => Some("getrusage"),
         166 => Some("umask"),
+        167 => Some("prctl"),
         169 => Some("gettimeofday"),
         172 => Some("getpid"),
         173 => Some("getppid"),
@@ -593,6 +595,7 @@ fn translate_mips64(generic_nr: u32) -> Option<u32> {
         55 => Some(5091),  // fchown
         56 => Some(5247),  // openat
         57 => Some(5003),  // close
+        59 => Some(5287),  // pipe2
         61 => Some(5308),  // getdents64
         62 => Some(5008),  // lseek
         63 => Some(5000),  // read
@@ -640,6 +643,7 @@ fn translate_mips64(generic_nr: u32) -> Option<u32> {
         164 => Some(5155),  // setrlimit
         165 => Some(5096),  // getrusage
         166 => Some(5093),  // umask
+        167 => Some(5153),  // prctl
         169 => Some(5094),  // gettimeofday
         172 => Some(5038),  // getpid
         173 => Some(5108),  // getppid
@@ -713,6 +717,7 @@ fn translate_powerpc64(generic_nr: u32) -> Option<u32> {
         55 => Some(95),  // fchown
         56 => Some(286),  // openat
         57 => Some(6),  // close
+        59 => Some(317),  // pipe2
         61 => Some(202),  // getdents64
         62 => Some(19),  // lseek
         63 => Some(3),  // read
@@ -760,6 +765,7 @@ fn translate_powerpc64(generic_nr: u32) -> Option<u32> {
         164 => Some(75),  // setrlimit
         165 => Some(77),  // getrusage
         166 => Some(60),  // umask
+        167 => Some(171),  // prctl
         169 => Some(78),  // gettimeofday
         172 => Some(20),  // getpid
         173 => Some(64),  // getppid
@@ -833,6 +839,7 @@ fn translate_s390x(generic_nr: u32) -> Option<u32> {
         55 => Some(207),  // fchown
         56 => Some(288),  // openat
         57 => Some(6),  // close
+        59 => Some(325),  // pipe2
         61 => Some(220),  // getdents64
         62 => Some(19),  // lseek
         63 => Some(3),  // read
@@ -880,6 +887,7 @@ fn translate_s390x(generic_nr: u32) -> Option<u32> {
         164 => Some(75),  // setrlimit
         165 => Some(77),  // getrusage
         166 => Some(60),  // umask
+        167 => Some(172),  // prctl
         169 => Some(78),  // gettimeofday
         172 => Some(20),  // getpid
         173 => Some(64),  // getppid
@@ -1075,6 +1083,7 @@ fn translate_alpha(generic_nr: u32) -> Option<u32> {
         55 => Some(123),  // fchown
         56 => Some(450),  // openat
         57 => Some(6),  // close
+        59 => Some(488),  // pipe2
         61 => Some(377),  // getdents64
         62 => Some(19),  // lseek
         63 => Some(3),  // read
@@ -1122,6 +1131,7 @@ fn translate_alpha(generic_nr: u32) -> Option<u32> {
         164 => Some(145),  // setrlimit
         165 => Some(364),  // getrusage
         166 => Some(60),  // umask
+        167 => Some(348),  // prctl
         169 => Some(359),  // gettimeofday
         172 => Some(20),  // getpid
         173 => Some(532),  // getppid
@@ -1194,6 +1204,7 @@ fn translate_hppa(generic_nr: u32) -> Option<u32> {
         55 => Some(95),  // fchown
         56 => Some(275),  // openat
         57 => Some(6),  // close
+        59 => Some(313),  // pipe2
         61 => Some(201),  // getdents64
         62 => Some(19),  // lseek
         63 => Some(3),  // read
@@ -1241,6 +1252,7 @@ fn translate_hppa(generic_nr: u32) -> Option<u32> {
         164 => Some(75),  // setrlimit
         165 => Some(77),  // getrusage
         166 => Some(60),  // umask
+        167 => Some(172),  // prctl
         169 => Some(78),  // gettimeofday
         172 => Some(20),  // getpid
         173 => Some(64),  // getppid
@@ -1313,6 +1325,7 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         55 => Some(95),  // fchown
         56 => Some(288),  // openat
         57 => Some(6),  // close
+        59 => Some(327),  // pipe2
         61 => Some(220),  // getdents64
         62 => Some(19),  // lseek
         63 => Some(3),  // read
@@ -1360,6 +1373,7 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         164 => Some(75),  // setrlimit
         165 => Some(77),  // getrusage
         166 => Some(60),  // umask
+        167 => Some(172),  // prctl
         169 => Some(78),  // gettimeofday
         172 => Some(20),  // getpid
         173 => Some(64),  // getppid
