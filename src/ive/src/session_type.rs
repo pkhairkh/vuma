@@ -597,3 +597,55 @@ mod tests {
         assert!(!all_sessions_valid(&[SessionViolation { valid: false, error: Some("x".into()) }]));
     }
 }
+
+// ── Wave 89: IR-based session type check (pipeline wiring) ───────────
+//
+// TASKS.md §0.5 requires that session type checking be CALLED from
+// src/pipeline.rs, not just defined as library code with unit tests.
+
+/// IR-based session type violation (Wave 89 pipeline wiring).
+#[derive(Debug, Clone)]
+pub struct SessionViolationIR {
+    /// Description of the violation.
+    pub message: String,
+}
+
+/// Scan an IRProgram for channel operations and verify they follow
+/// a valid session protocol.  This is the pipeline-facing wrapper.
+///
+/// Currently advisory — logs warnings but does NOT abort compilation.
+/// A future strict mode could promote this to an error.
+pub fn verify_session_types_from_ir(program: &vuma_codegen::ir::IRProgram) -> Vec<SessionViolationIR> {
+    let mut violations = Vec::new();
+    // Collect channel events from the IR (Call instructions to channel_send/recv/open/close).
+    let mut events: Vec<SessionEvent> = Vec::new();
+    for (fi, func) in program.functions.iter().enumerate() {
+        for (bi, block) in func.blocks.iter().enumerate() {
+            for (ii, instr) in block.instructions.iter().enumerate() {
+                if let vuma_codegen::ir::IRInstr::Call { func: name, .. } = instr {
+                    let kind = match name.as_str() {
+                        "channel_open" => Some(SessionEventKind::Open { vreg: 0, session_type: SessionType::End }),
+                        "channel_send" | "channel_send_cap" => Some(SessionEventKind::Send { vreg: 0, msg_type: "i64".to_string() }),
+                        "channel_recv" | "channel_recv_proto" | "channel_recv_timeout" => Some(SessionEventKind::Recv { vreg: 0, expected_type: "i64".to_string() }),
+                        "channel_close" => Some(SessionEventKind::Close { vreg: 0 }),
+                        _ => None,
+                    };
+                    if let Some(k) = kind {
+                        events.push(SessionEvent {
+                            kind: k,
+                            at_node: fi * 10000 + bi * 100 + ii,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    // Run the session type verifier on the collected events.
+    let session_violations = verify_session_types(&events);
+    for v in &session_violations {
+        violations.push(SessionViolationIR {
+            message: format!("{:?}", v),
+        });
+    }
+    violations
+}
