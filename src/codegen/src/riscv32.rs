@@ -5606,7 +5606,14 @@ impl Backend for RiscV32Backend {
                                 }
                             }
                             IRType::I32 | IRType::U32 => {
-                                finalized = false;
+                                // I32 Load: load 4 bytes into T0, store to low word,
+                                // AND zero the high word. This is critical: if the
+                                // high word is left as garbage, a subsequent I64
+                                // operation (e.g. Or with a 64-bit handle) will
+                                // corrupt the result. The channel handle packing
+                                // (write_fd << 32 | read_fd) relies on read_fd's
+                                // high word being zero.
+                                finalized = true;
                                 if off >= -2048 && off <= 2047 {
                                     code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T3, imm: off }.encode());
                                 } else {
@@ -5614,6 +5621,10 @@ impl Backend for RiscV32Backend {
                                     code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
                                     code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::T2, imm: 0 }.encode());
                                 }
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                                // Zero the high word
+                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
                             }
                             IRType::F32 => {
                                 // 4-byte FP load via FLW into F0, then FSW to dst slot.
