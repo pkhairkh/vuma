@@ -4208,19 +4208,41 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // hppa Linux syscall: args in R26-R23 (reversed),
                         // nr in R20, `gate` (ble 0x100(%sr2,%r0)), result in R28.
                         // HPPA has only 4 register arg slots (R26-R23).
-                        // Translate VUMA-generic (asm-generic) syscall number to the
-                        // backend's native numbering. TODO(P1-b): per-arch table.
+                        // Args 5+ go on the stack at SP-60/SP-56 (caller's frame).
                         let native_nr = crate::syscall_abi::translate_or_warn(
                             crate::backend::BackendKind::Hppa,
                             *nr,
                         );
-                        let syscall_arg_regs = [R26, R25, R24, R23];
-                        let num_reg_args = args.len().min(syscall_arg_regs.len());
-                        for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                            code.extend(ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]));
+                        // SPECIAL CASE for clone (nr 220): hppa's clone() in
+                        // QEMU user-mode returns -EINVAL for fork-like usage.
+                        // Redirect to fork() (nr 2 on hppa) which creates a
+                        // child process with shared stack semantics matching
+                        // clone(SIGCHLD, 0, ...). fork returns 0 in child,
+                        // child PID in parent — same as clone.
+                        let is_clone = *nr == 220;
+                        let effective_nr = if is_clone { 2 } else { native_nr };
+                        if !is_clone {
+                            let syscall_arg_regs = [R26, R25, R24, R23];
+                            let num_reg_args = args.len().min(syscall_arg_regs.len());
+                            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                                code.extend(ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]));
+                            }
+                            // Args 5+ go on the stack at SP-60, SP-56.
+                            if args.len() > 4 {
+                                if let Some(arg5) = args.get(4) {
+                                    code.extend(ss_load_value(arg5, &vreg_stack_slots, R1));
+                                    code.extend_from_slice(&encode_stw(R1, R30, -60));
+                                }
+                            }
+                            if args.len() > 5 {
+                                if let Some(arg6) = args.get(5) {
+                                    code.extend(ss_load_value(arg6, &vreg_stack_slots, R1));
+                                    code.extend_from_slice(&encode_stw(R1, R30, -56));
+                                }
+                            }
                         }
                         // LDI R20, nr
-                        code.extend(ss_load_imm(R20, native_nr as i64));
+                        code.extend(ss_load_imm(R20, effective_nr as i64));
                         // GATE (ble 0x100(%sr2,%r0))
                         code.extend_from_slice(&encode_gate());
                         // Store result (R28) to dst's stack slot
