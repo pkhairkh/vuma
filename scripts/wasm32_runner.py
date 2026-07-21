@@ -24,7 +24,7 @@ _current_wasm_path = None
 try:
     from wasmtime import (
         Engine, Store, Module, Linker, Func, FuncType, ValType,
-        Trap, WasiConfig,
+        Trap, WasiConfig, ExitTrap,
     )
 except ImportError:
     print("Error: wasmtime Python package not installed", file=sys.stderr)
@@ -246,9 +246,35 @@ def main():
     # Load the wasm module
     module = Module.from_file(engine, wasm_path)
 
-    # Create a linker with WASI support
+    # Create a linker with WASI support.
+    #
+    # We enable `allow_shadowing` so we can override `wasi_proc_exit` with a
+    # custom Python function.  The default WASI proc_exit raises a wasmtime
+    # `ExitTrap` whose `code` attribute is only populated for exit codes in
+    # [0..126); codes outside that range raise a generic `WasmtimeError`
+    # ("exit with invalid exit status outside of [0..126)"), which loses the
+    # intended exit code.
+    #
+    # By overriding proc_exit with a Python function that raises a custom
+    # exception carrying the exit code as an integer, we can correctly
+    # propagate ANY exit code (0..2**31-1) to the host process, matching
+    # the behavior of native backends whose `exit(N)` works for all N.
+    class _ProcExit(Exception):
+        def __init__(self, code):
+            self.code = code
+
     linker = Linker(engine)
     linker.define_wasi()
+    linker.allow_shadowing = True
+
+    def _vuma_proc_exit(code):
+        raise _ProcExit(code)
+
+    linker.define_func(
+        "wasi_snapshot_preview1", "proc_exit",
+        FuncType([ValType.i32()], []),
+        _vuma_proc_exit,
+    )
 
     # We need the memory to create host functions, but memory is only
     # available after instantiation.  Use a two-pass approach: define
@@ -1076,8 +1102,31 @@ def main():
     # clock_time_get; nanosleep is a new host function (real time.sleep).
     linker.define_func("vuma", "nanosleep", FuncType([i32, i32], [i32]), vuma_nanosleep)
 
-    # Instantiate the module
-    instance = linker.instantiate(store, module)
+    # Instantiate the module.
+    #
+    # The VUMA wasm32 module sets the Wasm start section to `_start`, which
+    # is automatically invoked by wasmtime during instantiation.  `_start`
+    # calls `main()` and passes the return value to our overridden
+    # `proc_exit`, which raises `_ProcExit(code)`.
+    #
+    # We catch `_ProcExit` here so we can propagate the exit code as our
+    # own process exit status.  This works for ALL exit codes (0..2**31-1),
+    # not just [0..126) — matching the behavior of native backends.
+    #
+    # We also catch `ExitTrap` as a fallback for the case where proc_exit
+    # is called from a child context (e.g. fork+exec) that bypasses our
+    # override.
+    try:
+        instance = linker.instantiate(store, module)
+    except _ProcExit as e:
+        sys.exit(e.code & 0xFF)
+    except ExitTrap as e:
+        sys.exit(getattr(e, 'code', 1) & 0xFF)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"Error instantiating module: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Get the memory export
     mem_holder[0] = instance.exports(store)["memory"]
@@ -1091,6 +1140,10 @@ def main():
             if result is not None:
                 sys.exit(result & 0xFF)
             sys.exit(0)
+        except _ProcExit as e:
+            # proc_exit was called from within _vuma_main (e.g. an explicit
+            # exit(N) in the program).  Use its exit code.
+            sys.exit(e.code & 0xFF)
         except SystemExit:
             raise
         except Exception as e:
