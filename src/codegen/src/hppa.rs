@@ -3381,6 +3381,10 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     // Check for 64-bit shift by 32 (unpack high word)
                                     if rhs.as_immediate().map(|v| v == 32).unwrap_or(false) {
                                         // 64-bit ShrL 32: result = high word from TMP64_C_HI
+                                        // TODO: The temp slot coordination between Shl 32 (stores
+                                        // to TMP64_A_HI), Or (stores to TMP64_B_HI), and ShrL 32
+                                        // (reads from TMP64_C_HI) is broken. A full rewrite of
+                                        // the hppa I64 temp slot management is needed.
                                         code.extend_from_slice(&encode_ldw(R3, TMP64_C_HI as i16, S0));
                                     } else {
                                         // Regular shift: SHRPW loop

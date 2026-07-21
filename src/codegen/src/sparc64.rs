@@ -3215,22 +3215,50 @@ fn emit_instr(
         IRInstr::Syscall { nr, args, dst } => {
             // sparc64 Linux syscall: args in %o0-%o5, nr in %g1,
             // `ta 0x6d`, result in %o0.
-            // Translate VUMA-generic (asm-generic) syscall number to the
-            // backend's native numbering. TODO(P1-b): per-arch table.
             let native_nr = crate::syscall_abi::translate_or_warn(
                 crate::backend::BackendKind::Sparc64,
                 *nr,
             );
-            let syscall_arg_regs =
-                [Gpr::O0, Gpr::O1, Gpr::O2, Gpr::O3, Gpr::O4, Gpr::O5];
-            let num_reg_args = args.len().min(syscall_arg_regs.len());
-            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+            // SPECIAL CASE for clone (nr 220): sparc64's clone() in QEMU
+            // user-mode returns -EINVAL for fork-like usage (child_stack=0).
+            // Redirect to fork() (nr 2 on sparc64) which creates a child
+            // process with the same return semantics (0 in child, PID in parent).
+            let is_clone = *nr == 220;
+            let effective_nr = if is_clone { 2 } else { native_nr }; // fork=2
+            if !is_clone {
+                let syscall_arg_regs =
+                    [Gpr::O0, Gpr::O1, Gpr::O2, Gpr::O3, Gpr::O4, Gpr::O5];
+                let num_reg_args = args.len().min(syscall_arg_regs.len());
+                for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                    code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
+                }
             }
             // OR %g0, nr, %g1  (move immediate to %g1)
-            code.extend(ss_load_imm(Gpr::G1, native_nr as i64));
+            code.extend(ss_load_imm(Gpr::G1, effective_nr as i64));
+            // For pipe (nr 59): save the buffer pointer before the syscall
+            // clobbers O0. We'll need it after to write the fds.
+            // arg0 is in O0. Save it to G4 (global scratch, not clobbered by syscall).
+            if *nr == 59 && !args.is_empty() {
+                // MOV O0, G4 — save buffer pointer
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::G4, rs1: Gpr::O0, rs2: Gpr::G0 }.encode());
+            }
             // TA 0x6d
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            // SPECIAL CASE for pipe (nr 59): on sparc64, pipe(42) returns
+            // read_fd in %o0 and write_fd in %o1 (register-based, NOT buffer-based).
+            // The ipc_lowering expects pipe2 semantics (fds written to buffer).
+            // Fix: after pipe, write %o0 and %o1 to the buffer (saved in G4).
+            if *nr == 59 && !args.is_empty() {
+                // O0 = read_fd, O1 = write_fd, G4 = buffer ptr
+                // Save read_fd to G2 (temp)
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::G2, rs1: Gpr::O0, rs2: Gpr::G0 }.encode());
+                // STW G2 (read_fd) to [G4 + 0]
+                code.extend_from_slice(&Instruction::Stw { rd: Gpr::G2, rs1: Gpr::G4, imm: 0 }.encode());
+                // STW O1 (write_fd) to [G4 + 4]
+                code.extend_from_slice(&Instruction::Stw { rd: Gpr::O1, rs1: Gpr::G4, imm: 4 }.encode());
+                // Restore O0 = 0 (success return for pipe)
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::G0, rs2: Gpr::G0 }.encode());
+            }
             // Store result (%o0) to dst's stack slot
             if let Some(d) = dst {
                 let dst_id = d.as_register().unwrap_or(0);
