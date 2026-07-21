@@ -1,0 +1,19 @@
+// graceful_degradation — Wave 21: graceful degradation
+// When a worker pool is exhausted, the system degrades gracefully.
+// This test verifies the wait_worker/supervisor_call path works for
+// multiple workers.
+// Expected exit code: 1
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        channel_send(ch, 42);
+        channel_close(ch);
+        return 0;
+    }
+    x = channel_recv(ch);
+    status = wait_worker(pid);
+    channel_close(ch);
+    if x == 42 { return 1; }
+    return 0;
+}

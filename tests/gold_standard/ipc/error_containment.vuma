@@ -1,0 +1,18 @@
+// error_containment — Wave 20: error containment
+// A child worker crashes (exit with non-zero), the parent detects via
+// wait_worker and handles the error gracefully.
+// Expected exit code: 1
+fn main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child "crashes" by exiting with non-zero
+        return 99;
+    }
+    // Parent waits — wait_worker returns the child's exit code
+    status = wait_worker(pid);
+    channel_close(ch);
+    // Error containment: parent detects child crash and recovers
+    if status == 99 { return 1; }
+    return 0;
+}
