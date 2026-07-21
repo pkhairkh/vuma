@@ -28,6 +28,7 @@ pub fn is_ipc_builtin(name: &str) -> bool {
         | "set_resource_limit" | "set_memory_limit"
         | "supervisor_call"
         | "driver_register" | "driver_call" | "irq_dispatch"
+        | "process_call"
         | "circuit_breaker_call" | "circuit_breaker_reset" | "circuit_breaker_state"
         | "hot_swap_register" | "hot_swap_trigger" | "hot_swap_rollback"
         | "capability_grant" | "capability_delegate"
@@ -134,6 +135,7 @@ fn expand_builtin(
         // ── L4: Driver / IRQ ───────────────────────────────────────────
         "driver_register" => expand_driver_register(args, dst, next_vreg),
         "driver_call" => expand_driver_call(args, dst, next_vreg),
+        "process_call" => expand_process_call(args, dst, next_vreg),
         "irq_dispatch" => expand_irq_dispatch(args, dst, next_vreg),
         // ── L5: Sandbox / resource limits / supervisor ─────────────────
         "sandbox_apply" => expand_sandbox_apply(dst, next_vreg),
@@ -1834,4 +1836,25 @@ fn expand_remote_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
             ty: Some(IRType::I64),
         },
     ]
+}
+
+/// process_call(ch, arg) -> i64
+///
+/// Marshals a foreign-function call across a process boundary via a
+/// channel: sends `arg` as a framed L1 message, then receives the framed
+/// result and extracts the payload. Same as driver_call.
+fn expand_process_call(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
+    if args.len() < 2 { return vec![]; }
+    let ch = args[0].clone();
+    let arg = args[1].clone();
+    let mut instrs = expand_channel_send(&[ch.clone(), arg], nv);
+    // Add a small delay (nanosleep 1ms) to give the child time to process
+    let delay_buf = new_vreg(nv);
+    let delay_ts = new_vreg(nv);
+    instrs.push(IRInstr::Alloc { dst: delay_buf.clone(), size: 16 });
+    instrs.push(IRInstr::Store { value: IRValue::Immediate(0), addr: delay_buf.clone(), offset: 0, ty: IRType::I64 });
+    instrs.push(IRInstr::Store { value: IRValue::Immediate(1_000_000), addr: delay_buf.clone(), offset: 8, ty: IRType::I64 });
+    instrs.push(IRInstr::Syscall { nr: 101, args: vec![delay_buf, IRValue::Immediate(0)], dst: Some(delay_ts) });
+    instrs.extend(expand_channel_recv(&[ch], dst, nv));
+    instrs
 }
