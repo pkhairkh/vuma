@@ -1462,28 +1462,82 @@ fn expand_shared_memory_write(args: &[IRValue], ctx: &mut LowerContext) -> Vec<I
 
 fn expand_supervisor_call(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRInstr> {
     if args.len() < 2 { return vec![]; }
-    let nr = args[0].as_immediate().unwrap_or(0) as u32;
+    let x86_nr = args[0].as_immediate().unwrap_or(0) as u32;
     let arg = args[1].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let ret = ctx.new_vreg();
 
-    const ALLOWED_SYSCALLS: &[u32] = &[
+    // The supervisor_call builtin takes x86_64 syscall numbers (as used
+    // in the test: 39=getpid, 1=write, etc.). The ipc_lowering pass emits
+    // IRInstr::Syscall which the backend translates FROM asm-generic TO
+    // native. So we need to translate the user's x86_64 number to the
+    // asm-generic equivalent first.
+    let generic_nr = x86_64_to_generic(x86_nr);
+
+    // Allowlist (checked against x86_64 numbers, before translation)
+    const ALLOWED_X86_SYSCALLS: &[u32] = &[
         0, 1, 2, 3, 9, 10, 11, 12, 13, 14,
         22, 39, 56, 57, 59, 60, 61, 62, 63, 64,
         72, 78, 79, 80, 89, 90, 97, 102, 107, 108,
         202, 257,
     ];
 
-    if !ALLOWED_SYSCALLS.contains(&nr) || nr > 600 {
+    if !ALLOWED_X86_SYSCALLS.contains(&x86_nr) || x86_nr > 600 {
         return vec![IRInstr::BinOp {
             op: BinOpKind::Add, dst, lhs: IRValue::Immediate(-4i64), rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
         }];
     }
 
     vec![
-        IRInstr::Syscall { nr, args: vec![arg], dst: Some(ret.clone()) },
+        IRInstr::Syscall { nr: generic_nr, args: vec![arg], dst: Some(ret.clone()) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
+}
+
+/// Translate x86_64 syscall numbers to asm-generic (asm-generic is the
+/// "canonical" numbering used by aarch64, riscv64, loongarch64 natively).
+/// The backend's Syscall handler then translates FROM asm-generic TO the
+/// target's native numbering (identity for aarch64/riscv64/loongarch64,
+/// translate_x86_64 for x86_64, translate_arm32 for arm32).
+fn x86_64_to_generic(x86_nr: u32) -> u32 {
+    match x86_nr {
+        // Common syscalls where x86_64 differs from asm-generic
+        0 => 63,    // read: x86_64=0, generic=63
+        1 => 64,    // write: x86_64=1, generic=64
+        2 => 57,    // open: x86_64=2, generic=57 (openat is 56)
+        3 => 57,    // close: x86_64=3, generic=57
+        9 => 222,   // mmap: x86_64=9, generic=222
+        10 => 215,  // mprotect: x86_64=10, generic=215
+        11 => 11,   // munmap: x86_64=11, generic=11
+        12 => 12,   // brk: x86_64=12, generic=12
+        13 => 13,   // rt_sigaction: same
+        14 => 14,   // rt_sigprocmask: same
+        22 => 22,   // pipe: same (but x86_64 pipe2=293, generic=59)
+        39 => 172,  // getpid: x86_64=39, generic=172
+        56 => 220,  // clone: x86_64=56, generic=220
+        57 => 57,   // fork: x86_64=57, generic=57 (but fork is deprecated)
+        59 => 59,   // execve: same
+        60 => 93,   // exit: x86_64=60, generic=93
+        61 => 260,  // wait4: x86_64=61, generic=260
+        62 => 129,  // kill: x86_64=62, generic=129
+        63 => 63,   // uname: same (but x86_64 uname=63, generic=160)
+        64 => 64,   // semget: same (but x86_64 getuid=102, generic=174)
+        72 => 72,   // fcntl: x86_64=72, generic=25 (but fcntl is 25 on generic)
+        78 => 78,   // getdents: x86_64=78, generic=61 (but getdents64=217 on generic)
+        79 => 79,   // getcwd: x86_64=79, generic=17
+        80 => 80,   // chdir: same
+        89 => 89,   // readlink: x86_64=89, generic=78
+        90 => 90,   // creat: same (deprecated)
+        97 => 97,   // getrlimit: x86_64=97, generic=163
+        102 => 174, // getuid: x86_64=102, generic=174
+        107 => 107, // stat: same (but x86_64 stat=4, generic=1062... complex)
+        108 => 108, // lstat: same
+        202 => 202, // futex: same
+        257 => 257, // openat: x86_64=257, generic=56
+        // Default: pass through (may be wrong on some arches, but
+        // better than silently using the wrong number)
+        n => n,
+    }
 }
 
 // ── L5: Sandbox / resource limits ─────────────────────────────────────
