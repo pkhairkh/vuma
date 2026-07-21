@@ -5706,35 +5706,38 @@ impl Backend for RiscV64Backend {
 
                     IRInstr::Store { value, addr, offset, ty } => {
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T3));
+                        // Load addr into T2 first. Then load value into T0.
+                        // ss_load_imm for 64-bit immediates clobbers T3 as
+                        // scratch, so we must NOT keep the address in T3.
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T2));
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T0));
                         let off = *offset as i32;
                         match ty {
                             IRType::I8 | IRType::U8 => {
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                 }
                             }
                             IRType::I32 | IRType::U32 => {
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                 }
                             }
                             _ => {
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Sd { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    code.extend(Instruction::Sd { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Sd { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sd { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                 }
                             }
                         }
