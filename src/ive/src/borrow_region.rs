@@ -777,3 +777,47 @@ mod tests {
         assert!(LinearType::Linear.is_linear());
     }
 }
+
+// ── Wave 95: IR-based linear check (pipeline wiring) ────────────────
+//
+// TASKS.md §0.3 requires that linear_check be CALLED from
+// src/pipeline.rs, not just defined as library code with unit tests.
+// This wrapper adapts the IR to the linear-check by counting how many
+// times each vreg is used (read) across all blocks.
+
+/// IR-based linear-type violation (Wave 95 pipeline wiring).
+#[derive(Debug, Clone)]
+pub struct LinearViolationIR {
+    /// The vreg ID that was used more than once.
+    pub vreg_id: u32,
+    /// The number of times it was used.
+    pub use_count: usize,
+}
+
+/// Scan an IRFunction for vregs used more than once (linear violations).
+///
+/// This is the pipeline-facing wrapper. It counts uses of each vreg
+/// across all instructions in all blocks. A vreg that is used (read)
+/// more than once is a linear violation if it was declared linear.
+///
+/// Note: this is a conservative check — it flags ALL multi-use vregs,
+/// not just those explicitly declared linear. The pipeline logs these
+/// as advisory warnings.
+pub fn linear_check_from_ir(func: &vuma_codegen::ir::IRFunction) -> Vec<LinearViolationIR> {
+    use std::collections::HashMap;
+    let mut use_counts: HashMap<u32, usize> = HashMap::new();
+
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for vreg_id in instr.used_regs() {
+                *use_counts.entry(vreg_id).or_insert(0) += 1;
+            }
+        }
+    }
+
+    use_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(vreg_id, use_count)| LinearViolationIR { vreg_id, use_count })
+        .collect()
+}
