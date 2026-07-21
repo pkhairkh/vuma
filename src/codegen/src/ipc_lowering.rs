@@ -568,14 +568,33 @@ fn expand_shared_memory_write(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
 /// and not reproduced here.
 fn expand_supervisor_call(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     if args.len() < 2 { return vec![]; }
-    // nr must be a compile-time immediate — IRInstr::Syscall takes a
-    // u32 nr, not a runtime IRValue.  If a runtime nr is supplied we
-    // fall back to 0 (which the backend will translate and the kernel
-    // will likely reject).
     let nr = args[0].as_immediate().unwrap_or(0) as u32;
     let arg = args[1].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let ret = new_vreg(nv);
+
+    // The Verified-trust syscall allowlist (same as x86_64's supervisor_call).
+    // Syscalls not in the allowlist are denied: return -4 (PermissionDenied)
+    // without executing the syscall.
+    const ALLOWED_SYSCALLS: &[u32] = &[
+        0, 1, 2, 3, 9, 10, 11, 12, 13, 14,
+        22, 39, 56, 57, 59, 60, 61, 62, 63, 64,
+        72, 78, 79, 80, 89, 90, 97, 102, 107, 108,
+        202, 257,
+    ];
+
+    if !ALLOWED_SYSCALLS.contains(&nr) || nr > 600 {
+        // Forbidden syscall — return -4 (PermissionDenied)
+        return vec![
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: dst,
+                lhs: IRValue::Immediate(-4i64),
+                rhs: IRValue::Immediate(0),
+                ty: Some(IRType::I64),
+            },
+        ];
+    }
 
     vec![
         IRInstr::Syscall {
@@ -584,20 +603,16 @@ fn expand_supervisor_call(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32)
             dst: Some(ret.clone()),
         },
         IRInstr::BinOp {
-
             op: BinOpKind::Add,
-
             dst: dst,
-
             lhs: ret,
-
             rhs: IRValue::Immediate(0),
-
             ty: Some(IRType::I64),
-
         },
     ]
 }
+
+// ── L5: Driver isolation ──
 
 // ── L7: Circuit breaker (simplified) ─────────────────────────────────
 
