@@ -54,7 +54,7 @@ fn main() {
         println!("\n--- Function: {} (params={:?} returns={:?}) ---",
             func.name, func.param_types, func.result_types);
         for (i, bb) in func.blocks.iter().enumerate() {
-            println!("  bb{}: preds={:?}", i, bb.predecessors);
+            println!("  bb{}: label={:?} preds={:?}", i, bb.label, bb.predecessors);
             for instr in &bb.instructions {
                 println!("    {:?}", instr);
             }
@@ -74,3 +74,4 @@ fn main() {
         }
     }
 }
+// placeholder
