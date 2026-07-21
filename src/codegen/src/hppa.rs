@@ -3513,10 +3513,10 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 CmpKind::Eq => {
                                     // Eq = (hi_eq AND lo_eq). S2=1; if hi!=0, S2=0; if lo!=0, S2=0.
                                     let hi_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, false, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     let lo_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, false, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     code.extend_from_slice(&encode_ldi(0, S2));
                                     let done = code.len() as i64;
@@ -3531,10 +3531,10 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     // Ne = (hi!=0 OR lo!=0). S2=0; if hi!=0, S2=1; if lo!=0, S2=1.
                                     code.extend_from_slice(&encode_ldi(0, S2));
                                     let hi_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, false, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     let lo_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, false, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     let done = code.len() as i64;
                                     for &off in &[hi_ne, lo_ne] {
@@ -3607,8 +3607,8 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));  // S1 = rhs
                             code.extend_from_slice(&encode_ldi(1, S0));  // S0 = 1 (default)
                             let (cond_code, inverted) = match kind {
-                                CmpKind::Eq => (0b001, false),
-                                CmpKind::Ne => (0b001, true),
+                                CmpKind::Eq => (0b000, false),  // = (equal): branch if equal → S0 stays 1 (true)
+                                CmpKind::Ne => (0b001, false),  // <> (not equal): branch if not equal → S0 stays 1 (true)
                                 CmpKind::SLt => (0b010, false),
                                 CmpKind::SLe => (0b011, false),
                                 CmpKind::SGt => (0b011, true),
