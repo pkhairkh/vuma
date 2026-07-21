@@ -219,15 +219,10 @@ pub fn translate(backend: BackendKind, generic_nr: u32) -> Option<u32> {
         | BackendKind::RiscV32
         | BackendKind::LoongArch64 => Some(generic_nr),
 
-        // arm32 (EABI): modern kernels use asm-generic numbering.
-        // NOTE: arm32-OABI would differ, but VUMA targets EABI exclusively
-        // (the arm32 backend's `extern "C"` stubs in arm32/mod.rs:7212+ use
-        // the legacy ARM EABI table for its `extern "C"` wrappers, but the
-        // `syscall` intrinsic is being standardized on asm-generic numbers
-        // per the P1 design — see TASKS.md Open Work §5). P1-b will
-        // reconcile the arm32 backend's `extern "C"` stub table with the
-        // intrinsic's asm-generic numbering if needed.
-        BackendKind::Arm32 => Some(generic_nr),
+        // arm32 (EABI): ARM EABI uses its own legacy syscall numbering
+        // that differs from asm-generic. The translation table covers
+        // all syscalls used by VUMA's IPC lowering pass and runtime stubs.
+        BackendKind::Arm32 => translate_arm32(generic_nr),
 
         // ── wasm32: uses `vuma.*` host imports, not syscalls ──
         // The `syscall` intrinsic is not meaningful on this target.
@@ -1400,6 +1395,61 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         306 => Some(343),  // syncfs
         435 => Some(435),  // clone3
         _ => None,
+    }
+}
+
+/// Translate asm-generic syscall numbers to ARM EABI (arm32) native numbers.
+///
+/// ARM EABI uses its own legacy syscall table that differs significantly
+/// from asm-generic. This table covers all syscalls used by VUMA's IPC
+/// lowering pass, runtime stubs, and the `syscall` intrinsic.
+///
+/// Source: Linux `arch/arm/include/uapi/asm/unistd-common.h`
+fn translate_arm32(generic_nr: u32) -> Option<u32> {
+    match generic_nr {
+        // ── File I/O ──
+        63 => Some(3),      // read
+        64 => Some(4),      // write
+        57 => Some(6),      // close
+        56 => Some(322),    // openat (ARM_EABI: __NR_openat = 322)
+        22 => Some(22),     // pipe (ARM: pipe = 22; pipe2 = 359)
+        59 => Some(359),    // pipe2
+        // ── Process ──
+        93 => Some(1),      // exit
+        94 => Some(248),    // exit_group
+        172 => Some(20),    // getpid
+        173 => Some(64),    // getppid
+        220 => Some(120),   // clone
+        260 => Some(114),   // wait4
+        129 => Some(37),    // kill
+        // ── Memory ──
+        222 => Some(192),   // mmap2 (ARM uses mmap2, not mmap)
+        215 => Some(91),    // munmap
+        226 => Some(125),   // mprotect
+        214 => Some(45),    // brk
+        // ── Time ──
+        101 => Some(162),   // nanosleep
+        73 => Some(168),    // poll
+        // ── Resource limits ──
+        163 => Some(75),    // setrlimit
+        164 => Some(76),    // getrlimit
+        165 => Some(77),    // getrusage
+        // ── Sockets ──
+        198 => Some(281),   // socket
+        203 => Some(283),   // connect
+        206 => Some(295),   // sendto
+        207 => Some(296),   // recvfrom
+        200 => Some(285),   // listen
+        201 => Some(284),   // bind
+        202 => Some(286),   // accept
+        199 => Some(280),   // socketpair
+        // ── Prctl / seccomp ──
+        167 => Some(172),   // prctl
+        // ── Misc ──
+        78 => Some(79),     // getcwd
+        79 => Some(80),     // chdir
+        // Unknown: pass through (kernel returns -ENOSYS)
+        _ => Some(generic_nr),
     }
 }
 
