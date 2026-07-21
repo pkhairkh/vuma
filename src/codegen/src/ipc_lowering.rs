@@ -103,25 +103,60 @@ fn expand_builtin(
     next_vreg: &mut u32,
     func_name: &str,
 ) -> Vec<IRInstr> {
-    let result = match name {
+    let _ = func_name;
+    match name {
+        // ── L0: Channel primitives ─────────────────────────────────────
         "channel_open" => expand_channel_open(dst, next_vreg),
         "channel_close" => expand_channel_close(args, next_vreg),
-        "spawn_worker" => expand_spawn_worker(dst, next_vreg),
-        "wait_worker" => expand_wait_worker(args, dst, next_vreg),
         "channel_send" => expand_channel_send(args, next_vreg),
         "channel_recv" => expand_channel_recv(args, dst, next_vreg),
+        "channel_try_recv" => expand_channel_try_recv(args, dst, next_vreg),
+        "channel_recv_timeout" => expand_channel_recv_timeout(args, dst, next_vreg),
+        "channel_send_cap" => expand_channel_send_cap(args, next_vreg),
+        "channel_recv_proto" => expand_channel_recv_proto(args, dst, next_vreg),
+        "channel_is_closed" => expand_channel_is_closed(args, dst, next_vreg),
+        "channel_open_remote" => expand_channel_open_remote(args, dst, next_vreg),
+        "remote_send" => expand_remote_send(args, dst, next_vreg),
+        "remote_recv" => expand_remote_recv(args, dst, next_vreg),
+        // ── L0: Worker spawn/wait ──────────────────────────────────────
+        "spawn_worker" => expand_spawn_worker(dst, next_vreg),
+        "wait_worker" => expand_wait_worker(args, dst, next_vreg),
+        // ── L1: Checkpoint ─────────────────────────────────────────────
+        "checkpoint_save" => expand_checkpoint_save(args, next_vreg),
+        "checkpoint_restore" => expand_checkpoint_restore(dst, next_vreg),
+        // ── L3: Capability ─────────────────────────────────────────────
+        "capability_grant" => expand_capability_grant(args, dst, next_vreg),
+        "capability_delegate" => expand_capability_delegate(args, dst, next_vreg),
+        // ── L4: Shared memory ──────────────────────────────────────────
         "shared_memory_open" => expand_shared_memory_open(args, dst, next_vreg),
         "shared_memory_read" => expand_shared_memory_read(args, dst, next_vreg),
         "shared_memory_write" => expand_shared_memory_write(args, next_vreg),
+        // ── L4: Driver / IRQ ───────────────────────────────────────────
+        "driver_register" => expand_driver_register(args, dst, next_vreg),
+        "driver_call" => expand_driver_call(args, dst, next_vreg),
+        "irq_dispatch" => expand_irq_dispatch(args, dst, next_vreg),
+        // ── L5: Sandbox / resource limits / supervisor ─────────────────
+        "sandbox_apply" => expand_sandbox_apply(dst, next_vreg),
+        "set_resource_limit" => expand_set_resource_limit(args, next_vreg),
+        "set_memory_limit" => expand_set_memory_limit(args, next_vreg),
         "supervisor_call" => expand_supervisor_call(args, dst, next_vreg),
-        "circuit_breaker_state" => expand_circuit_breaker_state(dst, next_vreg),
+        // ── L7: Circuit breaker ────────────────────────────────────────
+        "circuit_breaker_call" => expand_circuit_breaker_call(args, dst, next_vreg),
         "circuit_breaker_reset" => expand_circuit_breaker_reset(dst, next_vreg),
+        "circuit_breaker_state" => expand_circuit_breaker_state(dst, next_vreg),
+        // ── L7: Hot swap ───────────────────────────────────────────────
         "hot_swap_register" => expand_hot_swap_register(args, dst, next_vreg),
+        "hot_swap_trigger" => expand_hot_swap_trigger(args, dst, next_vreg),
         "hot_swap_rollback" => expand_hot_swap_rollback(args, dst, next_vreg),
+        // ── L8: Crypto / formal verification ───────────────────────────
+        "aead_seal" => expand_aead_seal(args, next_vreg),
+        "aead_open" => expand_aead_open(args, dst, next_vreg),
+        "stark_prove" => expand_stark_prove(args, dst, next_vreg),
+        "stark_verify" => expand_stark_verify(args, dst, next_vreg),
         "formal_verify" => expand_formal_verify(dst, next_vreg),
-        "channel_is_closed" => expand_channel_is_closed(args, dst, next_vreg),
-        // For builtins not yet expanded, emit a no-op (store 0 to dst)
-        // These will be expanded in future iterations
+        // For builtins not yet expanded (e.g. sandbox_seccomp, which
+        // requires BPF program construction), emit a no-op (store 0 to
+        // dst) so the call is at least well-formed IR.
         _ => {
             if let Some(d) = dst {
                 vec![IRInstr::BinOp {
@@ -135,8 +170,7 @@ fn expand_builtin(
                 vec![]
             }
         }
-    };
-    result
+    }
 }
 
 // ── L0: Channel primitives ───────────────────────────────────────────
@@ -461,37 +495,62 @@ fn expand_shared_memory_open(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u
 }
 
 /// shared_memory_read(ptr, offset) -> i64
-fn expand_shared_memory_read(args: &[IRValue], dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
+///
+/// Computes `addr = ptr + offset` at runtime, then loads 8 bytes from
+/// `addr`.  Uses a BinOp Add so the offset can be a runtime value
+/// (e.g. a loop index), not just a compile-time constant.
+fn expand_shared_memory_read(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     if args.len() < 2 { return vec![]; }
     let ptr = args[0].clone();
     let offset = args[1].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
 
-    // For now, use Load with the offset as a runtime value
-    // This requires computing ptr + offset first
-    let _ = offset; // TODO: use Add to compute address
+    let addr = new_vreg(nv);
     vec![
+        // addr = ptr + offset
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: addr.clone(),
+            lhs: ptr,
+            rhs: offset,
+            ty: Some(IRType::I64),
+        },
+        // dst = *addr  (Load directly — no dummy Store needed; mmap'd
+        // memory is volatile from the IR's perspective and survives DSE).
         IRInstr::Load {
             dst,
-            addr: ptr,
-            offset: 0, // TODO: use runtime offset
+            addr,
+            offset: 0,
             ty: IRType::I64,
         },
     ]
 }
 
 /// shared_memory_write(ptr, offset, value) -> void
-fn expand_shared_memory_write(args: &[IRValue], _nv: &mut u32) -> Vec<IRInstr> {
+///
+/// Computes `addr = ptr + offset` at runtime, then stores `value` to
+/// `addr`.
+fn expand_shared_memory_write(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     if args.len() < 3 { return vec![]; }
     let ptr = args[0].clone();
-    let _offset = args[1].clone();
+    let offset = args[1].clone();
     let value = args[2].clone();
 
+    let addr = new_vreg(nv);
     vec![
+        // addr = ptr + offset
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: addr.clone(),
+            lhs: ptr,
+            rhs: offset,
+            ty: Some(IRType::I64),
+        },
+        // *addr = value
         IRInstr::Store {
             value,
-            addr: ptr,
-            offset: 0, // TODO: use runtime offset
+            addr,
+            offset: 0,
             ty: IRType::I64,
         },
     ]
@@ -500,20 +559,27 @@ fn expand_shared_memory_write(args: &[IRValue], _nv: &mut u32) -> Vec<IRInstr> {
 // ── L5: Supervisor ───────────────────────────────────────────────────
 
 /// supervisor_call(nr, arg) -> i64
-/// Emits a raw syscall (no capability gate — the gate is x86_64-specific).
+///
+/// Emits a raw syscall with the given nr and arg.  The nr must be a
+/// compile-time immediate (the IR `Syscall` instruction takes a `u32`
+/// nr, not a runtime value).  On x86_64 the inline backend handler
+/// additionally enforces a Verified-trust syscall allowlist and returns
+/// -4 (PermissionDenied) for disallowed nrs; that gate is x86_64-only
+/// and not reproduced here.
 fn expand_supervisor_call(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     if args.len() < 2 { return vec![]; }
-    let nr = args[0].clone();
+    // nr must be a compile-time immediate — IRInstr::Syscall takes a
+    // u32 nr, not a runtime IRValue.  If a runtime nr is supplied we
+    // fall back to 0 (which the backend will translate and the kernel
+    // will likely reject).
+    let nr = args[0].as_immediate().unwrap_or(0) as u32;
     let arg = args[1].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let ret = new_vreg(nv);
 
-    // For non-x86_64 backends, supervisor_call is just a raw syscall.
-    // The capability gate (allowlist) is x86_64-specific.
-    // TODO: add capability gate for all backends via IR-level check.
     vec![
         IRInstr::Syscall {
-            nr: nr.as_register().unwrap_or(0) as u32, // Use the nr directly
+            nr,
             args: vec![arg],
             dst: Some(ret.clone()),
         },
@@ -533,82 +599,144 @@ fn expand_supervisor_call(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32)
     ]
 }
 
-// ── L7: Circuit breaker state (simplified) ──────────────────────────
+// ── L7: Circuit breaker (simplified) ─────────────────────────────────
+
+/// circuit_breaker_call(fn_ptr, threshold) -> i64
+///
+/// Simplified: returns 0.  The real per-function state machine
+/// (Closed/Open/HalfOpen with failure counting) requires IR-level
+/// indirect call support and per-function state slots, which the
+/// non-x86_64 backends do not yet have.  On x86_64 the inline backend
+/// handler in stack_slot_isel.rs implements the full state machine.
+fn expand_circuit_breaker_call(args: &[IRValue], dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
+    let _ = args;
+    let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
+    vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: IRValue::Immediate(0),
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    }]
+}
 
 /// circuit_breaker_state() -> i64
+///
 /// Returns 0 (Closed) — simplified (no per-function state slot).
 fn expand_circuit_breaker_state(dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
-    vec![
-        IRInstr::Store {
-            value: IRValue::Immediate(0),
-            addr: dst,
-            offset: 0,
-            ty: IRType::I64,
-        },
-    ]
+    vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: IRValue::Immediate(0),
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    }]
 }
 
 /// circuit_breaker_reset() -> i64
+///
 /// Returns 0 — simplified.
 fn expand_circuit_breaker_reset(dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
-    vec![
-        IRInstr::Store {
-            value: IRValue::Immediate(0),
-            addr: dst,
-            offset: 0,
-            ty: IRType::I64,
-        },
-    ]
+    vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: IRValue::Immediate(0),
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    }]
 }
 
 // ── L7: Hot swap (simplified) ────────────────────────────────────────
 
 /// hot_swap_register(module_id, version) -> u64
+///
 /// Returns 1 (success) — simplified.
 fn expand_hot_swap_register(args: &[IRValue], dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
     let _ = args;
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
+    vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: IRValue::Immediate(1),
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    }]
+}
+
+/// hot_swap_trigger(module_id, old_version, new_version) -> i64
+///
+/// Simplified version-monotonicity check: returns 1 if `new > old`,
+/// else -5 (ProtocolViolation).  The full per-function module-version
+/// table (which also detects concurrent-swap races by comparing
+/// `old_version` against the active version) lives in the x86_64
+/// inline backend handler.
+fn expand_hot_swap_trigger(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
+    if args.len() < 3 { return vec![]; }
+    let _module_id = args[0].clone();
+    let old_version = args[1].clone();
+    let new_version = args[2].clone();
+    let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
+
+    let is_newer = new_vreg(nv);
+    let result = new_vreg(nv);
     vec![
-        IRInstr::Store {
-            value: IRValue::Immediate(1),
-            addr: dst,
-            offset: 0,
-            ty: IRType::I64,
+        // is_newer = (new_version > old_version)
+        IRInstr::Cmp {
+            kind: CmpKind::SGt,
+            dst: is_newer.clone(),
+            lhs: new_version,
+            rhs: old_version,
+            ty: Some(IRType::I64),
+        },
+        // result = is_newer ? 1 : -5
+        IRInstr::Select {
+            dst: result.clone(),
+            cond: is_newer,
+            true_val: IRValue::Immediate(1),
+            false_val: IRValue::Immediate(-5),
+            ty: Some(IRType::I64),
+        },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs: result,
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
         },
     ]
 }
 
 /// hot_swap_rollback(module_id, old_version) -> i64
+///
 /// Returns 1 (success) — simplified.
 fn expand_hot_swap_rollback(args: &[IRValue], dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
     let _ = args;
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
-    vec![
-        IRInstr::Store {
-            value: IRValue::Immediate(1),
-            addr: dst,
-            offset: 0,
-            ty: IRType::I64,
-        },
-    ]
+    vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: IRValue::Immediate(1),
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    }]
 }
 
 // ── L7: Formal verify ────────────────────────────────────────────────
 
 /// formal_verify() -> i64
+///
 /// Returns 2 (count of folded L1 checks) — simplified.
 fn expand_formal_verify(dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
-    vec![
-        IRInstr::Store {
-            value: IRValue::Immediate(2),
-            addr: dst,
-            offset: 0,
-            ty: IRType::I64,
-        },
-    ]
+    vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: IRValue::Immediate(2),
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    }]
 }
 
 // ── L0: Channel is_closed ───────────────────────────────────────────
@@ -701,23 +829,17 @@ const CHECKPOINT_PATH_BYTES: [i64; 4] = [
     0x0000000000000000, // "\0…"
 ];
 
-/// Emits the IR instructions to mmap a 32-byte buffer and write the
-/// checkpoint path into it.  Returns (instrs, path_buf_vreg).
+/// Emits the IR instructions to Alloc a 32-byte stack buffer and write
+/// the checkpoint path into it as 8-byte chunks via Store with
+/// IRValue::Immediate.  Returns (instrs, path_buf_vreg).
+///
+/// The Alloc'd buffer escapes into the openat syscall (passed as the
+/// `path` argument), so SROA / alloc-elision / DSE all preserve the
+/// Stores — the same pattern `channel_send` uses for its 56-byte frame.
 fn build_checkpoint_path(nv: &mut u32) -> (Vec<IRInstr>, IRValue) {
     let path_buf = new_vreg(nv);
     let mut instrs = vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(32),
-                IRValue::Immediate(0x3),  // PROT_READ|PROT_WRITE
-                IRValue::Immediate(0x22), // MAP_PRIVATE|MAP_ANONYMOUS
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(path_buf.clone()),
-        },
+        IRInstr::Alloc { dst: path_buf.clone(), size: 32 },
     ];
     for (i, chunk) in CHECKPOINT_PATH_BYTES.iter().enumerate() {
         instrs.push(IRInstr::Store {
@@ -733,9 +855,9 @@ fn build_checkpoint_path(nv: &mut u32) -> (Vec<IRInstr>, IRValue) {
 /// checkpoint_save(value) — void
 ///
 /// Persists `value` (8 bytes) to /tmp/vuma_checkpoint.bin:
-///   1. mmap a 32-byte path buffer, write the NUL-terminated path
+///   1. Alloc a 32-byte path buffer, write the NUL-terminated path
 ///   2. openat(AT_FDCWD=-100, path, O_WRONLY|O_CREAT|O_TRUNC=0x241, 0644) → fd
-///   3. mmap an 8-byte value buffer, store the value
+///   3. Alloc an 8-byte value buffer, store the value
 ///   4. write(fd, &val_buf, 8)
 ///   5. close(fd)
 fn expand_checkpoint_save(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
@@ -757,18 +879,7 @@ fn expand_checkpoint_save(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     });
 
     let val_buf = new_vreg(nv);
-    instrs.push(IRInstr::Syscall {
-        nr: 222, // mmap
-        args: vec![
-            IRValue::Immediate(0),
-            IRValue::Immediate(8),
-            IRValue::Immediate(0x3),
-            IRValue::Immediate(0x22),
-            IRValue::Immediate(-1i64),
-            IRValue::Immediate(0),
-        ],
-        dst: Some(val_buf.clone()),
-    });
+    instrs.push(IRInstr::Alloc { dst: val_buf.clone(), size: 8 });
     instrs.push(IRInstr::Store {
         value: value,
         addr: val_buf.clone(),
@@ -794,11 +905,11 @@ fn expand_checkpoint_save(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
 /// checkpoint_restore() -> i64
 ///
 /// Reads 8 bytes from /tmp/vuma_checkpoint.bin and returns the value.
-///   1. mmap a 32-byte path buffer, write the path
+///   1. Alloc a 32-byte path buffer, write the path
 ///   2. openat(AT_FDCWD, path, O_RDONLY=0, 0) → fd
-///   3. mmap an 8-byte value buffer, read(fd, &val_buf, 8)
+///   3. Alloc an 8-byte value buffer, read(fd, &val_buf, 8)
 ///   4. close(fd)
-///   5. Load value from val_buf, store to dst
+///   5. Load value directly from val_buf (no dummy Store) → dst
 fn expand_checkpoint_restore(dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
 
@@ -817,18 +928,7 @@ fn expand_checkpoint_restore(dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr
     });
 
     let val_buf = new_vreg(nv);
-    instrs.push(IRInstr::Syscall {
-        nr: 222, // mmap
-        args: vec![
-            IRValue::Immediate(0),
-            IRValue::Immediate(8),
-            IRValue::Immediate(0x3),
-            IRValue::Immediate(0x22),
-            IRValue::Immediate(-1i64),
-            IRValue::Immediate(0),
-        ],
-        dst: Some(val_buf.clone()),
-    });
+    instrs.push(IRInstr::Alloc { dst: val_buf.clone(), size: 8 });
 
     let read_ret = new_vreg(nv);
     instrs.push(IRInstr::Syscall {
@@ -862,13 +962,14 @@ fn expand_checkpoint_restore(dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr
 
 // ── L5: Sandbox / resource limits ─────────────────────────────────────
 
-/// sandbox_apply() — void
+/// sandbox_apply() -> i64
 ///
-/// Emits prctl(PR_SET_NO_NEW_PRIVS=38, 1, 0, 0, 0) via generic syscall 167.
-/// This prevents the process from gaining privileges via setuid binaries.
-fn expand_sandbox_apply(nv: &mut u32) -> Vec<IRInstr> {
+/// Emits prctl(PR_SET_NO_NEW_PRIVS=38, 1, 0, 0, 0) via generic syscall
+/// 167.  This prevents the process from gaining privileges via setuid
+/// binaries.  Returns 1 (success) if `dst` is provided.
+fn expand_sandbox_apply(dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     let ret = new_vreg(nv);
-    vec![
+    let mut instrs = vec![
         IRInstr::Syscall {
             nr: 167, // prctl
             args: vec![
@@ -880,14 +981,25 @@ fn expand_sandbox_apply(nv: &mut u32) -> Vec<IRInstr> {
             ],
             dst: Some(ret),
         },
-    ]
+    ];
+    if let Some(d) = dst {
+        instrs.push(IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: d.clone(),
+            lhs: IRValue::Immediate(1),
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
+        });
+    }
+    instrs
 }
 
 /// set_resource_limit(rlimit_type, value) — void
 ///
 /// Emits setrlimit(rlimit_type, {rlim_cur=value, rlim_max=value}) via
-/// generic syscall 164.  The 16-byte `struct rlimit` is mmap'd (NOT Alloc,
-/// because the optimizer would eliminate the Stores before the syscall).
+/// generic syscall 164.  The 16-byte `struct rlimit` is Alloc'd on the
+/// stack; the Stores survive DSE because the buffer escapes into the
+/// setrlimit syscall (same pattern as channel_send's 56-byte frame).
 fn expand_set_resource_limit(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     if args.len() < 2 { return vec![]; }
     let rlimit_type = args[0].clone();
@@ -896,18 +1008,7 @@ fn expand_set_resource_limit(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     let rlim_buf = new_vreg(nv);
     let ret = new_vreg(nv);
     vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 16-byte rlimit struct
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(16),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(rlim_buf.clone()),
-        },
+        IRInstr::Alloc { dst: rlim_buf.clone(), size: 16 },
         // rlim_cur = value
         IRInstr::Store {
             value: value.clone(),
@@ -951,18 +1052,7 @@ fn expand_set_memory_limit(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
             rhs: IRValue::Immediate(1048576),
             ty: Some(IRType::I64),
         },
-        IRInstr::Syscall {
-            nr: 222, // mmap — 16-byte rlimit struct
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(16),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(rlim_buf.clone()),
-        },
+        IRInstr::Alloc { dst: rlim_buf.clone(), size: 16 },
         // rlim_cur = bytes
         IRInstr::Store {
             value: bytes.clone(),
@@ -1037,19 +1127,32 @@ fn expand_irq_dispatch(args: &[IRValue], dst: Option<&IRValue>, _nv: &mut u32) -
 
 /// capability_grant(resource_id, perms) -> u64
 ///
-/// Simplified: returns resource_id (uses the resource_id as the cap_id).
-/// The real FNV-1a×4 signature minting lives in the x86_64 backend.
-fn expand_capability_grant(args: &[IRValue], dst: Option<&IRValue>, _nv: &mut u32) -> Vec<IRInstr> {
+/// Simplified: returns resource_id + 1 (a synthetic cap_id derived
+/// from the resource_id).  The real FNV-1a×4 signature minting lives
+/// in the x86_64 backend.
+fn expand_capability_grant(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> Vec<IRInstr> {
     if args.is_empty() { return vec![]; }
     let resource_id = args[0].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
-    vec![IRInstr::BinOp {
-        op: BinOpKind::Add,
-        dst: dst,
-        lhs: resource_id,
-        rhs: IRValue::Immediate(0),
-        ty: Some(IRType::I64),
-    }]
+    let cap_id = new_vreg(nv);
+    vec![
+        // cap_id = resource_id + 1
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: cap_id.clone(),
+            lhs: resource_id,
+            rhs: IRValue::Immediate(1),
+            ty: Some(IRType::I64),
+        },
+        // dst = cap_id
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst,
+            lhs: cap_id,
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::I64),
+        },
+    ]
 }
 
 /// capability_delegate(cap_id, resource, perms) -> u64
@@ -1090,18 +1193,7 @@ fn expand_channel_send_cap(args: &[IRValue], nv: &mut u32) -> Vec<IRInstr> {
     const TYPE_HASH_I64: i64 = 0x2ae1af192b331746;
 
     vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 56-byte frame
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(56),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(frame.clone()),
-        },
+        IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Store { value: IRValue::Immediate(0x414D5556),     addr: frame.clone(), offset: 0,  ty: IRType::I32 },
         IRInstr::Store { value: IRValue::Immediate(0x00020000),     addr: frame.clone(), offset: 4,  ty: IRType::I32 },
         IRInstr::Store { value: IRValue::Immediate(0),              addr: frame.clone(), offset: 8,  ty: IRType::I64 },
@@ -1189,18 +1281,7 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32
     ];
     instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret));
     instrs.extend(vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 56-byte frame
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(56),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(frame.clone()),
-        },
+        IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall {
             nr: 63, // read
             args: vec![read_fd, frame.clone(), IRValue::Immediate(56)],
@@ -1276,20 +1357,9 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, nv: &mut
     ];
     instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret));
 
-    // Build pollfd
+    // Build pollfd (Alloc 8-byte stack buffer; escapes into ppoll syscall)
     instrs.extend(vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 8-byte pollfd
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(8),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(pollfd.clone()),
-        },
+        IRInstr::Alloc { dst: pollfd.clone(), size: 8 },
         IRInstr::Store {
             value: read_fd.clone(),
             addr: pollfd.clone(),
@@ -1306,18 +1376,7 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, nv: &mut
 
     // Build timespec { tv_sec = timeout_ms / 1000, tv_nsec = (timeout_ms % 1000) * 1_000_000 }
     instrs.extend(vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 16-byte timespec
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(16),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(ts.clone()),
-        },
+        IRInstr::Alloc { dst: ts.clone(), size: 16 },
         // tv_sec = timeout_ms / 1000
         IRInstr::BinOp {
             op: BinOpKind::SDiv,
@@ -1371,18 +1430,7 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, nv: &mut
     ]);
 
     instrs.extend(vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 56-byte frame
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(56),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(frame.clone()),
-        },
+        IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall {
             nr: 63, // read
             args: vec![read_fd, frame.clone(), IRValue::Immediate(56)],
@@ -1583,19 +1631,8 @@ fn expand_channel_open_remote(args: &[IRValue], dst: Option<&IRValue>, nv: &mut 
             ],
             dst: Some(fd.clone()),
         },
-        // mmap 16-byte sockaddr_in
-        IRInstr::Syscall {
-            nr: 222, // mmap
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(16),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(sockaddr.clone()),
-        },
+        // Alloc 16-byte sockaddr_in (stack buffer; escapes into connect)
+        IRInstr::Alloc { dst: sockaddr.clone(), size: 16 },
         // sin_family = AF_INET (2) at [sockaddr+0] (i16)
         IRInstr::Store {
             value: IRValue::Immediate(2),
@@ -1704,18 +1741,7 @@ fn expand_remote_send(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
     let buf = new_vreg(nv);
     let ret = new_vreg(nv);
     vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 8-byte value buffer
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(8),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(buf.clone()),
-        },
+        IRInstr::Alloc { dst: buf.clone(), size: 8 },
         IRInstr::Store {
             value: value,
             addr: buf.clone(),
@@ -1757,18 +1783,7 @@ fn expand_remote_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
     let ret = new_vreg(nv);
     let value = new_vreg(nv);
     vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap — 8-byte value buffer
-            args: vec![
-                IRValue::Immediate(0),
-                IRValue::Immediate(8),
-                IRValue::Immediate(0x3),
-                IRValue::Immediate(0x22),
-                IRValue::Immediate(-1i64),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(buf.clone()),
-        },
+        IRInstr::Alloc { dst: buf.clone(), size: 8 },
         // recvfrom(handle, &buf, 8, 0, NULL, NULL)
         IRInstr::Syscall {
             nr: 207, // recvfrom
@@ -1782,6 +1797,8 @@ fn expand_remote_recv(args: &[IRValue], dst: Option<&IRValue>, nv: &mut u32) -> 
             ],
             dst: Some(ret),
         },
+        // Load directly from buf (no dummy Store needed — the
+        // Alloc'd buffer escapes into recvfrom so the Load survives).
         IRInstr::Load {
             dst: value.clone(),
             addr: buf,
