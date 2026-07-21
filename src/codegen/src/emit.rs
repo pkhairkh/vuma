@@ -860,6 +860,16 @@ pub struct Emitter {
     /// channel_send/recv/capability_grant/stark_prove/stark_verify
     /// increments this slot at its emit site; `formal_verify()` loads it.
     formal_verify_count_off: i32,
+    /// Wave C (aarch64 port): per-function capability signature (32 bytes).
+    cap_sig_off: i32,
+    /// Wave C (aarch64 port): per-function capability signature_input buffer.
+    cap_siginput_off: i32,
+    /// Wave C (aarch64 port): per-function capability signature_input length.
+    cap_siginput_len_off: i32,
+    /// Wave C (aarch64 port): compile-time cap signature (from capability_grant).
+    cap_grant_sig: Option<[u8; 32]>,
+    /// Wave C (aarch64 port): compile-time cap signature_input bytes.
+    cap_grant_sig_input: Option<Vec<u8>>,
 }
 
 impl Emitter {
