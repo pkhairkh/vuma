@@ -4904,6 +4904,24 @@ pub fn run_ir_pipeline(
         timings.push(("ive-verification".to_string(), tive.elapsed().as_millis() as u64));
     }
 
+    // ── Wave 89-92: Session type + information-flow checks ──
+    // Wire session_type_check (Wave 89) and information_flow_check (Wave 91)
+    // into the pipeline.  Advisory — logs warnings, does NOT abort.
+    {
+        let tct = Instant::now();
+        // Wave 89: Session type verification.
+        let session_violations = vuma_ive::session_type::verify_session_types_from_ir(&ir_program);
+        for v in &session_violations {
+            vuma_log!(warn, "Wave 89: session type violation: {}", v.message);
+        }
+        // Wave 91: Information-flow verification.
+        let flow_violations = vuma_ive::information_flow::verify_information_flow_from_ir(&ir_program);
+        for v in &flow_violations {
+            vuma_log!(warn, "Wave 91: information-flow violation: {}", v.message);
+        }
+        timings.push(("ct-verification".to_string(), tct.elapsed().as_millis() as u64));
+    }
+
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
     // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
     // The backend is determined from `backend_kind` (passed by the caller —
