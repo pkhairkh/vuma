@@ -1101,7 +1101,7 @@ fn translate_sparc64(generic_nr: u32) -> Option<u32> {
         306 => Some(335),  // syncfs
         
         // ── IPC-critical syscalls (sparc64 uses its own legacy table) ──
-        59 => Some(298),    // pipe2 (sparc64: __NR_pipe2 = 298)
+        59 => Some(42),     // pipe (sparc64: pipe=42 returns fds in o0/o1, pipe2=298 misidentified by QEMU as ppoll)
         220 => Some(217),   // clone (sparc64: __NR_clone = 217)
         260 => Some(7),     // wait4 (sparc64: __NR_wait4 = 7)
         222 => Some(192),   // mmap2 (sparc64: __NR_mmap2 = 192, takes 6 args like generic mmap)
