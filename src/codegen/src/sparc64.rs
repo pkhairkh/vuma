@@ -2466,7 +2466,7 @@ fn emit_instr(
                     .encode(),
                 ),
                 IRType::I32 => code.extend_from_slice(
-                    &Instruction::Ldsw {
+                    &Instruction::Lduw {
                         rd: Gpr::L2,
                         rs1: Gpr::L0,
                         imm: 0,
