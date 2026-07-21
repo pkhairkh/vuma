@@ -1773,6 +1773,11 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
     let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
     let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
     alloc_vreg_ids.sort();
+    // Align the alloc region to 8 bytes (SPARC requires 8-byte alignment
+    // for STX/LDX 64-bit loads/stores). Without this, an odd number of
+    // 8-byte vreg slots leaves the alloc region at a 4-byte-aligned offset,
+    // causing SIGBUS on 64-bit frame field stores.
+    current_offset = (current_offset + 7) & !7;
     for &id in &alloc_vreg_ids {
         let size = alloc_sizes[&id];
         current_offset += size;
@@ -2476,14 +2481,43 @@ fn emit_instr(
                     }
                     .encode(),
                 ),
-                _ => code.extend_from_slice(
-                    &Instruction::Ldx {
-                        rd: Gpr::L2,
-                        rs1: Gpr::L0,
-                        imm: 0,
-                    }
-                    .encode(),
-                ),
+                _ => {
+                    // 64-bit load: SPARC requires 8-byte alignment for LDX.
+                    // The IPC frame layout has I64 fields at offset 44 (not
+                    // 8-byte aligned), which causes SIGBUS with LDX. Fix:
+                    // use two LDUW (4-byte loads) at [addr+0] and [addr+4].
+                    // LDUW only requires 4-byte alignment.
+                    // Load low 32 bits
+                    code.extend_from_slice(
+                        &Instruction::Lduw {
+                            rd: Gpr::L2,
+                            rs1: Gpr::L0,
+                            imm: 0,
+                        }
+                        .encode(),
+                    );
+                    // Load high 32 bits into L3
+                    code.extend_from_slice(
+                        &Instruction::Lduw {
+                            rd: Gpr::L3,
+                            rs1: Gpr::L0,
+                            imm: 4,
+                        }
+                        .encode(),
+                    );
+                    // Shift L3 left by 32, OR with L2
+                    code.extend_from_slice(
+                        &Instruction::SllxImm { rd: Gpr::L3, rs1: Gpr::L3, imm: 32 }.encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::Or {
+                            rd: Gpr::L2,
+                            rs1: Gpr::L2,
+                            rs2: Gpr::L3,
+                        }
+                        .encode(),
+                    );
+                }
             }
             code.extend(ss_stx(Gpr::L2, dst_off));
         }
@@ -2532,14 +2566,33 @@ fn emit_instr(
                     }
                     .encode(),
                 ),
-                _ => code.extend_from_slice(
-                    &Instruction::Stx {
-                        rd: Gpr::L0,
-                        rs1: Gpr::L1,
-                        imm: 0,
-                    }
-                    .encode(),
-                ),
+                _ => {
+                    // 64-bit store: SPARC requires 8-byte alignment for STX.
+                    // The IPC frame layout has I64 fields at offset 44 (not
+                    // 8-byte aligned), which causes SIGBUS with STX. Fix:
+                    // use two STW (4-byte stores) at [addr+0] and [addr+4].
+                    // STW only requires 4-byte alignment.
+                    code.extend_from_slice(
+                        &Instruction::Stw {
+                            rd: Gpr::L0,
+                            rs1: Gpr::L1,
+                            imm: 0,
+                        }
+                        .encode(),
+                    );
+                    // Shift L0 right by 32 to get the high word
+                    code.extend_from_slice(
+                        &Instruction::SrlxImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 32 }.encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::Stw {
+                            rd: Gpr::L0,
+                            rs1: Gpr::L1,
+                            imm: 4,
+                        }
+                        .encode(),
+                    );
+                }
             }
         }
         IRInstr::Alloc { dst, size } => {
@@ -3236,26 +3289,32 @@ fn emit_instr(
             // OR %g0, nr, %g1  (move immediate to %g1)
             code.extend(ss_load_imm(Gpr::G1, effective_nr as i64));
             // For pipe (nr 59): save the buffer pointer before the syscall
-            // clobbers O0. We'll need it after to write the fds.
-            // arg0 is in O0. Save it to G4 (global scratch, not clobbered by syscall).
+            // clobbers O0. We save it on the stack at %sp+stack_scratch
+            // (a scratch area in the register save area).
+            // arg0 is in O0. The sparc64 ABI reserves the first 192 bytes
+            // of the stack frame for the register save area. We use %sp+0
+            // (a normally-unused slot in the save area) as scratch.
             if *nr == 59 && !args.is_empty() {
-                // MOV O0, G4 — save buffer pointer
-                code.extend_from_slice(&Instruction::Or { rd: Gpr::G4, rs1: Gpr::O0, rs2: Gpr::G0 }.encode());
+                // STX O0, [%sp + STACK_SCRATCH] — save buffer pointer to stack
+                // Use 2224 (8-byte aligned, within the 192-byte register save area)
+                code.extend_from_slice(&Instruction::Stx { rd: Gpr::O0, rs1: Gpr::O6, imm: 2224 }.encode());
             }
             // TA 0x6d
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
             // SPECIAL CASE for pipe (nr 59): on sparc64, pipe(42) returns
             // read_fd in %o0 and write_fd in %o1 (register-based, NOT buffer-based).
             // The ipc_lowering expects pipe2 semantics (fds written to buffer).
-            // Fix: after pipe, write %o0 and %o1 to the buffer (saved in G4).
+            // Fix: after pipe, write %o0 and %o1 to the buffer (saved on stack).
             if *nr == 59 && !args.is_empty() {
-                // O0 = read_fd, O1 = write_fd, G4 = buffer ptr
-                // Save read_fd to G2 (temp)
+                // O0 = read_fd, O1 = write_fd
+                // Save read_fd to G2 (temp, will be clobbered by next syscall but ok)
                 code.extend_from_slice(&Instruction::Or { rd: Gpr::G2, rs1: Gpr::O0, rs2: Gpr::G0 }.encode());
-                // STW G2 (read_fd) to [G4 + 0]
-                code.extend_from_slice(&Instruction::Stw { rd: Gpr::G2, rs1: Gpr::G4, imm: 0 }.encode());
-                // STW O1 (write_fd) to [G4 + 4]
-                code.extend_from_slice(&Instruction::Stw { rd: Gpr::O1, rs1: Gpr::G4, imm: 4 }.encode());
+                // Load buffer ptr from stack into G3
+                code.extend_from_slice(&Instruction::Ldx { rd: Gpr::G3, rs1: Gpr::O6, imm: 2224 }.encode());
+                // STW G2 (read_fd) to [G3 + 0]
+                code.extend_from_slice(&Instruction::Stw { rd: Gpr::G2, rs1: Gpr::G3, imm: 0 }.encode());
+                // STW O1 (write_fd) to [G3 + 4]
+                code.extend_from_slice(&Instruction::Stw { rd: Gpr::O1, rs1: Gpr::G3, imm: 4 }.encode());
                 // Restore O0 = 0 (success return for pipe)
                 code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::G0, rs2: Gpr::G0 }.encode());
             }
