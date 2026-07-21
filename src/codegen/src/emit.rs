@@ -886,6 +886,11 @@ impl Emitter {
             stark_table_off: 0,
             stark_table_count_off: 0,
             formal_verify_count_off: 0,
+            cap_sig_off: 0,
+            cap_siginput_off: 0,
+            cap_siginput_len_off: 0,
+            cap_grant_sig: None,
+            cap_grant_sig_input: None,
         }
     }
 
@@ -3265,6 +3270,67 @@ impl Emitter {
         self.relocations.clear();
         self.current_func_name = func.name.clone();
         self.instr_pinned_regs.clear();
+        // Reset per-function cap state — populated by the Phase 0.5 scan
+        // below (or stays None if the function has no capability_grant).
+        self.cap_grant_sig = None;
+        self.cap_grant_sig_input = None;
+
+        // ── Phase 0.5: Scan for capability_grant calls (Wave C: L2 cap sigs) ──
+        //
+        // The recv side must recompute the FNV-1a×4 capability signature
+        // over the same `signature_input` byte vector the grant used. Since
+        // the grant's args (resource_id, perms) are compile-time immediates
+        // in the IR, we extract them here and compute the sig_input + sig at
+        // compile time. These are embedded as immediates in the prologue so
+        // that BOTH the parent (which calls grant + send_cap) and the child
+        // (which only calls recv, after fork) have the sig_input available
+        // on their stack. Mirrors x86_64 stack_slot_isel.rs:811-871.
+        'grant_search: for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::Call { func: fname, args, .. } = instr {
+                    if fname == "capability_grant" && args.len() == 2 {
+                        let resource_id = match &args[0] {
+                            IRValue::Immediate(v) => *v as u64,
+                            _ => continue,
+                        };
+                        let perms_raw = match &args[1] {
+                            IRValue::Immediate(v) => *v as u64,
+                            _ => continue,
+                        };
+                        let resource = crate::ipc::capability::Resource::Channel(resource_id);
+                        let perms = crate::ipc::capability::MemoryPermissions {
+                            read: (perms_raw & 1) != 0,
+                            write: (perms_raw & 2) != 0,
+                            execute: (perms_raw & 4) != 0,
+                            ..Default::default()
+                        };
+                        let token = crate::ipc::capability::grant_capability(
+                            resource_id as u128, 1, 1, resource, perms,
+                            0, 0, 3600, b"vuma_dev_signing_key",
+                        );
+                        // Reconstruct signature_input inline — ipc::capability::signature_input
+                        // is module-private, so we duplicate its logic here. The
+                        // byte layout MUST match signature_input() in ipc.rs.
+                        let signing_key = b"vuma_dev_signing_key";
+                        let mut sig_input = Vec::with_capacity(256);
+                        sig_input.extend_from_slice(signing_key);
+                        sig_input.extend_from_slice(&token.id.to_le_bytes());
+                        sig_input.extend_from_slice(&token.source_pid.to_le_bytes());
+                        sig_input.extend_from_slice(&token.target_pid.to_le_bytes());
+                        sig_input.extend_from_slice(&token.created_at.to_le_bytes());
+                        sig_input.extend_from_slice(&token.expires_at.to_le_bytes());
+                        sig_input.push(token.delegation_depth);
+                        sig_input.push(if token.permissions.read { 1 } else { 0 });
+                        sig_input.push(if token.permissions.write { 1 } else { 0 });
+                        sig_input.push(if token.permissions.execute { 1 } else { 0 });
+                        sig_input.extend_from_slice(&token.resource.encode());
+                        self.cap_grant_sig = Some(token.signature);
+                        self.cap_grant_sig_input = Some(sig_input);
+                        break 'grant_search;
+                    }
+                }
+            }
+        }
 
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
