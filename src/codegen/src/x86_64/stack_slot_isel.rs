@@ -2419,10 +2419,23 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_movzx_reg16(Gpr::Rax, Gpr::Rax));
                                     }
                                     Some(IRType::U32) | Some(IRType::I32) => {
-                                        // MOVZX r32, r32 would work but writing to
-                                        // EAX already zero-extends to RAX on x86_64.
-                                        // Use AND to clear upper 32 bits explicitly.
-                                        code.extend(encode_and_reg_imm32(Gpr::Rax, -1));
+                                        // On x86_64, writing to a 32-bit register
+                                        // (EAX) automatically zero-extends to the
+                                        // full 64-bit register (RAX).  The previous
+                                        // code used `AND RAX, -1` which is a 64-bit
+                                        // AND with 0xFFFFFFFFFFFFFFFF — a no-op that
+                                        // left the upper 32 bits unchanged.  This
+                                        // caused the CRC32 ZExt to fail (the upper
+                                        // 32 bits were 0xFFFFFFFF from the XOR !crc
+                                        // step, making the 64-bit comparison fail).
+                                        //
+                                        // The fix: emit `MOV EAX, EAX` (32-bit
+                                        // register move), which clears the upper
+                                        // 32 bits of RAX on x86_64.  Encoding:
+                                        //   89 C0  (MOV EAX, EAX)
+                                        // For R8–R15 a REX prefix is needed, but
+                                        // since we always use RAX here, no REX.
+                                        code.extend(&[0x89, 0xC0]); // mov eax, eax
                                     }
                                     _ => {
                                         // 64-bit source: no extension needed
