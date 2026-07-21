@@ -2357,9 +2357,34 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     // (32 bytes proof_data + 8 bytes public_input_dup) at [slot_ptr + 0..40].
     let hash_slot = ctx.new_vreg();
     let i_slot = ctx.new_vreg();
+    let count = ctx.new_vreg();
+    let handle_valid = ctx.new_vreg();
 
     let pre = vec![
-        IRInstr::BinOp { op: BinOpKind::Sub, dst: h_minus1.clone(), lhs: handle, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) },
+        // Load count from [table + 224] (4 entries × 56 bytes = 224 byte table + 8-byte count)
+        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 224, ty: IRType::I64 },
+        // handle_valid = (handle <= count) — if handle > count, it's out of bounds
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: handle_valid.clone(), lhs: handle.clone(), rhs: count.clone(), ty: Some(IRType::I64) },
+        // Clamp handle: if handle > count, use 1 (slot 0) to avoid OOB access.
+        // clamped_handle = handle_valid ? handle : 1
+        // Then compute slot_ptr from clamped_handle.
+        // This prevents segfault on invalid handles (e.g. stark_verify(99)).
+        // The result is still 0 because handle_valid is ANDed into the final result.
+    ];
+
+    // Use Select to clamp the handle before computing the slot pointer.
+    let clamped_handle = ctx.new_vreg();
+    let mut pre_with_clamp = pre.clone();
+    pre_with_clamp.push(IRInstr::Select {
+        dst: clamped_handle.clone(),
+        cond: handle_valid.clone(),
+        true_val: handle,
+        false_val: IRValue::Immediate(1),
+        ty: Some(IRType::I64),
+    });
+    pre_with_clamp.extend(vec![
+        // Compute slot pointer: table + (clamped_handle - 1) * 56
+        IRInstr::BinOp { op: BinOpKind::Sub, dst: h_minus1.clone(), lhs: clamped_handle, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: h_minus1, rhs: IRValue::Immediate(56), ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst: slot_ptr.clone(), lhs: table.clone(), rhs: offset, ty: Some(IRType::I64) },
         // Load stored verifier_key at [slot_ptr + 40]
@@ -2371,7 +2396,7 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         IRInstr::Store { value: IRValue::Immediate(0xcbf29ce484222325u64 as i64), addr: hash_slot.clone(), offset: 0, ty: IRType::I64 },
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
-    ];
+    ]);
 
     // Build the FNV-1a loop: for i in 0..40 { byte = Load(slot_ptr + i); hash ^= byte; hash *= 0x100000001b3; }
     let header = ctx.new_label("fnv_header");
@@ -2413,21 +2438,24 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     body_blk.instructions.push(IRInstr::Branch { target: header.clone() });
     body_blk.terminator = IRTerminator::Jump(header.clone());
 
-    // ── fnv_exit: computed_vk = hash; match = (computed_vk == stored_vk) & (validity > 0); dst = match ? 1 : 0; goto cont ──
+    // ── fnv_exit: computed_vk = hash; match = (computed_vk == stored_vk) & (validity > 0) & handle_valid; dst = result; goto cont ──
     let computed_vk = ctx.new_vreg();
     let is_match = ctx.new_vreg();
     let is_valid = ctx.new_vreg();
     let both_ok = ctx.new_vreg();
+    let all_ok = ctx.new_vreg();
     let mut exit_blk = IRBlock::new(&exit);
     exit_blk.instructions.push(IRInstr::Load { dst: computed_vk.clone(), addr: hash_slot, offset: 0, ty: IRType::I64 });
     exit_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: is_match.clone(), lhs: computed_vk, rhs: stored_vk, ty: Some(IRType::I64) });
     exit_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGt, dst: is_valid.clone(), lhs: validity, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
     exit_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::And, dst: both_ok.clone(), lhs: is_match, rhs: is_valid, ty: Some(IRType::I64) });
-    exit_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: both_ok, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    // Also AND with handle_valid (bounds check) — if handle was out of bounds, return 0
+    exit_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::And, dst: all_ok.clone(), lhs: both_ok, rhs: handle_valid, ty: Some(IRType::I64) });
+    exit_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: all_ok, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
     exit_blk.instructions.push(IRInstr::Branch { target: cont.clone() });
     exit_blk.terminator = IRTerminator::Jump(cont.clone());
 
-    Expansion { pre, new_blocks: vec![header_blk, body_blk, exit_blk], cont_label: Some(cont) }
+    Expansion { pre: pre_with_clamp, new_blocks: vec![header_blk, body_blk, exit_blk], cont_label: Some(cont) }
 }
 
 // ── L2: Distributed IPC ───────────────────────────────────────────────
