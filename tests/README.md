@@ -1,7 +1,7 @@
 # tests/ — VUMA Test Suite
 
 The `tests/` directory contains VUMA's test infrastructure: a
-**manifest-driven gold-standard suite of 5,832+ `.vuma` programs** that
+**manifest-driven gold-standard suite of 1,564 `.vuma` programs** that
 compiles + executes on every VUMA backend and checks the exit code against
 an `// Expected exit code: N` header, plus 13 Rust integration test files
 that exercise the compiler internals (parser, scheduler, e-graph, register
@@ -18,7 +18,7 @@ For the contributor workflow (adding a new test) see
 
 ```
 tests/
-├── gold_standard/        # 5,832+ manifest-driven PMT test programs
+├── gold_standard/        # 1,564 manifest-driven PMT test programs
 │   ├── arithmetic/       # 377 files — integer arithmetic
 │   ├── atomics/          # 338 files — atomic RMW patterns
 │   ├── bitwise/          # 359 files — AND/OR/XOR/shifts
@@ -68,7 +68,7 @@ tests/
 └── verification_tests.rs
 ```
 
-Total: **5,832+ `.vuma` test programs** across 34 subdirectories, plus
+Total: **1,564 `.vuma` test programs** across 39 subdirectories, plus
 **13 Rust integration test files** (~3,400 LOC).
 
 ---

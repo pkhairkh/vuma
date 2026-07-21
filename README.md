@@ -589,10 +589,11 @@ qemu-riscv64 --version
 ```
 
 If you cannot install via the system package manager (no root, sandboxed
-CI), use the **static binary approach**: extract a `qemu-user-static`
-tarball into a local directory and add it to `PATH`. The test runner looks
-for QEMU in `/tmp/my-project/bin`,
-`/tmp/my-project/qemu-user-extract/usr/bin`, then `PATH`. The runner also
+CI), use the **static binary approach**: download the
+`qemu-{arch}-static` binaries from the
+[multiarch/qemu-user-static](https://github.com/multiarch/qemu-user-static/releases)
+releases into a local directory on `PATH` (the convention used by this
+repo and `TASKS.md` §0.2 is `$HOME/.local/bin/`). The runner also
 registers `binfmt_misc` entries for every cross-architecture (skipping the
 host's native arch to avoid QEMU recursion) so fork+exec of a cross-compiled
 ELF goes through the right interpreter.
@@ -703,8 +704,8 @@ Poly1305, Argon2, scrypt, HKDF, HMAC, RSA-OAEP-PSS, and more) live in
 against a known value.
 
 ```bash
-# Run all womb KAT tests:
-bash scripts/run_all_kat.sh
+# Run all gold-standard tests:
+bash scripts/run_all_gold.sh
 # Run the real KAT suite (cross-architecture known-answer tests):
 bash scripts/run_real_kat.sh
 ```
@@ -877,18 +878,19 @@ more.
 
 See [Documentation](#documentation) below.
 
-### `scripts/` — 24 build/test scripts
+### `scripts/` — 20 build/test scripts
 
-Bash and Python scripts covering the full test + build surface:
+Bash and Python scripts covering the full test + build surface
+(verify with `ls scripts/`):
 `pi5_test_suite.sh` (gold-standard sweep), `kernel_smoke.sh` (boot smoke
 test), `kernel_parity.sh` (19-backend parity sweep), `run_all_gold.sh`,
-`run_all_kat.sh`, `run_real_kat.sh`, `cross_backend_test.sh`,
-`run_gold_sweep.py`, `run_backend_resilient.py`, `supervisor.py`,
-`wasm32_runner.py`, `gen_real_kat.py`, `generate_all_kat_tests.py`,
+`run_real_kat.sh`, `cross_backend_test.sh`, `run_backend_resilient.py`,
+`supervisor.py`, `wasm32_runner.py`, `gen_real_kat.py`,
 `ci_run_tests.sh`, `run_fuzz.sh`, `test_womb_compile.sh`,
 `womb_test_harness.sh`, `run_differential.sh`, `generate_report.sh`,
-`add_expected_codes.py`, `run_8backends.py`, `run_one_batch.py`,
-`supervisor_3par.sh`.
+`add_expected_codes.py`, `run_one_batch.py`, `qemu_boot.sh`,
+`qemu_system_boot.sh`. Plus two KAT test-data directories:
+`scripts/womb_kat_tests/` and `scripts/real_kat_tests/`.
 
 ---
 
