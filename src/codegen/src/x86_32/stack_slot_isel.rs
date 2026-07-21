@@ -70,6 +70,7 @@ use super::{
     encode_movsx_reg16,
     encode_movzx_reg8, encode_movzx_reg16,
     encode_movzx_reg8_mem, encode_movzx_reg16_mem,
+    encode_mul_reg,
     encode_neg_reg, encode_nop, encode_not_reg,
     encode_or_reg_imm32, encode_or_reg_reg,
     encode_pop, encode_push,
@@ -1271,51 +1272,59 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         BinOpKind::Mul => {
                             if is_64bit {
-                                // 64-bit multiply using 32-bit partial products.
-                                // result = (a.hi * b.lo + a.lo * b.hi) << 32 + a.lo * b.lo
-                                // We only have EAX/ECX/EDX as scratch registers.
-                                // Strategy: use stack slots as temp storage.
+                                // 64-bit unsigned multiply using 32-bit partial
+                                // products (schoolbook). This is the SAME algorithm
+                                // as the arm32 I64 Mul fix — required for the FNV-1a
+                                // hash in stark_verify (hash *= 0x100000001b3).
                                 //
-                                // Step 1: result.lo = a.lo * b.lo (low 32 bits)
-                                //   EAX = a.lo; MUL b.lo (EDX:EAX = a.lo * b.lo)
-                                //   store EAX → dst.lo, store EDX → temp (cross term)
+                                // result_lo = (a.lo * b.lo)_lo
+                                // result_hi = (a.lo * b.lo)_hi   ← was MISSING (IMUL dropped EDX)
+                                //          + (a.hi * b.lo)_lo
+                                //          + (a.lo * b.hi)_lo
                                 //
-                                // Step 2: result.hi = cross + EDX (from step 1)
-                                //   cross = a.hi * b.lo + a.lo * b.hi
-                                //   EAX = a.hi; MUL b.lo → EDX:EAX; add EAX to cross
-                                //   EAX = a.lo; MUL b.hi → EDX:EAX; add EAX to cross
-                                //   result.hi = cross + EDX (from step 1)
+                                // We use MUL (unsigned 32×32→64 in EDX:EAX) for
+                                // step 1 to capture the high word, and IMUL
+                                // (32×32→32) for the cross products (we only
+                                // need their low 32 bits).
                                 //
-                                // For simplicity (and since most 64-bit MUL in VUMA
-                                // tests have small operands), use IMUL for 32×32→32
-                                // and assume no overflow into high word beyond what
-                                // the cross-products give.
-                                //
-                                // Load lhs.lo → EAX, rhs.lo → ECX
+                                // Register usage: EAX, ECX, EDX (caller-saved).
+                                // Temp storage: dst slot + a stack temp at [EBP-100].
                                 code.extend(load_value(lhs, Gpr::Rax));
                                 code.extend(load_value(rhs, Gpr::Rcx));
-                                code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
-                                // EAX = a.lo * b.lo (low 32 bits)
+                                // MUL ECX → EDX:EAX = EAX * ECX (unsigned 64-bit)
+                                code.extend(encode_mul_reg(Gpr::Rcx));
+                                // EAX = (a.lo * b.lo)_lo, EDX = (a.lo * b.lo)_hi
                                 code.extend(store_vreg_lo(dst_id, Gpr::Rax));
-                                // High word: cross products
-                                // EAX = a.hi * b.lo
+                                // Save EDX (carry to high word) to [EBP-100]
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, -100, Gpr::Rdx));
+
+                                // Cross product 1: (a.hi * b.lo)_lo
                                 code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
                                 code.extend(load_value(rhs, Gpr::Rcx));
                                 code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
-                                // ECX = EAX (save a.hi * b.lo)
-                                code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax));
-                                // EAX = a.lo * b.hi
+                                // EAX = (a.hi * b.lo)_lo
+                                // Add carry from step 1
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::Rbp, -100));
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rdx));
+                                // Save running high word to [EBP-104]
+                                code.extend(encode_mov_mem_reg(Gpr::Rbp, -104, Gpr::Rax));
+
+                                // Cross product 2: (a.lo * b.hi)_lo
                                 code.extend(load_value(lhs, Gpr::Rax));
                                 if let IRValue::Register(rhs_id) = rhs {
-                                    code.extend(load_vreg_hi(*rhs_id, Gpr::Rdx));
+                                    code.extend(load_vreg_hi(*rhs_id, Gpr::Rcx));
                                 } else {
-                                    // Immediate: high word is 0 or -1
-                                    code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                    // Immediate: high word
+                                    let hi = if let IRValue::Immediate(imm) = rhs {
+                                        (*imm >> 32) as i32
+                                    } else { 0 };
+                                    code.extend(encode_mov_reg_imm32(Gpr::Rcx, hi));
                                 }
-                                code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rdx));
-                                // EAX = a.lo * b.hi, ECX = a.hi * b.lo
-                                // result.hi = EAX + ECX
-                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                code.extend(encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // EAX = (a.lo * b.hi)_lo
+                                // Add to running high word
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::Rbp, -104));
+                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rdx));
                                 code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                             } else {
                                 code.extend(load_value(lhs, Gpr::Rax));
@@ -2008,18 +2017,38 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Conditional select (Cmov) ──
-                IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+                IRInstr::Select { dst, cond, true_val, false_val, ty, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load false_val into EAX, true_val into ECX, cond into EDX
-                    code.extend(load_value(false_val, Gpr::Rax));
-                    code.extend(load_value(true_val, Gpr::Rcx));
-                    code.extend(load_value(cond, Gpr::Rdx));
-                    // Test cond != 0
-                    code.extend(encode_test_reg_reg(Gpr::Rdx, Gpr::Rdx));
-                    // CMOVNE EAX, ECX (if cond != 0, EAX = true_val)
-                    code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::Rcx));
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    let is_i64 = ty.as_ref().is_some_and(|t| matches!(t, IRType::I64 | IRType::U64));
+                    if is_i64 {
+                        // 64-bit Select: CMOV only operates on 32-bit registers,
+                        // so we must select BOTH the low and high 32-bit words.
+                        // Load false_val.lo into EAX, true_val.lo into ECX, cond into EDX.
+                        // Test+CMOVNE selects the low word. Then repeat for the high word.
+                        // This matches the arm32 I64 Select pattern (two 32-bit selects).
+                        code.extend(load_value(false_val, Gpr::Rax));
+                        code.extend(load_value(true_val, Gpr::Rcx));
+                        code.extend(load_value(cond, Gpr::Rdx));
+                        code.extend(encode_test_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                        code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                        // High word
+                        code.extend(load_value_hi(false_val, Gpr::Rax));
+                        code.extend(load_value_hi(true_val, Gpr::Rcx));
+                        code.extend(load_value(cond, Gpr::Rdx));
+                        code.extend(encode_test_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                        code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                    } else {
+                        // 32-bit Select (original path)
+                        code.extend(load_value(false_val, Gpr::Rax));
+                        code.extend(load_value(true_val, Gpr::Rcx));
+                        code.extend(load_value(cond, Gpr::Rdx));
+                        code.extend(encode_test_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                        code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::Rcx));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                    }
                     code
                 }
 
