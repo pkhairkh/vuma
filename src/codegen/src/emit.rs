@@ -5416,7 +5416,7 @@ impl Emitter {
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
             | IRInstr::StarkProof { .. } => {}
             // Wave 49: CallIndirect — indirect call through func_ptr vreg.
-            // aarch64 codegen: load func_ptr into X16, BLR X16.
+            // aarch64 SS-mode: load func_ptr into X16, BLR X16.
             IRInstr::CallIndirect { dst, func_ptr, args } => {
                 // Load args into X0-X7 (aarch64 calling convention)
                 for (i, arg) in args.iter().enumerate() {
@@ -5427,24 +5427,39 @@ impl Emitter {
                         4 => Register::X4, 5 => Register::X5,
                         6 => Register::X6, _ => Register::X7,
                     };
-                    let src_reg = self.resolve_reg(arg)?;
-                    if src_reg != arg_reg {
-                        self.emit_instruction(Instruction::MOV { rd: arg_reg, rm: src_reg })?;
-                    }
+                    self.ss_load_value(arg, arg_reg, slots)?;
                 }
                 // Load func_ptr into X16 (IP0, caller-saved, not an arg reg)
-                let fp_reg = self.resolve_reg(func_ptr)?;
-                if fp_reg != Register::X16 {
-                    self.emit_instruction(Instruction::MOV { rd: Register::X16, rm: fp_reg })?;
-                }
+                self.ss_load_value(func_ptr, Register::X16, slots)?;
+                // Ensure SP is 16-byte aligned before BLR (aarch64 ABI requirement).
+                // Save X29 (frame pointer) to X17 as a scratch, align SP, call, restore.
+                // SUB SP, SP, #16  (ensure alignment + scratch space)
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::SP, rn: Register::SP,
+                    rm: Operand::Imm12(16),
+                })?;
+                // STP X29, X30, [SP]  (save frame pointer + return address)
+                self.emit_instruction(Instruction::STP {
+                    rt1: Register::X29, rt2: Register::X30,
+                    rn: Register::SP, offset: 0,
+                })?;
                 // BLR X16 — branch with link to register
                 self.emit_instruction(Instruction::BLR { rn: Register::X16 })?;
+                // LDP X29, X30, [SP]  (restore frame pointer + return address)
+                self.emit_instruction(Instruction::LDP {
+                    rt1: Register::X29, rt2: Register::X30,
+                    rn: Register::SP, offset: 0,
+                })?;
+                // ADD SP, SP, #16  (restore SP)
+                self.emit_instruction(Instruction::ADD {
+                    rd: Register::SP, rn: Register::SP,
+                    rm: Operand::Imm12(16),
+                })?;
                 // Store return value (X0) to dst's stack slot
                 if let Some(d) = dst {
-                    let dst_reg = self.resolve_reg(d)?;
-                    if dst_reg != Register::X0 {
-                        self.emit_instruction(Instruction::MOV { rd: dst_reg, rm: Register::X0 })?;
-                    }
+                    let dst_id = d.as_register().unwrap_or(0);
+                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                    self.ss_store_to_slot(Register::X0, dst_offset)?;
                 }
             }
         }
