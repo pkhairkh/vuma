@@ -4198,7 +4198,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } => {}
+            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
                 }
             }
 

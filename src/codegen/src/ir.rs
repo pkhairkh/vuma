@@ -1889,6 +1889,25 @@ pub enum IRInstr {
         /// placeholder builtin path.
         constraints: Vec<u64>,
     },
+
+    /// Indirect call through a function pointer stored in a vreg.
+    ///
+    /// This is the IR-level analogue of `IRInstr::Call` for register-based
+    /// callees — used by `irq_dispatch` (Wave 49) to call a handler function
+    /// whose address was loaded from the per-function driver table via
+    /// `GetAddress` + `Store` + `Load`.
+    ///
+    /// **Effects:** may-read/write arbitrary memory, may-write any caller-saved
+    /// register.  Backends emit an indirect `CALL` (x86_64: `call rax`), `BLR`
+    /// (aarch64: `blr x0`), `JALR` (riscv64: `jalr ra, a0, 0`), etc.
+    CallIndirect {
+        /// Optional destination register for the return value.
+        dst: Option<IRValue>,
+        /// The function-pointer vreg (holds the callee's address).
+        func_ptr: IRValue,
+        /// Argument values.
+        args: Vec<IRValue>,
+    },
 }
 
 /// Wave 8b: error discriminants returned by [`IRInstr::ChannelRecvResult`].
@@ -1966,6 +1985,12 @@ impl IRInstr {
             }
             // Wave 93-94: StarkProof defines the proof-handle dst.
             IRInstr::StarkProof { dst, .. } => dst.as_register().into_iter().collect(),
+            // Wave 49: CallIndirect defines dst (return value).
+            IRInstr::CallIndirect { dst, .. } => dst
+                .as_ref()
+                .and_then(|v| v.as_register())
+                .into_iter()
+                .collect(),
             IRInstr::Store { .. }
             | IRInstr::Free { .. }
             | IRInstr::Ret { .. }
@@ -2072,6 +2097,12 @@ impl IRInstr {
             IRInstr::ChannelClose { ch } => ch.as_register().into_iter().collect(),
             // Wave 93-94: StarkProof reads the public input.
             IRInstr::StarkProof { input, .. } => input.as_register().into_iter().collect(),
+            // Wave 49: CallIndirect reads func_ptr + all args.
+            IRInstr::CallIndirect { func_ptr, args, .. } => {
+                let mut r = func_ptr.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(args.iter().flat_map(|a| a.as_register()));
+                r
+            }
         }
     }
 }
@@ -2245,6 +2276,13 @@ impl fmt::Display for IRInstr {
                 } else {
                     let cs: Vec<String> = constraints.iter().map(|c| c.to_string()).collect();
                     write!(f, "{} = stark_prove {}, [{}]", dst, input, cs.join(", "))
+                }
+            },
+            IRInstr::CallIndirect { dst, func_ptr, args } => {
+                let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                match dst {
+                    Some(d) => write!(f, "{} = call_indirect {}({})", d, func_ptr, args_str.join(", ")),
+                    None => write!(f, "call_indirect {}({})", func_ptr, args_str.join(", ")),
                 }
             },
         }

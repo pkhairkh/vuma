@@ -3509,7 +3509,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } => {}
+        | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
     }
     Ok(())
 }

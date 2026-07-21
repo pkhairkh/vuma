@@ -4032,7 +4032,7 @@ impl Backend for PPC64Backend {
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                     // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-                    | IRInstr::StarkProof { .. } => Vec::new(),
+                    | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic
