@@ -337,7 +337,9 @@ fn translate_x86_64(generic_nr: u32) -> Option<u32> {
         55 => Some(93),    // fchown
         56 => Some(257),   // openat
         57 => Some(3),     // close
+        59 => Some(293),   // pipe2
         62 => Some(8),     // lseek
+        73 => Some(7),     // poll / ppoll (x86_64 poll=7, ppoll=271; ipc_lowering uses 73 for both)
         78 => Some(267),   // readlinkat
         79 => Some(262),   // newfstatat
         80 => Some(5),     // fstat
@@ -384,6 +386,7 @@ fn translate_x86_64(generic_nr: u32) -> Option<u32> {
         164 => Some(160),  // setrlimit
         165 => Some(98),   // getrusage
         166 => Some(95),   // umask
+        167 => Some(157),  // prctl
         169 => Some(96),   // gettimeofday
         172 => Some(39),   // getpid
         173 => Some(110),  // getppid

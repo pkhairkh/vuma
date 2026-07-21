@@ -4795,22 +4795,18 @@ pub fn run_ir_pipeline(
     }
 
     // ── IPC Builtin Lowering ──
-    // Backends with working inline IPC codegen (x86_64, riscv64) handle
-    // IPC builtins directly in their instruction selectors — skip the
-    // lowering pass for them. Other backends (aarch64, arm32, etc.) use
-    // this pass as their IPC path. TODO: fix the inline code in those
-    // backends so they can also skip this pass.
+    // Single IPC codegen path: every backend (including x86_64 and riscv64)
+    // routes IPC builtins through `ipc_lowering::lower_ipc_builtins`, which
+    // rewrites `Call { func: "channel_send", .. }` into real
+    // `Syscall`/`Store`/`Load`/`BinOp` IR with a runtime CRC32 loop (block
+    // splitting). The backend instruction selectors no longer recognise IPC
+    // builtins by name — the inline Call-form arms in stack_slot_isel.rs and
+    // riscv64.rs have been deleted. The `IRInstr::ChannelSend`/etc. arms in
+    // each backend's isel stay (they handle the SCG-NodePayload path).
     {
         let tipc = Instant::now();
-        let has_inline_ipc = matches!(
-            backend_kind,
-            vuma_codegen::backend::BackendKind::X86_64
-            | vuma_codegen::backend::BackendKind::RiscV64
-        );
-        if !has_inline_ipc {
-            for func in &mut ir_program.functions {
-                vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
-            }
+        for func in &mut ir_program.functions {
+            vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
         }
         timings.push(("ipc-lowering".to_string(), tipc.elapsed().as_millis() as u64));
     }
