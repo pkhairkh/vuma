@@ -3385,12 +3385,11 @@ fn emit_binop(
                 .encode(),
             );
             if is_32bit {
-                // Zero-extend to 32 bits: SLL 0, then... actually SLL imm 0 is a no-op.
-                // Use AND with 0xFFFFFFFF for proper 32-bit result.
-                // Actually, for u32 add, the low 32 bits are correct. We just
-                // need to mask to clear the upper 32 bits.
+                // SRL rd, rs1, 0 — 32-bit shift right by 0 zero-extends
+                // the low 32 bits to 64 bits (clears upper 32).
+                // SRLX (64-bit shift) by 0 is a NO-OP — the original bug.
                 code.extend_from_slice(
-                    &Instruction::SrlxImm {
+                    &Instruction::SrlImm {
                         rd: Gpr::L0,
                         rs1: Gpr::L0,
                         imm: 0,
@@ -3411,6 +3410,9 @@ fn emit_binop(
                 }
                 .encode(),
             );
+            if is_32bit {
+                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+            }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::Mul => {
@@ -3522,6 +3524,9 @@ fn emit_binop(
                 }
                 .encode(),
             );
+            if is_32bit {
+                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+            }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::Or => {
@@ -3535,6 +3540,9 @@ fn emit_binop(
                 }
                 .encode(),
             );
+            if is_32bit {
+                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+            }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::Xor => {
@@ -3548,6 +3556,9 @@ fn emit_binop(
                 }
                 .encode(),
             );
+            if is_32bit {
+                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+            }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
         BinOpKind::Shl => {
