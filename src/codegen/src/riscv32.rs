@@ -5786,7 +5786,14 @@ impl Backend for RiscV32Backend {
                             code.extend(ss_load_imm(Gpr::T3, alloc_off as i64));
                             code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
                         }
+                        // Store the 32-bit pointer to the LOW word of the 64-bit slot
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        // ZERO the HIGH word — critical on RV32 where pointers are
+                        // 32-bit but vregs are 64-bit. Without this, I64 arithmetic
+                        // on the pointer (e.g. frame + i in CRC32 loop) produces a
+                        // garbage 64-bit address because the high word has stack garbage.
+                        code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T0 }.encode()); // T0 = 0
+                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4)); // high word at offset-4
                         code
                     }
 
