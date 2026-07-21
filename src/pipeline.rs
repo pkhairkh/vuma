@@ -4795,28 +4795,21 @@ pub fn run_ir_pipeline(
     }
 
     // ── IPC Builtin Lowering ──
-    // Expand IPC builtin Calls (channel_open, channel_send, etc.) into
-    // IR instruction sequences. This gives ALL backends IPC L0-L8 support
-    // without backend-specific inline code. On x86_64, the inline builtins
-    // in stack_slot_isel.rs handle IPC directly (they intercept the Call
-    // in the instruction selector); this pass is skipped for x86_64 to
-    // preserve the well-tested inline implementation. On all other
-    // backends (aarch64, riscv64, arm32, etc.), this pass is the ONLY
-    // IPC path — it lowers builtins to IR that those backends can emit.
+    // Backends with working inline IPC codegen (x86_64, riscv64) handle
+    // IPC builtins directly in their instruction selectors — skip the
+    // lowering pass for them. Other backends (aarch64, arm32, etc.) use
+    // this pass as their IPC path. TODO: fix the inline code in those
+    // backends so they can also skip this pass.
     {
         let tipc = Instant::now();
-        // Skip for x86_64 — it has its own inline IPC implementation
-        // that is more complete (real CRC32, type_hash, cap sigs, etc.)
-        if backend_kind != vuma_codegen::backend::BackendKind::X86_64 {
+        let has_inline_ipc = matches!(
+            backend_kind,
+            vuma_codegen::backend::BackendKind::X86_64
+            | vuma_codegen::backend::BackendKind::RiscV64
+        );
+        if !has_inline_ipc {
             for func in &mut ir_program.functions {
-                eprintln!("[DEBUG ipc_lowering] func={} before: {} instrs", func.name, func.blocks.iter().map(|b| b.instructions.len()).sum::<usize>());
                 vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
-                eprintln!("[DEBUG ipc_lowering] func={} after:  {} instrs", func.name, func.blocks.iter().map(|b| b.instructions.len()).sum::<usize>());
-                for b in &func.blocks {
-                    for i in &b.instructions {
-                        eprintln!("[DEBUG ipc_lowering]   {:?}", i);
-                    }
-                }
             }
         }
         timings.push(("ipc-lowering".to_string(), tipc.elapsed().as_millis() as u64));
