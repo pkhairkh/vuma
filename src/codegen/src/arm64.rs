@@ -4375,14 +4375,42 @@ impl InstructionSelector {
                 let rt = resolve(dst);
                 let rn = resolve(addr);
                 let mem_size = ir_type_to_memory_size(ty);
-                self.select_load(
-                    rt,
-                    &AddressingMode::UnsignedOffset {
-                        base: rn,
-                        offset: *offset as u32,
-                    },
-                    mem_size,
-                )?;
+                // aarch64 LDR/STR require the offset to be a multiple of
+                // the access size (8 for I64, 4 for I32, etc.). For
+                // non-aligned offsets (e.g. offset 44 for I64), compute
+                // the address first via ADD, then load with offset 0.
+                let align = match ty {
+                    IRType::I64 | IRType::U64 | IRType::Ptr | IRType::F64 => 8,
+                    IRType::I32 | IRType::U32 | IRType::F32 => 4,
+                    IRType::I16 | IRType::U16 => 2,
+                    _ => 1,
+                };
+                if *offset != 0 && (*offset as u32) % align != 0 {
+                    // Non-aligned offset: compute base + offset first
+                    // using X16 (IP0, scratch register) as temp
+                    self.push(Instruction::ADD {
+                        rd: Register::X16,
+                        rn,
+                        rm: Operand::Imm12(*offset as u16),
+                    });
+                    self.select_load(
+                        rt,
+                        &AddressingMode::UnsignedOffset {
+                            base: Register::X16,
+                            offset: 0,
+                        },
+                        mem_size,
+                    )?;
+                } else {
+                    self.select_load(
+                        rt,
+                        &AddressingMode::UnsignedOffset {
+                            base: rn,
+                            offset: *offset as u32,
+                        },
+                        mem_size,
+                    )?;
+                }
                 // For signed byte/halfword loads, sign-extend after loading.
                 match ty {
                     IRType::I8 => {
@@ -4411,14 +4439,37 @@ impl InstructionSelector {
                 let rt = resolve(value);
                 let rn = resolve(addr);
                 let mem_size = ir_type_to_memory_size(ty);
-                self.select_store(
-                    rt,
-                    &AddressingMode::UnsignedOffset {
-                        base: rn,
-                        offset: *offset as u32,
-                    },
-                    mem_size,
-                )?;
+                // Same alignment fix as Load: compute address for non-aligned offsets
+                let align = match ty {
+                    IRType::I64 | IRType::U64 | IRType::Ptr | IRType::F64 => 8,
+                    IRType::I32 | IRType::U32 | IRType::F32 => 4,
+                    IRType::I16 | IRType::U16 => 2,
+                    _ => 1,
+                };
+                if *offset != 0 && (*offset as u32) % align != 0 {
+                    self.push(Instruction::ADD {
+                        rd: Register::X16,
+                        rn,
+                        rm: Operand::Imm12(*offset as u16),
+                    });
+                    self.select_store(
+                        rt,
+                        &AddressingMode::UnsignedOffset {
+                            base: Register::X16,
+                            offset: 0,
+                        },
+                        mem_size,
+                    )?;
+                } else {
+                    self.select_store(
+                        rt,
+                        &AddressingMode::UnsignedOffset {
+                            base: rn,
+                            offset: *offset as u32,
+                        },
+                        mem_size,
+                    )?;
+                }
             }
 
             IRInstr::Alloc { dst, size } => {
