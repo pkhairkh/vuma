@@ -1525,6 +1525,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_mov_reg_imm32(Gpr::Rcx, n as i32));
                                         code.extend(encode_shr_reg_cl(Gpr::Rax));
                                         code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                                    } else if n == 32 {
+                                        // ShrL by 32: result.lo = lhs.hi, result.hi = 0
+                                        code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
+                                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                                    } else if n > 32 {
+                                        // ShrL by n>32: result.lo = lhs.hi >> (n-32), result.hi = 0
+                                        code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
+                                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, (n - 32) as i32));
+                                        code.extend(encode_shr_reg_cl(Gpr::Rax));
+                                        code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                                     } else {
                                         code.extend(load_value(lhs, Gpr::Rax));
                                         code.extend(load_value(rhs, Gpr::Rcx));
