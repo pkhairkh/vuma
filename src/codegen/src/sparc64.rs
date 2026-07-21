@@ -2647,9 +2647,18 @@ fn emit_instr(
             code.extend(ss_load_value(src, vreg_stack_slots, Gpr::L0));
             match kind {
                 CastKind::ZExt => {
-                    // Zero-extend: mask to the source width, then store.
-                    // For simplicity, just store the full 64-bit value (already
-                    // zero-extended if loaded with unsigned load).
+                    // Zero-extend: clear the high 32 bits for I32→I64.
+                    // The CRC accumulator is I32 but stored in a 64-bit vreg.
+                    // Without zeroing the high word, the Cmp(Eq, I64) fails
+                    // because the high 32 bits contain garbage from previous
+                    // I32 operations. SRL rd, rs1, 0 zero-extends low 32 bits.
+                    if let Some(IRType::I32 | IRType::U32) = from_ty {
+                        code.extend_from_slice(
+                            &Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode(),
+                        );
+                    }
+                    // For I8/I16, the unsigned loads (LDUB, LDUH) already
+                    // zero-extend to 64 bits on SPARC V9.
                 }
                 CastKind::SExt => {
                     // Sign-extend: already done by signed loads (LDSB, LDSH, LDSW).
