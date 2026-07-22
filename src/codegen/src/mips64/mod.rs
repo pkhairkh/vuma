@@ -3308,6 +3308,26 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                     code.extend(ss_load_imm(Gpr::V0, native_nr as i64));
                     // SYSCALL
                     code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+                    // NOP (delay slot for SYSCALL — required on MIPS to avoid
+                    // errata on some implementations)
+                    code.extend_from_slice(&encode_nop());
+                    // [Wave 81-88-ext] MIPS syscall error convention:
+                    // $a3=0 → success, $v0=return value
+                    // $a3=1 → error, $v0=POSITIVE errno
+                    // The IR expects x86_64-style -errno on error. Negate $v0
+                    // when $a3 != 0 so the I64 Cmp SLt($v0, 0) check works.
+                    // BEQ $a3, $zero, 8  (if $a3==0, skip to PC+12 = SD)
+                    // NOP  (delay slot — always executes)
+                    // DSUBU $v0, $zero, $v0  (only if branch NOT taken)
+                    // SD $v0, ... (branch target)
+                    code.extend_from_slice(&Instruction::Beq {
+                        rs: Gpr::A3, rt: Gpr::Zero, offset: 8,
+                    }.encode());
+                    code.extend_from_slice(&encode_nop()); // delay slot
+                    // DSUBU $v0, $zero, $v0  (negate: $v0 = 0 - $v0)
+                    code.extend_from_slice(&Instruction::Dsubu {
+                        rd: Gpr::V0, rs: Gpr::Zero, rt: Gpr::V0,
+                    }.encode());
                     // Store result ($v0) to dst's stack slot
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
