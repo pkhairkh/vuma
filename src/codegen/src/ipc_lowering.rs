@@ -2520,8 +2520,9 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
     let handle = ctx.new_vreg();
 
     let mut instrs = vec![
-        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 224, ty: IRType::I64 },
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: count.clone(), rhs: IRValue::Immediate(56), ty: Some(IRType::I64) },
+        // Use I32 for count — small value, avoids I64 issues on 32-bit backends.
+        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 224, ty: IRType::I32 },
+        IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: count.clone(), rhs: IRValue::Immediate(56), ty: Some(IRType::I32) },
         IRInstr::BinOp { op: BinOpKind::Add, dst: slot_ptr.clone(), lhs: table.clone(), rhs: offset, ty: Some(IRType::I64) },
     ];
     // Store 32-byte proof_data as INDIVIDUAL BYTES (I8 stores) at
@@ -2573,9 +2574,9 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
         IRInstr::Store { value: IRValue::Immediate(verifier_key), addr: slot_ptr.clone(), offset: 40, ty: IRType::I64 },
         // validity_window at [slot_ptr + 48]
         IRInstr::Store { value: IRValue::Immediate(3600), addr: slot_ptr, offset: 48, ty: IRType::I64 },
-        // count_new = count + 1
-        IRInstr::BinOp { op: BinOpKind::Add, dst: count_new.clone(), lhs: count, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) },
-        IRInstr::Store { value: count_new.clone(), addr: table, offset: 224, ty: IRType::I64 },
+        // count_new = count + 1 (I32 — count is a small value)
+        IRInstr::BinOp { op: BinOpKind::Add, dst: count_new.clone(), lhs: count, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) },
+        IRInstr::Store { value: count_new.clone(), addr: table, offset: 224, ty: IRType::I32 },
         IRInstr::BinOp { op: BinOpKind::Add, dst: handle.clone(), lhs: count_new, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: handle, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]);
@@ -2613,15 +2614,13 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let handle_valid = ctx.new_vreg();
 
     let pre = vec![
-        // Load count from [table + 224] (4 entries × 56 bytes = 224 byte table + 8-byte count)
-        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 224, ty: IRType::I64 },
+        // Load count from [table + 224]. Use I32 — count is a small value
+        // (0-4), and I64 comparison on 32-bit backends fails due to
+        // uninitialized high word in the Alloc'd buffer.
+        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 224, ty: IRType::I32 },
         // handle_valid = (handle <= count) — if handle > count, it's out of bounds
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: handle_valid.clone(), lhs: handle.clone(), rhs: count.clone(), ty: Some(IRType::I64) },
-        // Clamp handle: if handle > count, use 1 (slot 0) to avoid OOB access.
-        // clamped_handle = handle_valid ? handle : 1
-        // Then compute slot_ptr from clamped_handle.
-        // This prevents segfault on invalid handles (e.g. stark_verify(99)).
-        // The result is still 0 because handle_valid is ANDed into the final result.
+        // Use ty=None (32-bit comparison) for the same reason.
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: handle_valid.clone(), lhs: handle.clone(), rhs: count.clone(), ty: None },
     ];
 
     // Use Select to clamp the handle before computing the slot pointer.
@@ -2647,7 +2646,7 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         IRInstr::Alloc { dst: hash_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(0xcbf29ce484222325u64 as i64), addr: hash_slot.clone(), offset: 0, ty: IRType::I64 },
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I32 },
     ]);
 
     // Build the FNV-1a loop: for i in 0..40 { byte = Load(slot_ptr + i); hash ^= byte; hash *= 0x100000001b3; }
@@ -2657,11 +2656,12 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let cont = ctx.new_label("fnv_cont");
 
     // ── fnv_header: if i >= 40 goto exit, else goto body ──
+    // Use I32 for loop counter — avoids I64 issues on 32-bit backends.
     let i_val = ctx.new_vreg();
     let cond = ctx.new_vreg();
     let mut header_blk = IRBlock::new(&header);
-    header_blk.instructions.push(IRInstr::Load { dst: i_val.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I64 });
-    header_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: cond.clone(), lhs: i_val, rhs: IRValue::Immediate(40), ty: Some(IRType::I64) });
+    header_blk.instructions.push(IRInstr::Load { dst: i_val.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
+    header_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: cond.clone(), lhs: i_val, rhs: IRValue::Immediate(40), ty: None });
     header_blk.instructions.push(IRInstr::CondBranch { cond: cond.clone(), true_target: exit.clone(), false_target: body.clone() });
     header_blk.terminator = IRTerminator::Branch { cond, true_block: exit.clone(), false_block: body.clone() };
 
@@ -2676,7 +2676,7 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let i_val3 = ctx.new_vreg();
     let i_new = ctx.new_vreg();
     let mut body_blk = IRBlock::new(&body);
-    body_blk.instructions.push(IRInstr::Load { dst: i_val2.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I64 });
+    body_blk.instructions.push(IRInstr::Load { dst: i_val2.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
     body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: addr.clone(), lhs: slot_ptr.clone(), rhs: i_val2, ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::Load { dst: byte.clone(), addr: addr, offset: 0, ty: IRType::I8 });
     body_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: byte_ext.clone(), src: byte, from_ty: Some(IRType::I8), to_ty: Some(IRType::I64) });
@@ -2684,9 +2684,9 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Xor, dst: hash_xored.clone(), lhs: hash_val, rhs: byte_ext, ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Mul, dst: hash_new.clone(), lhs: hash_xored, rhs: IRValue::Immediate(0x100000001b3u64 as i64), ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::Store { value: hash_new, addr: hash_slot.clone(), offset: 0, ty: IRType::I64 });
-    body_blk.instructions.push(IRInstr::Load { dst: i_val3.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I64 });
-    body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: i_new.clone(), lhs: i_val3, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) });
-    body_blk.instructions.push(IRInstr::Store { value: i_new, addr: i_slot, offset: 0, ty: IRType::I64 });
+    body_blk.instructions.push(IRInstr::Load { dst: i_val3.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
+    body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: i_new.clone(), lhs: i_val3, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) });
+    body_blk.instructions.push(IRInstr::Store { value: i_new, addr: i_slot, offset: 0, ty: IRType::I32 });
     body_blk.instructions.push(IRInstr::Branch { target: header.clone() });
     body_blk.terminator = IRTerminator::Jump(header.clone());
 
