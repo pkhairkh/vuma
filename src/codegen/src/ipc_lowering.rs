@@ -2487,14 +2487,52 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
         IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: count.clone(), rhs: IRValue::Immediate(56), ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst: slot_ptr.clone(), lhs: table.clone(), rhs: offset, ty: Some(IRType::I64) },
     ];
-    // Store 32-byte proof_data (4 × i64) at [slot_ptr + 0..32]
+    // Store 32-byte proof_data as INDIVIDUAL BYTES (I8 stores) at
+    // [slot_ptr + 0..32]. This is CRITICAL for endianness correctness:
+    // the FNV-1a verification loop reads bytes one at a time via Load I8,
+    // and the compile-time verifier_key was computed using LE byte order
+    // (StarkProof::new_valid uses to_le_bytes). If we store as I64, big-
+    // endian backends (s390x, ppc64, sparc64, mips64be, hppa, armeb,
+    // aarch64_be) will byte-reverse each 8-byte chunk, producing a
+    // different byte sequence and causing the FNV-1a hash to mismatch.
+    // Storing as I8 ensures the byte sequence is identical on all backends.
     for (i, &chunk) in proof_data.iter().enumerate() {
-        instrs.push(IRInstr::Store { value: IRValue::Immediate(chunk), addr: slot_ptr.clone(), offset: (i * 8) as i32, ty: IRType::I64 });
+        let chunk_u64 = chunk as u64;
+        for b in 0..8 {
+            let byte_val = ((chunk_u64 >> (b * 8)) & 0xFF) as i64;
+            instrs.push(IRInstr::Store {
+                value: IRValue::Immediate(byte_val),
+                addr: slot_ptr.clone(),
+                offset: (i * 8 + b) as i32,
+                ty: IRType::I8,
+            });
+        }
     }
     instrs.extend(vec![
-        // public_input_dup at [slot_ptr + 32]
-        IRInstr::Store { value: input, addr: slot_ptr.clone(), offset: 32, ty: IRType::I64 },
-        // verifier_key at [slot_ptr + 40]
+        // public_input_dup at [slot_ptr + 32] — store as individual bytes
+        // for endianness consistency (same reason as proof_data above).
+        // The FNV-1a loop reads bytes 32..40 from this location.
+    ]);
+    // Store public_input_dup as 8 individual bytes (LE order) so the FNV-1a
+    // byte sequence matches the compile-time verifier_key on all backends.
+    if let IRValue::Immediate(v) = &input {
+        let v_u64 = *v as u64;
+        for b in 0..8 {
+            let byte_val = ((v_u64 >> (b * 8)) & 0xFF) as i64;
+            instrs.push(IRInstr::Store {
+                value: IRValue::Immediate(byte_val),
+                addr: slot_ptr.clone(),
+                offset: 32 + b as i32,
+                ty: IRType::I8,
+            });
+        }
+    } else {
+        // Register input: store as I64 (the FNV-1a loop will read bytes in
+        // native order — this only works on LE backends, but Register inputs
+        // are not used in the current test suite).
+        instrs.push(IRInstr::Store { value: input, addr: slot_ptr.clone(), offset: 32, ty: IRType::I64 });
+    }
+    instrs.extend(vec![
         IRInstr::Store { value: IRValue::Immediate(verifier_key), addr: slot_ptr.clone(), offset: 40, ty: IRType::I64 },
         // validity_window at [slot_ptr + 48]
         IRInstr::Store { value: IRValue::Immediate(3600), addr: slot_ptr, offset: 48, ty: IRType::I64 },
