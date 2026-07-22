@@ -1386,6 +1386,13 @@ fn emit_instr(
                     // just keeps the low bits. Load src into S0 and store.
                     code.extend(ss_load_value(src, vreg_stack_slots, S0));
                     code.extend(ss_st(S0, dst_off));
+                    // [Wave 93-94-ext] For ZExt to I64, MUST zero the high
+                    // word. Without this, the FNV-1a loop's I64 XOR reads
+                    // garbage from [dst_off+4], corrupting the hash.
+                    if matches!(to_ty, Some(IRType::I64) | Some(IRType::U64)) {
+                        code.extend(ss_load_imm(S0, 0));
+                        code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                    }
                 }
                 CastKind::FloatToFloat => {
                     // G4: bit-copy with truncation/zero-extension. Correct
