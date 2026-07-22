@@ -4046,6 +4046,55 @@ impl Backend for PPC64Backend {
                         }
                         code
                     }
+                    // ── CallIndirect (Wave 49) ──
+                    // Indirect call through a function pointer vreg.
+                    // 1. Load args into R3-R10 (PPC64 ELFv2 ABI)
+                    // 2. Load func_ptr into R12 (PPC64 indirect-call convention)
+                    // 3. MTCTR R12; BCTRL (branch to CTR with link)
+                    // 4. Store R3 (return value) to dst's stack slot
+                    IRInstr::CallIndirect { dst, func_ptr, args } => {
+                        let mut code = Vec::new();
+                        // ── Register-pass args 0..7 ──
+                        for (i, arg) in args.iter().enumerate() {
+                            if i >= 8 { break; }
+                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                        }
+                        // ── Stack-pass args 8+ ── (matches IRInstr::Call path)
+                        let stack_args = args.len().saturating_sub(8);
+                        let stack_bytes = ((stack_args * 8) + 15) & !15;
+                        if stack_bytes > 0 {
+                            code.extend_from_slice(&Instruction::Stdu {
+                                rs: Gpr::R1, ra: Gpr::R1, ds: -(stack_bytes as i32),
+                            }.encode());
+                            for i in (8..args.len()).rev() {
+                                let j = i - 8;
+                                let off = (j * 8) as i32;
+                                code.extend(ss_load_value(&args[i], &vreg_stack_slots, Gpr::R12));
+                                code.extend_from_slice(&Instruction::Std {
+                                    rs: Gpr::R12, ra: Gpr::R1, ds: off,
+                                }.encode());
+                            }
+                        }
+                        // Load func_ptr into R12.
+                        code.extend(ss_load_value(func_ptr, &vreg_stack_slots, Gpr::R12));
+                        // MTCTR R12 — move target address into Count Register.
+                        code.extend_from_slice(&Instruction::Mtctr { rs: Gpr::R12 }.encode());
+                        // BCTRL — branch to CTR with link (sets LR = return addr).
+                        // Encoding: 0x4E800421 (Bcctr 20, 0, 0 with LK bit set).
+                        code.extend_from_slice(&encode_word(0x4E800421));
+                        // ── Clean up the overflow-arg stack area ──
+                        if stack_bytes > 0 {
+                            code.extend_from_slice(&Instruction::Addi {
+                                rt: Gpr::R1, ra: Gpr::R1, simm: stack_bytes as i32,
+                            }.encode());
+                        }
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                        }
+                        code
+                    }
                     // ── VectorOp (Wave 29) ──
                     // ppc64 (AltiVec/VSX) has no SIMD encoder in the Wave 29
                     // suite; emit nothing.
@@ -4055,7 +4104,7 @@ impl Backend for PPC64Backend {
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                     // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-                    | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => Vec::new(),
+                    | IRInstr::StarkProof { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic

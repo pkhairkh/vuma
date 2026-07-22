@@ -4077,13 +4077,29 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     }
                     IRInstr::Phi { .. } => { /* no-op */ }
                     IRInstr::GetAddress { dst, name } => {
-                        // Load address of a function/symbol — use LDIL + LDO
-                        // For now, just load 0
-                        code.extend(ss_load_imm(S0, 0));
+                        // Load the absolute address of a function/symbol into S0.
+                        // Emit a fixed-size 4-instruction (16-byte) placeholder:
+                        //   LDIL L0, 0       — load lower 21 bits (placeholder 0)
+                        //   LDO  0(L0), L0   — add upper bits (placeholder 0)
+                        //   LDIL L1, 0       — high 21 bits
+                        //   LDO  0(L1), L1   — (combined with above for full 32-bit addr)
+                        // The relocation patches these with the symbol's absolute address.
+                        // For hppa32, 32-bit addresses suffice (QEMU user-mode < 4GB).
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                        let reloc_offset = code.len() as u64;
+                        // LDIL S0, 0 — loads 0 into upper 21 bits of S0
+                        code.extend_from_slice(&encode_ldil(S0, 0));
+                        // LDO 0(S0), S0 — S0 = S0 + 0 (no-op, but gives us the low bits slot)
+                        code.extend_from_slice(&encode_ldo(S0, 0, S0));
+                        // Record relocation for this 2-instruction (8-byte) sequence.
+                        // The linker patches LDIL's imm21 with %hi(addr) and LDO's imm14 with %lo(addr).
+                        relocations.push(crate::backend::RelocationEntry {
+                            offset: reloc_offset,
+                            symbol: name.clone(),
+                            reloc_type: "R_PARISC_DIR32".to_string(),
+                        });
                         code.extend(ss_st(S0, d_off));
-                        let _ = name;
                     }
                     IRInstr::Offset { dst, base, offset } => {
                         code.extend(ss_load_value(base, &vreg_stack_slots, S0));
@@ -4531,13 +4547,54 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     // ── VectorOp (Wave 29) ──
                     // HPPA has no SIMD encoder in the Wave 29 suite; emit nothing.
                     IRInstr::VectorOp { .. } => {}
+                    // ── CallIndirect (Wave 49) ──
+                    // Indirect call through a function pointer vreg. Uses a
+                    // SHORT 5-instruction (20-byte) BL+NOP+LDO+BV+NOP pattern
+                    // instead of the 32-byte direct-call sequence, to avoid
+                    // pushing cmpb displacements out of range.
+                    //   1. BL  +0, R2     — R2 = PC+8 (link)
+                    //   2. NOP             — delay slot
+                    //   3. LDO 12(R2), R2  — R2 = PC+20 (return address)
+                    //   4. BV  R0(R1)      — branch to address in R1
+                    //   5. NOP             — delay slot for BV (executed)
+                    IRInstr::CallIndirect { dst, func_ptr, args } => {
+                        // Move args to R26-R23 (first 4 args).
+                        // Stack args (4+) go to [R30 - 32 + (i-4)*4].
+                        for (i, arg) in args.iter().enumerate() {
+                            if i < 4 {
+                                code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                            } else {
+                                let stack_off = -32 + ((i - 4) * 4) as i32;
+                                code.extend(ss_load_value(arg, &vreg_stack_slots, S0));
+                                code.extend_from_slice(&encode_stw(S0, R30, stack_off as i16));
+                            }
+                        }
+                        // Load func_ptr into R1 (RP — standard indirect-call target).
+                        code.extend(ss_load_value(func_ptr, &vreg_stack_slots, R1));
+                        // BL +0, R2 — R2 = PC+8 (link register holds return-thunk addr)
+                        code.extend_from_slice(&0xE8400000u32.to_be_bytes());
+                        // NOP — delay slot (executed; harmless)
+                        code.extend_from_slice(&encode_nop());
+                        // LDO 12(R2), R2 — R2 = PC+8 + 12 = PC+20 (after BV+NOP)
+                        code.extend_from_slice(&encode_ldo_raw(R2, 12, R2));
+                        // BV R0(R1) — branch to address in R1
+                        code.extend_from_slice(&encode_bv_real(R1));
+                        // NOP — delay slot for BV (executed before branch takes effect)
+                        code.extend_from_slice(&encode_nop());
+                        // Move return value from R28 to dst's stack slot.
+                        if let Some(d) = dst {
+                            let d_id = d.as_register().unwrap_or(0);
+                            let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                            code.extend(ss_st(R28, d_off));
+                        }
+                    }
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit nothing (no frontend
                     // generates channel IR yet).  Will be lowered to runtime calls.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+            | IRInstr::StarkProof { .. } => {}
                 }
             }
 
@@ -4557,24 +4614,41 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 IRTerminator::Branch { cond, true_block, false_block } => {
                     // Conditional branch: if cond != 0 → true_block, else → false_block.
                     //
-                    // cmpb,<> S0, R0, true_target  — if S0 != R0 (i.e., S0 != 0), branch to true.
-                    //   <delay slot: NOP>
-                    //   <unconditional branch to false_target>  — runs only if cmpb didn't take.
+                    // LONG-FORM CondBranch (Wave 49): always emit a 48-byte
+                    // pattern that uses an inverted cmpb with a small fixed
+                    // displacement to skip past the true_target's unconditional
+                    // branch. This avoids the cmpb's ±8KB displacement limit
+                    // (which was causing "cmpb displacement out of range"
+                    // panics on large functions like driver_isolation's main).
                     //
-                    // cmpb,<> = major 0x22, cond=001 (=), inverted=true → '<>'
+                    // Layout:
+                    //   X+0:  cmpb,=  S0, R0, +20  — if cond is FALSE (S0==0),
+                    //                                 skip to X+28 (false_target's branch)
+                    //   X+4:  NOP                    — delay slot (executed regardless)
+                    //   X+8:  20-byte placeholder    — unconditional branch to true_block
+                    //                                   (BL+NOP+LDO+BV+NOP, patched later)
+                    //   X+28: 20-byte placeholder    — unconditional branch to false_block
+                    //                                   (BL+NOP+LDO+BV+NOP, patched later)
+                    //
+                    // cmpb,= = major 0x20, cond=001 (=), inverted=false → '='
+                    // (branches if S0 == R0, i.e., cond == 0)
                     code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
 
-                    // cmpb,<> S0, R0, true_target  (forward or backward)
-                    let comb_off = code.len();
-                    code.extend_from_slice(&encode_cmpb(S0, R0, 0b001, true, false, 0));
+                    // cmpb,= S0, R0, +20 (small fixed displacement; always fits)
+                    code.extend_from_slice(&encode_cmpb(S0, R0, 0b001, false, false, 20));
                     code.extend_from_slice(&encode_nop());  // delay slot
-                    comb_patches.push(CombPatch {
-                        code_offset: comb_off,
+
+                    // 20-byte placeholder for unconditional branch to true_block.
+                    let true_off = code.len();
+                    for _ in 0..5 {
+                        code.extend_from_slice(&encode_nop());
+                    }
+                    branch_patches.push(BranchPatch {
+                        code_offset: true_off,
                         target_label: true_block.clone(),
                     });
 
-                    // Unconditional branch to false_block.
-                    // Emit 20-byte placeholder.
+                    // 20-byte placeholder for unconditional branch to false_block.
                     let false_off = code.len();
                     for _ in 0..5 {
                         code.extend_from_slice(&encode_nop());
@@ -5457,14 +5531,68 @@ impl Backend for HppaBackend {
             patch_call_site(&mut all_code, start_call_offset, main_offset as usize, &mut trampolines);
         }
 
-        // ── Patch inter-function calls ──
+        // ── Patch inter-function calls and GetAddress relocations ──
         // Each call site is a 32-byte pattern (8 instructions).
         // patch_call_site handles short (BL), medium (1-4 LDOs), and
         // long (trampoline) cases.
+        // GetAddress uses R_PARISC_DIR32 — a 2-instruction (8-byte) LDIL+LDO
+        // sequence that gets patched with the symbol's absolute address.
         for func in &ordered_functions {
             let func_base = *func_offsets.get(&func.name).unwrap_or(&padded_header_size);
             for reloc in &func.relocations {
                 let abs_offset = func_base + reloc.offset as usize;
+                if reloc.reloc_type == "R_PARISC_DIR32" {
+                    // GetAddress: patch LDIL+LDO with absolute address.
+                    // LDIL loads imm21 into bits 31:11; LDO adds imm14 (sign-extended).
+                    // Together: addr = (imm21 << 11) + sign_extend(imm14).
+                    // We split the 32-bit absolute address into hi21/lo14.
+                    if abs_offset + 8 > all_code.len() { continue; }
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        })
+                        .unwrap_or(ffi_stub_offset);
+                    // hppa BASE_ADDR = 0x10000, text starts at offset 192
+                    let abs_addr: u32 = (0x10000u64 + 192 + target_offset as u64) as u32;
+                    // LDIL imm21 loads into bits 31:11 of register: S0 = imm21 << 11.
+                    // LDO adds 14-bit SIGNED immediate with NON-LINEAR encoding:
+                    //   bit 0 = sign, bits 13:1 = magnitude/2.
+                    // So disp=5 → imm14=10, disp=-5 → imm14=11.
+                    // addr = (imm21 << 11) + sign_extend(ldo_disp).
+                    // Split: hi21 = (addr + 0x400) >> 11, ldo_disp = addr - (hi21 << 11).
+                    let signed_addr = abs_addr as i32;
+                    let hi21_shifted = (signed_addr + 0x400) >> 11;
+                    let ldo_disp = signed_addr - (hi21_shifted << 11);
+                    let hi21 = (hi21_shifted as u32) & 0x1FFFFF;
+                    // Encode ldo_disp into non-linear imm14:
+                    //   disp >= 0: imm14 = disp * 2 (bit 0 = 0)
+                    //   disp < 0:  imm14 = (disp * 2 & 0x3FFE) | 1 (bit 0 = 1)
+                    let imm14 = if ldo_disp >= 0 {
+                        ((ldo_disp * 2) as u32) & 0x3FFE
+                    } else {
+                        (((ldo_disp * 2) as u32) & 0x3FFE) | 1
+                    };
+                    // Patch LDIL (first 4 bytes): bits 20:0 hold imm21
+                    let ldil_word = u32::from_be_bytes([
+                        all_code[abs_offset], all_code[abs_offset+1],
+                        all_code[abs_offset+2], all_code[abs_offset+3],
+                    ]);
+                    let patched_ldil = (ldil_word & 0xFFE00000) | hi21;
+                    all_code[abs_offset..abs_offset+4].copy_from_slice(&patched_ldil.to_be_bytes());
+                    // Patch LDO (next 4 bytes): bits 13:0 hold imm14 (non-linear)
+                    let ldo_word = u32::from_be_bytes([
+                        all_code[abs_offset+4], all_code[abs_offset+5],
+                        all_code[abs_offset+6], all_code[abs_offset+7],
+                    ]);
+                    let patched_ldo = (ldo_word & 0xFFFFC000) | imm14;
+                    all_code[abs_offset+4..abs_offset+8].copy_from_slice(&patched_ldo.to_be_bytes());
+                    continue;
+                }
                 if abs_offset + 32 > all_code.len() { continue; }
                 let target_offset = func_offsets.get(&reloc.symbol)
                     .copied()
