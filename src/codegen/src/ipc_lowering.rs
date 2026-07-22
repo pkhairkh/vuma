@@ -751,7 +751,7 @@ fn expand_channel_send(ctx: &mut LowerContext, args: &[IRValue]) -> Expansion {
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
         IRInstr::Alloc { dst: j_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(-1), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I32 },
     ]);
 
     // Build the CRC32 loop blocks.
@@ -798,11 +798,14 @@ fn build_crc32_loop_blocks(
     let cont = ctx.new_label("crc_cont");
 
     // ── crc_loop_header: if i >= 52 goto exit, else goto body ──
+    // [Wave 14-ext] Use I32 for loop counters — I64 on 32-bit backends
+    // (hppa, riscv32, m68k, arm32) fails due to uninitialized high word
+    // in Alloc'd buffers.
     let i_val = ctx.new_vreg();
     let cond = ctx.new_vreg();
     let mut header_blk = IRBlock::new(&header);
-    header_blk.instructions.push(IRInstr::Load { dst: i_val.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I64 });
-    header_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: cond.clone(), lhs: i_val, rhs: IRValue::Immediate(52), ty: Some(IRType::I64) });
+    header_blk.instructions.push(IRInstr::Load { dst: i_val.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
+    header_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: cond.clone(), lhs: i_val, rhs: IRValue::Immediate(52), ty: None });
     header_blk.instructions.push(IRInstr::CondBranch { cond: cond.clone(), true_target: exit.clone(), false_target: body.clone() });
     header_blk.terminator = IRTerminator::Branch { cond, true_block: exit.clone(), false_block: body.clone() };
 
@@ -814,14 +817,14 @@ fn build_crc32_loop_blocks(
     let crc_val = ctx.new_vreg();
     let crc_new = ctx.new_vreg();
     let mut body_blk = IRBlock::new(&body);
-    body_blk.instructions.push(IRInstr::Load { dst: i_val2.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I64 });
+    body_blk.instructions.push(IRInstr::Load { dst: i_val2.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
     body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: addr.clone(), lhs: frame.clone(), rhs: i_val2, ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::Load { dst: byte.clone(), addr: addr, offset: 0, ty: IRType::I8 });
     body_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: byte_ext.clone(), src: byte, from_ty: Some(IRType::I8), to_ty: Some(IRType::I32) });
     body_blk.instructions.push(IRInstr::Load { dst: crc_val.clone(), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 });
     body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Xor, dst: crc_new.clone(), lhs: crc_val, rhs: byte_ext, ty: Some(IRType::I32) });
     body_blk.instructions.push(IRInstr::Store { value: crc_new, addr: crc_slot.clone(), offset: 0, ty: IRType::I32 });
-    body_blk.instructions.push(IRInstr::Store { value: IRValue::Immediate(0), addr: j_slot.clone(), offset: 0, ty: IRType::I64 });
+    body_blk.instructions.push(IRInstr::Store { value: IRValue::Immediate(0), addr: j_slot.clone(), offset: 0, ty: IRType::I32 });
     body_blk.instructions.push(IRInstr::Branch { target: inner_header.clone() });
     body_blk.terminator = IRTerminator::Jump(inner_header.clone());
 
@@ -829,8 +832,8 @@ fn build_crc32_loop_blocks(
     let j_val = ctx.new_vreg();
     let cond2 = ctx.new_vreg();
     let mut inner_header_blk = IRBlock::new(&inner_header);
-    inner_header_blk.instructions.push(IRInstr::Load { dst: j_val.clone(), addr: j_slot.clone(), offset: 0, ty: IRType::I64 });
-    inner_header_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: cond2.clone(), lhs: j_val, rhs: IRValue::Immediate(8), ty: Some(IRType::I64) });
+    inner_header_blk.instructions.push(IRInstr::Load { dst: j_val.clone(), addr: j_slot.clone(), offset: 0, ty: IRType::I32 });
+    inner_header_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: cond2.clone(), lhs: j_val, rhs: IRValue::Immediate(8), ty: None });
     inner_header_blk.instructions.push(IRInstr::CondBranch { cond: cond2.clone(), true_target: inner_exit.clone(), false_target: inner_body.clone() });
     inner_header_blk.terminator = IRTerminator::Branch { cond: cond2, true_block: inner_exit.clone(), false_block: inner_body.clone() };
 
@@ -849,9 +852,9 @@ fn build_crc32_loop_blocks(
     inner_body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Xor, dst: xored.clone(), lhs: shifted.clone(), rhs: IRValue::Immediate(CRC32_POLY), ty: Some(IRType::I32) });
     inner_body_blk.instructions.push(IRInstr::Select { dst: crc_new2.clone(), cond: bit, true_val: xored, false_val: shifted, ty: Some(IRType::I32) });
     inner_body_blk.instructions.push(IRInstr::Store { value: crc_new2, addr: crc_slot.clone(), offset: 0, ty: IRType::I32 });
-    inner_body_blk.instructions.push(IRInstr::Load { dst: j_val2.clone(), addr: j_slot.clone(), offset: 0, ty: IRType::I64 });
-    inner_body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: j_new.clone(), lhs: j_val2, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) });
-    inner_body_blk.instructions.push(IRInstr::Store { value: j_new, addr: j_slot.clone(), offset: 0, ty: IRType::I64 });
+    inner_body_blk.instructions.push(IRInstr::Load { dst: j_val2.clone(), addr: j_slot.clone(), offset: 0, ty: IRType::I32 });
+    inner_body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: j_new.clone(), lhs: j_val2, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) });
+    inner_body_blk.instructions.push(IRInstr::Store { value: j_new, addr: j_slot.clone(), offset: 0, ty: IRType::I32 });
     inner_body_blk.instructions.push(IRInstr::Branch { target: inner_header.clone() });
     inner_body_blk.terminator = IRTerminator::Jump(inner_header.clone());
 
@@ -859,9 +862,9 @@ fn build_crc32_loop_blocks(
     let i_val3 = ctx.new_vreg();
     let i_new = ctx.new_vreg();
     let mut inner_exit_blk = IRBlock::new(&inner_exit);
-    inner_exit_blk.instructions.push(IRInstr::Load { dst: i_val3.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I64 });
-    inner_exit_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: i_new.clone(), lhs: i_val3, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) });
-    inner_exit_blk.instructions.push(IRInstr::Store { value: i_new, addr: i_slot, offset: 0, ty: IRType::I64 });
+    inner_exit_blk.instructions.push(IRInstr::Load { dst: i_val3.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
+    inner_exit_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: i_new.clone(), lhs: i_val3, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) });
+    inner_exit_blk.instructions.push(IRInstr::Store { value: i_new, addr: i_slot, offset: 0, ty: IRType::I32 });
     inner_exit_blk.instructions.push(IRInstr::Branch { target: header.clone() });
     inner_exit_blk.terminator = IRTerminator::Jump(header.clone());
 
@@ -956,7 +959,7 @@ fn expand_channel_recv_result(
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
         IRInstr::Alloc { dst: j_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(-1), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I32 },
     ];
 
     // Build the CRC32 loop blocks. After the loop, compute crc_match and
@@ -1089,7 +1092,7 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
         IRInstr::Alloc { dst: j_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(-1), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I32 },
     ];
 
     // Build CRC32 loop blocks (compute CRC over frame[0..52], store to computed_crc).
@@ -1186,7 +1189,7 @@ fn expand_channel_send_cap(ctx: &mut LowerContext, args: &[IRValue]) -> Expansio
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
         IRInstr::Alloc { dst: j_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(-1), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I32 },
     ]);
 
     let (new_blocks, cont_label) = build_crc32_loop_blocks(
