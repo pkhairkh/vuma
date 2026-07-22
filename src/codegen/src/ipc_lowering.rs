@@ -244,7 +244,10 @@ fn alloc_state_slots(func: &mut IRFunction, ctx: &mut LowerContext, needs: &Need
         let v = ctx.new_vreg();
         ctx.proto_state = Some(v.clone());
         prepend.push(IRInstr::Alloc { dst: v.clone(), size: 8 });
-        prepend.push(IRInstr::Store { value: IRValue::Immediate(0), addr: v, offset: 0, ty: IRType::I64 });
+        // Store as I32 — proto_state is a small counter. Using I64 on 32-bit
+        // backends requires both hi and lo words to be 0, but the high word
+        // may be uninitialized garbage from the Alloc'd buffer.
+        prepend.push(IRInstr::Store { value: IRValue::Immediate(0), addr: v, offset: 0, ty: IRType::I32 });
     }
     if needs.hotswap_table {
         // 8 entries × 16 bytes + 8-byte count = 136 bytes
@@ -1220,9 +1223,13 @@ fn expand_channel_recv_proto(ctx: &mut LowerContext, args: &[IRValue], dst: Opti
     let state_match = ctx.new_vreg();
 
     // pre: load proto_state, compare with expected, CondBranch to do_recv or fail.
+    // Use I32 (not I64) for the comparison — proto_state is a small counter
+    // (0, 1, 2, ...) that fits in 32 bits. I64 comparison on 32-bit backends
+    // (hppa, riscv32, m68k, arm32) requires both hi and lo words to match,
+    // but the high word may be uninitialized garbage from the Alloc'd buffer.
     let mut pre = vec![
-        IRInstr::Load { dst: current_state.clone(), addr: proto_state.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Cmp { kind: CmpKind::Eq, dst: state_match.clone(), lhs: current_state, rhs: expected, ty: Some(IRType::I64) },
+        IRInstr::Load { dst: current_state.clone(), addr: proto_state.clone(), offset: 0, ty: IRType::I32 },
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: state_match.clone(), lhs: current_state, rhs: expected, ty: None },
     ];
 
     let do_recv_label = ctx.new_label("proto_do_recv");
@@ -1295,12 +1302,12 @@ fn expand_channel_recv_proto(ctx: &mut LowerContext, args: &[IRValue], dst: Opti
     crc_cont_blk.instructions.push(IRInstr::Select { dst: result.clone(), cond: is_closed, true_val: IRValue::Immediate(-1), false_val: magic_ok_result, ty: Some(IRType::I64) });
     crc_cont_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
 
-    // Advance proto_state: state += 1
+    // Advance proto_state: state += 1 (use I32 — proto_state is a small counter)
     let cur_state = ctx.new_vreg();
     let new_state = ctx.new_vreg();
-    crc_cont_blk.instructions.push(IRInstr::Load { dst: cur_state.clone(), addr: proto_state.clone(), offset: 0, ty: IRType::I64 });
-    crc_cont_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: new_state.clone(), lhs: cur_state, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) });
-    crc_cont_blk.instructions.push(IRInstr::Store { value: new_state, addr: proto_state, offset: 0, ty: IRType::I64 });
+    crc_cont_blk.instructions.push(IRInstr::Load { dst: cur_state.clone(), addr: proto_state.clone(), offset: 0, ty: IRType::I32 });
+    crc_cont_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: new_state.clone(), lhs: cur_state, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) });
+    crc_cont_blk.instructions.push(IRInstr::Store { value: new_state, addr: proto_state, offset: 0, ty: IRType::I32 });
 
     crc_cont_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
     crc_cont_blk.terminator = IRTerminator::Jump(cont_label.clone());
