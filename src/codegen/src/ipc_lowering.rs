@@ -25,6 +25,7 @@
 //! reference function.
 
 use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue, BinOpKind, CmpKind, CastKind};
+use crate::backend::BackendKind;
 
 /// The CRC32 polynomial used by the VUMA L1 frame (same as `crate::ipc::crc32`).
 const CRC32_POLY: i64 = 0xEDB88320;
@@ -82,6 +83,9 @@ struct LowerContext {
     nv: u32,
     label_counter: u32,
     formal_verify_count: i64,
+    /// Target backend — used to select per-arch constants (e.g. O_NONBLOCK
+    /// differs from asm-generic 0x800 on alpha/hppa/sparc/mips).
+    backend: BackendKind,
     /// Per-function state slots (Alloc'd in the entry block, zero-initialised).
     seq_counter: Option<IRValue>,
     cb_state: Option<IRValue>,
@@ -92,12 +96,13 @@ struct LowerContext {
 }
 
 impl LowerContext {
-    fn new(func_name: &str, max_vreg: u32) -> Self {
+    fn new(func_name: &str, max_vreg: u32, backend: BackendKind) -> Self {
         Self {
             func_name: func_name.to_string(),
             nv: max_vreg + 1,
             label_counter: 0,
             formal_verify_count: 0,
+            backend,
             seq_counter: None,
             cb_state: None,
             proto_state: None,
@@ -149,9 +154,9 @@ impl Expansion {
 /// This pass walks every function and replaces IPC builtin Calls with
 /// IR instruction sequences. After this pass, no `IRInstr::Call` with an
 /// IPC builtin name remains — all have been expanded to real IR.
-pub fn lower_ipc_builtins(func: &mut IRFunction) {
+pub fn lower_ipc_builtins(func: &mut IRFunction, backend: BackendKind) {
     let max_vreg = func.vregs.keys().copied().max().unwrap_or(0);
-    let mut ctx = LowerContext::new(&func.name, max_vreg);
+    let mut ctx = LowerContext::new(&func.name, max_vreg, backend);
 
     // Scan the function to determine which state slots are needed and
     // count L1 folded checks for formal_verify.
@@ -1308,12 +1313,49 @@ fn expand_channel_recv_proto(ctx: &mut LowerContext, args: &[IRValue], dst: Opti
     Expansion { pre, new_blocks, cont_label: Some(cont_label) }
 }
 
-/// Helper: set O_NONBLOCK on a read_fd via fcntl(fd, F_SETFL=4, O_NONBLOCK=0x800).
-fn emit_set_nonblocking(read_fd: IRValue, ret: IRValue) -> Vec<IRInstr> {
+/// Per-arch `O_NONBLOCK` flag value for `fcntl(F_SETFL, O_NONBLOCK)`.
+///
+/// The asm-generic value (0x800) is correct for x86, arm64, riscv, arm32,
+/// loongarch64, s390x, ppc, m68k, and the big-endian wrappers of those.
+/// However, four pre-Linux-2.6 ISAs kept their legacy `O_NONBLOCK` value
+/// (which predates asm-generic) when adopting Linux, and so a `fcntl` call
+/// that ORs in 0x800 silently fails to set non-blocking mode on those
+/// arches — the subsequent `read(2)` blocks, manifesting as a test timeout.
+///
+/// Values verified against the Linux UAPI headers shipped at
+/// `/usr/lib/linux/uapi/<arch>/asm/fcntl.h`:
+///
+/// | arch                    | O_NONBLOCK | source (octal/hex)               |
+/// |-------------------------|------------|----------------------------------|
+/// | alpha                   | 0x4        | `00004`  (octal)                 |
+/// | parisc / hppa           | 0x10000    | `000200000` (octal)              |
+/// | sparc / sparc64         | 0x4000     | `0x4000` (hex literal)           |
+/// | mips (mips64 / mips64be)| 0x80       | `0x0080` (hex literal)           |
+/// | asm-generic (all other) | 0x800      | `00004000` (octal)               |
+fn o_nonblock_flag(backend: BackendKind) -> i64 {
+    match backend {
+        BackendKind::Alpha => 0x4,
+        BackendKind::Hppa => 0x10000,
+        BackendKind::Sparc64 => 0x4000,
+        BackendKind::Mips64 | BackendKind::Mips64Be => 0x80,
+        // All other backends use the asm-generic value (0x800):
+        //   AArch64, RiscV64, RiscV32, LoongArch64, X86_64, Arm32,
+        //   PowerPC64, PowerPC64LE, X86_32, S390X, ArmEb, AArch64Be,
+        //   M68k, Wasm32.
+        _ => 0x800,
+    }
+}
+
+/// Helper: set O_NONBLOCK on a read_fd via `fcntl(fd, F_SETFL=4, O_NONBLOCK)`.
+///
+/// `o_nonblock` is the per-arch `O_NONBLOCK` bit value (see [`o_nonblock_flag`]).
+/// `F_SETFL = 4` is universal across all Linux arches (asm-generic and all
+/// per-arch `fcntl.h` headers use 4 for `F_SETFL`).
+fn emit_set_nonblocking(read_fd: IRValue, ret: IRValue, o_nonblock: i64) -> Vec<IRInstr> {
     vec![
         IRInstr::Syscall {
             nr: 25, // fcntl
-            args: vec![read_fd, IRValue::Immediate(4), IRValue::Immediate(0x800)],
+            args: vec![read_fd, IRValue::Immediate(4), IRValue::Immediate(o_nonblock)],
             dst: Some(ret),
         },
     ]
@@ -1327,21 +1369,51 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
 
     let read_fd = ctx.new_vreg();
     let fcntl_ret = ctx.new_vreg();
+    let pollfd = ctx.new_vreg();
+    let poll_ret = ctx.new_vreg();
     let frame = ctx.new_vreg();
     let read_ret = ctx.new_vreg();
     let payload = ctx.new_vreg();
+    let poll_no_data = ctx.new_vreg();
+    let read_failed = ctx.new_vreg();
     let is_error = ctx.new_vreg();
     let result = ctx.new_vreg();
 
     let mut instrs = vec![
         IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
     ];
-    instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret));
+    instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret, o_nonblock_flag(ctx.backend)));
+    // Probe the pipe with a zero-timeout poll BEFORE issuing the read.
+    //
+    // Rationale: the original implementation relied on capturing -EAGAIN
+    // from the non-blocking read() to detect "no data right now". However,
+    // several backends (alpha, mips64, sparc64, hppa) use a separate error
+    // flag register to signal syscall errors (e.g. $a3 on alpha/mips, the
+    // carry bit on sparc, %r0 on hppa) rather than returning -errno in the
+    // result register. Their general `IRInstr::Syscall` handler does not
+    // yet consult that flag, so a `read()` that returns -EAGAIN is visible
+    // to the IR as a positive errno (e.g. 11) instead of -11 — breaking
+    // the `read_ret <= 0` check.
+    //
+    // Using poll(fd, 1, 0) sidesteps the issue: on an empty pipe poll
+    // returns 0 (success, no events), which is correctly captured as
+    // poll_ret=0 and used to select the -2 (EAGAIN) sentinel. The
+    // subsequent read() is still executed unconditionally (its result is
+    // only consulted when poll reports data ready), but its return value
+    // is masked out by the poll-based check on the empty-pipe path.
+    instrs.extend(vec![
+        IRInstr::Alloc { dst: pollfd.clone(), size: 8 },
+        IRInstr::Store { value: read_fd.clone(), addr: pollfd.clone(), offset: 0, ty: IRType::I32 },
+        IRInstr::Store { value: IRValue::Immediate(1), addr: pollfd.clone(), offset: 4, ty: IRType::I16 },
+        IRInstr::Syscall { nr: 7, args: vec![pollfd, IRValue::Immediate(1), IRValue::Immediate(0)], dst: Some(poll_ret.clone()) },
+    ]);
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: is_error.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I64) },
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(-2), false_val: payload, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]);
@@ -1367,13 +1439,15 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, ctx: &mu
     let frame = ctx.new_vreg();
     let read_ret = ctx.new_vreg();
     let payload = ctx.new_vreg();
+    let poll_no_data = ctx.new_vreg();
+    let read_failed = ctx.new_vreg();
     let is_error = ctx.new_vreg();
     let result = ctx.new_vreg();
 
     let mut instrs = vec![
         IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
     ];
-    instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret));
+    instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret, o_nonblock_flag(ctx.backend)));
     instrs.extend(vec![
         IRInstr::Alloc { dst: pollfd.clone(), size: 8 },
         IRInstr::Store { value: read_fd.clone(), addr: pollfd.clone(), offset: 0, ty: IRType::I32 },
@@ -1385,11 +1459,17 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, ctx: &mu
     instrs.extend(vec![
         IRInstr::Syscall { nr: 7, args: vec![pollfd.clone(), IRValue::Immediate(1), timeout_ms], dst: Some(poll_ret.clone()) },
     ]);
+    // Check poll_ret BEFORE consulting read_ret: on the timeout path poll
+    // returns 0 (success, no events) and we report the -3 (Timeout) sentinel
+    // without depending on capturing -EAGAIN from read (see note in
+    // expand_channel_try_recv about per-arch syscall error-flag handling).
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: is_error.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I64) },
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(-3), false_val: payload, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]);
