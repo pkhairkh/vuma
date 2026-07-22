@@ -8431,35 +8431,12 @@ impl Backend for Arm32Backend {
                         if stack_bytes > 0 {
                             code.extend_from_slice(&emit_add_sp(stack_bytes as i32));
                         }
-                        // Store return value (R0, 32-bit) to dst slot,
-                        // SIGN-EXTENDED to I64.
-                        // [Wave 81-88-ext] Without sign-extension, a negative
-                        // return (e.g. connect() = -1) is stored as
-                        // 0x00000000_FFFFFFFF instead of 0xFFFFFFFF_FFFFFFFF.
-                        // The I64 Cmp SLt check then fails, and the error-
-                        // detection Select picks the wrong branch.
+                        // Store return value (R0, 32-bit sign-extended) to dst slot
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset =
                                 vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            // ASR R14, R0, #31 — R14 = (R0 < 0) ? 0xFFFFFFFF : 0
-                            code.extend_from_slice(&encode_dp_imm(
-                                Condition::Al, DP_MOV, true, 0, Gpr::R14.encoding(),
-                                Gpr::R0.encoding(), 31,
-                            ));
-                            // Store low word (R0) and high word (R14) via
-                            // ss_store_64 pattern. We can't call ss_store_32_zero
-                            // because it zeroes the high word.
-                            let neg_off = -dst_offset;
-                            let hi_neg_off = neg_off - 4;
-                            code.extend_from_slice(&encode_ls_imm(
-                                Condition::Al, true, false, false, false, false,
-                                Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_off) as u32,
-                            ));
-                            code.extend_from_slice(&encode_ls_imm(
-                                Condition::Al, true, false, false, false, false,
-                                Gpr::R11.encoding(), Gpr::R14.encoding(), (-hi_neg_off) as u32,
-                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                         }
                         code
                     }
