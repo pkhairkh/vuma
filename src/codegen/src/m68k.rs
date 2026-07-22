@@ -1142,7 +1142,7 @@ fn emit_instr(
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
                 emit_fp_binop(op, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code, relocations);
             } else {
-                emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+                emit_binop(op, ty, dst, lhs, rhs, vreg_stack_slots, code);
             }
         }
         IRInstr::Cmp {
@@ -1174,7 +1174,7 @@ fn emit_instr(
                 // W8d: 64-bit integer comparison.
                 emit_i64_cmp(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
             } else {
-                emit_binop(&binop_kind, dst, lhs, rhs, vreg_stack_slots, code);
+                emit_binop(&binop_kind, ty, dst, lhs, rhs, vreg_stack_slots, code);
             }
         }
         IRInstr::UnaryOp {
@@ -1992,6 +1992,7 @@ fn emit_i64_cmp(
 
 fn emit_binop(
     op: &BinOpKind,
+    ty: &Option<crate::ir::IRType>,
     dst: &IRValue,
     lhs: &IRValue,
     rhs: &IRValue,
@@ -2039,10 +2040,82 @@ fn emit_binop(
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Mul => {
-            code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
-            code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            code.extend(Instruction::Mulu { src: S1, dst: S0 }.encode());
-            code.extend(ss_st(S0, dst_off));
+            // [Wave 93-94-ext] I64 Mul on m68k using MULU.L (32×32→64).
+            // MULU.L <ea>, Dh:Dl encoding (68020+):
+            //   Word 1: 0x4C00 | src_reg (register direct mode)
+            //   Word 2: 0_00_HHH_0_000_LLL (HHH=Dh, LLL=Dl)
+            // Result: Dh gets upper 32 bits, Dl gets lower 32 bits.
+            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+            if is_64 {
+                // Load 64-bit operands: S0=a_lo, S2=a_hi, S1=b_lo, S3=b_hi
+                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2));
+                code.extend(ss_load_value_64(rhs, vreg_stack_slots, S1, S3));
+
+                // Save a_lo and b_lo to stack (we'll need them for cross terms
+                // after MULU.L clobbers S0/S2).
+                // Save a_lo at dst_off (temp), b_lo at dst_off+4 (temp).
+                // We'll overwrite these with the final result later.
+                code.extend(ss_st(S0, dst_off));       // temp: a_lo
+                code.extend(ss_st(S1, dst_off + 4));   // temp: b_lo
+
+                // MULU.L S1, S2:S0 → S0=lo32(a_lo*b_lo), S2=hi32(a_lo*b_lo)
+                // MULU.L encoding (68020+): word1 = 0x4C20 | src_reg (bits 6-5 = 01 for long)
+                // word2 = (Dh<<12)|Dl
+                code.extend_from_slice(&[0x4C, 0x21]); // MULU.L D1 (0x4C20|1)
+                code.extend_from_slice(&[0x20, 0x00]); // Dh=D2, Dl=D0
+
+                // S2 now holds partial result_hi = hi32(a_lo * b_lo).
+                // Save it to a temp slot (reuse dst_off, we stored a_lo there
+                // but we can reload a_lo from lhs later).
+                // Actually, save S2 to the stack via SWAP or Store. We need
+                // S2 to survive the cross-term computations. Store it at
+                // dst_off (overwriting the saved a_lo — we can reload from lhs).
+                code.extend(ss_st(S2, dst_off));   // temp: result_hi (partial)
+
+                // Cross term 1: result_hi += lo32(a_lo * b_hi)
+                // Reload a_lo from lhs (S0), multiply with b_hi (S3).
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));  // S0 = a_lo
+                // MULU.L S3, S2:S0 → S0=lo32(a_lo*b_hi), S2=hi32(a_lo*b_hi)
+                code.extend_from_slice(&[0x4C, 0x23]); // MULU.L D3
+                code.extend_from_slice(&[0x20, 0x00]); // Dh=D2, Dl=D0
+                // S0 = lo32(a_lo * b_hi) — add to result_hi
+                code.extend(ss_ld(S2, dst_off));       // S2 = saved result_hi
+                code.extend(Instruction::Add { src: S0, dst: S2 }.encode()); // S2 += lo32(a_lo*b_hi)
+                code.extend(ss_st(S2, dst_off));        // save updated result_hi
+
+                // Cross term 2: result_hi += lo32(a_hi * b_lo)
+                // Reload a_hi from lhs (S2), b_lo from saved temp (S1).
+                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2)); // S2=a_hi
+                code.extend(ss_ld(S1, dst_off + 4));   // S1 = saved b_lo
+                // MULU.L S1, S3:S0 → S0=lo32(a_hi*b_lo), S3=hi32
+                code.extend_from_slice(&[0x4C, 0x21]); // MULU.L D1
+                code.extend_from_slice(&[0x30, 0x00]); // Dh=D3, Dl=D0
+                // S0 = lo32(a_hi * b_lo) — add to result_hi
+                code.extend(ss_ld(S2, dst_off));       // S2 = saved result_hi
+                code.extend(Instruction::Add { src: S0, dst: S2 }.encode()); // S2 += lo32(a_hi*b_lo)
+
+                // Now reload result_lo from the MULU.L we did earlier.
+                // But result_lo was in S0 which got clobbered. We need to
+                // recompute it or save it. Let me save it after the first MULU.
+                // ... Actually, the first MULU.L's result_lo is gone (S0 was
+                // overwritten by cross term reloads). We need to recompute it.
+                // Reload a_lo and b_lo, MULU.L again.
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));  // S0 = a_lo
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));  // S1 = b_lo
+                code.extend_from_slice(&[0x4C, 0x21]); // MULU.L D1
+                code.extend_from_slice(&[0x30, 0x00]); // Dh=D3, Dl=D0 (S3=hi, S0=lo)
+                // S0 = lo32(a_lo * b_lo) = result_lo
+
+                // Store final results
+                code.extend(ss_st(S0, dst_off));       // result_lo
+                code.extend(ss_st(S2, dst_off + 4));   // result_hi
+            } else {
+                // 32-bit multiply: use MULU.W (16×16→32)
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                code.extend(Instruction::Mulu { src: S1, dst: S0 }.encode());
+                code.extend(ss_st(S0, dst_off));
+            }
         }
         BinOpKind::UDiv | BinOpKind::SDiv => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
@@ -2847,7 +2920,7 @@ fn emit_fp_binop(
             // and shouldn't reach here. Defensive fallback to integer
             // emit_binop (which will produce integer results — wrong for
             // FP operands, but at least won't crash the backend).
-            emit_binop(op, dst, lhs, rhs, vreg_stack_slots, code);
+            emit_binop(op, &None, dst, lhs, rhs, vreg_stack_slots, code);
         }
     }
 }
