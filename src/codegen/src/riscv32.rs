@@ -5251,6 +5251,30 @@ impl Backend for RiscV32Backend {
                                         code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
                                     }
                                     code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                                } else if is_64bit && matches!(op, BinOpKind::Mul) {
+                                    // [Wave 93-94-ext] I64 Mul: 64-bit multiply on RV32.
+                                    // 64-bit result = a_lo * b_lo + (a_lo * b_hi + a_hi * b_lo) << 32
+                                    // Use: MUL (low 32), MULHU (high 32 of unsigned mul)
+                                    // Register plan:
+                                    //   T0 = a_lo, T2 = a_hi, T1 = b_lo, T3 = b_hi
+                                    //   T4 = a_lo (saved), T5 = b_lo (saved), T6 = a_hi (saved)
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                                    // Save a_lo, b_lo, a_hi before they're clobbered
+                                    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T0, imm: 0 }.encode()); // T4 = a_lo
+                                    code.extend(Instruction::Addi { rd: Gpr::T5, rs1: Gpr::T1, imm: 0 }.encode()); // T5 = b_lo
+                                    code.extend(Instruction::Addi { rd: Gpr::T6, rs1: Gpr::T2, imm: 0 }.encode()); // T6 = a_hi
+                                    // result_lo = MUL(a_lo, b_lo)
+                                    code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T4, rs2: Gpr::T5 }.encode());
+                                    // result_hi = MULHU(a_lo, b_lo)
+                                    code.extend(Instruction::Mulhu { rd: Gpr::T2, rs1: Gpr::T4, rs2: Gpr::T5 }.encode());
+                                    // result_hi += a_lo * b_hi = MUL(T4, T3)
+                                    code.extend(Instruction::Mul { rd: Gpr::A0, rs1: Gpr::T4, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::A0 }.encode());
+                                    // result_hi += a_hi * b_lo = MUL(T6, T5)
+                                    code.extend(Instruction::Mul { rd: Gpr::A0, rs1: Gpr::T6, rs2: Gpr::T5 }.encode());
+                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::A0 }.encode());
+                                    code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
                                 } else {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
