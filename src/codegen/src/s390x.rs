@@ -415,16 +415,31 @@ fn encode_stg(r1: Gpr, b2: Gpr, disp: i32) -> [u8; 6] {
 }
 
 /// Encode LGB R1, D2(X2, B2) (Load Byte, sign-extended to 64-bit). op2=0x77.
+///
+/// Unused after the Load handler switched to zero-extending LLC for I8/U8
+/// (see IRInstr::Load).  Retained for reference and potential future use by
+/// Cast SExt-style paths that might want a direct sign-extending byte load.
+#[allow(dead_code)]
 fn encode_lgb(r1: Gpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_rxy_a(0xE3, 0x77, r1, Gpr::R0, b2, disp)
 }
 
 /// Encode LGH R1, D2(X2, B2) (Load Halfword, sign-extended to 64-bit). op2=0x15.
+///
+/// Unused after the Load handler switched to zero-extending LLH for I16/U16.
+#[allow(dead_code)]
 fn encode_lgh(r1: Gpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_rxy_a(0xE3, 0x15, r1, Gpr::R0, b2, disp)
 }
 
 /// Encode LGF R1, D2(X2, B2) (Load 32-bit, sign-extended to 64-bit). op2=0x14.
+///
+/// Unused after the Load handler switched to zero-extending LLGF for I32/U32
+/// (matching x86_64 and sparc64).  Previously this was used for IRType::I32
+/// loads, which caused a CRC mismatch in ping_pong.vuma because the
+/// sign-extended stored_crc disagreed with the zero-extended computed_crc in
+/// the 64-bit CGR comparison.  See IRInstr::Load for the full rationale.
+#[allow(dead_code)]
 fn encode_lgf(r1: Gpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_rxy_a(0xE3, 0x14, r1, Gpr::R0, b2, disp)
 }
@@ -1491,17 +1506,45 @@ fn emit_instr(
                 code.extend_from_slice(&encode_agr(S0, S1));
             }
             // Load typed value from [S0] into S2.
+            //
+            // Sub-word loads (I8/I16/I32) use the **zero-extend** variants
+            // (LLC/LLH/LLGF) rather than the sign-extend variants
+            // (LGB/LGH/LGF).  This matches x86_64's reference backend, which
+            // zero-extends all sub-word loads (writing to a 32-bit register
+            // on x86_64 implicitly zero-extends to 64 bits, and MOVZX is used
+            // for I8/I16).  It also matches the s390x BinOp convention, where
+            // I32 Add/Sub/Mul results are explicitly zero-extended via LLGFR.
+            //
+            // Using sign-extending loads here created two latent bugs:
+            //   1. Cmp Eq between a sign-extended Load-I32 value and a
+            //      Cast-ZExt-I32-to-I64 value (which uses LLGFR = zero-extend)
+            //      would mismatch when the value's high bit was set, because
+            //      the 64-bit CGR comparison sees 0xFFFFFFFF_xxxxxxxx vs
+            //      0x00000000_xxxxxxxx.  This broke ping_pong.vuma on s390x
+            //      (CRC mismatch on the second channel_recv) because the
+            //      inverted CRC32 value happened to have its high bit set.
+            //   2. ShrL on I32 uses the 64-bit SRLG (see BinOpKind::ShrL
+            //      below); when the operand was sign-extended (high bits =
+            //      0xFFFFFFFF), SRLG shifted those high bits into the low 32,
+            //      corrupting the CRC32 inner loop result.
+            //
+            // Sign-extension is still available explicitly via Cast SExt
+            // (which uses LGBR/LGHR/LGFR and sign-extends from the low bits
+            // regardless of the input's high bits), so this change is safe
+            // for any code that genuinely needs signed semantics.
             match ty {
-                IRType::I8 => code.extend_from_slice(&encode_lgb(S2, S0, 0)),
-                IRType::U8 => {
+                IRType::I8 | IRType::U8 => {
+                    // LLC (Load Logical Character, op2=0x90): zero-extend byte.
                     code.extend_from_slice(&encode_rxy_a(0xE3, 0x90, S2, Gpr::R0, S0, 0));
                 }
-                IRType::I16 => code.extend_from_slice(&encode_lgh(S2, S0, 0)),
-                IRType::U16 => {
+                IRType::I16 | IRType::U16 => {
+                    // LLH (Load Logical Halfword, op2=0x91): zero-extend halfword.
                     code.extend_from_slice(&encode_rxy_a(0xE3, 0x91, S2, Gpr::R0, S0, 0));
                 }
-                IRType::I32 => code.extend_from_slice(&encode_lgf(S2, S0, 0)),
-                IRType::U32 => code.extend_from_slice(&encode_llgf(S2, S0, 0)),
+                IRType::I32 | IRType::U32 => {
+                    // LLGF (Load Logical Fullword, op2=0x16): zero-extend word.
+                    code.extend_from_slice(&encode_llgf(S2, S0, 0));
+                }
                 _ => code.extend_from_slice(&encode_lg(S2, S0, 0)),
             }
             code.extend(ss_st(S2, dst_off));

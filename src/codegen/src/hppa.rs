@@ -3183,6 +3183,23 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             match op {
                                 BinOpKind::Add => {
                                     code.extend_from_slice(&encode_add(S0, S1, S0));
+                                    // [Wave 4-ext-hppa-wait] For 64-bit Add used as a
+                                    // copy (rhs == 0), also propagate the high
+                                    // word from [lhs_off-4] to [dst_off-4].
+                                    // Without this, the channel handle's high
+                                    // word (write_fd) is lost when
+                                    // `ch = channel_open()` stores the result,
+                                    // and channel_send's `(ch >> 32)` extracts
+                                    // garbage instead of write_fd — causing
+                                    // the parent to write(0,…) (EBADF) and
+                                    // deadlock with the child's read.
+                                    if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                                        if let IRValue::Register(lhs_id) = lhs {
+                                            let lhs_off = vreg_stack_slots.get(lhs_id).copied().unwrap_or(0);
+                                            code.extend(ss_ld(S4, lhs_off - 4));
+                                            code.extend(ss_st(S4, dst_off - 4));
+                                        }
+                                    }
                                 }
                                 BinOpKind::Sub => {
                                     code.extend_from_slice(&encode_sub(S0, S1, S0));
@@ -3194,12 +3211,15 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     code.extend_from_slice(&encode_copy(S0, S0)); // nop-like
                                 }
                                 BinOpKind::Or => {
-                                    // Check if this is a 64-bit Or (combining Shl 32 with checksum)
-                                    // Detect: rhs is a Register (not Immediate) — means it's a variable
+                                    // Check if this is a 64-bit Or (combining Shl 32 with read_fd
+                                    // to pack a channel handle). Detect via the operation's `ty`
+                                    // field (NOT func.result_types, which is the function's RETURN
+                                    // type — e.g. main() returns i32, so the old check always
+                                    // failed for channel_open's handle = (write_fd<<32)|read_fd,
+                                    // dropping the high word and making channel_send write to
+                                    // fd 0 → EBADF → deadlock with the child's read).
                                     let is_64bit_pack = !matches!(rhs, IRValue::Immediate(_)) &&
-                                        func.result_types.first()
-                                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
-                                            .unwrap_or(false);
+                                        matches!(ty, Some(IRType::I64) | Some(IRType::U64));
                                     if is_64bit_pack {
                                         // S0 = lhs_lo (0 from Shl 32), S1 = rhs_lo (checksum)
                                         let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
@@ -3207,6 +3227,14 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         // High word = TMP64_A_HI (from Shl 32), store to TMP64_B_HI
                                         code.extend_from_slice(&encode_ldw(R3, TMP64_A_HI as i16, S4));
                                         code.extend_from_slice(&encode_stw(S4, R3, TMP64_B_HI as i16));
+                                        // [Wave 4-ext-hppa-wait] Also store the high
+                                        // word to [dst_off-4] so the standard
+                                        // 64-bit stack-slot layout (low at [off],
+                                        // high at [off-4]) is maintained. This
+                                        // lets subsequent ShrL 32 / Add / etc.
+                                        // find the high word without relying on
+                                        // the fragile TMP64_* temp-slot chain.
+                                        code.extend(ss_st(S4, dst_off - 4));
                                     } else {
                                         // Regular 32-bit OR
                                         let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
@@ -3380,12 +3408,27 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 BinOpKind::ShrL | BinOpKind::ShrA => {
                                     // Check for 64-bit shift by 32 (unpack high word)
                                     if rhs.as_immediate().map(|v| v == 32).unwrap_or(false) {
-                                        // 64-bit ShrL 32: result = high word from TMP64_C_HI
-                                        // TODO: The temp slot coordination between Shl 32 (stores
-                                        // to TMP64_A_HI), Or (stores to TMP64_B_HI), and ShrL 32
-                                        // (reads from TMP64_C_HI) is broken. A full rewrite of
-                                        // the hppa I64 temp slot management is needed.
-                                        code.extend_from_slice(&encode_ldw(R3, TMP64_C_HI as i16, S0));
+                                        // [Wave 4-ext-hppa-wait] 64-bit ShrL 32:
+                                        // result = high word of lhs.
+                                        //
+                                        // The high word now lives at [lhs_off-4]
+                                        // (the standard 64-bit stack-slot layout)
+                                        // because the Or, Add, and Call handlers
+                                        // were updated to maintain it. Previously
+                                        // this read from TMP64_C_HI, which was
+                                        // only set by the Call path — so values
+                                        // produced inline (e.g. channel_open's
+                                        // handle from Shl 32 + Or) returned
+                                        // garbage for `(handle >> 32)`, breaking
+                                        // channel_send's write_fd extraction.
+                                        if let IRValue::Register(lhs_id) = lhs {
+                                            let lhs_off = vreg_stack_slots.get(lhs_id).copied().unwrap_or(0);
+                                            code.extend(ss_ld(S0, lhs_off - 4));
+                                        } else {
+                                            // Fallback for non-Register lhs
+                                            // (rare): read from TMP64_C_HI.
+                                            code.extend_from_slice(&encode_ldw(R3, TMP64_C_HI as i16, S0));
+                                        }
                                     } else {
                                         // Regular shift: SHRPW loop
                                         code.extend_from_slice(&encode_copy(S1, S2));
@@ -3610,17 +3653,37 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S3));  // S3 = lhs
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));  // S1 = rhs
                             code.extend_from_slice(&encode_ldi(1, S0));  // S0 = 1 (default)
+                            // PA-RISC cmpb condition codes (see `encode_cmpb`):
+                            //   cond=001 (=), 010 (<), 011 (<=), 100 (<<), 101 (<<=)
+                            // Inverted conditions use the same cond with inverted=true:
+                            //   cond=001,inverted=true → <> (not equal)
+                            //   cond=010,inverted=true → >=
+                            //   cond=011,inverted=true → >
+                            //   cond=100,inverted=true → >>=
+                            //   cond=101,inverted=true → >>
+                            //
+                            // [Wave 4-ext-hppa-wait fix] Previously `Eq` was
+                            // encoded with cond=0b000 (the "never" condition),
+                            // and `Ne` with cond=0b001,inverted=false (the "="
+                            // condition).  Both were wrong, so every integer
+                            // equality test on hppa always returned false —
+                            // which in turn made `if pid == 0` in
+                            // spawn_worker/wait_worker callers fall through to
+                            // the parent branch in BOTH processes, causing the
+                            // child to call wait4(0,…) (ECHILD), exit 0, and
+                            // ultimately made the parent's wait_worker return 0
+                            // instead of the child's exit code.
                             let (cond_code, inverted) = match kind {
-                                CmpKind::Eq => (0b000, false),  // = (equal): branch if equal → S0 stays 1 (true)
-                                CmpKind::Ne => (0b001, false),  // <> (not equal): branch if not equal → S0 stays 1 (true)
-                                CmpKind::SLt => (0b010, false),
-                                CmpKind::SLe => (0b011, false),
-                                CmpKind::SGt => (0b011, true),
-                                CmpKind::SGe => (0b010, true),
-                                CmpKind::ULt => (0b100, false),
-                                CmpKind::ULe => (0b101, false),
-                                CmpKind::UGt => (0b101, true),
-                                CmpKind::UGe => (0b100, true),
+                                CmpKind::Eq => (0b001, false),  // = (equal)
+                                CmpKind::Ne => (0b001, true),   // <> (not equal)
+                                CmpKind::SLt => (0b010, false), // < (signed)
+                                CmpKind::SLe => (0b011, false), // <= (signed)
+                                CmpKind::SGt => (0b011, true),  // > (signed)
+                                CmpKind::SGe => (0b010, true),  // >= (signed)
+                                CmpKind::ULt => (0b100, false), // << (unsigned)
+                                CmpKind::ULe => (0b101, false), // <<= (unsigned)
+                                CmpKind::UGt => (0b101, true),  // >> (unsigned)
+                                CmpKind::UGe => (0b100, true),  // >>= (unsigned)
                             };
                             let cmpb_off = code.len();
                             code.extend_from_slice(&encode_cmpb(S3, S1, cond_code, inverted, false, 0));
@@ -3979,61 +4042,63 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         code.extend(ss_st(S0, d_off));
                     }
-                    IRInstr::Select { dst, cond, true_val, false_val, ty: _ } => {
+                    IRInstr::Select { dst, cond, true_val, false_val, ty } => {
                         // dst = (cond != 0) ? true_val : false_val
                         // HPPA has no CMOV; use the arithmetic mask trick:
-                        //   mask = -(cond != 0)  (0 if cond==0, -1 if cond!=0)
+                        //   mask  = (cond != 0) ? 0xFFFFFFFF : 0
                         //   result = (true_val & mask) | (false_val & ~mask)
+                        //
+                        // Mask computation (all arithmetic, no branches):
+                        //   S3 = 0 - cond          (SUB R0, S0, S3)  → -cond
+                        //   S3 = S3 | cond         (OR  S3, S0, S3)  → -cond|cond (MSB set if cond≠0)
+                        //   S3 = S3 >> 31          (SHRPW R0,S3,31,S3) → 1 if cond≠0, 0 if cond==0
+                        //   S3 = 0 - S3            (SUB R0, S3, S3)  → 0xFFFFFFFF if cond≠0, 0 if cond==0
+                        //
+                        // [Wave 4-ext-hppa-wait] Previously this was a STUB that
+                        // always stored false_val — breaking channel_recv's
+                        // result selection (child always returned -1 instead of
+                        // the received payload, so simple_send exited 255).
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                        let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+
+                        // S0 = cond
                         code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
-                        code.extend(ss_load_value(true_val, &vreg_stack_slots, S1));
-                        code.extend(ss_load_value(false_val, &vreg_stack_slots, S2));
-                        // S3 = S0 != 0 ? -1 : 0 (mask)
-                        // HPPA: SUB 0, S0, S3 → S3 = -S0 (0 if S0==0, nonzero otherwise)
-                        // Then: SARI S3, 31, S3 → arithmetic right shift 31 → all-ones if nonzero, 0 if zero
-                        // HPPA doesn't have SARI directly. Use:
-                        //   SUB 0, S0, S3 → S3 = -cond (0 if cond==0, else nonzero)
-                        //   S3 = S3 | S0 → S3 = (-cond | cond) → all-ones if cond!=0, 0 if cond==0
-                        //   Actually this only works if -cond has the right bits. Let me use:
-                        //   S3 = S0 >> 31 (sign bit) — but S0 could be any nonzero value.
-                        //
-                        // Simplest HPPA approach: use COMICLR to conditionally clear.
-                        //   COMICLR,<> 0, S0, S2 → if S0 <> 0 (cond != 0), S2 = 0 (clear false_val)
-                        //   Now S2 = (cond != 0) ? 0 : false_val
-                        //   S1 = true_val (unchanged)
-                        //   OR S1, S2, S0 → S0 = true_val | ((cond!=0)?0:false_val)
-                        //   = if cond!=0: true_val | 0 = true_val ✓
-                        //   = if cond==0: true_val | false_val ✗ (should be just false_val)
-                        //
-                        // This is wrong when both true_val and false_val are nonzero.
-                        // The CORRECT HPPA approach uses COMICLR twice:
-                        //   COMICLR,<> 0, S0, S1 → if cond != 0, S1 = 0 (clear true_val)
-                        //   COMICLR,= 0, S0, S2  → if cond == 0, S2 = 0 (clear false_val)
-                        //   OR S1, S2, S0 → S0 = (cond!=0?0:true_val) | (cond==0?0:false_val)
-                        //   = if cond!=0: 0 | false_val = false_val ✗ (should be true_val)
-                        //   = if cond==0: true_val | 0 = true_val ✗ (should be false_val)
-                        //   That's BACKWARDS! Swap S1 and S2:
-                        //   COMICLR,<> 0, S0, S2 → if cond != 0, S2 = 0 (clear false_val)
-                        //   COMICLR,= 0, S0, S1  → if cond == 0, S1 = 0 (clear true_val)
-                        //   OR S1, S2, S0 → S0 = (cond!=0?true_val:0) | (cond==0?0:false_val)
-                        //   = if cond!=0: true_val | 0 = true_val ✓
-                        //   = if cond==0: 0 | false_val = false_val ✓
-                        // PERFECT! This is the correct HPPA conditional select.
-                        //
-                        // HPPA COMICLR encoding: 0x32 000000 → COMICLR,<> r, imm, t
-                        // Format: e0 00 00 32 (for COMICLR,<>)
-                        // Actually, let me check the encoding helpers.
-                        code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
-                        code.extend(ss_load_value(true_val, &vreg_stack_slots, S1));
-                        code.extend(ss_load_value(false_val, &vreg_stack_slots, S2));
-                        // COMICLR,<> 0, S0, S2 → if S0 != 0, S2 = 0 (clear false_val when cond is true)
-                        // COMICLR,= 0, S0, S1  → if S0 == 0, S1 = 0 (clear true_val when cond is false)
-                        // OR S1, S2, S0 → result = true_val (if cond) | false_val (if !cond)
-                        // For now, since COMICLR encoding is complex, use the default approach:
-                        // store false_val, which at least doesn't always return true_val.
-                        code.extend(ss_st(S2, d_off)); // store false_val (default)
-                        // TODO: add COMICLR-based conditional select for full correctness
+                        // Compute mask in S3.
+                        code.extend_from_slice(&encode_sub(R0, S0, S3));      // S3 = -cond
+                        code.extend_from_slice(&encode_or(S3, S0, S3));       // S3 = -cond | cond
+                        code.extend_from_slice(&encode_shrpw(R0, S3, 31, S3)); // S3 = S3 >> 31 (1 or 0)
+                        code.extend_from_slice(&encode_sub(R0, S3, S3));      // S3 = -S3 (0xFFFFFFFF or 0)
+                        // Compute ~mask in S4.
+                        code.extend(ss_load_imm(S4, -1));                     // S4 = 0xFFFFFFFF
+                        code.extend_from_slice(&encode_xor(S3, S4, S4));      // S4 = mask ^ 0xFFFFFFFF = ~mask
+
+                        if is_64 {
+                            // 64-bit Select: apply mask to both lo and hi words.
+                            // S0 = true_lo, S1 = true_hi
+                            code.extend(ss_load_value_64(true_val, &vreg_stack_slots, S0, S1));
+                            // S2 = false_lo, S5 = false_hi
+                            code.extend(ss_load_value_64(false_val, &vreg_stack_slots, S2, S5));
+                            // result_lo = (true_lo & mask) | (false_lo & ~mask)
+                            code.extend_from_slice(&encode_and(S0, S3, S0));  // S0 = true_lo & mask
+                            code.extend_from_slice(&encode_and(S2, S4, S2));  // S2 = false_lo & ~mask
+                            code.extend_from_slice(&encode_or(S0, S2, S0));   // S0 = result_lo
+                            code.extend(ss_st(S0, d_off));                     // store result_lo
+                            // result_hi = (true_hi & mask) | (false_hi & ~mask)
+                            code.extend_from_slice(&encode_and(S1, S3, S1));  // S1 = true_hi & mask
+                            code.extend_from_slice(&encode_and(S5, S4, S5));  // S5 = false_hi & ~mask
+                            code.extend_from_slice(&encode_or(S1, S5, S1));   // S1 = result_hi
+                            code.extend(ss_st(S1, d_off - 4));                 // store result_hi
+                        } else {
+                            // 32-bit Select.
+                            // S0 = true_val, S1 = false_val
+                            code.extend(ss_load_value(true_val, &vreg_stack_slots, S0));
+                            code.extend(ss_load_value(false_val, &vreg_stack_slots, S1));
+                            code.extend_from_slice(&encode_and(S0, S3, S0));  // S0 = true_val & mask
+                            code.extend_from_slice(&encode_and(S1, S4, S1));  // S1 = false_val & ~mask
+                            code.extend_from_slice(&encode_or(S0, S1, S0));   // S0 = result
+                            code.extend(ss_st(S0, d_off));                     // store result
+                        }
                     }
                     IRInstr::Ret { values: _ } => {
                         // Instruction-level Ret (not terminator). Redundant with
@@ -4125,6 +4190,13 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 if is_64 {
                                     // Store high word to TMP64_C_HI for later ShrL 32
                                     code.extend_from_slice(&encode_stw(R29, R3, TMP64_C_HI as i16));
+                                    // [Wave 4-ext-hppa-wait] Also store the high
+                                    // word to [d_off-4] so the standard 64-bit
+                                    // stack-slot layout is maintained. This lets
+                                    // ShrL 32 uniformly read from [lhs_off-4]
+                                    // regardless of whether the 64-bit value came
+                                    // from a Call return or an inline BinOp.
+                                    code.extend(ss_st(R29, d_off - 4));
                                 }
                             }
                         }
@@ -4213,6 +4285,78 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // nr in R20, `gate` (ble 0x100(%sr2,%r0)), result in R28.
                         // HPPA has only 4 register arg slots (R26-R23).
                         // Args 5+ go on the stack at SP-60/SP-56 (caller's frame).
+                        //
+                        // [Wave 4-ext-hppa-wait] wait4 (asm-generic nr=260) rewrite.
+                        // QEMU's hppa linux-user emulator may not reliably support
+                        // wait4 in all configurations. As a defensive measure
+                        // (matching the riscv32 fix), rewrite wait4 as a
+                        // waitid(P_PID=1, pid, &siginfo, WEXITED=4, NULL)
+                        // sequence. waitid's siginfo_t.si_status (offset 20)
+                        // contains the child's exit code directly; we shift it
+                        // left by 8 to reconstruct the wait4-style raw status
+                        // so the downstream IR Load + ShrL(8) produces the
+                        // correct exit code.
+                        if *nr == 260 {
+                            // arg1 (R25) = pid (args[0]).
+                            code.extend(ss_load_value(&args[0], &vreg_stack_slots, R25));
+                            // arg0 (R26) = P_PID = 1.
+                            code.extend_from_slice(&encode_ldi(1, R26));
+                            // Allocate 128-byte siginfo_t on the stack.
+                            code.extend_from_slice(&encode_ldo(R30, -128, R30));
+                            // arg2 (R24) = &siginfo = R30 (new SP).
+                            code.extend_from_slice(&encode_copy(R30, R24));
+                            // arg3 (R23) = WEXITED = 4.
+                            code.extend_from_slice(&encode_ldi(4, R23));
+                            // arg4 (rusage) = NULL → store 0 at [R30-60]
+                            // (hppa passes the 5th syscall arg on the stack).
+                            code.extend_from_slice(&encode_stw(R0, R30, -60));
+                            // R20 = waitid native nr (asm-generic 95 → hppa 235).
+                            let waitid_nr = crate::syscall_abi::translate_or_warn(
+                                crate::backend::BackendKind::Hppa,
+                                95,
+                            );
+                            code.extend(ss_load_imm(R20, waitid_nr as i64));
+                            // GATE (ble 0x100(%sr2,%r0))
+                            code.extend_from_slice(&encode_gate());
+                            // GATE delay slot: MUST be a NOP (see comment below
+                            // in the normal path for the full explanation).
+                            code.extend_from_slice(&encode_nop());
+                            // Load si_status from siginfo[R30+20] into S0.
+                            // (si_signo@0, si_errno@4, si_code@8, si_pid@12,
+                            //  si_uid@16, si_status@20.)
+                            // NOTE: waitid's si_status is the child's raw exit
+                            // code (e.g. 42 for exit(42)), NOT the wait4 raw
+                            // status (which would be 0x2A00). The downstream IR
+                            // does WEXITSTATUS = (status >> 8) & 0xff, so we
+                            // shift si_status left by 8 before storing it to
+                            // *status_buf — this reconstructs the wait4 raw
+                            // status so the existing SHR-by-8 produces the
+                            // correct exit code.
+                            code.extend_from_slice(&encode_ldw(R30, 20, S0));
+                            // S0 = S0 << 9 via SHRPW: (S0:0) >> 23 = S0 << 9.
+                            code.extend_from_slice(&encode_shrpw(S0, R0, 23, S0));
+                            // S0 = S0 >> 1 via SHRPW: (0:S0) >> 1 = S0 >> 1.
+                            // Net effect: S0 = si_status << 8.
+                            code.extend_from_slice(&encode_shrpw(R0, S0, 1, S0));
+                            // Deallocate the 128-byte siginfo.
+                            code.extend_from_slice(&encode_ldo(R30, 128, R30));
+                            // Store S0 into *status_buf (args[1]) so the IR's
+                            // subsequent Load { addr: status_buf } reads the
+                            // raw wait status (same as wait4 would write).
+                            if args.len() > 1 {
+                                code.extend(ss_load_value(&args[1], &vreg_stack_slots, S1));
+                                code.extend_from_slice(&encode_stw(S0, S1, 0));
+                            }
+                            // Store waitid's return value (R28 = child PID or
+                            // -errno) to dst's stack slot.
+                            if let Some(d) = dst {
+                                let dst_id = d.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                code.extend(ss_st(R28, dst_off));
+                            }
+                        } else {
+                            // Normal syscall path (including the clone→fork
+                            // special case below).
                         let native_nr = crate::syscall_abi::translate_or_warn(
                             crate::backend::BackendKind::Hppa,
                             *nr,
@@ -4249,12 +4393,28 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         code.extend(ss_load_imm(R20, effective_nr as i64));
                         // GATE (ble 0x100(%sr2,%r0))
                         code.extend_from_slice(&encode_gate());
+                        // GATE delay slot: MUST be a NOP. The PA-RISC BLE used
+                        // for the syscall gateway is NOT nullified (its `n`
+                        // bit is 0), so the instruction immediately following
+                        // GATE always executes BEFORE the kernel jumps to
+                        // the gateway page. If we placed `ss_st(R28, …)`
+                        // here it would store the PRE-syscall value of R28
+                        // (whatever the previous instruction left in it),
+                        // which is the bug that made `wait_worker` return 0
+                        // instead of the child's WEXITSTATUS on hppa. The
+                        // kernel updates R28 with the syscall's return value
+                        // and then resumes execution at PC+8 of the GATE
+                        // (i.e. at the instruction after this NOP), so the
+                        // `ss_st` below runs AFTER the syscall completes and
+                        // stores the correct return value.
+                        code.extend_from_slice(&encode_nop());
                         // Store result (R28) to dst's stack slot
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                             code.extend(ss_st(R28, dst_off));
                         }
+                        } // end else (normal syscall path)
                     }
                     // ── VectorOp (Wave 29) ──
                     // HPPA has no SIMD encoder in the Wave 29 suite; emit nothing.

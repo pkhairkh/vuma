@@ -46,13 +46,13 @@ QEMU_MAP=(
     "ppc64:qemu-ppc64le"
     "ppc64le:qemu-ppc64le"
     "loongarch64:qemu-loongarch64"
-    "mips64:qemu-mips64"
+    "mips64:qemu-mips64el"
     "mips64be:qemu-mips64"
     "s390x:qemu-s390x"
 )
 
 # Backends we can actually EXECUTE (have QEMU or are native x86_64).
-EXECUTABLE_BACKENDS="x86_64 aarch64 riscv64 arm32 ppc64le loongarch64 s390x"
+EXECUTABLE_BACKENDS="x86_64 aarch64 riscv64 arm32 ppc64le loongarch64 s390x mips64 mips64be"
 
 # Tests to run on each backend.
 # Format: "test_file:expected_exit"

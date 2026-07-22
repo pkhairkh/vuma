@@ -86,6 +86,13 @@ fn swap_u64(buf: &mut [u8], off: usize) {
 fn swap_le_elf_to_be(elf: &mut [u8]) {
     if elf.len() < 64 { return; }
 
+    // Read ELF header offsets/sizes BEFORE swapping — the parent (mips64)
+    // emits these as LE bytes, and step 2 below will swap them to BE.
+    // Reading them as LE here captures the true values before they're swapped.
+    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
+
     // 1. EI_DATA: LE (1) → BE (2)
     elf[5] = 2;
 
@@ -104,12 +111,9 @@ fn swap_le_elf_to_be(elf: &mut [u8]) {
     swap_u16(elf, 60); // e_shnum
     swap_u16(elf, 62); // e_shstrndx
 
-    // 3. PHDR fields (now read as LE since parent emits LE)
-    let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
-    let phentsize = u16::from_le_bytes(elf[54..56].try_into().unwrap()) as usize;
-    let phnum = u16::from_le_bytes(elf[56..58].try_into().unwrap()) as usize;
-
-    // Read PHDR offsets BEFORE swapping (parent emits LE)
+    // 3. PHDR fields — read each PHDR's p_flags / p_offset / p_filesz as LE
+    // (parent emits LE) BEFORE swapping, then swap all PHDR multi-byte fields
+    // LE→BE.
     let mut segments: Vec<(u32, usize, usize)> = Vec::new(); // (p_flags, p_offset, p_filesz)
     let mut off = phoff;
     for _ in 0..phnum {

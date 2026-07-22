@@ -47,7 +47,18 @@ fn main() {
     for func in &mut ir_program.functions {
         vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
     }
-    let ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+    // Use the full production pipeline (matches compile_dump) so the IR
+    // we display reflects all post-lowering opts + backend latency table.
+    use vuma::pipeline::{CompileConfig, run_ir_pipeline, CompileTarget, OptLevel, VerificationLevel};
+    let cfg = CompileConfig {
+        target: if kind == vuma_codegen::backend::BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
+        opt_level: OptLevel::O3,
+        verification_level: VerificationLevel::Normal,
+        inline_threshold: 0,
+        ..Default::default()
+    };
+    let mut timings: Vec<(String, u64)> = Vec::new();
+    let ir_program = run_ir_pipeline(ir_program, &cfg, kind, &mut timings).unwrap();
 
     println!("=== IR for {} (backend={}) ===", path, backend_name);
     for func in &ir_program.functions {
