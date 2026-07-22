@@ -2102,10 +2102,46 @@ fn emit_instr(
             for (i, arg) in effective_args.iter().take(num_reg_args).enumerate() {
                 code.extend(ss_load_value(arg, vreg_stack_slots, syscall_arg_regs[i]));
             }
-            // LGFI R1, nr
-            code.extend(ss_load_imm(Gpr::R1, native_nr as i64));
-            // SVC 0
-            code.extend_from_slice(&encode_svc(0));
+            // s390x mmap special case: asm-generic nr=222 → s390x nr=90
+            // (old_mmap). Unlike the direct 6-arg mmap on x86_64/aarch64/etc.,
+            // s390x `old_mmap` takes a SINGLE argument: R2 = pointer to a
+            // `struct mmap_arg_struct { u64 addr, len, prot, flags, fd, offset; }`
+            // (48 bytes). Passing R2-R7 directly (the normal Syscall path)
+            // causes the kernel to dereference R2=0 (NULL) → EFAULT, mmap
+            // returns -EFAULT, and the subsequent Load from that pointer
+            // raises SIGSEGV (exit 139). s390x has NO mmap2 syscall, so we
+            // must build the struct on the stack and pass R2 = &struct.
+            // This mirrors the `mmap` Call-stub at line ~3222.
+            if *nr == 222 {
+                // R15 -= 64 (48-byte struct + 16-byte alignment)
+                code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+                code.extend_from_slice(&encode_sgr(SP, Gpr::R0));
+                // [R15+0]  = addr   (R2)
+                code.extend_from_slice(&encode_stg(Gpr::R2, SP, 0));
+                // [R15+8]  = len    (R3)
+                code.extend_from_slice(&encode_stg(Gpr::R3, SP, 8));
+                // [R15+16] = prot   (R4)
+                code.extend_from_slice(&encode_stg(Gpr::R4, SP, 16));
+                // [R15+24] = flags  (R5)
+                code.extend_from_slice(&encode_stg(Gpr::R5, SP, 24));
+                // [R15+32] = fd     (R6)
+                code.extend_from_slice(&encode_stg(Gpr::R6, SP, 32));
+                // [R15+40] = offset (R7)
+                code.extend_from_slice(&encode_stg(Gpr::R7, SP, 40));
+                // R2 = R15 (struct pointer)
+                code.extend_from_slice(&encode_lgr(Gpr::R2, SP));
+                // R1 = 90 (sys_old_mmap); SVC 0
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 90));
+                code.extend_from_slice(&encode_svc(0));
+                // R15 += 64 (restore stack)
+                code.extend_from_slice(&encode_lghi(Gpr::R0, 64));
+                code.extend_from_slice(&encode_agr(SP, Gpr::R0));
+            } else {
+                // LGFI R1, nr
+                code.extend(ss_load_imm(Gpr::R1, native_nr as i64));
+                // SVC 0
+                code.extend_from_slice(&encode_svc(0));
+            }
             // Store result (R2) to dst's stack slot
             if let Some(d) = dst {
                 let dst_id = d.as_register().unwrap_or(0);

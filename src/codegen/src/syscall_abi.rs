@@ -1376,7 +1376,12 @@ fn translate_hppa(generic_nr: u32) -> Option<u32> {
         216 => Some(163),  // mremap
         220 => Some(120),  // clone
         221 => Some(11),  // execve
-        222 => Some(192),  // mmap2 (m68k uses mmap2=192, NOT old mmap=90)
+        // NOTE: 222 (mmap) is mapped below in the IPC-critical block to
+        // hppa's __NR_mmap = 90 (direct 6-arg form, offset in bytes).
+        // An earlier duplicate arm `222 => Some(192)` was a copy-paste
+        // mistake from translate_m68k — on parisc 192 is `shmat`, which
+        // returns -EINVAL and causes the subsequent dereference to
+        // SIGSEGV. Removed in Wave 13-ext-shared-mem-2.
         226 => Some(125),  // mprotect
         227 => Some(144),  // msync
         228 => Some(150),  // mlock
@@ -1521,7 +1526,8 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         216 => Some(163),  // mremap
         220 => Some(120),  // clone
         221 => Some(11),  // execve
-        222 => Some(90),  // mmap
+        222 => Some(192),  // mmap2 (m68k: old_mmap=90 takes a struct pointer;
+                           // mmap2=192 takes 6 direct args like asm-generic mmap)
         226 => Some(125),  // mprotect
         227 => Some(144),  // msync
         228 => Some(150),  // mlock
@@ -1534,12 +1540,12 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         281 => Some(355),  // execveat
         306 => Some(343),  // syncfs
         435 => Some(435),  // clone3
-        
+
         // ── IPC-critical syscalls ──
         59 => Some(359),    // pipe2
         220 => Some(120),   // clone
         260 => Some(114),   // wait4
-        222 => Some(90),    // mmap (old-style)
+        222 => Some(192),   // mmap2 (m68k uses mmap2=192, NOT old mmap=90)
         73 => Some(168),    // poll
         172 => Some(20),    // getpid
         167 => Some(172),   // prctl

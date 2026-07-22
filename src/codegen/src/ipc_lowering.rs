@@ -1346,6 +1346,72 @@ fn o_nonblock_flag(backend: BackendKind) -> i64 {
     }
 }
 
+/// Per-arch `MAP_SHARED | MAP_ANONYMOUS` flag value for `mmap(2)`.
+///
+/// The asm-generic value (`MAP_SHARED=0x1 | MAP_ANONYMOUS=0x20` = `0x21`) is
+/// correct for x86, arm64, riscv, arm32, loongarch64, s390x, ppc, m68k, and
+/// the big-endian wrappers of those. However, four pre-Linux-2.6 ISAs kept
+/// their legacy `MAP_ANONYMOUS` value (which predates asm-generic) when
+/// adopting Linux. Passing `0x21` to mmap on those arches leaves the
+/// anonymous bit unset, so the kernel treats the mapping as file-backed
+/// with `fd=-1` → `EBADF` → `mmap` returns an error pointer → the first
+/// dereference raises `SIGSEGV` (exit 139).
+///
+/// Values verified against the Linux UAPI headers shipped at
+/// `/usr/lib/linux/uapi/<arch>/asm/mman.h`:
+///
+/// | arch                    | MAP_SHARED | MAP_ANONYMOUS | flags |
+/// |-------------------------|------------|---------------|-------|
+/// | alpha                   | 0x01       | 0x10          | 0x11  |
+/// | parisc / hppa           | 0x01       | 0x10          | 0x11  |
+/// | sparc / sparc64         | 0x01       | 0x20          | 0x21  |
+/// | mips (mips64 / mips64be)| 0x01       | 0x800         | 0x801 |
+/// | asm-generic (all other) | 0x01       | 0x20          | 0x21  |
+fn map_shared_anon_flags(backend: BackendKind) -> i64 {
+    match backend {
+        BackendKind::Alpha => 0x11,
+        BackendKind::Hppa => 0x11,
+        BackendKind::Sparc64 => 0x21,
+        BackendKind::Mips64 | BackendKind::Mips64Be => 0x801,
+        // All other backends use the asm-generic value (0x21):
+        //   AArch64, RiscV64, RiscV32, LoongArch64, X86_64, Arm32,
+        //   PowerPC64, PowerPC64LE, X86_32, S390X, ArmEb, AArch64Be,
+        //   M68k, Wasm32.
+        _ => 0x21,
+    }
+}
+
+/// Per-arch `O_WRONLY | O_CREAT | O_TRUNC` flag value for `openat(2)`.
+///
+/// The asm-generic value (`O_WRONLY=0x1 | O_CREAT=0x40 | O_TRUNC=0x200` = `0x241`)
+/// is correct for x86, aarch64, riscv, arm32, loongarch64, s390x, ppc, m68k,
+/// alpha and the big-endian wrappers of those. However, three pre-asm-generic
+/// arch families kept their legacy `O_CREAT`/`O_TRUNC` bit positions when
+/// adopting Linux. Passing `0x241` to openat on those arches leaves the
+/// `O_CREAT` bit unset, so `openat` returns `ENOENT` instead of creating
+/// the file — see Wave 19-ext-checkpoint-be.
+///
+/// Values verified against the Linux UAPI `fcntl.h` headers:
+///
+/// | arch                    | O_WRONLY | O_CREAT | O_TRUNC | flags  |
+/// |-------------------------|----------|---------|---------|--------|
+/// | mips (mips64 / mips64be)| 0x01     | 0x100   | 0x200   | 0x301  |
+/// | parisc / hppa           | 0x01     | 0x100   | 0x200   | 0x301  |
+/// | sparc / sparc64         | 0x01     | 0x200   | 0x400   | 0x601  |
+/// | asm-generic (all other) | 0x01     | 0x40    | 0x200   | 0x241  |
+fn openat_wronly_creat_trunc_flags(backend: BackendKind) -> i64 {
+    match backend {
+        BackendKind::Hppa => 0x301,
+        BackendKind::Mips64 | BackendKind::Mips64Be => 0x301,
+        BackendKind::Sparc64 => 0x601,
+        // All other backends use the asm-generic value (0x241):
+        //   AArch64, RiscV64, RiscV32, LoongArch64, X86_64, Arm32,
+        //   PowerPC64, PowerPC64LE, X86_32, S390X, ArmEb, AArch64Be,
+        //   M68k, Alpha, Wasm32.
+        _ => 0x241,
+    }
+}
+
 /// Helper: set O_NONBLOCK on a read_fd via `fcntl(fd, F_SETFL=4, O_NONBLOCK)`.
 ///
 /// `o_nonblock` is the per-arch `O_NONBLOCK` bit value (see [`o_nonblock_flag`]).
@@ -1507,11 +1573,14 @@ fn expand_shared_memory_open(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut 
     let size = args[0].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let ret = ctx.new_vreg();
+    // flags = MAP_SHARED | MAP_ANONYMOUS, per-arch (alpha/hppa/sparc/mips
+    // use legacy MAP_ANONYMOUS values that differ from asm-generic's 0x20).
+    let flags = map_shared_anon_flags(ctx.backend);
     vec![
         IRInstr::Syscall {
             nr: 222, // mmap
             args: vec![
-                IRValue::Immediate(0), size, IRValue::Immediate(0x3), IRValue::Immediate(0x21),
+                IRValue::Immediate(0), size, IRValue::Immediate(0x3), IRValue::Immediate(flags),
                 IRValue::Immediate(-1i64), IRValue::Immediate(0),
             ],
             dst: Some(ret.clone()),
@@ -1738,22 +1807,24 @@ fn expand_set_memory_limit(args: &[IRValue], ctx: &mut LowerContext) -> Vec<IRIn
 
 // ── L6: Checkpoint ────────────────────────────────────────────────────
 
-const CHECKPOINT_PATH_BYTES: [i64; 4] = [
-    0x6d75762f706d742f,
-    0x706b636568635f61,
-    0x6e69622e746e696f,
-    0x0000000000000000,
-];
+/// Path bytes for `/tmp/vuma_checkpoint.bin` (NUL-terminated).
+///
+/// Stored byte-by-byte via `IRType::I8` so the in-memory byte order is
+/// identical on every backend. (The previous implementation used `I64`
+/// stores of 8-byte chunks, which on big-endian targets reversed each
+/// chunk and produced the mangled relative path `muv/pmt/...` that
+/// `openat` could not create — see Wave 19-ext-checkpoint-be.)
+const CHECKPOINT_PATH_BYTES: &[u8; 25] = b"/tmp/vuma_checkpoint.bin\0";
 
 fn build_checkpoint_path(ctx: &mut LowerContext) -> (Vec<IRInstr>, IRValue) {
     let path_buf = ctx.new_vreg();
     let mut instrs = vec![IRInstr::Alloc { dst: path_buf.clone(), size: 32 }];
-    for (i, chunk) in CHECKPOINT_PATH_BYTES.iter().enumerate() {
+    for (i, byte) in CHECKPOINT_PATH_BYTES.iter().enumerate() {
         instrs.push(IRInstr::Store {
-            value: IRValue::Immediate(*chunk),
+            value: IRValue::Immediate(*byte as i64),
             addr: path_buf.clone(),
-            offset: (i * 8) as i32,
-            ty: IRType::I64,
+            offset: i as i32,
+            ty: IRType::I8,
         });
     }
     (instrs, path_buf)
@@ -1765,7 +1836,7 @@ fn expand_checkpoint_save(args: &[IRValue], ctx: &mut LowerContext) -> Vec<IRIns
     let (mut instrs, path_buf) = build_checkpoint_path(ctx);
     let fd = ctx.new_vreg();
     instrs.push(IRInstr::Syscall {
-        nr: 56, args: vec![IRValue::Immediate(-100i64), path_buf, IRValue::Immediate(0x241), IRValue::Immediate(0o644)],
+        nr: 56, args: vec![IRValue::Immediate(-100i64), path_buf, IRValue::Immediate(openat_wronly_creat_trunc_flags(ctx.backend)), IRValue::Immediate(0o644)],
         dst: Some(fd.clone()),
     });
     let val_buf = ctx.new_vreg();
