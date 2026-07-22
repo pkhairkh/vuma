@@ -2051,63 +2051,44 @@ fn emit_binop(
                 code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2));
                 code.extend(ss_load_value_64(rhs, vreg_stack_slots, S1, S3));
 
-                // Save a_lo and b_lo to stack (we'll need them for cross terms
-                // after MULU.L clobbers S0/S2).
-                // Save a_lo at dst_off (temp), b_lo at dst_off+4 (temp).
-                // We'll overwrite these with the final result later.
-                code.extend(ss_st(S0, dst_off));       // temp: a_lo
-                code.extend(ss_st(S1, dst_off + 4));   // temp: b_lo
+                // Save b_hi (S3) to dst_off+4 temporarily — we'll need it
+                // for cross term 1 but MULU.L will clobber S3.
+                code.extend(ss_st(S3, dst_off + 4));   // temp: b_hi
 
                 // MULU.L S1, S2:S0 → S0=lo32(a_lo*b_lo), S2=hi32(a_lo*b_lo)
-                // MULU.L encoding (68020+): word1 = 0x4C20 | src_reg (bits 6-5 = 01 for long)
-                // word2 = (Dh<<12)|Dl
-                code.extend_from_slice(&[0x4C, 0x21]); // MULU.L D1 (0x4C20|1)
+                code.extend_from_slice(&[0x4C, 0x01]); // MULU.L D1
                 code.extend_from_slice(&[0x20, 0x00]); // Dh=D2, Dl=D0
 
-                // S2 now holds partial result_hi = hi32(a_lo * b_lo).
-                // Save it to a temp slot (reuse dst_off, we stored a_lo there
-                // but we can reload a_lo from lhs later).
-                // Actually, save S2 to the stack via SWAP or Store. We need
-                // S2 to survive the cross-term computations. Store it at
-                // dst_off (overwriting the saved a_lo — we can reload from lhs).
-                code.extend(ss_st(S2, dst_off));   // temp: result_hi (partial)
+                // Save result_lo (S0) and result_hi (S2) to dst_off and a temp.
+                // dst_off will hold result_lo, dst_off+4 was b_hi (now overwrite).
+                code.extend(ss_st(S0, dst_off));       // save result_lo
+                code.extend(ss_st(S2, dst_off + 4));   // save partial result_hi
 
                 // Cross term 1: result_hi += lo32(a_lo * b_hi)
-                // Reload a_lo from lhs (S0), multiply with b_hi (S3).
+                // Reload a_lo from lhs, b_hi from... we saved it but overwrote
+                // dst_off+4. Reload b_hi from rhs instead.
                 code.extend(ss_load_value(lhs, vreg_stack_slots, S0));  // S0 = a_lo
-                // MULU.L S3, S2:S0 → S0=lo32(a_lo*b_hi), S2=hi32(a_lo*b_hi)
-                code.extend_from_slice(&[0x4C, 0x23]); // MULU.L D3
+                code.extend(ss_load_value_64(rhs, vreg_stack_slots, S1, S3)); // S3 = b_hi
+                // MULU.L S3, S2:S0 → S0=lo32(a_lo*b_hi), S2=hi32
+                code.extend_from_slice(&[0x4C, 0x03]); // MULU.L D3
                 code.extend_from_slice(&[0x20, 0x00]); // Dh=D2, Dl=D0
-                // S0 = lo32(a_lo * b_hi) — add to result_hi
-                code.extend(ss_ld(S2, dst_off));       // S2 = saved result_hi
+                // Add lo32(a_lo*b_hi) to partial result_hi
+                code.extend(ss_ld(S2, dst_off + 4));   // S2 = saved partial result_hi
                 code.extend(Instruction::Add { src: S0, dst: S2 }.encode()); // S2 += lo32(a_lo*b_hi)
-                code.extend(ss_st(S2, dst_off));        // save updated result_hi
+                code.extend(ss_st(S2, dst_off + 4));   // save updated result_hi
 
                 // Cross term 2: result_hi += lo32(a_hi * b_lo)
-                // Reload a_hi from lhs (S2), b_lo from saved temp (S1).
+                // Reload a_hi from lhs, b_lo from rhs.
                 code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2)); // S2=a_hi
-                code.extend(ss_ld(S1, dst_off + 4));   // S1 = saved b_lo
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));  // S1 = b_lo
                 // MULU.L S1, S3:S0 → S0=lo32(a_hi*b_lo), S3=hi32
-                code.extend_from_slice(&[0x4C, 0x21]); // MULU.L D1
+                code.extend_from_slice(&[0x4C, 0x01]); // MULU.L D1
                 code.extend_from_slice(&[0x30, 0x00]); // Dh=D3, Dl=D0
-                // S0 = lo32(a_hi * b_lo) — add to result_hi
-                code.extend(ss_ld(S2, dst_off));       // S2 = saved result_hi
+                // Add lo32(a_hi*b_lo) to result_hi
+                code.extend(ss_ld(S2, dst_off + 4));   // S2 = saved result_hi
                 code.extend(Instruction::Add { src: S0, dst: S2 }.encode()); // S2 += lo32(a_hi*b_lo)
 
-                // Now reload result_lo from the MULU.L we did earlier.
-                // But result_lo was in S0 which got clobbered. We need to
-                // recompute it or save it. Let me save it after the first MULU.
-                // ... Actually, the first MULU.L's result_lo is gone (S0 was
-                // overwritten by cross term reloads). We need to recompute it.
-                // Reload a_lo and b_lo, MULU.L again.
-                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));  // S0 = a_lo
-                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));  // S1 = b_lo
-                code.extend_from_slice(&[0x4C, 0x21]); // MULU.L D1
-                code.extend_from_slice(&[0x30, 0x00]); // Dh=D3, Dl=D0 (S3=hi, S0=lo)
-                // S0 = lo32(a_lo * b_lo) = result_lo
-
-                // Store final results
-                code.extend(ss_st(S0, dst_off));       // result_lo
+                // Store final result_hi (result_lo already at dst_off)
                 code.extend(ss_st(S2, dst_off + 4));   // result_hi
             } else {
                 // 32-bit multiply: use MULU.W (16×16→32)
