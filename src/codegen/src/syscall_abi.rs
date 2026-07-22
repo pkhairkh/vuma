@@ -693,6 +693,13 @@ fn translate_mips64(generic_nr: u32) -> Option<u32> {
         220 => Some(5055),  // clone
         260 => Some(5024),  // wait4
         222 => Some(5009),  // mmap
+        7 => Some(5007),    // poll (mips n64: __NR_poll = __NR_Linux + 7 = 5007;
+                            // without this, generic nr 7 would be passed verbatim
+                            // to the kernel. MIPS n64 syscalls start at 5000, so
+                            // native 7 is below the valid range and the kernel
+                            // returns -ENOSYS — poll "fails" silently and the
+                            // subsequent read on a (mistakenly blocking) fd hangs
+                            // in channel_recv_timeout).
         73 => Some(5188),   // poll
         172 => Some(5038),  // getpid
         167 => Some(5153),  // prctl
@@ -1105,6 +1112,10 @@ fn translate_sparc64(generic_nr: u32) -> Option<u32> {
         220 => Some(217),   // clone (sparc64: __NR_clone = 217)
         260 => Some(7),     // wait4 (sparc64: __NR_wait4 = 7)
         222 => Some(192),   // mmap2 (sparc64: __NR_mmap2 = 192, takes 6 args like generic mmap)
+        7 => Some(153),     // poll (sparc64: __NR_poll = 153; without this, generic nr 7
+                            // would be passed verbatim to the kernel and land on
+                            // __NR_wait4=7, which BLOCKS the caller — manifesting as a
+                            // test hang in channel_recv_timeout).
         73 => Some(153),    // poll (sparc64: __NR_poll = 153)
         172 => Some(20),    // getpid (sparc64: __NR_getpid = 20? Actually sparc64 __NR_getpid = 40? Let me use 20)
         167 => Some(172),   // prctl (sparc64: __NR_prctl = 172? Actually sparc64 __NR_prctl = 215? Hmm)
@@ -1244,6 +1255,10 @@ fn translate_alpha(generic_nr: u32) -> Option<u32> {
         220 => Some(412),   // clone (alpha __NR_clone)
         260 => Some(7),     // wait4 (alpha: wait4 = 7, like osf_wait4)
         222 => Some(115),   // mmap (alpha: __NR_mmap = 115? Actually alpha uses __NR_mmap = 115? No, alpha __NR_mmap = 471)
+        7 => Some(94),      // poll (alpha: __NR_poll = 94; without this, generic nr 7
+                            // would be passed verbatim to the kernel and land on
+                            // __NR_osf_wait4=7, which BLOCKS the caller — manifesting
+                            // as a test hang in channel_recv_timeout).
         73 => Some(94),     // poll (alpha: __NR_poll = 94)
         172 => Some(20),    // getpid (alpha: __NR_getpid = 20? Actually alpha uses __NR_getpid = 20)
         167 => Some(172),   // prctl (alpha: __NR_prctl = 172? Actually alpha __NR_prctl = 443? Hmm)
@@ -1380,6 +1395,10 @@ fn translate_hppa(generic_nr: u32) -> Option<u32> {
         220 => Some(120),   // clone
         260 => Some(114),   // wait4
         222 => Some(90),    // mmap
+        7 => Some(168),     // poll (parisc: __NR_poll = 168; without this, generic
+                            // nr 7 would be passed verbatim to the kernel and land
+                            // on __NR_waitpid=7, which BLOCKS the caller —
+                            // manifesting as a test hang in channel_recv_timeout).
         73 => Some(168),    // poll
         172 => Some(20),    // getpid
         167 => Some(172),   // prctl
@@ -1438,6 +1457,11 @@ fn translate_m68k(generic_nr: u32) -> Option<u32> {
         68 => Some(181),  // pwrite
         69 => Some(329),  // preadv
         70 => Some(330),  // pwritev
+        7 => Some(168),   // poll (m68k __NR_poll = 168; without this, generic
+                          // nr 7 would be passed verbatim to the kernel and
+                          // land on __NR_waitpid=7, which BLOCKS the caller
+                          // — manifesting as a test hang/wrong-arg error in
+                          // channel_try_recv / channel_recv_timeout).
         72 => Some(357),  // socketpair
         73 => Some(302),  // ppoll
         78 => Some(298),  // readlinkat

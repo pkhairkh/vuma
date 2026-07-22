@@ -3602,10 +3602,61 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     } else {
                                         if is_gt { 0b101 } else { 0b100 }
                                     };
-                                    let hi_opp_cond = if is_signed {
-                                        if is_gt { 0b010 } else { 0b011 }
+                                    // [Wave 7-ext-tryrecv-returnval] hi_opp is
+                                    // the OPPOSITE direction: for SLe, opposite
+                                    // is Gt; for SLt, opposite is Ge; etc. The
+                                    // previous code emitted the SAME-direction
+                                    // condition with inverted=false (e.g. for
+                                    // SLe it emitted `cmpb,<= lhs_hi, rhs_hi`
+                                    // — which fires when lhs_hi <= rhs_hi, the
+                                    // SAME direction as SLe, not the opposite).
+                                    // This made `poll_ret=0 SLe 0` evaluate to
+                                    // false (hi_opp fires because 0<=0 is true,
+                                    // setting S2=0), so try_recv's `reg18=0`
+                                    // made Select pick false_val (payload 0)
+                                    // instead of true_val (-2), and the test
+                                    // exited 0 instead of 77.
+                                    //
+                                    // Correct mapping (uses inverted=true to
+                                    // flip the cmpb condition into the opposite
+                                    // direction):
+                                    //   SLt (is_gt=F,is_eq=F): opp = SGe = cond=010,inverted=true (NOT <)
+                                    //   SLe (is_gt=F,is_eq=T): opp = SGt = cond=011,inverted=true (NOT <=)
+                                    //   SGt (is_gt=T,is_eq=F): opp = SLe = cond=011,inverted=false (<=)
+                                    //   SGe (is_gt=T,is_eq=T): opp = SLt = cond=010,inverted=false (<)
+                                    // Unsigned analogously with 100/101.
+                                    let (hi_opp_cond, hi_opp_inverted) = if is_signed {
+                                        if is_gt {
+                                            (0b011, false) // SGt/SGe opp: SLe/S不全
+                                        } else {
+                                            (0b011, true)  // SLt/SLe opp: SGt (NOT <=)
+                                        }
                                     } else {
-                                        if is_gt { 0b100 } else { 0b101 }
+                                        if is_gt {
+                                            (0b101, false) // UGt/UGe opp: ULe/ULt-ish
+                                        } else {
+                                            (0b101, true)  // ULt/ULe opp: UGt (NOT <<=)
+                                        }
+                                    };
+                                    // Refine per-kind: SLt's opposite is SGe
+                                    // (NOT <), and SGt's opposite is SLe (<=).
+                                    // The (cond, inverted) tuple above covers
+                                    // SLe/UL e correctly; for SLt/SGt/ULt/UGt
+                                    // we need to swap to cond=010/100.
+                                    let (hi_opp_cond, hi_opp_inverted) = match kind {
+                                        CmpKind::SLt | CmpKind::ULt => {
+                                            (if is_signed { 0b010 } else { 0b100 }, true)
+                                        }
+                                        CmpKind::SLe | CmpKind::ULe => {
+                                            (if is_signed { 0b011 } else { 0b101 }, true)
+                                        }
+                                        CmpKind::SGt | CmpKind::UGt => {
+                                            (if is_signed { 0b011 } else { 0b101 }, false)
+                                        }
+                                        CmpKind::SGe | CmpKind::UGe => {
+                                            (if is_signed { 0b010 } else { 0b100 }, false)
+                                        }
+                                        _ => (hi_opp_cond, hi_opp_inverted),
                                     };
                                     let lo_cond = if is_eq {
                                         if is_gt { 0b100 } else { 0b101 }
@@ -3619,7 +3670,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     code.extend_from_slice(&encode_nop());
                                     // If hi matches opposite direction → S2=0, skip to ldi0.
                                     let hi_opp = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, hi_opp_cond, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, hi_opp_cond, hi_opp_inverted, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     // hi == hi: compare lo. If lo matches → S2=1, skip to done.
                                     let lo_match = code.len();
@@ -4408,11 +4459,53 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // `ss_st` below runs AFTER the syscall completes and
                         // stores the correct return value.
                         code.extend_from_slice(&encode_nop());
+                        // [Wave 7-ext-tryrecv-returnval] HPPA Linux syscall
+                        // convention: on success, R20=0 and R28=return value;
+                        // on error, R20=1 and R28=POSITIVE errno (e.g. 11 for
+                        // EAGAIN). The rest of the IR (Cmp SLe 0, Select)
+                        // assumes the x86_64 -errno convention. Without
+                        // conversion, a failed `read` returns +11, the SLe 0
+                        // check is false, is_error becomes 0, and the Select
+                        // returns the (zero-initialized) payload instead of
+                        // the -2 / -3 sentinel — so try_recv/recv_timeout
+                        // exit 0 instead of 77/88.
+                        //
+                        // Fix: if R20 != 0 (error), negate R28 to convert the
+                        // positive errno to -errno. Uses CMPB cond=001 (=)
+                        // with f=true (nullify-on-taken) and disp_bytes=0:
+                        //   * branch taken (R20==0, success): SUB is nullified,
+                        //     R28 unchanged.
+                        //   * branch NOT taken (R20!=0, error): SUB executes,
+                        //     R28 = 0 - R28 = -errno.
+                        // `target = PC + 8 + 0 = PC + 8`, so the SUB at PC+4 is
+                        // skipped when the branch is taken.
+                        code.extend_from_slice(&encode_cmpb(
+                            R20, R0, /*cond=*/0b001, /*inverted=*/false,
+                            /*f=*/true, /*disp_bytes=*/0,
+                        ));
+                        code.extend_from_slice(&encode_sub(R0, R28, R28));
                         // Store result (R28) to dst's stack slot
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            // [Wave 7-ext-tryrecv-returnval] Sign-extend
+                            // R28 to 64 bits. hppa32 STW only stores 32
+                            // bits, but downstream IR often treats the
+                            // syscall result as I64 (Cmp SLe 0, Select).
+                            // Without sign-extension, the high 32 bits at
+                            // [dst_off-4] are uninitialized garbage —
+                            // breaking the I64 comparison (e.g. try_recv
+                            // exits 0 instead of 77 because reg14's high
+                            // word makes poll's "0" look like a large
+                            // positive I64, so SLe 0 is false).
+                            //
+                            // Sign-extension: SHRPW R0, R28, 31, S2 gives
+                            // S2 = R28 >> 31 (logical, 0 if positive, 1 if
+                            // negative); SUB R0, S2, S2 gives 0 or 0xFFFFFFFF.
+                            code.extend_from_slice(&encode_shrpw(R0, R28, 31, S2));
+                            code.extend_from_slice(&encode_sub(R0, S2, S2));
                             code.extend(ss_st(R28, dst_off));
+                            code.extend(ss_st(S2, dst_off - 4));
                         }
                         } // end else (normal syscall path)
                     }

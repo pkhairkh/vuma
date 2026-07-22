@@ -3996,6 +3996,22 @@ impl Backend for PPC64Backend {
                     IRInstr::Syscall { nr, args, dst } => {
                         // ppc64 Linux syscall: args in R3-R8, nr in R0,
                         // `sc`, result in R3.
+                        //
+                        // [Wave 7-ext-tryrecv-returnval] Unlike x86_64 (which
+                        // returns -errno on failure), the ppc64 Linux ABI
+                        // returns a POSITIVE errno in R3 with CR0.SO=1 on
+                        // failure. The IPC lowering's `Cmp SLe(read_ret, 0)`
+                        // assumes the x86_64 -errno convention; without
+                        // conversion, a failed read returns +11 (EAGAIN), the
+                        // SLe check is false, is_error becomes 0, and the
+                        // downstream Select returns the (zero-initialized)
+                        // payload instead of the -2 / -3 sentinel — so
+                        // try_recv/recv_timeout exit 0 instead of 77/88.
+                        //
+                        // Fix: after `sc`, conditionally negate R3 when
+                        // CR0.SO=1, converting the positive errno back to the
+                        // -errno form the rest of the IR expects. This matches
+                        // what glibc's syscall wrapper does.
                         let mut code = Vec::new();
                         // Translate VUMA-generic (asm-generic) syscall number to the
                         // backend's native numbering. TODO(P1-b): per-arch table.
@@ -4015,6 +4031,13 @@ impl Backend for PPC64Backend {
                         code.extend(ss_load_imm(Gpr::R0, native_nr as i64));
                         // SC
                         code.extend_from_slice(&Instruction::Sc.encode());
+                        // Convert ppc64's positive-errno convention to the
+                        // -errno convention used by the rest of the IR:
+                        //   bc 4, 3, +2   → if CR0.SO == 0 (no error), skip neg
+                        //   neg R3, R3    → R3 = -R3 (= -errno, if error)
+                        // (BD=2 → target = CIA + 2*4 = CIA + 8, skipping the neg.)
+                        code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 3, bd: 2 }.encode());
+                        code.extend_from_slice(&Instruction::Neg { rt: Gpr::R3, ra: Gpr::R3 }.encode());
                         // Store result (R3) to dst's stack slot
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
