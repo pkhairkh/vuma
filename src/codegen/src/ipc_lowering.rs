@@ -816,9 +816,14 @@ fn build_crc32_loop_blocks(
     let byte_ext = ctx.new_vreg();
     let crc_val = ctx.new_vreg();
     let crc_new = ctx.new_vreg();
+    let i_val2_ext = ctx.new_vreg();
     let mut body_blk = IRBlock::new(&body);
     body_blk.instructions.push(IRInstr::Load { dst: i_val2.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
-    body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: addr.clone(), lhs: frame.clone(), rhs: i_val2, ty: Some(IRType::I64) });
+    // [Wave 93-94-ext] Zero-extend i_val2 to I64 before I64 Add.
+    // Without this, 32-bit backends read garbage from [vreg_off+4]
+    // when the I64 Add reads i_val2's high word, corrupting the address.
+    body_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: i_val2_ext.clone(), src: i_val2, from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) });
+    body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: addr.clone(), lhs: frame.clone(), rhs: i_val2_ext, ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::Load { dst: byte.clone(), addr: addr, offset: 0, ty: IRType::I8 });
     body_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: byte_ext.clone(), src: byte, from_ty: Some(IRType::I8), to_ty: Some(IRType::I32) });
     body_blk.instructions.push(IRInstr::Load { dst: crc_val.clone(), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 });
@@ -2678,9 +2683,12 @@ fn expand_stark_verify(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let hash_new = ctx.new_vreg();
     let i_val3 = ctx.new_vreg();
     let i_new = ctx.new_vreg();
+    let i_val2_ext = ctx.new_vreg();
     let mut body_blk = IRBlock::new(&body);
     body_blk.instructions.push(IRInstr::Load { dst: i_val2.clone(), addr: i_slot.clone(), offset: 0, ty: IRType::I32 });
-    body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: addr.clone(), lhs: slot_ptr.clone(), rhs: i_val2, ty: Some(IRType::I64) });
+    // [Wave 93-94-ext] Zero-extend i_val2 to I64 before I64 Add (same fix as CRC loop).
+    body_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: i_val2_ext.clone(), src: i_val2, from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) });
+    body_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: addr.clone(), lhs: slot_ptr.clone(), rhs: i_val2_ext, ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::Load { dst: byte.clone(), addr: addr, offset: 0, ty: IRType::I8 });
     body_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: byte_ext.clone(), src: byte, from_ty: Some(IRType::I8), to_ty: Some(IRType::I64) });
     body_blk.instructions.push(IRInstr::Load { dst: hash_val.clone(), addr: hash_slot.clone(), offset: 0, ty: IRType::I64 });
