@@ -3956,6 +3956,13 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 // are handled via the TMP64_* mechanism elsewhere).
                                 code.extend(ss_load_value(src, &vreg_stack_slots, S0));
                                 code.extend(ss_st(S0, d_off));
+                                // [Wave 93-94-ext] For ZExt to I64, MUST zero the high
+                                // word. Without this, I64 XOR/And in the FNV-1a hash loop
+                                // reads garbage from [d_off-4], corrupting the hash.
+                                if matches!(to_ty, Some(IRType::I64) | Some(IRType::U64)) {
+                                    code.extend(ss_load_imm(S0, 0));
+                                    code.extend(ss_st(S0, d_off - 4));
+                                }
                             }
                             CastKind::IntToFloat | CastKind::UIntToFloat => {
                                 // W3e: constant-fold Immediate; call stub for Register.
