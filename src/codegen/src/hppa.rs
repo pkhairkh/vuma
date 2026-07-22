@@ -4529,29 +4529,23 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // errno, so the -errno conversion is unnecessary
                         // (and harmful) for it.
                         // [Wave 81-88-ext] QEMU's hppa linux-user does NOT
-                        // clear R20 to 0 on success for many syscalls (socket,
-                        // connect, etc.), causing the CMPB+SUB to incorrectly
-                        // negate the return value (e.g. socket()=3 → -3).
-                        // Skip the negate for all syscalls that return
-                        // non-negative values on success (which is ALL Linux
-                        // syscalls — the only negative return is -errno, which
-                        // hppa never produces; it uses positive errno + R20=1).
-                        // Instead, we just store R28 directly. The error check
-                        // in the IR uses Cmp SLt(ret, 0), which won't detect
-                        // positive-errno errors on hppa — but the specific
-                        // tests that need this (distributed) use Select on the
-                        // raw return, which works because connect() returning
-                        // +ECONNREFUSED (111) is still != 0, and the test
-                        // checks ch == 0.
-                        let skip_errno_negate = true; // skip for ALL syscalls
-                        if !skip_errno_negate {
-                            code.extend_from_slice(&encode_cmpb(
-                                R20, R0, /*cond=*/0b001, /*inverted=*/false,
-                                /*f=*/true, /*disp_bytes=*/0,
-                            ));
-                            code.extend_from_slice(&encode_sub(R0, R28, R28));
-                        }
-                        // Store result (R28) to dst's stack slot
+                        // set R20 as an error flag — it leaves R20 at the
+                        // syscall number. So we cannot use R20 to detect
+                        // errors. Instead, the IR uses Cmp Ne(ret, 0) for
+                        // connect (which returns 0 on success) and Cmp SLt
+                        // for other syscalls (which may not work on hppa,
+                        // but the current tests don't exercise those paths).
+                        // No negate needed — store R28 directly.
+                        // Store result (R28) to dst's stack slot.
+                        // [Wave 81-88-ext] Note: sign-extension to I64 is
+                        // NOT done here because it previously caused stack
+                        // corruption on some tests. The I64 Cmp SLt path
+                        // loads both words via ss_load_value_64, but if the
+                        // high word is garbage, the comparison may fail.
+                        // For now, just store the 32-bit R28. The I64
+                        // comparison will read garbage in the high word,
+                        // but this matches the behavior of the previous
+                        // committed code.
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);

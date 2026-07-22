@@ -2729,7 +2729,14 @@ fn expand_channel_open_remote(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut
         IRInstr::Store { value: addr, addr: sockaddr.clone(), offset: 4, ty: IRType::I32 },
         IRInstr::Store { value: IRValue::Immediate(0), addr: sockaddr.clone(), offset: 8, ty: IRType::I64 },
         IRInstr::Syscall { nr: 203, args: vec![fd.clone(), sockaddr, IRValue::Immediate(16)], dst: Some(connect_ret.clone()) },
-        IRInstr::Cmp { kind: CmpKind::SLt, dst: is_error.clone(), lhs: connect_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // Check connect_ret != 0 (error on all backends). We use Ne instead
+        // of SLt because some backends (hppa QEMU) return POSITIVE errno on
+        // error (e.g. +14 for EFAULT) rather than -errno. connect() returns
+        // 0 on success, so != 0 is the correct error check universally.
+        // Use ty=None (32-bit comparison) because on 32-bit backends the
+        // high word of the I64 slot may be uninitialized garbage, causing
+        // I64 Ne to always return true even when connect_ret=0.
+        IRInstr::Cmp { kind: CmpKind::Ne, dst: is_error.clone(), lhs: connect_ret, rhs: IRValue::Immediate(0), ty: None },
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(0), false_val: fd, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
