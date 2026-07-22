@@ -1759,27 +1759,29 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
+    // All PHDR fields are written LE to match EI_DATA=ELFDATA2LSB. The
+    // mips64be wrapper swaps each multi-byte field LE→BE for qemu-mips64.
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header in LOAD segment)
-    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_vaddr = base_addr (include ELF header)
-    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_paddr = base_addr
-    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_filesz (headers + code)
-    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_be_bytes()); // p_align
+    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr = base_addr (include ELF header)
+    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr = base_addr
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_filesz (headers + code)
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
     // Data segment PH removed — QEMU-mips64 doesn't handle 2 LOAD segments
 
     // --- Program Header 2: PT_GNU_STACK (0x6474e551) — non-executable stack ---
     // p_flags = PF_R | PF_W (6), all offsets/sizes zero, p_align = 0x10.
-    elf.extend_from_slice(&0x6474e551u32.to_be_bytes()); // p_type = PT_GNU_STACK
-    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&0x10u64.to_be_bytes()); // p_align
+    elf.extend_from_slice(&0x10u64.to_le_bytes()); // p_align
 
     // --- .text section ---
     // Pad to page-aligned text_offset
@@ -1815,27 +1817,28 @@ pub struct Mips64Backend {
 }
 
 impl Mips64Backend {
-    /// Create a new MIPS64 backend (big-endian, `qemu-mips64`).
+    /// Create a new MIPS64 backend (little-endian, `qemu-mips64el`).
     ///
-    /// Historically `new()` returned a little-endian backend and a separate
-    /// `Mips64BeBackend` wrapper was required for big-endian output.  The
-    /// `Mips64TargetInfo` and the ELF builder (`build_mips64_elf_2seg`) now
-    /// both emit big-endian output — matching the conventional `mips64`
-    /// target triple (`mips64-unknown-linux-gnuabi64`) and the `qemu-mips64`
-    /// emulator — so `new()` is big-endian as well.  `new_be()` is retained
-    /// as a deprecated alias for source compatibility.
+    /// The parent `mips64` backend emits a little-endian ELF
+    /// (`ELFDATA2LSB`) and uses LE data-access patterns (byte-level LBU
+    /// loads, SW+SW split stores) so that unaligned 64-bit accesses — which
+    /// are legal in the VUMA IR but would trap on MIPS `LD`/`SD` requiring
+    /// 8-byte natural alignment — work correctly.
+    ///
+    /// The `mips64be` wrapper (`Mips64BeBackend::new()` → `new_be()`)
+    /// byte-swaps the ELF header, PHDR fields and instruction words LE→BE
+    /// for `qemu-mips64`, and sets `big_endian: true` so that the data
+    /// access patterns use the CPU's native BE byte order.
     pub fn new() -> Self {
         Self {
             target_info: Mips64TargetInfo,
-            big_endian: true,
+            big_endian: false,
             use_real_regalloc: false,
         }
     }
 
-    /// Create a new MIPS64 backend with big-endian mode.
-    ///
-    /// This is now equivalent to `new()` (which is also big-endian) and is
-    /// retained for source compatibility with the `Mips64BeBackend` wrapper.
+    /// Create a new MIPS64 backend with big-endian data access
+    /// (`qemu-mips64`).  Used by the `Mips64BeBackend` wrapper.
     pub fn new_be() -> Self {
         Self {
             target_info: Mips64TargetInfo,
@@ -2487,19 +2490,31 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         }
                         _ => {
                             // U64/Ptr load.
-                            // For big-endian (mips64be): use LD (load doubleword) which
-                            // uses the CPU's native byte order (BE). This is correct
-                            // because the data was stored in BE order by SD.
-                            // For little-endian (mips64): use byte-level LBU assembly
-                            // for unaligned access (MIPS requires 8-byte alignment for LD).
+                            // MIPS requires 8-byte natural alignment for `LD`, but VUMA
+                            // IR permits unaligned 64-bit accesses (e.g. the 56-byte
+                            // channel frame's `payload` field at offset 44, which is
+                            // only 4-byte aligned).  Use `LWU`+`LWU` (4-byte aligned)
+                            // or byte-level `LBU` for fully unaligned access.
+                            //
+                            // For big-endian (mips64be): the high 32 bits live at the
+                            // lower address.  LWU on a BE CPU reads in BE byte order.
+                            // For little-endian (mips64): the low 32 bits live at the
+                            // lower address.  LBU byte-level assembly produces LE order.
                             if big_endian {
                                 if (-32768..=32767).contains(&off) {
-                                    code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                    // T0 = high 32 bits (zero-extended via LWU)
+                                    code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                    // T1 = low 32 bits (zero-extended via LWU)
+                                    code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T1, base: Gpr::T3, offset: off + 4 }.encode()); code.extend_from_slice(&encode_nop());
                                 } else {
                                     code.extend(ss_load_imm(Gpr::T4, off as i64));
                                     code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
-                                    code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T1, base: Gpr::T4, offset: 4 }.encode()); code.extend_from_slice(&encode_nop());
                                 }
+                                // T0 = (high << 32) | low
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
                             } else
                             // U64/Ptr load: MIPS requires 8-byte alignment for LD.
                             // Use LBU (byte loads) for fully unaligned 64-bit access.
@@ -2579,17 +2594,29 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         }
                         _ => {
                             // U64/Ptr store.
-                            // For big-endian (mips64be): use SD (store doubleword) which
-                            // uses the CPU's native byte order (BE). This is correct
-                            // because the data will be read by LD in BE order.
-                            // For little-endian (mips64): use SW + shift for unaligned access.
+                            // MIPS requires 8-byte natural alignment for `SD`, but VUMA
+                            // IR permits unaligned 64-bit stores (e.g. the 56-byte
+                            // channel frame's `payload` field at offset 44, which is
+                            // only 4-byte aligned).  Use `SW`+`SW` (4-byte aligned).
+                            //
+                            // For big-endian (mips64be): the high 32 bits go at the
+                            // lower address.  SW on a BE CPU writes in BE byte order.
+                            // For little-endian (mips64): the low 32 bits go at the
+                            // lower address.  SW on a LE CPU writes in LE byte order.
                             if big_endian {
                                 if (-32768..=32767).contains(&off) {
-                                    code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                    // T1 = high 32 bits of T0
+                                    code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T1, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                    // Store high 32 bits at offset 0 (BE: high at lower addr)
+                                    code.extend_from_slice(&Instruction::Sw { rt: Gpr::T1, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                    // Store low 32 bits at offset 4
+                                    code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T3, offset: off + 4 }.encode()); code.extend_from_slice(&encode_nop());
                                 } else {
                                     code.extend(ss_load_imm(Gpr::T4, off as i64));
                                     code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
-                                    code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T1, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Sw { rt: Gpr::T1, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                    code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T4, offset: 4 }.encode()); code.extend_from_slice(&encode_nop());
                                 }
                             } else
                             // U64/Ptr store: MIPS requires 8-byte alignment for SD.
@@ -3193,12 +3220,47 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         crate::backend::BackendKind::Mips64,
                         *nr,
                     );
+
+                    // mips64/mips64be-specific clone (asm-generic nr=220) fix.
+                    //
+                    // MIPS uses SIGCHLD=18, not SIGCHLD=17 like x86/arm/etc.
+                    // The shared IPC lowering in `ipc_lowering.rs::expand_spawn_worker`
+                    // hardcodes `Immediate(17)` (x86 SIGCHLD) as the clone flags.
+                    // QEMU's mips64 `do_fork()` enforces
+                    //   `(flags & CSIGNAL) == TARGET_SIGCHLD` (== 18 on MIPS)
+                    // and returns -EINVAL otherwise, so `spawn_worker()` silently
+                    // fails with -EINVAL and the parent never gets a child.
+                    //
+                    // We detect clone (generic nr=220) and rewrite arg[0]'s
+                    // CSIGNAL bits from 17 (x86 SIGCHLD) to 18 (MIPS SIGCHLD),
+                    // leaving any other flag bits untouched. This matches the
+                    // pattern of the riscv32 wait4→waitid workaround
+                    // (backend-local rewrite of a syscall whose semantics
+                    // QEMU/Linux mis-translate on this arch).
+                    let effective_args: Vec<IRValue> = if *nr == 220 {
+                        args.iter().enumerate().map(|(i, a)| {
+                            if i == 0 {
+                                if let IRValue::Immediate(v) = a {
+                                    let flags = *v as u64;
+                                    let csig = flags & 0xFF;
+                                    let rest = flags & !0xFFu64;
+                                    if csig == 17 {
+                                        return IRValue::Immediate((rest | 18) as i64);
+                                    }
+                                }
+                            }
+                            a.clone()
+                        }).collect()
+                    } else {
+                        args.to_vec()
+                    };
+
                     let syscall_arg_regs = [
                         Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
                         Gpr::T0, Gpr::T1,
                     ];
-                    let num_reg_args = args.len().min(syscall_arg_regs.len());
-                    for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                    let num_reg_args = effective_args.len().min(syscall_arg_regs.len());
+                    for (i, arg) in effective_args.iter().take(num_reg_args).enumerate() {
                         code.extend(ss_load_value(
                             arg, &vreg_stack_slots, syscall_arg_regs[i],
                         ));
@@ -4542,18 +4604,28 @@ mod tests {
     }
 
     #[test]
-    fn test_elf_header_big_endian() {
+    fn test_elf_header_little_endian() {
+        // Mips64TargetInfo::endianness() == Endianness::Little, and the
+        // parent mips64 backend emits an LE ELF (ELFDATA2LSB) for qemu-mips64el.
+        // The mips64be wrapper byte-swaps this LE ELF to BE for qemu-mips64.
         let elf = build_mips64_elf_2seg(&[0x01, 0x02, 0x03, 0x04], 0x120000000);
         // Check ELF magic
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
         // Check ELFCLASS64
         assert_eq!(elf[4], 2);
-        // Check ELFDATA2MSB (big-endian = 2) — matches Mips64TargetInfo::endianness()
-        assert_eq!(elf[5], 2);
-        // Check e_machine = EM_MIPS = 8 (big-endian u16 → 0x00, 0x08)
-        assert_eq!(&elf[18..20], &[0x00, 0x08]);
-        // Check e_type = ET_EXEC = 2 (big-endian u16 → 0x00, 0x02)
-        assert_eq!(&elf[16..18], &[0x00, 0x02]);
+        // Check ELFDATA2LSB (little-endian = 1)
+        assert_eq!(elf[5], 1);
+        // Check e_type = ET_EXEC = 2 (little-endian u16 → 0x02, 0x00)
+        assert_eq!(&elf[16..18], &[0x02, 0x00]);
+        // Check e_machine = EM_MIPS = 8 (little-endian u16 → 0x08, 0x00)
+        assert_eq!(&elf[18..20], &[0x08, 0x00]);
+
+        // PHDR1 (PT_LOAD) starts at offset 64. Verify p_vaddr is LE.
+        // p_offset = 0 (offset 72..80), p_vaddr at offset 80..88.
+        let p_vaddr = u64::from_le_bytes(elf[80..88].try_into().unwrap());
+        assert_eq!(p_vaddr, 0x120000000, "p_vaddr must be LE-encoded base_addr");
+        let p_type = u32::from_le_bytes(elf[64..68].try_into().unwrap());
+        assert_eq!(p_type, 1, "p_type = PT_LOAD");
     }
 
     #[test]

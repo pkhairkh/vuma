@@ -1037,11 +1037,22 @@ impl Instruction {
 
             // ── Conditional Move (MOVcc) ────────────────────────────────
             Instruction::Movcc { rd, rs2, cond } => {
-                // MOVcc: op=10, rd, op3=0x2C, rs1=0, i=0, cc2.cc1.cc0[12:11], cond[17:14]
-                // For simplicity, we use %icc (cc=000) and encode cond in bits[17:14].
+                // MOVcc: op=10, rd, op3=0x2C, cc2[18], cond[17:14], i[13], cc1.cc0[12:11], rs2[4:0]
+                // SPARC V9 cc field (cc2.cc1.cc0):
+                //   000 = %fcc0, 001 = %fcc1, 010 = %fcc2, 011 = %fcc3
+                //   100 = %icc,  110 = %xcc
+                // We pair MOVcc with SUBcc (which sets %icc and %xcc, NOT any
+                // %fccN), so we must select %icc here. cc=100 means cc2=1,
+                // cc1=0, cc0=0 → bit 18 set, bits 12:11 clear.
+                // (Previously this encoded cc=000 = %fcc0, which SUBcc never
+                // touches — so MOVcc always saw %fcc0=0 and the move never
+                // fired, breaking every Select — including channel_recv's
+                // result-selection, which then unconditionally returned
+                // false_val = -1, making simple_send exit 255 on sparc64.)
                 let word = (((OPC_FORMAT3 & 0x3) << 30)
                     | ((rd.encoding() & 0x1F) << 25)
-                    | ((OP3_MOVCC & 0x3F) << 19)) // cc = 000 (%icc)
+                    | ((OP3_MOVCC & 0x3F) << 19)
+                    | (1u32 << 18)) // cc2 = 1 → cc=100 = %icc
                     | ((*cond & 0xF) << 14)
                     | (rs2.encoding() & 0x1F);
                 word.to_be_bytes()
