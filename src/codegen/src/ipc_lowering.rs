@@ -1513,12 +1513,19 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         IRInstr::Store { value: IRValue::Immediate(1), addr: pollfd.clone(), offset: 4, ty: IRType::I16 },
         IRInstr::Syscall { nr: 7, args: vec![pollfd, IRValue::Immediate(1), IRValue::Immediate(0)], dst: Some(poll_ret.clone()) },
     ]);
+    // nanosleep(10ms) BEFORE the read — this gives the child process
+    // guaranteed CPU time to write BEFORE we try to read. This is critical
+    // because the read() on an empty pipe BLOCKS (even with O_NONBLOCK
+    // set, if fcntl doesn't work correctly on some QEMU backends).
+    // Moving the nanosleep before read ensures the child gets to run first.
+    let sleep_buf = ctx.new_vreg();
+    instrs.extend(vec![
+        IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(10_000_000), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
+        IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
+    ]);
     // Use read() with O_NONBLOCK (set above by emit_set_nonblocking).
-    // Also add a sched_yield() to prevent starvation on single-CPU QEMU:
-    // the spin loop in try_recv_success calls try_recv repeatedly, and
-    // without yielding, the child process never gets CPU time to write.
-    // sched_yield (asm-generic 124) gives the scheduler a chance to run
-    // the child.
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
@@ -1532,16 +1539,6 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         // result = is_error ? -2 : payload
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(-2), false_val: payload, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-    ]);
-    // nanosleep(1ms) — give the child process guaranteed CPU time to
-    // write. sched_yield is not sufficient on QEMU's single-CPU
-    // scheduler; a short sleep ensures the child gets to run.
-    let sleep_buf = ctx.new_vreg();
-    instrs.extend(vec![
-        IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Store { value: IRValue::Immediate(1_000_000), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
-        IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
     ]);
     instrs
 }
