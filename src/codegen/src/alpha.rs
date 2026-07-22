@@ -513,6 +513,57 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
     }
 }
 
+/// Emit a FIXED-SIZE 8-instruction (32-byte) load-immediate sequence that
+/// loads the full 64-bit value `val` into `dst`. Used by IRInstr::GetAddress
+/// as a placeholder (with val=0) and re-emitted by the R_ALPHA_REFQUAD
+/// patcher with the symbol's absolute 64-bit address.
+///
+/// Layout (each row = 4 bytes):
+///   [0] LDA    dst, lo_lo16(ZERO)        — bits 15:0
+///   [1] LDAH   dst, lo_hi16(dst)         — bits 31:16 (sign-adjusted)
+///   [2] ZAPNOT dst, 0x0F, dst            — zero-extend 32→64
+///   [3] LDA    S3,  hi_lo16(ZERO)        — bits 47:32
+///   [4] LDAH   S3,  hi_hi16(S3)          — bits 63:48 (sign-adjusted)
+///   [5] ZAPNOT S3,  0x0F, S3             — zero-extend 32→64
+///   [6] SLL    S3,  32, S3               — shift to upper 32 bits
+///   [7] BIS    dst, S3, dst              — OR high bits into dst
+fn encode_load_imm_64_fixed(dst: Gpr, val: u64) -> Vec<u8> {
+    let lo32 = (val & 0xFFFF_FFFF) as u32;
+    let hi32 = ((val >> 32) & 0xFFFF_FFFF) as u32;
+    let lo_lo16 = (lo32 & 0xFFFF) as i16 as i32;
+    let mut lo_hi16 = ((lo32 >> 16) & 0xFFFF) as i32;
+    if lo_lo16 < 0 { lo_hi16 += 1; }
+    let hi_lo16 = (hi32 & 0xFFFF) as i16 as i32;
+    let mut hi_hi16 = ((hi32 >> 16) & 0xFFFF) as i32;
+    if hi_lo16 < 0 { hi_hi16 += 1; }
+    let mut code = Vec::with_capacity(32);
+    // [0] LDA dst, lo_lo16(ZERO)
+    code.extend(Instruction::Lda { ra: dst, disp: lo_lo16 as i16, rb: ZERO }.encode());
+    // [1] LDAH dst, lo_hi16(dst)
+    let word1: u32 = (0x09u32 << 26)
+        | ((dst.encoding() as u32) << 21)
+        | ((dst.encoding() as u32) << 16)
+        | (lo_hi16 as u32 & 0xFFFF);
+    code.extend_from_slice(&word1.to_le_bytes());
+    // [2] ZAPNOT dst, 0x0F, dst — zero-extend low 32 bits to 64.
+    code.extend_from_slice(&op_lit(0x12, dst, 0x0F, dst, 0x31).to_le_bytes());
+    // [3] LDA S3, hi_lo16(ZERO)
+    code.extend(Instruction::Lda { ra: S3, disp: hi_lo16 as i16, rb: ZERO }.encode());
+    // [4] LDAH S3, hi_hi16(S3)
+    let word2: u32 = (0x09u32 << 26)
+        | ((S3.encoding() as u32) << 21)
+        | ((S3.encoding() as u32) << 16)
+        | (hi_hi16 as u32 & 0xFFFF);
+    code.extend_from_slice(&word2.to_le_bytes());
+    // [5] ZAPNOT S3, 0x0F, S3 — zero-extend high 32 bits to 64.
+    code.extend_from_slice(&op_lit(0x12, S3, 0x0F, S3, 0x31).to_le_bytes());
+    // [6] SLL S3, 32, S3 — shift high 32 bits to upper half.
+    code.extend_from_slice(&op_lit(0x12, S3, 32, S3, 0x39).to_le_bytes());
+    // [7] BIS dst, S3, dst — OR high bits into dst.
+    code.extend_from_slice(&op_reg(0x11, dst, S3, dst, 0x20).to_le_bytes());
+    code
+}
+
 /// Load a 64-bit value from stack slot at [FP + offset] into dst.
 fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
     if (-32768..=32767).contains(&offset) {
@@ -1371,16 +1422,23 @@ fn emit_instr(
         IRInstr::GetAddress { dst, name } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-            // LDA S0, sym — we use LDA with displacement 0 and record a relocation.
-            // Actually, for absolute address, use LDAQ via relocation.
-            // Simplified: load 0 (placeholder) and record a relocation.
+            // Emit a FIXED-SIZE 8-instruction (32-byte) load-immediate
+            // placeholder that can hold a full 64-bit address. The
+            // R_ALPHA_REFQUAD patcher (in the link phase) re-emits the
+            // same 8-instruction sequence with the symbol's absolute
+            // 64-bit address bits.
+            //
+            // Layout (each row = 4 bytes):
+            //   [0] LDA    S0, lo_lo16(ZERO)        — bits 15:0
+            //   [1] LDAH   S0, lo_hi16(S0)          — bits 31:16
+            //   [2] ZAPNOT S0, 0x0F, S0             — zero-extend 32→64
+            //   [3] LDA    S3, hi_lo16(ZERO)        — bits 47:32
+            //   [4] LDAH   S3, hi_hi16(S3)          — bits 63:48
+            //   [5] ZAPNOT S3, 0x0F, S3             — zero-extend 32→64
+            //   [6] SLL    S3, 32, S3               — shift to upper 32
+            //   [7] BIS    S0, S3, S0               — OR high bits in
             let reloc_offset = code.len() as u64;
-            code.extend(Instruction::Lda { ra: S0, disp: 0, rb: ZERO }.encode());
-            // Followed by LDAH S0, 0(S0) for high 16 bits.
-            let word: u32 = (0x09u32 << 26)
-                | ((S0.encoding() as u32) << 21)
-                | ((S0.encoding() as u32) << 16);
-            code.extend_from_slice(&word.to_le_bytes());
+            code.extend(encode_load_imm_64_fixed(S0, 0));
             relocations.push(RelocationEntry {
                 offset: reloc_offset,
                 symbol: name.clone(),
@@ -1561,13 +1619,39 @@ fn emit_instr(
         // The vectorizer still produces the IR; this backend just cannot
         // lower it to SIMD machine code.
         IRInstr::VectorOp { .. } => {}
+        // ── CallIndirect (Wave 49) ──
+        // Indirect call through a function pointer vreg.
+        // 1. Load args into R16-R21 (Alpha calling convention, 6 reg args)
+        // 2. Load func_ptr into S0 (= $1, caller-saved scratch, not an arg reg)
+        // 3. JSR RA, (S0) — call through S0; return addr → RA ($26)
+        // 4. Move R0 (return value) to dst's stack slot
+        IRInstr::CallIndirect { dst, func_ptr, args } => {
+            // Move args into R16-R21.
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(arg_reg) = Gpr::arg_register(i) {
+                    code.extend(ss_load_value(arg, vreg_stack_slots, S0));
+                    code.extend(Instruction::Or { ra: ZERO, rb: S0, rc: arg_reg }.encode());
+                }
+            }
+            // Load func_ptr into S0 (caller-saved, not an arg register).
+            code.extend(ss_load_value(func_ptr, vreg_stack_slots, S0));
+            // JSR RA, (S0) — call through S0; return addr → RA.
+            code.extend(Instruction::Jsr { ra: RA, rb: S0 }.encode());
+            // Move return value (R0) to dst's stack slot.
+            if let Some(d) = dst {
+                let d_id = d.as_register().unwrap_or(0);
+                let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                code.extend(Instruction::Or { ra: ZERO, rb: Gpr::R0, rc: S0 }.encode());
+                code.extend(ss_st(S0, d_off));
+            }
+        }
         // ── Channel operations (Wave 1d / Task 2a) ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+        | IRInstr::StarkProof { .. } => {}
     }
 }
 
@@ -2897,7 +2981,9 @@ impl Backend for AlphaBackend {
                     let new_le = word.to_le_bytes();
                     all_code[abs_offset..abs_offset + 4].copy_from_slice(&new_le);
                 } else if reloc.reloc_type == "R_ALPHA_REFQUAD" {
-                    // Absolute 64-bit address for GetAddress (LDA + LDAH sequence).
+                    // R_ALPHA_REFQUAD: re-emit the 8-instruction (32-byte)
+                    // load-immediate sequence emitted by IRInstr::GetAddress
+                    // with the symbol's absolute 64-bit address bits.
                     let target_offset = func_offsets
                         .get(&reloc.symbol)
                         .copied()
@@ -2910,20 +2996,15 @@ impl Backend for AlphaBackend {
                                 .copied()
                         })
                         .unwrap_or(0);
-                    let target_abs = BASE_ADDR + text_offset + target_offset as u64;
-                    let lo16 = (target_abs as u32 & 0xFFFF) as i16;
-                    let mut hi16 = ((target_abs as u32 >> 16) & 0xFFFF) as i32;
-                    if (lo16 as i16) < 0 { hi16 += 1; }
-                    // Patch LDA's displacement (low 16 bits of the 4-byte word, LE).
-                    let word_le = [all_code[abs_offset], all_code[abs_offset+1], all_code[abs_offset+2], all_code[abs_offset+3]];
-                    let mut word = u32::from_le_bytes(word_le);
-                    word = (word & !0xFFFF) | (lo16 as u16 as u32);
-                    all_code[abs_offset..abs_offset+4].copy_from_slice(&word.to_le_bytes());
-                    // Patch LDAH's displacement (next 4-byte word).
-                    let word_le = [all_code[abs_offset+4], all_code[abs_offset+5], all_code[abs_offset+6], all_code[abs_offset+7]];
-                    let mut word = u32::from_le_bytes(word_le);
-                    word = (word & !0xFFFF) | (hi16 as u16 as u32);
-                    all_code[abs_offset+4..abs_offset+8].copy_from_slice(&word.to_le_bytes());
+                    let target_abs: u64 = BASE_ADDR + text_offset + target_offset as u64;
+                    // Re-encode the 8-instruction load-imm with the real
+                    // 64-bit address. The destination register ($s0 = $1)
+                    // matches what GetAddress emits; we patch in-place.
+                    let patched: Vec<u8> = encode_load_imm_64_fixed(S0, target_abs);
+                    if abs_offset + patched.len() <= all_code.len() {
+                        all_code[abs_offset..abs_offset + patched.len()]
+                            .copy_from_slice(&patched);
+                    }
                 }
             }
             let func_size: usize = func

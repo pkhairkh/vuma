@@ -3345,8 +3345,57 @@ fn emit_instr(
                 code.extend(ss_stx(Gpr::O0, dst_off));
             }
         }
-        // ── VectorOp (Wave 29) ──
-        // sparc64 has no SIMD encoder in the Wave 29 suite; emit nothing.
+        // ── CallIndirect (Wave 49) ──
+        // Indirect call through a function pointer vreg.
+        // 1. Load args into %o0-%o5 (SPARC V9 ABI, 6 register args)
+        // 2. Load func_ptr into %l0
+        // 3. JMPL %l0+0, %o7 (call; return address → %o7)
+        // 4. NOP delay slot
+        // 5. Move %o0 (return value) to dst
+        IRInstr::CallIndirect { dst, func_ptr, args } => {
+            // Move args into %o0-%o5
+            for (i, arg) in args.iter().enumerate() {
+                if i < 6 {
+                    let arg_reg = Gpr::arg_register(i).unwrap();
+                    code.extend(ss_load_value(arg, vreg_stack_slots, Gpr::L0));
+                    // OR %g0, %l0, %oN (move)
+                    code.extend_from_slice(
+                        &Instruction::Or {
+                            rd: arg_reg,
+                            rs1: Gpr::G0,
+                            rs2: Gpr::L0,
+                        }
+                        .encode(),
+                    );
+                }
+            }
+            // Load func_ptr into %l0 (caller-saved, not an arg register).
+            code.extend(ss_load_value(func_ptr, vreg_stack_slots, Gpr::L0));
+            // JMPL %l0+0, %o7 — call through %l0, return addr → %o7.
+            code.extend_from_slice(
+                &Instruction::Jmpl {
+                    rd: Gpr::O7,
+                    rs1: Gpr::L0,
+                    imm: 0,
+                }
+                .encode(),
+            );
+            code.extend_from_slice(&encode_nop()); // delay slot
+            // Move return value (%o0) to dst's stack slot.
+            if let Some(d) = dst {
+                let d_id = d.as_register().unwrap_or(0);
+                let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                code.extend_from_slice(
+                    &Instruction::Or {
+                        rd: Gpr::L0,
+                        rs1: Gpr::G0,
+                        rs2: Gpr::O0,
+                    }
+                    .encode(),
+                );
+                code.extend(ss_stx(Gpr::L0, d_off));
+            }
+        }
         IRInstr::VectorOp { .. } => {}
         // ── Channel operations (Wave 1d / Task 2a) ──
         // Backend lowering not yet implemented; emit nothing (no frontend
@@ -3354,7 +3403,7 @@ fn emit_instr(
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+        | IRInstr::StarkProof { .. } => {}
     }
 }
 
@@ -5761,6 +5810,39 @@ impl Backend for Sparc64Backend {
                         all_code[abs_offset + 3],
                     ]);
                     let patched = (existing & 0xC0000000) | ((disp30 as u32) & 0x3FFF_FFFF);
+                    all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
+                } else if reloc.reloc_type == "R_SPARC_HI22" || reloc.reloc_type == "R_SPARC_LO10" {
+                    // Resolve the symbol's absolute address.
+                    let target_offset = func_offsets
+                        .get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets
+                                .keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    let target_offset = target_offset.unwrap_or(ffi_stub_offset);
+                    let abs_addr: u64 = BASE_ADDR + text_offset + target_offset as u64;
+                    let existing = u32::from_be_bytes([
+                        all_code[abs_offset],
+                        all_code[abs_offset + 1],
+                        all_code[abs_offset + 2],
+                        all_code[abs_offset + 3],
+                    ]);
+                    let patched: u32 = if reloc.reloc_type == "R_SPARC_HI22" {
+                        // Patch SETHI's imm22 field (bits 21:0 of the word)
+                        // with bits 31:10 of the address.
+                        let hi22 = ((abs_addr >> 10) & 0x3F_FFFF) as u32;
+                        (existing & 0xFFC00000) | hi22
+                    } else {
+                        // R_SPARC_LO10: patch OR's simm13 field (bits 12:0)
+                        // with bits 9:0 of the address (bits 12:10 stay 0).
+                        let lo10 = (abs_addr & 0x3FF) as u32;
+                        (existing & 0xFFFFE000) | lo10
+                    };
                     all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
                 }
             }

@@ -669,6 +669,14 @@ fn encode_br(r2: Gpr) -> [u8; 2] {
     [0x07, byte1]
 }
 
+/// Encode BASR R1, R2 (Branch And Save Register).
+/// Format: RR, 2 bytes. op1=0x0D. R1 = return address (PC+2), then branch
+/// to the address in R2. Used for indirect function calls.
+fn encode_basr(r1: Gpr, r2: Gpr) -> [u8; 2] {
+    let byte1 = ((r1.encoding() & 0xF) << 4) | (r2.encoding() & 0xF);
+    [0x0D, byte1]
+}
+
 /// Encode SVC imm (Supervisor Call). Format: RR, 2 bytes. op1=0x0A.
 /// For Linux s390x, use SVC 0 with syscall # in R1.
 fn encode_svc(imm: u8) -> [u8; 2] {
@@ -2152,13 +2160,45 @@ fn emit_instr(
         // ── VectorOp (Wave 29) ──
         // s390x has no SIMD encoder in the Wave 29 suite; emit nothing.
         IRInstr::VectorOp { .. } => {}
+        // ── CallIndirect (Wave 49) ──
+        // Indirect call through a function pointer vreg.
+        // 1. Load args into R2-R6 (5 register args); stack args at R15+160
+        // 2. Load func_ptr into R1 (s390x convention for indirect call target)
+        // 3. BASR R14, R1 (R14 = return addr, branch to R1)
+        // 4. Move R2 (return value) to dst
+        IRInstr::CallIndirect { dst, func_ptr, args } => {
+            // Move args into R2-R6 (up to 5 args in registers).
+            // Args 6+ go on the stack at R15+160, R15+168, etc.
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(arg_reg) = Gpr::arg_register(i) {
+                    code.extend(ss_load_value(arg, vreg_stack_slots, S0));
+                    code.extend_from_slice(&encode_lgr(arg_reg, S0));
+                } else {
+                    // Stack arg: store at R15 + (160 + (i - 5) * 8)
+                    let stack_off = (160 + (i - 5) * 8) as i32;
+                    code.extend(ss_load_value(arg, vreg_stack_slots, S0));
+                    code.extend_from_slice(&encode_stg(S0, SP, stack_off));
+                }
+            }
+            // Load func_ptr into R1 (caller-saved scratch, not an arg register).
+            code.extend(ss_load_value(func_ptr, vreg_stack_slots, Gpr::R1));
+            // BASR R14, R1 — call through R1, return addr → R14.
+            code.extend_from_slice(&encode_basr(LR, Gpr::R1));
+            // Move return value (R2) to dst's stack slot.
+            if let Some(d) = dst {
+                let d_id = d.as_register().unwrap_or(0);
+                let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                code.extend_from_slice(&encode_lgr(S0, Gpr::R2));
+                code.extend(ss_st(S0, d_off));
+            }
+        }
         // ── Channel operations (Wave 1d / Task 2a) ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+        | IRInstr::StarkProof { .. } => {}
     }
 }
 
