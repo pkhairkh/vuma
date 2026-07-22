@@ -1223,9 +1223,16 @@ fn emit_instr(
                 // ADDQ.L #data8, A1 (data 1-8) or ADDA.L #imm32, A1.
                 let o = *offset;
                 if (1..=8).contains(&o) {
-                    // ADDQ.L #data, An: word = 0x50C0 | (data<<9) | (3<<6) | An.
-                    // For An=A1 (enc 1): 0x50C0 | (o<<9) | (3<<6) | 1.
-                    let w = 0x50C0u16 | ((o as u16) << 9) | (3u16 << 6) | 1;
+                    // ADDQ.L #data, A1: 0101 ddd 0 10 001 001
+                    //   base 0x5089 (data=0⇒8, size=long, mode=(An), reg=A1)
+                    //   bits 11-9 = data (0-7, with 0 meaning 8)
+                    // NB: the previous encoding 0x50C0|(data<<9)|(3<<6)|1 was
+                    // WRONG — it had size=11 (Scc byte) and mode=000 (Dn), so
+                    // QEMU decoded it as `Scc <cond> D1` (e.g. 0x58C1 = SVC D1)
+                    // instead of `ADDQ.L #data, A1`. A1 was never incremented,
+                    // so Load I32 from offset 1-8 silently read from offset 0
+                    // (broke channel_open: write_fd was loaded as read_fd).
+                    let w = 0x5089u16 | (((o as u16) & 7) << 9);
                     code.extend_from_slice(&w.to_be_bytes());
                 } else {
                     // Load offset into D2, then ADDA.L D2, A1.
@@ -1238,14 +1245,14 @@ fn emit_instr(
             // Load value from (A1) into S0, using correct size based on ty.
             match ty {
                 IRType::F64 | IRType::I64 | IRType::U64 => {
-                    eprintln!("DEBUG m68k Load F64/U64/I64: ty={:?}", ty);
                     // 8-byte load: two MOVE.L from (A1).
                     // Big-endian memory: hi at [A1+0], lo at [A1+4].
                     // Stack slot: lo at [dst_off], hi at [dst_off+4].
                     // MOVE.L (A1), S0  — S0 = hi
                     code.extend_from_slice(&(0x2010u16 | ((S0.encoding() as u16) << 9) | 0x01).to_be_bytes());
-                    // ADDQ.L #4, A1
-                    code.extend_from_slice(&0x5981u16.to_be_bytes());
+                    // ADDQ.L #4, A1 — encoding 0x5889
+                    // (0101 100 0 10 001 001 = data=4, addq, long, mode=An, reg=A1)
+                    code.extend_from_slice(&0x5889u16.to_be_bytes());
                     // MOVE.L (A1), S2  — S2 = lo
                     code.extend_from_slice(&(0x2010u16 | ((S2.encoding() as u16) << 9) | 0x01).to_be_bytes());
                     // Store lo (S2) at dst_off, hi (S0) at dst_off+4
@@ -1290,7 +1297,8 @@ fn emit_instr(
             if *offset != 0 {
                 let o = *offset;
                 if (1..=8).contains(&o) {
-                    let w = 0x50C0u16 | ((o as u16) << 9) | (3u16 << 6) | 1;
+                    // ADDQ.L #data, A1 (see Load handler for full encoding notes).
+                    let w = 0x5089u16 | (((o as u16) & 7) << 9);
                     code.extend_from_slice(&w.to_be_bytes());
                 } else {
                     code.extend(ss_load_imm(S2, o as i64));
@@ -1307,8 +1315,8 @@ fn emit_instr(
                     // Big-endian memory: hi at [A1+0], lo at [A1+4].
                     // MOVE.L S3, (A1) — hi to [addr+0]
                     code.extend_from_slice(&(0x2000u16 | (1u16 << 9) | (2u16 << 6) | (S3.encoding() as u16 & 0x7)).to_be_bytes());
-                    // ADDQ.L #4, A1
-                    code.extend_from_slice(&0x5981u16.to_be_bytes());
+                    // ADDQ.L #4, A1 — encoding 0x5889
+                    code.extend_from_slice(&0x5889u16.to_be_bytes());
                     // MOVE.L S2, (A1) — lo to [addr+4]
                     code.extend_from_slice(&(0x2000u16 | (1u16 << 9) | (2u16 << 6) | (S2.encoding() as u16 & 0x7)).to_be_bytes());
                 }
@@ -1341,10 +1349,12 @@ fn emit_instr(
                 // ADD.L #off, D0 — ADDQ.L or ADDI.L.
                 if (-7..=-1).contains(&off) || (1..=8).contains(&off) {
                     let abs = off.unsigned_abs() as u16;
-                    let w = 0x5080u16 | (abs << 9);
+                    // ADDQ.L #data, D0: 0101 ddd 0 10 000 000 = 0x5080 | ((data&7)<<9).
+                    // (data=0 means 8; mask needed so abs=8 doesn't overflow into bit 12.)
+                    let w = 0x5080u16 | ((abs & 7) << 9);
                     // For negative: use SUBQ.L instead.
                     if off < 0 {
-                        let w = 0x5180u16 | (abs << 9);
+                        let w = 0x5180u16 | ((abs & 7) << 9);
                         code.extend_from_slice(&w.to_be_bytes());
                     } else {
                         code.extend_from_slice(&w.to_be_bytes());
@@ -1794,20 +1804,19 @@ fn emit_i64_cmp(
     match kind {
         BinOpKind::SLt | BinOpKind::ULt => {
             // result = (hi_a < hi_b) | (hi_eq & (lo_a <u lo_b))
-            // if hi_a < hi_b → 1; if hi_a != hi_b → 0; else check lo
+            // if hi_a < hi_b → 1; if hi_a > hi_b → 0; else check lo
             let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);
             let b_ne = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());  // lo_a - lo_b
             let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
-            // fall through → set_zero
+            // set_zero: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_ne)
+            patch_short_branch_to_here(code, b_ne);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
-            // set_one:
+            // set_one: (hi_a < hi_b via b_lt, OR lo_a < lo_b via b_lo_lt)
             patch_short_branch_to_here(code, b_lt);
             patch_short_branch_to_here(code, b_lo_lt);
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
-            // set_zero:
-            patch_short_branch_to_here(code, b_ne);
             // done:
             patch_short_branch_to_here(code, bra_done);
         }
@@ -1819,13 +1828,16 @@ fn emit_i64_cmp(
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
             let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
             let b_lo_eq = emit_bcc_short_placeholder(code, 0x67);   // BEQ.S set_one
+            // set_zero: (fall through → lo_a > lo_b, OR hi_a > hi_b via b_gt)
+            patch_short_branch_to_here(code, b_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
+            // set_one: (hi_a < hi_b, OR lo_a <= lo_b)
             patch_short_branch_to_here(code, b_lt);
             patch_short_branch_to_here(code, b_lo_lt);
             patch_short_branch_to_here(code, b_lo_eq);
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
-            patch_short_branch_to_here(code, b_gt);
+            // done:
             patch_short_branch_to_here(code, bra_done);
         }
         BinOpKind::SGt | BinOpKind::UGt => {
@@ -1834,12 +1846,15 @@ fn emit_i64_cmp(
             let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);  // BLT.S set_zero
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
             let b_lo_gt = emit_bcc_short_placeholder(code, 0x62);  // BHI.S set_one
+            // set_zero: (fall through → lo_a <= lo_b, OR hi_a < hi_b via b_lt)
+            patch_short_branch_to_here(code, b_lt);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
+            // set_one: (hi_a > hi_b, OR lo_a > lo_b)
             patch_short_branch_to_here(code, b_gt);
             patch_short_branch_to_here(code, b_lo_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
-            patch_short_branch_to_here(code, b_lt);
+            // done:
             patch_short_branch_to_here(code, bra_done);
         }
         BinOpKind::SGe | BinOpKind::UGe => {
@@ -1849,13 +1864,15 @@ fn emit_i64_cmp(
             let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S set_one
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
             let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);   // BCS.S set_zero
-            // fall through → set_one (lo_a >=u lo_b)
+            // set_one: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_gt)
+            patch_short_branch_to_here(code, b_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
-            patch_short_branch_to_here(code, b_gt);
-            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            // set_zero: (hi_a < hi_b via b_lt, OR lo_a < lo_b via b_lo_lt)
             patch_short_branch_to_here(code, b_lt);
             patch_short_branch_to_here(code, b_lo_lt);
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            // done:
             patch_short_branch_to_here(code, bra_done);
         }
         BinOpKind::Eq => {
@@ -1863,11 +1880,14 @@ fn emit_i64_cmp(
             let b_ne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
             let b_ne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
+            // set_one: (fall through → both equal)
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
-            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            // set_zero: (hi_a != hi_b via b_ne1, OR lo_a != lo_b via b_ne2)
             patch_short_branch_to_here(code, b_ne1);
             patch_short_branch_to_here(code, b_ne2);
+            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+            // done:
             patch_short_branch_to_here(code, bra_done);
         }
         BinOpKind::Ne => {
@@ -1875,11 +1895,14 @@ fn emit_i64_cmp(
             let b_ne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_one
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
             let b_ne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_one
+            // set_zero: (fall through → both equal)
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
-            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            // set_one: (hi_a != hi_b via b_ne1, OR lo_a != lo_b via b_ne2)
             patch_short_branch_to_here(code, b_ne1);
             patch_short_branch_to_here(code, b_ne2);
+            code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
+            // done:
             patch_short_branch_to_here(code, bra_done);
         }
         _ => {

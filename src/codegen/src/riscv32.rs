@@ -6658,33 +6658,109 @@ impl Backend for RiscV32Backend {
                     // dst = syscall(nr, args…) — raw Linux syscall.
                     // RISC-V ABI: args in a0-a5, nr in a7, ECALL, result in a0.
                     IRInstr::Syscall { nr, args, dst } => {
-                        let mut code = Vec::new();
-                        // Translate VUMA-generic (asm-generic) syscall number to
-                        // the backend's native numbering. Identity on RISC-V.
-                        let native_nr = crate::syscall_abi::translate_or_warn(
-                            crate::backend::BackendKind::RiscV32,
-                            *nr,
-                        );
-                        let syscall_arg_regs =
-                            [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
-                        let num_reg_args = args.len().min(syscall_arg_regs.len());
-                        for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                            code.extend(
-                                ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]),
+                        // riscv32-specific wait4 (asm-generic nr=260) rewrite.
+                        //
+                        // QEMU's riscv32 linux-user emulator (verified on
+                        // 10.0.11) does NOT have wait4 in its syscall table —
+                        // `qemu-riscv32 -strace` reports "Unknown syscall 260"
+                        // and the kernel returns -ENOSYS, so wait_worker()
+                        // silently returns 0 instead of the child's exit code.
+                        // waitid (asm-generic nr=95) IS in the table and
+                        // produces the same raw wait status in
+                        // siginfo_t.si_status (offset 20 on RV32).
+                        //
+                        // The IPC lowering emits:
+                        //   Syscall { nr: 260, args: [pid, status_buf, 0, 0], dst }
+                        //   Load     { dst, addr: status_buf, offset: 0, ty: I32 }
+                        //   BinOp    { ShrL, dst, lhs: dst, rhs: Imm(8) }
+                        // We rewrite the syscall as:
+                        //   waitid(P_PID=1, pid, &siginfo[SP], WEXITED=4, NULL)
+                        // and then store siginfo.si_status into *status_buf
+                        // so the subsequent IR Load reads the same value that
+                        // wait4 would have written. WEXITSTATUS extraction
+                        // (>>8) happens in the unchanged downstream IR.
+                        if *nr == 260 {
+                            let mut code = Vec::new();
+                            // A1 = pid (waitid's 2nd arg = id).
+                            code.extend(ss_load_value(&args[0], &vreg_stack_slots, Gpr::A1));
+                            // A0 = P_PID = 1 (waitid's 1st arg = idtype).
+                            code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode());
+                            // Allocate 128-byte siginfo_t on the stack
+                            // (16-byte aligned; siginfo_t is 128 bytes on RV32).
+                            code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -128 }.encode());
+                            // A2 = &siginfo = SP.
+                            code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Sp, imm: 0 }.encode());
+                            // A3 = WEXITED = 4.
+                            code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 4 }.encode());
+                            // A4 = NULL (rusage).
+                            code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());
+                            // A7 = 95 (sys_waitid).
+                            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 95 }.encode());
+                            code.extend(Instruction::Ecall.encode());
+                            // Load si_status from siginfo [SP+20] into T0.
+                            // (si_signo@0, si_errno@4, si_code@8, si_pid@12,
+                            //  si_uid@16, si_status@20.)
+                            // NOTE: waitid's si_status is the child's raw exit
+                            // code (e.g. 7 for exit(7)), NOT the wait4 raw
+                            // status (which would be 0x0700). The downstream IR
+                            // does WEXITSTATUS = (status >> 8) & 0xff, so we
+                            // shift si_status left by 8 before storing it to
+                            // *status_buf — this reconstructs the wait4 raw
+                            // status so the existing SHR-by-8 produces the
+                            // correct exit code.
+                            code.extend(Instruction::Lw { rd: Gpr::T0, rs1: Gpr::Sp, imm: 20 }.encode());
+                            // T0 = T0 << 8 (reconstruct wait4-style raw status).
+                            code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 8 }.encode());
+                            // Deallocate the 128-byte siginfo.
+                            code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 128 }.encode());
+                            // Store si_status into *status_buf (args[1]) so the
+                            // IR's subsequent Load { addr: status_buf } reads
+                            // the raw wait status (same as wait4 would write).
+                            if args.len() > 1 {
+                                code.extend(ss_load_value(&args[1], &vreg_stack_slots, Gpr::T3));
+                                code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
+                            }
+                            // Store waitid's return value (A0 = child PID or
+                            // -errno) to dst. This matches the wait4 path's
+                            // semantics (dst is overwritten by the subsequent
+                            // IR Load, but we write it for IR fidelity).
+                            if let Some(d) = dst {
+                                let dst_id = d.as_register().unwrap_or(0);
+                                let dst_offset =
+                                    vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                            }
+                            code
+                        } else {
+                            // Normal syscall path.
+                            let mut code = Vec::new();
+                            // Translate VUMA-generic (asm-generic) syscall number to
+                            // the backend's native numbering. Identity on RISC-V.
+                            let native_nr = crate::syscall_abi::translate_or_warn(
+                                crate::backend::BackendKind::RiscV32,
+                                *nr,
                             );
+                            let syscall_arg_regs =
+                                [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5];
+                            let num_reg_args = args.len().min(syscall_arg_regs.len());
+                            for (i, arg) in args.iter().take(num_reg_args).enumerate() {
+                                code.extend(
+                                    ss_load_value(arg, &vreg_stack_slots, syscall_arg_regs[i]),
+                                );
+                            }
+                            // LI a7, nr  (syscall number)
+                            code.extend(ss_load_imm(Gpr::A7, native_nr as i64));
+                            // ECALL
+                            code.extend(Instruction::Ecall.encode());
+                            // Store return value (a0) to dst's stack slot
+                            if let Some(d) = dst {
+                                let dst_id = d.as_register().unwrap_or(0);
+                                let dst_offset =
+                                    vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                            }
+                            code
                         }
-                        // LI a7, nr  (syscall number)
-                        code.extend(ss_load_imm(Gpr::A7, native_nr as i64));
-                        // ECALL
-                        code.extend(Instruction::Ecall.encode());
-                        // Store return value (a0) to dst's stack slot
-                        if let Some(d) = dst {
-                            let dst_id = d.as_register().unwrap_or(0);
-                            let dst_offset =
-                                vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
-                        }
-                        code
                     }
                     // ── VectorOp (Wave 29) ──
                     // riscv32 (RVV) has no SIMD encoder in the Wave 29 suite;

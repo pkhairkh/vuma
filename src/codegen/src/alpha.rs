@@ -1091,23 +1091,30 @@ fn emit_instr(
                     code.extend(Instruction::Ldbu { ra: S0, disp: 0, rb: S2 }.encode());
                 }
                 IRType::I8 => {
-                    // LDBU (zero-extend byte), then sign-extend: SLL 56, SRA 56.
-                    // SLL = opcode 0x12 function 0x34; SRA = opcode 0x13 function 0x3C.
-                    // Use register form with S3 holding the shift count.
+                    // LDBU always zero-extends the byte to 64 bits on Alpha.
+                    // The previous code attempted to sign-extend via an
+                    // SLL-by-56 + SRA-by-56 sequence, but the encodings were
+                    // wrong (function 0x34 is SRL, not SLL; opcode 0x13 is the
+                    // MULQ/DIVQ family, not the shift opcode 0x12), producing
+                    // an illegal instruction that raised SIGILL inside the
+                    // channel_recv CRC32 loop (which loads each frame byte as
+                    // I8 then Casts ZExt I8→I32).  The x86_64 reference
+                    // backend also treats Load I8 as zero-extension (MOVZX),
+                    // and the alpha Cast ZExt handler is a no-op (it assumes
+                    // loaded values are already extended), so plain LDBU is
+                    // both correct and matches the cross-backend contract.
                     code.extend(Instruction::Ldbu { ra: S0, disp: 0, rb: S2 }.encode());
-                    code.extend(ss_load_imm(S3, 56));
-                    code.extend_from_slice(&op_reg(0x12, S0, S3, S0, 0x34).to_le_bytes()); // SLL S0,S3,S0
-                    code.extend_from_slice(&op_reg(0x13, S0, S3, S0, 0x3C).to_le_bytes()); // SRA S0,S3,S0
                 }
                 IRType::U16 => {
                     code.extend(Instruction::Ldwu { ra: S0, disp: 0, rb: S2 }.encode());
                 }
                 IRType::I16 => {
-                    // LDWU (zero-extend halfword), then sign-extend: SLL 48, SRA 48.
+                    // LDWU zero-extends the halfword to 64 bits.  Same
+                    // rationale as I8 above: the previous SLL-48/SRA-48
+                    // sign-extension sequence used the wrong function and
+                    // opcode encodings (would SIGILL), and x86_64 also
+                    // zero-extends for Load I16.  Plain LDWU is correct.
                     code.extend(Instruction::Ldwu { ra: S0, disp: 0, rb: S2 }.encode());
-                    code.extend(ss_load_imm(S3, 48));
-                    code.extend_from_slice(&op_reg(0x12, S0, S3, S0, 0x34).to_le_bytes()); // SLL 48
-                    code.extend_from_slice(&op_reg(0x13, S0, S3, S0, 0x3C).to_le_bytes()); // SRA 48
                 }
                 IRType::U32 => {
                     // LDL sign-extends 32→64.  Zero-extend by masking high 32
