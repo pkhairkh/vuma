@@ -1412,6 +1412,31 @@ fn openat_wronly_creat_trunc_flags(backend: BackendKind) -> i64 {
     }
 }
 
+/// Per-arch `SOCK_STREAM` flag value for `socket(2)`.
+///
+/// Most arches use the asm-generic value `SOCK_STREAM = 1`. However, MIPS
+/// (mips64 / mips64be) has `SOCK_STREAM = 2` and `SOCK_DGRAM = 1` — the
+/// OPPOSITE of asm-generic. Passing 1 on MIPS creates a DGRAM (UDP) socket,
+/// and `connect()` on a UDP socket to 0.0.0.0:1 succeeds (UDP is
+/// connectionless), breaking the distributed test which expects TCP connect
+/// to fail.
+///
+/// Values verified against the Linux UAPI `socket.h` headers:
+///
+/// | arch                    | SOCK_STREAM |
+/// |-------------------------|-------------|
+/// | mips (mips64 / mips64be)| 2           |
+/// | asm-generic (all other) | 1           |
+fn sock_stream_flag(backend: BackendKind) -> i64 {
+    match backend {
+        BackendKind::Mips64 | BackendKind::Mips64Be => 2,
+        // All other backends use the asm-generic value (1):
+        //   AArch64, RiscV64, RiscV32, LoongArch64, X86_64, Arm32,
+        //   PowerPC64, PowerPC64LE, X86_32, S390X, ArmEb, AArch64Be,
+        //   M68k, Alpha, Hppa, Sparc64, Wasm32.
+        _ => 1,
+    }
+}
 /// Helper: set O_NONBLOCK on a read_fd via `fcntl(fd, F_SETFL=4, O_NONBLOCK)`.
 ///
 /// `o_nonblock` is the per-arch `O_NONBLOCK` bit value (see [`o_nonblock_flag`]).
@@ -2692,7 +2717,7 @@ fn expand_channel_open_remote(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut
     let result = ctx.new_vreg();
 
     vec![
-        IRInstr::Syscall { nr: 198, args: vec![IRValue::Immediate(2), IRValue::Immediate(1), IRValue::Immediate(0)], dst: Some(fd.clone()) },
+        IRInstr::Syscall { nr: 198, args: vec![IRValue::Immediate(2), IRValue::Immediate(sock_stream_flag(ctx.backend)), IRValue::Immediate(0)], dst: Some(fd.clone()) },
         IRInstr::Alloc { dst: sockaddr.clone(), size: 16 },
         IRInstr::Store { value: IRValue::Immediate(2), addr: sockaddr.clone(), offset: 0, ty: IRType::I16 },
         IRInstr::BinOp { op: BinOpKind::And, dst: port_lo.clone(), lhs: port.clone(), rhs: IRValue::Immediate(0xFF), ty: Some(IRType::I64) },

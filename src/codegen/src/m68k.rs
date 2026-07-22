@@ -1745,11 +1745,23 @@ fn emit_instr(
             if args.len() > 5 {
                 code.extend_from_slice(&[0x58, 0x8F]); // 0x588F = ADDQ.L #4, SP
             }
-            // Store result (D0) to dst's stack slot
+            // Store result (D0) to dst's stack slot, sign-extended to I64.
+            // [Wave 81-88-ext] Without sign-extension, a negative return
+            // value (e.g. connect() = -1) is stored as 0x00000000_FFFFFFFF
+            // (= +4294967295) instead of 0xFFFFFFFF_FFFFFFFF (= -1). The
+            // I64 Cmp SLt check then fails (positive, not negative), and
+            // the error-detection Select picks the wrong branch.
             if let Some(d) = dst {
                 let dst_id = d.as_register().unwrap_or(0);
                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                code.extend(ss_st(Gpr::D0, dst_off));
+                // Sign-extend D0 into D1: D1 = (D0 < 0) ? 0xFFFFFFFF : 0
+                code.extend(Instruction::Tst { dst: Gpr::D0 }.encode()); // TST.L D0
+                // SMI D1: cc=11 (MI), word = 0x50C0 | (11<<8) | D1 = 0x5BC1
+                code.extend_from_slice(&[0x5B, 0xC1]); // SMI D1
+                // EXTB.L D1: sign-extend byte to long = 0x49C1
+                code.extend_from_slice(&[0x49, 0xC1]); // EXTB.L D1
+                code.extend(ss_st(Gpr::D0, dst_off));       // low word
+                code.extend(ss_st(Gpr::D1, dst_off + 4));   // high word (sign extension)
             }
         }
         // ── VectorOp (Wave 29) ──
