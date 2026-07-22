@@ -1607,6 +1607,19 @@ fn emit_instr(
             code.extend(ss_load_imm(Gpr::R0, native_nr as i64));
             // CALL_PAL 0x83 (callsys)
             code.extend_from_slice(&Instruction::CallPal { palcode: 0x83 }.encode());
+            // [Wave 81-88-ext] Alpha Linux syscall error convention:
+            // R19=0 → success, R0 = return value
+            // R19=1 → error, R0 = POSITIVE errno
+            // Negate R0 when R19 != 0 so the IR's I64 Cmp SLt(R0, 0) works.
+            // BEQ R19, skip (disp = 1 instruction = skip SUBQ)
+            // SUBQ ZERO, R0, R0 (negate: R0 = 0 - R0)
+            // skip: STQ R0, dst
+            code.extend(Instruction::Beq {
+                ra: Gpr::R19, disp: 1,
+            }.encode());
+            code.extend(Instruction::Subq {
+                ra: ZERO, rb: Gpr::R0, rc: Gpr::R0,
+            }.encode());
             // Store result (R0) to dst's stack slot
             if let Some(d) = dst {
                 let dst_id = d.as_register().unwrap_or(0);
