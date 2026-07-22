@@ -1469,27 +1469,57 @@ fn emit_instr(
             cond,
             true_val,
             false_val,
-            ty: _,
+            ty,
         } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             // dst = (cond != 0) ? true_val : false_val
-            code.extend(ss_load_value(false_val, vreg_stack_slots, S0));
-            code.extend(ss_load_value(cond, vreg_stack_slots, S1));
-            code.extend(Instruction::Tst { dst: S1 }.encode());
-            // BEQ.S skip (skip the load-true if cond == 0).
-            // BEQ.S +4 (skip MOVE.L #true, S0 — but true_val is variable size, so use 4-byte skip).
-            // For safety, use BEQ.W (4 bytes) + skip the load-true sequence.
-            // Actually simpler: BEQ.W +sizeof(load_true_seq).  We compute the patch later.
-            let beq_patch = code.len();
-            code.extend_from_slice(&[0x67, 0x00, 0x00, 0x00]); // BEQ.W placeholder
-            let load_true_start = code.len();
-            code.extend(ss_load_value(true_val, vreg_stack_slots, S0));
-            let load_true_end = code.len();
-            let skip_disp = (load_true_end as i64 - (beq_patch as i64 + 2)) as i16;
-            code[beq_patch + 2..beq_patch + 4].copy_from_slice(&skip_disp.to_be_bytes());
-            let _ = load_true_start;
-            code.extend(ss_st(S0, dst_off));
+            //
+            // [Wave 7-ext-tryrecv-returnval] Handle I64/U64/F64/Channel
+            // types with 64-bit load/store. The previous 32-bit code only
+            // loaded/stored the low word, so the high word stayed
+            // uninitialized (typically 0). try_recv's `Select { ty: I64,
+            // true_val: -2, false_val: payload }` then wrote 0xFFFFFFFE
+            // (low of -2) but left high as 0, producing 0x00000000_FFFFFFFE
+            // = +4294967294 instead of -2. The subsequent `Cmp Eq -2`
+            // failed, and the test exited 0 instead of 77.
+            let is_64 = matches!(
+                ty,
+                Some(IRType::I64) | Some(IRType::U64)
+                | Some(IRType::F64) | Some(IRType::Channel(_))
+            );
+            if is_64 {
+                // S0 = false_lo, S2 = false_hi
+                code.extend(ss_load_value_64(false_val, vreg_stack_slots, S0, S2));
+                // S1 = cond (32-bit)
+                code.extend(ss_load_value(cond, vreg_stack_slots, S1));
+                code.extend(Instruction::Tst { dst: S1 }.encode());
+                let beq_patch = code.len();
+                code.extend_from_slice(&[0x67, 0x00, 0x00, 0x00]); // BEQ.W placeholder
+                let load_true_start = code.len();
+                // Overwrite S0/S2 with true_lo/true_hi
+                code.extend(ss_load_value_64(true_val, vreg_stack_slots, S0, S2));
+                let load_true_end = code.len();
+                let skip_disp = (load_true_end as i64 - (beq_patch as i64 + 2)) as i16;
+                code[beq_patch + 2..beq_patch + 4].copy_from_slice(&skip_disp.to_be_bytes());
+                let _ = load_true_start;
+                // Store low (S0) at [dst_off], high (S2) at [dst_off+4]
+                code.extend(ss_st(S0, dst_off));
+                code.extend(ss_st(S2, dst_off + 4));
+            } else {
+                code.extend(ss_load_value(false_val, vreg_stack_slots, S0));
+                code.extend(ss_load_value(cond, vreg_stack_slots, S1));
+                code.extend(Instruction::Tst { dst: S1 }.encode());
+                let beq_patch = code.len();
+                code.extend_from_slice(&[0x67, 0x00, 0x00, 0x00]); // BEQ.W placeholder
+                let load_true_start = code.len();
+                code.extend(ss_load_value(true_val, vreg_stack_slots, S0));
+                let load_true_end = code.len();
+                let skip_disp = (load_true_end as i64 - (beq_patch as i64 + 2)) as i16;
+                code[beq_patch + 2..beq_patch + 4].copy_from_slice(&skip_disp.to_be_bytes());
+                let _ = load_true_start;
+                code.extend(ss_st(S0, dst_off));
+            }
         }
         IRInstr::Ret { values } => {
             if let Some(first_val) = values.first() {

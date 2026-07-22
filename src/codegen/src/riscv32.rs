@@ -6077,16 +6077,50 @@ impl Backend for RiscV32Backend {
                         code
                     }
 
-                    IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+                    IRInstr::Select { dst, cond, true_val, false_val, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::T0));
-                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::T1));
-                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T2));
-                        code.extend(Instruction::Beq { rs1: Gpr::T2, rs2: Gpr::Zero, offset: 8 }.encode());
-                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T1, imm: 0 }.encode());
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        // [Wave 7-ext-tryrecv-returnval] The previous
+                        // implementation used 32-bit ss_load_value /
+                        // ss_store_to_slot, which silently dropped the high
+                        // 32 bits of I64 values. For try_recv/recv_timeout
+                        // the IR's `Select { ty: Some(I64) }` chooses
+                        // between -2/-3 (true_val) and the 64-bit payload
+                        // (false_val); with only the low half written, the
+                        // result's high half stayed uninitialized (usually
+                        // 0), the `if result == -2/-3` 64-bit compare
+                        // failed, and the program returned 0 instead of
+                        // 77/88. Use the paired 32-bit Lw/Sw path for all
+                        // 8-byte types (and for ty=None, matching the
+                        // BinOp convention).
+                        let is_64bit = matches!(
+                            ty,
+                            Some(IRType::I64) | Some(IRType::U64)
+                            | Some(IRType::F64) | Some(IRType::Channel(_))
+                        ) || ty.is_none();
+                        if is_64bit {
+                            // T0/T2 = false_val (lo, hi); T1/T3 = true_val (lo, hi); T4 = cond
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, false_val, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, true_val, &vreg_stack_slots));
+                            code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T4));
+                            // BEQ T4, zero, +12 → if cond == 0, skip both
+                            // MOVEs (8 bytes) below and land on the store.
+                            // RISC-V B-type immediate is a PC-relative byte
+                            // offset (target = PC + imm); two Addis = 8 bytes,
+                            // so imm = 4 (next instr) + 8 (skip) = 12.
+                            code.extend(Instruction::Beq { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 12 }.encode());
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T1, imm: 0 }.encode()); // T0 = T1
+                            code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T3, imm: 0 }.encode()); // T2 = T3
+                            code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                        } else {
+                            code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::T0));
+                            code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::T1));
+                            code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T2));
+                            code.extend(Instruction::Beq { rs1: Gpr::T2, rs2: Gpr::Zero, offset: 8 }.encode());
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T1, imm: 0 }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        }
                         code
                     }
 
@@ -6724,11 +6758,17 @@ impl Backend for RiscV32Backend {
                             // -errno) to dst. This matches the wait4 path's
                             // semantics (dst is overwritten by the subsequent
                             // IR Load, but we write it for IR fidelity).
+                            //
+                            // [Wave 7-ext-tryrecv-returnval] Sign-extend the
+                            // 32-bit A0 return value to 64 bits so downstream
+                            // 64-bit IR (Cmp SLe, Select) sees the correct
+                            // value (matches the normal syscall path).
                             if let Some(d) = dst {
                                 let dst_id = d.as_register().unwrap_or(0);
                                 let dst_offset =
                                     vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                                code.extend(Instruction::Srai { rd: Gpr::T0, rs1: Gpr::A0, shamt: 31 }.encode());
+                                code.extend(ss_store_64(Gpr::A0, Gpr::T0, dst_offset));
                             }
                             code
                         } else {
@@ -6753,11 +6793,26 @@ impl Backend for RiscV32Backend {
                             // ECALL
                             code.extend(Instruction::Ecall.encode());
                             // Store return value (a0) to dst's stack slot
+                            //
+                            // [Wave 7-ext-tryrecv-returnval] RV32 syscalls
+                            // return a 32-bit value in A0 (positive on
+                            // success, -errno on failure). The dst vreg slot
+                            // is 8 bytes and downstream IR (Cmp SLe, Select)
+                            // treats the value as 64-bit, reading both
+                            // halves. Without sign-extension, a -11 (EAGAIN)
+                            // return becomes 0x00000000_FFFFFFF5 (positive)
+                            // in 64-bit — the SLe(read_ret, 0) check is
+                            // false, is_error becomes 0, and the Select
+                            // returns the zero payload instead of -2/-3.
+                            // Fix: SRAI T0, A0, 31 sign-extends A0 into T0
+                            // (0 if A0 >= 0, -1 if A0 < 0), then store both
+                            // halves via ss_store_64.
                             if let Some(d) = dst {
                                 let dst_id = d.as_register().unwrap_or(0);
                                 let dst_offset =
                                     vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                                code.extend(Instruction::Srai { rd: Gpr::T0, rs1: Gpr::A0, shamt: 31 }.encode());
+                                code.extend(ss_store_64(Gpr::A0, Gpr::T0, dst_offset));
                             }
                             code
                         }

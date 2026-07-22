@@ -4806,7 +4806,7 @@ pub fn run_ir_pipeline(
     {
         let tipc = Instant::now();
         for func in &mut ir_program.functions {
-            vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
+            vuma_codegen::ipc_lowering::lower_ipc_builtins(func, backend_kind);
         }
         timings.push(("ipc-lowering".to_string(), tipc.elapsed().as_millis() as u64));
     }

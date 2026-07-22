@@ -17,7 +17,10 @@ fn main() {
     let mut ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).unwrap() };
     // Run IPC lowering
     for func in &mut ir_program.functions {
-        vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
+        // dump_stages is a host-side IR inspection tool — pass the host
+        // backend (x86_64) since the per-arch constants only affect emitted
+        // machine code, not the IR structure being dumped here.
+        vuma_codegen::ipc_lowering::lower_ipc_builtins(func, BackendKind::X86_64);
     }
     println!("=== AFTER IPC LOWERING ===");
     for func in &ir_program.functions {

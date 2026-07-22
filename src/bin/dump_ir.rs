@@ -45,7 +45,7 @@ fn main() {
     let ir_program = b.build(&codegen_scg).unwrap();
     let mut ir_program = ir_program;
     for func in &mut ir_program.functions {
-        vuma_codegen::ipc_lowering::lower_ipc_builtins(func);
+        vuma_codegen::ipc_lowering::lower_ipc_builtins(func, kind);
     }
     // Use the full production pipeline (matches compile_dump) so the IR
     // we display reflects all post-lowering opts + backend latency table.
