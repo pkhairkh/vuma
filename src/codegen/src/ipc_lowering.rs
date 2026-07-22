@@ -1513,15 +1513,35 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         IRInstr::Store { value: IRValue::Immediate(1), addr: pollfd.clone(), offset: 4, ty: IRType::I16 },
         IRInstr::Syscall { nr: 7, args: vec![pollfd, IRValue::Immediate(1), IRValue::Immediate(0)], dst: Some(poll_ret.clone()) },
     ]);
+    // Use read() with O_NONBLOCK (set above by emit_set_nonblocking).
+    // Also add a sched_yield() to prevent starvation on single-CPU QEMU:
+    // the spin loop in try_recv_success calls try_recv repeatedly, and
+    // without yielding, the child process never gets CPU time to write.
+    // sched_yield (asm-generic 124) gives the scheduler a chance to run
+    // the child.
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
+        // poll_no_data = (poll_ret <= 0) — no data available
         IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // read_failed = (read_ret <= 0) — read returned error or no bytes
         IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // is_error = poll_no_data OR read_failed
         IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I64) },
+        // result = is_error ? -2 : payload
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(-2), false_val: payload, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+    ]);
+    // nanosleep(1ms) — give the child process guaranteed CPU time to
+    // write. sched_yield is not sufficient on QEMU's single-CPU
+    // scheduler; a short sleep ensures the child gets to run.
+    let sleep_buf = ctx.new_vreg();
+    instrs.extend(vec![
+        IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Store { value: IRValue::Immediate(1_000_000), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
+        IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
     ]);
     instrs
 }

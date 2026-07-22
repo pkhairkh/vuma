@@ -319,6 +319,7 @@ fn translate_x86_64(generic_nr: u32) -> Option<u32> {
         23 => Some(32),    // dup
         24 => Some(292),   // dup3
         25 => Some(72),    // fcntl
+        124 => Some(24),   // sched_yield
         29 => Some(16),    // ioctl
         // ── inotify ──
         26 => Some(294),   // inotify_init1
