@@ -4487,7 +4487,33 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // and simple_send/ping_pong/multi_message exiting 0 or
                         // 255. fork's return value (pid or 0) is never an
                         // errno, so the conversion is unnecessary for it.
-                        if !is_clone {
+                        //
+                        // [Wave 19-ext-checkpoint-be] ALSO skip for openat
+                        // (asm-generic nr=56). QEMU's hppa openat() likewise
+                        // leaves R20 at the syscall number (native nr=275) on
+                        // success, so the CMPB (R20==0) is false and the SUB
+                        // would negate the returned file descriptor (e.g.
+                        // fd=3 → -3), making the subsequent write() fail with
+                        // EBADF and breaking checkpoint round-trip. openat's
+                        // return value on success is a non-negative fd, never
+                        // an errno; the IR uses it directly without an SLe 0
+                        // error check, so the -errno conversion is
+                        // unnecessary (and harmful) for it.
+                        //
+                        // [Wave 13-ext-shared-mem-3] ALSO skip for mmap
+                        // (asm-generic nr=222 → hppa nr=90). QEMU's hppa
+                        // mmap() likewise leaves R20 at the native syscall
+                        // number (90) on success, so the CMPB (R20==0) is
+                        // false and the SUB negates the returned mapping
+                        // pointer (e.g. 0x45001000 → 0xBAFFF000), causing the
+                        // subsequent Load/Store to that pointer to raise
+                        // SIGSEGV (exit 139) in shared_memory/shared_memory_rw.
+                        // mmap's return value on success is a non-negative
+                        // pointer (or -errno on failure), never a positive
+                        // errno, so the -errno conversion is unnecessary
+                        // (and harmful) for it.
+                        let skip_errno_negate = is_clone || (*nr == 56) || (*nr == 222);
+                        if !skip_errno_negate {
                             code.extend_from_slice(&encode_cmpb(
                                 R20, R0, /*cond=*/0b001, /*inverted=*/false,
                                 /*f=*/true, /*disp_bytes=*/0,
