@@ -4477,35 +4477,28 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         //     R28 unchanged.
                         //   * branch NOT taken (R20!=0, error): SUB executes,
                         //     R28 = 0 - R28 = -errno.
-                        // `target = PC + 8 + 0 = PC + 8`, so the SUB at PC+4 is
-                        // skipped when the branch is taken.
-                        code.extend_from_slice(&encode_cmpb(
-                            R20, R0, /*cond=*/0b001, /*inverted=*/false,
-                            /*f=*/true, /*disp_bytes=*/0,
-                        ));
-                        code.extend_from_slice(&encode_sub(R0, R28, R28));
+                        //
+                        // [Wave 4-ext regression] SKIP the CMPB+SUB for the
+                        // clone→fork redirect case. QEMU's hppa fork() does
+                        // NOT clear R20 to 0 on success (it leaves R20 at the
+                        // syscall number = 2), so the CMPB (R20==0) is false,
+                        // the SUB executes, and the parent's child-PID gets
+                        // negated — manifesting as waitid(-pid,…) = -EINVAL
+                        // and simple_send/ping_pong/multi_message exiting 0 or
+                        // 255. fork's return value (pid or 0) is never an
+                        // errno, so the conversion is unnecessary for it.
+                        if !is_clone {
+                            code.extend_from_slice(&encode_cmpb(
+                                R20, R0, /*cond=*/0b001, /*inverted=*/false,
+                                /*f=*/true, /*disp_bytes=*/0,
+                            ));
+                            code.extend_from_slice(&encode_sub(R0, R28, R28));
+                        }
                         // Store result (R28) to dst's stack slot
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            // [Wave 7-ext-tryrecv-returnval] Sign-extend
-                            // R28 to 64 bits. hppa32 STW only stores 32
-                            // bits, but downstream IR often treats the
-                            // syscall result as I64 (Cmp SLe 0, Select).
-                            // Without sign-extension, the high 32 bits at
-                            // [dst_off-4] are uninitialized garbage —
-                            // breaking the I64 comparison (e.g. try_recv
-                            // exits 0 instead of 77 because reg14's high
-                            // word makes poll's "0" look like a large
-                            // positive I64, so SLe 0 is false).
-                            //
-                            // Sign-extension: SHRPW R0, R28, 31, S2 gives
-                            // S2 = R28 >> 31 (logical, 0 if positive, 1 if
-                            // negative); SUB R0, S2, S2 gives 0 or 0xFFFFFFFF.
-                            code.extend_from_slice(&encode_shrpw(R0, R28, 31, S2));
-                            code.extend_from_slice(&encode_sub(R0, S2, S2));
                             code.extend(ss_st(R28, dst_off));
-                            code.extend(ss_st(S2, dst_off - 4));
                         }
                         } // end else (normal syscall path)
                     }
