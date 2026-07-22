@@ -3558,34 +3558,50 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend_from_slice(&encode_ldi(1, S2));
                             match kind {
                                 CmpKind::Eq => {
-                                    // Eq = (hi_eq AND lo_eq). S2=1; if hi!=0, S2=0; if lo!=0, S2=0.
+                                    // Eq = (hi_eq AND lo_eq). S2=1 (default);
+                                    // if hi_ne OR lo_ne, branch to ldi0 (S2=0).
+                                    // [Wave 14-ext] Previous code used cmpb,= (branch
+                                    // if equal) to skip to done, giving OR semantics:
+                                    // if EITHER hi OR lo matched, S2 stayed 1. But Eq
+                                    // requires BOTH to match. Fix: use cmpb,<> (branch
+                                    // if NOT equal) to branch to ldi0 when either half
+                                    // differs.
                                     let hi_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     let lo_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
                                     code.extend_from_slice(&encode_nop());
+                                    let ldi0_off = code.len() as i64;
                                     code.extend_from_slice(&encode_ldi(0, S2));
                                     let done = code.len() as i64;
                                     for &off in &[hi_ne, lo_ne] {
-                                        let disp = ((done - off as i64 - 8) as i32) & !3;
+                                        let disp = ((ldi0_off - off as i64 - 8) as i32) & !3;
                                         let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
                                         let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
                                         code[off..off+4].copy_from_slice(&p.to_be_bytes());
                                     }
                                 }
                                 CmpKind::Ne => {
-                                    // Ne = (hi!=0 OR lo!=0). S2=0; if hi!=0, S2=1; if lo!=0, S2=1.
+                                    // Ne = (hi_ne OR lo_ne). S2=0 (default);
+                                    // if hi_ne OR lo_ne, branch to ldi1 (S2=1).
+                                    // [Wave 14-ext] Previous code used cmpb,= (branch
+                                    // if equal) to skip to done, keeping S2=0 — so Ne
+                                    // ALWAYS returned 0. Fix: use cmpb,<> (branch if
+                                    // NOT equal) to branch to ldi1 when either half
+                                    // differs.
                                     code.extend_from_slice(&encode_ldi(0, S2));
                                     let hi_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     let lo_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
                                     code.extend_from_slice(&encode_nop());
+                                    let ldi1_off = code.len() as i64;
+                                    code.extend_from_slice(&encode_ldi(1, S2));
                                     let done = code.len() as i64;
                                     for &off in &[hi_ne, lo_ne] {
-                                        let disp = ((done - off as i64 - 8) as i32) & !3;
+                                        let disp = ((ldi1_off - off as i64 - 8) as i32) & !3;
                                         let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
                                         let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
                                         code[off..off+4].copy_from_slice(&p.to_be_bytes());
