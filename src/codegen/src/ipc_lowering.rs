@@ -2531,6 +2531,8 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
         // Use I32 for count — small value, avoids I64 issues on 32-bit backends.
         IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 224, ty: IRType::I32 },
         IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: count.clone(), rhs: IRValue::Immediate(56), ty: Some(IRType::I32) },
+        // [Wave 93-94-ext] ZExt offset to I64 before I64 Add.
+        IRInstr::Cast { kind: CastKind::ZExt, dst: offset.clone(), src: offset.clone(), from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst: slot_ptr.clone(), lhs: table.clone(), rhs: offset, ty: Some(IRType::I64) },
     ];
     // Store 32-byte proof_data as INDIVIDUAL BYTES (I8 stores) at
@@ -2585,7 +2587,9 @@ fn expand_stark_prove(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
         // count_new = count + 1 (I32 — count is a small value)
         IRInstr::BinOp { op: BinOpKind::Add, dst: count_new.clone(), lhs: count, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) },
         IRInstr::Store { value: count_new.clone(), addr: table, offset: 224, ty: IRType::I32 },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: handle.clone(), lhs: count_new, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // [Wave 93-94-ext] ZExt count_new to I64 before using in I64 Add.
+        // Without this, 32-bit backends read garbage from [vreg_off+4].
+        IRInstr::Cast { kind: CastKind::ZExt, dst: handle.clone(), src: count_new, from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: handle, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]);
     instrs
