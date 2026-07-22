@@ -2078,8 +2078,8 @@ fn emit_binop(
                 code.extend(ss_st(S2, dst_off + 4));   // save updated result_hi
 
                 // Cross term 2: result_hi += lo32(a_hi * b_lo)
-                // Reload a_hi from lhs, b_lo from rhs.
-                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2)); // S2=a_hi
+                // Need a_hi in S0 and b_lo in S1 for MULU.L.
+                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S2, S0)); // S0=a_hi (hi word)
                 code.extend(ss_load_value(rhs, vreg_stack_slots, S1));  // S1 = b_lo
                 // MULU.L S1, S3:S0 → S0=lo32(a_hi*b_lo), S3=hi32
                 code.extend_from_slice(&[0x4C, 0x01]); // MULU.L D1
