@@ -3338,6 +3338,18 @@ fn emit_instr(
                 // Restore O0 = 0 (success return for pipe)
                 code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::G0, rs2: Gpr::G0 }.encode());
             }
+            // [Wave 81-88-ext] SPARC64 Linux syscall error convention:
+            // %o0 = return value, carry flag (ICC.C) set on error with
+            // %o0 = POSITIVE errno. Negate %o0 when carry is set so the
+            // IR's I64 Cmp SLt(%o0, 0) check works (expects -errno).
+            // Bcc +3 (skip NOP + SUB if carry clear = success)
+            // SPARC V8: disp22 is word displacement, target = PC + disp22*4
+            // Delay slot at PC+4 always executes.
+            code.extend(Instruction::Bcc { offset: 3 }.encode());
+            code.extend_from_slice(&encode_nop()); // delay slot
+            code.extend_from_slice(&Instruction::Sub {
+                rd: Gpr::O0, rs1: Gpr::G0, rs2: Gpr::O0,
+            }.encode()); // %o0 = %g0 - %o0 = -%o0
             // Store result (%o0) to dst's stack slot
             if let Some(d) = dst {
                 let dst_id = d.as_register().unwrap_or(0);
