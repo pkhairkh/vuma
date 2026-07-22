@@ -1755,13 +1755,47 @@ fn emit_instr(
         // ── VectorOp (Wave 29) ──
         // m68k has no SIMD encoder in the Wave 29 suite; emit nothing.
         IRInstr::VectorOp { .. } => {}
+        // ── CallIndirect (Wave 49) ──
+        // Indirect call through a function pointer vreg.
+        // 1. Load args into D1-D5 (Linux m68k calling convention)
+        // 2. Load func_ptr into D0 (scratch; will be overwritten by return)
+        // 3. MOVEA.L D0, A0; JSR (A0)
+        // 4. Move D0 (return value low) to dst's stack slot
+        IRInstr::CallIndirect { dst, func_ptr, args } => {
+            // Move args into D1-D5 (up to 5 args).
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(arg_reg) = Gpr::arg_register(i) {
+                    code.extend(ss_load_value(arg, vreg_stack_slots, S0));
+                    code.extend(Instruction::Move { src: S0, dst: arg_reg }.encode());
+                }
+            }
+            // Load func_ptr into D0 (caller-saved scratch; will be overwritten
+            // by the callee's return value).
+            code.extend(ss_load_value(func_ptr, vreg_stack_slots, Gpr::D0));
+            // MOVEA.L D0, A0 — copy function pointer to address register A0.
+            // Encoding: 0x2040 | (A0 << 9) | D0 = 0x2040.
+            code.extend_from_slice(&[0x20, 0x40]);
+            // JSR (A0) — call through A0; return address pushed on stack.
+            // Encoding: 0x4E90.
+            code.extend_from_slice(&[0x4E, 0x90]);
+            // Move return value (D0 low, D1 high) to dst's stack slot.
+            if let Some(d) = dst {
+                let d_id = d.as_register().unwrap_or(0);
+                let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
+                // Store low word from D0
+                code.extend(Instruction::Move { src: Gpr::D0, dst: S0 }.encode());
+                code.extend(ss_st(S0, d_off));
+                // Store high word from D1
+                code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (d_off + 4) as i16 }.encode());
+            }
+        }
         // ── Channel operations (Wave 1d / Task 2a) ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+        | IRInstr::StarkProof { .. } => {}
     }
 }
 

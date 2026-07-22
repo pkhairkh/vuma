@@ -2930,15 +2930,28 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                 IRInstr::GetAddress { dst, name } => {
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                    // Emit a 4-instruction load-immediate sequence (16 bytes)
-                    // as a placeholder. The link() function patches this with
-                    // the symbol's absolute address via R_MIPS_64 relocation.
-                    // LUI T0, 0; ORI T0, T0, 0; DSLL T0, T0, 16; ORI T0, T0, 0
-                    //                 DSLL T0, T0, 16; ORI T0, T0, 0
-                    //                 DSLL T0, T0, 16; ORI T0, T0, 0
-                    // Simplified: use ss_load_imm which emits the full sequence.
+                    // Emit a FIXED-SIZE 6-instruction (24-byte) load-immediate
+                    // placeholder. The R_MIPS_64 relocation patcher (in the
+                    // link phase) re-emits the same 6-instruction sequence
+                    // with the symbol's absolute 64-bit address bits.
+                    //
+                    // Layout (each row = 4 bytes):
+                    //   [0] LUI   T0, bits63_48        (sign-extends imm16)
+                    //   [1] ORI   T0, T0, bits47_32
+                    //   [2] DSLL  T0, T0, 16
+                    //   [3] ORI   T0, T0, bits31_16
+                    //   [4] DSLL  T0, T0, 16
+                    //   [5] ORI   T0, T0, bits15_0
+                    //
+                    // After [5], T0 = bits63_48:bits47_32:bits31_16:bits15_0
+                    // (the second DSLL discards the LUI sign-extension).
                     let reloc_offset = code.len();
-                    code.extend(ss_load_imm(Gpr::T0, 0));
+                    code.extend_from_slice(&Instruction::Lui { rt: Gpr::T0, imm: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Ori { rt: Gpr::T0, rs: Gpr::T0, imm: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 16 }.encode());
+                    code.extend_from_slice(&Instruction::Ori { rt: Gpr::T0, rs: Gpr::T0, imm: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 16 }.encode());
+                    code.extend_from_slice(&Instruction::Ori { rt: Gpr::T0, rs: Gpr::T0, imm: 0 }.encode());
                     // Record relocation for the load-immediate sequence
                     relocations.push(crate::backend::RelocationEntry {
                         offset: reloc_offset as u64,
@@ -2946,6 +2959,32 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                         reloc_type: "R_MIPS_64".to_string(),
                     });
                     code.extend(ss_sd(Gpr::T0, dst_off));
+                }
+
+                // ── CallIndirect (Wave 49) ──
+                // Indirect call through a function pointer vreg.
+                // 1. Load args into $a0-$a7 (N64 ABI)
+                // 2. Load func_ptr into $t9 (MIPS convention for indirect calls)
+                // 3. JALR $ra, $t9 + NOP delay slot
+                // 4. Store $v0 (return value) to dst
+                IRInstr::CallIndirect { dst, func_ptr, args } => {
+                    let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::T0, Gpr::T1, Gpr::T2, Gpr::T3];
+                    for (i, arg) in args.iter().enumerate() {
+                        if i < 8 {
+                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
+                        }
+                    }
+                    // Load func_ptr into $t9 (caller-saved, not in arg_regs).
+                    code.extend(ss_load_value(func_ptr, &vreg_stack_slots, Gpr::T9));
+                    // JALR $ra, $t9 — call through $t9, return addr → $ra.
+                    code.extend_from_slice(&Instruction::Jalr { rd: Gpr::Ra, rs: Gpr::T9 }.encode());
+                    code.extend_from_slice(&encode_nop()); // delay slot
+                    // Store return value ($v0) to dst's stack slot.
+                    if let Some(d) = dst {
+                        let dst_id = d.as_register().unwrap_or(0);
+                        let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        code.extend(ss_sd(Gpr::V0, dst_off));
+                    }
                 }
 
                 // ── Ret ──
@@ -3285,7 +3324,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction, big_endian: bool) -> Result<A
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
             // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+            | IRInstr::StarkProof { .. } => {}
             }
         }
     }
@@ -4127,10 +4166,17 @@ impl Backend for Mips64Backend {
                             .copy_from_slice(&patched.to_le_bytes());
                     }
                 } else if reloc.reloc_type == "R_MIPS_64" {
-                    // R_MIPS_64: patch the load-immediate sequence with the
-                    // symbol's absolute 64-bit address. The load-imm sequence
-                    // is 8 instructions (32 bytes) — we patch the immediate
-                    // fields of LUI/ORI/DSLL/ORI/DSLL/ORI/DSLL/ORI.
+                    // R_MIPS_64: re-emit the 6-instruction (24-byte)
+                    // load-immediate sequence emitted by IRInstr::GetAddress
+                    // with the symbol's absolute 64-bit address bits.
+                    //
+                    // Layout (matches GetAddress):
+                    //   [0] LUI   T0, bits63_48
+                    //   [1] ORI   T0, T0, bits47_32
+                    //   [2] DSLL  T0, T0, 16
+                    //   [3] ORI   T0, T0, bits31_16
+                    //   [4] DSLL  T0, T0, 16
+                    //   [5] ORI   T0, T0, bits15_0
                     let target_offset = func_offsets.get(&reloc.symbol)
                         .copied()
                         .or_else(|| {
@@ -4142,14 +4188,21 @@ impl Backend for Mips64Backend {
                         });
                     if let Some(target_offset) = target_offset {
                         let abs_addr: u64 = BASE_ADDR + text_offset + target_offset as u64;
-                        // Patch the load-immediate sequence in-place.
-                        // ss_load_imm emits: LUI(imm16) + ORI(imm16) + DSLL + ORI(imm16) + DSLL + ORI(imm16) + DSLL + ORI(imm16)
-                        // = 8 instructions = 32 bytes
-                        if abs_offset + 32 <= all_code.len() {
-                            // Re-encode the load-imm with the correct address
-                            let patched_code: Vec<u8> = abs_addr.to_le_bytes().to_vec();
-                            all_code[abs_offset..abs_offset + patched_code.len()]
-                                .copy_from_slice(&patched_code);
+                        let bits63_48 = ((abs_addr >> 48) & 0xFFFF) as u32;
+                        let bits47_32 = ((abs_addr >> 32) & 0xFFFF) as u32;
+                        let bits31_16 = ((abs_addr >> 16) & 0xFFFF) as u32;
+                        let bits15_0  = (abs_addr & 0xFFFF) as u32;
+                        let patched: Vec<u8> = Instruction::Lui { rt: Gpr::T0, imm: bits63_48 }.encode().iter()
+                            .chain(Instruction::Ori { rt: Gpr::T0, rs: Gpr::T0, imm: bits47_32 }.encode().iter())
+                            .chain(Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 16 }.encode().iter())
+                            .chain(Instruction::Ori { rt: Gpr::T0, rs: Gpr::T0, imm: bits31_16 }.encode().iter())
+                            .chain(Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 16 }.encode().iter())
+                            .chain(Instruction::Ori { rt: Gpr::T0, rs: Gpr::T0, imm: bits15_0 }.encode().iter())
+                            .copied()
+                            .collect();
+                        if abs_offset + patched.len() <= all_code.len() {
+                            all_code[abs_offset..abs_offset + patched.len()]
+                                .copy_from_slice(&patched);
                         }
                     }
                 }
