@@ -2265,13 +2265,15 @@ fn expand_hot_swap_register(ctx: &mut LowerContext, args: &[IRValue], dst: Optio
     let handle = ctx.new_vreg();
 
     vec![
-        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 128, ty: IRType::I64 },
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: count.clone(), rhs: IRValue::Immediate(16), ty: Some(IRType::I64) },
+        // Use I32 for count/module_id/version — they're small values, and
+        // I64 on 32-bit backends has uninitialized high word issues.
+        IRInstr::Load { dst: count.clone(), addr: table.clone(), offset: 128, ty: IRType::I32 },
+        IRInstr::BinOp { op: BinOpKind::Mul, dst: offset.clone(), lhs: count.clone(), rhs: IRValue::Immediate(16), ty: Some(IRType::I32) },
         IRInstr::BinOp { op: BinOpKind::Add, dst: slot_ptr.clone(), lhs: table.clone(), rhs: offset, ty: Some(IRType::I64) },
-        IRInstr::Store { value: module_id, addr: slot_ptr.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Store { value: version, addr: slot_ptr, offset: 8, ty: IRType::I64 },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: count_new.clone(), lhs: count, rhs: IRValue::Immediate(1), ty: Some(IRType::I64) },
-        IRInstr::Store { value: count_new.clone(), addr: table, offset: 128, ty: IRType::I64 },
+        IRInstr::Store { value: module_id, addr: slot_ptr.clone(), offset: 0, ty: IRType::I32 },
+        IRInstr::Store { value: version, addr: slot_ptr, offset: 8, ty: IRType::I32 },
+        IRInstr::BinOp { op: BinOpKind::Add, dst: count_new.clone(), lhs: count, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) },
+        IRInstr::Store { value: count_new.clone(), addr: table, offset: 128, ty: IRType::I32 },
         IRInstr::BinOp { op: BinOpKind::Add, dst: handle.clone(), lhs: count_new, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: handle, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
@@ -2307,19 +2309,21 @@ fn expand_hot_swap_trigger(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
 
     vec![
         // Load active version from slot 0 (offset 8 = version field)
-        IRInstr::Load { dst: active_version.clone(), addr: table.clone(), offset: 8, ty: IRType::I64 },
+        // Use I32 — version is a small counter, and I64 comparison on
+        // 32-bit backends fails due to uninitialized high word.
+        IRInstr::Load { dst: active_version.clone(), addr: table.clone(), offset: 8, ty: IRType::I32 },
         // version_matches = (active_version == old_version)
-        IRInstr::Cmp { kind: CmpKind::Eq, dst: version_matches.clone(), lhs: active_version.clone(), rhs: old_version.clone(), ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: version_matches.clone(), lhs: active_version.clone(), rhs: old_version.clone(), ty: None },
         // is_newer = (new_version > old_version)
-        IRInstr::Cmp { kind: CmpKind::SGt, dst: is_newer.clone(), lhs: new_version.clone(), rhs: old_version, ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SGt, dst: is_newer.clone(), lhs: new_version.clone(), rhs: old_version, ty: None },
         // both_ok = version_matches AND is_newer (logical AND via multiplication: 1*1=1, 1*0=0, 0*1=0, 0*0=0)
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: both_ok.clone(), lhs: version_matches, rhs: is_newer, ty: Some(IRType::I64) },
+        IRInstr::BinOp { op: BinOpKind::Mul, dst: both_ok.clone(), lhs: version_matches, rhs: is_newer, ty: Some(IRType::I32) },
         // result = both_ok ? 1 : -5
         IRInstr::Select { dst: result.clone(), cond: both_ok.clone(), true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(-5), ty: Some(IRType::I64) },
         // If result == 1 (success): store new_version as the active version
         // Use Select to conditionally update: active_version' = both_ok ? new_version : active_version
-        IRInstr::Select { dst: active_version.clone(), cond: both_ok, true_val: new_version, false_val: active_version.clone(), ty: Some(IRType::I64) },
-        IRInstr::Store { value: active_version, addr: table, offset: 8, ty: IRType::I64 },
+        IRInstr::Select { dst: active_version.clone(), cond: both_ok, true_val: new_version, false_val: active_version.clone(), ty: Some(IRType::I32) },
+        IRInstr::Store { value: active_version, addr: table, offset: 8, ty: IRType::I32 },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
 }
@@ -2344,15 +2348,16 @@ fn expand_hot_swap_rollback(ctx: &mut LowerContext, args: &[IRValue], dst: Optio
     let module_match = ctx.new_vreg();
     let result = ctx.new_vreg();
     vec![
-        // Load module_id from slot 0 (offset 0)
-        IRInstr::Load { dst: slot_module.clone(), addr: table.clone(), offset: 0, ty: IRType::I64 },
+        // Load module_id from slot 0 (offset 0). Use I32 — module_id is a
+        // small value, and I64 comparison on 32-bit backends has issues.
+        IRInstr::Load { dst: slot_module.clone(), addr: table.clone(), offset: 0, ty: IRType::I32 },
         // module_match = (slot_module == module_id)
-        IRInstr::Cmp { kind: CmpKind::Eq, dst: module_match.clone(), lhs: slot_module, rhs: module_id, ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: module_match.clone(), lhs: slot_module, rhs: module_id, ty: None },
         // result = module_match ? 1 : -3
         IRInstr::Select { dst: result.clone(), cond: module_match, true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(-3), ty: Some(IRType::I64) },
         // If module_match: store old_version as the active version
         // (unconditionally store — the result already reflects success/failure)
-        IRInstr::Store { value: old_version, addr: table, offset: 8, ty: IRType::I64 },
+        IRInstr::Store { value: old_version, addr: table, offset: 8, ty: IRType::I32 },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
 }
