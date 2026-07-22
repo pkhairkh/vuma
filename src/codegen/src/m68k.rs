@@ -1994,7 +1994,12 @@ fn emit_i64_cmp(
         }
     }
 
+    // [Wave 93-94-ext] Zero the high word — emit_i64_cmp returns a boolean
+    // (0 or 1) in the low word. Without zeroing the high word, subsequent
+    // I64 And/Or operations read garbage from [dst_off+4].
     code.extend(ss_st(S0, dst_off));
+    code.extend(ss_load_imm(S0, 0));
+    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
 }
 
 fn emit_binop(
@@ -2118,10 +2123,20 @@ fn emit_binop(
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::And => {
+            // [Wave 93-94-ext] 64-bit AND: AND both low and high words
+            // (matching the Or handler's pattern). The previous code only
+            // ANDed the low word, leaving the high word uninitialized.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::And { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
+            // AND high words
+            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            code.extend(Instruction::And { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Or => {
             // 64-bit OR: OR both low and high words.
