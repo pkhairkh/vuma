@@ -3561,11 +3561,9 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     // Eq = (hi_eq AND lo_eq). S2=1 (default);
                                     // if hi_ne OR lo_ne, branch to ldi0 (S2=0).
                                     // [Wave 14-ext] Previous code used cmpb,= (branch
-                                    // if equal) to skip to done, giving OR semantics:
-                                    // if EITHER hi OR lo matched, S2 stayed 1. But Eq
-                                    // requires BOTH to match. Fix: use cmpb,<> (branch
-                                    // if NOT equal) to branch to ldi0 when either half
-                                    // differs.
+                                    // if equal) to skip to done, giving OR semantics.
+                                    // Fix: use cmpb,<> (branch if NOT equal) to branch
+                                    // to ldi0 when either half differs.
                                     let hi_ne = code.len();
                                     code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
                                     code.extend_from_slice(&encode_nop());
@@ -3613,10 +3611,15 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     let is_gt = matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe);
                                     let is_eq = matches!(kind, CmpKind::SLe | CmpKind::ULe | CmpKind::SGe | CmpKind::UGe);
 
-                                    let hi_cond = if is_signed {
-                                        if is_gt { 0b011 } else { 0b010 }
+                                    // [Wave 14-ext] Fix: for SGt/UGt/SGe/UGe (is_gt=true),
+                                    // hi_cond must use inverted=true to get ">" instead of "<=".
+                                    // PA-RISC cmpb: 011=<=, 011+inv=>, 101=<<=, 101+inv=>>
+                                    let (hi_cond, hi_cond_inv) = if is_signed {
+                                        if is_gt { (0b011, true) }   // > (NOT <=)
+                                        else      { (0b010, false) } // < (less than)
                                     } else {
-                                        if is_gt { 0b101 } else { 0b100 }
+                                        if is_gt { (0b101, true) }   // >> (NOT <<=)
+                                        else      { (0b100, false) } // << (unsigned less)
                                     };
                                     // [Wave 7-ext-tryrecv-returnval] hi_opp is
                                     // the OPPOSITE direction: for SLe, opposite
@@ -3682,7 +3685,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
                                     // If hi matches primary direction → S2=1, skip to done.
                                     let hi_match = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, hi_cond, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, hi_cond, hi_cond_inv, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     // If hi matches opposite direction → S2=0, skip to ldi0.
                                     let hi_opp = code.len();
@@ -3932,10 +3935,16 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             symbol: "__vuma_alloc".to_string(),
                             reloc_type: "R_PARISC_PCREL".to_string(),
                         });
-                        // Store return value (R28) to dst vreg
+                        // Store return value (R28) to dst vreg, with high word zeroed.
+                        // [Wave 14-ext] ss_st only stores 32 bits. Without zeroing
+                        // the high word, ss_load_value_64 reads garbage from
+                        // [d_off-4], corrupting the 64-bit pointer. This breaks
+                        // I64 Load/Store on the Alloc'd buffer (e.g. proto_state).
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
-                        code.extend(ss_st(R28, d_off));
+                        code.extend(ss_st(R28, d_off));       // low word = pointer
+                        code.extend(ss_load_imm(S0, 0));
+                        code.extend(ss_st(S0, d_off - 4));     // high word = 0
                     }
                     IRInstr::Free { ptr: _ } => { /* no-op */ }
                     IRInstr::Cast { dst, src, kind, from_ty, to_ty } => {
