@@ -961,14 +961,21 @@ fn const_fold_fp_cmp(kind: &crate::ir::CmpKind, lhs: i64, rhs: i64, is_f64: bool
 /// Returns the 5-instruction (20-byte) sequence as a Vec<u8>.
 fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     let mut code = Vec::new();
+    let disp = target_offset - (bl_offset + 8);
     // BL +0, R1 (link = R1, disp = 0)
-    // BL format: 0xE8000000 | (D << 21) | (disp17 << 5) | w
-    // D = 1 (R1), disp = 0
     code.extend_from_slice(&0xE8200000u32.to_be_bytes());
     code.extend_from_slice(&encode_nop());  // delay slot
-    // LDO disp(R1), R1 — disp = target_offset - (bl_offset + 8)
-    let disp = (target_offset - (bl_offset + 8)) as i16;
-    code.extend_from_slice(&encode_ldo_raw(R1, disp, R1));
+    // [Wave I-hppa-branch-range] LDO has a 14-bit signed displacement
+    // (±8191 bytes). For large functions (>8KB code), a single LDO can't
+    // reach the target. Use multiple LDOs to decompose the displacement.
+    let mut remaining = disp;
+    // Each LDO can add up to ±8191. Use chunks of 8000 to stay safe.
+    while remaining.abs() > 8000 {
+        let chunk = if remaining > 0 { 8000i16 } else { -8000i16 };
+        code.extend_from_slice(&encode_ldo_raw(R1, chunk, R1));
+        remaining -= chunk as i64;
+    }
+    code.extend_from_slice(&encode_ldo_raw(R1, remaining as i16, R1));
     // BV R0(R1) — branch to address in R1
     code.extend_from_slice(&encode_bv_real(R1));
     code.extend_from_slice(&encode_nop());  // delay slot
@@ -1229,7 +1236,7 @@ fn patch_cmpb_to_target(code: &mut Vec<u8>, cmpb_off: usize, target_off: usize) 
 /// Patch later with `patch_forward_branch_to_here`.
 fn emit_forward_branch_placeholder(code: &mut Vec<u8>) -> usize {
     let off = code.len();
-    for _ in 0..5 {
+    for _ in 0..10 {
         code.extend_from_slice(&encode_nop());
     }
     off
@@ -1240,7 +1247,7 @@ fn emit_forward_branch_placeholder(code: &mut Vec<u8>) -> usize {
 fn patch_forward_branch_to_here(code: &mut Vec<u8>, branch_off: usize) {
     let here = code.len() as i64;
     let (branch_code, _) = emit_branch(here, branch_off as i64);
-    assert!(branch_code.len() <= 20,
+    assert!(branch_code.len() <= 40,
             "forward branch {} bytes exceeds 20-byte placeholder", branch_code.len());
     for (i, byte) in branch_code.iter().enumerate() {
         code[branch_off + i] = *byte;
@@ -4508,7 +4515,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // Branch to end (skip fail block)
                         let skip_off = code.len();
                         // Emit 20-byte placeholder for branch to end
-                        for _ in 0..5 { code.extend_from_slice(&encode_nop()); }
+                        for _ in 0..10 { code.extend_from_slice(&encode_nop()); }
                         // fail: dst = *addr (S1)
                         let fail_off = code.len();
                         code.extend(ss_st(S1, d_off));
@@ -4807,7 +4814,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     // backward BL+LDO+BV (20 bytes).
                     let patch_off = code.len();
                     // Emit 5 NOPs (20 bytes) as placeholder.
-                    for _ in 0..5 {
+                    for _ in 0..10 {
                         code.extend_from_slice(&encode_nop());
                     }
                     branch_patches.push(BranchPatch { code_offset: patch_off, target_label: target.clone() });
@@ -4841,7 +4848,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
                     // 20-byte placeholder for unconditional branch to true_block.
                     let true_off = code.len();
-                    for _ in 0..5 {
+                    for _ in 0..10 {
                         code.extend_from_slice(&encode_nop());
                     }
                     branch_patches.push(BranchPatch {
@@ -4851,7 +4858,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
                     // 20-byte placeholder for unconditional branch to false_block.
                     let false_off = code.len();
-                    for _ in 0..5 {
+                    for _ in 0..10 {
                         code.extend_from_slice(&encode_nop());
                     }
                     branch_patches.push(BranchPatch {
@@ -4907,8 +4914,8 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 let target_offset = block_start_offsets[target_idx] as i64;
                 let pc_offset = patch.code_offset as i64;
                 let (branch_code, _) = emit_branch(target_offset, pc_offset);
-                assert!(branch_code.len() <= 20,
-                        "branch code {} bytes exceeds 20-byte placeholder", branch_code.len());
+                assert!(branch_code.len() <= 40,
+                        "branch code {} bytes exceeds 40-byte placeholder", branch_code.len());
                 for (i, byte) in branch_code.iter().enumerate() {
                     code[patch.code_offset + i] = *byte;
                 }

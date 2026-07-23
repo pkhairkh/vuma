@@ -2161,31 +2161,25 @@ fn expand_irq_dispatch(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         IRInstr::CondBranch { cond: irq_match, true_target: call_label.clone(), false_target: skip_label.clone() },
     ];
 
-    // call_block: CallIndirect, then goto finish
-    let finish_label = ctx.new_label("irq_finish");
+    // call_block: CallIndirect → call_result, dst = call_result, goto cont
     let mut call_blk = IRBlock::new(&call_label);
     call_blk.instructions.push(IRInstr::CallIndirect {
         dst: Some(call_result.clone()),
         func_ptr: handler_ptr,
         args: vec![],
     });
-    call_blk.instructions.push(IRInstr::Branch { target: finish_label.clone() });
-    call_blk.terminator = IRTerminator::Jump(finish_label.clone());
+    call_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: call_result.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    call_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
+    call_blk.terminator = IRTerminator::Jump(cont_label.clone());
 
-    // skip_block: call_result = -7, then goto finish
+    // skip_block: call_result = -7, dst = call_result, goto cont
     let mut skip_blk = IRBlock::new(&skip_label);
     skip_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: call_result.clone(), lhs: IRValue::Immediate(-7), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
-    skip_blk.instructions.push(IRInstr::Branch { target: finish_label.clone() });
-    skip_blk.terminator = IRTerminator::Jump(finish_label.clone());
+    skip_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: call_result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    skip_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
+    skip_blk.terminator = IRTerminator::Jump(cont_label.clone());
 
-    // finish_block: result = call_result, dst = result, goto cont
-    let mut finish_blk = IRBlock::new(&finish_label);
-    finish_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: result.clone(), lhs: call_result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
-    finish_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
-    finish_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
-    finish_blk.terminator = IRTerminator::Jump(cont_label.clone());
-
-    Expansion { pre, new_blocks: vec![call_blk, skip_blk, finish_blk], cont_label: Some(cont_label) }
+    Expansion { pre, new_blocks: vec![call_blk, skip_blk], cont_label: Some(cont_label) }
 }
 
 // ── L7: Circuit breaker ───────────────────────────────────────────────
