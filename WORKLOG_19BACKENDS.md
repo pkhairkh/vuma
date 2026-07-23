@@ -88,3 +88,40 @@ Stage Summary:
 - ffi_basic now passes on 18/18 runnable backends (was 15/18)
 - The 32-bit timespec fix also unlocks driver_isolation (which uses expand_driver_call) on riscv32 — needs verification
 - Next: Wave B (stark_proof on m68k/hppa), Wave C (distributed on arm32/hppa), Wave D (driver_isolation on hppa), Wave E (fault_tolerance segfaults)
+
+---
+Task ID: Wave-B-m68k-stark-proof
+Agent: main (orchestrator)
+Task: Fix stark_proof on m68k — FNV-1a hash mismatch.
+
+Work Log:
+- Pre-state: stark_proof.vuma → exit 0 on m68k (expected 1). FNV-1a hash mismatch.
+- Root cause: The m68k I64 Mul used encoding 0x4C01 which is MULU.W (16×16→32),
+  NOT MULU.L (32×32→64). Bit 8 of the MULU opcode distinguishes MULU.W (0)
+  from MULU.L (1). The schoolbook 64×64→64 multiply was silently doing 16×16
+  multiplies, producing garbage FNV-1a hashes.
+- Attempted fix 1: Changed encoding to 0x4D01 (MULU.L, bit 8 = 1). This caused
+  an Illegal Instruction signal because QEMU-m68k defaults to the m68000 CPU
+  model, which does NOT support MULU.L (a 68020+ instruction).
+- Final fix: Rewrote the m68k I64 Mul to use only MULU.W (68000-compatible):
+  * Added emit_mulu32_to_64() helper — computes 32×32→64 using four MULU.W
+    (16×16→32) multiplies with schoolbook 16-bit limbs.
+  * The helper uses LINK A0 / UNLK A0 to allocate 24 bytes of scratch stack
+    space (A0-relative), avoiding conflicts with FP-relative vreg stack slots.
+  * The I64 Mul caller uses LINK A1 / UNLK A1 for its own scratch, calling
+    emit_mulu32_to_64 three times for the three 32×32→64 partial products
+    (a_lo*b_lo, a_lo*b_hi, a_hi*b_lo) and combining them into the 64-bit result.
+  * Also fixed two MOVE.L register-copy encodings (0x2003/0x2002 were reversed;
+    correct is 0x2600 for D0→D3, 0x2400 for D0→D2).
+- Build: PASS (cargo build --workspace, 0 errors)
+- Wave test: stark_proof.vuma → exit 1 on m68k ✓ (was: exit 0)
+- No regressions: simple_send=42, ping_pong=84, multi_message=63, try_recv=77,
+  recv_timeout=88, match_recv=42, framed_send_recv=42 all pass on m68k.
+
+Stage Summary:
+- stark_proof now passes on 17/18 runnable backends (m68k fixed; hppa remains).
+- hppa uses a repeated-addition loop for Mul (O(n) where n = multiplier value),
+  which is infeasible for FNV-1a's 0x100000001b3 prime (~10^12 iterations).
+  hppa is BackendTier::Scaffolded — needs a real I64 Mul implementation.
+- Next: Wave C (distributed on arm32/hppa), Wave D (driver_isolation on riscv32/hppa),
+  Wave E (fault_tolerance segfaults on ppc64/ppc64le/sparc64/hppa).
