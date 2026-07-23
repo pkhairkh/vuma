@@ -7026,7 +7026,9 @@ impl Backend for RiscV32Backend {
         }
 
         // ── Phase 4: Apply branch fixups ──
-        for fixup in &branch_fixups {
+        // [Wave I-riscv32-bne-range] Same trampoline fix as riscv64.
+        let mut trampolines: Vec<(usize, String)> = Vec::new();
+        for (i, fixup) in branch_fixups.iter().enumerate() {
             if let Some(&target_offset) = label_offsets.get(&fixup.target_label) {
                 let rel_offset = target_offset as i32 - fixup.abs_byte_offset as i32;
                 let instr = &mut instructions[fixup.instr_idx];
@@ -7035,10 +7037,44 @@ impl Backend for RiscV32Backend {
                     instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                         .copy_from_slice(&encoded);
                 } else {
-                    let encoded = Instruction::Bne { rs1: fixup.bne_rs1, rs2: fixup.bne_rs2, offset: rel_offset }.encode();
-                    instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
-                        .copy_from_slice(&encoded);
+                    if rel_offset >= -4096 && rel_offset <= 4094 {
+                        let encoded = Instruction::Bne { rs1: fixup.bne_rs1, rs2: fixup.bne_rs2, offset: rel_offset }.encode();
+                        instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
+                            .copy_from_slice(&encoded);
+                    } else {
+                        trampolines.push((i, fixup.target_label.clone()));
+                    }
                 }
+            }
+        }
+        let mut trampoline_code: Vec<u8> = Vec::new();
+        let mut trampoline_offsets: Vec<i32> = Vec::new();
+        for (_, target_label) in &trampolines {
+            let tramp_off = instructions.iter().map(|i| i.encoded.len()).sum::<usize>() + trampoline_code.len();
+            trampoline_offsets.push(tramp_off as i32);
+            trampoline_code.extend_from_slice(&Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
+        }
+        for (idx, (fixup_idx, _)) in trampolines.iter().enumerate() {
+            let fixup = &branch_fixups[*fixup_idx];
+            let tramp_abs = trampoline_offsets[idx] as i64;
+            let bne_to_tramp = tramp_abs as i32 - fixup.abs_byte_offset as i32;
+            let instr = &mut instructions[fixup.instr_idx];
+            let bne = Instruction::Bne { rs1: fixup.bne_rs1, rs2: fixup.bne_rs2, offset: bne_to_tramp }.encode();
+            instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
+                .copy_from_slice(&bne);
+        }
+        for (idx, (_, target_label)) in trampolines.iter().enumerate() {
+            if let Some(&target_offset) = label_offsets.get(target_label) {
+                let tramp_abs = trampoline_offsets[idx] as i64;
+                let jal_rel = target_offset as i32 - tramp_abs as i32;
+                let jal = Instruction::Jal { rd: Gpr::Ra, offset: jal_rel }.encode();
+                let off = idx * 4;
+                trampoline_code[off..off + 4].copy_from_slice(&jal);
+            }
+        }
+        if !trampoline_code.is_empty() {
+            if let Some(last) = instructions.last_mut() {
+                last.encoded.extend_from_slice(&trampoline_code);
             }
         }
 
