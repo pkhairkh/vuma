@@ -7042,7 +7042,6 @@ impl Backend for RiscV32Backend {
                         instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                             .copy_from_slice(&encoded);
                     } else {
-                        trampolines.push((i, fixup.target_label.clone()));
                     }
                 }
             }
