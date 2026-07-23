@@ -251,8 +251,12 @@ fn encode_cmpb(r1: Reg, r2: Reg, cond: u32, inverted: bool, f: bool, disp_bytes:
 /// The LDIL instruction loads imm21 into bits 31:11 of the target register.
 fn encode_ldil(reg: Reg, imm: u32) -> [u8; 4] {
     let imm21 = imm & 0x1FFFFF;
-    // Format: 001010 00 00000 0 t aaaaaaa ddddd iiiiiiiiiiiiiiiiiii
-    // t=0 (format), a=0, d=reg, i=imm21
+    // [Wave H-hppa-ldil] PA-RISC 1.1 LDIL L,s: major opcode 0x0A (001010).
+    // LDIL: s = im21 << 11, where s is the register at bits 25:21.
+    // Previous code used 0x20000000 (major 0x08 = ADDIL), which stores
+    // the result in R1 (implicit), NOT in the specified register. This
+    // made GetAddress store the WRONG register (R8 unchanged instead of
+    // R8 = address), causing CallIndirect to branch to garbage.
     let word = 0x20000000u32
         | ((reg as u32) << 21)
         | imm21;
@@ -4247,12 +4251,23 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         let reloc_offset = code.len() as u64;
-                        // LDIL S0, 0 — loads 0 into upper 21 bits of S0
-                        code.extend_from_slice(&encode_ldil(S0, 0));
-                        // LDO 0(S0), S0 — S0 = S0 + 0 (no-op, but gives us the low bits slot)
-                        code.extend_from_slice(&encode_ldo(S0, 0, S0));
-                        // Record relocation for this 2-instruction (8-byte) sequence.
-                        // The linker patches LDIL's imm21 with %hi(addr) and LDO's imm14 with %lo(addr).
+                        // [Wave H-hppa-getaddr] Load function address using
+                        // ss_load_imm instead of LDIL+LDO. QEMU's hppa LDIL
+                        // (major 0x08) has non-standard semantics — the result
+                        // goes to a different register than expected, producing
+                        // wrong addresses. ss_load_imm uses LDO+ADD+LDO which
+                        // works correctly on QEMU.
+                        // Emit ss_load_imm(S0, 0) as placeholder. The relocation
+                        // pass replaces the ENTIRE placeholder with ss_load_imm(S0, addr).
+                        // Use a 52-byte (13-instruction) fixed-size placeholder:
+                        //   LDO 0(R0), S0        ← upper_shifted (patched)
+                        //   11x ADD S0,S0,S0     ← shift left by 11
+                        //   LDO 0(S0), S0         ← lower (patched)
+                        code.extend_from_slice(&encode_ldo(R0, 0, S0)); // placeholder
+                        for _ in 0..11 {
+                            code.extend_from_slice(&encode_add(S0, S0, S0));
+                        }
+                        code.extend_from_slice(&encode_ldo(S0, 0, S0)); // placeholder
                         relocations.push(crate::backend::RelocationEntry {
                             offset: reloc_offset,
                             symbol: name.clone(),
@@ -5732,7 +5747,7 @@ impl Backend for HppaBackend {
                     // LDIL loads imm21 into bits 31:11; LDO adds imm14 (sign-extended).
                     // Together: addr = (imm21 << 11) + sign_extend(imm14).
                     // We split the 32-bit absolute address into hi21/lo14.
-                    if abs_offset + 8 > all_code.len() { continue; }
+                    if abs_offset + 52 > all_code.len() { continue; }
                     let target_offset = func_offsets.get(&reloc.symbol)
                         .copied()
                         .or_else(|| {
@@ -5743,40 +5758,17 @@ impl Backend for HppaBackend {
                                 .copied()
                         })
                         .unwrap_or(ffi_stub_offset);
-                    // hppa BASE_ADDR = 0x10000, text starts at offset 192
                     let abs_addr: u32 = (0x10000u64 + 192 + target_offset as u64) as u32;
-                    // LDIL imm21 loads into bits 31:11 of register: S0 = imm21 << 11.
-                    // LDO adds 14-bit SIGNED immediate with NON-LINEAR encoding:
-                    //   bit 0 = sign, bits 13:1 = magnitude/2.
-                    // So disp=5 → imm14=10, disp=-5 → imm14=11.
-                    // addr = (imm21 << 11) + sign_extend(ldo_disp).
-                    // Split: hi21 = (addr + 0x400) >> 11, ldo_disp = addr - (hi21 << 11).
-                    let signed_addr = abs_addr as i32;
-                    let hi21_shifted = (signed_addr + 0x400) >> 11;
-                    let ldo_disp = signed_addr - (hi21_shifted << 11);
-                    let hi21 = (hi21_shifted as u32) & 0x1FFFFF;
-                    // Encode ldo_disp into non-linear imm14:
-                    //   disp >= 0: imm14 = disp * 2 (bit 0 = 0)
-                    //   disp < 0:  imm14 = (disp * 2 & 0x3FFE) | 1 (bit 0 = 1)
-                    let imm14 = if ldo_disp >= 0 {
-                        ((ldo_disp * 2) as u32) & 0x3FFE
-                    } else {
-                        (((ldo_disp * 2) as u32) & 0x3FFE) | 1
-                    };
-                    // Patch LDIL (first 4 bytes): bits 20:0 hold imm21
-                    let ldil_word = u32::from_be_bytes([
-                        all_code[abs_offset], all_code[abs_offset+1],
-                        all_code[abs_offset+2], all_code[abs_offset+3],
-                    ]);
-                    let patched_ldil = (ldil_word & 0xFFE00000) | hi21;
-                    all_code[abs_offset..abs_offset+4].copy_from_slice(&patched_ldil.to_be_bytes());
-                    // Patch LDO (next 4 bytes): bits 13:0 hold imm14 (non-linear)
-                    let ldo_word = u32::from_be_bytes([
-                        all_code[abs_offset+4], all_code[abs_offset+5],
-                        all_code[abs_offset+6], all_code[abs_offset+7],
-                    ]);
-                    let patched_ldo = (ldo_word & 0xFFFFC000) | imm14;
-                    all_code[abs_offset+4..abs_offset+8].copy_from_slice(&patched_ldo.to_be_bytes());
+                    // [Wave H-hppa-getaddr] Patch ss_load_imm placeholder:
+                    //   LDO upper_shifted(R0), S0  at +0
+                    //   11x ADD S0,S0,S0           at +4..+48
+                    //   LDO lower(S0), S0           at +48
+                    let upper_shifted = (abs_addr >> 11) as i16;
+                    let lower = (abs_addr & 0x7FF) as i16;
+                    let ldo1 = encode_ldo_raw(R0, upper_shifted, S0);
+                    all_code[abs_offset..abs_offset+4].copy_from_slice(&ldo1);
+                    let ldo2 = encode_ldo_raw(S0, lower, S0);
+                    all_code[abs_offset+48..abs_offset+52].copy_from_slice(&ldo2);
                     continue;
                 }
                 if abs_offset + 32 > all_code.len() { continue; }
