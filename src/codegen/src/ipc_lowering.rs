@@ -1578,7 +1578,7 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
     // Uses emit_nanosleep which emits the correct struct timespec layout
     // for both 32-bit (8 bytes, tv_nsec at offset 4) and 64-bit (16 bytes,
     // tv_nsec at offset 8) backends.
-    instrs.extend(emit_nanosleep(ctx, 10_000_000));
+    instrs.extend(emit_nanosleep(ctx, 1_000_000));
     // Use read() with O_NONBLOCK (set above by emit_set_nonblocking).
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
