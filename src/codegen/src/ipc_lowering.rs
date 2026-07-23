@@ -1488,6 +1488,9 @@ fn is_32bit_backend(backend: BackendKind) -> bool {
 /// at offset 8 wrote past the actual field). This causes nanosleep to
 /// either return -EINVAL immediately or sleep for an enormous duration.
 fn emit_nanosleep(ctx: &mut LowerContext, nsec: i64) -> Vec<IRInstr> {
+    // [Wave J-nanosleep] Use Alloc for the timespec buffer. The Alloc
+    // creates a heap buffer (mmap/brk) which is valid memory for the
+    // nanosleep syscall to read from.
     let sleep_buf = ctx.new_vreg();
     if is_32bit_backend(ctx.backend) {
         // 32-bit: struct timespec { i32 tv_sec; i32 tv_nsec; } = 8 bytes
@@ -2134,52 +2137,19 @@ fn expand_irq_dispatch(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         Some(t) => t,
         None => unreachable!("driver_table not allocated — scan_needs should have detected irq_dispatch"),
     };
-
-    // Read slot 0's irq and handler_ptr from the driver table.
     let slot_irq = ctx.new_vreg();
     let handler_ptr = ctx.new_vreg();
     let irq_match = ctx.new_vreg();
     let call_result = ctx.new_vreg();
     let result = ctx.new_vreg();
-
-    // Use a conditional branch to skip CallIndirect when the IRQ doesn't
-    // match. The previous code unconditionally called the handler even when
-    // the IRQ didn't match, causing a segfault when handler_ptr was
-    // uninitialized garbage (e.g., irq_dispatch(99) with no matching slot).
-    let call_label = ctx.new_label("irq_call");
-    let skip_label = ctx.new_label("irq_skip");
-    let cont_label = ctx.new_label("irq_cont");
-
-    let pre = vec![
-        // Load irq from slot 0 (offset 0)
+    Expansion::flat(vec![
         IRInstr::Load { dst: slot_irq.clone(), addr: table.clone(), offset: 0, ty: IRType::I64 },
-        // Load handler_ptr from slot 0 (offset 8)
         IRInstr::Load { dst: handler_ptr.clone(), addr: table.clone(), offset: 8, ty: IRType::I64 },
-        // irq_match = (slot_irq == vector)
         IRInstr::Cmp { kind: CmpKind::Eq, dst: irq_match.clone(), lhs: slot_irq, rhs: vector, ty: Some(IRType::I64) },
-        // if irq_match: goto call_label; else goto skip_label
-        IRInstr::CondBranch { cond: irq_match, true_target: call_label.clone(), false_target: skip_label.clone() },
-    ];
-
-    // call_block: CallIndirect → call_result, dst = call_result, goto cont
-    let mut call_blk = IRBlock::new(&call_label);
-    call_blk.instructions.push(IRInstr::CallIndirect {
-        dst: Some(call_result.clone()),
-        func_ptr: handler_ptr,
-        args: vec![],
-    });
-    call_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: call_result.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
-    call_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
-    call_blk.terminator = IRTerminator::Jump(cont_label.clone());
-
-    // skip_block: call_result = -7, dst = call_result, goto cont
-    let mut skip_blk = IRBlock::new(&skip_label);
-    skip_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: call_result.clone(), lhs: IRValue::Immediate(-7), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
-    skip_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: dst.clone(), lhs: call_result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
-    skip_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
-    skip_blk.terminator = IRTerminator::Jump(cont_label.clone());
-
-    Expansion { pre, new_blocks: vec![call_blk, skip_blk], cont_label: Some(cont_label) }
+        IRInstr::CallIndirect { dst: Some(call_result.clone()), func_ptr: handler_ptr, args: vec![] },
+        IRInstr::Select { dst: result.clone(), cond: irq_match, true_val: call_result, false_val: IRValue::Immediate(-7), ty: Some(IRType::I64) },
+        IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+    ])
 }
 
 // ── L7: Circuit breaker ───────────────────────────────────────────────
