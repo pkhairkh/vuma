@@ -2307,7 +2307,7 @@ fn expand_circuit_breaker_call(ctx: &mut LowerContext, args: &[IRValue], dst: Op
         args: vec![],
     });
     // is_fail = (call_ret != 0)
-    do_call_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Ne, dst: is_fail.clone(), lhs: call_ret.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    do_call_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Ne, dst: is_fail.clone(), lhs: call_ret.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I32) });
     do_call_blk.instructions.push(IRInstr::Branch { target: after_call_label.clone() });
     do_call_blk.terminator = IRTerminator::Jump(after_call_label.clone());
 
