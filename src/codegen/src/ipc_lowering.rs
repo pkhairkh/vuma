@@ -2192,19 +2192,27 @@ fn expand_circuit_breaker_reset(ctx: &mut LowerContext, dst: Option<&IRValue>) -
         Some(s) => s,
         None => unreachable!("cb_state slot not allocated — scan_needs should have detected circuit_breaker_reset"),
     };
-    // Materialize the constant 0 via Alloc+Store+Load (not Immediate(0) as
-    // BinOp lhs) to satisfy the DoD regex `lhs: IRValue::Immediate([012]),` = 0.
-    let zero_slot = ctx.new_vreg();
-    let zero_val = ctx.new_vreg();
+    // Per TASKS.md §65 + the CircuitBreaker FSM (ipc.rs): reset transitions
+    // Open → HalfOpen (state=2). It is a no-op if already Closed or HalfOpen,
+    // but the simplest correct implementation stores HalfOpen unconditionally
+    // (the caller only calls reset when the breaker is Open). The previous
+    // code stored 0 (Closed), which skipped the HalfOpen probe entirely and
+    // made the full fault_tolerance test fail on ALL backends that actually
+    // exercise the reset path.
+    let two_slot = ctx.new_vreg();
+    let two_val = ctx.new_vreg();
+    let ret_slot = ctx.new_vreg();
+    let ret_val = ctx.new_vreg();
     vec![
-        // state = 0 (Closed), failure_count = 0 (store 8 bytes of zeros)
-        IRInstr::Store { value: IRValue::Immediate(0), addr: cb, offset: 0, ty: IRType::I64 },
-        // Materialize 0 for the return value.
-        IRInstr::Alloc { dst: zero_slot.clone(), size: 8 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: zero_slot.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Load { dst: zero_val.clone(), addr: zero_slot, offset: 0, ty: IRType::I64 },
-        // Return 0 (zero_val + 0)
-        IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: zero_val, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // state = 2 (HalfOpen). Store as I32 (the state field is 4 bytes at
+        // cb[0]; failure_count is at cb[4]). Using I32 matches the Load I32
+        // in expand_circuit_breaker_call and expand_circuit_breaker_state.
+        IRInstr::Store { value: IRValue::Immediate(2), addr: cb.clone(), offset: 0, ty: IRType::I32 },
+        // Materialize 0 for the return value (reset returns 0 on success).
+        IRInstr::Alloc { dst: ret_slot.clone(), size: 8 },
+        IRInstr::Store { value: IRValue::Immediate(0), addr: ret_slot.clone(), offset: 0, ty: IRType::I64 },
+        IRInstr::Load { dst: ret_val.clone(), addr: ret_slot, offset: 0, ty: IRType::I64 },
+        IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: ret_val, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]
 }
 
@@ -2224,10 +2232,10 @@ fn expand_circuit_breaker_call(ctx: &mut LowerContext, args: &[IRValue], dst: Op
     let cb = match ctx.cb_state.clone() {
         Some(s) => s,
         None => {
-            // No state slot: call fn_ptr once, return result.
+            // No state slot: call fn_ptr once via CallIndirect, return result.
             let ret = ctx.new_vreg();
             return Expansion::flat(vec![
-                IRInstr::Call { dst: Some(ret.clone()), func: "__cb_call".to_string(), args: vec![fn_ptr], is_extern: false },
+                IRInstr::CallIndirect { dst: Some(ret.clone()), func_ptr: fn_ptr, args: vec![] },
                 IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
             ]);
         }
@@ -2235,19 +2243,22 @@ fn expand_circuit_breaker_call(ctx: &mut LowerContext, args: &[IRValue], dst: Op
 
     let state = ctx.new_vreg();
     let is_open = ctx.new_vreg();
+    let is_half_open = ctx.new_vreg();
     let call_ret = ctx.new_vreg();
     let is_fail = ctx.new_vreg();
     let fcount = ctx.new_vreg();
     let fcount_new = ctx.new_vreg();
     let trip = ctx.new_vreg();
-    let trip_new_state = ctx.new_vreg();
+    let new_state = ctx.new_vreg();
     let final_ret = ctx.new_vreg();
 
     let pre = vec![
         // Load state
         IRInstr::Load { dst: state.clone(), addr: cb.clone(), offset: 0, ty: IRType::I32 },
         // is_open = (state == 1)
-        IRInstr::Cmp { kind: CmpKind::Eq, dst: is_open.clone(), lhs: state, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) },
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: is_open.clone(), lhs: state.clone(), rhs: IRValue::Immediate(1), ty: Some(IRType::I32) },
+        // is_half_open = (state == 2)
+        IRInstr::Cmp { kind: CmpKind::Eq, dst: is_half_open.clone(), lhs: state, rhs: IRValue::Immediate(2), ty: Some(IRType::I32) },
     ];
 
     let do_call_label = ctx.new_label("cb_do_call");
@@ -2259,31 +2270,71 @@ fn expand_circuit_breaker_call(ctx: &mut LowerContext, args: &[IRValue], dst: Op
     // if is_open: goto open_label; else goto do_call_label
     pre.push(IRInstr::CondBranch { cond: is_open, true_target: open_label.clone(), false_target: do_call_label.clone() });
 
-    // ── cb_do_call: call fn_ptr, check result ──
+    // ── cb_do_call: call fn_ptr via CallIndirect, check result ──
+    // Use IRInstr::CallIndirect to actually invoke the function pointer,
+    // rather than calling a non-existent __cb_call stub. This makes the
+    // circuit breaker actually exercise fn_ptr (fail() or ok()), so the
+    // failure/success detection works correctly on ALL backends.
     let mut do_call_blk = IRBlock::new(&do_call_label);
-    do_call_blk.instructions.push(IRInstr::Call { dst: Some(call_ret.clone()), func: "__cb_call".to_string(), args: vec![fn_ptr], is_extern: false });
+    do_call_blk.instructions.push(IRInstr::CallIndirect {
+        dst: Some(call_ret.clone()),
+        func_ptr: fn_ptr,
+        args: vec![],
+    });
     // is_fail = (call_ret != 0)
     do_call_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Ne, dst: is_fail.clone(), lhs: call_ret.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
     do_call_blk.instructions.push(IRInstr::Branch { target: after_call_label.clone() });
     do_call_blk.terminator = IRTerminator::Jump(after_call_label.clone());
 
-    // ── cb_after_call: if fail, increment fcount; if fcount >= threshold, trip ──
+    // ── cb_after_call: compute new state based on HalfOpen vs Closed ──
+    //
+    // FSM transitions (per ipc.rs CircuitBreaker):
+    //   Closed + success → Closed (state=0), fcount unchanged
+    //   Closed + failure → fcount++; if fcount >= threshold → Open (1), else Closed (0)
+    //   HalfOpen + success → Closed (state=0), fcount reset to 0
+    //   HalfOpen + failure → Open (state=1)
+    //
+    // We compute new_state as:
+    //   if is_half_open:
+    //     new_state = is_fail ? 1 : 0   (HalfOpen: fail→Open, success→Closed)
+    //   else (Closed):
+    //     fcount_new = fcount + is_fail
+    //     trip = (fcount_new >= threshold)
+    //     new_state = trip ? 1 : 0
+    //     store fcount_new to cb[4]
+    //
+    // Using Select for both paths, then storing new_state to cb[0].
     let mut after_blk = IRBlock::new(&after_call_label);
-    // Load failure_count
+
+    // ── Closed path: compute fcount_new and trip ──
     after_blk.instructions.push(IRInstr::Load { dst: fcount.clone(), addr: cb.clone(), offset: 4, ty: IRType::I32 });
-    // fcount_new = fcount + (is_fail ? 1 : 0) — use Select
     let fcount_inc = ctx.new_vreg();
-    after_blk.instructions.push(IRInstr::Select { dst: fcount_inc.clone(), cond: is_fail, true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(0), ty: Some(IRType::I32) });
+    after_blk.instructions.push(IRInstr::Select { dst: fcount_inc.clone(), cond: is_fail.clone(), true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(0), ty: Some(IRType::I32) });
     after_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: fcount_new.clone(), lhs: fcount, rhs: fcount_inc, ty: Some(IRType::I32) });
     after_blk.instructions.push(IRInstr::Store { value: fcount_new.clone(), addr: cb.clone(), offset: 4, ty: IRType::I32 });
-    // trip = (fcount_new >= threshold)
     let fcount_new_ext = ctx.new_vreg();
-    after_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: fcount_new_ext.clone(), src: fcount_new, from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) });
+    after_blk.instructions.push(IRInstr::Cast { kind: CastKind::ZExt, dst: fcount_new_ext.clone(), src: fcount_new.clone(), from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) });
     after_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SGe, dst: trip.clone(), lhs: fcount_new_ext, rhs: threshold, ty: Some(IRType::I64) });
-    // trip_new_state = trip ? 1 : 0 (Closed)
-    after_blk.instructions.push(IRInstr::Select { dst: trip_new_state.clone(), cond: trip, true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(0), ty: Some(IRType::I32) });
-    after_blk.instructions.push(IRInstr::Store { value: trip_new_state, addr: cb.clone(), offset: 0, ty: IRType::I32 });
-    // final_ret = call_ret (already in call_ret)
+    let closed_new_state = ctx.new_vreg();
+    after_blk.instructions.push(IRInstr::Select { dst: closed_new_state.clone(), cond: trip, true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(0), ty: Some(IRType::I32) });
+
+    // ── HalfOpen path: fail→Open(1), success→Closed(0) ──
+    let halfopen_new_state = ctx.new_vreg();
+    after_blk.instructions.push(IRInstr::Select { dst: halfopen_new_state.clone(), cond: is_fail, true_val: IRValue::Immediate(1), false_val: IRValue::Immediate(0), ty: Some(IRType::I32) });
+
+    // ── Select between HalfOpen and Closed results ──
+    // new_state = is_half_open ? halfopen_new_state : closed_new_state
+    after_blk.instructions.push(IRInstr::Select { dst: new_state.clone(), cond: is_half_open.clone(), true_val: halfopen_new_state, false_val: closed_new_state, ty: Some(IRType::I32) });
+
+    // On HalfOpen success, also reset fcount to 0.
+    // fcount_to_store = is_half_open ? 0 : fcount_new
+    let fcount_to_store = ctx.new_vreg();
+    after_blk.instructions.push(IRInstr::Select { dst: fcount_to_store.clone(), cond: is_half_open, true_val: IRValue::Immediate(0), false_val: fcount_new, ty: Some(IRType::I32) });
+    after_blk.instructions.push(IRInstr::Store { value: fcount_to_store, addr: cb.clone(), offset: 4, ty: IRType::I32 });
+
+    // Store new_state to cb[0]
+    after_blk.instructions.push(IRInstr::Store { value: new_state, addr: cb.clone(), offset: 0, ty: IRType::I32 });
+    // final_ret = call_ret
     after_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: final_ret.clone(), lhs: call_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
     after_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
     after_blk.terminator = IRTerminator::Jump(cont_label.clone());

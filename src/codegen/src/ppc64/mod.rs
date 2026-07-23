@@ -4887,8 +4887,17 @@ impl Backend for PPC64Backend {
                                 all_code[abs_offset + 2],
                                 all_code[abs_offset + 3],
                             ]);
-                            let imm24 = ((fallback_off as i64) - (abs_offset as i64)) as i32;
-                            let patched = (existing & 0xFC00_0003) | (((imm24 & 0x00FFFFFF) as u32) << 2);
+                            // PPC BL's LI field is a signed 24-bit WORD offset
+                            // (target = CIA + sign_extend(LI) * 4). The resolved
+                            // case above correctly divides by 4 to get word
+                            // offset. The previous code here used the raw byte
+                            // offset, making the branch target 4× too far →
+                            // segfault on any Call to an unresolved external
+                            // (e.g. __cb_call in circuit_breaker_call).
+                            let byte_offset = (fallback_off as i64) - (abs_offset as i64);
+                            let offset_words = (byte_offset / 4) as i32;
+                            let imm24 = (offset_words as u32) & 0x00FF_FFFF;
+                            let patched = (existing & 0xFC00_0003) | (imm24 << 2);
                             all_code[abs_offset..abs_offset + 4]
                                 .copy_from_slice(&patched.to_be_bytes());
                         } else {
