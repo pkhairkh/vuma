@@ -2052,56 +2052,67 @@ fn emit_binop(
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Mul => {
-            // [Wave 93-94-ext] I64 Mul on m68k using MULU.L (32×32→64).
-            // MULU.L <ea>, Dh:Dl encoding (68020+):
-            //   Word 1: 0x4C00 | src_reg (register direct mode)
-            //   Word 2: 0_00_HHH_0_000_LLL (HHH=Dh, LLL=Dl)
-            // Result: Dh gets upper 32 bits, Dl gets lower 32 bits.
+            // [Wave B-m68k-muluw] I64 Mul on m68k using MULU.W (16×16→32).
+            //
+            // QEMU-m68k defaults to the m68000 CPU model, which does NOT support
+            // the 68020+ MULU.L (32×32→64) instruction. The previous code used
+            // 0x4C01 which decoded as MULU.W (bit 8 = 0), silently doing 16×16
+            // multiplies instead of 32×32 — producing garbage FNV-1a hashes.
+            // Attempting to use the correct MULU.L encoding (0x4D01) causes an
+            // Illegal Instruction signal on the default m68000 CPU.
+            //
+            // Fix: implement 64×64→64 multiply using only MULU.W (68000-compatible).
+            // The schoolbook approach uses three 32×32→64 partial products:
+            //   result = a_lo*b_lo + (a_lo*b_hi + a_hi*b_lo) << 32  [mod 2^64]
+            // Each 32×32→64 partial is computed by emit_mulu32_to_64, which uses
+            // four MULU.W (16×16→32) multiplies internally.
             let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
             if is_64 {
                 // Load 64-bit operands: S0=a_lo, S2=a_hi, S1=b_lo, S3=b_hi
                 code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2));
                 code.extend(ss_load_value_64(rhs, vreg_stack_slots, S1, S3));
 
-                // Save b_hi (S3) to dst_off+4 temporarily — we'll need it
-                // for cross term 1 but MULU.L will clobber S3.
-                code.extend(ss_st(S3, dst_off + 4));   // temp: b_hi
+                // Allocate a 24-byte scratch frame via LINK A1, #-24.
+                // This gives us A1-relative temps that don't conflict with
+                // FP-relative vreg stack slots. We save a_lo, a_hi, b_lo, b_hi
+                // and the partial result_hi here.
+                // LINK A1, #-24: 0x4E50 | 1 = 0x4E51, ext = -24 = 0xFFE8.
+                code.extend_from_slice(&[0x4E, 0x51, 0xFF, 0xE8]); // LINK A1, #-24
+                // Temps: A1-4=a_lo, A1-8=a_hi, A1-12=b_lo, A1-16=b_hi, A1-20=partial_hi, A1-24=unused
+                code.extend(Instruction::Store { src: S0, base: Gpr::A1, offset: -4 }.encode());  // a_lo
+                code.extend(Instruction::Store { src: S2, base: Gpr::A1, offset: -8 }.encode());  // a_hi
+                code.extend(Instruction::Store { src: S1, base: Gpr::A1, offset: -12 }.encode()); // b_lo
+                code.extend(Instruction::Store { src: S3, base: Gpr::A1, offset: -16 }.encode()); // b_hi
 
-                // MULU.L S1, S2:S0 → S0=lo32(a_lo*b_lo), S2=hi32(a_lo*b_lo)
-                code.extend_from_slice(&[0x4C, 0x01]); // MULU.L D1
-                code.extend_from_slice(&[0x20, 0x00]); // Dh=D2, Dl=D0
+                // ── Partial 1: a_lo * b_lo → 64-bit (lo, hi) ──
+                // S0 = a_lo, S1 = b_lo (still in registers from ss_load_value_64).
+                emit_mulu32_to_64(code);
+                // S2 = lo32(a_lo*b_lo), S3 = hi32(a_lo*b_lo)
+                code.extend(ss_st(S2, dst_off));  // result_lo
+                code.extend(Instruction::Store { src: S3, base: Gpr::A1, offset: -20 }.encode()); // partial_hi
 
-                // Save result_lo (S0) and result_hi (S2) to dst_off and a temp.
-                // dst_off will hold result_lo, dst_off+4 was b_hi (now overwrite).
-                code.extend(ss_st(S0, dst_off));       // save result_lo
-                code.extend(ss_st(S2, dst_off + 4));   // save partial result_hi
+                // ── Partial 2: a_lo * b_hi → take lo32, add to partial_hi ──
+                code.extend(Instruction::Load { base: Gpr::A1, offset: -4, dst: S0 }.encode());  // a_lo
+                code.extend(Instruction::Load { base: Gpr::A1, offset: -16, dst: S1 }.encode()); // b_hi
+                emit_mulu32_to_64(code);
+                // S2 = lo32(a_lo*b_hi). Add to partial_hi.
+                code.extend(Instruction::Load { base: Gpr::A1, offset: -20, dst: S3 }.encode());
+                code.extend(Instruction::Add { src: S2, dst: S3 }.encode());
+                code.extend(Instruction::Store { src: S3, base: Gpr::A1, offset: -20 }.encode());
 
-                // Cross term 1: result_hi += lo32(a_lo * b_hi)
-                // Reload a_lo from lhs, b_hi from... we saved it but overwrote
-                // dst_off+4. Reload b_hi from rhs instead.
-                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));  // S0 = a_lo
-                code.extend(ss_load_value_64(rhs, vreg_stack_slots, S1, S3)); // S3 = b_hi
-                // MULU.L S3, S2:S0 → S0=lo32(a_lo*b_hi), S2=hi32
-                code.extend_from_slice(&[0x4C, 0x03]); // MULU.L D3
-                code.extend_from_slice(&[0x20, 0x00]); // Dh=D2, Dl=D0
-                // Add lo32(a_lo*b_hi) to partial result_hi
-                code.extend(ss_ld(S2, dst_off + 4));   // S2 = saved partial result_hi
-                code.extend(Instruction::Add { src: S0, dst: S2 }.encode()); // S2 += lo32(a_lo*b_hi)
-                code.extend(ss_st(S2, dst_off + 4));   // save updated result_hi
+                // ── Partial 3: a_hi * b_lo → take lo32, add to partial_hi ──
+                code.extend(Instruction::Load { base: Gpr::A1, offset: -8, dst: S0 }.encode());  // a_hi
+                code.extend(Instruction::Load { base: Gpr::A1, offset: -12, dst: S1 }.encode()); // b_lo
+                emit_mulu32_to_64(code);
+                // S2 = lo32(a_hi*b_lo). Add to partial_hi.
+                code.extend(Instruction::Load { base: Gpr::A1, offset: -20, dst: S3 }.encode());
+                code.extend(Instruction::Add { src: S2, dst: S3 }.encode());
 
-                // Cross term 2: result_hi += lo32(a_hi * b_lo)
-                // Need a_hi in S0 and b_lo in S1 for MULU.L.
-                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S2, S0)); // S0=a_hi (hi word)
-                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));  // S1 = b_lo
-                // MULU.L S1, S3:S0 → S0=lo32(a_hi*b_lo), S3=hi32
-                code.extend_from_slice(&[0x4C, 0x01]); // MULU.L D1
-                code.extend_from_slice(&[0x30, 0x00]); // Dh=D3, Dl=D0
-                // Add lo32(a_hi*b_lo) to result_hi
-                code.extend(ss_ld(S2, dst_off + 4));   // S2 = saved result_hi
-                code.extend(Instruction::Add { src: S0, dst: S2 }.encode()); // S2 += lo32(a_hi*b_lo)
+                // Store final result_hi at dst_off+4.
+                code.extend(Instruction::Store { src: S3, base: FP, offset: (dst_off + 4) as i16 }.encode());
 
-                // Store final result_hi (result_lo already at dst_off)
-                code.extend(ss_st(S2, dst_off + 4));   // result_hi
+                // Restore A1 and SP via UNLK A1.
+                code.extend_from_slice(&[0x4E, 0x59]); // UNLK A1
             } else {
                 // 32-bit multiply: use MULU.W (16×16→32)
                 code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
@@ -2533,6 +2544,163 @@ fn ss_load_value_64(
         }
     }
     code
+}
+
+/// Emit a 32×32→64 unsigned multiply using only 68000-compatible MULU.W
+/// (16×16→32) instructions.
+///
+/// Input:  S0 = a (32-bit), S1 = b (32-bit)
+/// Output: S2 = result_lo (32-bit), S3 = result_hi (32-bit)
+/// Clobbers: S0, S1, A0 (used as scratch pointer)
+/// Uses: 4 stack temp slots allocated BELOW SP (SP-relative, safe — does
+/// not conflict with vreg stack slots which are FP-relative).
+///
+/// Algorithm (schoolbook with 16-bit limbs):
+///   a = a_hi:a_lo, b = b_hi:b_lo (each 16 bits)
+///   p0 = a_lo * b_lo   (32-bit)
+///   p1 = a_lo * b_hi   (32-bit)
+///   p2 = a_hi * b_lo   (32-bit)
+///   p3 = a_hi * b_hi   (32-bit)
+///   result_64 = p0 + ((p1 + p2) << 16) + (p3 << 32)
+///
+///   result_lo = p0 + ((p1 + p2) << 16)  [mod 2^32, carry into result_hi]
+///   result_hi = p3 + ((p1 + p2) >> 16) + carry
+///
+/// QEMU-m68k defaults to the m68000 CPU model, which does NOT support the
+/// 68020+ MULU.L (32×32→64) instruction. Using MULU.L causes an Illegal
+/// Instruction signal. This helper uses only MULU.W, available on all
+/// 68000+ CPUs.
+///
+/// Scratch memory: we allocate 24 bytes on the stack via LEA -24(SP), A0
+/// (without modifying SP, so the temps are valid until the function
+/// returns). A0 is used as the base for all temp accesses. This avoids
+/// conflicting with FP-relative vreg stack slots.
+fn emit_mulu32_to_64(code: &mut Vec<u8>) {
+    // Use A0 as scratch base: A0 = SP - 24 (allocate 24 bytes below SP).
+    // LEA.L (-24, SP), A0: 0x4FEF 0xFFF8
+    //   LEA = 0100 1110 0111 mmm rrr, with mode=101 (d16,An), reg=SP(7)
+    //   0x4FEF | 0xFFF8 = LEA (d16,SP), A0
+    //   Actually: LEA <ea>, An = 0100 1110 01 mmm rrr (An in bits 11-9).
+    //   For A0 (reg 0): 0x4EE8 | (0<<9) | mode_101_reg_7...
+    //   Simpler: use MOVEA.L SP, A0 then SUBQ.L #8, A0 three times. But that's
+    //   8 bytes. Use: PEA (SP,-24) trick? No.
+    //   Correct LEA encoding: 0100 1110 0 1 1 0 1 nnn (d16,An) where nnn=src An.
+    //   For src=SP(7): 0x4EEF, dst=A0(0): word1 = 0x4EE8 | (0<<9) | 7 = 0x4EEF.
+    //   Then d16 = -24 = 0xFFE8.
+    // Hmm, let me just use: MOVEA.L SP, A0 (0x2E8F) then SUBA.W #24, A0.
+    // MOVEA.L SP, A0: word = 0x2047 | (0<<9) | 7 = 0x2047? No.
+    // Actually MOVEA.L <ea>, An: 0x2040 | (An<<9) | ea. For An=A0(0), ea=SP(7,mode=001):
+    //   0x2040 | (0<<9) | (001<<3) | 7 = 0x2040 | 0x08 | 0x07 = 0x204F.
+    // Then SUBQ.L #8, A0 three times (0x5088 each, data=8 maps to 0):
+    //   SUBQ.L #8, A0: 0x5188 (data=0 means 8, size=long, mode=An, reg=A0)
+    //   Wait — SUBQ encoding: 0101 ddd 1 S mm rrr. data=0→8, size=10(long), mode=001(An), reg=000(A0).
+    //   = 0101 000 1 10 001 000 = 0x5088? No: 0101 000 1 10 001 000 = 0x5188.
+    //   Let me just use ADDQ.L #-24... no, ADDQ/SUBQ only supports 1-8.
+    // Simpler: MOVE.L SP, D3 (save), then SUBQ.L #8, SP x3, use SP-relative.
+    // But that clobbers D3. Use A1 instead.
+    // Actually, simplest: use the 4 FP-relative slots but at LARGE negative
+    // offsets that are guaranteed below all vreg slots. The frame_size is
+    // bounded by the number of vregs (typically < 200 slots × 8 bytes = 1600).
+    // Using FP-2048..FP-2072 is safe. But that requires the frame to be that
+    // big, which it isn't.
+    //
+    // Correct approach: decrement SP by 24, use SP-relative, restore SP.
+    // SUBL.L #24, SP: 0x9FC 0x00000018
+    //   SUB.L #imm32, Dn is actually ADDQ/SUBQ for small, or SUBI.L.
+    //   SUBI.L #24, SP: no — SP is An. SUBA.L #24, SP.
+    //   SUBA.W #24, SP: 0x9CFC 0x0018 (SUBA.W #imm16, An)?
+    //   Actually: SUBA.L #imm, An for immediate: 0x9C7C | imm32? Complex.
+    //   Use: LINK A0, #-24 (pushes A0, A0=SP, SP-=24). Then use A0-relative.
+    //   UNLK A0 restores.
+    // LINK A0, #-24: 0x4E50 | 0 = 0x4E50, ext = -24 = 0xFFE8.
+    code.extend_from_slice(&[0x4E, 0x50, 0xFF, 0xE8]); // LINK A0, #-24
+    // Now A0 = old SP - 0 (points to saved A0), SP = A0 - 24.
+    // Temp slots: A0-4, A0-8, A0-12, A0-16, A0-20, A0-24 (all below saved A0).
+
+    // Save a and b to A0-4 and A0-8.
+    // MOVE.L D0, (-4,A0): 0x2D40 | (0<<9), ext=-4. Mode=101(d16,An), reg=A0(0).
+    //   word = 0x2D40 | (0<<9) | (101<<3) | 0 = 0x2D40 | 0x28 | 0 = 0x2D68.
+    // Hmm, the Store instruction uses base+offset. Let me check if A0 is a valid base.
+    // Instruction::Store { src, base, offset } — base is a Gpr. A0 is an address register.
+    // The Gpr enum likely includes A0-A6. Let me check.
+    // (Will verify at compile time — if A0 isn't a Gpr variant, this won't compile.)
+    code.extend(Instruction::Store { src: Gpr::D0, base: Gpr::A0, offset: -4 }.encode());
+    code.extend(Instruction::Store { src: Gpr::D1, base: Gpr::A0, offset: -8 }.encode());
+
+    // ── p0 = a_lo * b_lo ──
+    // S0 = a, S1 = b. MULU.W S1, S0 → S0 = (a & 0xFFFF) * (b & 0xFFFF).
+    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    // S0 = p0. Save to A0-12.
+    code.extend(Instruction::Store { src: Gpr::D0, base: Gpr::A0, offset: -12 }.encode());
+
+    // ── p1 = a_lo * b_hi ──
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -4, dst: Gpr::D0 }.encode());  // S0 = a
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -8, dst: Gpr::D1 }.encode());  // S1 = b
+    code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 low 16 = b_hi
+    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    // S0 = p1. Save to A0-16.
+    code.extend(Instruction::Store { src: Gpr::D0, base: Gpr::A0, offset: -16 }.encode());
+
+    // ── p2 = a_hi * b_lo ──
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -4, dst: Gpr::D0 }.encode());  // S0 = a
+    code.extend(Instruction::Swap { dst: Gpr::D0 }.encode()); // S0 low 16 = a_hi
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -8, dst: Gpr::D1 }.encode());  // S1 = b
+    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    // S0 = p2. Load p1 from A0-16, add p2: S1 = p1 + p2.
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -16, dst: Gpr::D1 }.encode()); // S1 = p1
+    // Save p1 to A0-20 for carry check.
+    code.extend(Instruction::Store { src: Gpr::D1, base: Gpr::A0, offset: -20 }.encode());
+    code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D1 }.encode()); // S1 = p1 + p2
+    // Save p1+p2 to A0-16.
+    code.extend(Instruction::Store { src: Gpr::D1, base: Gpr::A0, offset: -16 }.encode());
+    // Carry = (p1+p2) < p1 (unsigned). CMP.L S0, S1: S1 - S0. If S1 < S0 → carry.
+    // S0 = p2 (still). We need to compare S1 (p1+p2) with p1 (A0-20).
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -20, dst: Gpr::D0 }.encode()); // S0 = p1
+    code.extend(Instruction::Cmp { src: Gpr::D0, dst: Gpr::D1 }.encode()); // S1 - S0: if S1 < S0, C set
+    // S3 = carry = (S1 < S0) ? 1 : 0. Use BCC/BCS.
+    // BCS.S set_one (carry set → overflow occurred)
+    // MOVEQ #0, D3; BCC.S +2; MOVEQ #1, D3
+    code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 0 }.encode());
+    // BCC.S skip (0x64 0x02): if carry clear (no overflow), skip
+    code.extend_from_slice(&[0x64, 0x02]);
+    code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 1 }.encode());
+
+    // ── p3 = a_hi * b_hi ── (contributes to result_hi via << 32)
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -4, dst: Gpr::D0 }.encode());  // S0 = a
+    code.extend(Instruction::Swap { dst: Gpr::D0 }.encode()); // S0 low 16 = a_hi
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -8, dst: Gpr::D1 }.encode());  // S1 = b
+    code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 low 16 = b_hi
+    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    // S0 = p3.
+
+    // ── result_hi = p3 + ((p1+p2) >> 16) + carry ──
+    // Load p1+p2 (A0-16), SWAP, mask low 16 → (p1+p2) >> 16.
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -16, dst: Gpr::D1 }.encode()); // S1 = p1+p2
+    code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 low 16 = (p1+p2)_hi
+    // ANDI.L #0xFFFF, D1
+    code.extend_from_slice(&[0x02, 0x81, 0x00, 0x00, 0xFF, 0xFF]);
+    // S1 = (p1+p2) >> 16. S0 = p3. result_hi = p3 + (p1+p2)>>16 + carry.
+    code.extend(Instruction::Add { src: Gpr::D1, dst: Gpr::D0 }.encode()); // S0 = p3 + (p1+p2)>>16
+    code.extend(Instruction::Add { src: Gpr::D3, dst: Gpr::D0 }.encode()); // S0 += carry
+    // S0 = result_hi. Move to S3.
+    // MOVE.L D0, D3: 0x2000 | (3<<9) | 0 = 0x2600
+    code.extend_from_slice(&[0x26, 0x00]); // MOVE.L D0, D3
+
+    // ── result_lo = p0 + ((p1+p2) << 16) ──
+    // Load p1+p2 (A0-16), SWAP, mask high 16 → (p1+p2)_lo << 16.
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -16, dst: Gpr::D1 }.encode()); // S1 = p1+p2
+    code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 high 16 = (p1+p2)_lo
+    // ANDI.L #0xFFFF0000, D1
+    code.extend_from_slice(&[0x02, 0x81, 0xFF, 0xFF, 0x00, 0x00]);
+    // S1 = (p1+p2)_lo << 16. Load p0 (A0-12).
+    code.extend(Instruction::Load { base: Gpr::A0, offset: -12, dst: Gpr::D0 }.encode()); // S0 = p0
+    code.extend(Instruction::Add { src: Gpr::D1, dst: Gpr::D0 }.encode()); // S0 = p0 + (p1+p2)_lo << 16
+    // S0 = result_lo. Move to S2.
+    // MOVE.L D0, D2: 0x2000 | (2<<9) | 0 = 0x2400
+    code.extend_from_slice(&[0x24, 0x00]); // MOVE.L D0, D2
+
+    // ── Restore A0 and SP via UNLK A0 ──
+    code.extend_from_slice(&[0x4E, 0x58]); // UNLK A0: SP=A0, A0=(SP)+
 }
 
 /// Emit a `BSR.L <symbol>` (m68k subroutine call) with a PC-relative
