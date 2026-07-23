@@ -5743,7 +5743,15 @@ impl Backend for Sparc64Backend {
         }
 
         // ── Add FFI return-0 stub ──
-        // OR %g0, 0, %o0 (return 0); JMPL %i7+8, %g0; RESTORE
+        // The ffi_stub is entered via CALL (which puts the return address in
+        // %o7) but does NOT execute SAVE. Therefore:
+        //   - The return address is in %o7 (NOT %i7, which would only be
+        //     correct after SAVE shifts the window).
+        //   - RESTORE must NOT be executed (no SAVE was done — RESTORE
+        //     would shift to the caller's caller's window, corrupting the
+        //     register window and returning garbage).
+        //
+        // Correct sequence: OR %o0=0; JMPL %o7+8 (return); NOP (delay slot).
         let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
         ffi_stub.extend_from_slice(
             &Instruction::Or {
@@ -5756,19 +5764,13 @@ impl Backend for Sparc64Backend {
         ffi_stub.extend_from_slice(
             &Instruction::Jmpl {
                 rd: Gpr::G0,
-                rs1: Gpr::I7,
+                rs1: Gpr::O7,
                 imm: 8,
             }
             .encode(),
         );
-        ffi_stub.extend_from_slice(
-            &Instruction::Restore {
-                rd: Gpr::G0,
-                rs1: Gpr::G0,
-                imm: 0,
-            }
-            .encode(),
-        );
+        // NOP for the JMPL delay slot (SETHI %g0, 0 = 0x01000000).
+        ffi_stub.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
