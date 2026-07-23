@@ -821,6 +821,27 @@ fn ss_load_value_64(
     code
 }
 
+/// Load only the high 32 bits of a 64-bit IRValue into `dst`.
+/// For Register: load from `[offset - 4]` (the standard 64-bit stack-slot
+/// layout: low at [off], high at [off-4]). For Immediate: load `v >> 32`.
+/// [Wave K-hppa-stark] Used by I64 Xor/And/Or/Sub to apply the op to both
+/// halves — without this, only the low 32 bits of the destination are
+/// written, leaving the high 32 bits as 0 and corrupting 64-bit values
+/// like the FNV-1a hash in stark_verify.
+fn ss_load_value_hi(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, dst: Reg) -> Vec<u8> {
+    match val {
+        IRValue::Register(id) => {
+            let offset = slots.get(id).copied().unwrap_or(0);
+            ss_ld(dst, offset - 4)
+        }
+        IRValue::Immediate(v) => {
+            let hi = (*v as u64 >> 32) as i64;
+            ss_load_imm(dst, hi)
+        }
+        _ => ss_load_imm(dst, 0),
+    }
+}
+
 /// Store a 64-bit value (lo_reg, hi_reg) to a stack slot at offset `off`.
 /// Low word goes to `[off]`, high word to `[off-4]` (matches the f64 layout
 /// convention used elsewhere in this file).
@@ -1006,9 +1027,13 @@ fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
     // S6 = S1 & 1
     code.extend(ss_load_imm(S6, 1));
     code.extend_from_slice(&encode_and(S1, S6, S6));
-    // cmpb,= S6, R0, skip_add (nullify delay slot if taken)
+    // [Wave K-hppa-stark] cmpb,= S6, R0, skip_add — branch if S6 == 0
+    // (bit is 0) to skip the add. The previous code used inverted=true,
+    // which branches if S6 != 0 (bit is 1) — the OPPOSITE of what
+    // shift-and-add requires, making every multiply compute the wrong
+    // result (adding on bit=0 iterations and skipping on bit=1).
     let cmpb_off = code.len();
-    code.extend_from_slice(&encode_cmpb(S6, R0, 0b001, true, false, 0));
+    code.extend_from_slice(&encode_cmpb(S6, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
     // add: S0 += S3 (low word). Save old S0 in S6 for carry check.
     code.extend_from_slice(&encode_copy(S0, S6));     // S6 = old_lo
@@ -1035,14 +1060,20 @@ fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
     let ep = (ew & !0x1FFF) | encode_cmpb_disp(exit_disp);
     code[exit_cmpb_off..exit_cmpb_off+4].copy_from_slice(&ep.to_be_bytes());
 
-    // Patch cmpb,= (bit-0 check) to skip: nop + copy + add + carry_cmpb + nop + ldo = 24 bytes
-    let skip_disp1 = 24i32 & !3;
+    // Patch cmpb,= (bit-0 check) to skip: copy + add + carry_cmpb + nop +
+    // ldo = 20 bytes (5 instructions). Target = shladd (S3 <<= 1), which
+    // MUST always execute. The previous code used 24 bytes, which skipped
+    // the shladd too — when bit=0, S3 was never shifted, corrupting all
+    // subsequent partial products.
+    let skip_disp1 = 20i32 & !3;
     let cw1 = u32::from_be_bytes([code[cmpb_off], code[cmpb_off+1], code[cmpb_off+2], code[cmpb_off+3]]);
     let cp1 = (cw1 & !0x1FFF) | encode_cmpb_disp(skip_disp1);
     code[cmpb_off..cmpb_off+4].copy_from_slice(&cp1.to_be_bytes());
 
-    // Patch carry cmpb,>>= to skip the S2++ (8 bytes: nop + ldo)
-    let skip_disp2 = 8i32 & !3;
+    // Patch carry cmpb,>>= to skip the S2++ (4 bytes: ldo). Target =
+    // shladd. The previous code used 8 bytes, which skipped the shladd
+    // too — when there was no carry, S3 was never shifted.
+    let skip_disp2 = 4i32 & !3;
     let cw2 = u32::from_be_bytes([code[carry_cmpb_off], code[carry_cmpb_off+1], code[carry_cmpb_off+2], code[carry_cmpb_off+3]]);
     let cp2 = (cw2 & !0x1FFF) | encode_cmpb_disp(skip_disp2);
     code[carry_cmpb_off..carry_cmpb_off+4].copy_from_slice(&cp2.to_be_bytes());
@@ -3280,12 +3311,51 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     }
                                 }
                                 BinOpKind::Sub => {
-                                    code.extend_from_slice(&encode_sub(S0, S1, S0));
+                                    // [Wave K-hppa-stark] I64 Sub: handle the high
+                                    // word with borrow from the low subtraction.
+                                    // Without this, only the low 32 bits of the
+                                    // destination are written, leaving the high 32
+                                    // bits as 0 (uninitialized).
+                                    if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                                        // S5 = 1 if lhs_lo <u rhs_lo (borrow), else 0.
+                                        // cmpb,>>=,n S0, S1, skip  (cond=100, inverted=true, nullify=true)
+                                        code.extend_from_slice(&encode_ldi(0, S5));
+                                        let brw_cmpb = code.len();
+                                        code.extend_from_slice(&encode_cmpb(S0, S1, 0b100, true, true, 0));
+                                        code.extend_from_slice(&encode_nop()); // delay slot
+                                        code.extend_from_slice(&encode_ldi(1, S5));
+                                        let brw_done = code.len() as i64;
+                                        let brw_disp = ((brw_done - brw_cmpb as i64 - 8) as i32) & !3;
+                                        let brw_w = u32::from_be_bytes([code[brw_cmpb], code[brw_cmpb+1], code[brw_cmpb+2], code[brw_cmpb+3]]);
+                                        let brw_p = (brw_w & !0x1FFF) | encode_cmpb_disp(brw_disp);
+                                        code[brw_cmpb..brw_cmpb+4].copy_from_slice(&brw_p.to_be_bytes());
+                                        // S0 = S0 - S1 (low word)
+                                        code.extend_from_slice(&encode_sub(S0, S1, S0));
+                                        // S3 = lhs_hi, S4 = rhs_hi
+                                        code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                                        code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                                        // S3 = S3 - S4 - S5 (high word with borrow)
+                                        code.extend_from_slice(&encode_sub(S3, S4, S3));
+                                        code.extend_from_slice(&encode_sub(S3, S5, S3));
+                                        code.extend(ss_st(S3, dst_off - 4));
+                                    } else {
+                                        code.extend_from_slice(&encode_sub(S0, S1, S0));
+                                    }
                                 }
                                 BinOpKind::And => {
                                     // AND = 0x08000200 | (r1<<16) | r2
                                     let w = 0x08000200u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
                                     code.extend_from_slice(&w.to_be_bytes());
+                                    // [Wave K-hppa-stark] For I64 And, also AND the
+                                    // high 32 bits so the destination's high word is
+                                    // lhs_hi & rhs_hi (not 0).
+                                    if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                                        code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                                        code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                                        let w_hi = 0x08000200u32 | ((S3 as u32) << 16) | (S3 as u32) | ((S4 as u32) << 21);
+                                        code.extend_from_slice(&w_hi.to_be_bytes());
+                                        code.extend(ss_st(S3, dst_off - 4));
+                                    }
                                     code.extend_from_slice(&encode_copy(S0, S0)); // nop-like
                                 }
                                 BinOpKind::Or => {
@@ -3314,9 +3384,19 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         // the fragile TMP64_* temp-slot chain.
                                         code.extend(ss_st(S4, dst_off - 4));
                                     } else {
-                                        // Regular 32-bit OR
+                                        // Regular 32-bit OR (low word)
                                         let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
                                         code.extend_from_slice(&w.to_be_bytes());
+                                        // [Wave K-hppa-stark] For I64 Or (non-pack
+                                        // case), also OR the high 32 bits so the
+                                        // destination's high word is lhs_hi | rhs_hi.
+                                        if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                                            code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                                            code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                                            let w_hi = 0x08000260u32 | ((S3 as u32) << 16) | (S3 as u32) | ((S4 as u32) << 21);
+                                            code.extend_from_slice(&w_hi.to_be_bytes());
+                                            code.extend(ss_st(S3, dst_off - 4));
+                                        }
                                         code.extend_from_slice(&encode_copy(S0, S0));
                                     }
                                 }
@@ -3324,6 +3404,20 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     // XOR = 0x08000280 | (r1<<16) | r2
                                     let w = 0x08000280u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
                                     code.extend_from_slice(&w.to_be_bytes());
+                                    // [Wave K-hppa-stark] For I64 Xor, also XOR the
+                                    // high 32 bits. Without this, the destination's
+                                    // high word stays 0 (uninitialized), which
+                                    // corrupts the FNV-1a hash in stark_verify: each
+                                    // loop iteration zeroes the hash's high word, so
+                                    // the recomputed commitment never matches the
+                                    // stored verifier_key (verify wrongly returns 0).
+                                    if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                                        code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                                        code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                                        let w_hi = 0x08000280u32 | ((S3 as u32) << 16) | (S3 as u32) | ((S4 as u32) << 21);
+                                        code.extend_from_slice(&w_hi.to_be_bytes());
+                                        code.extend(ss_st(S3, dst_off - 4));
+                                    }
                                     code.extend_from_slice(&encode_copy(S0, S0));
                                 }
                                 BinOpKind::Mul => {
@@ -3331,41 +3425,38 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
                                     if is_64 {
                                         // 64-bit multiply via three 32×32→64 schoolbook partials.
-                                        // Load hi words for both operands.
-                                        let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-                                        let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-                                        code.extend(ss_ld(S3, lhs_off - 4));  // lhs_hi
-                                        code.extend(ss_ld(S4, rhs_off - 4));  // rhs_hi
-                                        // Save all 4 words to stack temps.
-                                        code.extend(ss_st(S0, dst_off - 8));   // lhs_lo
-                                        code.extend(ss_st(S1, dst_off - 12));  // rhs_lo
-                                        code.extend(ss_st(S3, dst_off - 16));  // lhs_hi
-                                        code.extend(ss_st(S4, dst_off - 20));  // rhs_hi
+                                        // [Wave K-hppa-stark-final] FIX: use S4 as a REGISTER
+                                        // accumulator for result_hi (no stack temps). Previous
+                                        // code used dst_off-8/-12/-16/-20/-24 as stack temps,
+                                        // which ALIASED with adjacent vreg slots (vregs are
+                                        // 8 bytes apart). Using S4 (preserved across
+                                        // emit_hppa_mulu32_to_64 which clobbers S0,S1,S2,S3,
+                                        // S5,S6 but NOT S4) eliminates ALL stack aliasing.
 
-                                        // Partial 1: lhs_lo * rhs_lo → 64-bit (S0=lo, S2=hi)
-                                        code.extend(ss_ld(S0, dst_off - 8));
-                                        code.extend(ss_ld(S1, dst_off - 12));
+                                        // S4 = 0 (result_hi accumulator)
+                                        code.extend_from_slice(&encode_copy(R0, S4));
+
+                                        // Partial 1: lhs_lo * rhs_lo → S0=lo, S2=hi
+                                        // S0 = lhs_lo, S1 = rhs_lo (from prologue)
                                         emit_hppa_mulu32_to_64(&mut code);
                                         code.extend(ss_st(S0, dst_off));       // result_lo
-                                        code.extend(ss_st(S2, dst_off - 24));  // partial result_hi
+                                        code.extend_from_slice(&encode_add(S2, S4, S4));  // S4 += partial1_hi
 
-                                        // Partial 2: lhs_lo * rhs_hi → lo32 added to result_hi
-                                        code.extend(ss_ld(S0, dst_off - 8));
-                                        code.extend(ss_ld(S1, dst_off - 20));
+                                        // Partial 2: lhs_lo * rhs_hi → S0=lo, S2=hi
+                                        code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
+                                        code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S1));
                                         emit_hppa_mulu32_to_64(&mut code);
-                                        code.extend(ss_ld(S2, dst_off - 24));
-                                        code.extend_from_slice(&encode_add(S0, S2, S2));
-                                        code.extend(ss_st(S2, dst_off - 24));
+                                        code.extend_from_slice(&encode_add(S0, S4, S4));  // S4 += partial2_lo
 
-                                        // Partial 3: lhs_hi * rhs_lo → lo32 added to result_hi
-                                        code.extend(ss_ld(S0, dst_off - 16));
-                                        code.extend(ss_ld(S1, dst_off - 12));
+                                        // Partial 3: lhs_hi * rhs_lo → S0=lo, S2=hi
+                                        code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S0));
+                                        code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
                                         emit_hppa_mulu32_to_64(&mut code);
-                                        code.extend(ss_ld(S2, dst_off - 24));
-                                        code.extend_from_slice(&encode_add(S0, S2, S2));
+                                        code.extend_from_slice(&encode_add(S0, S4, S4));  // S4 += partial3_lo
 
-                                        // Store final result_hi at dst_off-4.
-                                        code.extend(ss_st(S2, dst_off - 4));
+                                        // Store final result_hi and reload result_lo.
+                                        code.extend(ss_st(S4, dst_off - 4));
+                                        code.extend(ss_ld(S0, dst_off));
                                     } else {
                                         // 32-bit multiply via shift-and-add (O(32)).
                                         code.extend_from_slice(&encode_copy(S0, S3));  // S3 = lhs
@@ -3379,9 +3470,13 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         // S6 = S1 & 1
                                         code.extend(ss_load_imm(S6, 1));
                                         code.extend_from_slice(&encode_and(S1, S6, S6));
-                                        // cmpb,= S6, R0, skip_add
+                                        // [Wave K-hppa-stark] cmpb,= S6, R0, skip_add —
+                                        // branch if S6 == 0 (bit is 0) to skip the add.
+                                        // The previous code used inverted=true (branch
+                                        // if bit is 1) — the OPPOSITE of what
+                                        // shift-and-add requires.
                                         let cmpb_off = code.len();
-                                        code.extend_from_slice(&encode_cmpb(S6, R0, 0b001, true, false, 0));
+                                        code.extend_from_slice(&encode_cmpb(S6, R0, 0b001, false, false, 0));
                                         code.extend_from_slice(&encode_nop());
                                         // add: S0 += S3
                                         code.extend_from_slice(&encode_add(S3, S0, S0));
@@ -3398,8 +3493,12 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         let ew = u32::from_be_bytes([code[exit_cmpb_off], code[exit_cmpb_off+1], code[exit_cmpb_off+2], code[exit_cmpb_off+3]]);
                                         let ep = (ew & !0x1FFF) | encode_cmpb_disp(exit_disp);
                                         code[exit_cmpb_off..exit_cmpb_off+4].copy_from_slice(&ep.to_be_bytes());
-                                        // Patch the bit-check cmpb,= to skip nop+add = 8 bytes.
-                                        let skip_disp = 8i32 & !3;
+                                        // Patch the bit-check cmpb,= to skip the add
+                                        // (4 bytes). Target = shladd (S3 <<= 1),
+                                        // which MUST always execute. The previous
+                                        // code used 8 bytes, which skipped the
+                                        // shladd too — corrupting the multiply.
+                                        let skip_disp = 4i32 & !3;
                                         let cw = u32::from_be_bytes([code[cmpb_off], code[cmpb_off+1], code[cmpb_off+2], code[cmpb_off+3]]);
                                         let cp = (cw & !0x1FFF) | encode_cmpb_disp(skip_disp);
                                         code[cmpb_off..cmpb_off+4].copy_from_slice(&cp.to_be_bytes());
