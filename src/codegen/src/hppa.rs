@@ -4720,7 +4720,6 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     //   5. NOP             — delay slot for BV (executed)
                     IRInstr::CallIndirect { dst, func_ptr, args } => {
                         // Move args to R26-R23 (first 4 args).
-                        // Stack args (4+) go to [R30 - 32 + (i-4)*4].
                         for (i, arg) in args.iter().enumerate() {
                             if i < 4 {
                                 code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
@@ -4730,17 +4729,27 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 code.extend_from_slice(&encode_stw(S0, R30, stack_off as i16));
                             }
                         }
-                        // Load func_ptr into R1 (RP — standard indirect-call target).
-                        code.extend(ss_load_value(func_ptr, &vreg_stack_slots, R1));
-                        // BL +0, R2 — R2 = PC+8 (link register holds return-thunk addr)
-                        code.extend_from_slice(&0xE8400000u32.to_be_bytes());
-                        // NOP — delay slot (executed; harmless)
+                        // [Wave G-hppa-callindirect] Indirect call using the SAME
+                        // 32-byte (8-instruction) pattern as direct calls, but with
+                        // COPY S0,R1 instead of LDO disp(R1),R1 for the target.
+                        // This ensures the return address (R2 = PC+32) and BV layout
+                        // match exactly what the callee's prologue/epilogue expect.
+                        code.extend(ss_load_value(func_ptr, &vreg_stack_slots, S0)); // S0 = func_ptr
+                        // +0: BL +0, R1 (same as direct call)
+                        code.extend_from_slice(&0xE8200000u32.to_be_bytes());
+                        // +4: NOP (delay slot)
                         code.extend_from_slice(&encode_nop());
-                        // LDO 12(R2), R2 — R2 = PC+8 + 12 = PC+20 (after BV+NOP)
-                        code.extend_from_slice(&encode_ldo_raw(R2, 12, R2));
-                        // BV R0(R1) — branch to address in R1
+                        // +8: LDO 24(R1), R2 (R2 = PC+32, same as direct call)
+                        code.extend_from_slice(&encode_ldo_raw(R1, 24, R2));
+                        // +12: COPY S0, R1 (R1 = func_ptr — replaces LDO disp)
+                        code.extend_from_slice(&encode_copy(S0, R1));
+                        // +16: BV R0(R1) (same as direct call)
                         code.extend_from_slice(&encode_bv_real(R1));
-                        // NOP — delay slot for BV (executed before branch takes effect)
+                        // +20: NOP (delay slot for BV; return address is PC+32)
+                        code.extend_from_slice(&encode_nop());
+                        // +24: NOP (padding to match 32-byte pattern)
+                        code.extend_from_slice(&encode_nop());
+                        // +28: NOP (padding to match 32-byte pattern)
                         code.extend_from_slice(&encode_nop());
                         // Move return value from R28 to dst's stack slot.
                         if let Some(d) = dst {
