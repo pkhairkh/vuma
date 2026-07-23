@@ -244,3 +244,58 @@ Stage Summary:
   * fault_tolerance: 14/18 (ppc64/ppc64le/sparc64/hppa multi-block CFG)
   * distributed: 17/18 (arm32 QEMU environment issue)
   * All other tests: 18/18 pass
+
+---
+Task ID: Wave-final-summary
+Agent: main (orchestrator)
+Task: Final summary of all 19-backend wave progress.
+
+Work Log:
+- Ran comprehensive test matrix across all 19 backends in batches.
+- Confirmed build is green: cargo build --workspace succeeds with 0 errors.
+
+Final 19-Backend Test Matrix Summary (18 runnable + wasm32 non-QEMU):
+
+  Test Category           | Pass/18 | Failing backends
+  ------------------------|---------|-------------------------------------------
+  Core IPC (7 tests)      | 17/18   | riscv32 multi_message (hang, pre-existing)
+  L2-L8 (7 tests)         | 18/18   | —
+  stark_proof             | 17/18   | hppa (repeated-addition Mul, needs real I64 Mul)
+  ffi_basic               | 18/18   | — (FIXED in Wave A: 32-bit timespec)
+  ffi_isolation           | 18/18   | —
+  ffi_crash_recovery      | 18/18   | —
+  supervisor              | 18/18   | —
+  driver_isolation        | 17/18   | riscv32 (driver_call+if, needs deeper investigation)
+  fault_tolerance         | 14/18   | ppc64/ppc64le/sparc64/hppa (multi-block CFG)
+  hot_swap                | 18/18   | —
+  distributed             | 17/18   | arm32 (QEMU env: connect to 0.0.0.0:1 succeeds)
+  sandbox                 | 18/18   | —
+  resource_limit          | 18/18   | —
+  error_containment       | 18/18   | —
+  cap_flow/cap_revoke     | 18/18   | —
+  delegation              | 18/18   | —
+  linear_valid            | 18/18   | —
+  infoflow_valid          | 18/18   | —
+  session_valid           | 18/18   | —
+  formal_verify           | 18/18   | —
+
+Waves Completed (committed and pushed):
+  - Wave baseline-audit: 19-backend test matrix script + worklog
+  - Wave A: 32-bit timespec fix (ffi_basic on arm32/riscv32/x86_32)
+  - Wave B: m68k I64 Mul fix (stark_proof on m68k — MULU.W schoolbook)
+  - Wave C: distributed arm32 investigation (QEMU env, not codegen bug)
+  - Wave D: riscv32 CallIndirect + GetAddress relocation fixes
+  - Wave E: fault_tolerance multi-block CFG investigation (ppc64/sparc64/hppa)
+
+Total commits pushed: 5 waves + baseline audit = 6 commits.
+
+Stage Summary:
+- 18/19 backends are QEMU-runnable (wasm32 is not Linux-native)
+- The vast majority of the 33-test gold-standard suite passes on all 18 backends
+- Remaining issues are backend-specific deep codegen bugs:
+  * hppa: needs real I64 Mul (repeated-addition is O(n), infeasible for FNV prime)
+  * riscv32: multi_message + driver_isolation+if (stack/Alloc interaction)
+  * ppc64/ppc64le/sparc64/hppa: multi-block CFG branch fixup for merge blocks
+  * arm32: distributed (QEMU env, not fixable in codegen)
+- All §0.3 single-path IPC architecture criteria continue to pass.
+- Build is green. No regressions introduced.
