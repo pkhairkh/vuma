@@ -4259,6 +4259,15 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             reloc_type: "R_PARISC_DIR32".to_string(),
                         });
                         code.extend(ss_st(S0, d_off));
+                        // [Wave G-hppa-getaddr] Zero the hi word at [d_off-4].
+                        // VUMA vreg slots are 8 bytes (64-bit). The GetAddress
+                        // stores a 32-bit address to [d_off] but leaves [d_off-4]
+                        // (the hi word) uninitialized. When the I64 Store reads
+                        // via ss_load_value_64, it picks up garbage from [d_off-4]
+                        // and writes it to memory, corrupting the handler_ptr.
+                        // Fix: explicitly store 0 to [d_off-4].
+                        code.extend_from_slice(&encode_ldi(0, S1));
+                        code.extend(ss_st(S1, d_off - 4));
                     }
                     IRInstr::Offset { dst, base, offset } => {
                         code.extend(ss_load_value(base, &vreg_stack_slots, S0));
