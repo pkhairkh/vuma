@@ -5742,7 +5742,16 @@ impl Backend for RiscV32Backend {
 
                     IRInstr::Store { value, addr, offset, ty } => {
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T3));
+                        // [Wave K-rv32] Load addr into T2 (NOT T3), and use T3
+                        // as the offset scratch. ss_load_from_slot (called by
+                        // ss_load_value / ss_load_value_64 / ss_load_fpr_*_from_slot)
+                        // and ss_store_to_slot use T3 as an internal scratch when
+                        // the slot offset exceeds 2047. If addr lived in T3, the
+                        // subsequent value load would clobber it, causing the store
+                        // to write to the wrong address (root cause of the
+                        // driver_isolation hang when the stack frame is large).
+                        // This mirrors the riscv64 backend's IRInstr::Store.
+                        code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T2));
                         // [Wave D-riscv32-label] Handle IRValue::Label (function
                         // pointer) by emitting LUI+ADDI with R_RISCV_HI20/
                         // R_RISCV_LO12_I relocations, same as GetAddress.
@@ -5776,26 +5785,29 @@ impl Backend for RiscV32Backend {
                         match ty {
                             IRType::I8 | IRType::U8 => {
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Sb { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sb { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                 }
                             }
                             IRType::I32 | IRType::U32 => {
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                 }
                             }
                             IRType::F32 => {
                                 // 4-byte FP store: load value bits into F0 (via
                                 // FLW from value's slot if Register, or FMV.W.X
                                 // from T0 if immediate), then FSW to [addr+off].
+                                // [Wave K-rv32] ss_load_fpr_s_from_slot may
+                                // clobber T3 (its internal scratch for large slot
+                                // offsets) — safe here because addr lives in T2.
                                 if let IRValue::Register(id) = value {
                                     let voff = vreg_stack_slots.get(id).copied().unwrap_or(0);
                                     code.extend(ss_load_fpr_s_from_slot(Fpr::F0, voff));
@@ -5804,16 +5816,19 @@ impl Backend for RiscV32Backend {
                                     code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
                                 }
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Fsw { rs1: Gpr::T3, rs2: Fpr::F0, imm: off }.encode());
+                                    code.extend(Instruction::Fsw { rs1: Gpr::T2, rs2: Fpr::F0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Fsw { rs1: Gpr::T2, rs2: Fpr::F0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Fsw { rs1: Gpr::T3, rs2: Fpr::F0, imm: 0 }.encode());
                                 }
                             }
                             IRType::F64 | IRType::I64 | IRType::U64 => {
                                 // 8-byte store. For F64: FLD value into F0, then FSD.
                                 // For I64/U64: load lo/hi into T0/T1, then two Sw's.
+                                // [Wave K-rv32] ss_load_value_64 and ss_load_fpr_d_from_slot
+                                // may clobber T3 (internal scratch for large slot
+                                // offsets) — safe here because addr lives in T2.
                                 if matches!(ty, IRType::F64) {
                                     if let IRValue::Register(id) = value {
                                         let voff = vreg_stack_slots.get(id).copied().unwrap_or(0);
@@ -5826,11 +5841,11 @@ impl Backend for RiscV32Backend {
                                         code.extend(ss_load_fpr_d_from_slot(Fpr::F0, fp_scratch_off_0));
                                     }
                                     if off >= -2048 && off <= 2047 {
-                                        code.extend(Instruction::Fsd { rs1: Gpr::T3, rs2: Fpr::F0, imm: off }.encode());
+                                        code.extend(Instruction::Fsd { rs1: Gpr::T2, rs2: Fpr::F0, imm: off }.encode());
                                     } else {
-                                        code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                        code.extend(Instruction::Fsd { rs1: Gpr::T2, rs2: Fpr::F0, imm: 0 }.encode());
+                                        code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                        code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                        code.extend(Instruction::Fsd { rs1: Gpr::T3, rs2: Fpr::F0, imm: 0 }.encode());
                                     }
                                 } else {
                                     // I64/U64: load lo (T0) and hi (T1), then two Sw's.
@@ -5844,29 +5859,29 @@ impl Backend for RiscV32Backend {
                                         code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
                                     }
                                     if off >= -2048 && off <= 2047 {
-                                        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                        code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                     } else {
-                                        code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                        code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                        code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                        code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                     }
                                     let hi_off = off + 4;
                                     if hi_off >= -2048 && hi_off <= 2047 {
-                                        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T1, imm: hi_off }.encode());
+                                        code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T1, imm: hi_off }.encode());
                                     } else {
-                                        code.extend(ss_load_imm(Gpr::T2, hi_off as i64));
-                                        code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                        code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T1, imm: 0 }.encode());
+                                        code.extend(ss_load_imm(Gpr::T3, hi_off as i64));
+                                        code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T1, imm: 0 }.encode());
                                     }
                                 }
                             }
                             _ => {
                                 if off >= -2048 && off <= 2047 {
-                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
+                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
                                 } else {
-                                    code.extend(ss_load_imm(Gpr::T2, off as i64));
-                                    code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T3, rs2: Gpr::T2 }.encode());
-                                    code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: 0 }.encode());
+                                    code.extend(ss_load_imm(Gpr::T3, off as i64));
+                                    code.extend(Instruction::Add { rd: Gpr::T3, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                    code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: 0 }.encode());
                                 }
                             }
                         }
@@ -7042,6 +7057,16 @@ impl Backend for RiscV32Backend {
                         instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                             .copy_from_slice(&encoded);
                     } else {
+                        // [Wave K-rv32] Out of range: record for trampoline
+                        // emission. The previous code had an empty `else`
+                        // branch here, leaving the BNE with its placeholder
+                        // offset of 0 (branch-to-self), causing an infinite
+                        // loop whenever a CondBranch's true_target was more
+                        // than ±4KB away. This is the root cause of the
+                        // driver_isolation hang at the final
+                        // `CondBranch R17 ? then_3 : merge_5` (close syscalls
+                        // push then_3 >4KB before the BNE).
+                        trampolines.push((i, fixup.target_label.clone()));
                     }
                 }
             }
