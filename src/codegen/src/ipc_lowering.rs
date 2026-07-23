@@ -1452,6 +1452,62 @@ fn sock_stream_flag(backend: BackendKind) -> i64 {
         _ => 1,
     }
 }
+
+/// Returns true for backends where `long` and `time_t` are 32-bit (4 bytes).
+///
+/// On 32-bit Linux, `struct timespec { time_t tv_sec; long tv_nsec; }`
+/// has both fields as 4 bytes (total 8 bytes), with `tv_nsec` at offset 4.
+/// On 64-bit Linux, both fields are 8 bytes (total 16 bytes), with
+/// `tv_nsec` at offset 8.
+///
+/// This affects `nanosleep`, `poll`/`ppoll` timeout structs, and any
+/// other syscall that takes a `struct timespec`. Using the wrong layout
+/// causes the kernel to read garbage `tv_nsec` values, leading to either
+/// -EINVAL (immediate return) or infinite sleeps (huge nsec).
+fn is_32bit_backend(backend: BackendKind) -> bool {
+    matches!(
+        backend,
+        BackendKind::Arm32
+            | BackendKind::ArmEb
+            | BackendKind::RiscV32
+            | BackendKind::X86_32
+    )
+}
+
+/// Emit a `nanosleep(timespec, NULL)` IR sequence with the correct
+/// `struct timespec` layout for the target backend.
+///
+/// `tv_sec` is always 0 (no whole seconds). `tv_nsec` is `nsec`.
+///
+/// On 64-bit backends: `timespec = { i64 tv_sec=0, i64 tv_nsec=nsec }` (16 bytes).
+/// On 32-bit backends: `timespec = { i32 tv_sec=0, i32 tv_nsec=nsec }` (8 bytes).
+///
+/// The 32-bit case is critical: if we store `tv_nsec` at offset 8 with
+/// `IRType::I64`, the kernel reads `tv_sec` from [0..4] (correct), but
+/// `tv_nsec` from [4..8] which is uninitialized garbage (the I64 store
+/// at offset 8 wrote past the actual field). This causes nanosleep to
+/// either return -EINVAL immediately or sleep for an enormous duration.
+fn emit_nanosleep(ctx: &mut LowerContext, nsec: i64) -> Vec<IRInstr> {
+    let sleep_buf = ctx.new_vreg();
+    if is_32bit_backend(ctx.backend) {
+        // 32-bit: struct timespec { i32 tv_sec; i32 tv_nsec; } = 8 bytes
+        vec![
+            IRInstr::Alloc { dst: sleep_buf.clone(), size: 8 },
+            IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I32 },
+            IRInstr::Store { value: IRValue::Immediate(nsec), addr: sleep_buf.clone(), offset: 4, ty: IRType::I32 },
+            IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
+        ]
+    } else {
+        // 64-bit: struct timespec { i64 tv_sec; i64 tv_nsec; } = 16 bytes
+        vec![
+            IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
+            IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
+            IRInstr::Store { value: IRValue::Immediate(nsec), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
+            IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
+        ]
+    }
+}
+
 /// Helper: set O_NONBLOCK on a read_fd via `fcntl(fd, F_SETFL=4, O_NONBLOCK)`.
 ///
 /// `o_nonblock` is the per-arch `O_NONBLOCK` bit value (see [`o_nonblock_flag`]).
@@ -1518,13 +1574,11 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
     // because the read() on an empty pipe BLOCKS (even with O_NONBLOCK
     // set, if fcntl doesn't work correctly on some QEMU backends).
     // Moving the nanosleep before read ensures the child gets to run first.
-    let sleep_buf = ctx.new_vreg();
-    instrs.extend(vec![
-        IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Store { value: IRValue::Immediate(10_000_000), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
-        IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
-    ]);
+    //
+    // Uses emit_nanosleep which emits the correct struct timespec layout
+    // for both 32-bit (8 bytes, tv_nsec at offset 4) and 64-bit (16 bytes,
+    // tv_nsec at offset 8) backends.
+    instrs.extend(emit_nanosleep(ctx, 10_000_000));
     // Use read() with O_NONBLOCK (set above by emit_set_nonblocking).
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
@@ -2033,7 +2087,14 @@ fn expand_driver_call(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
     // The `while changed` loop in lower_ipc_builtins will catch the
     // new Call instructions on the next iteration and expand them with
     // real CRC32 framing, capability verification, and MAGIC checks.
-    let sleep_buf = ctx.new_vreg();
+    //
+    // Uses emit_nanosleep which emits the correct struct timespec layout
+    // for both 32-bit (8 bytes, tv_nsec at offset 4) and 64-bit (16 bytes,
+    // tv_nsec at offset 8) backends. The 32-bit case is critical: the
+    // previous hardcoded I64 stores at offsets 0/8 corrupted the timespec
+    // on 32-bit backends, causing nanosleep to return -EINVAL immediately
+    // (no sleep) and the subsequent channel_recv to race with the child's
+    // send, deadlocking ffi_basic/driver_call on arm32/riscv32/x86_32.
     let mut instrs = vec![
         IRInstr::Call {
             dst: None,
@@ -2041,12 +2102,8 @@ fn expand_driver_call(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRV
             args: vec![ch.clone(), cmd],
             is_extern: false,
         },
-        // nanosleep(1ms) between send and recv.
-        IRInstr::Alloc { dst: sleep_buf.clone(), size: 16 },
-        IRInstr::Store { value: IRValue::Immediate(0), addr: sleep_buf.clone(), offset: 0, ty: IRType::I64 },
-        IRInstr::Store { value: IRValue::Immediate(1_000_000), addr: sleep_buf.clone(), offset: 8, ty: IRType::I64 },
-        IRInstr::Syscall { nr: 101, args: vec![sleep_buf, IRValue::Immediate(0)], dst: None },
     ];
+    instrs.extend(emit_nanosleep(ctx, 1_000_000));
     if let Some(d) = dst {
         instrs.push(IRInstr::Call {
             dst: Some(d.clone()),

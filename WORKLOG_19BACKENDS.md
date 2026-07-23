@@ -65,3 +65,26 @@ Stage Summary:
   * Wave D: driver_isolation on riscv32 (hang) + hppa (segfault)
   * Wave E: fault_tolerance on ppc64/ppc64le/sparc64/hppa (segfault) + riscv32/m68k (F:1)
   * Wave F: multi_message on riscv32 (hang)
+
+---
+Task ID: Wave-A-32bit-timespec
+Agent: main (orchestrator)
+Task: Fix 32-bit timespec bug — ffi_basic hangs on arm32, riscv32, x86_32.
+
+Work Log:
+- Pre-state: `rg 'nanosleep|tv_nsec' src/codegen/src/ipc_lowering.rs` returned 10 matches across 2 call sites
+- Identified root cause: `expand_channel_try_recv` and `expand_driver_call` (which backs process_call) both emitted nanosleep timespec as 2x I64 stores (offsets 0/8). On 32-bit Linux, struct timespec is { i32 tv_sec, i32 tv_nsec } (8 bytes, nsec at offset 4). The I64 stores corrupted the struct, causing nanosleep to return -EINVAL immediately and the subsequent channel_recv to race with the child's send → deadlock.
+- Edited src/codegen/src/ipc_lowering.rs:
+  * Added `is_32bit_backend(backend)` helper — true for Arm32, ArmEb, RiscV32, X86_32
+  * Added `emit_nanosleep(ctx, nsec)` helper — emits 8-byte timespec (i32/i32) on 32-bit, 16-byte (i64/i64) on 64-bit
+  * Replaced channel_try_recv nanosleep block with `emit_nanosleep(ctx, 10_000_000)`
+  * Replaced driver_call/process_call nanosleep block with `emit_nanosleep(ctx, 1_000_000)`
+- Build: PASS (cargo build --workspace, 0 errors)
+- Regression: simple_send=42, ping_pong=84, multi_message=63, try_recv=77, recv_timeout=88 — all pass on all 18 runnable backends
+- Wave test: ffi_basic.vuma → exit=42 on arm32, riscv32, x86_32 ✓ (was: timeout/hang)
+- No regressions: ffi_isolation=42, ffi_crash_recovery=1 still pass on all 18 backends
+
+Stage Summary:
+- ffi_basic now passes on 18/18 runnable backends (was 15/18)
+- The 32-bit timespec fix also unlocks driver_isolation (which uses expand_driver_call) on riscv32 — needs verification
+- Next: Wave B (stark_proof on m68k/hppa), Wave C (distributed on arm32/hppa), Wave D (driver_isolation on hppa), Wave E (fault_tolerance segfaults)
