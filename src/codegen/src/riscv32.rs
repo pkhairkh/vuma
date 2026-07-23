@@ -5743,7 +5743,35 @@ impl Backend for RiscV32Backend {
                     IRInstr::Store { value, addr, offset, ty } => {
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T3));
-                        code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T0));
+                        // [Wave D-riscv32-label] Handle IRValue::Label (function
+                        // pointer) by emitting LUI+ADDI with R_RISCV_HI20/
+                        // R_RISCV_LO12_I relocations, same as GetAddress.
+                        // Without this, driver_register(irq, my_handler) stores 0
+                        // as the handler pointer, and irq_dispatch's CallIndirect
+                        // jumps to address 0 → segfault.
+                        let is_label = matches!(value, IRValue::Label(_));
+                        if is_label {
+                            if let IRValue::Label(name) = value {
+                                // LUI T0, 0 (placeholder — patched by linker)
+                                let lui_off = current_byte_offset + code.len() as u64;
+                                code.extend(Instruction::Lui { rd: Gpr::T0, imm: 0 }.encode());
+                                // ADDI T0, T0, 0 (placeholder)
+                                let addi_off = current_byte_offset + code.len() as u64;
+                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
+                                relocations.push(RelocationEntry {
+                                    offset: lui_off,
+                                    symbol: name.clone(),
+                                    reloc_type: "R_RISCV_HI20".to_string(),
+                                });
+                                relocations.push(RelocationEntry {
+                                    offset: addi_off,
+                                    symbol: name.clone(),
+                                    reloc_type: "R_RISCV_LO12_I".to_string(),
+                                });
+                            }
+                        } else {
+                            code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T0));
+                        }
                         let off = *offset as i32;
                         match ty {
                             IRType::I8 | IRType::U8 => {
@@ -5806,7 +5834,15 @@ impl Backend for RiscV32Backend {
                                     }
                                 } else {
                                     // I64/U64: load lo (T0) and hi (T1), then two Sw's.
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
+                                    // [Wave D-riscv32-label] For Label values, T0
+                                    // already holds the function address (loaded
+                                    // above via LUI+ADDI). Set T1=0 (high word —
+                                    // function addresses are 32-bit on RV32).
+                                    if is_label {
+                                        code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 0 }.encode());
+                                    } else {
+                                        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
+                                    }
                                     if off >= -2048 && off <= 2047 {
                                         code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::T0, imm: off }.encode());
                                     } else {
@@ -6845,10 +6881,39 @@ impl Backend for RiscV32Backend {
                     // riscv32 (RVV) has no SIMD encoder in the Wave 29 suite;
                     // emit nothing.
                     IRInstr::VectorOp { .. } => Vec::new(),
+                    // ── CallIndirect (Wave 49 / Wave D) ──
+                    // Indirect call through a function pointer vreg.
+                    // Used by irq_dispatch to call driver handler functions.
+                    // Loads func_ptr into t0, args into a0-a7, JALR ra, t0.
+                    // Stores return value (a0:a1 for 64-bit) to dst.
+                    IRInstr::CallIndirect { dst, func_ptr, args } => {
+                        let mut code = Vec::new();
+                        let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
+                                            Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+                        // Load args into a0-a7 (32-bit values; irq_dispatch handlers
+                        // take no args, so this loop is typically empty).
+                        for (i, arg) in args.iter().take(8).enumerate() {
+                            code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg_list[i]));
+                        }
+                        // Load func_ptr into t0 (caller-saved scratch).
+                        code.extend(ss_load_value(func_ptr, &vreg_stack_slots, Gpr::T0));
+                        // JALR ra, t0, 0 — call to address in t0, save return in ra.
+                        code.extend(Instruction::Jalr { rd: Gpr::Ra, rs1: Gpr::T0, imm: 0 }.encode());
+                        // Store return value. VUMA functions return 64-bit in a0:a1.
+                        if let Some(d) = dst {
+                            let dst_id = d.as_register().unwrap_or(0);
+                            let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            // Sign-extend a0 to a1 (handlers return i64 but on RV32
+                            // the value fits in 32 bits — e.g., 42 or -7).
+                            code.extend(Instruction::Srai { rd: Gpr::A1, rs1: Gpr::A0, shamt: 31 }.encode());
+                            code.extend(ss_store_64(Gpr::A0, Gpr::A1, dst_offset));
+                        }
+                        code
+                    }
                     // ── Channel operations (Wave 1d / Task 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
-                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::CallIndirect { .. } | IRInstr::ChannelClose { .. }
+                    | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                     // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
                     | IRInstr::StarkProof { .. } => Vec::new(),
                 };
@@ -7734,14 +7799,27 @@ impl Backend for RiscV32Backend {
                                 .copied()
                         });
                     if let Some(target_offset) = target_offset {
-                        let abs_addr: u32 = (0x100000u64 + target_offset as u64) as u32;
+                        // [Wave D-riscv32-reloc] Include ELF text_offset (116
+                        // bytes = 52-byte ELF header + 2×32-byte program headers)
+                        // in the absolute address. Without this, GetAddress /
+                        // Label stores produce an address 116 bytes too low,
+                        // causing CallIndirect to jump into the ELF header →
+                        // segfault on riscv32.
+                        const ELF_TEXT_OFFSET: u32 = 52 + 2 * 32; // = 116
+                        let abs_addr: u32 = (0x100000u64 + ELF_TEXT_OFFSET as u64 + target_offset as u64) as u32;
                         let hi20 = ((abs_addr as i32).wrapping_add(0x800) >> 12) as u32 & 0xFFFFF;
                         let existing = u32::from_le_bytes([
                             all_code[abs_offset], all_code[abs_offset + 1],
                             all_code[abs_offset + 2], all_code[abs_offset + 3],
                         ]);
-                        let rd = existing & 0x1F;
-                        let patched = (0x537 << 20) | (hi20 << 12) | rd;
+                        let rd = (existing >> 7) & 0x1F;
+                        // [Wave D-riscv32-reloc] Fix LUI encoding: U-type format is
+                        //   imm[31:12] | rd[11:7] | opcode[6:0]
+                        // OP_LUI = 0x37 = 0b0110111. The previous code used
+                        // (0x537 << 20) which put garbage in bits [31:20] and
+                        // left the opcode field (bits [6:0]) as 0 — causing
+                        // Illegal Instruction or wrong address computation.
+                        let patched = ((hi20 & 0xFFFFF) << 12) | (rd << 7) | 0x37;
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     }
@@ -7757,15 +7835,23 @@ impl Backend for RiscV32Backend {
                                 .copied()
                         });
                     if let Some(target_offset) = target_offset {
-                        let abs_addr: u32 = (0x100000u64 + target_offset as u64) as u32;
+                        // [Wave D-riscv32-reloc] Include ELF text_offset (see HI20 above).
+                        const ELF_TEXT_OFFSET: u32 = 52 + 2 * 32; // = 116
+                        let abs_addr: u32 = (0x100000u64 + ELF_TEXT_OFFSET as u64 + target_offset as u64) as u32;
                         let lo12 = (abs_addr as i32) & 0xFFF;
                         let existing = u32::from_le_bytes([
                             all_code[abs_offset], all_code[abs_offset + 1],
                             all_code[abs_offset + 2], all_code[abs_offset + 3],
                         ]);
-                        let rd = existing & 0x1F;
+                        let rd = (existing >> 7) & 0x1F;
                         let rs1 = (existing >> 15) & 0x1F;
-                        let patched = (0x04 << 2) | (lo12 as u32 & 0xFFF) << 20 | (rs1 << 15) | rd;
+                        // [Wave D-riscv32-reloc] Fix ADDI encoding: I-type format is
+                        //   imm[31:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+                        // ADDI: funct3=0b000, opcode=0x13=0b0010011 (OP_IMM).
+                        // The previous code used (0x04 << 2) = 0x10 as the opcode
+                        // (wrong — 0x10 is not OP_IMM) and put rd at bits [0:4]
+                        // instead of [7:11].
+                        let patched = ((lo12 as u32 & 0xFFF) << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x13;
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     }
