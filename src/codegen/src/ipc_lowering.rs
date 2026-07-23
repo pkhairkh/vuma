@@ -482,7 +482,7 @@ fn expand_builtin(
         "driver_register" => Expansion::flat(expand_driver_register(ctx, args, dst)),
         "driver_call" => Expansion::flat(expand_driver_call(ctx, args, dst)),
         "process_call" => Expansion::flat(expand_process_call(ctx, args, dst)),
-        "irq_dispatch" => Expansion::flat(expand_irq_dispatch(ctx, args, dst)),
+        "irq_dispatch" => expand_irq_dispatch(ctx, args, dst),
         // ── L5: Sandbox / resource limits / supervisor ─────────────────
         "sandbox_apply" => Expansion::flat(expand_sandbox_apply(ctx, dst)),
         "sandbox_seccomp" => Expansion::flat(expand_sandbox_seccomp(ctx, args, dst)),
@@ -2126,10 +2126,10 @@ fn expand_process_call(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
 ///
 /// Looks up the vector in the per-function driver table and calls the
 /// handler. Returns -7 (IrqNotRegistered) if not found.
-fn expand_irq_dispatch(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRValue>) -> Vec<IRInstr> {
-    if args.is_empty() { return vec![]; }
+fn expand_irq_dispatch(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IRValue>) -> Expansion {
+    if args.is_empty() { return Expansion::flat(vec![]); }
     let vector = args[0].clone();
-    let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
+    let dst = match dst { Some(d) => d.clone(), None => { return Expansion::flat(vec![]); } };
     let table = match ctx.driver_table.clone() {
         Some(t) => t,
         None => unreachable!("driver_table not allocated — scan_needs should have detected irq_dispatch"),
@@ -2142,25 +2142,50 @@ fn expand_irq_dispatch(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let call_result = ctx.new_vreg();
     let result = ctx.new_vreg();
 
-    vec![
+    // Use a conditional branch to skip CallIndirect when the IRQ doesn't
+    // match. The previous code unconditionally called the handler even when
+    // the IRQ didn't match, causing a segfault when handler_ptr was
+    // uninitialized garbage (e.g., irq_dispatch(99) with no matching slot).
+    let call_label = ctx.new_label("irq_call");
+    let skip_label = ctx.new_label("irq_skip");
+    let cont_label = ctx.new_label("irq_cont");
+
+    let pre = vec![
         // Load irq from slot 0 (offset 0)
         IRInstr::Load { dst: slot_irq.clone(), addr: table.clone(), offset: 0, ty: IRType::I64 },
         // Load handler_ptr from slot 0 (offset 8)
         IRInstr::Load { dst: handler_ptr.clone(), addr: table.clone(), offset: 8, ty: IRType::I64 },
         // irq_match = (slot_irq == vector)
         IRInstr::Cmp { kind: CmpKind::Eq, dst: irq_match.clone(), lhs: slot_irq, rhs: vector, ty: Some(IRType::I64) },
-        // Call the handler via IRInstr::CallIndirect (indirect call through
-        // the handler_ptr vreg).  The x86_64 backend lowers this to
-        // `call r10` (FF D2 with REX.B).  Other backends lower to BLR/JALR.
-        IRInstr::CallIndirect {
-            dst: Some(call_result.clone()),
-            func_ptr: handler_ptr,
-            args: vec![],
-        },
-        // result = irq_match ? call_result : -7
-        IRInstr::Select { dst: result.clone(), cond: irq_match, true_val: call_result, false_val: IRValue::Immediate(-7), ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-    ]
+        // if irq_match: goto call_label; else goto skip_label
+        IRInstr::CondBranch { cond: irq_match, true_target: call_label.clone(), false_target: skip_label.clone() },
+    ];
+
+    // call_block: CallIndirect, then goto finish
+    let finish_label = ctx.new_label("irq_finish");
+    let mut call_blk = IRBlock::new(&call_label);
+    call_blk.instructions.push(IRInstr::CallIndirect {
+        dst: Some(call_result.clone()),
+        func_ptr: handler_ptr,
+        args: vec![],
+    });
+    call_blk.instructions.push(IRInstr::Branch { target: finish_label.clone() });
+    call_blk.terminator = IRTerminator::Jump(finish_label.clone());
+
+    // skip_block: call_result = -7, then goto finish
+    let mut skip_blk = IRBlock::new(&skip_label);
+    skip_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: call_result.clone(), lhs: IRValue::Immediate(-7), rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    skip_blk.instructions.push(IRInstr::Branch { target: finish_label.clone() });
+    skip_blk.terminator = IRTerminator::Jump(finish_label.clone());
+
+    // finish_block: result = call_result, dst = result, goto cont
+    let mut finish_blk = IRBlock::new(&finish_label);
+    finish_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: result.clone(), lhs: call_result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    finish_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    finish_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
+    finish_blk.terminator = IRTerminator::Jump(cont_label.clone());
+
+    Expansion { pre, new_blocks: vec![call_blk, skip_blk, finish_blk], cont_label: Some(cont_label) }
 }
 
 // ── L7: Circuit breaker ───────────────────────────────────────────────

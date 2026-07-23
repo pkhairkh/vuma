@@ -3678,27 +3678,34 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend_from_slice(&encode_ldi(1, S2));
                             match kind {
                                 CmpKind::Eq => {
-                                    // Eq = (hi_eq AND lo_eq). S2=1 (default);
-                                    // if hi_ne OR lo_ne, branch to ldi0 (S2=0).
-                                    // [Wave 14-ext] Previous code used cmpb,= (branch
-                                    // if equal) to skip to done, giving OR semantics.
-                                    // Fix: use cmpb,<> (branch if NOT equal) to branch
-                                    // to ldi0 when either half differs.
+                                    // Eq = (hi_eq AND lo_eq). S2=1 (default).
+                                    // [Wave G-hppa-i64eq] Fix: the previous code used
+                                    // two cmpb,<> (branch if NOT equal) to ldi0, but
+                                    // when BOTH halves ARE equal, neither branches and
+                                    // execution falls through to ldi0, incorrectly
+                                    // setting S2=0. Fix: first cmpb,<> branches to
+                                    // ldi0 if hi differs. Second cmpb,= branches to
+                                    // done if lo EQUAL (skipping ldi0, keeping S2=1).
+                                    // If lo NOT equal, falls through to ldi0 (S2=0).
                                     let hi_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0)); // cmpb,<> hi → ldi0
                                     code.extend_from_slice(&encode_nop());
-                                    let lo_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
+                                    let lo_eq = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, false, false, 0)); // cmpb,= lo → done
                                     code.extend_from_slice(&encode_nop());
                                     let ldi0_off = code.len() as i64;
                                     code.extend_from_slice(&encode_ldi(0, S2));
                                     let done = code.len() as i64;
-                                    for &off in &[hi_ne, lo_ne] {
-                                        let disp = ((ldi0_off - off as i64 - 8) as i32) & !3;
-                                        let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
-                                        let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
-                                        code[off..off+4].copy_from_slice(&p.to_be_bytes());
-                                    }
+                                    // Patch hi_ne: branch to ldi0
+                                    let hi_disp = ((ldi0_off - hi_ne as i64 - 8) as i32) & !3;
+                                    let hw = u32::from_be_bytes([code[hi_ne], code[hi_ne+1], code[hi_ne+2], code[hi_ne+3]]);
+                                    let hp = (hw & !0x1FFF) | encode_cmpb_disp(hi_disp);
+                                    code[hi_ne..hi_ne+4].copy_from_slice(&hp.to_be_bytes());
+                                    // Patch lo_eq: branch to done
+                                    let lo_disp = ((done - lo_eq as i64 - 8) as i32) & !3;
+                                    let lw = u32::from_be_bytes([code[lo_eq], code[lo_eq+1], code[lo_eq+2], code[lo_eq+3]]);
+                                    let lp = (lw & !0x1FFF) | encode_cmpb_disp(lo_disp);
+                                    code[lo_eq..lo_eq+4].copy_from_slice(&lp.to_be_bytes());
                                 }
                                 CmpKind::Ne => {
                                     // Ne = (hi_ne OR lo_ne). S2=0 (default);
