@@ -1047,86 +1047,91 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
 ///     the S3 shift is placed in the cmpb's delay slot so it executes
 ///     regardless of branch direction (f=false).
 fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
-    // [Wave K2-hppa-stark] Correct 32×32→64 shift-and-add multiply.
+    // [Wave K3-hppa-stark] Correct 32×32→64 multiply, BRANCH-FREE inner loop.
+    //
+    // Algorithm (LSB-first, shift result left):
+    //   result = 0, a_shifted = a
+    //   for i in 0..32:
+    //     if a_shifted bit 0 set: result += b << i
+    //     result <<= 1  ← NO, this shifts the partial into position
+    //     a_shifted >>= 1
+    //
+    // Actually, the correct LSB-first algorithm is:
+    //   result = 0
+    //   for i in 0..32:
+    //     if a & 1: result += b  (b is already at the right position because
+    //                              we shift result left BEFORE the next add)
+    //     result <<= 1
+    //     a >>= 1
+    //   But this does 33 shifts (one too many). Fix: shift result left FIRST
+    //   (except on the first iteration), then add.
+    //
+    // Simpler correct version (32 iterations, no extra shift):
+    //   result = 0
+    //   for i in 0..32:
+    //     if a & 1: result += b
+    //     a >>= 1
+    //     if i < 31: result <<= 1  (skip last shift)
+    //   But the conditional "if i < 31" is annoying.
+    //
+    // Cleanest: MSB-first without pre-shift:
+    //   result = 0
+    //   for i in 0..32:
+    //     result <<= 1
+    //     if a MSB set: result += b
+    //     a <<= 1
+    //   This gives result = sum of b << i for each bit i of a (MSB first).
+    //   Iteration 0: result <<= 1 (0→0), check bit 31, add b → result = b or 0
+    //   Iteration 1: result <<= 1 (→2b or b or 0), check bit 30, add b
+    //   ...
+    //   Iteration 31: result <<= 1, check bit 0, add b
+    //   Final: result = b*bit31*2^31 + b*bit30*2^30 + ... + b*bit0*2^0 = a*b. ✓
+    //
+    // Branch-free conditional add: mask = -(a >> 31) = 0 or 0xFFFFFFFF.
+    //   addend = mask & b = 0 or b. result += addend.
+    //
     // Input:  S0 = a, S1 = b
     // Output: S0 = result_lo, S2 = result_hi
     // Clobbers: S0, S1, S2, S3, S5, S6
-    //
-    // Tracks shifted_a as 64-bit: S3 = low 32 bits, S6 = high 32 bits.
-    // When bit i of b is set, adds (S6:S3) to (S2:S0).
-    //
-    // Temp stack slots (above vreg area, which starts at FP-64):
-    //   FP-44 = shifted_a_hi (S6 save during bit check)
-    //   FP-48 = old_lo (S0 save during carry check)
-    //   FP-52 = counter (S5 save during old_lo load — not needed if we keep S5)
+    // S1 (b) is PRESERVED.
 
     code.extend_from_slice(&encode_copy(S0, S3));     // S3 = S0 (= a)
     code.extend_from_slice(&encode_copy(R0, S0));     // S0 = 0 (lo)
     code.extend_from_slice(&encode_copy(R0, S2));     // S2 = 0 (hi)
-    code.extend_from_slice(&encode_copy(R0, S6));     // S6 = 0 (shifted_a hi)
     code.extend(ss_load_imm(S5, 32));                  // S5 = 32 (counter)
 
     let loop_off = code.len();
-    // Loop exit: cmpb,= S5, R0, exit (if S5 == 0, branch forward to exit).
     let exit_cmpb_off = code.len();
     code.extend_from_slice(&encode_cmpb(S5, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop()); // delay slot
 
-    // --- Bit check: is bit 0 of S1 (b) set? ---
-    // Save shifted_a_hi (S6) to FP-44, use S6 as temp for bit extraction.
-    code.extend_from_slice(&encode_stw(S6, R3, -44));  // save S6 (shifted_a_hi)
-    code.extend(ss_load_imm(S6, 1));
-    code.extend_from_slice(&encode_and(S1, S6, S6));   // S6 = S1 & 1 (bit 0)
-    // cmpb,= S6, R0, skip_add — branch if bit is 0 (skip the add).
-    let cmpb_off = code.len();
-    code.extend_from_slice(&encode_cmpb(S6, R0, 0b001, false, false, 0));
-    code.extend_from_slice(&encode_nop()); // delay slot
+    // --- Step 1: Shift result (S2:S0) left by 1 ---
+    // S6 = S0 >> 31 (MSB of result_lo, 0 or 1)
+    code.extend_from_slice(&encode_shrpw(R0, S0, 31, S6));  // S6 = S0 >> 31
+    // S0 <<= 1
+    code.extend_from_slice(&encode_shladd(1, S0, R0, S0));
+    // S2 <<= 1, then S2 += S6 (carry from S0's MSB)
+    code.extend_from_slice(&encode_shladd(1, S2, R0, S2));  // S2 <<= 1
+    code.extend_from_slice(&encode_add(S6, S2, S2));        // S2 += S6
 
-    // --- Add: S2:S0 += S6:S3 (shifted_a) ---
-    // Restore S6 = shifted_a_hi.
-    code.extend_from_slice(&encode_ldw(R3, -44, S6));  // S6 = shifted_a_hi
-    // Save old S0 (for carry check) to FP-48.
+    // --- Step 2: Conditionally add b (S1) to result ---
+    // S6 = S3 >> 31 (MSB of a, 0 or 1)
+    code.extend_from_slice(&encode_shrpw(R0, S3, 31, S6));  // S6 = S3 >> 31
+    // S6 = -S6 (0 or 0xFFFFFFFF). PA-RISC SUB r1,r2,t = t = r1 - r2.
+    code.extend_from_slice(&encode_sub(R0, S6, S6));   // S6 = R0 - S6 = -S6
+    code.extend_from_slice(&encode_and(S6, S1, S6));   // S6 = S6 & S1 (0 or b)
+    // Add S6 to result. Save old S0 for carry check.
     code.extend_from_slice(&encode_stw(S0, R3, -48));  // save old_lo
-    // S0 += S3 (low add)
-    code.extend_from_slice(&encode_add(S3, S0, S0));   // S0 += S3
-    // S2 += S6 (high add — add shifted_a_hi to result_hi)
-    code.extend_from_slice(&encode_add(S6, S2, S2));   // S2 += S6
-    // Carry: if S0 <u old_lo, S2 += 1.
-    // Load old_lo into S6 (temporarily — S6 is done being shifted_a_hi for this iter).
+    code.extend_from_slice(&encode_add(S6, S0, S0));   // S0 += S6 (conditional add of b)
+    // Carry: S6 = S0 - old_lo. If S0 <u old_lo (carry/overflow), MSB set.
+    // PA-RISC SUB r1,r2,t = t = r1 - r2. SUB S0, old_lo, S6 = S6 = S0 - old_lo.
     code.extend_from_slice(&encode_ldw(R3, -48, S6));  // S6 = old_lo
-    let carry_cmpb_off = code.len();
-    code.extend_from_slice(&encode_cmpb(S0, S6, 0b100, true, false, 0)); // cmpb,>>= (no carry)
-    code.extend_from_slice(&encode_nop()); // delay slot
-    // Carry: S2 += 1
-    code.extend_from_slice(&encode_ldo(S2, 1, S2));
+    code.extend_from_slice(&encode_sub(S0, S6, S6));   // S6 = S0 - old_lo (carry → MSB set)
+    code.extend_from_slice(&encode_shrpw(R0, S6, 31, S6)); // S6 = S6 >> 31 (0 or 1)
+    code.extend_from_slice(&encode_add(S6, S2, S2));   // S2 += carry
 
-    // --- skip_add / no_carry target: shift step ---
-    // Restore S6 = shifted_a_hi (was clobbered by old_lo load).
-    code.extend_from_slice(&encode_ldw(R3, -44, S6));  // S6 = shifted_a_hi
-
-    // Shift (S6, S3) left by 1: MSB of S3 → LSB of S6.
-    // Check S3's MSB BEFORE shifting: cmpb,>= S3, R0 (signed) — branch if S3 >= 0 (MSB=0).
-    let s6_msb_cmpb_off = code.len();
-    code.extend_from_slice(&encode_cmpb(S3, R0, 0b010, true, false, 0)); // cmpb,>= signed
-    // Delay slot: S3 <<= 1 (always executes).
-    code.extend_from_slice(&encode_shladd(1, S3, R0, S3));
-    // MSB was set: S6 = (S6 << 1) | 1
-    code.extend_from_slice(&encode_shladd(1, S6, R0, S6));  // S6 <<= 1
-    code.extend_from_slice(&encode_ldo(S6, 1, S6));         // S6 |= 1
-    // skip_msb (branch target for MSB=0): S6 <<= 1
-    // NOTE: the cmpb,>= above branches to skip the `S6 |= 1`, landing here.
-    // But we already did S6 <<= 1 above. For the MSB=0 case, we need S6 <<= 1
-    // WITHOUT the |= 1. So the branch target should be the `shladd` above.
-    // This is wrong — let me fix: the branch should skip BOTH the shladd AND
-    // the ldo, then do its own shladd. OR: restructure so shladd is always
-    // executed, and only ldo is conditional.
-    // Actually, the cmpb,>= branches if S3 >= 0 (MSB=0). In that case we want
-    // S6 = S6 << 1 (no |1). The code above does S6 <<= 1 then S6 |= 1. If we
-    // branch to AFTER the ldo, S6 is already <<1 but missing the |1 — correct!
-    // So the branch target is the instruction AFTER the ldo (the shrpw below).
-
-    // S1 >>= 1, S5--
-    code.extend_from_slice(&encode_shrpw(R0, S1, 1, S1));   // S1 >>= 1
+    // --- Step 3: S3 <<= 1, S5-- ---
+    code.extend_from_slice(&encode_shladd(1, S3, R0, S3));  // S3 <<= 1
     code.extend_from_slice(&encode_ldo(S5, -1, S5));         // S5--
 
     // Unconditional backward branch to loop_off
@@ -1139,26 +1144,6 @@ fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
     let ew = u32::from_be_bytes([code[exit_cmpb_off], code[exit_cmpb_off+1], code[exit_cmpb_off+2], code[exit_cmpb_off+3]]);
     let ep = (ew & !0x1FFF) | encode_cmpb_disp(exit_disp);
     code[exit_cmpb_off..exit_cmpb_off+4].copy_from_slice(&ep.to_be_bytes());
-
-    // Patch cmpb,= (bit-0 check) to skip: restore S6 + save old_lo + add +
-    // add S6 + load old_lo + carry_cmpb + nop + ldo = 8 instructions = 32 bytes.
-    // Target = restore S6 (shift step start).
-    let skip_disp1 = 32i32 & !3;
-    let cw1 = u32::from_be_bytes([code[cmpb_off], code[cmpb_off+1], code[cmpb_off+2], code[cmpb_off+3]]);
-    let cp1 = (cw1 & !0x1FFF) | encode_cmpb_disp(skip_disp1);
-    code[cmpb_off..cmpb_off+4].copy_from_slice(&cp1.to_be_bytes());
-
-    // Patch carry cmpb,>>= to skip the S2++ (4 bytes: ldo). Target = restore S6.
-    let skip_disp2 = 4i32 & !3;
-    let cw2 = u32::from_be_bytes([code[carry_cmpb_off], code[carry_cmpb_off+1], code[carry_cmpb_off+2], code[carry_cmpb_off+3]]);
-    let cp2 = (cw2 & !0x1FFF) | encode_cmpb_disp(skip_disp2);
-    code[carry_cmpb_off..carry_cmpb_off+4].copy_from_slice(&cp2.to_be_bytes());
-
-    // Patch s6_msb cmpb,>= to skip the S6 |= 1 (4 bytes: ldo). Target = shrpw.
-    let skip_disp3 = 4i32 & !3;
-    let cw3 = u32::from_be_bytes([code[s6_msb_cmpb_off], code[s6_msb_cmpb_off+1], code[s6_msb_cmpb_off+2], code[s6_msb_cmpb_off+3]]);
-    let cp3 = (cw3 & !0x1FFF) | encode_cmpb_disp(skip_disp3);
-    code[s6_msb_cmpb_off..s6_msb_cmpb_off+4].copy_from_slice(&cp3.to_be_bytes());
 }
 
 /// Emit an unconditional branch (forward or backward).
