@@ -164,6 +164,7 @@ pub fn vuma_generic_name(nr: u32) -> Option<&'static str> {
         201 => Some("listen"),
         202 => Some("accept"),
         203 => Some("connect"),
+        205 => Some("getpeername"),
         206 => Some("sendto"),
         207 => Some("recvfrom"),
         208 => Some("setsockopt"),
@@ -401,6 +402,7 @@ fn translate_x86_64(generic_nr: u32) -> Option<u32> {
         201 => Some(50),   // listen
         202 => Some(43),   // accept
         203 => Some(42),   // connect
+        205 => Some(52),   // getpeername [K11B]
         206 => Some(44),   // sendto
         207 => Some(45),   // recvfrom
         208 => Some(54),   // setsockopt
@@ -1610,6 +1612,11 @@ fn translate_arm32(generic_nr: u32) -> Option<u32> {
         // ── Sockets ──
         198 => Some(281),   // socket
         203 => Some(283),   // connect
+        205 => Some(287),   // getpeername (ARM EABI __NR_getpeername = 287;
+                            //   verified from /usr/lib/linux/uapi/arm/asm/unistd-eabi.h.
+                            //   [K11B] used to validate connect() success on
+                            //   QEMU 7.2.0 arm32/armeb, which has a bug where
+                            //   connect() to 0.0.0.0:1 spuriously returns 0.)
         206 => Some(295),   // sendto
         207 => Some(296),   // recvfrom
         200 => Some(285),   // listen
