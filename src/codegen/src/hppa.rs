@@ -3944,28 +3944,42 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     code[lo_eq..lo_eq+4].copy_from_slice(&lp.to_be_bytes());
                                 }
                                 CmpKind::Ne => {
-                                    // Ne = (hi_ne OR lo_ne). S2=0 (default);
-                                    // if hi_ne OR lo_ne, branch to ldi1 (S2=1).
-                                    // [Wave 14-ext] Previous code used cmpb,= (branch
-                                    // if equal) to skip to done, keeping S2=0 — so Ne
-                                    // ALWAYS returned 0. Fix: use cmpb,<> (branch if
-                                    // NOT equal) to branch to ldi1 when either half
-                                    // differs.
+                                    // Ne = (hi_ne OR lo_ne). S2=0 (default).
+                                    // [Wave K10C-hppa-u64-ne] Fix: previous code
+                                    // used two cmpb,<> (branch if NOT equal) to
+                                    // ldi1, but when BOTH halves ARE equal,
+                                    // neither branch fires and execution falls
+                                    // through to ldi1 (S2=1) — so Ne ALWAYS
+                                    // returned 1. Fix mirrors the K4 Eq handler:
+                                    // first cmpb,<> branches to ldi1 if hi
+                                    // differs. Second cmpb,= branches to done
+                                    // if lo EQUAL (skipping ldi1, keeping S2=0).
+                                    // If lo NOT equal, falls through to ldi1
+                                    // (S2=1). If hi differed, we already branched
+                                    // to ldi1.
                                     code.extend_from_slice(&encode_ldi(0, S2));
                                     let hi_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S4, S5, 0b001, true, false, 0));  // cmpb,<> hi → ldi1
                                     code.extend_from_slice(&encode_nop());
-                                    let lo_ne = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, true, false, 0));
+                                    let lo_eq = code.len();
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, 0b001, false, false, 0)); // cmpb,= lo → done
                                     code.extend_from_slice(&encode_nop());
                                     let ldi1_off = code.len() as i64;
                                     code.extend_from_slice(&encode_ldi(1, S2));
                                     let done = code.len() as i64;
-                                    for &off in &[hi_ne, lo_ne] {
-                                        let disp = ((ldi1_off - off as i64 - 8) as i32) & !3;
-                                        let w = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+                                    // Patch hi_ne: branch to ldi1 (S2=1)
+                                    {
+                                        let disp = ((ldi1_off - hi_ne as i64 - 8) as i32) & !3;
+                                        let w = u32::from_be_bytes([code[hi_ne], code[hi_ne+1], code[hi_ne+2], code[hi_ne+3]]);
                                         let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
-                                        code[off..off+4].copy_from_slice(&p.to_be_bytes());
+                                        code[hi_ne..hi_ne+4].copy_from_slice(&p.to_be_bytes());
+                                    }
+                                    // Patch lo_eq: branch to done (skip ldi1, keep S2=0)
+                                    {
+                                        let disp = ((done - lo_eq as i64 - 8) as i32) & !3;
+                                        let w = u32::from_be_bytes([code[lo_eq], code[lo_eq+1], code[lo_eq+2], code[lo_eq+3]]);
+                                        let p = (w & !0x1FFF) | encode_cmpb_disp(disp);
+                                        code[lo_eq..lo_eq+4].copy_from_slice(&p.to_be_bytes());
                                     }
                                 }
                                 CmpKind::SLt | CmpKind::ULt | CmpKind::SLe | CmpKind::ULe

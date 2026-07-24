@@ -1612,8 +1612,30 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
         // poll_no_data = (poll_ret <= 0) — poll says no data available
         IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-        // read_failed = (read_ret <= 0) — read returned error or no bytes
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        // read_failed = (read_ret != 56) — read did NOT return a full frame.
+        //
+        // [K10B-try-recv-regression] The previous check `read_ret <= 0`
+        // breaks on sparc64/hppa: QEMU's linux-user for these arches does
+        // NOT set the syscall error flag (sparc64 carry / hppa R20), so a
+        // failed read() leaves the POSITIVE errno (e.g. 11 for EAGAIN) in
+        // the result register. `11 <= 0` is false, so read_failed=0, the
+        // AND logic gives is_error=0, and the Select returns the
+        // zero-initialized payload (0) instead of -2 — manifesting as
+        // try_recv exit 0 (expected 77) and try_recv_success exit 0
+        // (expected 99) on both arches.
+        //
+        // Checking `read_ret != 56` (the exact L1 frame size) is robust
+        // across ALL errno conventions:
+        //   * Proper -errno (x86_64, aarch64, …): -11 != 56 → failure ✓
+        //   * Positive errno (sparc64/hppa QEMU): 11 != 56 → failure ✓
+        //   * EOF (0 bytes): 0 != 56 → failure ✓
+        //   * Success: 56 == 56 → not failure ✓
+        //   * Partial read: != 56 → failure (correct — partial frame is
+        //     corrupt and must be retried).
+        // It also preserves the K9B AND logic: on arches where poll is
+        // broken (returns -EFAULT etc.), a successful read (56) still
+        // yields read_failed=0, is_error=0, and the payload is returned.
+        IRInstr::Cmp { kind: CmpKind::Ne, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(56), ty: Some(IRType::I64) },
         // is_error = poll_no_data AND read_failed
         //
         // [K9B-try-recv-qemu] AND (not OR) is critical. On 11 of 19 QEMU

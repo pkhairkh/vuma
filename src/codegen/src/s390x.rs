@@ -1346,35 +1346,27 @@ fn emit_instr(
 ) {
     let _ = alloc_offsets;
     match instr {
-        IRInstr::Add { dst, lhs, rhs, ty } => {
+        IRInstr::Add { dst, lhs, rhs, ty: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit_ty(ty.as_ref()) {
-                // 32-bit add: ARK S0, S0, S1 (S0 = S0 + S1, low 32 bits).
-                // The high 32 bits of S0 are unchanged (garbage).  For correctness
-                // with subsequent 64-bit ops, zero-extend via LLGFR.
-                code.extend_from_slice(&encode_ark(S0, S0, S1));
-                // Zero-extend the 32-bit result to 64 bits.
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                // 64-bit add: AGR S0, S1 (S0 += S1).
-                code.extend_from_slice(&encode_agr(S0, S1));
-            }
+            // K10A-mem-copy-buffer: always emit 64-bit AGR. ss_load_value
+            // loads 8 bytes via LG, so operands are 64-bit; the old 32-bit
+            // ARK + LLGFR path zero-extended the result, truncating pointer
+            // high bits in `addr = src + i` (where src is a 64-bit stack
+            // buffer pointer and i is u32) → SIGSEGV on the subsequent
+            // STC. AGR is safe for 32-bit values (high bits are zero).
+            code.extend_from_slice(&encode_agr(S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
-        IRInstr::Sub { dst, lhs, rhs, ty } => {
+        IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit_ty(ty.as_ref()) {
-                code.extend_from_slice(&encode_srk(S0, S0, S1));
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                code.extend_from_slice(&encode_sgr(S0, S1));
-            }
+            // K10A: same as Add — 64-bit SGR preserves pointer high bits.
+            code.extend_from_slice(&encode_sgr(S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
         IRInstr::Mul { dst, lhs, rhs, ty } => {
@@ -2375,23 +2367,19 @@ fn emit_binop(
         BinOpKind::Add => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit {
-                code.extend_from_slice(&encode_ark(S0, S0, S1));
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                code.extend_from_slice(&encode_agr(S0, S1));
-            }
+            // K10A-mem-copy-buffer: always use 64-bit AGR. `ss_load_value`
+            // loads via LG (8 bytes) so operands are already 64-bit; the old
+            // 32-bit ARK + LLGFR path zero-extended the result, truncating
+            // pointer high bits in `addr = src + i` and causing SIGSEGV.
+            // AGR is safe for 32-bit values too (high bits are zero).
+            code.extend_from_slice(&encode_agr(S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::Sub => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            if is_32bit {
-                code.extend_from_slice(&encode_srk(S0, S0, S1));
-                code.extend_from_slice(&encode_llgfr(S0, S0));
-            } else {
-                code.extend_from_slice(&encode_sgr(S0, S1));
-            }
+            // K10A: same as Add — 64-bit SGR preserves pointer high bits.
+            code.extend_from_slice(&encode_sgr(S0, S1));
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::Mul => {
