@@ -3983,43 +3983,47 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     //   SGt (is_gt=T,is_eq=F): opp = SLe = cond=011,inverted=false (<=)
                                     //   SGe (is_gt=T,is_eq=T): opp = SLt = cond=010,inverted=false (<)
                                     // Unsigned analogously with 100/101.
+                                    // [Wave K4-hppa-stark] Fix: hi_opp must fire ONLY
+                                    // when the result is DEFINITELY false without
+                                    // consulting the lo word — i.e. when hi is STRICTLY
+                                    // on the losing side. The previous code used the
+                                    // NON-strict opposite for strict kinds (SLt/ULt used
+                                    // `>=`/`>>=`, SGt/UGt used `<=`/`<<=`), which fired
+                                    // when hi was EQUAL — jumping to ldi0 (S2=0) and
+                                    // skipping the lo comparison. For stark_verify's
+                                    // `validity > 0` (SGt) with validity.hi==0 &&
+                                    // rhs.hi==0, hi_opp fired on `0 <= 0` and forced
+                                    // is_valid=0, zeroing the whole And chain → exit 0.
+                                    //
+                                    // Correct mapping (depends only on is_gt/is_signed,
+                                    // NOT on is_eq — strictness only affects lo_match):
+                                    //   less-than family (is_gt=false): opp = strictly-greater
+                                    //     signed:   cond=011, inverted=true  → >  (NOT <=)
+                                    //     unsigned: cond=101, inverted=true  → >> (NOT <<=)
+                                    //   greater-than family (is_gt=true): opp = strictly-less
+                                    //     signed:   cond=010, inverted=false → <
+                                    //     unsigned: cond=100, inverted=false → <<
                                     let (hi_opp_cond, hi_opp_inverted) = if is_signed {
-                                        if is_gt {
-                                            (0b011, false) // SGt/SGe opp: SLe/S不全
-                                        } else {
-                                            (0b011, true)  // SLt/SLe opp: SGt (NOT <=)
-                                        }
+                                        if is_gt { (0b010, false) } // <  — SGt AND SGe
+                                        else     { (0b011, true) }  // >  — SLt AND SLe
                                     } else {
-                                        if is_gt {
-                                            (0b101, false) // UGt/UGe opp: ULe/ULt-ish
-                                        } else {
-                                            (0b101, true)  // ULt/ULe opp: UGt (NOT <<=)
-                                        }
+                                        if is_gt { (0b100, false) } // << — UGt AND UGe
+                                        else     { (0b101, true) }  // >> — ULt AND ULe
                                     };
-                                    // Refine per-kind: SLt's opposite is SGe
-                                    // (NOT <), and SGt's opposite is SLe (<=).
-                                    // The (cond, inverted) tuple above covers
-                                    // SLe/UL e correctly; for SLt/SGt/ULt/UGt
-                                    // we need to swap to cond=010/100.
-                                    let (hi_opp_cond, hi_opp_inverted) = match kind {
-                                        CmpKind::SLt | CmpKind::ULt => {
-                                            (if is_signed { 0b010 } else { 0b100 }, true)
-                                        }
-                                        CmpKind::SLe | CmpKind::ULe => {
-                                            (if is_signed { 0b011 } else { 0b101 }, true)
-                                        }
-                                        CmpKind::SGt | CmpKind::UGt => {
-                                            (if is_signed { 0b011 } else { 0b101 }, false)
-                                        }
-                                        CmpKind::SGe | CmpKind::UGe => {
-                                            (if is_signed { 0b010 } else { 0b100 }, false)
-                                        }
-                                        _ => (hi_opp_cond, hi_opp_inverted),
-                                    };
-                                    let lo_cond = if is_eq {
-                                        if is_gt { 0b100 } else { 0b101 }
+                                    // [Wave K4-hppa-stark] Fix: lo_match must fire when
+                                    // the lo word makes the result true (hi being equal).
+                                    // For the less-than family that's <</<<= (inverted=false);
+                                    // for the greater-than family that's >>/>>=, which
+                                    // REQUIRES inverted=true. The previous code always
+                                    // passed inverted=false, so SGt/SGe/UGt/UGe got
+                                    // <<</<<<= (the OPPOSITE direction) — inverted results
+                                    // whenever hi was equal.
+                                    let (lo_cond, lo_inverted) = if is_gt {
+                                        if is_eq { (0b100, true) }  // >>=
+                                        else     { (0b101, true) }  // >>
                                     } else {
-                                        if is_gt { 0b101 } else { 0b100 }
+                                        if is_eq { (0b101, false) } // <<=
+                                        else     { (0b100, false) } // <<
                                     };
 
                                     // If hi matches primary direction → S2=1, skip to done.
@@ -4032,7 +4036,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     code.extend_from_slice(&encode_nop());
                                     // hi == hi: compare lo. If lo matches → S2=1, skip to done.
                                     let lo_match = code.len();
-                                    code.extend_from_slice(&encode_cmpb(S0, S1, lo_cond, false, false, 0));
+                                    code.extend_from_slice(&encode_cmpb(S0, S1, lo_cond, lo_inverted, false, 0));
                                     code.extend_from_slice(&encode_nop());
                                     // lo doesn't match → S2=0.
                                     let ldi0_off = code.len() as i64;
