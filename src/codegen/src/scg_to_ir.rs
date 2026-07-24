@@ -4624,6 +4624,15 @@ impl IRBuilder {
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &co.dst));
         names.insert(co.dst.clone(), dst_vreg);
+        // [K12A-ipc-pattern-b-timeout] The channel handle is a 64-bit value
+        // (low 32 = read_fd, high 32 = write_fd). On 32-bit backends
+        // (x86_32/hppa/riscv32/m68k/arm32), if the vreg type is not set to
+        // I64, the BinOp Shl/Or in expand_channel_open may be lowered as
+        // 32-bit, truncating the write_fd. This causes channel_send to
+        // extract write_fd=0 and write to fd 0 → EBADF → receiver polls
+        // forever → exit 124 (timeout). Setting the vreg type to I64
+        // ensures all backends use 64-bit operations for the handle.
+        self.vreg_types.insert(dst_vreg, crate::ir::IRType::I64);
 
         ir_func.current_block().push(IRInstruction::ChannelOpen {
             dst: IRValue::Register(dst_vreg),
