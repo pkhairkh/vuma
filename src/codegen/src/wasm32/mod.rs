@@ -1883,14 +1883,20 @@ impl LoweringContext {
     /// I64 is used only when the type hint explicitly requests it (e.g., for
     /// I64Load/I64Store of 64-bit values).  Addresses are always truncated
     /// to i32 since the Wasm32 address space is 32 bits.
+    ///
+    /// Float immediates are stored in the IR as their bit pattern reinterpreted
+    /// as i64 (see `scg_to_ir.rs` `ScgExpr::Float`).  We must bitcast (not
+    /// numerically convert) back to f64/f32 here, otherwise e.g. the bit
+    /// pattern for `1000.0` (0x408F400000000000 = 4635846084134318080i64)
+    /// would become `4.6358e18` instead of `1000.0`.
     fn push_value(&mut self, val: &IRValue, type_hint: Option<&WasmType>) {
         match val {
             IRValue::Immediate(v) => {
                 let ty = type_hint.copied().unwrap_or(WasmType::I32);
                 match ty {
                     WasmType::I64 => self.emit(WasmInstr::I64Const(*v)),
-                    WasmType::F32 => self.emit(WasmInstr::F32Const(*v as f32)),
-                    WasmType::F64 => self.emit(WasmInstr::F64Const(*v as f64)),
+                    WasmType::F32 => self.emit(WasmInstr::F32Const(f32::from_bits(*v as u32))),
+                    WasmType::F64 => self.emit(WasmInstr::F64Const(f64::from_bits(*v as u64))),
                     _ => self.emit(WasmInstr::I32Const(*v as i32)),
                 }
                 self.stack_depth += 1;
@@ -1904,16 +1910,19 @@ impl LoweringContext {
                 if let Some(local_idx) = self.get_local(*id) {
                     self.emit(WasmInstr::LocalGet(local_idx));
                     self.stack_depth += 1;
-                    // If this local is I64 (from a 64-bit Call return) but
-                    // the desired type is I32, wrap to I32.
-                    // If this local is I32 but the desired type is I64, extend.
+                    // Convert the local's actual type to the desired type.
+                    // Handles integer widen/narrow (I32<->I64) AND float
+                    // bitcasts (I64<->F64, I32<->F32) plus the I32<->F64
+                    // two-instruction chain.  This is needed because
+                    // `scg_to_ir::make_copy` emits `Add { ty: None }` phi
+                    // copies that — after `constant_fold` — may store an f64
+                    // bit pattern in a local whose type defaulted to I32/I64
+                    // (because the copy's `ty` was None).  Without these
+                    // bitcasts, `f64.div` consuming such a local would fail
+                    // wasmtime validation ("expected f64, found i32").
                     let local_ty = self.vreg_types.get(id).copied().unwrap_or(WasmType::I32);
                     let desired_ty = type_hint.copied().unwrap_or(WasmType::I32);
-                    if local_ty == WasmType::I64 && desired_ty != WasmType::I64 {
-                        self.emit(WasmInstr::I32WrapI64);
-                    } else if local_ty == WasmType::I32 && desired_ty == WasmType::I64 {
-                        self.emit(WasmInstr::I64ExtendI32U);
-                    }
+                    emit_type_conversion(self, local_ty, desired_ty);
                 }
             }
             IRValue::Address(addr) => {
@@ -1927,24 +1936,59 @@ impl LoweringContext {
     }
 
     /// Store the top of the Wasm stack into a virtual register's local.
+    ///
+    /// If the stack-top type (`ty`) differs from the local's already-allocated
+    /// type (`local_ty`), emit the appropriate conversion before `local.set`.
+    /// Handles integer widen/narrow AND float bitcasts (I64<->F64, I32<->F32,
+    /// plus the I32<->F64 two-instruction chain).  See `push_value` for why
+    /// these bitcasts are required.
     fn pop_to_vreg(&mut self, vreg_id: u32, ty: WasmType) {
         if !self.vreg_to_local.contains_key(&vreg_id) {
             self.alloc_local(vreg_id, ty);
         }
         if let Some(local_idx) = self.get_local(vreg_id) {
-            // Check if type conversion is needed: if the stack value (ty)
-            // differs from the local's type, convert before LocalSet.
             let local_ty = self.vreg_types.get(&vreg_id).copied().unwrap_or(WasmType::I32);
-            if ty != local_ty {
-                if ty == WasmType::I64 && local_ty == WasmType::I32 {
-                    self.emit(WasmInstr::I32WrapI64);
-                } else if ty == WasmType::I32 && local_ty == WasmType::I64 {
-                    self.emit(WasmInstr::I64ExtendI32U);
-                }
-            }
+            emit_type_conversion(self, ty, local_ty);
             self.emit(WasmInstr::LocalSet(local_idx));
             self.stack_depth -= 1;
         }
+    }
+}
+
+/// Emit a wasm type-conversion instruction sequence that takes the value
+/// currently on top of the wasm stack (whose type is `from`) and leaves a
+/// value of type `to` in its place.  No-op when `from == to`.
+///
+/// Covers all conversions needed by `push_value` and `pop_to_vreg`:
+///   - integer widen/narrow: I32<->I64
+///   - float bitcasts:       I64<->F64, I32<->F32
+///   - cross-size bitcasts:  I32<->F64 (via I64 intermediate)
+///   - F32<->F64 and I64<->F32 are NOT handled (rare; would require
+///     width-changing bitcast which wasm doesn't have a single instruction
+///     for — callers should avoid producing these).
+fn emit_type_conversion(ctx: &mut LoweringContext, from: WasmType, to: WasmType) {
+    if from == to {
+        return;
+    }
+    match (from, to) {
+        (WasmType::I64, WasmType::I32) => ctx.emit(WasmInstr::I32WrapI64),
+        (WasmType::I32, WasmType::I64) => ctx.emit(WasmInstr::I64ExtendI32U),
+        (WasmType::I64, WasmType::F64) => ctx.emit(WasmInstr::F64ReinterpretI64),
+        (WasmType::F64, WasmType::I64) => ctx.emit(WasmInstr::I64ReinterpretF64),
+        (WasmType::I32, WasmType::F32) => ctx.emit(WasmInstr::F32ReinterpretI32),
+        (WasmType::F32, WasmType::I32) => ctx.emit(WasmInstr::I32ReinterpretF32),
+        // I32 <-> F64 (cross-size bitcast): go via I64.
+        (WasmType::I32, WasmType::F64) => {
+            ctx.emit(WasmInstr::I64ExtendI32U);
+            ctx.emit(WasmInstr::F64ReinterpretI64);
+        }
+        (WasmType::F64, WasmType::I32) => {
+            ctx.emit(WasmInstr::I64ReinterpretF64);
+            ctx.emit(WasmInstr::I32WrapI64);
+        }
+        // Other combinations (F32<->F64, I64<->F32): leave as-is; backend
+        // callers should not produce these for make_copy phis.
+        _ => {}
     }
 }
 
@@ -1954,12 +1998,66 @@ impl LoweringContext {
 /// to I32 since pointers are 32 bits and the address space is 32 bits;
 /// only float types retain their original width.  This is consistent with
 /// `wasm_type_for_binop` and ensures pointer arithmetic always uses i32 ops.
-fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
+///
+/// When `ty` is `None` (e.g. from `scg_to_ir::make_copy` phi copies, which
+/// hard-code `ty: None`), infer the type from the operands so that an f64
+/// loop-carried variable copied via `Add { lhs: Register(f64_vreg), rhs: Imm(0),
+/// ty: None }` correctly uses F64 — otherwise the local would be allocated
+/// as I32 and later `f64.div` would fail wasmtime validation.  Also infer I64
+/// from Register operands or from Immediate operands whose high 32 bits are
+/// non-zero (which indicates a 64-bit value such as a constant-folded f64 bit
+/// pattern).
+fn wasm_type_for_dedicated_arith(
+    ir_ty: Option<&IRType>,
+    lhs: &IRValue,
+    rhs: &IRValue,
+    vreg_types: &HashMap<u32, WasmType>,
+) -> WasmType {
     match ir_ty {
-        Some(IRType::F32) => WasmType::F32,
-        Some(IRType::F64) => WasmType::F64,
-        _ => WasmType::I32, // all integer types → i32 on wasm32 (pointers are i32)
+        Some(IRType::F32) => return WasmType::F32,
+        Some(IRType::F64) => return WasmType::F64,
+        Some(IRType::I64) | Some(IRType::U64) => return WasmType::I64,
+        _ => {}
     }
+    // ty is None or an integer type narrower than I64: infer from operands.
+    infer_wasm_type_from_operands(lhs, rhs, vreg_types)
+}
+
+/// Infer the Wasm type of a (lhs, rhs) operand pair when no explicit `ty` is
+/// provided.  Returns the first non-I32 type found among the operands; falls
+/// back to I32.  Used by `wasm_type_for_dedicated_arith` and
+/// `wasm_type_for_binop` to recover type information lost by `make_copy`'s
+/// `ty: None` and by `constant_fold`'s re-emission of folded `Add`/`Sub`/
+/// `Mul`/`Div` with `ty: None`.
+fn infer_wasm_type_from_operands(
+    lhs: &IRValue,
+    rhs: &IRValue,
+    vreg_types: &HashMap<u32, WasmType>,
+) -> WasmType {
+    // Check Register operands first (their vreg_types entry is authoritative).
+    for val in [lhs, rhs] {
+        if let IRValue::Register(id) = val {
+            match vreg_types.get(id).copied() {
+                Some(WasmType::F64) => return WasmType::F64,
+                Some(WasmType::F32) => return WasmType::F32,
+                Some(WasmType::I64) => return WasmType::I64,
+                _ => {}
+            }
+        }
+    }
+    // Check Immediate operands: if the value doesn't fit in i32 (high 32 bits
+    // are non-zero), it's a 64-bit pattern (e.g. a constant-folded f64 bit
+    // pattern like 0x408F400000000000 for 1000.0).  Use I64 to preserve the
+    // full 64 bits; later `push_value`/`pop_to_vreg` will bitcast to F64 when
+    // a float consumer is encountered.
+    for val in [lhs, rhs] {
+        if let IRValue::Immediate(v) = val {
+            if *v != (*v as i32 as i64) {
+                return WasmType::I64;
+            }
+        }
+    }
+    WasmType::I32
 }
 
 /// Determine the Wasm type for an IR BinOp based on the operand types and
@@ -1982,20 +2080,9 @@ fn wasm_type_for_binop(
             _ => WasmType::I32,
         };
     }
-    // If ty is None, check if either operand is an I64 local (from shift >= 32
-    // or 64-bit Call return). If so, use I64 so the operation matches.
-    if let IRValue::Register(id) = lhs {
-        if let Some(&WasmType::I64) = vreg_types.get(id) {
-            return WasmType::I64;
-        }
-    }
-    if let IRValue::Register(id) = rhs {
-        if let Some(&WasmType::I64) = vreg_types.get(id) {
-            return WasmType::I64;
-        }
-    }
-    // Default to i32 for all integer ops on wasm32
-    WasmType::I32
+    // If ty is None, infer from operands (handles make_copy phi copies whose
+    // src is a typed f64/i64 vreg, and constant-folded f64 bit patterns).
+    infer_wasm_type_from_operands(lhs, rhs, vreg_types)
 }
 
 /// Infer the Wasm type of an IR value based on its representation.
@@ -3228,10 +3315,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Add { dst, lhs, rhs, ty } => {
-            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref(), lhs, rhs, &ctx.vreg_types);
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             ctx.emit(match wasm_ty {
+                WasmType::F32 => WasmInstr::F32Add,
+                WasmType::F64 => WasmInstr::F64Add,
                 WasmType::I64 => WasmInstr::I64Add,
                 _ => WasmInstr::I32Add,
             });
@@ -3245,10 +3334,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Sub { dst, lhs, rhs, ty } => {
-            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref(), lhs, rhs, &ctx.vreg_types);
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             ctx.emit(match wasm_ty {
+                WasmType::F32 => WasmInstr::F32Sub,
+                WasmType::F64 => WasmInstr::F64Sub,
                 WasmType::I64 => WasmInstr::I64Sub,
                 _ => WasmInstr::I32Sub,
             });
@@ -3262,10 +3353,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Mul { dst, lhs, rhs, ty } => {
-            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref(), lhs, rhs, &ctx.vreg_types);
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             ctx.emit(match wasm_ty {
+                WasmType::F32 => WasmInstr::F32Mul,
+                WasmType::F64 => WasmInstr::F64Mul,
                 WasmType::I64 => WasmInstr::I64Mul,
                 _ => WasmInstr::I32Mul,
             });
@@ -3279,10 +3372,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Div { dst, lhs, rhs, ty } => {
-            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref(), lhs, rhs, &ctx.vreg_types);
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             ctx.emit(match wasm_ty {
+                WasmType::F32 => WasmInstr::F32Div,
+                WasmType::F64 => WasmInstr::F64Div,
                 WasmType::I64 => WasmInstr::I64DivS,
                 _ => WasmInstr::I32DivS,
             });
@@ -3302,7 +3397,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             rhs,
             ty,
         } => {
-            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref());
+            let wasm_ty = wasm_type_for_dedicated_arith(ty.as_ref(), lhs, rhs, &ctx.vreg_types);
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             let wasm_op = match wasm_ty {
