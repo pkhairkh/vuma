@@ -1,33 +1,19 @@
-VUMA Test Failures — 2026-07-24 18:56:32 UTC
-Total: 30 failures across 29 tests
+VUMA Test Failures — 2026-07-24 20:03:36 UTC
+Total: 34 failures across 15 tests
 Skipped: 0 (architecturally unavailable on target)
 
   ipc                  bench.vuma                                    exp= 232 [('x86_32', 124, 'TO')]
   ipc                  cap_flow.vuma                                 exp=  42 [('wasm32', 0, 'MM')]
   ipc                  capability_grant_verify.vuma                  exp=  42 [('wasm32', 0, 'MM')]
   ipc                  checkpoint.vuma                               exp=   1 [('wasm32', 0, 'MM')]
-  ipc                  closed_channel.vuma                           exp=  99 [('wasm32', 0, 'MM')]
-  ipc                  crc_mismatch.vuma                             exp=  88 [('wasm32', 253, 'CR')]
-  ipc                  distributed.vuma                              exp=   1 [('wasm32', 0, 'MM')]
+  ipc                  closed_channel.vuma                           exp=  99 [('aarch64', 124, 'TO'), ('aarch64_be', 124, 'TO'), ('x86_64', 124, 'TO'), ('riscv64', 124, 'TO'), ('arm32', 124, 'TO'), ('armeb', 124, 'TO'), ('mips64', 124, 'TO'), ('mips64be', 124, 'TO'), ('ppc64', 124, 'TO'), ('ppc64le', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO'), ('x86_32', 124, 'TO'), ('s390x', 124, 'TO'), ('alpha', 124, 'TO'), ('m68k', 124, 'TO'), ('sparc64', 124, 'TO'), ('wasm32', 0, 'MM'), ('hppa', 124, 'TO')]
   ipc                  driver_isolation.vuma                         exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  fault_tolerance.vuma                          exp=   0 [('wasm32', 1, 'MM')]
   ipc                  ffi_basic.vuma                                exp=  42 [('wasm32', 21, 'MM')]
   ipc                  ffi_isolation.vuma                            exp=  42 [('wasm32', 21, 'MM')]
-  ipc                  framed_roundtrip_arm32.vuma                   exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  framed_roundtrip_riscv64.vuma                 exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  framed_send_recv.vuma                         exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  hot_swap.vuma                                 exp=   1 [('wasm32', 0, 'MM')]
   ipc                  large_message.vuma                            exp=   1 [('wasm32', 0, 'MM')]
   ipc                  large_payload.vuma                            exp=  45 [('hppa', 124, 'TO')]
-  ipc                  match_recv.vuma                               exp=  42 [('wasm32', 255, 'CR')]
-  ipc                  multi_message.vuma                            exp=  63 [('wasm32', 0, 'MM')]
   ipc                  multi_msg_10.vuma                             exp=  45 [('wasm32', 0, 'MM'), ('x86_32', 124, 'TO')]
   ipc                  ping_pong.vuma                                exp=  84 [('wasm32', 0, 'MM')]
-  ipc                  protocol_valid.vuma                           exp=  50 [('wasm32', 254, 'CR')]
-  ipc                  recv_timeout.vuma                             exp=  88 [('wasm32', 253, 'CR')]
-  ipc                  session_invalid.vuma                          exp=  88 [('wasm32', 0, 'MM')]
   ipc                  session_types.vuma                            exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  session_valid.vuma                            exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  shared_memory.vuma                            exp= 200 [('wasm32', 1, 'MM')]
-  ipc                  simple_send.vuma                              exp=  42 [('wasm32', 0, 'MM')]
+  ipc                  shared_memory.vuma                            exp= 200 [('wasm32', 124, 'TO')]
   ipc                  supervisor.vuma                               exp=   1 [('wasm32', 0, 'MM')]
