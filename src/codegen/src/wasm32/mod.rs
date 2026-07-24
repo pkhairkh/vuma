@@ -1492,6 +1492,11 @@ const ARGV_BUF_ADDR: i32 = 0x0938;
 /// is known.
 const UNRESOLVED_CALL_IDX: u32 = 0xDEAD;
 
+/// Placeholder type index for unresolved `call_indirect` instructions.
+/// Patched during `encode_program` to the module's void-function type
+/// (`() -> ()`) once the type section is finalized.
+const UNRESOLVED_TYPE_IDX: u32 = 0xDEAD;
+
 /// A Wasm data segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmDataSegment {
@@ -1850,6 +1855,15 @@ struct LoweringContext {
     /// as the call index and must be patched once the module's function
     /// index space is known.
     call_targets: Vec<(usize, String)>,
+    /// For each `GetAddress` instruction (indexed by position in
+    /// `instrs`), record the target symbol name.  The placeholder
+    /// `i32.const 0` is emitted and the LEB128 immediate is patched with
+    /// the symbol's function-table slot index during `encode_program`.
+    address_targets: Vec<(usize, String)>,
+    /// For each `CallIndirect` instruction (indexed by position in
+    /// `instrs`), record its position so we can patch the `call_indirect`
+    /// type-index immediate during `encode_program`.
+    indirect_calls: Vec<usize>,
     /// Current wasm value stack depth (number of unconsumed values).
     /// Used to emit Drop instructions before block End to keep the stack
     /// balanced (wasm requires void blocks to have 0 values at End).
@@ -1866,6 +1880,8 @@ impl LoweringContext {
             instrs: Vec::new(),
             result_types,
             call_targets: Vec::new(),
+            address_targets: Vec::new(),
+            indirect_calls: Vec::new(),
             stack_depth: 0,
         }
     }
@@ -2170,7 +2186,9 @@ fn infer_wasm_type(val: &IRValue, vreg_types: &HashMap<u32, WasmType>) -> WasmTy
 type LoweredWasmFunction = (
     WasmFuncBody,
     WasmFuncType,
-    Vec<(usize, String)>,
+    Vec<(usize, String)>,       // call relocations: (byte_offset, func_name)
+    Vec<(usize, String)>,       // table-index relocations (GetAddress)
+    Vec<usize>,                 // type-index relocations (CallIndirect)
     Vec<(String, Vec<u8>)>,
 );
 
@@ -2355,6 +2373,11 @@ fn lower_function(
     // Encode all instructions to bytecode and compute call relocations.
     let mut body_bytes = Vec::new();
     let mut call_relocations: Vec<(usize, String)> = Vec::new();
+    // NEW: relocations for GetAddress (table-slot index) and CallIndirect
+    // (type index).  These are patched in `encode_program` once the
+    // function table and type section are finalized.
+    let mut table_relocations: Vec<(usize, String)> = Vec::new();
+    let mut type_relocations: Vec<usize> = Vec::new();
     let mut per_instr: Vec<(String, Vec<u8>)> = Vec::with_capacity(ctx.instrs.len());
     for (i, instr) in ctx.instrs.iter().enumerate() {
         let offset_before = body_bytes.len();
@@ -2381,6 +2404,24 @@ fn lower_function(
                 }
             }
         }
+
+        // NEW: GetAddress placeholder — record a table-index relocation.
+        // The `i32.const` opcode (0x41) is 1 byte, followed by a signed
+        // LEB128 immediate (up to 5 bytes).  The immediate starts at
+        // offset_before + 1.
+        if let Some((_, name)) = ctx.address_targets.iter().find(|(instr_idx, _)| *instr_idx == i) {
+            table_relocations.push((offset_before + 1, name.clone()));
+        }
+
+        // NEW: CallIndirect with unresolved type_idx — record a type-index
+        // relocation.  The `call_indirect` opcode (0x11) is 1 byte,
+        // followed by the type_idx LEB128, then the table_idx LEB128.
+        // The type_idx immediate starts at offset_before + 1.
+        if let WasmInstr::CallIndirect { type_idx, .. } = instr {
+            if *type_idx == UNRESOLVED_TYPE_IDX {
+                type_relocations.push(offset_before + 1);
+            }
+        }
     }
     // Append the implicit end byte for the function body
     body_bytes.push(0x0B);
@@ -2393,7 +2434,7 @@ fn lower_function(
         body: body_bytes,
     };
 
-    Ok((func_body, func_type, call_relocations, per_instr))
+    Ok((func_body, func_type, call_relocations, table_relocations, type_relocations, per_instr))
 }
 
 /// Lower a single IR instruction.
@@ -3509,32 +3550,21 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // not at the phi block entry. See func.build_phi_map().
         }
 
-        IRInstr::GetAddress { dst, name: _ } => {
-            // In Wasm, addresses are offsets in linear memory.
+        IRInstr::GetAddress { dst, name } => {
+            // On wasm32, `GetAddress` returns a function-table slot index
+            // used by `call_indirect` to dispatch indirect calls (e.g.
+            // `irq_dispatch` → handler).  We emit `i32.const 0` as a
+            // placeholder and record a relocation so `encode_program` can
+            // patch the LEB128 immediate with the symbol's actual table
+            // slot once the function-table layout is finalized.
             //
-            // BUG W2 (wasm32): we have no notion of a "data symbol" — the
-            // module emits no data segment and the only memory in use is the
-            // bump-allocator heap (starting at HEAP_START = 65536).  Without
-            // a linker-defined data layout, we cannot resolve the address of
-            // an arbitrary named symbol here.
-            //
-            // For now we emit `i32.const 0` (placeholder) and log a warning
-            // so callers know the result is meaningless.  This matches the
-            // pre-existing behavior (the placeholder was already being
-            // emitted silently) but makes the failure visible.
-            //
-            // TODO: implement a proper relocation similar to
-            // resolve_call_relocations — emit `i32.const <placeholder>` and
-            // record a (byte_offset, symbol_name) entry; then in
-            // encode_program allocate a data region for each unique symbol
-            // and patch the i32.const immediate (signed LEB128, 5 bytes
-            // following the 0x41 opcode) with the symbol's linear-memory
-            // address.
-            vuma_log!(warn, 
-                "wasm32 GetAddress: returning placeholder 0 — symbol addresses \
-                 are not yet supported on the wasm32 backend"
-            );
-            ctx.emit(WasmInstr::I32Const(0)); // placeholder
+            // The symbol name is resolved against `func_name_to_idx`
+            // (built in `encode_program`) to find the corresponding wasm
+            // function index, which is then placed in the table at the
+            // slot index we patch in here.
+            let instr_idx = ctx.instrs.len();
+            ctx.address_targets.push((instr_idx, name.clone()));
+            ctx.emit(WasmInstr::I32Const(0)); // placeholder, patched later
             ctx.stack_depth += 1;
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
@@ -3991,7 +4021,63 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } | IRInstr::CallIndirect { .. } => {}
+        | IRInstr::StarkProof { .. } => {}
+
+        IRInstr::CallIndirect { dst, func_ptr, args } => {
+            // Indirect call through a function pointer (table slot index on
+            // wasm32).  Used by `irq_dispatch` to call driver handler
+            // functions registered via `driver_register`.
+            //
+            // We push the args, then the table index (func_ptr), then emit
+            // `call_indirect (type) (table=0)`.  The type index is a
+            // placeholder (UNRESOLVED_TYPE_IDX) patched by `encode_program`
+            // to the module's void-function type (() -> ()).
+            //
+            // All program functions are emitted as `() -> ()` on wasm32
+            // (return values are passed via memory[0]), so any pushed args
+            // become orphans on the wasm stack and are dropped at the block
+            // End by the trampoline's stack-cleanup logic.  The wasm
+            // validator accepts this: `call_indirect` with a `() -> ()`
+            // type pops 0 args + 1 table index; the args sit below as
+            // extra stack values, which is permitted.
+            //
+            // After the call, the return value (if any) is loaded from
+            // memory[0] — same convention as `IRInstr::Call`.
+            for arg in args {
+                ctx.push_value(arg, Some(&WasmType::I32));
+                ctx.stack_depth += 1;
+            }
+            // Push the function pointer (table index).  On wasm32 this is
+            // an i32.  If the vreg holds an i64 (e.g. loaded from the
+            // driver table via i64.load), `push_value`'s type conversion
+            // emits `i32.wrap_i64` to narrow it.
+            ctx.push_value(func_ptr, Some(&WasmType::I32));
+            ctx.stack_depth += 1;
+            // Record the position for type-index patching.
+            let instr_idx = ctx.instrs.len();
+            ctx.indirect_calls.push(instr_idx);
+            ctx.emit(WasmInstr::CallIndirect {
+                type_idx: UNRESOLVED_TYPE_IDX,
+                table_idx: 0,
+            });
+            // `call_indirect` pops args.len() + 1 (the table index).
+            ctx.stack_depth -= (args.len() as i32) + 1;
+            // Read the return value from memory[0] (same convention as
+            // `IRInstr::Call`).  Indirect callees return i64 (driver
+            // handlers return i64 per the IPC protocol), so use i64.load.
+            if let Some(IRValue::Register(id)) = dst {
+                ctx.emit(WasmInstr::I32Const(0));
+                ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 });
+                ctx.stack_depth += 1;
+                if !ctx.vreg_to_local.contains_key(id) {
+                    ctx.alloc_local(*id, WasmType::I64);
+                }
+                if let Some(local_idx) = ctx.get_local(*id) {
+                    ctx.emit(WasmInstr::LocalSet(local_idx));
+                }
+                ctx.stack_depth -= 1;
+            }
+        }
     }
     Ok(())
 }
@@ -4234,7 +4320,7 @@ impl Backend for Wasm32Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Wasm has no registers — map virtual regs to locals.
         // We lower the IR function to Wasm bytecode here.
-        let (func_body, func_type, call_relocs, per_instr) =
+        let (func_body, func_type, call_relocs, table_relocs, type_relocs, per_instr) =
             lower_function(func).map_err(|e| BackendError::RegisterAllocFailed {
                 isa: "wasm32",
                 reason: e.to_string(),
@@ -4287,6 +4373,20 @@ impl Backend for Wasm32Backend {
                 symbol: func_name,
                 reloc_type: "R_WASM_FUNCTION_INDEX_LEB".to_string(),
             })
+            // NEW: GetAddress table-slot relocations.  Patched in
+            // `encode_program` with the function's table-slot index.
+            .chain(table_relocs.into_iter().map(|(byte_offset, name)| RelocationEntry {
+                offset: byte_offset as u64,
+                symbol: name,
+                reloc_type: "R_WASM_TABLE_INDEX_LEB".to_string(),
+            }))
+            // NEW: CallIndirect type-index relocations.  Patched in
+            // `encode_program` with the module's void-function type idx.
+            .chain(type_relocs.into_iter().map(|byte_offset| RelocationEntry {
+                offset: byte_offset as u64,
+                symbol: "__void_type__".to_string(),
+                reloc_type: "R_WASM_TYPE_INDEX_LEB".to_string(),
+            }))
             .collect();
 
         Ok(AllocatedFunction {
@@ -4827,6 +4927,101 @@ impl Backend for Wasm32Backend {
         let mut main_func_idx: Option<u32> = None;
         let mut main_func_type: Option<WasmFuncType> = None;
 
+        // ── K16-wasm32-callindirect: pre-pass ──────────────────────
+        // Pre-populate `func_name_to_idx` with ALL program function names
+        // and their future wasm function indices BEFORE emitting any
+        // function body.  This serves two purposes:
+        //
+        //   (a) Forward call references resolve correctly (a function
+        //       calling a sibling defined later in `program.functions`
+        //       now finds the callee in the map).
+        //
+        //   (b) The function-table element segment can be built with
+        //       correct wasm function indices for `GetAddress` targets
+        //       before the per-function relocation patching runs.
+        //
+        // The wasm function index for the i-th program function is
+        // `first_program_func_idx + i`, where `first_program_func_idx`
+        // accounts for all imported functions + runtime-helper functions
+        // added above.  The main emission loop below calls
+        // `module.add_function` which assigns exactly these indices.
+        let first_program_func_idx = module.num_imported_functions
+            + (module.functions.len() as u32);
+        for (i, func) in program.functions.iter().enumerate() {
+            let func_idx = first_program_func_idx + i as u32;
+            func_name_to_idx.insert(func.name.clone(), func_idx);
+            // Mirror the short-name alias logic from the main loop below.
+            if let Some(rest) = func.name.strip_prefix("fn_") {
+                let short = rest.split("_entry").next().unwrap_or(rest);
+                func_name_to_idx.entry(short.to_string()).or_insert(func_idx);
+                let full_no_params = format!("fn_{}_entry", short);
+                func_name_to_idx.entry(full_no_params).or_insert(func_idx);
+            }
+        }
+
+        // ── K16-wasm32-callindirect: function table ───────────────
+        // Pre-scan all program functions' relocations for
+        // `R_WASM_TABLE_INDEX_LEB` entries (emitted by `GetAddress`).
+        // Each unique symbol gets a sequential table slot.  We then emit:
+        //
+        //   - a `table` section: `(table N funcref)` where N = number of
+        //     unique addressed functions,
+        //   - an `element` segment: `(elem (i32.const 0) $func1 $func2 ...)`
+        //     populating slot i with the wasm function index of the i-th
+        //     addressed function.
+        //
+        // `table_slot_map` maps symbol-name → slot-index, used to patch
+        // `GetAddress` placeholders.  `CallIndirect` type-index
+        // placeholders are patched with `start_type_idx` (the `() -> ()`
+        // type used by all program functions on wasm32).
+        let mut addressed_funcs: Vec<String> = Vec::new();
+        {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for func in &program.functions {
+                for reloc in &func.relocations {
+                    if reloc.reloc_type == "R_WASM_TABLE_INDEX_LEB"
+                        && seen.insert(reloc.symbol.clone())
+                    {
+                        addressed_funcs.push(reloc.symbol.clone());
+                    }
+                }
+            }
+        }
+        // Sort for deterministic table-slot assignment across runs.
+        addressed_funcs.sort();
+
+        let mut table_slot_map: HashMap<String, u32> = HashMap::new();
+        let mut element_func_indices: Vec<u32> = Vec::new();
+        for (i, name) in addressed_funcs.iter().enumerate() {
+            table_slot_map.insert(name.clone(), i as u32);
+            // Look up the wasm function index for this symbol.  Fall back
+            // to the -ENOSYS stub if not found (shouldn't happen for
+            // well-formed IR, but keeps the module validatable).
+            let idx = func_name_to_idx.get(name).copied().unwrap_or(stub_func_idx);
+            element_func_indices.push(idx);
+        }
+
+        if !addressed_funcs.is_empty() {
+            // 0x70 = funcref element type.
+            let table_size = addressed_funcs.len() as u32;
+            module.tables.push((
+                0x70,
+                WasmLimits {
+                    min: table_size,
+                    max: Some(table_size),
+                    shared: false,
+                },
+            ));
+            // Element segment: offset 0, list of function indices.
+            // offset_expr = `i32.const 0` (0x41 0x00) + `end` (0x0B).
+            let offset_expr: Vec<u8> = vec![0x41, 0x00, 0x0B];
+            module.elements.push(WasmElementSegment {
+                table_index: 0,
+                offset_expr,
+                func_indices: element_func_indices,
+            });
+        }
+
         for func in &program.functions {
             // Recover the function type from the typed metadata field.
             let func_type = func.wasm_func_type.as_ref().map_or_else(
@@ -4888,8 +5083,17 @@ impl Backend for Wasm32Backend {
             }
 
             // ── Resolve call relocations ────────────────────────────
-            // Patch unresolved Call targets in the body bytecode.
-            resolve_call_relocations(&mut body_bytes, &func.relocations, &func_name_to_idx, stub_func_idx)?;
+            // Patch unresolved Call targets in the body bytecode.  Also
+            // patches GetAddress table-index placeholders and CallIndirect
+            // type-index placeholders (K16-wasm32-callindirect).
+            resolve_call_relocations(
+                &mut body_bytes,
+                &func.relocations,
+                &func_name_to_idx,
+                stub_func_idx,
+                &table_slot_map,
+                start_type_idx,
+            )?;
 
             module.add_code(WasmFuncBody {
                 locals: local_decls,
@@ -5113,39 +5317,68 @@ impl Backend for Wasm32Backend {
 /// Each `RelocationEntry` with `reloc_type == "R_WASM_FUNCTION_INDEX_LEB"`
 /// describes a position where the LEB128-encoded function index of a `call`
 /// instruction must be replaced with the resolved index from `func_name_to_idx`.
+///
+/// Additionally handles two new reloc types emitted by the CallIndirect /
+/// GetAddress lowering (K16-wasm32-callindirect):
+///   - `R_WASM_TABLE_INDEX_LEB`: the LEB128 immediate of an `i32.const`
+///     emitted by `GetAddress` must be replaced with the symbol's
+///     function-table slot index (from `table_slot_map`).
+///   - `R_WASM_TYPE_INDEX_LEB`: the type_idx LEB128 of a `call_indirect`
+///     must be replaced with the module's void-function type index
+///     (`void_type_idx`, i.e. the `() -> ()` signature used by all
+///     program functions on wasm32).
 fn resolve_call_relocations(
     body_bytes: &mut Vec<u8>,
     relocations: &[RelocationEntry],
     func_name_to_idx: &HashMap<String, u32>,
     stub_func_idx: u32,
+    table_slot_map: &HashMap<String, u32>,
+    void_type_idx: u32,
 ) -> Result<(), BackendError> {
     // Process relocations in reverse order (highest offset first) so that
     // splicing earlier relocations doesn't invalidate later offsets.
     let mut sorted_relocs: Vec<&RelocationEntry> = relocations.iter().collect();
     sorted_relocs.sort_by_key(|b| std::cmp::Reverse(b.offset));
     for reloc in &sorted_relocs {
-        if reloc.reloc_type != "R_WASM_FUNCTION_INDEX_LEB" {
-            continue;
-        }
-        let offset = reloc.offset as usize;
-        let resolved_idx = match func_name_to_idx.get(&reloc.symbol) {
-            Some(&idx) => idx,
-            None => {
-                // External symbol — resolve to the generic stub that returns
-                // -ENOSYS so callers can detect unsupported syscalls (Wave 5).
-                // This allows tests to detect unsupported functionality gracefully
-                // (e.g. epoll_create1 returns -ENOSYS on wasm32/WASI).
-                vuma_log!(debug, 
-                    "unresolved call target '{}' in wasm32 module — using stub (returns -ENOSYS)",
-                    reloc.symbol
-                );
-                stub_func_idx
-            }
+        let resolved_idx: u32 = match reloc.reloc_type.as_str() {
+            "R_WASM_FUNCTION_INDEX_LEB" => match func_name_to_idx.get(&reloc.symbol) {
+                Some(&idx) => idx,
+                None => {
+                    // External symbol — resolve to the generic stub that returns
+                    // -ENOSYS so callers can detect unsupported syscalls (Wave 5).
+                    // This allows tests to detect unsupported functionality gracefully
+                    // (e.g. epoll_create1 returns -ENOSYS on wasm32/WASI).
+                    vuma_log!(debug,
+                        "unresolved call target '{}' in wasm32 module — using stub (returns -ENOSYS)",
+                        reloc.symbol
+                    );
+                    stub_func_idx
+                }
+            },
+            "R_WASM_TABLE_INDEX_LEB" => match table_slot_map.get(&reloc.symbol) {
+                Some(&idx) => idx,
+                None => {
+                    // Symbol was not registered in the function table.
+                    // Resolve to slot 0 as a fallback (the module still
+                    // validates; the runtime call may trap if slot 0 holds
+                    // an unrelated function, but this is a degenerate case
+                    // that shouldn't occur in well-formed IR).
+                    vuma_log!(warn,
+                        "GetAddress target '{}' not in function table — using slot 0",
+                        reloc.symbol
+                    );
+                    0
+                }
+            },
+            "R_WASM_TYPE_INDEX_LEB" => void_type_idx,
+            _ => continue,
         };
+
+        let offset = reloc.offset as usize;
 
         // Decode the existing LEB128 to find its byte length.
         let (old_idx, leb_len) = decode_unsigned_leb128(&body_bytes[offset..]);
-        let _ = old_idx; // was the placeholder UNRESOLVED_CALL_IDX
+        let _ = old_idx; // was the placeholder
 
         // Encode the resolved index as LEB128.
         let new_leb = encode_unsigned_leb128(resolved_idx as u64);
@@ -7770,7 +8003,8 @@ mod wasm_target_tests {
         let mut name_map = HashMap::new();
         name_map.insert("main".to_string(), 5u32);
 
-        resolve_call_relocations(&mut body, &relocs, &name_map, 99).expect("resolution should succeed");
+        let empty_table_map: HashMap<String, u32> = HashMap::new();
+        resolve_call_relocations(&mut body, &relocs, &name_map, 99, &empty_table_map, 0).expect("resolution should succeed");
 
         // Verify the Call target was patched
         let (_, leb_len) = decode_unsigned_leb128(&body[1..]);
