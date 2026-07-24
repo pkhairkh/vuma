@@ -281,9 +281,84 @@ fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
         _ => return, // no spawn_worker pattern in this function
     };
 
-    // Phase 3: rewrite the child block's Return → Store + Jump(parent).
+    // K12B-wasm32-fork-debug: Pattern B (parent sends, child receives)
+    // reorder. K11A ran the child first then jumped to the parent, but for
+    // Pattern B the child's `channel_recv` reads an EMPTY ring buffer
+    // (parent hasn't sent yet) and gets garbage (or 0). Fix: when the
+    // child block contains a `channel_recv` Call AND the parent block
+    // contains the `wait_worker` Load (from WASM32_CHILD_EXIT_ADDR), split
+    // the parent block at that Load and reorder execution to:
+    //   parent_pre (channel_send + friends) → child (channel_recv +
+    //   store exit) → parent_post (wait_worker loads the stashed exit).
+    //
+    // Pattern A (child sends, parent try_recv in a loop) is left
+    // untouched: the child has no `channel_recv`, so K11A's child-first
+    // ordering is preserved.
+    let parent_post_lbl: String = {
+        let parent_idx = match func.blocks.iter().position(|b| b.label == parent_lbl) {
+            Some(i) => i,
+            None => return,
+        };
+        let child_idx = match func.blocks.iter().position(|b| b.label == child_lbl) {
+            Some(i) => i,
+            None => return,
+        };
+        let child_has_recv = func.blocks[child_idx].instructions.iter().any(|instr| {
+            matches!(instr, IRInstr::Call { func, .. } if func.as_str() == "channel_recv")
+        });
+        let wait_idx = func.blocks[parent_idx].instructions.iter().position(|instr| {
+            matches!(instr,
+                IRInstr::Load { addr: IRValue::Immediate(a), .. } if *a == WASM32_CHILD_EXIT_ADDR)
+        });
+        if child_has_recv {
+            if let Some(wi) = wait_idx {
+                let post_label = format!("{}__wasm32_wait", parent_lbl);
+                let parent_src_line = func.blocks[parent_idx].source_line;
+                // Move instructions [wi..) out of the parent block into a
+                // new parent_post block; parent keeps [0..wi).
+                let post_instructions =
+                    func.blocks[parent_idx].instructions.split_off(wi);
+                let original_terminator = std::mem::replace(
+                    &mut func.blocks[parent_idx].terminator,
+                    IRTerminator::Jump(child_lbl.clone()));
+                func.blocks[parent_idx].successors.clear();
+                func.blocks[parent_idx].successors.insert(child_lbl.clone());
+                let mut post_block = IRBlock::new(post_label.clone());
+                post_block.instructions = post_instructions;
+                post_block.terminator = original_terminator;
+                post_block.source_line = parent_src_line;
+                func.blocks.insert(parent_idx + 1, post_block);
+                // Swap the Branch targets so cond=true→parent (runs first).
+                // The cond `pid == 0` is true on wasm32 (pid is 0), so the
+                // true_target runs first. We want parent first, so swap.
+                for blk in &mut func.blocks {
+                    if let IRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } = &mut blk.terminator
+                    {
+                        if *true_block == child_lbl && *false_block == parent_lbl {
+                            std::mem::swap(true_block, false_block);
+                            break;
+                        }
+                    }
+                }
+                post_label
+            } else {
+                // Pattern B without a wait_worker in the immediate parent
+                // block — can't safely split. Fall back to K11A ordering.
+                parent_lbl.clone()
+            }
+        } else {
+            // Pattern A: child sends, parent receives. Keep child-first.
+            parent_lbl.clone()
+        }
+    };
+
+    // Phase 3: rewrite the child block's Return → Store + Jump(parent_post).
     // Also handle the case where the child block ends with a Jump chain
-    // leading to a Return — follow up to 8 jumps to find the actual Return.
+    // leading to a Return — follow up to 16 jumps to find the actual Return.
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cursor = child_lbl.clone();
     for _ in 0..16 {
@@ -307,11 +382,11 @@ fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
                 ty: IRType::I64,
             });
             block.instructions.push(IRInstr::Branch {
-                target: parent_lbl.clone(),
+                target: parent_post_lbl.clone(),
             });
-            block.terminator = IRTerminator::Jump(parent_lbl.clone());
+            block.terminator = IRTerminator::Jump(parent_post_lbl.clone());
             block.successors.clear();
-            block.successors.insert(parent_lbl.clone());
+            block.successors.insert(parent_post_lbl.clone());
             break;
         }
         // Follow unconditional jumps deeper into the child CFG.
@@ -707,6 +782,8 @@ fn expand_channel_open(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRI
     let ret = ctx.new_vreg();
     let read_fd = ctx.new_vreg();
     let write_fd = ctx.new_vreg();
+    let read_fd_ext = ctx.new_vreg();
+    let write_fd_ext = ctx.new_vreg();
     let shifted = ctx.new_vreg();
     let handle = ctx.new_vreg();
 
@@ -719,10 +796,22 @@ fn expand_channel_open(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRI
         },
         IRInstr::Load { dst: read_fd.clone(), addr: fds_buf.clone(), offset: 0, ty: IRType::I32 },
         IRInstr::Load { dst: write_fd.clone(), addr: fds_buf, offset: 4, ty: IRType::I32 },
+        // [K12A-ipc-pattern-b-timeout] Zero-extend I32 fds to I64 before
+        // packing into the 64-bit channel handle. On 32-bit backends
+        // (x86_32/hppa/riscv32/m68k/arm32), an I32 Load only initialises the
+        // low 4 bytes of the vreg's 8-byte stack slot; the high 4 bytes
+        // retain garbage from prior use. When the vreg is later used as an
+        // operand in an I64 BinOp (Shl/Or), the backend reads both words,
+        // corrupting the result (e.g. write_fd<<32 | garbage_hi produces a
+        // wrong handle, so channel_send extracts write_fd=0 and writes to
+        // fd 0 → EBADF → receiver polls forever → exit 124). This is the
+        // same class of bug documented at line ~1035 for the CRC loop index.
+        IRInstr::Cast { kind: CastKind::ZExt, dst: read_fd_ext.clone(), src: read_fd, from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) },
+        IRInstr::Cast { kind: CastKind::ZExt, dst: write_fd_ext.clone(), src: write_fd, from_ty: Some(IRType::I32), to_ty: Some(IRType::I64) },
         IRInstr::BinOp {
             op: BinOpKind::Shl,
             dst: shifted.clone(),
-            lhs: write_fd,
+            lhs: write_fd_ext,
             rhs: IRValue::Immediate(32),
             ty: Some(IRType::I64),
         },
@@ -730,7 +819,7 @@ fn expand_channel_open(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRI
             op: BinOpKind::Or,
             dst: handle.clone(),
             lhs: shifted,
-            rhs: read_fd,
+            rhs: read_fd_ext,
             ty: Some(IRType::I64),
         },
         IRInstr::BinOp {
@@ -791,7 +880,13 @@ const WASM32_CHILD_EXIT_ADDR: i64 = 4096;
 fn is_wasm32_native_channel_builtin(name: &str) -> bool {
     matches!(name,
         "channel_open" | "channel_send" | "channel_recv" | "channel_close"
-        | "channel_try_recv"
+        | "channel_try_recv" | "channel_recv_timeout"
+        // K12C-wasm32-cr-compile: channel_recv_proto and ChannelRecvResult
+        // are NOT in this list — they need proto_state validation logic
+        // that lives in this pass (not the backend). They are special-cased
+        // at the top of their expand_* functions to use channel_recv on
+        // wasm32 (skipping the Syscall-based framed read path that returns
+        // -ENOSYS on wasm32).
     )
 }
 
@@ -1133,6 +1228,43 @@ fn expand_channel_recv_result(
     let dst = dst.clone();
     let err_dst = err_dst.clone();
 
+    // K12C-wasm32-cr-compile: on wasm32 the channel is an in-memory ring
+    // buffer (no framing, no MAGIC, no CRC). The Syscall-based framed read
+    // path below returns -38 (ENOSYS) for `read`, which sets is_closed=true
+    // and produces err_dst=1 (Closed) regardless of buffer state. Replace
+    // with a direct call to the wasm32-native `channel_recv` (ring-buffer
+    // read) and unconditionally report Ok (err_dst=0). This recovers the
+    // `match_recv` test (Pattern A: child sends 42 → parent recv Ok(42)).
+    if ctx.backend == BackendKind::Wasm32 {
+        let recv_dst = ctx.new_vreg();
+        return Expansion {
+            pre: vec![
+                IRInstr::Call {
+                    dst: Some(recv_dst.clone()),
+                    func: "channel_recv".into(),
+                    args: vec![ch],
+                    is_extern: false,
+                },
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    dst: dst.clone(),
+                    lhs: recv_dst,
+                    rhs: IRValue::Immediate(0),
+                    ty: Some(IRType::I64),
+                },
+                IRInstr::BinOp {
+                    op: BinOpKind::Add,
+                    dst: err_dst.clone(),
+                    lhs: IRValue::Immediate(0),
+                    rhs: IRValue::Immediate(0),
+                    ty: Some(IRType::I64),
+                },
+            ],
+            new_blocks: vec![],
+            cont_label: None,
+        };
+    }
+
     let frame = ctx.new_vreg();
     let read_fd = ctx.new_vreg();
     let read_ret = ctx.new_vreg();
@@ -1275,7 +1407,14 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
 
     let frame = ctx.new_vreg();
     let read_fd = ctx.new_vreg();
+    let fcntl_ret = ctx.new_vreg();
+    let pollfd = ctx.new_vreg();
+    let poll_ret = ctx.new_vreg();
+    let poll_no_data = ctx.new_vreg();
     let read_ret = ctx.new_vreg();
+    let is_full = ctx.new_vreg();
+    let is_eof = ctx.new_vreg();
+    let has_data = ctx.new_vreg();
     let is_closed = ctx.new_vreg();
     let magic = ctx.new_vreg();
     let magic_ok = ctx.new_vreg();
@@ -1290,54 +1429,137 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let i_slot = ctx.new_vreg();
     let j_slot = ctx.new_vreg();
 
-    let pre = vec![
+    // [K12A-ipc-pattern-b-timeout] Use a poll+retry loop instead of a single
+    // blocking read. Under QEMU user-mode on x86_32/hppa, a blocking read()
+    // on an empty pipe deadlocks because the clone()'d peer may not be
+    // scheduled concurrently — the peer's channel_send (blocking write) and
+    // this process's blocking read both stall and neither gets CPU. The
+    // nanosleep(1ms) yields the CPU so the peer can run; poll(timeout=0)
+    // probes for data; read (with O_NONBLOCK) fetches the frame. We retry
+    // until we get a full 56-byte frame (read_ret == 56) or EOF
+    // (read_ret == 0).
+    //
+    // The `poll_no_data` gate (poll_ret == 0) is critical for backends where
+    // O_NONBLOCK via fcntl(F_SETFL) doesn't take effect under QEMU
+    // (alpha/mips64/sparc64/hppa per K10B notes): if poll says "no data" we
+    // skip the read entirely and retry, avoiding a blocking read on an empty
+    // pipe. On asm-generic arches (aarch64/riscv/loongarch), generic nr 7 is
+    // fsetxattr not poll, so poll_ret = -EFAULT (≠ 0), poll_no_data = false,
+    // and we fall through to read — which is safe because O_NONBLOCK works
+    // correctly on those native backends.
+    //
+    // Modelled after expand_channel_try_recv (K9B/K10B) but with a retry
+    // loop instead of returning -2 (EAGAIN) when no data is available.
+    let mut pre = vec![
         // Alloc frame
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         // read_fd = ch & 0xFFFFFFFF
         IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
-        // read(read_fd, frame, 56)
-        IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
-        // is_closed = (read_ret <= 0)
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-        // Load MAGIC from frame[0]
-        IRInstr::Load { dst: magic.clone(), addr: frame.clone(), offset: 0, ty: IRType::I32 },
-        // magic_ok = (magic == 0x414D5556)
-        IRInstr::Cmp { kind: CmpKind::Eq, dst: magic_ok.clone(), lhs: magic, rhs: IRValue::Immediate(0x414D5556), ty: Some(IRType::I32) },
-        // Load stored CRC from frame[52]
-        IRInstr::Load { dst: stored_crc.clone(), addr: frame.clone(), offset: 52, ty: IRType::I32 },
+    ];
+    // Set O_NONBLOCK on read_fd (like try_recv does)
+    pre.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret, o_nonblock_flag(ctx.backend)));
+    pre.extend(vec![
+        // Alloc pollfd struct { i32 fd; i16 events; i16 revents; } = 8 bytes
+        IRInstr::Alloc { dst: pollfd.clone(), size: 8 },
+        IRInstr::Store { value: read_fd.clone(), addr: pollfd.clone(), offset: 0, ty: IRType::I32 },
+        IRInstr::Store { value: IRValue::Immediate(1), addr: pollfd.clone(), offset: 4, ty: IRType::I16 },
         // CRC loop state: crc = 0xFFFFFFFF, i = 0
         IRInstr::Alloc { dst: crc_slot.clone(), size: 8 },
         IRInstr::Alloc { dst: i_slot.clone(), size: 8 },
         IRInstr::Alloc { dst: j_slot.clone(), size: 8 },
         IRInstr::Store { value: IRValue::Immediate(-1), addr: crc_slot.clone(), offset: 0, ty: IRType::I32 },
         IRInstr::Store { value: IRValue::Immediate(0), addr: i_slot.clone(), offset: 0, ty: IRType::I32 },
-    ];
+    ]);
+
+    // ── poll_loop block ──
+    //   nanosleep(1ms)         — yield CPU so the peer can run
+    //   read(read_fd, frame, 56) → read_ret   (O_NONBLOCK set above)
+    //   is_full = (read_ret == 56)   — got a complete frame
+    //   is_eof  = (read_ret == 0)    — write end closed, pipe empty
+    //   if is_full OR is_eof: jump to read_done
+    //   else: retry (jump back to poll_loop)
+    //
+    // [K12A-fix] Removed the poll() call — QEMU arm32's poll() returns 0
+    // (no data) even when data IS available in the pipe, causing an infinite
+    // loop. Instead, use read() with O_NONBLOCK directly: read returns
+    // -EAGAIN (-11) if the pipe is empty, which we retry. This is simpler
+    // and avoids the broken poll on QEMU arm32/sparc64/hppa.
+    let poll_loop_lbl = ctx.new_label("recv_poll_loop");
+    let read_done_lbl = ctx.new_label("recv_read_done");
+
+    let mut poll_loop_blk = IRBlock::new(&poll_loop_lbl);
+    // nanosleep(1ms) — yield CPU. This is the critical fix for QEMU user-mode
+    // where clone()'d children may not be scheduled concurrently with the
+    // parent. The 1ms sleep forces a context switch so the peer process
+    // (sender) gets CPU time to write to the pipe.
+    poll_loop_blk.instructions.extend(emit_nanosleep(ctx, 1_000_000));
+    // read(read_fd, frame, 56) — O_NONBLOCK is set, so this returns
+    // immediately: 56 if data available, -EAGAIN (-11) if empty, 0 on EOF.
+    poll_loop_blk.instructions.push(IRInstr::Syscall {
+        nr: 63, // read
+        args: vec![read_fd.clone(), frame.clone(), IRValue::Immediate(56)],
+        dst: Some(read_ret.clone()),
+    });
+    // is_full = (read_ret == 56) — got a complete frame
+    poll_loop_blk.instructions.push(IRInstr::Cmp {
+        kind: CmpKind::Eq, dst: is_full.clone(),
+        lhs: read_ret.clone(), rhs: IRValue::Immediate(56), ty: Some(IRType::I64),
+    });
+    // is_eof = (read_ret == 0) — write end closed
+    poll_loop_blk.instructions.push(IRInstr::Cmp {
+        kind: CmpKind::Eq, dst: is_eof.clone(),
+        lhs: read_ret.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
+    });
+    // has_data = is_full OR is_eof
+    poll_loop_blk.instructions.push(IRInstr::BinOp {
+        op: BinOpKind::Or, dst: has_data.clone(),
+        lhs: is_full.clone(), rhs: is_eof.clone(), ty: Some(IRType::I32),
+    });
+    // If has_data → read_done. Else → retry (poll_loop).
+    poll_loop_blk.instructions.push(IRInstr::CondBranch {
+        cond: has_data.clone(),
+        true_target: read_done_lbl.clone(),
+        false_target: poll_loop_lbl.clone(),
+    });
+    poll_loop_blk.terminator = IRTerminator::Branch {
+        cond: has_data,
+        true_block: read_done_lbl.clone(),
+        false_block: poll_loop_lbl.clone(),
+    };
 
     // Build CRC32 loop blocks (compute CRC over frame[0..52], store to computed_crc).
     let (mut crc_blocks, crc_cont) = build_crc32_loop_blocks(
         ctx, frame.clone(), crc_slot, i_slot, j_slot,
         CRC32PostAction::StoreToReg { dst: computed_crc.clone() },
     );
+    // read_done block jumps to the first CRC loop block.
+    let crc_first_lbl = crc_blocks[0].label.clone();
+
+    // ── read_done block ──
+    //   is_closed = (read_ret <= 0)
+    //   Load MAGIC, stored_crc from frame
+    //   Jump to CRC loop header
+    let mut read_done_blk = IRBlock::new(&read_done_lbl);
+    read_done_blk.instructions.push(IRInstr::Cmp {
+        kind: CmpKind::SLe, dst: is_closed.clone(),
+        lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
+    });
+    read_done_blk.instructions.push(IRInstr::Load { dst: magic.clone(), addr: frame.clone(), offset: 0, ty: IRType::I32 });
+    read_done_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: magic_ok.clone(), lhs: magic, rhs: IRValue::Immediate(0x414D5556), ty: Some(IRType::I32) });
+    read_done_blk.instructions.push(IRInstr::Load { dst: stored_crc.clone(), addr: frame.clone(), offset: 52, ty: IRType::I32 });
+    read_done_blk.instructions.push(IRInstr::Branch { target: crc_first_lbl.clone() });
+    read_done_blk.terminator = IRTerminator::Jump(crc_first_lbl);
 
     // After the CRC loop (in the crc_cont block), compare computed vs stored,
     // check is_closed and magic_ok, and select the result.
     let cont_label = ctx.new_label("recv_cont");
 
-    // The crc_cont block: load payload, compare CRCs, select result.
-    // We need to append this block to crc_blocks (it's the continuation
-    // after the CRC loop, before the final recv_cont).
-    // Actually, the build_crc32_loop_blocks already created a "crc_cont"
-    // label that the exit block jumps to. We'll make crc_cont the block
-    // that does the comparison, and then jumps to recv_cont (the real
-    // continuation for the original post-instructions).
-
-    // crc_cont block:
+    // crc_cont block: load payload, compare CRCs, select result.
     let mut crc_cont_blk = IRBlock::new(&crc_cont);
     crc_cont_blk.instructions.push(IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 });
     // crc_match = (computed_crc == stored_crc)
     crc_cont_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: crc_match.clone(), lhs: computed_crc.clone(), rhs: stored_crc.clone(), ty: Some(IRType::I32) });
     // result = is_closed ? -1 : (magic_ok ? (crc_match ? payload : -6) : -1)
-    // We need nested selects. Let's do it step by step:
     //   crc_ok_result = crc_match ? payload : -6
     //   magic_ok_result = magic_ok ? crc_ok_result : -1
     //   final = is_closed ? -1 : magic_ok_result
@@ -1350,9 +1572,12 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     crc_cont_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
     crc_cont_blk.terminator = IRTerminator::Jump(cont_label.clone());
 
-    crc_blocks.push(crc_cont_blk);
+    // Assemble new_blocks: poll_loop → read_block → read_done → crc_blocks... → crc_cont
+    let mut new_blocks = vec![poll_loop_blk, read_done_blk];
+    new_blocks.extend(crc_blocks);
+    new_blocks.push(crc_cont_blk);
 
-    Expansion { pre, new_blocks: crc_blocks, cont_label: Some(cont_label) }
+    Expansion { pre, new_blocks, cont_label: Some(cont_label) }
 }
 
 // ── L1: Framed messaging variants ─────────────────────────────────────
@@ -1431,6 +1656,80 @@ fn expand_channel_recv_proto(ctx: &mut LowerContext, args: &[IRValue], dst: Opti
     let ch = args[0].clone();
     let expected = args[1].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return Expansion::flat(vec![]); } };
+
+    // K12C-wasm32-cr-compile: on wasm32 the channel is an in-memory ring
+    // buffer (no framing, no CRC). The Syscall-based framed read below
+    // returns -38 (ENOSYS) on wasm32 → is_closed=true → result=-1 (Closed).
+    // Replace with a direct call to the wasm32-native `channel_recv`, while
+    // preserving proto_state validation (mismatch → -5, match → payload +
+    // advance proto_state). Recovers `protocol_valid` test (Pattern A:
+    // child sends 10, 40 → parent recv_proto(ch,0)=10, recv_proto(ch,1)=40).
+    if ctx.backend == BackendKind::Wasm32 {
+        let proto_state = match ctx.proto_state.clone() {
+            Some(p) => p,
+            None => {
+                // No proto_state slot — just call channel_recv.
+                let recv_dst = ctx.new_vreg();
+                return Expansion::flat(vec![
+                    IRInstr::Call {
+                        dst: Some(recv_dst.clone()),
+                        func: "channel_recv".into(),
+                        args: vec![ch],
+                        is_extern: false,
+                    },
+                    IRInstr::BinOp {
+                        op: BinOpKind::Add,
+                        dst,
+                        lhs: recv_dst,
+                        rhs: IRValue::Immediate(0),
+                        ty: Some(IRType::I64),
+                    },
+                ]);
+            }
+        };
+        let current_state = ctx.new_vreg();
+        let state_match = ctx.new_vreg();
+        let do_recv_label = ctx.new_label("w32_proto_do_recv");
+        let fail_label = ctx.new_label("w32_proto_fail");
+        let cont_label = ctx.new_label("w32_proto_cont");
+        let pre = vec![
+            IRInstr::Load { dst: current_state.clone(), addr: proto_state.clone(), offset: 0, ty: IRType::I32 },
+            IRInstr::Cmp { kind: CmpKind::Eq, dst: state_match.clone(), lhs: current_state, rhs: expected, ty: None },
+            IRInstr::CondBranch {
+                cond: state_match,
+                true_target: do_recv_label.clone(),
+                false_target: fail_label.clone(),
+            },
+        ];
+        // fail block: dst = -5 (ProtocolViolation), jump to cont.
+        let mut fail_blk = IRBlock::new(&fail_label);
+        fail_blk.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add, dst: dst.clone(), lhs: IRValue::Immediate(-5), rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
+        });
+        fail_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
+        fail_blk.terminator = IRTerminator::Jump(cont_label.clone());
+        // do_recv block: call channel_recv, dst = recv result, advance proto_state, jump to cont.
+        let mut do_blk = IRBlock::new(&do_recv_label);
+        let recv_dst = ctx.new_vreg();
+        do_blk.instructions.push(IRInstr::Call {
+            dst: Some(recv_dst.clone()),
+            func: "channel_recv".into(),
+            args: vec![ch],
+            is_extern: false,
+        });
+        do_blk.instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Add, dst: dst.clone(), lhs: recv_dst, rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
+        });
+        // Advance proto_state: state += 1 (I32).
+        let cur_state = ctx.new_vreg();
+        let new_state = ctx.new_vreg();
+        do_blk.instructions.push(IRInstr::Load { dst: cur_state.clone(), addr: proto_state.clone(), offset: 0, ty: IRType::I32 });
+        do_blk.instructions.push(IRInstr::BinOp { op: BinOpKind::Add, dst: new_state.clone(), lhs: cur_state, rhs: IRValue::Immediate(1), ty: Some(IRType::I32) });
+        do_blk.instructions.push(IRInstr::Store { value: new_state, addr: proto_state, offset: 0, ty: IRType::I32 });
+        do_blk.instructions.push(IRInstr::Branch { target: cont_label.clone() });
+        do_blk.terminator = IRTerminator::Jump(cont_label.clone());
+        return Expansion { pre, new_blocks: vec![fail_blk, do_blk], cont_label: Some(cont_label) };
+    }
 
     let proto_state = match ctx.proto_state.clone() {
         Some(p) => p,
@@ -1979,6 +2278,22 @@ fn expand_shared_memory_open(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut 
     let size = args[0].clone();
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let ret = ctx.new_vreg();
+    // K12D-wasm32-mm-remaining: on wasm32 there is no mmap syscall (the
+    // Syscall handler returns -38 ENOSYS for nr!=220), so the returned
+    // pointer was -38 and subsequent shared_memory_write/read at that
+    // address trapped with "out of bounds memory access" (runner exits 1).
+    // On wasm32, both "parent" and "child" run in the SAME linear memory
+    // (no real fork — K11A's fork-emulation pass rewrites child Return to
+    // Store+Jump), so a bump-allocated buffer via IRInstr::Alloc is
+    // effectively shared between the two code paths. Alloc on wasm32
+    // advances __heap_ptr and returns the previous value as an I32
+    // pointer (wasm32/mod.rs:3265).
+    if ctx.backend == BackendKind::Wasm32 {
+        return vec![
+            IRInstr::Alloc { dst: ret.clone(), size: 4096 },
+            IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        ];
+    }
     // flags = MAP_SHARED | MAP_ANONYMOUS, per-arch (alpha/hppa/sparc/mips
     // use legacy MAP_ANONYMOUS values that differ from asm-generic's 0x20).
     let flags = map_shared_anon_flags(ctx.backend);

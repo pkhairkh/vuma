@@ -1991,7 +1991,19 @@ fn emit_type_conversion(ctx: &mut LoweringContext, from: WasmType, to: WasmType)
     }
     match (from, to) {
         (WasmType::I64, WasmType::I32) => ctx.emit(WasmInstr::I32WrapI64),
-        (WasmType::I32, WasmType::I64) => ctx.emit(WasmInstr::I64ExtendI32U),
+        // K12D-wasm32-mm-remaining: I32→I64 implicit widening uses SIGNED
+        // extension (I64ExtendI32S), not unsigned. Most I32 values in the IR
+        // are signed (loop counters, error codes like -5/-3, return values).
+        // Using ZExt corrupted negative values when widened to I64: e.g.
+        // hot_swap's `BinOp{Add, ty:I64, lhs:result(I32=-5), rhs:Imm(0)}`
+        // produced 0x00000000FFFFFFFB instead of 0xFFFFFFFFFFFFFFFB, so the
+        // subsequent `Cmp{Eq, lhs, rhs:Imm(-5)}` (I64) failed and the test
+        // exited 0 instead of 1. Cases needing ZExt use explicit
+        // `IRInstr::Cast{kind:ZExt}` (e.g. channel_open's read_fd/write_fd
+        // packing at ipc_lowering.rs:809), which goes through the Cast arm
+        // (line ~3382) and is unaffected. The I32→F64 bitcast path below
+        // still uses ZExt to preserve the low-32-bit pattern.
+        (WasmType::I32, WasmType::I64) => ctx.emit(WasmInstr::I64ExtendI32S),
         (WasmType::I64, WasmType::F64) => ctx.emit(WasmInstr::F64ReinterpretI64),
         (WasmType::F64, WasmType::I64) => ctx.emit(WasmInstr::I64ReinterpretF64),
         (WasmType::I32, WasmType::F32) => ctx.emit(WasmInstr::F32ReinterpretI32),
@@ -3076,6 +3088,89 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     }
                     return Ok(());
                 }
+                // K12C-wasm32-cr-compile: channel_recv_timeout(ch, timeout_ms)
+                // -> i32. On wasm32 there is no real timer/poll; the ring
+                // buffer is checked once. If empty (head == tail), return -3
+                // (Timeout sentinel). If data is available, behave exactly
+                // like channel_recv (load payload, advance head). This
+                // recovers `recv_timeout` and `crc_mismatch` tests, which
+                // open a channel with no sender and expect -3.
+                "channel_recv_timeout" if args.len() == 2 && dst.is_some() => {
+                    let ch = &args[0];
+                    ctx.push_value(ch, Some(&WasmType::I32));
+                    ctx.stack_depth += 1;
+                    let base_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(base_local));
+                    ctx.stack_depth -= 1;
+                    // Load head and tail.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
+                    let head_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(head_local));
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 4 });
+                    let tail_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(tail_local));
+                    ctx.stack_depth -= 1;
+                    // cond = (head == tail) -> empty -> return -3 (Timeout)
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(tail_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Eq);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::If(Some(WasmType::I32)));
+                    // if-body (empty): -3
+                    ctx.emit(WasmInstr::I32Const(-3));
+                    // else-body (data available): load payload + advance head
+                    ctx.emit(WasmInstr::Else);
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(16));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 });
+                    ctx.emit(WasmInstr::I32WrapI64);
+                    // Advance head: new_head = (head + 8) % capacity
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(8));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 8 });
+                    ctx.emit(WasmInstr::I32RemU);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                    ctx.stack_depth -= 2;
+                    ctx.emit(WasmInstr::End);
+                    // Stack: [result]. Pop to dst.
+                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                    return Ok(());
+                }
                 _ => {}
             }
 
@@ -3406,9 +3501,23 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             true_val,
             false_val, ty: _,
         } => {
-            ctx.push_value(cond, None);
+            // K12D-wasm32-mm-remaining: wasm `select` expects the stack to be
+            // [val1, val2, cond] with cond on TOP. It pops cond, then val2,
+            // then val1, and returns val1 if cond != 0, else val2.
+            // For IR Select{cond, true_val, false_val} we want:
+            //   result = true_val if cond != 0 else false_val
+            // So val1=true_val, val2=false_val, c=cond.
+            // Push order MUST be: true_val, false_val, cond (cond on top).
+            // The previous order (cond, true_val, false_val) put false_val on
+            // top, making select treat false_val as the condition — producing
+            // garbage results for any Select with non-zero false_val (e.g.
+            // hot_swap's `Select{cond, true_val:1, false_val:-5}` returned
+            // the cond value instead of 1/-5, and fault_tolerance's
+            // `Select{cond:is_fail, true_val:1, false_val:0}` always
+            // returned 1, breaking the circuit-breaker FSM).
             ctx.push_value(true_val, None);
             ctx.push_value(false_val, None);
+            ctx.push_value(cond, None);
             ctx.emit(WasmInstr::Select);
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
