@@ -5580,6 +5580,32 @@ impl Emitter {
 
         match op {
             BinOpKind::Add => {
+                // K10A-mem-copy-buffer: Force 64-bit ADD in the spill-skip
+                // path. `ss_load_value_with_width` ALWAYS loads register
+                // operands as 64-bit (ss_load_from_slot → LDR X, 8 bytes),
+                // but the arithmetic width was derived from `ty` — which can
+                // be `Some(U32)` for `addr = src + i` (rhs `i` is u32) even
+                // when `lhs` (`src`) is a 64-bit pointer. The resulting
+                // 32-bit `add w9, w9, w10` zero-extends the result,
+                // truncating the high 32 bits of the pointer. The subsequent
+                // `strb w11, [x10]` then dereferences the truncated address
+                // → SIGSEGV on aarch64 / aarch64_be / s390x.
+                //
+                // K9G's pointer-vreg propagation in `scg_to_ir.rs` was
+                // supposed to set `ty=Some(Ptr)` for pointer arithmetic, but
+                // it doesn't reliably reach every Add emitted for
+                // `state.field[index]` (the bridge produces
+                // `Add(Var(state), Var(index))` via a path the heuristic
+                // misses — see `identify_state_vars` Case 2 which requires
+                // `rhs: Int(_)`).
+                //
+                // 64-bit ADD is always safe here because:
+                //  (a) operands are already 64-bit (loaded by ss_load_*),
+                //  (b) for genuine 32-bit values the high 32 bits are zero,
+                //      so `ADD Xd, Xn, Xm` produces the same low-32 result
+                //      as `ADD Wd, Wn, Wm` (with zero high bits), and
+                //  (c) for pointer values the high bits are preserved.
+                let arith_width = RegWidth::X64;
                 match rhs {
                     IRValue::Immediate(v) if supports_imm && *v >= 0 && *v <= 4095 => {
                         self.emit_instruction_with_width(
@@ -5588,7 +5614,7 @@ impl Emitter {
                                 rn: Register::X9,
                                 rm: Operand::Imm12(*v as u16),
                             },
-                            width,
+                            arith_width,
                         )?;
                     }
                     _ => {
@@ -5602,12 +5628,15 @@ impl Emitter {
                                     shift: None,
                                 },
                             },
-                            width,
+                            arith_width,
                         )?;
                     }
                 }
             }
             BinOpKind::Sub => {
+                // K10A: same rationale as Add — 64-bit SUB preserves pointer
+                // high bits when computing `addr - offset`.
+                let arith_width = RegWidth::X64;
                 match rhs {
                     IRValue::Immediate(v) if supports_imm && *v >= 0 && *v <= 4095 => {
                         self.emit_instruction_with_width(
@@ -5616,7 +5645,7 @@ impl Emitter {
                                 rn: Register::X9,
                                 rm: Operand::Imm12(*v as u16),
                             },
-                            width,
+                            arith_width,
                         )?;
                     }
                     _ => {
@@ -5630,7 +5659,7 @@ impl Emitter {
                                     shift: None,
                                 },
                             },
-                            width,
+                            arith_width,
                         )?;
                     }
                 }

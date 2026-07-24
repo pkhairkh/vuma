@@ -761,6 +761,13 @@ pub fn set_64bit_returns(names: &HashSet<String>) {
     crate::hppa::set_64bit_returns(names);
 }
 
+/// Set the global function-name → param-IRTypes map (K10G-wasm32-newton).
+/// Only the wasm32 backend consults this (in its IRInstr::Call handler);
+/// other backends ignore it. Mirrors `set_64bit_returns`.
+pub fn set_func_param_types(map: &std::collections::HashMap<String, Vec<crate::ir::IRType>>) {
+    crate::wasm32::set_func_param_types(map);
+}
+
 // ---------------------------------------------------------------------------
 // BackendKind
 // ---------------------------------------------------------------------------

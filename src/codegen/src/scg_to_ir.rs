@@ -3261,6 +3261,11 @@ impl IRBuilder {
                     // The state var is a POINTER into the buffer (used as
                     // the base address for subsequent field Loads/Stores).
                     self.pointer_vregs.insert(vreg);
+                    // K10A-mem-copy-buffer: also stamp IRType::Ptr into
+                    // `vreg_types` (mirrors the regular Alloc path) so the
+                    // `lower_computation` fallback chain sees pointer-ness
+                    // even when `pointer_vregs.contains` misses.
+                    self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
                     // Assign the next free offset (aligned to 16 bytes)
                     // within `___pmt_buffer`. `next_state_offset` advances
                     // by the aligned size after each state-typed allocation.
@@ -3288,6 +3293,14 @@ impl IRBuilder {
                 names.insert(name.clone(), vreg);
                 // Mark this vreg as a pointer for Store/Load width
                 self.pointer_vregs.insert(vreg);
+                // K10A-mem-copy-buffer: also record the IRType::Ptr in
+                // `vreg_types` so that `lower_computation`'s fallback
+                // type-inference chain (which consults `vreg_types` when
+                // `pointer_vregs` lookup misses — e.g. when the lhs is
+                // reached via a `vreg_aliases` indirection that lands on a
+                // different vreg id) still concludes pointer arithmetic and
+                // forces `ty=Some(Ptr)` for `addr = buf + i`.
+                self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
                 // Arena State Model (Wave 3a): Arena struct allocations
                 // (24 bytes) from arena_new are NOT state vars in the PMT
                 // sense — they're just stack buffers holding (base, offset,
