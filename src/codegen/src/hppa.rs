@@ -5801,11 +5801,15 @@ impl Backend for HppaBackend {
 
         // ── Build __vuma_alloc stub ──
         // __vuma_alloc(size in R26) → R28 = allocated pointer.
-        // Uses brk() syscall to extend the heap:
-        //   1. brk(0) → R28 = current_brk
-        //   2. Save current_brk to R24
-        //   3. brk(current_brk + size) → extend heap
-        //   4. R28 = R24 (return current_brk = start of new region)
+        // Uses brk() syscall to extend the heap.
+        // [Wave K3-hppa-stark] FIX: QEMU hppa's brk(0) returns 0 (not the
+        // current break). Use a two-step approach:
+        //   1. brk(0) → R28 = current_brk (may be 0 on QEMU)
+        //   2. brk(current_brk + size) → R28 = new_brk
+        //   3. Return new_brk - size = start of allocated region.
+        // If brk(0) returns 0, brk(0+size) = brk(size) returns the new break
+        // after allocating `size` bytes from address 0. The allocated region
+        // starts at (new_brk - size).
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
             // Save size (R26) to R25
@@ -5822,8 +5826,11 @@ impl Backend for HppaBackend {
             code.extend(ss_load_imm(R20, 45));  // __NR_brk
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop());  // GATE delay slot
-            // Return current_brk (R24) in R28
-            code.extend_from_slice(&encode_copy(R24, R28));
+            // R28 = new_brk. Compute start = new_brk - size = R28 - R25.
+            // [Wave K3-hppa-stark] The previous code returned R24 (current_brk),
+            // but QEMU hppa's brk(0) returns 0, so R24=0 and the returned
+            // pointer was 0. Fix: return new_brk - size instead.
+            code.extend_from_slice(&encode_sub(R28, R25, R28));  // R28 = R28 - R25 = new_brk - size
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             code
