@@ -1,13 +1,8 @@
-VUMA Test Failures — 2026-07-24 21:08:48 UTC
-Total: 15 failures across 9 tests
+VUMA Test Failures — 2026-07-24 21:45:55 UTC
+Total: 4 failures across 4 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  ipc                  cap_flow.vuma                                 exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  capability_grant_verify.vuma                  exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  closed_channel.vuma                           exp=  99 [('wasm32', 0, 'MM'), ('sparc64', 124, 'TO'), ('hppa', 124, 'TO')]
+  ipc                  checkpoint.vuma                               exp=   1 [('aarch64_be', 0, 'MM')]
   ipc                  driver_isolation.vuma                         exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  large_message.vuma                            exp=   1 [('wasm32', 0, 'MM')]
   ipc                  large_payload.vuma                            exp=  45 [('hppa', 124, 'TO')]
-  ipc                  ping_pong.vuma                                exp=  84 [('arm32', 255, 'MM'), ('armeb', 255, 'MM'), ('alpha', 255, 'MM')]
-  ipc                  session_types.vuma                            exp=  42 [('arm32', 255, 'MM'), ('armeb', 255, 'MM'), ('alpha', 255, 'MM')]
-  ipc                  try_recv_success.vuma                         exp=  99 [('wasm32', 124, 'TO')]
+  ipc                  protocol_valid.vuma                           exp=  50 [('wasm32', 40, 'MM')]
