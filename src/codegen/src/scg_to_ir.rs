@@ -3644,43 +3644,68 @@ impl IRBuilder {
         // backends (especially ppc64/riscv64) can use the correct instruction
         // width (32-bit vs 64-bit shifts). Without this, 64-bit shifts on
         // 32-bit values with garbage in the upper bits corrupt the result.
-        let op_ty = lhs_val.as_register()
-            .and_then(|id| self.vreg_types.get(&id).cloned())
-            .or_else(|| {
-                // Also check RHS vreg type (e.g., val is F64 from array load).
-                // Critical for `total = total + val` where total's phi vreg
-                // doesn't have a type, but val does.
-                rhs_val.as_register()
-                    .and_then(|id| self.vreg_types.get(&id).cloned())
-                    .filter(|ty| matches!(ty, IRType::F32 | IRType::F64))
-            })
-            .or_else(|| {
-                if let Some(ref name) = comp.reassigns {
-                    self.param_types.get(name).cloned()
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                // G7: look up the dst temp name in the function's var_types
-                // (populated from let-binding type annotations like `let a: f64`).
-                // [Wave K2-hppa-stark] Return ALL types (including I64/U64) so
-                // that integer BinOps get the correct ty field. The previous
-                // code only returned F32/F64, leaving integer BinOps with
-                // ty=None — corrupting 64-bit values on 32-bit backends.
-                self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
-            })
-            .or_else(|| self.expr_ir_type(&comp.lhs))
-            .or_else(|| self.expr_ir_type(&comp.rhs))
-            .or_else(|| {
-                // G7: check param_types by name (for function parameters
-                // whose vreg was remapped by loop-body SSA renaming).
-                if let ScgExpr::Var(name) = &comp.lhs {
-                    self.param_types.get(name).cloned()
-                } else {
-                    None
-                }
-            });
+        //
+        // POINTER ARITHMETIC (K9G-mem-copy-buffer): if either operand is a
+        // pointer vreg (e.g. the result of `state_new(Layout)` lowered via
+        // `IRInstr::Offset` into `___pmt_buffer`), the operation is pointer
+        // arithmetic and MUST be performed at 64-bit width. Without this, an
+        // expression like `addr = src + i` (where `src` is a 64-bit pointer
+        // and `i` is a `u32` index) gets `ty=Some(U32)` from the rhs fallback
+        // below, causing strict-alignment/64-bit backends (aarch64, aarch64_be,
+        // s390x) to emit a 32-bit `ADD` that truncates the high 32 bits of the
+        // pointer. Subsequent Load/Store at the truncated address → SIGSEGV.
+        // x86_64 happens to survive because its `ADD r64, r64` encoding
+        // defaults to 64-bit and ignores the IR `ty` for register operands.
+        let lhs_is_ptr = lhs_val.as_register()
+            .map(|id| self.pointer_vregs.contains(&id))
+            .unwrap_or(false);
+        let rhs_is_ptr = rhs_val.as_register()
+            .map(|id| self.pointer_vregs.contains(&id))
+            .unwrap_or(false);
+        let op_ty = if lhs_is_ptr || rhs_is_ptr {
+            // Pointer arithmetic: force 64-bit. `IRType::Ptr` is mapped to
+            // `RegWidth::X64` / `is_32bit_ty == false` by every backend, so
+            // the emitted ADD is always 64-bit.
+            Some(crate::ir::IRType::Ptr)
+        } else {
+            lhs_val.as_register()
+                .and_then(|id| self.vreg_types.get(&id).cloned())
+                .or_else(|| {
+                    // Also check RHS vreg type (e.g., val is F64 from array load).
+                    // Critical for `total = total + val` where total's phi vreg
+                    // doesn't have a type, but val does.
+                    rhs_val.as_register()
+                        .and_then(|id| self.vreg_types.get(&id).cloned())
+                        .filter(|ty| matches!(ty, IRType::F32 | IRType::F64))
+                })
+                .or_else(|| {
+                    if let Some(ref name) = comp.reassigns {
+                        self.param_types.get(name).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    // G7: look up the dst temp name in the function's var_types
+                    // (populated from let-binding type annotations like `let a: f64`).
+                    // [Wave K2-hppa-stark] Return ALL types (including I64/U64) so
+                    // that integer BinOps get the correct ty field. The previous
+                    // code only returned F32/F64, leaving integer BinOps with
+                    // ty=None — corrupting 64-bit values on 32-bit backends.
+                    self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
+                })
+                .or_else(|| self.expr_ir_type(&comp.lhs))
+                .or_else(|| self.expr_ir_type(&comp.rhs))
+                .or_else(|| {
+                    // G7: check param_types by name (for function parameters
+                    // whose vreg was remapped by loop-body SSA renaming).
+                    if let ScgExpr::Var(name) = &comp.lhs {
+                        self.param_types.get(name).cloned()
+                    } else {
+                        None
+                    }
+                })
+        };
         // Record the dst vreg's type so downstream operations can use it
         if let Some(ref ty) = op_ty {
             self.vreg_types.insert(dst_vreg, ty.clone());
@@ -3692,12 +3717,10 @@ impl IRBuilder {
         // the store must use U64 (not U8) to preserve the full address.
         // Without this, the copy `buf2 = buf2 + 0` creates a new vreg that
         // is NOT in pointer_vregs, causing the Store to truncate the address.
-        let lhs_is_ptr = lhs_val.as_register()
-            .map(|id| self.pointer_vregs.contains(&id))
-            .unwrap_or(false);
-        let rhs_is_ptr = rhs_val.as_register()
-            .map(|id| self.pointer_vregs.contains(&id))
-            .unwrap_or(false);
+        //
+        // (`lhs_is_ptr`/`rhs_is_ptr` were computed above, before the op_ty
+        // chain, so the pointer-arithmetic case gets `ty=Ptr` AND propagates
+        // pointer-ness to the dst vreg.)
         if lhs_is_ptr || rhs_is_ptr {
             self.pointer_vregs.insert(dst_vreg);
             self.vreg_types.insert(dst_vreg, crate::ir::IRType::Ptr);

@@ -5097,13 +5097,29 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 }
                 IRTerminator::Return(vals) => {
                     if let Some(first_val) = vals.first() {
-                        let is_64 = func.result_types.first()
+                        let ret_ty = func.result_types.first();
+                        let is_i64 = ret_ty
                             .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
                             .unwrap_or(false);
-                        code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
-                        if is_64 {
-                            // Load high word from TMP64_B_HI into R29
-                            code.extend_from_slice(&encode_ldw(R3, TMP64_B_HI as i16, R29));
+                        let is_f64 = ret_ty
+                            .map(|t| matches!(t, crate::ir::IRType::F64))
+                            .unwrap_or(false);
+                        if is_f64 {
+                            // [K9D-hppa-fdiv-ffi] F64 return: load BOTH lo
+                            // (R28) and hi (R29) words. Previously the Return
+                            // handler only loaded R28 via ss_load_value (which
+                            // truncates 64-bit Immediates to 32 bits) and left
+                            // R29 unset — so `return 6.0` returned 0.0 (lo=0,
+                            // hi=garbage). Using ss_load_value_64 correctly
+                            // splits 64-bit Immediates and loads [off]/[off-4]
+                            // for Register sources.
+                            code.extend(ss_load_value_64(first_val, &vreg_stack_slots, R28, R29));
+                        } else {
+                            code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
+                            if is_i64 {
+                                // Load high word from TMP64_B_HI into R29
+                                code.extend_from_slice(&encode_ldw(R3, TMP64_B_HI as i16, R29));
+                            }
                         }
                     }
                     code.extend_from_slice(&encode_copy(R3, R30)); // R30 = FP

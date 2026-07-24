@@ -2035,13 +2035,15 @@ fn infer_wasm_type_from_operands(
     vreg_types: &HashMap<u32, WasmType>,
 ) -> WasmType {
     // Check Register operands first (their vreg_types entry is authoritative).
+    let mut has_register = false;
     for val in [lhs, rhs] {
         if let IRValue::Register(id) = val {
+            has_register = true;
             match vreg_types.get(id).copied() {
                 Some(WasmType::F64) => return WasmType::F64,
                 Some(WasmType::F32) => return WasmType::F32,
                 Some(WasmType::I64) => return WasmType::I64,
-                _ => {}
+                _ => {} // I32 or unknown: skip
             }
         }
     }
@@ -2057,7 +2059,34 @@ fn infer_wasm_type_from_operands(
             }
         }
     }
-    WasmType::I32
+    // Default: when at least one operand is a Register (typical pointer
+    // arithmetic, BinOp with a typed lhs/rhs), honor the I32 default — this
+    // preserves the existing pointer-arithmetic behaviour where (ptr + offset)
+    // is computed in 32 bits and stored in an I32 local.
+    //
+    // When BOTH operands are Immediate (the make_copy phi-copy pattern
+    // `Add { lhs: Imm, rhs: Imm(0), ty: None }` used to initialise a
+    // loop-carried variable), default to I64 instead of I32.  This is
+    // necessary because the source value might be an f64 bit pattern
+    // constant-folded to `Imm(0)` (e.g. `total = 0.0` — the f64 bit pattern
+    // for 0.0 is 0, which fits in i32, so the high-bit heuristic above does
+    // not trigger).  Defaulting to I64 ensures the local can later be
+    // bitcast to F64 without losing the high bits when the f64 constant is
+    // non-zero (e.g. `total = 2.0` initialisation in a different code path
+    // would be `Imm(0x4000000000000000)` which DOES trigger the high-bit
+    // heuristic).  For the `Imm(0)` case, the I64 local holds 0, which
+    // bitcasts correctly to both f64 0.0 and i64 0.  When the local is
+    // later consumed as I32 (pointer arithmetic), `push_value` emits
+    // `i32.wrap_i64` to truncate.  See f64_array_sum for the motivating
+    // example: the accumulator `total = 0.0` was previously allocated as
+    // I32, then on each loop iteration the f64 result was truncated to i32
+    // (losing the high 32 bits of the f64 bit pattern) and re-extended,
+    // corrupting the running sum.
+    if has_register {
+        WasmType::I32
+    } else {
+        WasmType::I64
+    }
 }
 
 /// Determine the Wasm type for an IR BinOp based on the operand types and
@@ -2653,9 +2682,16 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Load { dst, addr, offset, ty } => {
-            // On Wasm32, all integers are i32. Use i32 loads for all integer types.
+            // On Wasm32, all integers are i32 EXCEPT I64/U64 which are i64.
+            // Float types F32/F64 retain their width. The default I32 path
+            // handles all smaller integer types (I8/I16/I32/U8/U16/U32/Ptr).
+            // I64/U64 must use i64.load (8 bytes) to preserve the full
+            // 64-bit value — important for f64 bit-patterns that the parser
+            // tags as U64 (see bridge_type_to_ir_type) and for genuine i64
+            // values stored in memory.
             let load_ty = if matches!(ty, IRType::F32) { WasmType::F32 }
                 else if matches!(ty, IRType::F64) { WasmType::F64 }
+                else if matches!(ty, IRType::I64 | IRType::U64) { WasmType::I64 }
                 else { WasmType::I32 };
             ctx.push_value(addr, Some(&WasmType::I32));
             let wasm_offset = (*offset).max(0) as u32;
@@ -2666,6 +2702,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 IRType::U16 => WasmInstr::I32Load16U { align: 1, offset: wasm_offset },
                 IRType::F32 => WasmInstr::F32Load { align: 2, offset: wasm_offset },
                 IRType::F64 => WasmInstr::F64Load { align: 3, offset: wasm_offset },
+                IRType::I64 | IRType::U64 => WasmInstr::I64Load { align: 3, offset: wasm_offset },
                 _ => WasmInstr::I32Load { align: 2, offset: wasm_offset },
             };
             ctx.emit(load_op);
@@ -2678,9 +2715,11 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Store { value, addr, offset, ty } => {
-            // On Wasm32, all integers are i32. Use i32 stores for all integer types.
+            // On Wasm32, all integers are i32 EXCEPT I64/U64 which are i64.
+            // See IRInstr::Load for the rationale.
             let store_ty = if matches!(ty, IRType::F32) { WasmType::F32 }
                 else if matches!(ty, IRType::F64) { WasmType::F64 }
+                else if matches!(ty, IRType::I64 | IRType::U64) { WasmType::I64 }
                 else { WasmType::I32 };
             ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(value, Some(&store_ty));
@@ -2690,6 +2729,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 IRType::I16 | IRType::U16 => WasmInstr::I32Store16 { align: 1, offset: wasm_offset },
                 IRType::F32 => WasmInstr::F32Store { align: 2, offset: wasm_offset },
                 IRType::F64 => WasmInstr::F64Store { align: 3, offset: wasm_offset },
+                IRType::I64 | IRType::U64 => WasmInstr::I64Store { align: 3, offset: wasm_offset },
                 _ => WasmInstr::I32Store { align: 2, offset: wasm_offset },
             };
             ctx.emit(store_op);
@@ -3028,21 +3068,40 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
-            // Determine the source type.  For register sources, `vreg_types`
-            // has the correct Wasm type (integers are I32 on Wasm32, floats
-            // retain their width).  For immediates/labels/addresses,
-            // `infer_wasm_type` always returns I32, so we consult `from_ty`
-            // to detect float-typed values.
-            let src_ty = match src {
-                IRValue::Register(id) => {
+            // Determine the source type.  When the IR provides an explicit
+            // float `from_ty` (Some(F32) or Some(F64)), that is authoritative
+            // — even if the source register is currently held in an integer
+            // local (e.g. an f64 bit pattern in an I64 local, because the
+            // parser tags f64 struct fields as U64 and `bridge_type_to_ir_type`
+            // maps them to IRType::U64 before the wasm32 backend's Load emits
+            // an I64 local).  The actual bitcast from the local's runtime
+            // type to `src_ty` is handled by `push_value` → `emit_type_conversion`
+            // below.  Without this, a FloatToInt cast on a value loaded from
+            // an f64-typed struct field would see src_ty=I64 (the local's
+            // type) and select `i32.trunc_f32_s` (the default arm), which
+            // fails wasmtime validation ("expected f32, found i64").
+            //
+            // For register sources without an explicit float `from_ty`, fall
+            // back to `vreg_types[id]` (the local's allocated type).
+            // For immediates/labels/addresses, `infer_wasm_type` returns I32,
+            // so consult `from_ty` to detect float-typed values.
+            let src_ty = match (src, from_ty) {
+                (IRValue::Register(id), Some(IRType::F32)) => {
+                    // Force F32 — push_value will bitcast the local's actual type.
+                    let _ = id;
+                    WasmType::F32
+                }
+                (IRValue::Register(id), Some(IRType::F64)) => {
+                    let _ = id;
+                    WasmType::F64
+                }
+                (IRValue::Register(id), _) => {
                     ctx.vreg_types.get(id).copied()
                         .unwrap_or_else(|| infer_wasm_type(src, &ctx.vreg_types))
                 }
-                _ => match from_ty {
-                    Some(IRType::F32) => WasmType::F32,
-                    Some(IRType::F64) => WasmType::F64,
-                    _ => infer_wasm_type(src, &ctx.vreg_types),
-                },
+                (_, Some(IRType::F32)) => WasmType::F32,
+                (_, Some(IRType::F64)) => WasmType::F64,
+                _ => infer_wasm_type(src, &ctx.vreg_types),
             };
 
             // Try to determine the destination type.  In SSA form the
@@ -3455,34 +3514,19 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
 
         IRInstr::Ret { values } => {
             // Store return value at memory address 0 for _start to read.
-            // For 64-bit returns (I64/U64), use i64.store to preserve the
+            // For 64-bit returns (I64/U64/F64), use i64.store to preserve the
             // full 64-bit value. For 32-bit returns, use i32.store.
+            // F64 returns are also 8 bytes — the f64 bit pattern fits in an
+            // i64 local and the caller bitcasts back to F64 via push_value's
+            // emit_type_conversion when consumed as a float.
             if let Some(val) = values.first() {
-                let is_64bit_ret = ctx.result_types.iter().any(|t| matches!(t, WasmType::I64));
+                let is_64bit_ret = ctx.result_types.iter().any(|t| matches!(t, WasmType::I64 | WasmType::F64));
                 if is_64bit_ret {
                     ctx.emit(WasmInstr::I32Const(0));
                     ctx.stack_depth += 1;
-                    // Push value as I64
-                    match val {
-                        IRValue::Register(id) => {
-                            if let Some(local_idx) = ctx.get_local(*id) {
-                                ctx.emit(WasmInstr::LocalGet(local_idx));
-                                // Only extend if the local is I32 (not I64)
-                                let local_ty = ctx.vreg_types.get(id).copied().unwrap_or(WasmType::I32);
-                                if local_ty != WasmType::I64 {
-                                    ctx.emit(WasmInstr::I64ExtendI32U);
-                                }
-                            } else {
-                                ctx.emit(WasmInstr::I64Const(0));
-                            }
-                        }
-                        IRValue::Immediate(v) => {
-                            ctx.emit(WasmInstr::I64Const(*v));
-                        }
-                        _ => {
-                            ctx.emit(WasmInstr::I64Const(0));
-                        }
-                    }
+                    // Push value as I64 (the local may be I64 holding f64 bits,
+                    // or F64; push_value with type_hint=I64 bitcasts F64→I64).
+                    ctx.push_value(val, Some(&WasmType::I64));
                     ctx.stack_depth += 1;
                     ctx.emit(WasmInstr::I64Store { align: 3, offset: 0 });
                     ctx.stack_depth -= 2;
@@ -3635,13 +3679,28 @@ fn lower_terminator_trampoline(
 ) -> Result<(), BackendError> {
     match term {
         IRTerminator::Return(values) => {
-            // Store return value at memory address 0 for _start to read
+            // Store return value at memory address 0 for _start to read.
+            // For 64-bit returns (I64/U64/F64), use i64.store to preserve the
+            // full 64-bit value. For 32-bit returns, use i32.store.
+            // Mirrors IRInstr::Ret's logic. F64 returns are 8 bytes — the f64
+            // bit pattern fits in an i64 local; the caller bitcasts via
+            // push_value's emit_type_conversion when consumed as a float.
             if let Some(val) = values.first() {
-                ctx.emit(WasmInstr::I32Const(0));
-                ctx.stack_depth += 1;
-                ctx.push_value(val, Some(&WasmType::I32));
-                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
-                ctx.stack_depth -= 2;
+                let is_64bit_ret = ctx.result_types.iter().any(|t| matches!(t, WasmType::I64 | WasmType::F64));
+                if is_64bit_ret {
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
+                    ctx.push_value(val, Some(&WasmType::I64));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I64Store { align: 3, offset: 0 });
+                    ctx.stack_depth -= 2;
+                } else {
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
+                    ctx.push_value(val, Some(&WasmType::I32));
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                    ctx.stack_depth -= 2;
+                }
             }
             ctx.emit(WasmInstr::Return);
         }

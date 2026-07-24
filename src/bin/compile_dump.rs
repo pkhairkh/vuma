@@ -214,10 +214,26 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     {
         use std::collections::HashSet;
         let func_64bit: HashSet<String> = ir_program.functions.iter()
-            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64)))
+            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64 | vuma_codegen::ir::IRType::F64)))
             .map(|f| f.name.clone())
             .collect();
         vuma_codegen::backend::set_64bit_returns(&func_64bit);
+    }
+
+    // Pre-register ALL function param types BEFORE the parallel
+    // `allocate_registers` loop.  The arm32/armeb Call handler looks up
+    // the callee's param types (to decide 32-vs-64-bit arg passing) from
+    // a shared global map that is populated inside `allocate_registers`.
+    // When allocation runs in parallel (par_collect_result below), a Call
+    // in function A may be lowered before function B (the callee) has
+    // registered its param types — the lookup misses and the Call handler
+    // falls back to `vec![true; num_args]` (all-64-bit), corrupting the
+    // ABI for 32-bit params (callee reads arg0's high word as arg1).
+    // Symptoms: fn_chained_calls=3 (expect 15), test_sha_round=54 (expect 77).
+    // Pre-registering eliminates the race for arm32/armeb.  Other backends
+    // (riscv32 has the same pattern but is not in scope here) are unaffected.
+    if matches!(kind, BackendKind::Arm32 | BackendKind::ArmEb) {
+        vuma_codegen::arm32::preregister_param_types(&ir_program.functions);
     }
 
     // Parallel per-function codegen using std::thread::scope.

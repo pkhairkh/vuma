@@ -1588,7 +1588,7 @@ fn compile_to_binary_direct(
     {
         use std::collections::HashSet;
         let func_64bit: HashSet<String> = ir_program.functions.iter()
-            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64)))
+            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64 | vuma_codegen::ir::IRType::F64)))
             .map(|f| f.name.clone())
             .collect();
         vuma_codegen::backend::set_64bit_returns(&func_64bit);

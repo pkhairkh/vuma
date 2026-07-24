@@ -2986,15 +2986,36 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // clobber the high word with 0 and corrupt the f64 value).
                     // The f64→u64 path also stores directly to dst's slot
                     // (both words) and sets `result_in_slot` to skip this.
-                    match kind {
-                        CastKind::FloatToInt | CastKind::FloatToUInt
-                            if !result_in_slot =>
-                        {
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
-                        }
-                        _ => {
-                            // int→FP, FP→FP, or f64→u64: result already in dst's slot.
-                        }
+                    // [K9I-x86_32-aead] The Cast handler's trailing store was
+                    // originally gated to FloatToInt/FloatToUInt only, so every
+                    // integer-to-integer cast that left its result in EAX
+                    // (Trunc, ZExt when not I32→I64, SExt when not to I64,
+                    // BitCast) SILENTLY DROPPED the result — dst's stack slot
+                    // kept whatever garbage was there before.  For aead_open's
+                    // `Cast Trunc I64→I32` (computing the CRC tag from the
+                    // XOR checksum), the slot happened to read 0, so the
+                    // tag-match Cmp Eq I32(0, 0) returned true, aead_open
+                    // returned 0 (success) instead of -6 (CrcMismatch), and
+                    // aead_tamper exited 0 instead of 1.
+                    //
+                    // Fix: store_vreg for every integer-result cast whose
+                    // handler didn't already store both words (result_in_slot).
+                    // IntToFloat/UIntToFloat/FloatToFloat store their FP result
+                    // directly via store_xmm_to_vreg, so they are excluded
+                    // (store_vreg would clobber the FP bits with EAX garbage).
+                    // SExt to an I64 destination is also excluded because
+                    // store_vreg would zero the high word instead of
+                    // sign-extending it (a separate latent bug, not exercised
+                    // by the current test suite).
+                    let is_int_result_cast = matches!(kind,
+                        CastKind::Trunc | CastKind::ZExt | CastKind::SExt
+                        | CastKind::BitCast | CastKind::FloatToInt
+                        | CastKind::FloatToUInt
+                    );
+                    let sext_to_i64 = matches!(kind, CastKind::SExt)
+                        && !dst_is_32bit_int;
+                    if !result_in_slot && is_int_result_cast && !sext_to_i64 {
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
                     }
                     code
                 }
