@@ -3664,14 +3664,11 @@ impl IRBuilder {
             .or_else(|| {
                 // G7: look up the dst temp name in the function's var_types
                 // (populated from let-binding type annotations like `let a: f64`).
-                // Only return FLOAT types — integer types would break shift width.
-                self.fn_var_types.get(&comp.dst).and_then(|t| {
-                    match t {
-                        ScgType::F32 => Some(IRType::F32),
-                        ScgType::F64 => Some(IRType::F64),
-                        _ => None,
-                    }
-                })
+                // [Wave K2-hppa-stark] Return ALL types (including I64/U64) so
+                // that integer BinOps get the correct ty field. The previous
+                // code only returned F32/F64, leaving integer BinOps with
+                // ty=None — corrupting 64-bit values on 32-bit backends.
+                self.fn_var_types.get(&comp.dst).map(|t| t.to_ir_type())
             })
             .or_else(|| self.expr_ir_type(&comp.lhs))
             .or_else(|| self.expr_ir_type(&comp.rhs))
@@ -3795,16 +3792,16 @@ impl IRBuilder {
                 } else {
                     match comp.op {
                         BinOpKind::Add => {
-                            ir_func.current_block().push(IRInstruction::Add { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                            ir_func.current_block().push(IRInstruction::Add { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
                         }
                         BinOpKind::Sub => {
-                            ir_func.current_block().push(IRInstruction::Sub { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                            ir_func.current_block().push(IRInstruction::Sub { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
                         }
                         BinOpKind::Mul => {
-                            ir_func.current_block().push(IRInstruction::Mul { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                            ir_func.current_block().push(IRInstruction::Mul { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
                         }
                         BinOpKind::SDiv | BinOpKind::UDiv => {
-                            ir_func.current_block().push(IRInstruction::Div { dst, lhs: lhs_val, rhs: rhs_val, ty: None });
+                            ir_func.current_block().push(IRInstruction::Div { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
                         }
                         _ => unreachable!(),
                     }
@@ -5308,17 +5305,16 @@ impl IRBuilder {
         match expr {
             ScgExpr::Float(_) => Some(IRType::F64),
             ScgExpr::Var(name) => {
-                // Check fn_var_types for the variable's declared type.
-                // Only return FLOAT types (F32/F64) — returning integer types
-                // here would cause op_ty to be set for integer BinOps, which
-                // breaks shift width inference and other integer-specific paths.
-                self.fn_var_types.get(name).and_then(|t| {
-                    match t {
-                        ScgType::F32 => Some(IRType::F32),
-                        ScgType::F64 => Some(IRType::F64),
-                        _ => None,
-                    }
-                })
+                // [Wave K2-hppa-stark] Return the FULL declared type (including
+                // integer types I64/U64). The previous code only returned F32/F64,
+                // which meant integer BinOps (Xor/And/Or/Mul) got ty=None. On 32-bit
+                // big-endian backends (hppa), this caused the high 32 bits to be
+                // skipped — corrupting 64-bit values like the FNV-1a hash in
+                // stark_verify. The "breaks shift width inference" concern was
+                // addressed by the separate vreg_types propagation at line ~3689,
+                // which only fires for F32/F64; integer types from this fallback
+                // are safe because shift handlers already check ty explicitly.
+                self.fn_var_types.get(name).map(|t| t.to_ir_type())
             }
             ScgExpr::BinOp { lhs, .. } => self.expr_ir_type(lhs),
             _ => None,
