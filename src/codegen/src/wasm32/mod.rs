@@ -2941,8 +2941,17 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     return Ok(());
                 }
                 "channel_recv" if args.len() == 1 && dst.is_some() => {
+                    // K14C-wasm32-remaining: ring-buffer layout:
+                    //   [base+0]  head (i32)
+                    //   [base+4]  tail (i32)
+                    //   [base+8]  capacity (i32)
+                    //   [base+12] closed flag (i32, 0=open, 1=closed)
+                    //   [base+16..] data (4096 bytes)
+                    // If head==tail AND closed==1 → return -1 (Closed sentinel).
+                    // Otherwise load 8-byte payload from [base+16+head], return
+                    // as I64 (preserves i64 channels; i32 callers compare low
+                    // 32 bits which still match).
                     let ch = &args[0];
-                    // Push base address and save to a temp local.
                     ctx.push_value(ch, Some(&WasmType::I32));
                     ctx.stack_depth += 1;
                     let base_local = ctx.num_locals;
@@ -2959,7 +2968,47 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     ctx.locals.push((1, WasmType::I32));
                     ctx.emit(WasmInstr::LocalSet(head_local));
                     ctx.stack_depth -= 1;
-                    // Compute addr = base + 16 + head, load 8-byte msg.
+                    // Load tail from [base+4] into temp.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 4 });
+                    let tail_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(tail_local));
+                    ctx.stack_depth -= 1;
+                    // Load closed flag from [base+12] into temp.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 12 });
+                    let closed_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(closed_local));
+                    ctx.stack_depth -= 1;
+                    // empty = (head == tail)
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(tail_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Eq);
+                    ctx.stack_depth -= 1;
+                    // closed_nonzero = (closed != 0)
+                    ctx.emit(WasmInstr::LocalGet(closed_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Ne);
+                    ctx.stack_depth -= 1;
+                    // is_closed_empty = empty AND closed_nonzero
+                    ctx.emit(WasmInstr::I32And);
+                    ctx.stack_depth -= 1;
+                    // if is_closed_empty: return -1; else: load payload + advance head.
+                    ctx.emit(WasmInstr::If(Some(WasmType::I64)));
+                    // if-body (closed + empty): return -1 as i64.
+                    ctx.emit(WasmInstr::I64Const(-1));
+                    // else-body (data available): load 8-byte payload at [base+16+head].
+                    ctx.emit(WasmInstr::Else);
                     ctx.emit(WasmInstr::LocalGet(base_local));
                     ctx.stack_depth += 1;
                     ctx.emit(WasmInstr::I32Const(16));
@@ -2970,17 +3019,8 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     ctx.stack_depth += 1;
                     ctx.emit(WasmInstr::I32Add);
                     ctx.stack_depth -= 1;
-                    // Load 8 bytes, wrap to i32, store to dst.
                     ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 });
-                    ctx.emit(WasmInstr::I32WrapI64);
-                    // I32WrapI64: pops 1 (i64), pushes 1 (i32) — net 0 on depth
-                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
-                        ctx.pop_to_vreg(*id, WasmType::I32);
-                    } else {
-                        ctx.emit(WasmInstr::Drop);
-                        ctx.stack_depth -= 1;
-                    }
-                    // Update head: new_head = (head + 8) % capacity.
+                    // Advance head: new_head = (head + 8) % capacity.
                     ctx.emit(WasmInstr::LocalGet(base_local));
                     ctx.stack_depth += 1;
                     ctx.emit(WasmInstr::LocalGet(head_local));
@@ -2994,15 +3034,37 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     ctx.emit(WasmInstr::I32Load { align: 2, offset: 8 });
                     ctx.emit(WasmInstr::I32RemU);
                     ctx.stack_depth -= 1;
-                    // Store new_head at [base+0].  Stack: [base, new_head]
                     ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
                     ctx.stack_depth -= 2;
+                    ctx.emit(WasmInstr::End);
+                    // Store result (i64) to dst vreg as I64 — preserves full
+                    // 8-byte payload for i64 channels (K14C: large_message).
+                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
+                        ctx.pop_to_vreg(*id, WasmType::I64);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
                     return Ok(());
                 }
                 "channel_close" if args.len() == 1 => {
-                    // No-op: linear memory is automatically freed (bump
-                    // allocator never reclaims, but the channel's ring
-                    // buffer is simply abandoned).
+                    // K14C-wasm32-remaining: set the closed flag at [base+12]=1
+                    // so subsequent channel_recv returns -1 (Closed sentinel)
+                    // when the ring buffer is empty. Recovers closed_channel.
+                    let ch = &args[0];
+                    ctx.push_value(ch, Some(&WasmType::I32));
+                    ctx.stack_depth += 1;
+                    let base_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(base_local));
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(1));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 12 });
+                    ctx.stack_depth -= 2;
                     return Ok(());
                 }
                 // K11A-wasm32-fork-emulation: non-blocking try_recv on the
