@@ -845,21 +845,28 @@ if [ $NO_PUSH -eq 0 ]; then
     # Stage the critical result files explicitly. failures.txt and summary.json
     # are the files needed for remote debugging — do NOT silently swallow errors
     # from `git add` on them (the old `2>/dev/null || true` hid real problems).
+    #
+    # NOTE: test_results/ is in .gitignore because per-run artifacts
+    # (checkpoint.jsonl with one line per test, build.log, run_tests.py,
+    # wt_pip_*.log) would bloat the repo and go stale. We therefore use
+    # `git add -f` to force-stage ONLY these two small summary files. Do NOT
+    # add a broad `git add -f test_results/` here — that would commit the
+    # bulky per-run artifacts we deliberately exclude.
     for f in test_results/failures.txt test_results/summary.json; do
         if [[ -f "$f" ]]; then
-            if ! git add "$f"; then
-                echo "ERROR: 'git add $f' failed. Test results may be incomplete in the commit."
+            if ! git add -f "$f"; then
+                echo "ERROR: 'git add -f $f' failed. Test results may be incomplete in the commit."
             fi
         else
             echo "WARNING: $f does not exist — cannot stage it."
         fi
     done
-    # Stage any other test_results/ changes.
     # IMPORTANT: the Pi MUST ONLY commit files under test_results/ — never
     # scripts/, src/, docs/, or any other agent-owned path. This isolation
     # guarantees the Pi can always `git pull && git push` without merge
-    # conflicts on agent-maintained files.
-    git add test_results/ 2>/dev/null || echo "WARNING: 'git add test_results/' reported an error."
+    # conflicts on agent-maintained files. (Previously a broad
+    # `git add test_results/` lived here; it was removed because it always
+    # failed under the .gitignore and emitted a misleading WARNING every run.)
 
     TIMESTAMP=$(date -u '+%Y-%m-%d_%H%M-UTC')
 

@@ -198,6 +198,16 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                         if matches!(ty, IRType::F32 | IRType::F64) {
                             if let Some(id) = dst.as_register() {
                                 if fp.insert(id) { changed = true; }
+                                // [K7D-x86_32-fpload] Track F32-ness
+                                // explicitly so that downstream Add/Sub/Mul/
+                                // Div (whose `ty` is None or a non-FP type
+                                // like U64 from make_copy) can correctly
+                                // choose MOVSS vs MOVQ.  Previously only `fp`
+                                // was populated, causing f32 loads to be
+                                // mis-treated as f64 in the codegen fallback.
+                                if matches!(ty, IRType::F32) {
+                                    if fp_f32.insert(id) { changed = true; }
+                                }
                             }
                         }
                     }
@@ -207,6 +217,17 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                     | IRInstr::Div { dst, lhs, rhs, ty } => {
                         let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
                         let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
+                        // [K7D-x86_32-fpload] Detect F32-ness of operands
+                        // for forward propagation.  If any operand is in
+                        // fp_f32 (and none is in fp\fp_f32, i.e. known-F64),
+                        // the result is F32.  This mirrors the BinOp arm's
+                        // explicit `ty==F32` insertion and is required for
+                        // the codegen fallback (`!fp_vregs_f32.contains`)
+                        // to correctly pick MOVSS for F32 sources.
+                        let lhs_f32 = if let IRValue::Register(id) = lhs { fp_f32.contains(id) } else { false };
+                        let rhs_f32 = if let IRValue::Register(id) = rhs { fp_f32.contains(id) } else { false };
+                        let op_is_f32 = matches!(ty, Some(IRType::F32))
+                            || (!matches!(ty, Some(IRType::F64)) && (lhs_f32 || rhs_f32));
                         // `0 / 0` with no type tag: classify as FP (NaN).
                         let zero_div_zero = matches!(instr, IRInstr::Div { .. })
                             && ty.is_none()
@@ -215,6 +236,9 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                         if op_fp || zero_div_zero {
                             if let Some(id) = dst.as_register() {
                                 if fp.insert(id) { changed = true; }
+                                if op_is_f32 {
+                                    if fp_f32.insert(id) { changed = true; }
+                                }
                             }
                             // Backward propagation: when ANY operand is FP
                             // (or `ty` is explicitly FP), ALL register
@@ -818,10 +842,18 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // see mod.rs caveat about `encode_movq_xmm_gpr`).
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
-                    eprintln!("[DBG-ADD] dst={} lhs={:?} rhs={:?} ty={:?} is_fp={} fp_vregs_len={}", dst_id, lhs, rhs, ty, is_fp, fp_vregs.len());
+                    // [DBG-ADD] dst={} lhs={:?} rhs={:?} ty={:?} is_fp={} fp_vregs_len={}
+                    // (K7D-x86_32-fpload: eprintln disabled)
                     if is_fp {
+                        // Choose F64 vs F32: explicit ty wins; otherwise
+                        // fall back to fp_vregs_f32 (F32-ness inferred from
+                        // Load/operand forward propagation).  When ty is
+                        // None OR a non-FP type (e.g. U64 from make_copy on
+                        // a pointer-typed vreg that happens to alias a
+                        // known-FP vreg), we use the inferred F32-ness.
                         let is_f64 = matches!(ty, Some(IRType::F64))
-                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                            || (!matches!(ty, Some(IRType::F32))
+                                && !fp_vregs_f32.contains(&dst_id));
                         let dst_off = slot_offset(dst_id);
                         code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
                         code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
@@ -859,8 +891,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
+                        // [K7D-x86_32-fpload] Same F64/F32 fallback as Add.
                         let is_f64 = matches!(ty, Some(IRType::F64))
-                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                            || (!matches!(ty, Some(IRType::F32))
+                                && !fp_vregs_f32.contains(&dst_id));
                         let dst_off = slot_offset(dst_id);
                         code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
                         code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
@@ -895,8 +929,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
+                        // [K7D-x86_32-fpload] Same F64/F32 fallback as Add.
                         let is_f64 = matches!(ty, Some(IRType::F64))
-                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                            || (!matches!(ty, Some(IRType::F32))
+                                && !fp_vregs_f32.contains(&dst_id));
                         let dst_off = slot_offset(dst_id);
                         code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
                         code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));
@@ -921,8 +957,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                         || fp_vregs.contains(&dst_id);
                     if is_fp {
+                        // [K7D-x86_32-fpload] Same F64/F32 fallback as Add.
                         let is_f64 = matches!(ty, Some(IRType::F64))
-                            || (ty.is_none() && !fp_vregs_f32.contains(&dst_id));
+                            || (!matches!(ty, Some(IRType::F32))
+                                && !fp_vregs_f32.contains(&dst_id));
                         let dst_off = slot_offset(dst_id);
                         code.extend(load_fp_to_xmm(lhs, Xmm::Xmm0, is_f64, dst_off));
                         code.extend(load_fp_to_xmm(rhs, Xmm::Xmm1, is_f64, dst_off));

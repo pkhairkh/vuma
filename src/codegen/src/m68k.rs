@@ -862,9 +862,15 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 if let Some(first_val) = vals.first() {
                     code.extend(ss_load_value(first_val, &vreg_stack_slots, Gpr::D0));
                     // Also load high word into D1
+                    // [K7E-m68k-f64-followup] For Immediate values, load the
+                    // actual high 32 bits of the i64 bit pattern (was Moveq #0,
+                    // which dropped the high word — breaking f64/i64 returns of
+                    // constants with non-zero high word, e.g. `return 7.0`).
                     if let IRValue::Register(id) = first_val {
                         let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
                         code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: Gpr::D1 }.encode());
+                    } else if let IRValue::Immediate(v) = first_val {
+                        code.extend(ss_load_imm(Gpr::D1, (*v) >> 32));
                     } else {
                         code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
                     }
@@ -1532,9 +1538,14 @@ fn emit_instr(
             if let Some(first_val) = values.first() {
                 code.extend(ss_load_value(first_val, vreg_stack_slots, Gpr::D0));
                 // Also load high word into D1 for 64-bit return values
+                // [K7E-m68k-f64-followup] For Immediate values, load the
+                // actual high 32 bits of the i64 bit pattern (was Moveq #0,
+                // which dropped the high word — see IRTerminator::Return above).
                 if let IRValue::Register(id) = first_val {
                     let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
                     code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: Gpr::D1 }.encode());
+                } else if let IRValue::Immediate(v) = first_val {
+                    code.extend(ss_load_imm(Gpr::D1, (*v) >> 32));
                 } else {
                     code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
                 }
@@ -2395,65 +2406,94 @@ fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
     }
 }
 
-/// Best-effort 68881 `FMOVE.S/D (A1), FPn` — memory-to-FPR load.
+/// 68881 `FMOVE.S/D (A1), FPn` — memory-to-FPR load.
 ///
-/// Word 1: `0xF211` (cp1, cpGEN, mode 2 = (An), reg = A1).
-/// Word 2: `0x4000 | (FPn << 7) | (R/M=1 << 6) | format`
-///   format: `0x01` = S (f32), `0x04` = D (f64).
+/// [K7E-m68k-f64-followup] RE-CORRECTED encoding based on empirical QEMU-m68k
+/// disassembly testing. QEMU m68k's FPU decoder expects the 68040-style
+/// compact encoding (NOT the M68000 PRM §8.3 68881 layout K7B used):
+///   Word 1: 0xF211 (cp1, mode=010=(An), reg=A1)
+///   Word 2: 0_R/M=1(1)_DIR=0(1)_DOUBLE(1)_0(1)_NORMAL(1)_DST(3)_0(7)
+///     Bit 15: 0
+///     Bit 14: 1 (memory-form indicator)
+///     Bit 13: 0 (load direction; 1 = store)
+///     Bit 12: 1 if double, 0 if single  (precision)
+///     Bit 11: 0 (reserved)
+///     Bit 10: 1 (normal FMOVE; 0 = fsmove rounding-mode variant)
+///     Bits 9-7: DST FPn
+///     Bits 6-0: 0 (fixed for FMOVE)
+///   For f64: 0x5400 | (FPn << 7). Verified: `0xf211 0x5400` → `fmoved %a1@,%fp0`.
+///   For f32: 0x4400 | (FPn << 7). Verified: `0xf211 0x4400` → `fmoves %a1@,%fp0`.
 ///
-/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+/// K7B's previous encoding (`0x8000 | (FPn<<12) | fmt`) was rejected by QEMU
+/// as `0171021` (unknown 2-byte F-line) and the second word was misdecoded
+/// as integer ALU (e.g. `orb %d5,%d0`), so loads/stores silently no-op'd and
+/// loop-carried f64 sums stayed at 0.0.
 fn emit_fmove_mem_to_fp(dst: Fpr, is_f64: bool, code: &mut Vec<u8>) {
-    // 68881 FMOVE.<fmt> (A1), FPn — external (memory) load.
-    // Word 1: 0xF211 (cp1, cpGEN, mode=2=(A1), reg=A1)
-    // Word 2: bit15=1(external) | bit13=0(load) | FPn(12-10) | fmt(6-4)
-    //   fmt: 0x01=Single(f32)→bits6-4=001, 0x05=Double(f64)→bits6-4=101
-    let fmt_bits: u16 = if is_f64 { 0x05 << 4 } else { 0x01 << 4 };
-    let w2 = 0x8000u16                          // bit 15 = 1 (external/memory)
-        | ((dst.encoding() as u16) << 10)       // FPn at bits 12-10
-        | fmt_bits;                             // format at bits 6-4
+    let precision_bit: u16 = if is_f64 { 0x1000 } else { 0x0000 }; // bit 12: 1=double, 0=single
+    let w2 = 0x4000u16                          // bit 14 = 1 (memory form)
+        | precision_bit                          // bit 12 = precision
+        | (0u16 << 13)                           // bit 13 = 0 (load direction)
+        | (1u16 << 10)                           // bit 10 = 1 (normal FMOVE)
+        | ((dst.encoding() as u16) << 7);        // DST FPn at bits 9-7
     code.extend_from_slice(&0xF211u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
 
 /// 68881 `FMOVE.S/D FPn, (A1)` — FPR-to-memory store.
+///
+/// [K7E-m68k-f64-followup] RE-CORRECTED encoding (same layout as load but
+/// bit 13 = 1 to indicate store direction):
+///   Word 2: 0_1_1_DOUBLE_0_1_SRC(3)_0(7)
+///     Bit 14: 1 (memory form)
+///     Bit 13: 1 (store direction)
+///     Bit 12: 1 if double, 0 if single
+///     Bit 10: 1 (normal FMOVE)
+///     Bits 9-7: SRC FPn
+///   For f64: 0x7400 | (FPn << 7). Verified: `0xf211 0x7400` → `fmoved %fp0,%a1@`.
+///   For f32: 0x6400 | (FPn << 7). Verified: `0xf211 0x6400` → `fmoves %fp0,%a1@`.
 fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
-    // Word 2: bit15=1(external) | bit13=1(store) | FPn(12-10) | fmt(6-4)
-    let fmt_bits: u16 = if is_f64 { 0x05 << 4 } else { 0x01 << 4 };
-    let w2 = 0x8000u16                          // bit 15 = 1 (external/memory)
-        | (1u16 << 13)                          // bit 13 = 1 (store direction)
-        | ((src.encoding() as u16) << 10)       // FPn at bits 12-10
-        | fmt_bits;                             // format at bits 6-4
+    let precision_bit: u16 = if is_f64 { 0x1000 } else { 0x0000 };
+    let w2 = 0x4000u16                          // bit 14 = 1 (memory form)
+        | (1u16 << 13)                           // bit 13 = 1 (store direction)
+        | precision_bit                          // bit 12 = precision
+        | (1u16 << 10)                           // bit 10 = 1 (normal FMOVE)
+        | ((src.encoding() as u16) << 7);        // SRC FPn at bits 9-7
     code.extend_from_slice(&0xF211u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
 
-/// Best-effort 68881 `FADD/FSUB/FMUL/FDIV FPm, FPn` → FPn (register form).
+/// 68881 `FADD/FSUB/FMUL/FDIV FPm, FPn` → FPn (register form).
 ///
-/// Word 1: `0xF200` (cp1, cpGEN, EA = D0 placeholder, ignored for R/M=0).
-/// Word 2: `(opcode << 8) | (FPn << 4) | FPm`
-///   FADD = 0x22, FSUB = 0x28, FMUL = 0x23, FDIV = 0x20.
+/// [K7E-m68k-f64-followup] RE-CORRECTED encoding based on empirical QEMU-m68k
+/// disassembly testing. QEMU m68k expects the 68040-style compact encoding
+/// (NOT the M68000 PRM §8.3 68881 layout K7B used):
+///   Word 1: 0xF200 (cp1, EA = D0 placeholder, ignored for register form)
+///   Word 2: 0_0_0_SRC(3)_DST(3)_OPSEL(7)
+///     Bit 15: R/M = 0 (register-to-register)
+///     Bit 14: 0 (FP source, not integer Dn)
+///     Bit 13: 0 (reserved)
+///     Bits 12-10: SOURCE FPm
+///     Bits 9-7: DEST FPn
+///     Bits 6-0: operation selector (fixed 7-bit code per op):
+///       FADD.X = 0x22, FMUL.X = 0x23, FSUB.X = 0x28, FDIV.X = 0x20
+///   For FADD FP1→FP0: 0x0422. Verified: `0xf200 0x0422` → `faddd %fp1,%fp0`.
+///   For FADD FP0+FP0→FP0: 0x0022. Verified: `0xf200 0x0022` → `faddd %fp0,%fp0`.
 ///
-/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+/// K7B's previous encoding (bit 7 as "dyadic indicator", OPMODE at bits 5-3,
+/// SOURCE at bits 2-0) produced `0x0001` for FADD FP1→FP0, which QEMU decoded
+/// as `fintd %fp0,%fp0` (monadic FINT) — silently no-op'ing the add.
 fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
-    // 68881 dyadic register form (R/M=0):
-    // Word 1: 0xF200 (cp1, cpGEN, EA placeholder for register form)
-    // Word 2: 0_R/M(0)_0_0_DEST(3)_0_0_0_1_OPMODE(2)_SOURCE(3)_0_0
-    //   Bit 15: R/M = 0 (register-to-register)
-    //   Bits 13-11: DEST FPn
-    //   Bit 7: 1 (dyadic operation indicator)
-    //   Bits 6-5: OPMODE (00=FADD, 01=FMUL, 10=FSUB, 11=FDIV)
-    //   Bits 4-2: SOURCE FPm
-    let opmode: u16 = match op {
-        BinOpKind::Add => 0b000,      // FADD
-        BinOpKind::Mul => 0b001,      // FMUL
-        BinOpKind::Sub => 0b010,      // FSUB
-        BinOpKind::SDiv | BinOpKind::UDiv => 0b011, // FDIV
-        _ => 0b000,
+    let op_selector: u16 = match op {
+        BinOpKind::Add => 0x22,      // FADD.X
+        BinOpKind::Mul => 0x23,      // FMUL.X
+        BinOpKind::Sub => 0x28,      // FSUB.X
+        BinOpKind::SDiv | BinOpKind::UDiv => 0x20, // FDIV.X
+        _ => 0x22,
     };
-    let w2: u16 = (1u16 << 7)                          // dyadic indicator (bit 7)
-        | (opmode << 4)                                // OPMODE at bits 6-4
-        | ((src.encoding() as u16) << 1)               // SOURCE FPm at bits 3-1
-        | ((dst.encoding() as u16) << 12);             // DEST FPn at bits 14-12
+    let w2: u16 = (0u16 << 15)                          // R/M = 0 (register)
+        | ((src.encoding() as u16) << 10)               // SOURCE FPm at bits 12-10
+        | ((dst.encoding() as u16) << 7)                // DEST FPn at bits 9-7
+        | op_selector;                                  // operation selector at bits 6-0
     code.extend_from_slice(&0xF200u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
@@ -3247,9 +3287,15 @@ fn emit_cast_int_to_float(
         // 1. A1 = FP + src_off
         emit_lea_fp_disp(src_off, code);
         // 2. FMOVE.L (A1), FP0 — 68881 external load, Long format.
-        //    Word 2: bit15=1(ext) | bit13=0(load) | FPn=0(12-10) | fmt=000(L, bits 6-4)
+        //    [K7E-m68k-f64-followup] Corrected encoding per QEMU-m68k disasm:
+        //      Word 2: 0_1_0_0_0_0_DST(3)_0(7)  (bit 14=1 mem, bit 13=0 load,
+        //      bit 12=0 long-int precision, bit 10=0 long-int marker,
+        //      bits 9-7=dst FPn)
+        //      For FP0: 0x4000. Verified: `0xf211 0x4000` → `fmovel %a1@,%fp0`.
+        //    (Previous encoding 0x8000 set bit 15 (=R/M=1) which QEMU rejects
+        //     as `0171021` unknown 2-byte F-line, dropping the load.)
         code.extend_from_slice(&0xF211u16.to_be_bytes());
-        code.extend_from_slice(&0x8000u16.to_be_bytes());
+        code.extend_from_slice(&0x4000u16.to_be_bytes());
         // 3. A1 = FP + dst_off
         emit_lea_fp_disp(dst_off, code);
         // 4. FMOVE.S/D FP0, (A1)
@@ -3515,18 +3561,27 @@ fn emit_cast_float_to_int(
         if src_is_f64 {
             emit_swap_f64_slot(src_off, code);
         }
-        // 3. FINTRZ FP0, FP0 — best-effort 68881 encoding.
-        //    Word 1: 0xF200 (cp1, cpGEN, EA = D0 placeholder).
-        //    Word 2: (0x03 << 8) | (FPn=0 << 4) | FPm=0 = 0x0300.
-        //    TODO G4: verify against M68000 PRM.
+        // 3. FINTRZ FP0, FP0 — round toward zero (truncate to integer).
+        //    [K7E-m68k-f64-followup] Corrected encoding per QEMU-m68k disasm:
+        //      Word 2 = (src_fp << 10) | (dst_fp << 7) | opsel
+        //      FINTRZ.X opsel = 0x03 (verified: 0xf200 0x0003 → `fintrzd %fp0,%fp0`).
+        //    (Previous encoding 0x0300 was decoded by QEMU as `fmoved %fp0,%fp6` —
+        //     a register-to-register FMOVE monadic, not FINTRZ. Left FP0 unmodified.)
         code.extend_from_slice(&0xF200u16.to_be_bytes());
-        code.extend_from_slice(&0x0300u16.to_be_bytes());
+        code.extend_from_slice(&0x0003u16.to_be_bytes());
         // 4. A1 = FP + dst_off
         emit_lea_fp_disp(dst_off, code);
         // 5. FMOVE.L FP0, (A1) — 68881 external store, Long format.
-        //    Word 2: bit15=1(ext) | bit13=1(store) | FPn=0(12-10) | fmt=000(L)
+        //    [K7E-m68k-f64-followup] Corrected encoding per QEMU-m68k disasm:
+        //      Word 2: 0_1_1_0_0_0_SRC(3)_0(7)  (bit 14=1 mem, bit 13=1 store,
+        //      bit 12=0 long-int precision, bit 10=0 long-int marker,
+        //      bits 9-7=src FPn)
+        //      For FP0: 0x6000. Verified: `0xf211 0x6000` → `fmovel %fp0,%a1@`.
+        //    (Previous encoding 0xA000 set bit 15 (=R/M=1) which QEMU rejects;
+        //     decoded as `fmovel ,%a1@` with missing source — silently dropped
+        //     the store, so floattoint(result) always returned 0.)
         code.extend_from_slice(&0xF211u16.to_be_bytes());
-        code.extend_from_slice(&0xA000u16.to_be_bytes());
+        code.extend_from_slice(&0x6000u16.to_be_bytes());
     } else if let IRValue::Immediate(imm) = src {
         // W4b: compute the float→int conversion in Rust at compile time
         // and emit MOVEQ/MOVE.L for the result.  This is the simplest
