@@ -180,6 +180,154 @@ pub fn lower_ipc_builtins(func: &mut IRFunction, backend: BackendKind) {
     for &id in &collect_vregs(func) {
         func.vregs.entry(id).or_insert_with(|| crate::ir::VirtualRegister { id, name: None });
     }
+
+    // K11A-wasm32-fork-emulation: on wasm32, rewrite the `if pid == 0`
+    // branch emitted by `spawn_worker()` so that BOTH the child and parent
+    // blocks run sequentially in the same process. The child's `Return`
+    // is converted to a store + jump-to-parent, and `wait_worker` (already
+    // lowered above to a Load from WASM32_CHILD_EXIT_ADDR) reads the
+    // stashed exit value. No-op on other backends.
+    if backend == BackendKind::Wasm32 {
+        wasm32_fork_emulation_pass(func);
+    }
+}
+
+/// K11A-wasm32-fork-emulation: rewrite the `spawn_worker` if/else pattern
+/// so both branches run sequentially in-process.
+///
+/// Pattern (post-`expand_spawn_worker`, all in one block because the
+/// expansion is `Expansion::flat` with no new_blocks):
+/// ```text
+///   block:
+///     ...
+///     Syscall { nr: 220, dst: <ret> }
+///     BinOp  { Add, dst: <pid>, lhs: <ret>, rhs: 0 }
+///     Cmp    { Eq, lhs: <pid>, rhs: 0, dst: <cond> }
+///     CondBranch { cond: <cond>, true_target: <child>, false_target: <parent> }
+/// ```
+///
+/// Rewrite:
+/// 1. Locate `<child>` block; rewrite its `Return([v])` terminator to
+///    `Store(v, WASM32_CHILD_EXIT_ADDR); Jump(<parent>)`. This makes the
+///    child fall through to the parent instead of exiting `main`.
+/// 2. `wait_worker` was already lowered to `Load(WASM32_CHILD_EXIT_ADDR)`
+///    by `expand_wait_worker`, so the parent reads the child's exit value.
+///
+/// Only `Return` terminators reachable from the child block via a chain of
+/// unconditional `Jump`s are rewritten (up to 16 hops, cycle-guarded). If
+/// the child CFG contains conditional branches, the pass gives up and leaves
+/// the child's `Return` intact (the program exits with the child's value —
+/// see worklog K11A for the Pattern-B limitation).
+fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
+    // Phase 1: build a map of vreg → defining instruction so we can trace
+    // `pid` back to `Syscall{nr:220}` across block boundaries. The
+    // `expand_spawn_worker` emission is `Syscall{220, dst: ret}` followed
+    // by `BinOp{Add, dst: pid, lhs: ret}`, but the `Cmp{Eq, pid, 0}` +
+    // `Branch` may land in a different block (the SCG→IR builder often
+    // puts the `if` condition in its own block).
+    use std::collections::HashMap;
+    let mut def_kind: HashMap<u32, DefKind> = HashMap::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            match instr {
+                IRInstr::Syscall { nr: 220, args: _, dst: Some(IRValue::Register(id)) } => {
+                    def_kind.insert(*id, DefKind::CloneRet);
+                }
+                IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(id), lhs: IRValue::Register(lhs), .. } => {
+                    if def_kind.get(lhs) == Some(&DefKind::CloneRet) {
+                        def_kind.insert(*id, DefKind::ClonePid);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Phase 2: find the `Cmp{Eq, pid, 0}` whose block terminator is a
+    // `Branch{cond, true: child, false: parent}` using that Cmp's dst.
+    let mut child_label: Option<String> = None;
+    let mut parent_label: Option<String> = None;
+    'outer: for block in &func.blocks {
+        for instr in &block.instructions {
+            if let IRInstr::Cmp {
+                kind: CmpKind::Eq,
+                dst: IRValue::Register(cond_id),
+                lhs: IRValue::Register(lhs_id),
+                rhs: IRValue::Immediate(0),
+                ..
+            } = instr
+            {
+                if def_kind.get(lhs_id) != Some(&DefKind::ClonePid) {
+                    continue;
+                }
+                if let IRTerminator::Branch {
+                    cond: IRValue::Register(tcond_id),
+                    true_block,
+                    false_block,
+                } = &block.terminator
+                {
+                    if tcond_id == cond_id {
+                        child_label = Some(true_block.clone());
+                        parent_label = Some(false_block.clone());
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    let (child_lbl, parent_lbl) = match (child_label, parent_label) {
+        (Some(c), Some(p)) => (c, p),
+        _ => return, // no spawn_worker pattern in this function
+    };
+
+    // Phase 3: rewrite the child block's Return → Store + Jump(parent).
+    // Also handle the case where the child block ends with a Jump chain
+    // leading to a Return — follow up to 8 jumps to find the actual Return.
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cursor = child_lbl.clone();
+    for _ in 0..16 {
+        if !visited.insert(cursor.clone()) {
+            break; // cycle guard
+        }
+        let idx = match func.blocks.iter().position(|b| b.label == cursor) {
+            Some(i) => i,
+            None => break,
+        };
+        let block = &mut func.blocks[idx];
+        if let IRTerminator::Return(values) = &block.terminator {
+            let val = values.first().cloned().unwrap_or(IRValue::Immediate(0));
+            if matches!(block.instructions.last(), Some(IRInstr::Ret { .. })) {
+                block.instructions.pop();
+            }
+            block.instructions.push(IRInstr::Store {
+                value: val,
+                addr: IRValue::Immediate(WASM32_CHILD_EXIT_ADDR),
+                offset: 0,
+                ty: IRType::I64,
+            });
+            block.instructions.push(IRInstr::Branch {
+                target: parent_lbl.clone(),
+            });
+            block.terminator = IRTerminator::Jump(parent_lbl.clone());
+            block.successors.clear();
+            block.successors.insert(parent_lbl.clone());
+            break;
+        }
+        // Follow unconditional jumps deeper into the child CFG.
+        match &block.terminator {
+            IRTerminator::Jump(t) => cursor = t.clone(),
+            _ => break, // conditional branch / switch — give up (see worklog)
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum DefKind {
+    /// vreg holds the raw return of `Syscall{nr:220}` (clone).
+    CloneRet,
+    /// vreg holds `pid` = clone_ret + 0 (the user-visible spawn_worker result).
+    ClonePid,
 }
 
 /// Scan the function for IPC builtin usage and count L1 checks.
@@ -286,8 +434,26 @@ fn alloc_state_slots(func: &mut IRFunction, ctx: &mut LowerContext, needs: &Need
 fn split_block_at_first_ipc(func: &mut IRFunction, ctx: &mut LowerContext, bi: usize) -> bool {
     // Find the first IPC builtin Call OR ChannelRecvResult in this block.
     let split_idx = func.blocks[bi].instructions.iter().position(|instr| {
-        matches!(instr, IRInstr::Call { func, .. } if is_ipc_builtin(func))
-            || matches!(instr, IRInstr::ChannelRecvResult { .. })
+        match instr {
+            IRInstr::Call { func: fname, .. } if is_ipc_builtin(fname) => {
+                // K11A-wasm32-fork-emulation: on wasm32, the four basic
+                // channel builtins (open/send/recv/close) are lowered
+                // natively by the backend's `IRInstr::Call` arm into
+                // in-memory ring-buffer operations. Lowering them here to
+                // `Syscall{nr:..}` would produce -ENOSYS stubs (wasm32 has
+                // no pipe2/read/write syscalls). Skip them so the Call
+                // reaches the backend intact.
+                if ctx.backend == BackendKind::Wasm32
+                    && is_wasm32_native_channel_builtin(fname)
+                {
+                    false
+                } else {
+                    true
+                }
+            }
+            IRInstr::ChannelRecvResult { .. } => true,
+            _ => false,
+        }
     });
     let Some(idx) = split_idx else { return false; };
 
@@ -613,34 +779,81 @@ fn expand_channel_close(args: &[IRValue], ctx: &mut LowerContext) -> Vec<IRInstr
 }
 
 /// spawn_worker() -> i64
+/// Linear-memory address used to stash the child branch's exit value on
+/// wasm32 (no real fork — both branches run sequentially in-process).
+/// Page 0 (0..65536) is reserved for data/scratch; 4096 is well clear of
+/// mem[0] (return-value slot) and the bump heap (starts at 65536).
+const WASM32_CHILD_EXIT_ADDR: i64 = 4096;
+
+/// Returns true if the named IPC builtin is handled natively by the wasm32
+/// backend's `IRInstr::Call` arm (ring-buffer channels) and therefore must
+/// NOT be lowered to `Syscall`/`Store`/`Load` IR by this shared pass.
+fn is_wasm32_native_channel_builtin(name: &str) -> bool {
+    matches!(name,
+        "channel_open" | "channel_send" | "channel_recv" | "channel_close"
+        | "channel_try_recv"
+    )
+}
+
 fn expand_spawn_worker(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRInstr> {
     let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
     let ret = ctx.new_vreg();
-    vec![
-        IRInstr::Syscall {
-            nr: 220, // clone (asm-generic)
-            args: vec![
-                IRValue::Immediate(17), // SIGCHLD
-                IRValue::Immediate(0),
-                IRValue::Immediate(0),
-                IRValue::Immediate(0),
-                IRValue::Immediate(0),
-            ],
-            dst: Some(ret.clone()),
-        },
-        IRInstr::BinOp {
-            op: BinOpKind::Add,
-            dst,
-            lhs: ret,
-            rhs: IRValue::Immediate(0),
-            ty: Some(IRType::I64),
-        },
-    ]
+    let mut instrs: Vec<IRInstr> = Vec::new();
+    // K11A-wasm32-fork-emulation: on wasm32 there is no clone syscall. The
+    // backend's `Syscall{nr:220}` handler returns 0 (child branch runs).
+    // We pre-zero the child-exit slot here so `wait_worker` loads 0 if the
+    // child falls through without an explicit return. The fork-emulation
+    // pass (called after lowering) rewrites the child's `Return` to store
+    // its value here and jump to the parent block.
+    if ctx.backend == BackendKind::Wasm32 {
+        instrs.push(IRInstr::Store {
+            value: IRValue::Immediate(0),
+            addr: IRValue::Immediate(WASM32_CHILD_EXIT_ADDR),
+            offset: 0,
+            ty: IRType::I64,
+        });
+    }
+    instrs.push(IRInstr::Syscall {
+        nr: 220, // clone (asm-generic)
+        args: vec![
+            IRValue::Immediate(17), // SIGCHLD
+            IRValue::Immediate(0),
+            IRValue::Immediate(0),
+            IRValue::Immediate(0),
+            IRValue::Immediate(0),
+        ],
+        dst: Some(ret.clone()),
+    });
+    instrs.push(IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: ret,
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    });
+    instrs
 }
 
 /// wait_worker(pid) -> i32
 fn expand_wait_worker(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRInstr> {
     if args.is_empty() { return vec![]; }
+
+    // K11A-wasm32-fork-emulation: on wasm32 the child branch has already
+    // run (spawn_worker returned 0) and its `Return` was rewritten by the
+    // fork-emulation pass to store the exit value at
+    // WASM32_CHILD_EXIT_ADDR. wait_worker just loads that slot.
+    if ctx.backend == BackendKind::Wasm32 {
+        let dst = match dst { Some(d) => d.clone(), None => { return vec![]; } };
+        return vec![
+            IRInstr::Load {
+                dst,
+                addr: IRValue::Immediate(WASM32_CHILD_EXIT_ADDR),
+                offset: 0,
+                ty: IRType::I32,
+            },
+        ];
+    }
+
     let pid = args[0].clone();
     let status_buf = ctx.new_vreg();
     let ret = ctx.new_vreg();
@@ -2928,11 +3141,15 @@ fn expand_channel_open_remote(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut
 
     let fd = ctx.new_vreg();
     let sockaddr = ctx.new_vreg();
+    let addrlen = ctx.new_vreg();
     let port_lo = ctx.new_vreg();
     let port_hi = ctx.new_vreg();
     let port_shifted = ctx.new_vreg();
     let port_nbo = ctx.new_vreg();
     let connect_ret = ctx.new_vreg();
+    let gp_ret = ctx.new_vreg();
+    let connect_err = ctx.new_vreg();
+    let gp_err = ctx.new_vreg();
     let is_error = ctx.new_vreg();
     let result = ctx.new_vreg();
 
@@ -2948,15 +3165,40 @@ fn expand_channel_open_remote(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut
         IRInstr::Store { value: port_nbo, addr: sockaddr.clone(), offset: 2, ty: IRType::I16 },
         IRInstr::Store { value: addr, addr: sockaddr.clone(), offset: 4, ty: IRType::I32 },
         IRInstr::Store { value: IRValue::Immediate(0), addr: sockaddr.clone(), offset: 8, ty: IRType::I64 },
-        IRInstr::Syscall { nr: 203, args: vec![fd.clone(), sockaddr, IRValue::Immediate(16)], dst: Some(connect_ret.clone()) },
-        // Check connect_ret != 0 (error on all backends). We use Ne instead
-        // of SLt because some backends (hppa QEMU) return POSITIVE errno on
-        // error (e.g. +14 for EFAULT) rather than -errno. connect() returns
-        // 0 on success, so != 0 is the correct error check universally.
-        // Use ty=None (32-bit comparison) because on 32-bit backends the
-        // high word of the I64 slot may be uninitialized garbage, causing
-        // I64 Ne to always return true even when connect_ret=0.
-        IRInstr::Cmp { kind: CmpKind::Ne, dst: is_error.clone(), lhs: connect_ret, rhs: IRValue::Immediate(0), ty: None },
+        IRInstr::Syscall { nr: 203, args: vec![fd.clone(), sockaddr.clone(), IRValue::Immediate(16)], dst: Some(connect_ret.clone()) },
+        // [K11B] Post-connect validation via getpeername.
+        //
+        // QEMU 7.2.0 arm32/armeb has a bug where connect() to 0.0.0.0:1
+        // spuriously returns 0 (success) instead of -ECONNREFUSED. This
+        // breaks distributed.vuma, which expects channel_open_remote to
+        // return 0 (failure) for that destination. We cannot upgrade QEMU
+        // (7.2.0 is the latest static release).
+        //
+        // Workaround: after connect() returns, call getpeername(fd, ...).
+        // On a not-really-connected socket the kernel returns -ENOTCONN
+        // (-107), exposing the QEMU bug. On a genuinely-connected socket
+        // getpeername returns 0 and fills the peer address.
+        //
+        // is_error = (connect_ret != 0) OR (gp_ret != 0)
+        //   - connect_ret != 0: real connect failure (all backends except
+        //     buggy QEMU 7.2.0 arm32/armeb).
+        //   - gp_ret != 0: QEMU arm32 bug — connect returned 0 but the
+        //     socket is not actually connected.
+        //
+        // getpeername needs an output sockaddr buffer (reuse the existing
+        // `sockaddr` Alloc) and an in/out socklen_t pointer (new 4-byte
+        // Alloc initialized to 16). The syscall uses generic nr 205,
+        // translated to native (e.g. 287 on ARM EABI, 52 on x86_64,
+        // identity 205 on aarch64/riscv/loongarch) by syscall_abi.rs.
+        IRInstr::Alloc { dst: addrlen.clone(), size: 4 },
+        IRInstr::Store { value: IRValue::Immediate(16), addr: addrlen.clone(), offset: 0, ty: IRType::I32 },
+        IRInstr::Syscall { nr: 205, args: vec![fd.clone(), sockaddr, addrlen], dst: Some(gp_ret.clone()) },
+        // is_error = (connect_ret != 0) OR (gp_ret != 0). Use ty=None
+        // (32-bit comparison) for both Cmps — see the note above on
+        // 32-bit backends and uninitialized high words.
+        IRInstr::Cmp { kind: CmpKind::Ne, dst: connect_err.clone(), lhs: connect_ret, rhs: IRValue::Immediate(0), ty: None },
+        IRInstr::Cmp { kind: CmpKind::Ne, dst: gp_err.clone(), lhs: gp_ret, rhs: IRValue::Immediate(0), ty: None },
+        IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: connect_err, rhs: gp_err, ty: Some(IRType::I32) },
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(0), false_val: fd, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]

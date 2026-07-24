@@ -576,15 +576,47 @@ def run_one(args):
         result["actual"] = expected
         return result
     out = f"/tmp/vuma_{os.getpid()}_{backend}_{test_name}.bin"
-    try:
-        compile_cmd = [str(COMPILE), test_path, out, backend, "--opt-level=O3"]
-        if verify:
-            compile_cmd.append("--verify")
-        r = subprocess.run(compile_cmd, capture_output=True, timeout=15)
-        if r.returncode != 0:
-            return result
-        result["compile_ok"] = True
+    # K11D: Under --workers 8 parallel load on a multi-core box, compile_dump
+    # wall-clock can spike well past 15s (observed 16s for sparc64 hot_swap
+    # under 8-way parallel compile). The old 15s timeout raised
+    # subprocess.TimeoutExpired, which was silently swallowed by the bare
+    # outer `except:` below — leaving result["actual"]=None (the "None" exit
+    # code crashes in the report). Fix: (1) raise the compile timeout to 30s,
+    # (2) retry once on TimeoutExpired/OSError with an even longer budget,
+    # (3) capture any remaining exception into result["error"] instead of
+    # swallowing it, so future None results are diagnosable.
+    compile_cmd = [str(COMPILE), test_path, out, backend, "--opt-level=O3"]
+    if verify:
+        compile_cmd.append("--verify")
+    compile_timeout = 30
+    compile_exc = None
+    r = None
+    for compile_attempt in range(2):  # at most 2 attempts
+        try:
+            r = subprocess.run(compile_cmd, capture_output=True, timeout=compile_timeout)
+            compile_exc = None
+            break
+        except subprocess.TimeoutExpired:
+            compile_exc = f"compile_timeout ({compile_timeout}s)"
+            compile_timeout = 60  # generous retry budget
+        except OSError as e:
+            compile_exc = f"compile_oserror: {e}"
+        except Exception as e:
+            compile_exc = f"compile_exc: {type(e).__name__}: {e}"
+            break
+    if compile_exc is not None:
+        result["error"] = compile_exc
+        return result  # actual stays None but error is recorded
+    if r.returncode != 0:
+        return result
+    result["compile_ok"] = True
 
+    # K11D: Wrap IVE parsing + run in a try that CAPTURES (not swallows)
+    # exceptions. The old bare `except: pass` here was the root cause of
+    # the "None" exit code crashes — any transient error (compile timeout
+    # bleed-through, OSError from fork, worker memory pressure) left
+    # result["actual"]=None with no diagnostic. Now we record the error.
+    try:
         # Parse IVE status from stderr (if --verify was passed)
         if verify:
             stderr = r.stderr.decode(errors="replace")
@@ -670,8 +702,13 @@ def run_one(args):
                 break
         except subprocess.TimeoutExpired:
             result["timed_out"] = True; result["actual"] = 124
-    except:
-        pass
+        except Exception as e:
+            # K11D: was `except: pass` — swallowed ALL exceptions (including
+            # compile-timeout bleed, OSError from fork failure under parallel
+            # load, MemoryError) leaving actual=None with no diagnostic.
+            # Now record the error so None results are attributable.
+            if result["actual"] is None:
+                result["error"] = f"run_exc: {type(e).__name__}: {e}"
     finally:
         try: os.remove(out)
         except: pass
@@ -721,22 +758,46 @@ def main():
     skipped = 0
     t0 = time.monotonic()
 
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(run_one, t): t for t in remaining}
-        for i, fut in enumerate(as_completed(futures), 1):
-            try: r = fut.result()
-            except: r = {"path": "", "backend": "", "match": False, "actual": None,
-                        "expected": 0, "test": "", "category": "", "compile_ok": False,
-                        "crashed": False, "timed_out": False, "skipped": False}
-            ckpt.write(json.dumps(r) + "\n")
-            if r.get("match"):
-                matches += 1
-                if r.get("skipped"): skipped += 1
-            if i % 200 == 0 or i == len(remaining):
-                elapsed = time.monotonic() - t0
-                rate = i / elapsed if elapsed > 0 else 0
-                eta = (len(remaining) - i) / rate / 60 if rate > 0 else 0
-                print(f"  [{i}/{len(remaining)}] {rate:.0f}/s ETA {eta:.1f}min | matches={matches} ({100*matches/i:.1f}%) skipped={skipped}", flush=True)
+    # K11C: IPC tests use fork+exec+wait which requires real process
+    # scheduling headroom. Under --workers 8, 8 parallel QEMU processes
+    # each spawning forked children saturate the Pi's 8 cores, so the
+    # children never get scheduled within the 30s timeout — they PASS in
+    # isolation but time out (exit 124) under parallel load. Split into two
+    # phases: IPC tests first with reduced parallelism (≤3 workers, leaving
+    # ≥5 cores free for forked children), then all other tests with the full
+    # --workers count for maximum throughput. This does not change which
+    # tests run, only the concurrency used for the fork-heavy subset.
+    ipc_tasks = [t for t in remaining if t[1] == "ipc"]
+    other_tasks = [t for t in remaining if t[1] != "ipc"]
+    total_remaining = len(remaining)
+    ipc_workers = min(args.workers, 3)
+    total_done = 0
+
+    def run_batch(batch, label, workers):
+        nonlocal matches, skipped, total_done
+        if not batch:
+            return
+        print(f"  [phase:{label}] {len(batch)} tasks with {workers} workers", flush=True)
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(run_one, t): t for t in batch}
+            for fut in as_completed(futures):
+                try: r = fut.result()
+                except: r = {"path": "", "backend": "", "match": False, "actual": None,
+                            "expected": 0, "test": "", "category": "", "compile_ok": False,
+                            "crashed": False, "timed_out": False, "skipped": False}
+                ckpt.write(json.dumps(r) + "\n")
+                if r.get("match"):
+                    matches += 1
+                    if r.get("skipped"): skipped += 1
+                total_done += 1
+                if total_done % 200 == 0 or total_done == total_remaining:
+                    elapsed = time.monotonic() - t0
+                    rate = total_done / elapsed if elapsed > 0 else 0
+                    eta = (total_remaining - total_done) / rate / 60 if rate > 0 else 0
+                    print(f"  [{total_done}/{total_remaining}] {rate:.0f}/s ETA {eta:.1f}min | matches={matches} ({100*matches/total_done:.1f}%) skipped={skipped}", flush=True)
+
+    run_batch(ipc_tasks, "ipc", ipc_workers)
+    run_batch(other_tasks, "other", args.workers)
 
     ckpt.close()
     elapsed = time.monotonic() - t0

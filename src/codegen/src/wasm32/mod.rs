@@ -2993,6 +2993,89 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     // buffer is simply abandoned).
                     return Ok(());
                 }
+                // K11A-wasm32-fork-emulation: non-blocking try_recv on the
+                // in-memory ring buffer. Returns the payload (i32) when data
+                // is available, or -2 (EAGAIN) when the buffer is empty.
+                // This lets Pattern-A tests (child sends, parent try_recv in
+                // a spin-loop) work after the fork-emulation pass runs the
+                // child branch first.
+                "channel_try_recv" if args.len() == 1 && dst.is_some() => {
+                    let ch = &args[0];
+                    ctx.push_value(ch, Some(&WasmType::I32));
+                    ctx.stack_depth += 1;
+                    let base_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(base_local));
+                    ctx.stack_depth -= 1;
+                    // Load head and tail.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
+                    let head_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(head_local));
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 4 });
+                    let tail_local = ctx.num_locals;
+                    ctx.num_locals += 1;
+                    ctx.locals.push((1, WasmType::I32));
+                    ctx.emit(WasmInstr::LocalSet(tail_local));
+                    ctx.stack_depth -= 1;
+                    // cond = (head == tail)  → empty → return -2
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(tail_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Eq);
+                    ctx.stack_depth -= 1;
+                    // if empty: push -2; else: load payload + advance head.
+                    ctx.emit(WasmInstr::If(Some(WasmType::I32)));
+                    // if-body (empty)
+                    ctx.emit(WasmInstr::I32Const(-2));
+                    // else-body (data available): load payload at base+16+head
+                    ctx.emit(WasmInstr::Else);
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(16));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 });
+                    ctx.emit(WasmInstr::I32WrapI64);
+                    // Advance head: new_head = (head + 8) % capacity
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(8));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Add);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 8 });
+                    ctx.emit(WasmInstr::I32RemU);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                    ctx.stack_depth -= 2;
+                    ctx.emit(WasmInstr::End);
+                    // Stack now: [result]. Pop to dst.
+                    if let IRValue::Register(id) = dst.as_ref().unwrap() {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                    return Ok(());
+                }
                 _ => {}
             }
 
