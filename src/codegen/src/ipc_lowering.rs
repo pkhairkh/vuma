@@ -2692,19 +2692,33 @@ fn expand_set_memory_limit(args: &[IRValue], ctx: &mut LowerContext) -> Vec<IRIn
 
 // ── L6: Checkpoint ────────────────────────────────────────────────────
 
-/// Path bytes for `/tmp/vuma_checkpoint.bin` (NUL-terminated).
+/// Path prefix for `/tmp/vuma_checkpoint_` (PID bytes appended).
+///
+/// The full path is `/tmp/vuma_checkpoint_<PID_raw_bytes>.bin` where PID
+/// is obtained via getpid() and stored as 4 raw bytes. This ensures each
+/// process writes its own file, avoiding race conditions when multiple
+/// QEMU processes run in parallel (the Pi5 test suite runs 3-4 workers
+/// concurrently, and the shared `/tmp/vuma_checkpoint.bin` path caused
+/// intermittent s390x checkpoint failures).
 ///
 /// Stored byte-by-byte via `IRType::I8` so the in-memory byte order is
 /// identical on every backend. (The previous implementation used `I64`
 /// stores of 8-byte chunks, which on big-endian targets reversed each
 /// chunk and produced the mangled relative path `muv/pmt/...` that
 /// `openat` could not create — see Wave 19-ext-checkpoint-be.)
-const CHECKPOINT_PATH_BYTES: &[u8; 25] = b"/tmp/vuma_checkpoint.bin\0";
+const CHECKPOINT_PATH_PREFIX: &[u8; 21] = b"/tmp/vuma_checkpoint_";
+const CHECKPOINT_PATH_SUFFIX: &[u8; 5] = b".bin\0";
 
 fn build_checkpoint_path(ctx: &mut LowerContext) -> (Vec<IRInstr>, IRValue) {
     let path_buf = ctx.new_vreg();
+    let pid = ctx.new_vreg();
+    let tmp = ctx.new_vreg();
+
+    // Path: "/tmp/vuma_checkpoint_" (21) + 4 PID bytes + ".bin\0" (5) = 30 bytes
     let mut instrs = vec![IRInstr::Alloc { dst: path_buf.clone(), size: 32 }];
-    for (i, byte) in CHECKPOINT_PATH_BYTES.iter().enumerate() {
+
+    // Store prefix
+    for (i, byte) in CHECKPOINT_PATH_PREFIX.iter().enumerate() {
         instrs.push(IRInstr::Store {
             value: IRValue::Immediate(*byte as i64),
             addr: path_buf.clone(),
@@ -2712,6 +2726,35 @@ fn build_checkpoint_path(ctx: &mut LowerContext) -> (Vec<IRInstr>, IRValue) {
             ty: IRType::I8,
         });
     }
+
+    // Get PID via getpid() (syscall 39, translated per-backend)
+    instrs.push(IRInstr::Syscall {
+        nr: 39,
+        args: vec![],
+        dst: Some(pid.clone()),
+    });
+
+    // Store PID as 4 raw bytes (little-endian) at offsets 21-24.
+    // Each byte has 1 added to avoid NUL (0x00) which would terminate
+    // the path string. Linux paths allow any byte except NUL and '/'.
+    for shift in [0, 8, 16, 24] {
+        instrs.push(IRInstr::BinOp { op: BinOpKind::ShrL, dst: tmp.clone(), lhs: pid.clone(), rhs: IRValue::Immediate(shift), ty: Some(IRType::I64) });
+        instrs.push(IRInstr::BinOp { op: BinOpKind::And, dst: tmp.clone(), lhs: tmp.clone(), rhs: IRValue::Immediate(0xFF), ty: Some(IRType::I64) });
+        // Add 1 to avoid NUL byte (0 → 1, 0x2F → 0x30 which is '0', still valid)
+        instrs.push(IRInstr::BinOp { op: BinOpKind::Add, dst: tmp.clone(), lhs: tmp.clone(), rhs: IRValue::Immediate(1), ty: Some(IRType::I64) });
+        instrs.push(IRInstr::Store { value: tmp.clone(), addr: path_buf.clone(), offset: 21 + (shift / 8) as i32, ty: IRType::I8 });
+    }
+
+    // Store suffix ".bin\0" at offset 25
+    for (i, byte) in CHECKPOINT_PATH_SUFFIX.iter().enumerate() {
+        instrs.push(IRInstr::Store {
+            value: IRValue::Immediate(*byte as i64),
+            addr: path_buf.clone(),
+            offset: (25 + i) as i32,
+            ty: IRType::I8,
+        });
+    }
+
     (instrs, path_buf)
 }
 
