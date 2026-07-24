@@ -7298,7 +7298,28 @@ impl Backend for Arm32Backend {
                                         | crate::ir::IRType::U64))
                                     .unwrap_or(false)
                             }).collect(),
-                            None => vec![true; num_args],
+                            None => {
+                                // Extern "C" call (callee_param_types is None
+                                // when is_extern).  VUMA extern targets resolve
+                                // to *syscall stubs* (write/read/open/close/…)
+                                // which use the ARM EABI *kernel* calling
+                                // convention — one 32-bit arg per register
+                                // (R0–R5), NOT the AAPCS C-ABI convention
+                                // (which would pair 64-bit args across two
+                                // registers).  Passing i64 args as 64-bit here
+                                // would put fd→R0:R1, buf→R2:R3, leaving count
+                                // on the stack — but the syscall stub reads
+                                // R0=fd, R1=buf, R2=count, so the call would
+                                // corrupt every syscall with ≥2 args (e.g.
+                                // write(1, NULL, buf_addr) → -EFAULT).
+                                //
+                                // Force all extern args to 32-bit (low word
+                                // only) so they line up with the kernel EABI
+                                // stubs.  All VUMA extern arg values (fd,
+                                // pointer, count, …) fit in 32 bits on arm32.
+                                if *is_extern { vec![false; num_args] }
+                                else { vec![true; num_args] }
+                            }
                         };
 
                         // Compute which args go in R0-R3 vs on the stack.

@@ -3767,9 +3767,21 @@ impl Backend for M68kBackend {
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
             // CRITICAL: D3, D4, D5 are callee-saved on m68k. mmap2 uses
-            // D3=prot, D4=flags, D5=fd. Save/restore them with MOVEM.L.
-            // MOVEM.L D3-D5, -(SP) = 0x48E7 0x0038 (mask: D3=bit3, D4=bit4, D5=bit5)
-            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0x38]);
+            // D3=prot, D4=flags, D5=fd. Save/restore them.
+            // NOTE: Do NOT use `MOVEM.L D3-D5, -(SP)` (0x48E7 0x0038) — QEMU-m68k
+            // has a translator/disassembler disagreement on the register-list
+            // mask for BOTH predecrement and postincrement MOVEM modes (the
+            // translator uses reversed-mask semantics; the disassembler uses
+            // the architecture-spec semantics), which causes a fatal
+            // "Disassembler disagrees with translator over instruction decoding"
+            // SIGILL on the very first MOVEM. Work around this QEMU bug by
+            // emitting three individual `MOVE.L Dn, -(SP)` instructions (each
+            // is a single 2-byte word with no register-list ambiguity).
+            //   MOVE.L D5, -(SP) = 0x2F05
+            //   MOVE.L D4, -(SP) = 0x2F04
+            //   MOVE.L D3, -(SP) = 0x2F03
+            // Push order is D5,D4,D3 so D3 lands at [SP] (lowest address).
+            code.extend_from_slice(&[0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
             // D2 = size (from D1)
             code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D2 }.encode());
             // D1 = NULL
@@ -3794,8 +3806,13 @@ impl Backend for M68kBackend {
             // pushed pgoff on the stack, so RTS would pop pgoff(0) as the
             // return address and crash. Fixed in wave 6 to the real ADDQ.
             code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
-            // Restore D3-D5: MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038
-            code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0x38]);
+            // Restore D3-D5: three individual `MOVE.L (SP)+, Dn` (2 bytes each).
+            // Pop order is D3,D4,D5 to match the push order (D3 at [SP]).
+            //   MOVE.L (SP)+, D3 = 0x261F
+            //   MOVE.L (SP)+, D4 = 0x281F
+            //   MOVE.L (SP)+, D5 = 0x2A1F
+            // (Replaces MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038 — see note above.)
+            code.extend_from_slice(&[0x26, 0x1F, 0x28, 0x1F, 0x2A, 0x1F]);
             // RTS
             code.extend(Instruction::Rts.encode());
             code
@@ -3963,8 +3980,12 @@ impl Backend for M68kBackend {
             // m68k: syscall# in D0, args in D1-D5, pgoff on stack. D3-D5 callee-saved.
             {
                 let mut code = Vec::new();
-                // MOVEM.L D3-D5, -(SP) — save callee-saved
-                code.extend_from_slice(&[0x48, 0xE7, 0x00, 0x38]);
+                // Save callee-saved D3-D5 via three individual MOVE.L Dn, -(SP).
+                // (Cannot use MOVEM.L D3-D5, -(SP) = 0x48E7 0x0038 — QEMU-m68k
+                // translator/disassembler disagreement on the register-list mask
+                // causes SIGILL. See __vuma_alloc above for the full explanation.)
+                // Push order D5,D4,D3 so D3 lands at [SP].
+                code.extend_from_slice(&[0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
                 // D1 = 0 (NULL addr)
                 code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
                 // D2 = 4096 (len)
@@ -3984,8 +4005,9 @@ impl Backend for M68kBackend {
                 code.extend(Instruction::Trap0.encode());
                 // ADDQ.L #4, A7 — pop pgoff
                 code.extend_from_slice(&[0x58, 0x8F]);
-                // MOVEM.L (SP)+, D3-D5 — restore
-                code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0x38]);
+                // Restore D3-D5: three individual MOVE.L (SP)+, Dn.
+                // Pop order D3,D4,D5 to match push order.
+                code.extend_from_slice(&[0x26, 0x1F, 0x28, 0x1F, 0x2A, 0x1F]);
                 // RTS
                 code.extend(Instruction::Rts.encode());
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
@@ -4194,9 +4216,18 @@ impl Backend for M68kBackend {
             // ── Prologue ──
             // LINK A6, #-32
             code.extend(Instruction::Link { reg: Gpr::A6, disp: -32 }.encode());
-            // MOVEM.L D3-D7, -(SP) — save callee-saved
-            // Encoding: 0x48E7 + 2-byte mask. Mask for D3-D7 = 0x00F8.
-            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0xF8]);
+            // Save callee-saved D3-D7 via five individual MOVE.L Dn, -(SP).
+            // (Cannot use MOVEM.L D3-D7, -(SP) = 0x48E7 0x00F8 — QEMU-m68k
+            // translator/disassembler disagreement on the register-list mask
+            // for MOVEM predecrement/postincrement causes SIGILL. See
+            // __vuma_alloc above for the full explanation.)
+            // Push order D7,D6,D5,D4,D3 so D3 lands at [SP].
+            //   MOVE.L D7, -(SP) = 0x2F07
+            //   MOVE.L D6, -(SP) = 0x2F06
+            //   MOVE.L D5, -(SP) = 0x2F05
+            //   MOVE.L D4, -(SP) = 0x2F04
+            //   MOVE.L D3, -(SP) = 0x2F03
+            code.extend_from_slice(&[0x2F, 0x07, 0x2F, 0x06, 0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
 
             // D4 = D1 (save input value)
             code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
@@ -4329,9 +4360,14 @@ impl Backend for M68kBackend {
             code.extend(Instruction::Trap0.encode());
 
             // ── Epilogue ──
-            // MOVEM.L (SP)+, D3-D7 — restore callee-saved
-            // Encoding: 0x4CDF + 2-byte mask. Mask for D3-D7 = 0x00F8.
-            code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0xF8]);
+            // Restore D3-D7: five individual MOVE.L (SP)+, Dn.
+            // Pop order D3,D4,D5,D6,D7 to match push order.
+            //   MOVE.L (SP)+, D3 = 0x261F
+            //   MOVE.L (SP)+, D4 = 0x281F
+            //   MOVE.L (SP)+, D5 = 0x2A1F
+            //   MOVE.L (SP)+, D6 = 0x2C1F
+            //   MOVE.L (SP)+, D7 = 0x2E1F
+            code.extend_from_slice(&[0x26, 0x1F, 0x28, 0x1F, 0x2A, 0x1F, 0x2C, 0x1F, 0x2E, 0x1F]);
             // UNLK A6
             code.extend(Instruction::Unlk { reg: Gpr::A6 }.encode());
             // RTS
@@ -4361,8 +4397,10 @@ impl Backend for M68kBackend {
             // ── Prologue ──
             // LINK A6, #-16
             code.extend(Instruction::Link { reg: Gpr::A6, disp: -16 }.encode());
-            // MOVEM.L D3-D7, -(SP)
-            code.extend_from_slice(&[0x48, 0xE7, 0x00, 0xF8]);
+            // Save callee-saved D3-D7 via five individual MOVE.L Dn, -(SP).
+            // (See __vuma_alloc / print_int above for the QEMU-m68k MOVEM bug
+            // rationale. Push order D7..D3 so D3 lands at [SP].)
+            code.extend_from_slice(&[0x2F, 0x07, 0x2F, 0x06, 0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
 
             // D4 = D1 (save value)
             code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
@@ -4419,8 +4457,8 @@ impl Backend for M68kBackend {
             code.extend(Instruction::Trap0.encode());
 
             // ── Epilogue ──
-            // MOVEM.L (SP)+, D3-D7
-            code.extend_from_slice(&[0x4C, 0xDF, 0x00, 0xF8]);
+            // Restore D3-D7: five individual MOVE.L (SP)+, Dn.
+            code.extend_from_slice(&[0x26, 0x1F, 0x28, 0x1F, 0x2A, 0x1F, 0x2C, 0x1F, 0x2E, 0x1F]);
             // UNLK A6
             code.extend(Instruction::Unlk { reg: Gpr::A6 }.encode());
             // RTS
