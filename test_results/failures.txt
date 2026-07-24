@@ -1,8 +1,5 @@
-VUMA Test Failures — 2026-07-24 21:45:55 UTC
-Total: 4 failures across 4 tests
+VUMA Test Failures — 2026-07-24 22:27:41 UTC
+Total: 1 failures across 1 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  ipc                  checkpoint.vuma                               exp=   1 [('aarch64_be', 0, 'MM')]
   ipc                  driver_isolation.vuma                         exp=  42 [('wasm32', 0, 'MM')]
-  ipc                  large_payload.vuma                            exp=  45 [('hppa', 124, 'TO')]
-  ipc                  protocol_valid.vuma                           exp=  50 [('wasm32', 40, 'MM')]
