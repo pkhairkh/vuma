@@ -1888,12 +1888,30 @@ fn emit_i64_cmp(
         BinOpKind::SLt | BinOpKind::ULt => {
             // result = (hi_a < hi_b) | (hi_eq & (lo_a <u lo_b))
             // if hi_a < hi_b → 1; if hi_a > hi_b → 0; else check lo
+            //
+            // [K6-m68k-i64cmp] Port of K4-hppa strict-opposite fix.
+            //
+            // hi_opp must fire ONLY when hi is STRICTLY on the losing side
+            // (strictly greater, for the less-than family) — NOT when hi is
+            // equal — so the equal-hi case falls through to the lo comparison.
+            // Using a non-strict branch (BLE/BLS) here would fire on equal-hi
+            // and incorrectly short-circuit to "result = false" (the exact
+            // hppa bug). Using BGT/BHI (strict) is correct: it excludes the
+            // equal case.
+            //
+            // The previous code used BNE (0x66) here. BNE after the strict
+            // less-than branch above didn't fire is *semantically equivalent*
+            // to BGT/BHI (after BLT doesn't fire, N==V holds, so BNE ≡ BGT;
+            // after BCS doesn't fire, C==0 holds, so BNE ≡ BHI). We now emit
+            // the explicit strict-greater branch (hi_gt_cc = BGT for signed,
+            // BHI for unsigned) to mirror the K4-hppa fix's structural pattern
+            // and make the strict-opposite semantics directly auditable.
             let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);
-            let b_ne = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
+            let b_hi_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S/BHI.S set_zero (strict opposite)
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());  // lo_a - lo_b
             let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
-            // set_zero: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_ne)
-            patch_short_branch_to_here(code, b_ne);
+            // set_zero: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_hi_gt)
+            patch_short_branch_to_here(code, b_hi_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
             // set_one: (hi_a < hi_b via b_lt, OR lo_a < lo_b via b_lo_lt)

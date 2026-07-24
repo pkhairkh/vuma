@@ -2167,19 +2167,18 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     // p_filesz covers exactly the file bytes in this segment (ELF header +
-    // phdrs + code). p_memsz is page-aligned up so QEMU can mmap a whole
-    // page; the tail (memsz - filesz) is zero-filled in memory.  Setting
-    // p_filesz to the page-aligned value would claim file content past EOF
-    // (ELF spec: p_offset + p_filesz must be <= file size).
+    // phdrs + code). p_memsz is set equal to p_filesz: QEMU 7.2.0's
+    // loongarch64 loader crashes (SIGSEGV) when p_memsz > p_filesz for the
+    // executable PT_LOAD segment. This matches the riscv64 backend.
     let text_filesz = text_offset + text_size;
-    let text_memsz = text_filesz.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let text_memsz = text_filesz;
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
     elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr (page-aligned; p_offset=0 requires alignment)
     elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&text_filesz.to_le_bytes()); // p_filesz (actual file content: header + code)
-    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_memsz (page-aligned; zero-filled tail in memory)
+    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_memsz (== p_filesz; QEMU 7.2.0 loongarch64 loader crashes if p_memsz > p_filesz)
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
     // --- Program Header 2: LOAD (PF_R | PF_W) — .bss / stack ---
