@@ -3491,7 +3491,17 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             let _ = (native_nr, args);
             if let Some(d) = dst {
                 if let IRValue::Register(id) = d {
-                    ctx.emit(WasmInstr::I32Const(-38)); // -ENOSYS
+                    // Emit -ENOSYS as i64 to match the I64 local allocated by
+                    // `pop_to_vreg(*id, WasmType::I64)` below.  The IR Syscall
+                    // expansion (e.g. `expand_spawn_worker`) tags the result
+                    // with `ty: Some(IRType::I64)`, so the destination vreg is
+                    // declared as an I64 local.  Emitting `i32.const` here
+                    // pushes an i32 onto the wasm value stack while `local.set`
+                    // pops an i64 → wasmtime refuses to compile the module
+                    // ("type mismatch: expected i64, found i32") for any
+                    // function that contains a Syscall with an i64 dst (every
+                    // IPC test that uses `spawn_worker()`/`wait_worker()`).
+                    ctx.emit(WasmInstr::I64Const(-38)); // -ENOSYS
                     ctx.pop_to_vreg(*id, WasmType::I64);
                 } else {
                     ctx.emit(WasmInstr::Drop);
