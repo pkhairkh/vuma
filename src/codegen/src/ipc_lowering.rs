@@ -366,9 +366,15 @@ fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
         let mut split_block_idx: Option<usize> = None;
         let mut split_instr_idx: Option<usize> = None;
         for &bi in &parent_blocks_ordered {
-            // First, look for a channel_recv Call in this block.
+            // First, look for a channel_recv OR channel_try_recv Call in
+            // this block. K14C-wasm32-remaining: try_recv in a spin-loop
+            // (try_recv_success) needs the same split as channel_recv —
+            // without it, the parent's pre-split runs the spin-loop before
+            // the child has had a chance to send, deadlocking (exit 124).
             if let Some(ii) = func.blocks[bi].instructions.iter().position(|instr| {
-                matches!(instr, IRInstr::Call { func, .. } if func.as_str() == "channel_recv")
+                matches!(instr,
+                    IRInstr::Call { func, .. }
+                    if func.as_str() == "channel_recv" || func.as_str() == "channel_try_recv")
             }) {
                 split_block_idx = Some(bi);
                 split_instr_idx = Some(ii);
@@ -1377,7 +1383,7 @@ fn expand_channel_recv_result(
         // read(read_fd, frame, 56)
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
         // is_closed = (read_ret <= 0)
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I32) },
         // Load MAGIC from frame[0]
         IRInstr::Load { dst: magic.clone(), addr: frame.clone(), offset: 0, ty: IRType::I32 },
         // magic_ok = (magic == 0x414D5556)
@@ -1494,8 +1500,6 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let poll_ret = ctx.new_vreg();
     let poll_no_data = ctx.new_vreg();
     let read_ret = ctx.new_vreg();
-    let is_full = ctx.new_vreg();
-    let is_eof = ctx.new_vreg();
     let has_data = ctx.new_vreg();
     let is_closed = ctx.new_vreg();
     let magic = ctx.new_vreg();
@@ -1583,52 +1587,35 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
         args: vec![read_fd.clone(), frame.clone(), IRValue::Immediate(56)],
         dst: Some(read_ret.clone()),
     });
-    // is_full = (read_ret == 56) — got a complete frame
+    // [K14A-hppa-sparc64-ebadf] Break on anything that isn't EAGAIN.
+    // QEMU hppa/sparc64 do NOT set the syscall error flag (carry/R20), so a
+    // failed read() returns a POSITIVE errno (e.g. +9 for EBADF) instead of
+    // the usual -9. The old `read_ret < 0` (SLt) check missed positive errno,
+    // causing closed_channel to retry forever on hppa/sparc64. Same root cause
+    // as K10B (try_recv). Fix: check EAGAIN in BOTH signs (±11) and break on
+    // everything else — 56=full frame, 0=EOF, ±9=EBADF, any other error.
+    let is_eagain_neg = ctx.new_vreg();
+    let eagain_val = eagain_errno(ctx.backend);
     poll_loop_blk.instructions.push(IRInstr::Cmp {
-        kind: CmpKind::Eq, dst: is_full.clone(),
-        lhs: read_ret.clone(), rhs: IRValue::Immediate(56), ty: Some(IRType::I64),
+        kind: CmpKind::Eq, dst: is_eagain_neg.clone(),
+        lhs: read_ret.clone(), rhs: IRValue::Immediate(-eagain_val), ty: Some(IRType::I32),
     });
-    // is_eof = (read_ret == 0) — write end closed
+    let is_eagain_pos = ctx.new_vreg();
     poll_loop_blk.instructions.push(IRInstr::Cmp {
-        kind: CmpKind::Eq, dst: is_eof.clone(),
-        lhs: read_ret.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
+        kind: CmpKind::Eq, dst: is_eagain_pos.clone(),
+        lhs: read_ret.clone(), rhs: IRValue::Immediate(eagain_val), ty: Some(IRType::I32),
     });
-    // [K13-closed-channel] is_eagain = (read_ret == -11) — EAGAIN: pipe empty,
-    // retry. Distinguish from other errors (EBADF=-9 from closed fd) which
-    // should break the loop, not retry forever.
+    // is_eagain = is_eagain_neg OR is_eagain_pos
     let is_eagain = ctx.new_vreg();
-    poll_loop_blk.instructions.push(IRInstr::Cmp {
-        kind: CmpKind::Eq, dst: is_eagain.clone(),
-        lhs: read_ret.clone(), rhs: IRValue::Immediate(-11), ty: Some(IRType::I64),
-    });
-    // has_data = is_full OR is_eof OR (NOT is_eagain AND read_ret < 0)
-    // Break (has_data=true) when: full frame, EOF, or any error except EAGAIN.
-    // Retry (has_data=false) only when EAGAIN (pipe empty, write end still open).
-    let is_error_non_eagain = ctx.new_vreg();
-    poll_loop_blk.instructions.push(IRInstr::Cmp {
-        kind: CmpKind::SLt, dst: is_error_non_eagain.clone(),
-        lhs: read_ret.clone(), rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
-    });
-    // is_break = is_error_non_eagain AND (NOT is_eagain)
-    let not_eagain = ctx.new_vreg();
     poll_loop_blk.instructions.push(IRInstr::BinOp {
-        op: BinOpKind::Xor, dst: not_eagain.clone(),
-        lhs: is_eagain.clone(), rhs: IRValue::Immediate(1), ty: Some(IRType::I32),
+        op: BinOpKind::Or, dst: is_eagain.clone(),
+        lhs: is_eagain_neg, rhs: is_eagain_pos, ty: Some(IRType::I32),
     });
-    let is_break = ctx.new_vreg();
+    // has_data = NOT is_eagain — break (jump to read_done) on full/EOF/any-error,
+    // retry (jump to poll_loop) only on EAGAIN (pipe empty, write end open).
     poll_loop_blk.instructions.push(IRInstr::BinOp {
-        op: BinOpKind::And, dst: is_break.clone(),
-        lhs: is_error_non_eagain.clone(), rhs: not_eagain, ty: Some(IRType::I32),
-    });
-    // has_data = is_full OR is_eof OR is_break
-    let tmp1 = ctx.new_vreg();
-    poll_loop_blk.instructions.push(IRInstr::BinOp {
-        op: BinOpKind::Or, dst: tmp1.clone(),
-        lhs: is_full.clone(), rhs: is_eof.clone(), ty: Some(IRType::I32),
-    });
-    poll_loop_blk.instructions.push(IRInstr::BinOp {
-        op: BinOpKind::Or, dst: has_data.clone(),
-        lhs: tmp1, rhs: is_break, ty: Some(IRType::I32),
+        op: BinOpKind::Xor, dst: has_data.clone(),
+        lhs: is_eagain, rhs: IRValue::Immediate(1), ty: Some(IRType::I32),
     });
     // If has_data → read_done. Else → retry (poll_loop).
     poll_loop_blk.instructions.push(IRInstr::CondBranch {
@@ -1657,7 +1644,7 @@ fn expand_channel_recv(ctx: &mut LowerContext, args: &[IRValue], dst: Option<&IR
     let mut read_done_blk = IRBlock::new(&read_done_lbl);
     read_done_blk.instructions.push(IRInstr::Cmp {
         kind: CmpKind::SLe, dst: is_closed.clone(),
-        lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64),
+        lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I32),
     });
     read_done_blk.instructions.push(IRInstr::Load { dst: magic.clone(), addr: frame.clone(), offset: 0, ty: IRType::I32 });
     read_done_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: magic_ok.clone(), lhs: magic, rhs: IRValue::Immediate(0x414D5556), ty: Some(IRType::I32) });
@@ -1706,6 +1693,30 @@ fn expand_channel_send_cap(ctx: &mut LowerContext, args: &[IRValue]) -> Expansio
     }
     let ch = args[0].clone();
     let msg = args[1].clone();
+
+    // K14C-wasm32-remaining: on wasm32 the channel is an in-memory ring
+    // buffer (no framing, no CRC, no cap verification). The Syscall-based
+    // framed write below uses `Load write_fd from [ch+4]` — but on wasm32
+    // the channel handle is the ring buffer base address, so [ch+4] is the
+    // tail index (not a write_fd). The subsequent `write(write_fd, ...)`
+    // Syscall returns -38 (ENOSYS) on wasm32, silently dropping the
+    // message. The child's `channel_recv` then reads uninitialized memory
+    // (zero) → exit 0 instead of the expected payload (42).
+    //
+    // Fix: emit a direct `channel_send(ch, msg)` Call, which the wasm32
+    // backend's ring-buffer `channel_send` handler processes natively.
+    // The capability token is dropped (wasm32 has no cap verification
+    // anyway). Recovers cap_flow + capability_grant_verify.
+    if ctx.backend == BackendKind::Wasm32 {
+        return Expansion::flat(vec![
+            IRInstr::Call {
+                dst: None,
+                func: "channel_send".to_string(),
+                args: vec![ch, msg],
+                is_extern: false,
+            },
+        ]);
+    }
 
     let frame = ctx.new_vreg();
     let write_fd = ctx.new_vreg();
@@ -1902,7 +1913,7 @@ fn expand_channel_recv_proto(ctx: &mut LowerContext, args: &[IRValue], dst: Opti
     // [K13A] read_fd = Load I32 [handle+0]
     do_recv_blk.instructions.push(IRInstr::Load { dst: read_fd.clone(), addr: ch, offset: 0, ty: IRType::I32 });
     do_recv_blk.instructions.push(IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) });
-    do_recv_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) });
+    do_recv_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::SLe, dst: is_closed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I32) });
     do_recv_blk.instructions.push(IRInstr::Load { dst: magic.clone(), addr: frame.clone(), offset: 0, ty: IRType::I32 });
     do_recv_blk.instructions.push(IRInstr::Cmp { kind: CmpKind::Eq, dst: magic_ok.clone(), lhs: magic, rhs: IRValue::Immediate(0x414D5556), ty: Some(IRType::I32) });
     do_recv_blk.instructions.push(IRInstr::Load { dst: stored_crc.clone(), addr: frame.clone(), offset: 52, ty: IRType::I32 });
@@ -1985,6 +1996,28 @@ fn o_nonblock_flag(backend: BackendKind) -> i64 {
         //   PowerPC64, PowerPC64LE, X86_32, S390X, ArmEb, AArch64Be,
         //   M68k, Wasm32.
         _ => 0x800,
+    }
+}
+
+/// Per-arch `EAGAIN` errno value for `read(2)` on a non-blocking pipe.
+///
+/// Almost every Linux arch uses the asm-generic value 11. The sole exception
+/// is **alpha**, which inherited OSF/1's legacy errno numbering where
+/// `EAGAIN = 35` (and `EWOULDBLOCK = 35`, same value). Hard-coding ±11 in
+/// the channel-recv poll loop causes alpha to mis-classify `-EAGAIN` as a
+/// fatal error → loop exits after one retry → recv returns -1 → ping_pong /
+/// session_types fail with exit 255.
+///
+/// Values verified against `/usr/lib/linux/uapi/<arch>/asm/errno.h`:
+///
+/// | arch                          | EAGAIN |
+/// |-------------------------------|--------|
+/// | alpha                         | 35     |
+/// | all others (asm-generic)      | 11     |
+fn eagain_errno(backend: BackendKind) -> i64 {
+    match backend {
+        BackendKind::Alpha => 35,
+        _ => 11,
     }
 }
 
@@ -2354,9 +2387,9 @@ fn expand_channel_recv_timeout(args: &[IRValue], dst: Option<&IRValue>, ctx: &mu
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-        IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-        IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I64) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I32) },
+        IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I32) },
+        IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I32) },
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(-3), false_val: payload, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
     ]);
