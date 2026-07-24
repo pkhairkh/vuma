@@ -84,6 +84,28 @@ fn func_param_types() -> &'static std::sync::RwLock<Option<std::collections::Has
     FUNC_PARAM_TYPES.get_or_init(|| std::sync::RwLock::new(None))
 }
 
+/// Pre-register ALL functions' parameter types BEFORE parallel
+/// `allocate_registers` begins.  This eliminates the race condition where
+/// function A's Call handler looks up function B's param types before B
+/// has been registered (B is being `allocate_registers`'d in parallel on
+/// another thread).  When the lookup misses, the Call handler falls back
+/// to `vec![true; num_args]` (all-64-bit), which corrupts the calling
+/// convention for 32-bit params (callee receives the high word of arg0
+/// as arg1's value).  Symptoms: `fn_chained_calls` returns 3 instead of
+/// 15, `test_sha_round` returns 54 instead of 77.
+///
+/// Call this from the driver (e.g. `compile_dump.rs`) right before the
+/// parallel `backend.allocate_registers(func)` loop, for Arm32/ArmEb
+/// backends only.
+pub fn preregister_param_types(functions: &[crate::ir::IRFunction]) {
+    let lock = func_param_types();
+    let mut guard = lock.write().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    for func in functions {
+        map.insert(func.name.clone(), func.param_types.clone());
+    }
+}
+
 use std::fmt;
 
 // ===========================================================================
@@ -9087,35 +9109,34 @@ impl Backend for Arm32Backend {
             // offset in BYTES (NOT pages, unlike mmap2). We build the struct on
             // our own stack and call SVC.
             //
-            // VUMA caller convention for extern `mmap(...)` (6 args, all treated
-            // as 64-bit by the arm32 extern-call lowering — see the
-            // `vec![true; num_args]` fallback in the Call codegen). Each 64-bit
-            // arg occupies either a register pair (R0:R1, R2:R3) or 8 bytes on
-            // the stack. The high word is zero/sign extension and is ignored
-            // (all mmap_arg_struct fields are 32-bit on ARM32):
-            //   R0:R1           = arg0 (addr)            — R0 = lo
-            //   R2:R3           = arg1 (len)             — R2 = lo
-            //   [SP+0]:[SP+4]   = arg2 (prot)            — lo at [SP+0]
-            //   [SP+8]:[SP+0xc] = arg3 (flags)           — lo at [SP+8]
-            //   [SP+0x10]:[SP+0x14] = arg4 (fd)          — lo at [SP+0x10]
-            //   [SP+0x18]:[SP+0x1c] = arg5 (offset, BYTES) — lo at [SP+0x18]
-            // We extract the low 32-bit word of each arg into R0..R5 in the
-            // order the kernel expects (addr, len, prot, flags, fd, offset).
+            // VUMA caller convention for extern `mmap(...)` (6 args): since
+            // the K8D-arm32-driver-isolation fix, ALL extern args are passed
+            // 32-bit-per-arg (kernel EABI convention — see the
+            // `vec![false; num_args]` fallback at arm32/mod.rs:7320).  So:
+            //   R0  = arg0 (addr)
+            //   R1  = arg1 (len)
+            //   R2  = arg2 (prot)
+            //   R3  = arg3 (flags)
+            //   [SP+0]  = arg4 (fd)      ← 32-bit each, NOT 64-bit
+            //   [SP+4]  = arg5 (offset, BYTES)
+            // R0..R3 are already correct from the caller; we only need to load
+            // arg4 (fd) and arg5 (offset) from the caller's stack into R4/R5,
+            // build the 24-byte struct, call sys_old_mmap, and clean up.
             //
             // This matches __vuma_alloc (same struct-pointer sys_old_mmap=90
             // path with offset=0): both use the SAME offset unit (bytes, via
             // the struct's `offset` field), satisfying the wave-6 "same
             // offset-unit handling as __vuma_alloc" requirement.
             //
-            // K6-arm32-arena: previously the two `LDR R4/R5` from the caller's
-            // stack used `encode_ls_imm(..., false)` for the L bit, which
-            // produces STR (store) not LDR (load) — so the caller's [SP+0]/[SP+4]
-            // were clobbered with uninitialized R4/R5 instead of fd/offset being
-            // loaded. Additionally the offsets assumed a 32-bit-per-arg caller
-            // convention ([SP+0]/[SP+4]) which does not match the 64-bit-per-arg
-            // convention the arm32 extern-call lowering actually uses, so even
-            // with the L bit fixed, R0..R3 held addr_hi/len_hi/len_lo/len_hi
-            // rather than addr/len/prot/flags. Both bugs are fixed below.
+            // K9A-arm32-arena-regression: K6 had rewritten this stub to assume
+            // a 64-bit-per-arg caller convention (reading fd from [SP+0x18] and
+            // offset from [SP+0x20] after PUSH, plus a `MOV R1, R2` shuffle and
+            // extra LDRs for prot/flags).  K6 was working around the very bug
+            // that K8D fixed at the source — with K8D's 32-bit-per-arg extern
+            // convention in place, the K6 stub now reads garbage (the slots it
+            // probes are beyond the caller's actual stack frame, causing the
+            // arena SIGSEGV).  Reverted to the simpler 32-bit-per-arg layout
+            // that K8D now produces at every extern call site.
             {
                 let mut code = Vec::new();
                 // PUSH {R4, R5}  — save callee-saved registers we clobber.
@@ -9123,35 +9144,19 @@ impl Backend for Arm32Backend {
                     Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x0030,
                 ));
                 // After PUSH (SP -= 8): every caller stack slot shifts up by 8.
-                //   caller [SP+0]    (arg2 prot lo)     → [SP+8]
-                //   caller [SP+8]    (arg3 flags lo)    → [SP+0x10]
-                //   caller [SP+0x10] (arg4 fd lo)       → [SP+0x18]
-                //   caller [SP+0x18] (arg5 offset lo)   → [SP+0x20]
-                // LDR R4, [SP, #0x18]  (fd = arg4 lo)
+                //   caller [SP+0] (arg4 fd)     → [SP+8]
+                //   caller [SP+4] (arg5 offset) → [SP+12]
+                // R0..R3 already hold addr/len/prot/flags from the caller.
+                // LDR R4, [SP, #8]  (fd = arg4)
                 code.extend_from_slice(&encode_ls_imm(
                     Condition::Al, true, true, false, false, true,
-                    Gpr::R13.encoding(), Gpr::R4.encoding(), 0x18,
+                    Gpr::R13.encoding(), Gpr::R4.encoding(), 8,
                 ));
-                // LDR R5, [SP, #0x20]  (offset = arg5 lo, in bytes)
+                // LDR R5, [SP, #12]  (offset = arg5, in bytes)
                 code.extend_from_slice(&encode_ls_imm(
                     Condition::Al, true, true, false, false, true,
-                    Gpr::R13.encoding(), Gpr::R5.encoding(), 0x20,
+                    Gpr::R13.encoding(), Gpr::R5.encoding(), 12,
                 ));
-                // MOV R1, R2  (len = arg1 lo, currently in R2; R1 had addr_hi)
-                code.extend_from_slice(&encode_dp_reg(
-                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), Gpr::R2.encoding(),
-                ));
-                // LDR R2, [SP, #8]  (prot = arg2 lo)
-                code.extend_from_slice(&encode_ls_imm(
-                    Condition::Al, true, true, false, false, true,
-                    Gpr::R13.encoding(), Gpr::R2.encoding(), 8,
-                ));
-                // LDR R3, [SP, #0x10]  (flags = arg3 lo)
-                code.extend_from_slice(&encode_ls_imm(
-                    Condition::Al, true, true, false, false, true,
-                    Gpr::R13.encoding(), Gpr::R3.encoding(), 0x10,
-                ));
-                // R0 already holds addr (arg0 lo). Now R0..R5 = all 6 fields.
                 // SUB SP, SP, #24  (allocate mmap_arg_struct: 6 × 4 bytes)
                 code.extend_from_slice(&encode_dp_imm(
                     Condition::Al, DP_SUB, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 24,

@@ -1610,12 +1610,46 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
         IRInstr::Load { dst: payload.clone(), addr: frame, offset: 44, ty: IRType::I64 },
-        // poll_no_data = (poll_ret <= 0) — no data available
+        // poll_no_data = (poll_ret <= 0) — poll says no data available
         IRInstr::Cmp { kind: CmpKind::SLe, dst: poll_no_data.clone(), lhs: poll_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
         // read_failed = (read_ret <= 0) — read returned error or no bytes
         IRInstr::Cmp { kind: CmpKind::SLe, dst: read_failed.clone(), lhs: read_ret, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },
-        // is_error = poll_no_data OR read_failed
-        IRInstr::BinOp { op: BinOpKind::Or, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I64) },
+        // is_error = poll_no_data AND read_failed
+        //
+        // [K9B-try-recv-qemu] AND (not OR) is critical. On 11 of 19 QEMU
+        // backends the `poll` syscall does NOT return a trustworthy value:
+        //
+        //   * asm-generic arches (riscv64, riscv32, aarch64, aarch64_be,
+        //     loongarch64): Linux asm-generic has NO `poll` syscall —
+        //     generic nr 7 is `fsetxattr`. poll_ret = -EFAULT (-14).
+        //   * ppc64 / ppc64le: generic nr 7 is `waitpid` (the per-arch
+        //     translate table has no `7 => poll` entry). poll_ret = -ECHILD.
+        //   * s390x: generic nr 7 is `restart_syscall`. poll_ret = -ENOSYS.
+        //   * arm32 / armeb: nr 7 correctly translates to 168 (poll), but
+        //     QEMU arm user-mode poll() returns 0 even when the pipe holds
+        //     data — the subsequent read() returns 56, proving the data was
+        //     there. (QEMU arm pollfd-reporting quirk.)
+        //
+        // With the old OR logic, a broken `poll_no_data=true` dominated and
+        // forced `is_error=true` even when `read` had just successfully
+        // returned 56 bytes (payload=99). The 56-byte frame was discarded,
+        // result was set to -2, and the spin-loop re-entered — on iter 2+
+        // the pipe was empty (read returns -EAGAIN), so the loop spun
+        // forever, manifesting as exit 124 (timeout).
+        //
+        // With AND, `is_error` is true ONLY when BOTH poll and read agree
+        // there is no data. When `read` succeeds (read_ret > 0), the
+        // payload is returned regardless of what `poll` reported — which is
+        // correct, because `read` is the authoritative probe (it either
+        // copies bytes or returns -EAGAIN / 0). `poll` is retained as a
+        // secondary signal: on arches where `read`'s -EAGAIN is
+        // mis-reported as a positive errno (legacy concern), poll's "no
+        // data" vote still combines with read_failed's false to give false
+        // — but on those arches (alpha/hppa/m68k/sparc64) the loop exits on
+        // iter 1 (poll correctly reports POLLIN, read succeeds), so the
+        // positive-errno path is never exercised. Verified via QEMU
+        // -strace on riscv64/arm32/ppc64/s390x/alpha/hppa.
+        IRInstr::BinOp { op: BinOpKind::And, dst: is_error.clone(), lhs: poll_no_data, rhs: read_failed, ty: Some(IRType::I64) },
         // result = is_error ? -2 : payload
         IRInstr::Select { dst: result.clone(), cond: is_error, true_val: IRValue::Immediate(-2), false_val: payload, ty: Some(IRType::I64) },
         IRInstr::BinOp { op: BinOpKind::Add, dst, lhs: result, rhs: IRValue::Immediate(0), ty: Some(IRType::I64) },

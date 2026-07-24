@@ -6083,6 +6083,14 @@ pub fn compile_modules(
     // (mirrors main.rs::compile_to_binary_direct — needed by arm32 and
     // other 32-bit backends for call-return lowering; included here for
     // parity with the production path).
+    //
+    // F64 is included because the wasm32 backend stores 8-byte returns
+    // (whether i64 or f64) via i64.store at mem[0]; the caller loads via
+    // i64.load and bitcasts to F64 when consumed as a float.  Without F64
+    // here, f64-returning functions would have their return value
+    // truncated to the low 32 bits via i32.store/i32.load (e.g. newton_sqrt
+    // returns f64 31.0 = 0x403F000000000000; i32.store would only save the
+    // low 32 bits = 0, then floattoint would yield 0 instead of 31).
     {
         let func_64bit: HashSet<String> = ir_program
             .functions
@@ -6090,7 +6098,7 @@ pub fn compile_modules(
             .filter(|f| {
                 f.result_types
                     .iter()
-                    .any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64))
+                    .any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64 | vuma_codegen::ir::IRType::F64))
             })
             .map(|f| f.name.clone())
             .collect();

@@ -762,6 +762,10 @@ fn translate_powerpc64(generic_nr: u32) -> Option<u32> {
         70 => Some(321),  // pwritev
         72 => Some(333),  // socketpair
         73 => Some(281),  // ppoll
+        // [K9B-try-recv-qemu] poll — ppc64 __NR_poll = 167. Without this,
+        // generic nr 7 stays as 7 which is waitpid on ppc64, returning
+        // -ECHILD and breaking try_recv's poll-based probe.
+        7 => Some(167),   // poll
         78 => Some(296),  // readlinkat
         79 => Some(291),  // newfstatat
         80 => Some(108),  // fstat
@@ -900,6 +904,10 @@ fn translate_s390x(generic_nr: u32) -> Option<u32> {
         70 => Some(329),  // pwritev
         72 => Some(360),  // socketpair
         73 => Some(302),  // ppoll
+        // [K9B-try-recv-qemu] poll — s390x __NR_poll = 8. Without this,
+        // generic nr 7 stays as 7 which is restart_syscall on s390x,
+        // returning -ENOSYS and breaking try_recv's poll-based probe.
+        7 => Some(8),     // poll
         78 => Some(298),  // readlinkat
         79 => Some(293),  // newfstatat
         80 => Some(108),  // fstat
