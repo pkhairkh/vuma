@@ -1116,15 +1116,30 @@ fn emit_instr(
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
-        IRInstr::Mul { dst, lhs, rhs, ty: _ } => {
-            let dst_id = dst.as_register().unwrap_or(0);
-            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-            code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
-            code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // MULU.W S1, S0: S0[31:0] = S0[15:0] * S1[15:0] (low 16 bits each).
-            // For values that fit in 16 bits, this gives the correct 32-bit result.
-            code.extend(Instruction::Mulu { src: S1, dst: S0 }.encode());
-            code.extend(ss_st(S0, dst_off));
+        IRInstr::Mul { dst, lhs, rhs, ty } => {
+            // [K9E-m68k-i64mul] The previous handler unconditionally used
+            // MULU.W (16×16→32), which is only correct for i32 operands
+            // where both operands fit in 16 bits. For i64/u64 multiplies
+            // (e.g. monte_carlo_pi's LCG `state * 1103515245`), this silently
+            // truncated the result to the low 16×16 partial product,
+            // producing wrong values inside loops where state is a runtime
+            // value. Fix: dispatch to `emit_binop` for I64/U64 (which has
+            // the full 64×64→64 schoolbook multiply) and to `emit_fp_binop`
+            // for F32/F64. Keep the fast MULU.W path for 32-bit integer muls.
+            if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
+                emit_binop(&BinOpKind::Mul, ty, dst, lhs, rhs, vreg_stack_slots, code);
+            } else if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) {
+                emit_fp_binop(&BinOpKind::Mul, ty.clone(), dst, lhs, rhs, vreg_stack_slots, code, relocations);
+            } else {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                // MULU.W S1, S0: S0[31:0] = S0[15:0] * S1[15:0] (low 16 bits each).
+                // For values that fit in 16 bits, this gives the correct 32-bit result.
+                code.extend(Instruction::Mulu { src: S1, dst: S0 }.encode());
+                code.extend(ss_st(S0, dst_off));
+            }
         }
         IRInstr::Div { dst, lhs, rhs, ty: _ } => {
             let dst_id = dst.as_register().unwrap_or(0);
@@ -4305,9 +4320,16 @@ impl Backend for M68kBackend {
             code.extend_from_slice(&[0x02, 0x82, 0x00, 0x00, 0xFF, 0xFF]);
 
             // ── After divmod10: D6=quotient, D7=remainder ──
-            // ADDI.B #48, D7 (remainder + '0')
-            // ADDI.B #imm8, Dn: 0x0600 | dn, then 2-byte imm. For D7: 0x0607
-            code.extend_from_slice(&[0x06, 0x07, 0x00, 0x30]);
+            // Add ASCII '0' (48) to remainder.
+            // [K9E-m68k-print] Replaced ADDI.B #48, D7 (encoding 0x0607 0x0030)
+            // with MOVEQ #48, D0 + ADD.L D0, D7 — same 4-byte size, but avoids
+            // the ADDI.B form which QEMU-m68k's translator rejects with SIGILL
+            // ("Disassembler disagrees with translator over instruction
+            // decoding"). D0 held the divisor (10) for the just-completed
+            // DIVU; it is reset to 10 at the top of the next loop iteration,
+            // so clobbering it here is safe.
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 48 }.encode()); // D0 = 48
+            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 += 48
             // SUBQ.L #1, A0 (A0--)
             // SUBQ.L #1, An: 0101_001_1_11_001_000 = 0x53C8 for A0
             code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
@@ -4417,15 +4439,19 @@ impl Backend for M68kBackend {
             // ANDI.L #0xF, D7 (extract low nibble)
             // ANDI.L #imm32, Dn: 0x0280 | dn. For D7: 0x0287
             code.extend_from_slice(&[0x02, 0x87, 0x00, 0x00, 0x00, 0x0F]);
-            // ADDI.B #48, D7 (nibble + '0')
-            code.extend_from_slice(&[0x06, 0x07, 0x00, 0x30]);
-            // CMPI.B #57, D7 (compare with '9')
-            // CMPI.B #imm8, Dn: 0x0C00 | dn, then 2-byte imm. For D7: 0x0C07
-            code.extend_from_slice(&[0x0C, 0x07, 0x00, 0x39]);
-            // BLE.S store (cond=15=LE, skip ADDI.B = 4 bytes)
+            // Add ASCII '0' (48) to nibble.
+            // [K9E-m68k-print] Replaced ADDI.B with MOVEQ+ADD.L (see print_int
+            // above). D0 is unused in the hex_loop body (only D4/D5/D7/A0).
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 48 }.encode()); // D0 = 48
+            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 += 48
+            // Compare D7 with '9' (57). [K9E] Replaced CMPI.B with MOVEQ+CMP.L.
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 57 }.encode()); // D0 = 57
+            code.extend(Instruction::Cmp { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 - D0
+            // BLE.S store (cond=15=LE, skip alpha-adjust = 4 bytes)
             code.extend_from_slice(&[0x6F, 0x04]);
-            // ADDI.B #39, D7 (alpha adjust: 'a'-'9' = 39)
-            code.extend_from_slice(&[0x06, 0x07, 0x00, 0x27]);
+            // Alpha adjust: D7 += 39 ('a'-'9' = 39). [K9E] MOVEQ+ADD.L.
+            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 39 }.encode()); // D0 = 39
+            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 += 39
             // store: SUBQ.L #1, A0
             code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
             // MOVE.B D7, (A0)
