@@ -1,20 +1,25 @@
 {
-  "timestamp": "2026-07-24 18:03:30 UTC",
+  "timestamp": "2026-07-24 18:56:32 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 29659,
-  "matches": 29609,
+  "matches": 29629,
   "skipped": 0,
-  "pass_rate": "99.83%",
+  "pass_rate": "99.90%",
   "per_backend": {
+    "aarch64": {
+      "total": 1561,
+      "match": 1561,
+      "skipped": 0
+    },
     "riscv64": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
     },
-    "arm32": {
+    "x86_64": {
       "total": 1561,
-      "match": 1559,
+      "match": 1561,
       "skipped": 0
     },
     "aarch64_be": {
@@ -27,34 +32,34 @@
       "match": 1561,
       "skipped": 0
     },
-    "mips64be": {
-      "total": 1561,
-      "match": 1560,
-      "skipped": 0
-    },
-    "x86_64": {
-      "total": 1561,
-      "match": 1561,
-      "skipped": 0
-    },
-    "aarch64": {
+    "arm32": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
     },
     "armeb": {
       "total": 1561,
-      "match": 1560,
+      "match": 1561,
+      "skipped": 0
+    },
+    "mips64be": {
+      "total": 1561,
+      "match": 1561,
       "skipped": 0
     },
     "ppc64": {
       "total": 1561,
-      "match": 1560,
+      "match": 1561,
       "skipped": 0
     },
     "ppc64le": {
       "total": 1561,
-      "match": 1560,
+      "match": 1561,
+      "skipped": 0
+    },
+    "riscv32": {
+      "total": 1561,
+      "match": 1561,
       "skipped": 0
     },
     "loongarch64": {
@@ -62,14 +67,14 @@
       "match": 1561,
       "skipped": 0
     },
-    "riscv32": {
+    "x86_32": {
       "total": 1561,
       "match": 1559,
       "skipped": 0
     },
     "s390x": {
       "total": 1561,
-      "match": 1560,
+      "match": 1561,
       "skipped": 0
     },
     "alpha": {
@@ -77,17 +82,12 @@
       "match": 1561,
       "skipped": 0
     },
-    "m68k": {
+    "sparc64": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
     },
-    "x86_32": {
-      "total": 1561,
-      "match": 1558,
-      "skipped": 0
-    },
-    "sparc64": {
+    "m68k": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
@@ -99,13 +99,13 @@
     },
     "wasm32": {
       "total": 1561,
-      "match": 1524,
+      "match": 1534,
       "skipped": 0
     }
   },
   "ive_verification": {
-    "total": 29656,
-    "pass": 29656,
+    "total": 29659,
+    "pass": 29659,
     "fail": 0,
     "pass_rate": "100.00%"
   }
