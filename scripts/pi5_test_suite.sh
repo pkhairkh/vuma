@@ -628,7 +628,7 @@ def run_one(args):
             # is narrow and usually succeeds on a second attempt.
             max_retries = 3 if test_name == "self_exec.vuma" else 1
             for attempt in range(max_retries):
-                ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3)
+                ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3, stdin=subprocess.DEVNULL)
                 rc = ep.returncode
                 if backend == "wasm32":
                     # Custom runner returns _vuma_main's value as the exit code.
