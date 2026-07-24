@@ -1298,7 +1298,33 @@ fn patch_call_site(
         return;
     }
 
-    // Case 4: Beyond 4-LDO range — need a trampoline
+    // Case 4: Beyond 4-LDO range — use BL directly (±256KB range).
+    //
+    // [K15A-hppa-large-payload] For binaries > ~32KB, call sites near the
+    // beginning can't reach trampolines at the end via 4 LDOs (max 32764).
+    // The previous fallback wrote LDO 0(R1),R1 (a no-op), leaving R1 = pc+8
+    // and causing BV R0(R1) to branch to pc+8 = infinite loop / timeout.
+    //
+    // Fix: patch +12 to BL,n target, R1. The +0 BL .+8, R1 (load PC into R1)
+    // and +8 LDO 24(R1), R2 (set return address = pc+32) still execute first.
+    // The +12 BL branches to the target with nullified delay slot (+16).
+    // The callee returns to R2 = pc+32 (set by +8 LDO), executing the
+    // post-call code at +32. +16..+28 are dead code (NOP).
+    //
+    // BL has ±262144 byte (±256KB) range — sufficient for any practical
+    // binary. For binaries > 256KB (extremely rare), fall back to trampoline.
+    let bl_disp = (disp - 12) as i32;
+    if bl_disp.abs() <= 262140 && bl_disp % 4 == 0 {
+        let bl = encode_bl(bl_disp);
+        all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&bl);
+        for off in [16, 20, 24, 28].iter() {
+            let o = abs_offset + off;
+            all_code[o..o + 4].copy_from_slice(&nop);
+        }
+        return;
+    }
+
+    // Fallback: trampoline for binaries > 256KB (extremely rare).
     trampolines.push((abs_offset, target_offset));
 }
 
@@ -6110,10 +6136,25 @@ impl Backend for HppaBackend {
                 let bv_n = 0xE820C002u32 | ((R1 as u32) << 21);
                 all_code[*call_offset + 28..*call_offset + 32].copy_from_slice(&bv_n.to_be_bytes());
             } else {
-                // Even 4 LDOs can't reach. This is extremely unlikely for
-                // practical binaries. Fall back to LDO=0 (no-op).
-                let ldo = encode_ldo_raw(R1, 0, R1);
-                all_code[*call_offset + 12..*call_offset + 16].copy_from_slice(&ldo);
+                // 4 LDOs can't reach the trampoline. Use BL directly to
+                // branch to the trampoline (±256KB range).
+                // [K15A-hppa-large-payload] The previous fallback wrote
+                // LDO 0(R1),R1 (no-op), causing an infinite loop.
+                let bl_disp = (tramp_disp - 12) as i32;
+                if bl_disp.abs() <= 262140 && bl_disp % 4 == 0 {
+                    let bl = encode_bl(bl_disp);
+                    let nop = encode_nop();
+                    all_code[*call_offset + 12..*call_offset + 16].copy_from_slice(&bl);
+                    for off in [16, 20, 24, 28].iter() {
+                        let o = *call_offset + off;
+                        all_code[o..o + 4].copy_from_slice(&nop);
+                    }
+                } else {
+                    // Beyond BL range too — leave as LDO 0 (will crash,
+                    // but this requires a binary > 512KB which is unheard of).
+                    let ldo = encode_ldo_raw(R1, 0, R1);
+                    all_code[*call_offset + 12..*call_offset + 16].copy_from_slice(&ldo);
+                }
             }
         }
 
