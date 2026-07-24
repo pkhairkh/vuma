@@ -6377,7 +6377,36 @@ impl Backend for RiscV32Backend {
                         let mut reg_idx = 0usize;
                         for (arg_i, arg) in args.iter().enumerate() {
                             if reg_idx >= 8 { break; }
-                            let is_8byte = if let Some(ref types) = callee_param_types {
+                            // K8B-riscv32-arena: For extern/syscall calls, the
+                            // Linux RV32 kernel ABI uses 32-bit args (each arg
+                            // takes ONE register: a0, a1, a2, …). The previous
+                            // logic inferred `is_8byte` from the IRValue's type
+                            // (Register U64/I64/F64 → 8-byte → 2 regs), which
+                            // misaligned subsequent args when a syscall took a
+                            // mix of Register-U64 and Immediate args. Symptom:
+                            // `arena_grow` calls `mremap(arena_ptr, cap_val,
+                            // min_cap, 1)`; cap_val is a Register U64 (loaded
+                            // from memory), so the codegen put arena_ptr in
+                            // a0:a1, cap_val in a2:a3, min_cap in a4, flags
+                            // in a5 — but the kernel read a0=old_addr,
+                            // a1=old_size, a2=new_size, a3=flags, a4=new_addr.
+                            // mremap saw new_size=0 (cap_val high), flags=65536
+                            // (min_cap low) → returned -ENOMEM; the test then
+                            // used -ENOMEM as the new arena base and SIGSEGV'd
+                            // on the next store. Fix: for is_extern calls,
+                            // always pass args as 32-bit (1 register each,
+                            // loading only the low word via ss_load_value).
+                            // The 64-bit Immediate case (value doesn't fit in
+                            // i32) still uses 2 regs, but no current VUMA
+                            // syscall arg triggers that path.
+                            let is_8byte = if *is_extern {
+                                if let IRValue::Immediate(v) = arg {
+                                    let val_sign_ext_32 = (*v as i32) as i64;
+                                    *v != val_sign_ext_32
+                                } else {
+                                    false
+                                }
+                            } else if let Some(ref types) = callee_param_types {
                                 types.get(arg_i)
                                     .map(|t| matches!(t, IRType::F64 | IRType::I64 | IRType::U64))
                                     .unwrap_or(false)
