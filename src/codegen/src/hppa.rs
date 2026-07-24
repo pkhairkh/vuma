@@ -446,24 +446,32 @@ fn encode_copy(src: Reg, dst: Reg) -> [u8; 4] {
 ///   bits 4-0:   t (target)
 /// Shift amount: sa = 31 - cl - pos
 fn encode_shrpw(r1: Reg, r2: Reg, sa: u8, t: Reg) -> [u8; 4] {
-    // QEMU PA-RISC SHRPW encoding (empirically determined):
+    // PA-RISC 1.1 SHRPW fixed-shift form (per PA-RISC 1.1 ARM §5.3):
     //   bits 31-26: 110100 (opcode 0x34)
     //   bits 25-21: r2 (source, low 32 bits of pair)
     //   bits 20-16: r1 (source, high 32 bits — use R0 for zero)
-    //   bits 15-11: cl = 1 (MUST be 1 for unconditional SHRPW)
-    //   bit  10:    0 (fixed shift)
-    //   bits 9-6:   pos (shift amount encoded as (31 - sa) / 2)
+    //   bit  15:    0
+    //   bit  14:    0 (fixed-shift form)
+    //   bits 13-12: 0
+    //   bit  11:    1 (cl = 1, fixed shift)
+    //   bit  10:    0
+    //   bits 9-5:   sa_complement (5-bit field; actual shift = 31 - sa_complement)
     //   bits 4-0:   t (target)
-    // Formula: sa = 31 - 2 * pos, so pos = (31 - sa) / 2.
-    // Only works for ODD sa values (sa = 31, 29, 27, ..., 3, 1).
-    // For even sa values, use two shifts: sa-1 then shift by 1.
-    let pos = (31u8 - sa) / 2;
+    //
+    // [K8C-hppa-f64] Fix: previously encoded only bits 9-6 (4-bit pos) with
+    // bit 5 forced to 0, restricting shifts to ODD amounts (sa = 31 - 2*pos).
+    // The mul-stub extraction needed sa=20 (even) and worked around it with
+    // `shrpw sa=19` + `shrpw R0,.,1,.`, but that workaround zeroed the
+    // high bit of the result (the carry from r1), corrupting the high word
+    // of the product. Now we encode the full 5-bit complement so any sa
+    // in [0, 31] is supported directly.
+    let sa_field = (31u32.wrapping_sub(sa as u32)) & 0x1F;
     let cl: u32 = 1;
     let word = 0xD0000000u32
         | ((r2 as u32 & 0x1F) << 21)
         | ((r1 as u32 & 0x1F) << 16)
         | (cl << 11)
-        | ((pos as u32 & 0xF) << 6)
+        | (sa_field << 5)
         | (t as u32 & 0x1F);
     word.to_be_bytes()
 }
@@ -2535,15 +2543,24 @@ fn build_f64_mul_stub() -> Vec<u8> {
     // --- Pre-shift M_b left by 11 so MSB (bit 52) lands at bit 31 of R23 ---
     // R18 = R24 >> 21 (carry from low to high)
     code.extend_from_slice(&encode_shrpw(R0, R24, 21, R18));
+    // [K8C-hppa-f64] Fix: PA-RISC 1.1 SHLADD only supports sa in {1,2,3}.
+    // The original code used `shladd 4` which encode_shladd silently masks
+    // to sa=0 (i.e., plain ADD, no shift), so M_b was shifted left by only
+    // 3 instead of 11 — corrupting every f64 multiply. Replace each
+    // `shladd 4, R, R0, R` with `shladd 2 + shladd 2` (2+2=4).
     // R23 = R23 << 4
-    code.extend_from_slice(&encode_shladd(4, R23, R0, R23));
+    code.extend_from_slice(&encode_shladd(2, R23, R0, R23));
+    code.extend_from_slice(&encode_shladd(2, R23, R0, R23));
     // R23 = R23 << 4 (= orig << 8)
-    code.extend_from_slice(&encode_shladd(4, R23, R0, R23));
+    code.extend_from_slice(&encode_shladd(2, R23, R0, R23));
+    code.extend_from_slice(&encode_shladd(2, R23, R0, R23));
     // R23 = (R23 << 3) + carry (= orig << 11 | carry)
     code.extend_from_slice(&encode_shladd(3, R23, R18, R23));
     // R24 = R24 << 11 (4+4+3)
-    code.extend_from_slice(&encode_shladd(4, R24, R0, R24));
-    code.extend_from_slice(&encode_shladd(4, R24, R0, R24));
+    code.extend_from_slice(&encode_shladd(2, R24, R0, R24));
+    code.extend_from_slice(&encode_shladd(2, R24, R0, R24));
+    code.extend_from_slice(&encode_shladd(2, R24, R0, R24));
+    code.extend_from_slice(&encode_shladd(2, R24, R0, R24));
     code.extend_from_slice(&encode_shladd(3, R24, R0, R24));
 
     // --- Init 128-bit acc (R25:R26:R28:R29) = 0, counter R19 = 53 ---
@@ -2634,12 +2651,14 @@ fn build_f64_mul_stub() -> Vec<u8> {
     }
 
     // --- Extract result = P >> 52 (54 bits) into R26:R28 ---
-    // R28 = (R26:R28) >> 20  [sa=20 = 19 + 1]
-    code.extend_from_slice(&encode_shrpw(R26, R28, 19, R28));
-    code.extend_from_slice(&encode_shrpw(R0, R28, 1, R28));
-    // R26 = (R25:R26) >> 20
-    code.extend_from_slice(&encode_shrpw(R25, R26, 19, R26));
-    code.extend_from_slice(&encode_shrpw(R0, R26, 1, R26));
+    // R28 = (R26:R28) >> 20  — extracts bits [83:52] of acc into R28
+    // [K8C-hppa-f64] Fix: previously used sa=19 + shrpw R0,.,1,. as a
+    // workaround for even sa. The second shrpw zeroed bit 31 (the carry
+    // from r1=R26 = bit 83 of acc), losing the MSB of the low mantissa.
+    // Now that encode_shrpw supports even sa directly, use sa=20.
+    code.extend_from_slice(&encode_shrpw(R26, R28, 20, R28));
+    // R26 = (R25:R26) >> 20  — extracts bits [105:84] of acc into R26[21:0]
+    code.extend_from_slice(&encode_shrpw(R25, R26, 20, R26));
     // Now R26:R28 = P[105:52] (54 bits). R26 = high 22 bits, R28 = low 32 bits.
 
     // Check carry: R20 = R26 >> 21 = P[105].
@@ -2907,10 +2926,15 @@ fn build_f64_div_stub() -> Vec<u8> {
     // --- Normalize Q ---
     // Q is in R25:R26 (53 bits). bit 52 = bit 20 of R25 (implicit bit).
     // If bit 20 of R25 is 0 (Q < 2^52, mant_a < mant_b): shift Q left by 1, exp--.
+    // [K8C-hppa-f64] Fix: the cmpb must SKIP normalization when the bit IS set
+    // (i.e. branch when R20 != 0). The previous code used `inverted: false`
+    // (cmpb,=) which branches when R20 == 0 — the opposite of the intended
+    // "if bit set, skip" — causing div(x, x) to erroneously shift Q left,
+    // producing 0.5 instead of 1.0 (exp off by one, mantissa zeroed).
     code.extend(ss_load_imm(R20, 0x100000));  // 1 << 20
     code.extend_from_slice(&encode_and(R25, R20, R20));  // R20 = R25 & 0x100000
     let q_normalized = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if bit set, skip
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, true, false, 0));  // cmpb,<>: if R20 != 0 (bit set), skip
     code.extend_from_slice(&encode_nop());
     // Q <<= 1 (64-bit shift).
     code.extend_from_slice(&encode_shrpw(R25, R26, 31, R25));

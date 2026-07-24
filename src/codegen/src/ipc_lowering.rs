@@ -1548,7 +1548,37 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         IRInstr::BinOp { op: BinOpKind::And, dst: read_fd.clone(), lhs: ch, rhs: IRValue::Immediate(0xFFFFFFFF), ty: Some(IRType::I64) },
     ];
     instrs.extend(emit_set_nonblocking(read_fd.clone(), fcntl_ret, o_nonblock_flag(ctx.backend)));
-    // Probe the pipe with a zero-timeout poll BEFORE issuing the read.
+    // nanosleep(10ms) BEFORE the poll — this gives the child process
+    // guaranteed CPU time to write BEFORE we probe the pipe. This is
+    // critical for two reasons:
+    //
+    //   (1) On QEMU single-CPU schedulers, the parent monopolizes the CPU
+    //       after clone() and the child never runs until the parent yields.
+    //       nanosleep is the yield. Without it, poll() always sees an empty
+    //       pipe on iteration 1.
+    //
+    //   (2) The read() on an empty pipe with an open write end BLOCKS, even
+    //       with O_NONBLOCK set, on QEMU backends where fcntl(F_SETFL)
+    //       doesn't take effect (alpha/mips64/sparc64/hppa). By sleeping
+    //       first, we guarantee the child has already written (and the
+    //       pipe holds 56 bytes) by the time we call read(), so read()
+    //       returns immediately with the data regardless of O_NONBLOCK.
+    //
+    // Order MUST be: nanosleep → poll → read. If poll runs BEFORE
+    // nanosleep, poll returns 0 (empty pipe) on iteration 1, then nanosleep
+    // lets the child write, then read succeeds with payload=99 — but the
+    // poll_no_data flag from the stale poll causes is_error=true and the
+    // payload is discarded (result=-2). On iteration 2+ the write end is
+    // closed, poll returns 1 (POLLHUP) but read returns 0 (EOF), and the
+    // loop spins forever returning -2 — manifesting as exit 124 (timeout)
+    // on ALL backends.
+    //
+    // Uses emit_nanosleep which emits the correct struct timespec layout
+    // for both 32-bit (8 bytes, tv_nsec at offset 4) and 64-bit (16 bytes,
+    // tv_nsec at offset 8) backends.
+    instrs.extend(emit_nanosleep(ctx, 1_000_000));
+    // Probe the pipe with a zero-timeout poll AFTER the nanosleep so it
+    // observes the data the child wrote during the sleep.
     //
     // Rationale: the original implementation relied on capturing -EAGAIN
     // from the non-blocking read() to detect "no data right now". However,
@@ -1572,17 +1602,10 @@ fn expand_channel_try_recv(args: &[IRValue], dst: Option<&IRValue>, ctx: &mut Lo
         IRInstr::Store { value: IRValue::Immediate(1), addr: pollfd.clone(), offset: 4, ty: IRType::I16 },
         IRInstr::Syscall { nr: 7, args: vec![pollfd, IRValue::Immediate(1), IRValue::Immediate(0)], dst: Some(poll_ret.clone()) },
     ]);
-    // nanosleep(10ms) BEFORE the read — this gives the child process
-    // guaranteed CPU time to write BEFORE we try to read. This is critical
-    // because the read() on an empty pipe BLOCKS (even with O_NONBLOCK
-    // set, if fcntl doesn't work correctly on some QEMU backends).
-    // Moving the nanosleep before read ensures the child gets to run first.
-    //
-    // Uses emit_nanosleep which emits the correct struct timespec layout
-    // for both 32-bit (8 bytes, tv_nsec at offset 4) and 64-bit (16 bytes,
-    // tv_nsec at offset 8) backends.
-    instrs.extend(emit_nanosleep(ctx, 1_000_000));
-    // Use read() with O_NONBLOCK (set above by emit_set_nonblocking).
+    // Use read() with O_NONBLOCK (set above by emit_set_nonblocking). By
+    // this point the child has already written (during nanosleep), so
+    // read() returns 56 bytes immediately even on backends where
+    // O_NONBLOCK is not honored.
     instrs.extend(vec![
         IRInstr::Alloc { dst: frame.clone(), size: 56 },
         IRInstr::Syscall { nr: 63, args: vec![read_fd, frame.clone(), IRValue::Immediate(56)], dst: Some(read_ret.clone()) },
