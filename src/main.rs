@@ -1594,6 +1594,17 @@ fn compile_to_binary_direct(
         vuma_codegen::backend::set_64bit_returns(&func_64bit);
     }
 
+    // K10G-wasm32-newton: populate the global function-name → param-IRTypes
+    // map so the wasm32 backend's IRInstr::Call handler can push each call
+    // argument with the correct wasm type (F64 vs I32).
+    {
+        let func_params: std::collections::HashMap<String, Vec<vuma_codegen::ir::IRType>> =
+            ir_program.functions.iter()
+                .map(|f| (f.name.clone(), f.param_types.clone()))
+                .collect();
+        vuma_codegen::backend::set_func_param_types(&func_params);
+    }
+
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
         match backend.allocate_registers(func) {

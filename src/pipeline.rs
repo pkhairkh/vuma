@@ -6105,6 +6105,22 @@ pub fn compile_modules(
         vuma_codegen::backend::set_64bit_returns(&func_64bit);
     }
 
+    // K10G-wasm32-newton: populate the global function-name → param-IRTypes
+    // map so the wasm32 backend's IRInstr::Call handler can push each call
+    // argument with the correct wasm type (F64 vs I32). Without this,
+    // `newton_sqrt(n_f, n_f, 8)` pushes all three args as I32, failing
+    // wasmtime validation ("expected f64, found i32") because newton_sqrt's
+    // wasm signature is (f64, f64, i32) -> ().
+    {
+        let func_params: std::collections::HashMap<String, Vec<vuma_codegen::ir::IRType>> =
+            ir_program
+                .functions
+                .iter()
+                .map(|f| (f.name.clone(), f.param_types.clone()))
+                .collect();
+        vuma_codegen::backend::set_func_param_types(&func_params);
+    }
+
     // ── Stage 5: Register allocation (per-function) ───────────────────
     let t = Instant::now();
     let backend = match vuma_codegen::backend::create_backend(backend_kind) {

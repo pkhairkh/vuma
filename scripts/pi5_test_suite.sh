@@ -516,6 +516,15 @@ except ImportError:
             BACKENDS["wasm32"] = "WASMTIME"
 
 EXEC_TIMEOUT = 5
+# IPC tests (tests/gold_standard/ipc/*.vuma: driver_isolation, bench,
+# multi_msg_10, ffi_basic, large_payload, try_recv_success, ...) use
+# fork+exec+wait which requires real process scheduling. Under
+# `--workers 8` parallel load, 8 QEMU processes compete for CPU and the
+# fork/exec tests deadlock or hit the 5s wall-clock cap (exit 124) even
+# though they PASS in isolation. Give them a generously longer wall-clock
+# budget so the scheduler has time to make progress. The Python-side
+# subprocess timeout below is exec_timeout + 3.
+IPC_TIMEOUT = 30
 EXPECTED_RE = re.compile(rb"//\s*Expected exit code:\s*(-?\d+)")
 SKIP_ON_RE = re.compile(rb"//\s*skip_on:\s*([a-zA-Z0-9_,\s]+)")
 
@@ -549,6 +558,9 @@ def find_tests():
 
 def run_one(args):
     test_path, category, test_name, expected, skip_backends, backend, verify = args
+    # IPC tests need a longer wall-clock budget under parallel load (see
+    # IPC_TIMEOUT comment above). All other categories use EXEC_TIMEOUT.
+    exec_timeout = IPC_TIMEOUT if category == "ipc" else EXEC_TIMEOUT
     result = {
         "test": test_name, "category": category, "path": test_path,
         "backend": backend, "expected": expected, "actual": None,
@@ -610,11 +622,11 @@ def run_one(args):
                     cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
         elif BACKENDS[backend] is None:
             os.chmod(out, 0o755)
-            cmd = ["timeout", str(EXEC_TIMEOUT), out]
+            cmd = ["timeout", str(exec_timeout), out]
         else:
             os.chmod(out, 0o755)
             qemu_bin = BACKENDS[backend]
-            cmd = ["timeout", str(EXEC_TIMEOUT), qemu_bin]
+            cmd = ["timeout", str(exec_timeout), qemu_bin]
             # riscv32: QEMU's default rv32 CPU lacks the D extension.
             # Enable D explicitly via CPU properties.
             if backend == "riscv32":
@@ -628,7 +640,7 @@ def run_one(args):
             # is narrow and usually succeeds on a second attempt.
             max_retries = 3 if test_name == "self_exec.vuma" else 1
             for attempt in range(max_retries):
-                ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3, stdin=subprocess.DEVNULL)
+                ep = subprocess.run(cmd, capture_output=True, timeout=exec_timeout + 3, stdin=subprocess.DEVNULL)
                 rc = ep.returncode
                 if backend == "wasm32":
                     # Custom runner returns _vuma_main's value as the exit code.
