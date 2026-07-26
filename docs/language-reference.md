@@ -229,7 +229,7 @@ The PMT memory model — arena allocation, state reads/writes, and state
 transforms — is mechanically verified in Lean 4; the `pmt_soundness` and
 `no_oob_trap_for_well_typed_strong` theorems hold for all well-typed programs.
 See [. Formal Verification](#10-formal-verification-lean-4) and
-[`../architecture/pmt-formal-spec.md`](../architecture/pmt-formal-spec.md).
+[`./pmt-formal-spec.md`](./pmt-formal-spec.md).
 
 **SCG lowering.** PMT constructs are no longer
 opaque stubs on the Structured Call Graph:
@@ -367,7 +367,7 @@ make verify-all # Lean + CI + docs in one shot
 CI runs `lake build` on every push — see `.github/workflows/proof-verify.yml`.
 The full formal specification (Arena, Layout, Allocation, State Value,
 trap-code taxonomy, theorem statements, and proof strategy) is in
-[`../architecture/pmt-formal-spec.md`](../architecture/pmt-formal-spec.md).
+[`./pmt-formal-spec.md`](./pmt-formal-spec.md).
 
 **In-tree verified checkers (`pmt-runtime-check` feature).** The Lean-
 verified PMT checkers from `proof/PMT/Extraction.lean` are hand-translated
