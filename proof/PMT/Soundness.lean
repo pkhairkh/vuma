@@ -60,6 +60,43 @@ machinery in `exec`). A full concurrent-execution semantics
 (interleaved `exec`, memory-model axioms, happens-before relations) is
 out of scope for PMT-1-C and is not modeled here.
 
+**Channel / special-variant abstractions (PMT-1-D).** The 10
+channel/special `PmtInstr` variants added in PMT-1-D (`vector_op`,
+`channel_open`, `channel_send`, `channel_recv`, `channel_close`,
+`channel_recv_timeout`, `channel_recv_result`, `stark_proof`,
+`call_indirect`, `syscall` — see `PMT.PmtInstr` §4) are modeled
+structurally with explicit domain abstractions that keep them outside
+PMT's arena-state concern:
+  * `vector_op` — pure SIMD computation (no arena effect); flattens to `[]`.
+  * `channel_*` (6 variants) — **out-of-band effect modeled by IVE's
+    capability system, not by PMT's arena state**. The channel handle
+    is an opaque capability; send / recv / close / timeout / result
+    semantics are runtime / IVE concerns. All 6 flatten to `[]`.
+  * `stark_proof` — **proof-buffer model**: proof verification is an
+    opaque effect delegated to the verifier; the proof buffer is
+    allocated and tracked at the IPC / runtime layer, not as a PMT
+    arena region. Flattens to `[]`.
+  * `call_indirect` — like `.call` but with an indirect
+    (register-resident) target. Flattens to `args.map (fun v => ⟨v,
+    v, ⟨1, []⟩, .transform⟩)` — exactly mirroring `.call` (placeholder
+    self-loop steps per argument vreg, each carrying the well-formed
+    layout `⟨1, []⟩`).
+  * `syscall` — **opaque-effect model**: syscalls are out-of-scope for
+    PMT (no arena state interaction; the syscall ABI is a runtime
+    concern). Flattens to `[]`.
+
+The `pmt_soundness` statement and proof are therefore **unchanged** by
+PMT-1-D — the 9 `[]`-flattening variants contribute zero `Step`s to
+`IRFunction.flat_steps` (so the name-uniqueness conjuncts of
+`WellTyped` are vacuously preserved), and `call_indirect`'s per-argument
+placeholder `Step`s are discharged by the existing
+`IRFunction.in_vars_unique` / `out_vars_unique` conjuncts in
+`IRFunction.well_typed`, exactly as for `.call`. No new hypothesis is
+added to the theorem signature. A full channel-concurrency /
+proof-verification / syscall-ABI semantics is out of scope for PMT-1-D
+and is not modeled here; the structural mirror suffices for
+`instr_sim` / `block_sim` traversal in `PMT.SimRel`.
+
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
 `just proof` from the repo root) — the legacy `lean PMT/Soundness.lean`
