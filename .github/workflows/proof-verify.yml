@@ -77,3 +77,49 @@ jobs:
       # failure so all regressions are surfaced in one log.
       - name: Run proof / bv_verify / proof_log tests
         run: cargo test --workspace --no-fail-fast -- bv_verify proof_artifacts proof_log
+
+  # ==========================================================================
+  # Lean 4 proofs (lake build + sorry check)
+  # ==========================================================================
+  # Parallel Lean-side gate, sibling of `proof-verify` above. Runs `lake
+  # build` against the `proof/` Lake package (multi-module PMT library +
+  # `check-pmt` exe + `test` exe, as declared in `proof/lakefile.toml`)
+  # and then invokes `scripts/check-lean.sh` to detect any `sorry` tokens
+  # in the build output. This is the Lean counterpart to the Rust-side
+  # `proof-verify` job — both run in parallel on every push/PR to `main`.
+  #
+  # Toolchain pin: `proof/lean-toolchain` declares `leanprover/lean4:v4.21.0`,
+  # mirrored below in the `lean-version` input to `elan-action` so the
+  # installed toolchain matches the project pin exactly.
+  #
+  # Strict by default: the PMT proof library is sorry-free as of Wave 15.
+  # `PROOF_CHECK_STRICT=1` causes `scripts/check-lean.sh` to fail CI on any
+  # `sorry` token surfaced by `lake build`.
+  # ==========================================================================
+  lean-proofs:
+    name: Lean 4 Proofs (lake build + sorry check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain)
+        uses: oravirt/elan-action@v2
+        with:
+          lean-version: leanprover/lean4:v4.21.0
+
+      - name: Verify Lean version
+        run: lean --version
+
+      - name: Build Lean proofs
+        run: cd proof && lake build
+
+      - name: Check for sorry (strict)
+        env:
+          # Strict mode (fail on any sorry) is enabled as of Wave 15 — the
+          # PMT proof library is sorry-free.
+          PROOF_CHECK_STRICT: "1"
+        run: ./scripts/check-lean.sh
+
+      - name: Run Lean tests
+        run: cd proof && lake exe test

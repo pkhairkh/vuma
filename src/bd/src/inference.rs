@@ -28,16 +28,14 @@ use crate::capd::{CapD, Capability};
 use crate::descriptor::BD;
 use crate::reld::{DepKind, RelD, Relation};
 use crate::repd::{
-    ArrayRep, BDConstraint as RepDConstraint, ByteRep, EnumRep, FuncRep,
-    PtrRep, RepD, StructRep, UnionRep,
+    ArrayRep, BDConstraint as RepDConstraint, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep,
+    UnionRep,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
-use vuma_scg::node::{
-    AccessMode, NodeId, NodePayload, NodeType,
-};
+use vuma_scg::node::{AccessMode, NodeId, NodePayload, NodeType};
 
 // ---------------------------------------------------------------------------
 // Inference errors
@@ -395,7 +393,13 @@ impl BDInferenceEngine {
             NodeType::Effect => self.compute_effect_bd(scg, node_id, bd_map),
             NodeType::Control => self.compute_control_bd(scg, node_id, bd_map),
             NodeType::Phantom => self.compute_phantom_bd(scg, node_id, bd_map),
-            NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime | NodeType::Syscall => {
+            NodeType::VTable
+            | NodeType::ClosureEnv
+            | NodeType::StructDef
+            | NodeType::EnumDef
+            | NodeType::Match
+            | NodeType::ConstantTime
+            | NodeType::Syscall => {
                 // VTable and ClosureEnv nodes inherit BD from their inputs.
                 // Syscall nodes are treated as opaque side-effecting ops —
                 // they inherit BD from their arguments (like Effect nodes).
@@ -883,7 +887,13 @@ impl BDInferenceEngine {
             NodeType::Effect => Some(UsageContext::ReadWrite),
             NodeType::Control => Some(UsageContext::Argument),
             NodeType::Phantom => None,
-            NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime | NodeType::Syscall => None,
+            NodeType::VTable
+            | NodeType::ClosureEnv
+            | NodeType::StructDef
+            | NodeType::EnumDef
+            | NodeType::Match
+            | NodeType::ConstantTime
+            | NodeType::Syscall => None,
             // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
             // nodes need proper usage-context inference — for now, return
             // None (no self-usage) so the build passes.
@@ -1170,7 +1180,10 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
         // PMT (Programs as Memory Transformations) — pass through unchanged;
         // LayoutId/FieldId are opaque handles that don't carry generics.
         RepD::State { layout } => RepD::State { layout: *layout },
-        RepD::Ref { layout, field } => RepD::Ref { layout: *layout, field: *field },
+        RepD::Ref { layout, field } => RepD::Ref {
+            layout: *layout,
+            field: *field,
+        },
         // Wave 9 — Dependent state types: pass through unchanged. The
         // element may contain generics, so recurse; the count_var is a
         // runtime-variable name (not a type), kept as-is.

@@ -30,9 +30,27 @@ fn wave5_phi_nodes_stay_at_block_top() {
             ],
         },
         // Non-Phi instructions (schedulable)
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(5), lhs: IRValue::Register(1), rhs: IRValue::Register(2), ty: None },
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: IRValue::Register(3), lhs: IRValue::Register(5), rhs: IRValue::Immediate(2), ty: None },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(4), lhs: IRValue::Register(3), rhs: IRValue::Immediate(1), ty: None },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(5),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+            ty: None,
+        },
+        IRInstr::BinOp {
+            op: BinOpKind::Mul,
+            dst: IRValue::Register(3),
+            lhs: IRValue::Register(5),
+            rhs: IRValue::Immediate(2),
+            ty: None,
+        },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(4),
+            lhs: IRValue::Register(3),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        },
     ];
 
     let lt = LatencyTable::default_ooo();
@@ -65,7 +83,13 @@ fn wave5_phi_order_preserved() {
             incoming: vec![(IRValue::Immediate(30), "b0".to_string())],
         },
         // A non-Phi with no deps (schedulable independently)
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(4), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(2), ty: None },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(4),
+            lhs: IRValue::Immediate(1),
+            rhs: IRValue::Immediate(2),
+            ty: None,
+        },
     ];
 
     let lt = LatencyTable::default_ooo();
@@ -83,8 +107,20 @@ fn wave5_scheduler_preserves_data_dependencies() {
     // b = a + 1; c = b + 2
     // c depends on b, so b must be scheduled before c.
     let instrs = vec![
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Register(0), rhs: IRValue::Immediate(1), ty: None },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Register(1), rhs: IRValue::Immediate(2), ty: None },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Immediate(1),
+            ty: None,
+        },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(2),
+            ty: None,
+        },
     ];
     let lt = LatencyTable::default_ooo();
     let order = schedule_block(&instrs, &lt);
@@ -96,16 +132,37 @@ fn wave5_scheduler_reorders_independent_instructions() {
     // a = 1 + 2; b = a + 3; c = 4 + 5
     // c is independent of a, b → should be scheduled before b (which depends on a).
     let instrs = vec![
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(2), ty: None },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Register(1), rhs: IRValue::Immediate(3), ty: None },
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(3), lhs: IRValue::Immediate(4), rhs: IRValue::Immediate(5), ty: None },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Immediate(1),
+            rhs: IRValue::Immediate(2),
+            ty: None,
+        },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Immediate(3),
+            ty: None,
+        },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(3),
+            lhs: IRValue::Immediate(4),
+            rhs: IRValue::Immediate(5),
+            ty: None,
+        },
     ];
     let lt = LatencyTable::default_ooo();
     let order = schedule_block(&instrs, &lt);
     // c (idx 2) should be scheduled before b (idx 1) because c is independent.
     let pos_c = order.iter().position(|&x| x == 2).unwrap();
     let pos_b = order.iter().position(|&x| x == 1).unwrap();
-    assert!(pos_c < pos_b, "independent instruction should be scheduled before dependent one");
+    assert!(
+        pos_c < pos_b,
+        "independent instruction should be scheduled before dependent one"
+    );
 }
 
 #[test]
@@ -180,13 +237,25 @@ fn wave5_scheduler_uses_per_isa_latency() {
     // (higher critical path).
     let instrs = vec![
         // a = x * y  (multiply — high latency on some ISAs)
-        IRInstr::BinOp { op: BinOpKind::Mul, dst: IRValue::Register(1), lhs: IRValue::Register(0), rhs: IRValue::Register(0), ty: None },
+        IRInstr::BinOp {
+            op: BinOpKind::Mul,
+            dst: IRValue::Register(1),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(0),
+            ty: None,
+        },
         // b = c + d  (add — low latency)
-        IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(2), ty: None },
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Immediate(1),
+            rhs: IRValue::Immediate(2),
+            ty: None,
+        },
     ];
 
     let cheap_mul = LatencyTable::default_ooo(); // mul=3
-    let expensive_mul = LatencyTable::m68k();     // mul=20
+    let expensive_mul = LatencyTable::m68k(); // mul=20
 
     let order_cheap = schedule_block(&instrs, &cheap_mul);
     let order_expensive = schedule_block(&instrs, &expensive_mul);

@@ -1,0 +1,32 @@
+// oob_array_write — Array write out of bounds (requires --safe)
+// Expected exit code: 134
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+//
+// Bounds Wave 1 SAFE-ONLY negative test: allocate a 4-byte buffer
+// (`[u8; 4]`) and write past its end at index 10. With `--safe`, the
+// injected `UGe(idx, 4)` check on the Store path evaluates to true
+// (10 >= 4) and dispatches to `__oob_trap`, aborting with exit 134
+// (SIGABRT, 128 + 6).
+//
+// IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
+// standard suite because it only passes when compiled with `--safe`.
+// Without `--safe`, the OOB write is undefined behaviour (may crash
+// or corrupt adjacent memory). The expected exit code below assumes
+// `--safe` was passed at compile time.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocation
+//   - `[u8; 4]` array field, size statically known to alloc-size analysis
+//   - out-of-bounds Store (write) at index 10 — exercises the WRITE
+//     path of `inject_bounds_check_ir`. The `UGe(idx, 4)` check on the
+//     Store is folded to true and the trap branch is emitted.
+//   - exit 134 == SIGABRT emitted by `__oob_trap`.
+
+layout Buf = { data: [u8; 4] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    let idx = 10;
+    b.data[idx] = 99;
+    return 0;
+}

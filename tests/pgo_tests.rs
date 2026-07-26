@@ -3,10 +3,12 @@
 //! These tests prove that profile data can be loaded, serialized, and that
 //! the PGO cost function biases e-graph extraction toward hot-path optimization.
 
-use vuma_codegen::egraph::{ProfileData, pgo_cost_fn, target_cost_fn, EGraph, ENode, standard_rules};
+use vuma_codegen::egraph::{
+    pgo_cost_fn, standard_rules, target_cost_fn, EGraph, ENode, ProfileData,
+};
 use vuma_codegen::ir::BinOpKind;
-use vuma_codegen::target_desc::LatencyTable;
 use vuma_codegen::opt::{run_optimizations, run_optimizations_with_profile};
+use vuma_codegen::target_desc::LatencyTable;
 
 #[test]
 fn wave12_profile_data_load_from_json() {
@@ -51,8 +53,8 @@ fn wave12_pgo_cost_fn_lowers_cost_for_hot_vregs() {
 
     let pgo_cost = pgo_cost_fn(&lt, &profile);
 
-    let hot_node = ENode::VReg(0);   // hot
-    let cold_node = ENode::VReg(1);  // cold
+    let hot_node = ENode::VReg(0); // hot
+    let cold_node = ENode::VReg(1); // cold
 
     let hot_cost = pgo_cost(&hot_node);
     let cold_cost = pgo_cost(&cold_node);
@@ -91,7 +93,7 @@ fn wave12_pgo_cost_fn_differs_from_target_cost_fn() {
 fn wave12_run_optimizations_with_profile_compiles() {
     // End-to-end: run_optimizations_with_profile must accept a profile and
     // produce a valid program. This proves the PGO path is wired.
-    use vuma_codegen::ir::{IRFunction, IRProgram, IRInstr, IRTerminator, IRValue, BinOpKind};
+    use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRProgram, IRTerminator, IRValue};
     let mut func = IRFunction::new("main");
     func.blocks[0].instructions = vec![IRInstr::BinOp {
         op: BinOpKind::Xor,
@@ -101,7 +103,10 @@ fn wave12_run_optimizations_with_profile_compiles() {
         ty: None,
     }];
     func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
-    let program = IRProgram { functions: vec![func], data_sections: vec![] };
+    let program = IRProgram {
+        functions: vec![func],
+        data_sections: vec![],
+    };
 
     let mut hotness = std::collections::HashMap::new();
     hotness.insert(0, 50);
@@ -117,7 +122,7 @@ fn wave12_run_optimizations_with_profile_compiles() {
 fn wave12_empty_profile_falls_back_to_target() {
     // When profile has no data, run_optimizations_with_profile should
     // behave identically to run_optimizations_with_target.
-    use vuma_codegen::ir::{IRFunction, IRProgram, IRInstr, IRTerminator, IRValue, BinOpKind};
+    use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRProgram, IRTerminator, IRValue};
     let make_program = || {
         let mut func = IRFunction::new("main");
         func.blocks[0].instructions = vec![IRInstr::BinOp {
@@ -128,7 +133,10 @@ fn wave12_empty_profile_falls_back_to_target() {
             ty: None,
         }];
         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
-        IRProgram { functions: vec![func], data_sections: vec![] }
+        IRProgram {
+            functions: vec![func],
+            data_sections: vec![],
+        }
     };
 
     let lt = LatencyTable::default_ooo();
@@ -138,7 +146,10 @@ fn wave12_empty_profile_falls_back_to_target() {
     let without_profile = run_optimizations(make_program());
 
     // Both should produce the same result (empty profile = no PGO effect).
-    assert_eq!(with_profile.functions.len(), without_profile.functions.len());
+    assert_eq!(
+        with_profile.functions.len(),
+        without_profile.functions.len()
+    );
 }
 
 #[test]

@@ -1,10 +1,6 @@
 //! VUMA Tests Module
 //!
 //! Integration and unit tests for the VUMA framework, covering:
-//! - Trivial program memory safety tests
-//! - Doubly-linked list structure tests
-//! - Graph structure tests
-//! - Concurrent access tests
 //! - BD (Behavioral Descriptor) inference tests
 //! - Integration test framework with pipeline helpers, test registry,
 //!   helper macros, and SCG builders
@@ -20,11 +16,15 @@
 //! |----------------|---------------------|------------------------------------------------|
 //! | Unit           | all                 | Individual crate functions, edge cases         |
 //! | Integration    | `framework`         | Cross-crate pipelines (parse -> SCG -> verify) |
-//! | Verification   | `trivial`, `dlist`  | IVE invariant checks, proofs                   |
 //! | Codegen        | `codegen`           | ARM64 code emission, ELF generation            |
 //! | Pipeline       | `full_pipeline`     | Full compile() pipeline end-to-end             |
 //! | Parser         | `parser_roundtrip`  | Parse roundtrip: source → AST → SCG            |
 //! | Benchmark      | `benchmarks`        | Performance benchmarks (8 categories)           |
+//!
+//! (Legacy cleanup) The `trivial`, `dlist`, `graph`, and `concurrent`
+//! modules have been removed — they exercised the now-deleted five legacy
+//! IVE pointer-invariant verifiers (liveness / exclusivity /
+//! interpretation / origin / cleanup) via per-invariant APIs.
 //!
 //! # Benchmark Result Type
 //!
@@ -64,46 +64,36 @@ pub mod benchmarks;
 pub mod ffi_types;
 
 #[cfg(test)]
-pub mod codegen;
-#[cfg(test)]
-pub mod concurrent;
-#[cfg(test)]
-pub mod dlist;
-#[cfg(test)]
-pub mod e2e_cor;
-#[cfg(test)]
-pub mod execution_validation;
-pub mod framework;
-#[cfg(test)]
-pub mod full_pipeline;
-#[cfg(test)]
-pub mod graph;
-#[cfg(test)]
-pub mod parser_roundtrip;
-#[cfg(test)]
-pub mod sha256d;
-#[cfg(test)]
-pub mod elf_validation;
-#[cfg(test)]
-pub mod trivial;
-#[cfg(test)]
-pub mod wasm_validation;
-#[cfg(test)]
-pub mod cross_backend;
-#[cfg(test)]
-pub mod property_tests;
-#[cfg(test)]
 pub mod abi_conformance;
 #[cfg(test)]
-pub mod final_integration;
+pub mod codegen;
+#[cfg(test)]
+pub mod cross_backend;
 #[cfg(test)]
 pub mod diagnostics_integration;
 #[cfg(test)]
 pub mod dwarf_ffi_integration;
 #[cfg(test)]
-pub mod sha256d_backends;
+pub mod elf_validation;
+#[cfg(test)]
+pub mod execution_validation;
+#[cfg(test)]
+pub mod final_integration;
+pub mod framework;
+#[cfg(test)]
+pub mod full_pipeline;
+#[cfg(test)]
+pub mod parser_roundtrip;
+#[cfg(test)]
+pub mod property_tests;
 #[cfg(test)]
 pub mod regression;
+#[cfg(test)]
+pub mod sha256d;
+#[cfg(test)]
+pub mod sha256d_backends;
+#[cfg(test)]
+pub mod wasm_validation;
 #[cfg(test)]
 pub mod wave47_bootstrap;
 #[cfg(test)]

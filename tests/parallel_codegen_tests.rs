@@ -5,9 +5,9 @@
 //! production (compile_with_path and compile_with_recovery); this test
 //! verifies it doesn't corrupt the output.
 
-use vuma_codegen::backend::{create_backend, BackendKind, Backend, AllocatedProgram};
-use vuma_codegen::regalloc::LinearScanAllocator;
+use vuma_codegen::backend::{create_backend, AllocatedProgram, Backend, BackendKind};
 use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
+use vuma_codegen::regalloc::LinearScanAllocator;
 
 /// Build a multi-function program suitable for parallel regalloc.
 fn make_program() -> Vec<IRFunction> {
@@ -72,13 +72,15 @@ fn wave9_parallel_regalloc_matches_sequential() {
     let allocator = LinearScanAllocator::new();
 
     // Sequential
-    let sequential: Vec<_> = funcs.iter()
+    let sequential: Vec<_> = funcs
+        .iter()
         .map(|f| allocator.allocate_function(f))
         .collect();
 
     // Parallel (using std::thread::scope instead of rayon)
     let parallel: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = funcs.iter()
+        let handles: Vec<_> = funcs
+            .iter()
             .map(|f| s.spawn(|| allocator.allocate_function(f)))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -124,7 +126,8 @@ fn wave9_parallel_regalloc_handles_errors() {
     let allocator = LinearScanAllocator::new();
 
     let results: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = funcs.iter()
+        let handles: Vec<_> = funcs
+            .iter()
             .map(|f| s.spawn(|| allocator.allocate_function(f)))
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -160,7 +163,11 @@ fn wave9_production_compile_uses_parallel_regalloc() {
     };
 
     let result = compile(source, &config);
-    assert!(result.is_ok(), "production compile with parallel regalloc failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "production compile with parallel regalloc failed: {:?}",
+        result.err()
+    );
     let output = result.unwrap();
     assert!(!output.binary.is_empty(), "should produce a binary");
 }

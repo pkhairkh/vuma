@@ -35,9 +35,9 @@
 //! can still use the `serde` derives.
 
 use crate::capd::{CapD, Capability, Condition, LockId, OpId, PhaseId, RegionId, SecLevel};
-use crate::descriptor::{BD, BDId};
+use crate::descriptor::{BDId, BD};
 use crate::manifold::SpaceFillingCurve;
-use crate::reld::{DepKind, FlowPolicy, Relation, RelD, TemporalKind};
+use crate::reld::{DepKind, FlowPolicy, RelD, Relation, TemporalKind};
 use crate::repd::{
     ArrayRep, BDConstraint, ByteRep, ConceptRelationalRep, EnumRep, FuncRep,
     GestaltSuperpositionRep, ManifoldSpatialRep, PtrRep, RepD, StructRep, UnionRep,
@@ -169,10 +169,7 @@ fn read_string<R: Read>(r: &mut R) -> Result<String, BinaryError> {
         .map_err(|e| BinaryError::InvalidData(format!("invalid UTF-8 in string field: {e}")))
 }
 
-fn write_opt<T: BinaryWrite, W: Write>(
-    w: &mut W,
-    opt: &Option<T>,
-) -> Result<(), BinaryError> {
+fn write_opt<T: BinaryWrite, W: Write>(w: &mut W, opt: &Option<T>) -> Result<(), BinaryError> {
     match opt {
         None => write_u8(w, 0),
         Some(v) => {
@@ -193,10 +190,7 @@ fn read_opt<T: BinaryRead, R: Read>(r: &mut R) -> Result<Option<T>, BinaryError>
     }
 }
 
-fn write_vec<T: BinaryWrite, W: Write>(
-    w: &mut W,
-    v: &[T],
-) -> Result<(), BinaryError> {
+fn write_vec<T: BinaryWrite, W: Write>(w: &mut W, v: &[T]) -> Result<(), BinaryError> {
     write_u32(w, v.len() as u32)?;
     for item in v {
         item.write_binary(w)?;
@@ -213,10 +207,7 @@ fn read_vec<T: BinaryRead, R: Read>(r: &mut R) -> Result<Vec<T>, BinaryError> {
     Ok(out)
 }
 
-fn write_hashset<T: BinaryWrite, W: Write>(
-    w: &mut W,
-    s: &HashSet<T>,
-) -> Result<(), BinaryError> {
+fn write_hashset<T: BinaryWrite, W: Write>(w: &mut W, s: &HashSet<T>) -> Result<(), BinaryError> {
     write_u32(w, s.len() as u32)?;
     for item in s {
         item.write_binary(w)?;
@@ -1057,10 +1048,7 @@ mod tests {
         let mut conditions = HashSet::new();
         conditions.insert(Condition::InPhase(7));
         conditions.insert(Condition::RequiresLock(99));
-        let capd = CapD {
-            caps,
-            conditions,
-        };
+        let capd = CapD { caps, conditions };
         let mut relations = HashSet::new();
         relations.insert(Relation::Liveness);
         relations.insert(Relation::Dependency(DepKind::DataDep));
@@ -1151,10 +1139,7 @@ mod tests {
         let mut conditions = HashSet::new();
         conditions.insert(Condition::AfterOp(3));
         conditions.insert(Condition::SecurityLevel(2));
-        let capd = CapD {
-            caps,
-            conditions,
-        };
+        let capd = CapD { caps, conditions };
         let mut buf = Vec::new();
         capd.write_binary(&mut buf).expect("write");
         let mut cursor = io::Cursor::new(&buf);

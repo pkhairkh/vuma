@@ -3,7 +3,7 @@
   "suite": "VUMA Gold Standard Test Suite",
   "description": "Comprehensive test suite for the VUMA compiler across 19 backends",
   "source_dir": "tests/gold_standard",
-  "total_programs": 1521,
+  "total_programs": 1589,
   "categories": {
     "arena_wave0": {
       "title": "Arena Wave ",
@@ -358,6 +358,33 @@
         "shl_then_or.vuma",
         "test_rotr.vuma",
         "xor_then_shr.vuma"
+      ]
+    },
+    "bounds_wave1": {
+      "title": "Bounds Wave 1 (In-bounds positive)",
+      "program_count": 8,
+      "programs": [
+        "inbounds_array_read.vuma",
+        "inbounds_array_write.vuma",
+        "inbounds_dynamic_index.vuma",
+        "inbounds_last_index.vuma",
+        "inbounds_loop.vuma",
+        "inbounds_loop_dynamic.vuma",
+        "inbounds_pmt_state.vuma",
+        "uaf_compile_time.vuma"
+      ]
+    },
+    "bounds_wave1_safe": {
+      "title": "Bounds Wave 1 (OOB negative, requires --safe)",
+      "program_count": 7,
+      "programs": [
+        "oob_array_read.vuma",
+        "oob_array_write.vuma",
+        "oob_dynamic_index.vuma",
+        "oob_large_index.vuma",
+        "oob_loop_overflow.vuma",
+        "oob_offbyone.vuma",
+        "uaf_negative.vuma"
       ]
     },
     "complex_stores": {
@@ -1090,6 +1117,65 @@
         "test_print2.vuma",
         "two_args_sub.vuma",
         "zero_arg_lit.vuma"
+      ]
+    },
+    "ipc": {
+      "title": "ipc",
+      "program_count": 53,
+      "programs": [
+        "aead.vuma",
+        "aead_tamper.vuma",
+        "bench.vuma",
+        "cap_flow.vuma",
+        "cap_revoke.vuma",
+        "capability_grant_verify.vuma",
+        "checkpoint.vuma",
+        "closed_channel.vuma",
+        "crc_mismatch.vuma",
+        "delegation.vuma",
+        "distributed.vuma",
+        "driver_isolation.vuma",
+        "error_containment.vuma",
+        "fault_tolerance.vuma",
+        "ffi_basic.vuma",
+        "ffi_crash_recovery.vuma",
+        "ffi_isolation.vuma",
+        "formal_verify.vuma",
+        "framed_roundtrip_aarch64.vuma",
+        "framed_roundtrip_arm32.vuma",
+        "framed_roundtrip_riscv64.vuma",
+        "framed_send_recv.vuma",
+        "graceful_degradation.vuma",
+        "hot_swap.vuma",
+        "infoflow_invalid.vuma",
+        "infoflow_valid.vuma",
+        "large_message.vuma",
+        "large_payload.vuma",
+        "linear_invalid.vuma",
+        "linear_valid.vuma",
+        "match_recv.vuma",
+        "memory_limit.vuma",
+        "multi_message.vuma",
+        "multi_msg_10.vuma",
+        "ping_pong.vuma",
+        "protocol_invalid.vuma",
+        "protocol_valid.vuma",
+        "recv_timeout.vuma",
+        "resource_limit.vuma",
+        "sandbox.vuma",
+        "sandbox_seccomp.vuma",
+        "session_invalid.vuma",
+        "session_types.vuma",
+        "session_valid.vuma",
+        "shared_memory.vuma",
+        "shared_memory_rw.vuma",
+        "simple_send.vuma",
+        "stark_proof.vuma",
+        "supervised_worker.vuma",
+        "supervisor.vuma",
+        "try_recv.vuma",
+        "try_recv_success.vuma",
+        "worker_error.vuma"
       ]
     },
     "kernel_crypto": {

@@ -233,7 +233,9 @@ impl<N, E> DiGraph<N, E> {
 
     /// Iterate over all live node weights.
     pub fn node_weights(&self) -> impl Iterator<Item = &N> {
-        self.nodes.iter().filter_map(|slot| slot.as_ref().map(|e| &e.weight))
+        self.nodes
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|e| &e.weight))
     }
 
     /// Iterate over all live node weights, mutably.
@@ -326,7 +328,9 @@ impl<N, E> DiGraph<N, E> {
 
     /// Iterate over all live edge weights.
     pub fn edge_weights(&self) -> impl Iterator<Item = &E> {
-        self.edges.iter().filter_map(|slot| slot.as_ref().map(|e| &e.weight))
+        self.edges
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|e| &e.weight))
     }
 
     /// Iterate over all live edge weights, mutably.
@@ -395,14 +399,15 @@ impl<N, E> DiGraph<N, E> {
                 list.iter().copied()
             })
             .filter_map(move |eidx| {
-                self.edges.get(eidx).and_then(|s| s.as_ref()).map(|en| {
-                    EdgeReference {
+                self.edges
+                    .get(eidx)
+                    .and_then(|s| s.as_ref())
+                    .map(|en| EdgeReference {
                         id: EdgeIndex(eidx),
                         source: NodeIndex(en.source),
                         target: NodeIndex(en.target),
                         weight: &en.weight,
-                    }
-                })
+                    })
             })
     }
 
@@ -490,9 +495,7 @@ pub fn toposort<N, E>(g: &DiGraph<N, E>) -> Result<Vec<NodeIndex>, NodeIndex> {
     // ascending slot order and then `pop()` from the end, so the smallest
     // slot is explored first.
     let mut stack: Vec<NodeIndex> = (0..n)
-        .filter(|i| {
-            g.nodes.get(*i).is_some_and(|s| s.is_some()) && in_degree[*i] == 0
-        })
+        .filter(|i| g.nodes.get(*i).is_some_and(|s| s.is_some()) && in_degree[*i] == 0)
         .map(NodeIndex)
         .collect();
 
@@ -525,9 +528,7 @@ pub fn toposort<N, E>(g: &DiGraph<N, E>) -> Result<Vec<NodeIndex>, NodeIndex> {
     } else {
         // Return any node still in a cycle (in_degree > 0 and live).
         let leftover = (0..n)
-            .find(|i| {
-                g.nodes.get(*i).is_some_and(|s| s.is_some()) && in_degree[*i] > 0
-            })
+            .find(|i| g.nodes.get(*i).is_some_and(|s| s.is_some()) && in_degree[*i] > 0)
             .map(NodeIndex)
             .unwrap_or(NodeIndex(0));
         Err(leftover)
@@ -594,7 +595,14 @@ fn tarjan_strongconnect<N, E>(
             };
             if indices[w.0].is_none() {
                 tarjan_strongconnect(
-                    w, g, index_counter, stack, on_stack, indices, lowlinks, sccs,
+                    w,
+                    g,
+                    index_counter,
+                    stack,
+                    on_stack,
+                    indices,
+                    lowlinks,
+                    sccs,
                 );
                 lowlinks[v.0] = lowlinks[v.0].min(lowlinks[w.0]);
             } else if on_stack[w.0] {
@@ -621,11 +629,7 @@ fn tarjan_strongconnect<N, E>(
 ///
 /// Uses BFS. `from == to` is treated as a trivial path (returns `true`) as
 /// long as the node exists.
-pub fn has_path_connecting<N, E>(
-    g: &DiGraph<N, E>,
-    from: NodeIndex,
-    to: NodeIndex,
-) -> bool {
+pub fn has_path_connecting<N, E>(g: &DiGraph<N, E>, from: NodeIndex, to: NodeIndex) -> bool {
     if g.nodes.get(from.0).is_some_and(|s| s.is_none())
         || g.nodes.get(to.0).is_some_and(|s| s.is_none())
     {
@@ -770,10 +774,7 @@ mod tests {
         let g = build_chain();
         assert!(g.contains_edge(NodeIndex(0), NodeIndex(1)));
         assert!(!g.contains_edge(NodeIndex(0), NodeIndex(2)));
-        assert_eq!(
-            g.find_edge(NodeIndex(1), NodeIndex(2)),
-            Some(EdgeIndex(1))
-        );
+        assert_eq!(g.find_edge(NodeIndex(1), NodeIndex(2)), Some(EdgeIndex(1)));
         assert_eq!(g.find_edge(NodeIndex(2), NodeIndex(0)), None);
     }
 

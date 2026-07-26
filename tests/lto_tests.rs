@@ -51,7 +51,11 @@ fn wave11_constant_propagation_into_function() {
     let program = make_program();
     let result = cross_function_constant_prop(program);
 
-    let double = result.functions.iter().find(|f| f.name == "double").unwrap();
+    let double = result
+        .functions
+        .iter()
+        .find(|f| f.name == "double")
+        .unwrap();
     // The Mul should now use Immediate(5) instead of Register(0).
     let mul = &double.blocks[0].instructions[0];
     match mul {
@@ -71,7 +75,11 @@ fn wave11_no_propagation_when_arg_varies() {
     // If a function is called with different arguments, no propagation.
     let mut program = make_program();
     // Add a second call site with a different argument.
-    let main = program.functions.iter_mut().find(|f| f.name == "main").unwrap();
+    let main = program
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "main")
+        .unwrap();
     main.blocks[0].instructions.push(IRInstr::Call {
         dst: Some(IRValue::Register(1)),
         func: "double".to_string(),
@@ -80,7 +88,11 @@ fn wave11_no_propagation_when_arg_varies() {
     });
 
     let result = cross_function_constant_prop(program);
-    let double = result.functions.iter().find(|f| f.name == "double").unwrap();
+    let double = result
+        .functions
+        .iter()
+        .find(|f| f.name == "double")
+        .unwrap();
     let mul = &double.blocks[0].instructions[0];
     match mul {
         IRInstr::Mul { lhs, .. } => {

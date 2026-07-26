@@ -10,8 +10,8 @@
 //! They are forbidden from touching any State in the caller's live set
 //! (enforced by `callback_live_set` — trap on violation in callback.rs).
 
-use super::ffi_scratch;
 use super::callback::{self, CallbackContext};
+use super::ffi_scratch;
 
 /// The opaque VUMA callback context. Exposed to C as `vuma_context_t`.
 ///
@@ -28,12 +28,12 @@ pub struct VumaContext {
     pub callback_ctx: CallbackContext,
 }
 
-// SAFETY: VumaContext is only used from the thread that invoked the callback.
-// The callback_live_set is thread-local, so sending the context across threads
-// would be unsound. We mark it Send + Sync because the C API is single-threaded
-// by contract (callbacks run on the same thread that invoked C).
-unsafe impl Send for VumaContext {}
-unsafe impl Sync for VumaContext {}
+// NOTE (Stage 5): `unsafe impl Send for VumaContext` and `unsafe impl Sync`
+// were removed. VumaContext carries raw pointers and a CallbackContext whose
+// live-set guard is thread-local; sending/sharing it across threads would
+// be unsound. The C-API contract guarantees single-threaded use (callbacks
+// run on the thread that invoked C); if cross-thread use is ever required,
+// wrap in `Arc<Mutex<VumaContext>>` and audit the callback_live_set access.
 
 /// Create a new VumaContext for a callback invocation.
 /// Called by the runtime when entering a #[callback] extern call.
@@ -54,6 +54,7 @@ pub fn vuma_context_enter(
 
 /// Destroy a VumaContext after the callback returns.
 /// Pops the scratchpad frame and frees the callback context.
+#[allow(clippy::boxed_local)]
 pub fn vuma_context_leave(ctx: Box<VumaContext>) {
     callback::exit_callback(ctx.callback_ctx);
     ffi_scratch::pop_frame();
@@ -66,8 +67,13 @@ pub fn vuma_context_leave(ctx: Box<VumaContext>) {
 
 /// Read a u32 from ___pmt_buffer at `offset`.
 /// Traps if `offset` falls within a caller-live region.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by [`vuma_context_enter`] (or null,
+/// which is treated as a no-op). The buffer must remain valid for the duration
+/// of the call.
 #[no_mangle]
-pub extern "C" fn vuma_read_u32(ctx: *const VumaContext, offset: u64) -> u32 {
+pub unsafe extern "C" fn vuma_read_u32(ctx: *const VumaContext, offset: u64) -> u32 {
     if ctx.is_null() {
         return 0;
     }
@@ -88,8 +94,11 @@ pub extern "C" fn vuma_read_u32(ctx: *const VumaContext, offset: u64) -> u32 {
 }
 
 /// Read a u64 from ___pmt_buffer at `offset`.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by [`vuma_context_enter`] (or null).
 #[no_mangle]
-pub extern "C" fn vuma_read_u64(ctx: *const VumaContext, offset: u64) -> u64 {
+pub unsafe extern "C" fn vuma_read_u64(ctx: *const VumaContext, offset: u64) -> u64 {
     if ctx.is_null() {
         return 0;
     }
@@ -109,8 +118,11 @@ pub extern "C" fn vuma_read_u64(ctx: *const VumaContext, offset: u64) -> u64 {
 }
 
 /// Write a u32 to ___pmt_buffer at `offset`.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by [`vuma_context_enter`] (or null).
 #[no_mangle]
-pub extern "C" fn vuma_write_u32(ctx: *mut VumaContext, offset: u64, val: u32) {
+pub unsafe extern "C" fn vuma_write_u32(ctx: *mut VumaContext, offset: u64, val: u32) {
     if ctx.is_null() {
         return;
     }
@@ -130,8 +142,11 @@ pub extern "C" fn vuma_write_u32(ctx: *mut VumaContext, offset: u64, val: u32) {
 }
 
 /// Write a u64 to ___pmt_buffer at `offset`.
+///
+/// # Safety
+/// `ctx` must be a valid pointer returned by [`vuma_context_enter`] (or null).
 #[no_mangle]
-pub extern "C" fn vuma_write_u64(ctx: *mut VumaContext, offset: u64, val: u64) {
+pub unsafe extern "C" fn vuma_write_u64(ctx: *mut VumaContext, offset: u64, val: u64) {
     if ctx.is_null() {
         return;
     }
@@ -153,7 +168,10 @@ pub extern "C" fn vuma_write_u64(ctx: *mut VumaContext, offset: u64, val: u64) {
 /// Allocate a fresh state in ___pmt_buffer.
 /// (Stub: returns 0 for now — full state_new integration is Wave 8.)
 #[no_mangle]
-pub extern "C" fn vuma_state_new(_ctx: *mut VumaContext, _layout_name: *const std::os::raw::c_char) -> u64 {
+pub extern "C" fn vuma_state_new(
+    _ctx: *mut VumaContext,
+    _layout_name: *const std::os::raw::c_char,
+) -> u64 {
     // TODO Wave 8: allocate at a fresh offset in ___pmt_buffer.
     // For now, return 0 (the callback can use offset 0 as a scratch area,
     // since the callback_live_set prevents aliasing with caller state).
@@ -176,8 +194,8 @@ pub extern "C" fn vuma_push_i64(_ctx: *mut VumaContext, val: i64) {
 // ── Thread-local return value slots ──────────────────────────────────────
 
 thread_local! {
-    static CALLBACK_RETURN_I32: std::cell::Cell<Option<i32>> = std::cell::Cell::new(None);
-    static CALLBACK_RETURN_I64: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
+    static CALLBACK_RETURN_I32: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+    static CALLBACK_RETURN_I64: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Retrieve and clear the last pushed i32 return value.
@@ -209,10 +227,12 @@ mod tests {
         // Caller-live region: [0, 16). Free region: [16, 64).
         let ctx = vuma_context_enter(buf.as_mut_ptr(), buf.len() as u64, &[(0, 16)]);
         // Write to offset 32 (free region) — should work.
-        vuma_write_u32(Box::into_raw(ctx), 32, 42);
+        unsafe {
+            vuma_write_u32(Box::into_raw(ctx), 32, 42);
+        }
         // Re-create context (the previous one was consumed by Box::into_raw).
         let ctx2 = vuma_context_enter(buf.as_mut_ptr(), buf.len() as u64, &[(0, 16)]);
-        let val = vuma_read_u32(Box::into_raw(ctx2), 32);
+        let val = unsafe { vuma_read_u32(Box::into_raw(ctx2), 32) };
         assert_eq!(val, 42);
         // Note: in real usage, vuma_context_leave is called; here we leak
         // for test simplicity (the frames are thread-local and will be
@@ -234,8 +254,10 @@ mod tests {
 
     #[test]
     fn test_null_context_returns_zero() {
-        assert_eq!(vuma_read_u32(std::ptr::null(), 0), 0);
-        assert_eq!(vuma_read_u64(std::ptr::null(), 0), 0);
-        vuma_write_u32(std::ptr::null_mut(), 0, 42); // no-op, no crash
+        assert_eq!(unsafe { vuma_read_u32(std::ptr::null(), 0) }, 0);
+        assert_eq!(unsafe { vuma_read_u64(std::ptr::null(), 0) }, 0);
+        unsafe {
+            vuma_write_u32(std::ptr::null_mut(), 0, 42);
+        } // no-op, no crash
     }
 }

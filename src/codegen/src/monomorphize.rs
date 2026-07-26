@@ -27,9 +27,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendError;
-use crate::ir::{IRFunction, IRInstr, IRProgram};
 #[cfg(test)]
 use crate::ir::IRValue;
+use crate::ir::{IRFunction, IRInstr, IRProgram};
 
 /// A monomorphization key: (function_name, type_args)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -171,7 +171,8 @@ impl Monomorphizer {
                     // No definition found — the call site references an
                     // extern / runtime generic. Leave the call as-is (it
                     // will be resolved at link time).
-                    vuma_log!(warn, 
+                    vuma_log!(
+                        warn,
                         "Monomorphizer: no definition for generic `{}` \
                          (referenced by call site `{}`); leaving extern",
                         key.func_name,
@@ -197,7 +198,10 @@ impl Monomorphizer {
                 for instr in &mut block.instructions {
                     if let IRInstr::Call { func: callee, .. } = instr {
                         if let Some((name, type_args)) = parse_generic_callee(callee) {
-                            let key = MonoKey { func_name: name, type_args };
+                            let key = MonoKey {
+                                func_name: name,
+                                type_args,
+                            };
                             if let Some(spec_name) = self.specializations.get(&key) {
                                 *callee = spec_name.clone();
                             }
@@ -276,7 +280,7 @@ pub fn monomorphize(program: &mut IRProgram) -> Result<(), BackendError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IRProgram, IRType, IRTerminator};
+    use crate::ir::{IRProgram, IRTerminator, IRType};
 
     #[test]
     fn test_specialized_name() {
@@ -285,10 +289,7 @@ mod tests {
             "push_u32"
         );
         assert_eq!(
-            Monomorphizer::specialized_name(
-                "insert",
-                &["String".to_string(), "u32".to_string()]
-            ),
+            Monomorphizer::specialized_name("insert", &["String".to_string(), "u32".to_string()]),
             "insert_String_u32"
         );
     }
@@ -362,8 +363,7 @@ mod tests {
         //  - two specialized clones (`id_i32`, `id_i64`) are added,
         //  - the caller survives and its call sites reference the
         //    specialized names.
-        let names: Vec<&str> =
-            prog.functions.iter().map(|f| f.name.as_str()).collect();
+        let names: Vec<&str> = prog.functions.iter().map(|f| f.name.as_str()).collect();
         assert!(
             names.contains(&"id_i32"),
             "missing `id_i32` specialization (got {:?})",
@@ -478,11 +478,7 @@ mod tests {
 
         monomorphize(&mut prog).expect("monomorphize should succeed");
 
-        let count = prog
-            .functions
-            .iter()
-            .filter(|f| f.name == "id_i32")
-            .count();
+        let count = prog.functions.iter().filter(|f| f.name == "id_i32").count();
         assert_eq!(
             count, 1,
             "expected exactly one `id_i32` specialization, got {}",

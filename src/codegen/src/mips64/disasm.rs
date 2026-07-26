@@ -77,10 +77,10 @@ const FN_CVT_S: u32 = 0x20; // cvt.*.s  (cvt.s.d / cvt.s.w / cvt.s.l)
 const FN_CVT_D: u32 = 0x21; // cvt.*.d  (cvt.d.s / cvt.d.w / cvt.d.l)
 const FN_CVT_W: u32 = 0x24; // cvt.*.w  (cvt.w.s / cvt.w.d)
 const FN_CVT_L: u32 = 0x25; // cvt.*.l  (cvt.l.s / cvt.l.d)
-// COP1 function codes for FP truncate (round-toward-zero) instructions.
-// These are emitted by the Cast lowering for FloatToInt / FloatToUInt
-// (per the comment in `mips64/mod.rs`, TRUNC.L.D is preferred over
-// CVT.L.D because it always rounds toward zero regardless of FCSR).
+                            // COP1 function codes for FP truncate (round-toward-zero) instructions.
+                            // These are emitted by the Cast lowering for FloatToInt / FloatToUInt
+                            // (per the comment in `mips64/mod.rs`, TRUNC.L.D is preferred over
+                            // CVT.L.D because it always rounds toward zero regardless of FCSR).
 const FN_TRUNC_W: u32 = 0x0D; // trunc.*.w  (trunc.w.d / trunc.w.s)
 const FN_TRUNC_L: u32 = 0x09; // trunc.*.l  (trunc.l.d / trunc.l.s)
 

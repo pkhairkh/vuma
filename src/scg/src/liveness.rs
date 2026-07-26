@@ -708,8 +708,8 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AccessNode, AllocationNode, ComputationKind, ComputationNode, ControlKind, ControlNode, DeallocationNode,
-        EffectNode, NodePayload, NodeType, ProgramPoint,
+        AccessNode, AllocationNode, ComputationKind, ComputationNode, ControlKind, ControlNode,
+        DeallocationNode, EffectNode, NodePayload, NodeType, ProgramPoint,
     };
     use crate::region::RegionId;
 

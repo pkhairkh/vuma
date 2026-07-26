@@ -897,26 +897,30 @@ impl Instruction {
             let rs = (word >> 21) & 0x1F;
             let ra = (word >> 16) & 0x1F;
             let rb = (word >> 11) & 0x1F;
-            let mb_lo = (word >> 6) & 0x1F;  // MB[1:5] (low 5 bits of MB)
-            let mb5 = (word >> 5) & 1;       // MB[0] (high bit of MB)
+            let mb_lo = (word >> 6) & 0x1F; // MB[1:5] (low 5 bits of MB)
+            let mb5 = (word >> 5) & 1; // MB[0] (high bit of MB)
             let mb = mb_lo | (mb5 << 5);
             let me_lo = mb_lo; // same field positions for ME
             let me5 = mb5;
             let me = me_lo | (me5 << 5);
             let xo_md = (word >> 1) & 0xF; // 4-bit XO in MD-form
             match xo_md {
-                8 => return Ok(Instruction::Rldcl {
-                    ra: gpr_from_bits(ra),
-                    rs: gpr_from_bits(rs),
-                    rb: gpr_from_bits(rb),
-                    mb,
-                }),
-                9 => return Ok(Instruction::Rldcr {
-                    ra: gpr_from_bits(ra),
-                    rs: gpr_from_bits(rs),
-                    rb: gpr_from_bits(rb),
-                    me,
-                }),
+                8 => {
+                    return Ok(Instruction::Rldcl {
+                        ra: gpr_from_bits(ra),
+                        rs: gpr_from_bits(rs),
+                        rb: gpr_from_bits(rb),
+                        mb,
+                    })
+                }
+                9 => {
+                    return Ok(Instruction::Rldcr {
+                        ra: gpr_from_bits(ra),
+                        rs: gpr_from_bits(rs),
+                        rb: gpr_from_bits(rb),
+                        me,
+                    })
+                }
                 // RLDICR (XO=2): MD-form with SH (immediate) and ME fields.
                 // bits [16:20] (MSB-first) = SH[1:5] (low 5 bits)
                 // bit  [21]   (MSB-first) = SH[0]    (high bit)

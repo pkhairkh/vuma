@@ -33,8 +33,6 @@
 //! value assignment, channel send, or branch condition) and returns a
 //! list of `FlowViolation`s for any disallowed flows.
 
-use std::collections::HashMap;
-
 /// A security label in the Denning lattice.
 ///
 /// The ordering is `Public ⊑ Internal ⊑ Secret ⊑ TopSecret`. Higher
@@ -60,7 +58,7 @@ impl SecurityLabel {
     pub fn can_flow_to(self, other: SecurityLabel) -> bool {
         use SecurityLabel::*;
         match (self, other) {
-            (Public, _) => true,           // Public flows anywhere
+            (Public, _) => true, // Public flows anywhere
             (Internal, Internal | Secret | TopSecret) => true,
             (Secret, Secret | TopSecret) => true,
             (TopSecret, TopSecret) => true,
@@ -173,7 +171,11 @@ pub fn verify_information_flow(events: &[FlowEvent]) -> Vec<FlowViolation> {
 
     for event in &sorted {
         match &event.kind {
-            FlowKind::Assign { dst_vreg, dst_label, src_label } => {
+            FlowKind::Assign {
+                dst_vreg,
+                dst_label,
+                src_label,
+            } => {
                 if !src_label.can_flow_to(*dst_label) {
                     results.push(FlowViolation {
                         valid: false,
@@ -186,7 +188,12 @@ pub fn verify_information_flow(events: &[FlowEvent]) -> Vec<FlowViolation> {
                     });
                 }
             }
-            FlowKind::BinOp { dst_vreg, dst_label, lhs_label, rhs_label } => {
+            FlowKind::BinOp {
+                dst_vreg,
+                dst_label,
+                lhs_label,
+                rhs_label,
+            } => {
                 let result_label = lhs_label.join(*rhs_label);
                 if !result_label.can_flow_to(*dst_label) {
                     results.push(FlowViolation {
@@ -200,20 +207,31 @@ pub fn verify_information_flow(events: &[FlowEvent]) -> Vec<FlowViolation> {
                     });
                 }
             }
-            FlowKind::ChannelSend { channel_label, msg_label } => {
+            FlowKind::ChannelSend {
+                channel_label,
+                msg_label,
+            } => {
                 if !msg_label.can_flow_to(*channel_label) {
                     results.push(FlowViolation {
                         valid: false,
                         error: Some(format!(
                             "information-flow violation at node {}: sending message with label {} \
                              on channel with label {} — {} ⊀ {} (would leak {} data to {} channel)",
-                            event.at_node, msg_label, channel_label,
-                            msg_label, channel_label, msg_label, channel_label
+                            event.at_node,
+                            msg_label,
+                            channel_label,
+                            msg_label,
+                            channel_label,
+                            msg_label,
+                            channel_label
                         )),
                     });
                 }
             }
-            FlowKind::Branch { cond_label, branch_var_labels } => {
+            FlowKind::Branch {
+                cond_label,
+                branch_var_labels,
+            } => {
                 // Implicit flow: any variable assigned in a branch on a
                 // secret condition inherits the condition's label. If a
                 // branch variable has a lower label, that's a leak.
@@ -225,8 +243,7 @@ pub fn verify_information_flow(events: &[FlowEvent]) -> Vec<FlowViolation> {
                                 "implicit information-flow violation at node {}: branch on \
                                  condition with label {} assigns to variable with label {} — \
                                  {} ⊀ {} (implicit leak via control flow)",
-                                event.at_node, cond_label, var_label,
-                                cond_label, var_label
+                                event.at_node, cond_label, var_label, cond_label, var_label
                             )),
                         });
                     }
@@ -273,10 +290,22 @@ mod tests {
 
     #[test]
     fn test_join_takes_higher_label() {
-        assert_eq!(SecurityLabel::Public.join(SecurityLabel::Secret), SecurityLabel::Secret);
-        assert_eq!(SecurityLabel::Secret.join(SecurityLabel::Public), SecurityLabel::Secret);
-        assert_eq!(SecurityLabel::Internal.join(SecurityLabel::TopSecret), SecurityLabel::TopSecret);
-        assert_eq!(SecurityLabel::Public.join(SecurityLabel::Public), SecurityLabel::Public);
+        assert_eq!(
+            SecurityLabel::Public.join(SecurityLabel::Secret),
+            SecurityLabel::Secret
+        );
+        assert_eq!(
+            SecurityLabel::Secret.join(SecurityLabel::Public),
+            SecurityLabel::Secret
+        );
+        assert_eq!(
+            SecurityLabel::Internal.join(SecurityLabel::TopSecret),
+            SecurityLabel::TopSecret
+        );
+        assert_eq!(
+            SecurityLabel::Public.join(SecurityLabel::Public),
+            SecurityLabel::Public
+        );
     }
 
     #[test]
@@ -284,7 +313,8 @@ mod tests {
         // public → public: OK
         let events = vec![FlowEvent {
             kind: FlowKind::Assign {
-                dst_vreg: 0, dst_label: SecurityLabel::Public,
+                dst_vreg: 0,
+                dst_label: SecurityLabel::Public,
                 src_label: SecurityLabel::Public,
             },
             at_node: 10,
@@ -297,7 +327,8 @@ mod tests {
         // secret → public: LEAK
         let events = vec![FlowEvent {
             kind: FlowKind::Assign {
-                dst_vreg: 0, dst_label: SecurityLabel::Public,
+                dst_vreg: 0,
+                dst_label: SecurityLabel::Public,
                 src_label: SecurityLabel::Secret,
             },
             at_node: 10,
@@ -312,7 +343,8 @@ mod tests {
         // dst (public) = secret + internal → join = secret, secret ⊀ public: LEAK
         let events = vec![FlowEvent {
             kind: FlowKind::BinOp {
-                dst_vreg: 0, dst_label: SecurityLabel::Public,
+                dst_vreg: 0,
+                dst_label: SecurityLabel::Public,
                 lhs_label: SecurityLabel::Secret,
                 rhs_label: SecurityLabel::Internal,
             },
@@ -327,7 +359,7 @@ mod tests {
     fn test_channel_send_leak_detected() {
         // send secret on public channel: LEAK
         let events = vec![FlowEvent {
-            kind: FlowKind::ChannelSend { channel_label: SecurityLabel::Public, msg_label: SecurityLabel::Public } {
+            kind: FlowKind::ChannelSend {
                 channel_label: SecurityLabel::Public,
                 msg_label: SecurityLabel::Secret,
             },
@@ -342,7 +374,7 @@ mod tests {
     fn test_channel_send_valid() {
         // send public on secret channel: OK (public ⊑ secret)
         let events = vec![FlowEvent {
-            kind: FlowKind::ChannelSend { channel_label: SecurityLabel::Public, msg_label: SecurityLabel::Public } {
+            kind: FlowKind::ChannelSend {
                 channel_label: SecurityLabel::Secret,
                 msg_label: SecurityLabel::Public,
             },
@@ -385,21 +417,24 @@ mod tests {
         let events = vec![
             FlowEvent {
                 kind: FlowKind::Assign {
-                    dst_vreg: 0, dst_label: SecurityLabel::Public,
+                    dst_vreg: 0,
+                    dst_label: SecurityLabel::Public,
                     src_label: SecurityLabel::Public,
                 },
                 at_node: 10,
             },
             FlowEvent {
                 kind: FlowKind::Assign {
-                    dst_vreg: 1, dst_label: SecurityLabel::Secret,
+                    dst_vreg: 1,
+                    dst_label: SecurityLabel::Secret,
                     src_label: SecurityLabel::Public, // OK: public ⊑ secret
                 },
                 at_node: 20,
             },
             FlowEvent {
                 kind: FlowKind::Assign {
-                    dst_vreg: 2, dst_label: SecurityLabel::Public,
+                    dst_vreg: 2,
+                    dst_label: SecurityLabel::Public,
                     src_label: SecurityLabel::TopSecret, // LEAK
                 },
                 at_node: 30,
@@ -413,8 +448,14 @@ mod tests {
     #[test]
     fn test_all_flows_valid_helper() {
         assert!(all_flows_valid(&[]));
-        assert!(all_flows_valid(&[FlowViolation { valid: true, error: None }]));
-        assert!(!all_flows_valid(&[FlowViolation { valid: false, error: Some("x".into()) }]));
+        assert!(all_flows_valid(&[FlowViolation {
+            valid: true,
+            error: None
+        }]));
+        assert!(!all_flows_valid(&[FlowViolation {
+            valid: false,
+            error: Some("x".into())
+        }]));
     }
 }
 
@@ -434,7 +475,9 @@ pub struct FlowViolationIR {
 /// This is the pipeline-facing wrapper.
 ///
 /// Currently advisory — logs warnings but does NOT abort compilation.
-pub fn verify_information_flow_from_ir(program: &vuma_codegen::ir::IRProgram) -> Vec<FlowViolationIR> {
+pub fn verify_information_flow_from_ir(
+    program: &vuma_codegen::ir::IRProgram,
+) -> Vec<FlowViolationIR> {
     let mut violations = Vec::new();
     // Collect flow events from the IR.
     // A High → Low flow occurs when a value from a high-security source
@@ -449,14 +492,21 @@ pub fn verify_information_flow_from_ir(program: &vuma_codegen::ir::IRProgram) ->
                 if let vuma_codegen::ir::IRInstr::Call { func: name, .. } = instr {
                     if name == "channel_send" || name == "channel_send_cap" {
                         events.push(FlowEvent {
-                            kind: FlowKind::ChannelSend { channel_label: SecurityLabel::Public, msg_label: SecurityLabel::Public },
+                            kind: FlowKind::ChannelSend {
+                                channel_label: SecurityLabel::Public,
+                                msg_label: SecurityLabel::Public,
+                            },
                             at_node: fi * 10000 + bi * 100 + ii,
                         });
                     }
                 }
                 if let vuma_codegen::ir::IRInstr::Store { .. } = instr {
                     events.push(FlowEvent {
-                        kind: FlowKind::Assign { dst_vreg: 0, dst_label: SecurityLabel::Public, src_label: SecurityLabel::Public },
+                        kind: FlowKind::Assign {
+                            dst_vreg: 0,
+                            dst_label: SecurityLabel::Public,
+                            src_label: SecurityLabel::Public,
+                        },
                         at_node: fi * 10000 + bi * 100 + ii,
                     });
                 }

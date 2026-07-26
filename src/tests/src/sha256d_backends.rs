@@ -60,21 +60,18 @@ use crate::framework::{build_scg_from_source, compile_to_arm64, CompileError};
 // ===========================================================================
 
 const H_INIT: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 fn ch(x: u32, y: u32, z: u32) -> u32 {
@@ -247,7 +244,12 @@ fn all_backends() -> Vec<BackendMeta> {
             name: "mips64",
             elf_machine: EM_MIPS,
             elf_class: ELFCLASS64,
-            elf_data: ELFDATA2MSB,
+            // mips64 (Mips64Backend) intentionally emits a little-endian
+            // ELF (ELFDATA2LSB) to match `qemu-mips64el` — see
+            // src/codegen/src/mips64/mod.rs:1743-1855 (build_mips64_elf_2seg
+            // pushes ELFDATA2LSB at line 1779). The `mips64be` wrapper
+            // (`Mips64BeBackend`) is the big-endian variant for `qemu-mips64`.
+            elf_data: ELFDATA2LSB,
         },
         BackendMeta {
             kind: BackendKind::PowerPC64,
@@ -319,7 +321,8 @@ fn validate_elf_header_for_backend(bytes: &[u8], meta: &BackendMeta) {
 
     // Data encoding (endianness)
     assert_eq!(
-        bytes[5], meta.elf_data,
+        bytes[5],
+        meta.elf_data,
         "[{}] ELF data encoding should be {} ({})",
         meta.name,
         meta.elf_data,
@@ -404,42 +407,35 @@ fn validate_wasm_module(bytes: &[u8]) {
 fn compile_ir_to_binary(backend: &dyn Backend, functions: &[IRFunction], label: &str) -> Vec<u8> {
     let mut allocated_functions = Vec::new();
     for func in functions {
-        let allocated = backend
-            .allocate_registers(func)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{}: allocate_registers failed for {}: {}",
-                    backend.name(),
-                    label,
-                    e
-                )
-            });
+        let allocated = backend.allocate_registers(func).unwrap_or_else(|e| {
+            panic!(
+                "{}: allocate_registers failed for {}: {}",
+                backend.name(),
+                label,
+                e
+            )
+        });
         allocated_functions.push(allocated);
     }
 
-    let total_code_size: usize = allocated_functions
-        .iter()
-        .map(|f| f.code_size)
-        .sum();
+    let total_code_size: usize = allocated_functions.iter().map(|f| f.code_size).sum();
 
     let program = AllocatedProgram {
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
-    backend
-        .encode_program(&program)
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}: encode_program failed for {}: {}",
-                backend.name(),
-                label,
-                e
-            )
-        })
+    backend.encode_program(&program).unwrap_or_else(|e| {
+        panic!(
+            "{}: encode_program failed for {}: {}",
+            backend.name(),
+            label,
+            e
+        )
+    })
 }
 
 /// Compile a codegen SCG through a given backend and return the binary bytes.
@@ -459,8 +455,8 @@ fn compile_scg_to_binary(scg: &Scg, backend: &dyn Backend) -> Result<Vec<u8>, St
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     backend.encode_program(&program).map_err(|e| e.to_string())
@@ -492,7 +488,7 @@ fn make_add_scg() -> Scg {
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Var("b".to_string()),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -558,9 +554,7 @@ fn test_sha256d_compiles_via_framework_arm64() {
         }
         Err(errors) => {
             // Parse errors are unacceptable — the program is syntactically valid.
-            let has_parse_error = errors.iter().any(|e| {
-                matches!(e, CompileError::Parse(_))
-            });
+            let has_parse_error = errors.iter().any(|e| matches!(e, CompileError::Parse(_)));
             assert!(
                 !has_parse_error,
                 "SHA256d must parse without errors: {:?}",
@@ -690,10 +684,8 @@ fn make_sha256d_bitwise_ir() -> IRFunction {
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(6));
     for i in 0..7 {
-        func.vregs.insert(
-            i,
-            VirtualRegister::new(i, Some(format!("v{}", i))),
-        );
+        func.vregs
+            .insert(i, VirtualRegister::new(i, Some(format!("v{}", i))));
     }
 
     let block = func.current_block();
@@ -834,10 +826,8 @@ fn make_sha256d_shift_ir() -> IRFunction {
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(4));
     for i in 0..5 {
-        func.vregs.insert(
-            i,
-            VirtualRegister::new(i, Some(format!("v{}", i))),
-        );
+        func.vregs
+            .insert(i, VirtualRegister::new(i, Some(format!("v{}", i))));
     }
 
     let block = func.current_block();
@@ -943,8 +933,8 @@ mod x86_64_execution {
 
     /// Execute raw x86_64 machine code by mapping it into executable memory.
     fn execute_native(code: &[u8]) -> i64 {
-        use std::ptr;
         use crate::ffi_types as ffi;
+        use std::ptr;
 
         let len = code.len();
         let page_size = 4096usize;
@@ -1009,7 +999,11 @@ mod x86_64_execution {
         let program_bytes = compile_ir_to_binary(&*backend, &[func], "sha256d_return_79");
 
         // Verify the ELF is valid for x86_64
-        assert_eq!(&program_bytes[0..4], &[0x7f, b'E', b'L', b'F'], "Must be ELF");
+        assert_eq!(
+            &program_bytes[0..4],
+            &[0x7f, b'E', b'L', b'F'],
+            "Must be ELF"
+        );
         assert_eq!(program_bytes[4], ELFCLASS64, "Must be ELF64");
         let e_machine = u16::from_le_bytes([program_bytes[18], program_bytes[19]]);
         assert_eq!(e_machine, EM_X86_64, "Must be x86_64");
@@ -1069,7 +1063,8 @@ fn test_sha256d_property_different_inputs_different_outputs() {
         let d1 = sha256d(x);
         let d2 = sha256d(x_plus_1);
         assert_ne!(
-            d1, d2,
+            d1,
+            d2,
             "SHA256d({:?}) must differ from SHA256d({:?})",
             std::str::from_utf8(x).unwrap_or("<binary>"),
             std::str::from_utf8(x_plus_1).unwrap_or("<binary>")
@@ -1081,23 +1076,29 @@ fn test_sha256d_property_different_inputs_different_outputs() {
 fn test_sha256d_property_avalanche_effect() {
     // Avalanche effect: changing 1 bit should change ~50% of output bits.
     let pairs: [(&[u8], &[u8]); 6] = [
-        (b"abc", b"abd"),       // 1 bit change in last char
-        (b"test", b"tesu"),     // 1 bit change in last char
-        (b"\x00", b"\x01"),     // 1 bit change (LSB)
-        (b"\xFF\xFE", b"\xFF\xFF"), // 1 bit change in second byte
+        (b"abc", b"abd"),                 // 1 bit change in last char
+        (b"test", b"tesu"),               // 1 bit change in last char
+        (b"\x00", b"\x01"),               // 1 bit change (LSB)
+        (b"\xFF\xFE", b"\xFF\xFF"),       // 1 bit change in second byte
         (b"hello world", b"hello worle"), // 1 bit change
-        (b"VUMA", b"VUMB"),     // 1 bit change
+        (b"VUMA", b"VUMB"),               // 1 bit change
     ];
 
     for (a, b) in &pairs {
         let da = sha256d(a);
         let db = sha256d(b);
-        let diff_bits: u32 = da.iter().zip(db.iter()).map(|(x, y)| (x ^ y).count_ones()).sum();
+        let diff_bits: u32 = da
+            .iter()
+            .zip(db.iter())
+            .map(|(x, y)| (x ^ y).count_ones())
+            .sum();
         // Expect roughly 128 bits different out of 256 (±25% tolerance).
         assert!(
             diff_bits > 96 && diff_bits < 160,
             "Avalanche: pair {:?} vs {:?} got {} diff bits (expected ~128)",
-            a, b, diff_bits
+            a,
+            b,
+            diff_bits
         );
     }
 }
@@ -1118,9 +1119,19 @@ fn test_sha256d_property_preimage_resistance_basic() {
     // We can't prove this, but we can verify that different inputs
     // produce different outputs (collision resistance).
     let inputs: &[&[u8]] = &[
-        b"", b"a", b"ab", b"abc", b"abcd",
-        b"0", b"1", b"2", b"3", b"4",
-        b"Satoshi", b"Nakamoto", b"Bitcoin",
+        b"",
+        b"a",
+        b"ab",
+        b"abc",
+        b"abcd",
+        b"0",
+        b"1",
+        b"2",
+        b"3",
+        b"4",
+        b"Satoshi",
+        b"Nakamoto",
+        b"Bitcoin",
     ];
     let outputs: Vec<[u8; 32]> = inputs.iter().map(|i| sha256d(i)).collect();
 
@@ -1128,7 +1139,8 @@ fn test_sha256d_property_preimage_resistance_basic() {
     for i in 0..outputs.len() {
         for j in (i + 1)..outputs.len() {
             assert_ne!(
-                outputs[i], outputs[j],
+                outputs[i],
+                outputs[j],
                 "SHA256d of different inputs must differ: {:?} vs {:?}",
                 std::str::from_utf8(inputs[i]).unwrap_or("<binary>"),
                 std::str::from_utf8(inputs[j]).unwrap_or("<binary>")
@@ -1146,7 +1158,8 @@ fn test_sha256d_property_length_extension() {
         let single = sha256(input);
         let double = sha256d(input);
         assert_ne!(
-            double, single,
+            double,
+            single,
             "SHA256d(x) must differ from SHA-256(x) for input {:?}",
             std::str::from_utf8(input).unwrap_or("<binary>")
         );
@@ -1196,10 +1209,8 @@ fn make_fp_conversion_ir() -> IRFunction {
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(2));
     for i in 0..3 {
-        func.vregs.insert(
-            i,
-            VirtualRegister::new(i, Some(format!("v{}", i))),
-        );
+        func.vregs
+            .insert(i, VirtualRegister::new(i, Some(format!("v{}", i))));
     }
 
     let block = func.current_block();
@@ -1245,9 +1256,9 @@ fn test_fp_conversion_pipeline_all_backends() {
         let backend = create_backend(meta.kind).expect("backend creation should succeed");
         let name = meta.name;
 
-        let allocated = backend
-            .allocate_registers(&func)
-            .unwrap_or_else(|e| panic!("{}: allocate_registers failed for FP pipeline: {}", name, e));
+        let allocated = backend.allocate_registers(&func).unwrap_or_else(|e| {
+            panic!("{}: allocate_registers failed for FP pipeline: {}", name, e)
+        });
 
         // FP pipeline program should have multiple instructions.
         // Wasm32 is excluded: it lowers the whole function to a single
@@ -1315,10 +1326,8 @@ fn make_atomic_ops_ir() -> IRFunction {
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(4));
     for i in 0..5 {
-        func.vregs.insert(
-            i,
-            VirtualRegister::new(i, Some(format!("v{}", i))),
-        );
+        func.vregs
+            .insert(i, VirtualRegister::new(i, Some(format!("v{}", i))));
     }
 
     let block = func.current_block();
@@ -1379,9 +1388,9 @@ fn test_atomic_ops_pipeline_all_backends() {
         let backend = create_backend(meta.kind).expect("backend creation should succeed");
         let name = meta.name;
 
-        let allocated = backend
-            .allocate_registers(&func)
-            .unwrap_or_else(|e| panic!("{}: allocate_registers failed for atomic ops: {}", name, e));
+        let allocated = backend.allocate_registers(&func).unwrap_or_else(|e| {
+            panic!("{}: allocate_registers failed for atomic ops: {}", name, e)
+        });
 
         // Atomic-ops program should have multiple instructions.
         // Wasm32 is excluded: it lowers the whole function to a single
@@ -1459,9 +1468,7 @@ fn test_atomic_ops_vuma_pipeline() {
         }
         Err(errors) => {
             // Parse errors are unacceptable.
-            let has_parse_error = errors.iter().any(|e| {
-                matches!(e, CompileError::Parse(_))
-            });
+            let has_parse_error = errors.iter().any(|e| matches!(e, CompileError::Parse(_)));
             assert!(
                 !has_parse_error,
                 "Spinlock must parse without errors: {:?}",
@@ -1496,20 +1503,28 @@ fn test_sha256d_cross_backend_elf_consistency() {
         // Entry point must be non-zero
         let e_entry = if meta.elf_data == ELFDATA2MSB {
             u64::from_be_bytes([
-                program_bytes[24], program_bytes[25], program_bytes[26], program_bytes[27],
-                program_bytes[28], program_bytes[29], program_bytes[30], program_bytes[31],
+                program_bytes[24],
+                program_bytes[25],
+                program_bytes[26],
+                program_bytes[27],
+                program_bytes[28],
+                program_bytes[29],
+                program_bytes[30],
+                program_bytes[31],
             ])
         } else {
             u64::from_le_bytes([
-                program_bytes[24], program_bytes[25], program_bytes[26], program_bytes[27],
-                program_bytes[28], program_bytes[29], program_bytes[30], program_bytes[31],
+                program_bytes[24],
+                program_bytes[25],
+                program_bytes[26],
+                program_bytes[27],
+                program_bytes[28],
+                program_bytes[29],
+                program_bytes[30],
+                program_bytes[31],
             ])
         };
-        assert_ne!(
-            e_entry, 0,
-            "[{}] entry point must be non-zero",
-            meta.name
-        );
+        assert_ne!(e_entry, 0, "[{}] entry point must be non-zero", meta.name);
     }
 }
 
@@ -1590,10 +1605,8 @@ fn make_sha256d_memory_ir() -> IRFunction {
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(3));
     for i in 0..4 {
-        func.vregs.insert(
-            i,
-            VirtualRegister::new(i, Some(format!("v{}", i))),
-        );
+        func.vregs
+            .insert(i, VirtualRegister::new(i, Some(format!("v{}", i))));
     }
 
     let block = func.current_block();
@@ -1700,10 +1713,9 @@ fn make_sha256d_call_program() -> Vec<IRFunction> {
     let mut helper = IRFunction::new("rotr32");
     helper.result_types.push(IRType::I64);
     helper.results.push(IRValue::Register(0));
-    helper.vregs.insert(
-        0,
-        VirtualRegister::new(0, Some("result".to_string())),
-    );
+    helper
+        .vregs
+        .insert(0, VirtualRegister::new(0, Some("result".to_string())));
     // rotr32: just return a constant simulating a rotation result
     helper.current_block().terminator = IRTerminator::Return(vec![IRValue::Immediate(0x4F)]);
 
@@ -1737,11 +1749,12 @@ fn test_sha256d_function_call_all_backends() {
         // Allocate registers for each function
         let mut allocated_functions = Vec::new();
         for func in &functions {
-            let allocated = backend
-                .allocate_registers(func)
-                .unwrap_or_else(|e| {
-                    panic!("{}: allocate_registers failed for {}: {}", name, func.name, e)
-                });
+            let allocated = backend.allocate_registers(func).unwrap_or_else(|e| {
+                panic!(
+                    "{}: allocate_registers failed for {}: {}",
+                    name, func.name, e
+                )
+            });
             allocated_functions.push(allocated);
         }
 
@@ -1771,10 +1784,8 @@ fn make_sha256d_wrapping_add_ir() -> IRFunction {
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(3));
     for i in 0..4 {
-        func.vregs.insert(
-            i,
-            VirtualRegister::new(i, Some(format!("v{}", i))),
-        );
+        func.vregs
+            .insert(i, VirtualRegister::new(i, Some(format!("v{}", i))));
     }
 
     let block = func.current_block();
@@ -1844,7 +1855,8 @@ fn test_sha256d_wrapping_add_all_backends() {
             );
         }
 
-        let program_bytes = compile_ir_to_binary(&*backend, &[func.clone()], "sha256d_wrapping_add");
+        let program_bytes =
+            compile_ir_to_binary(&*backend, &[func.clone()], "sha256d_wrapping_add");
 
         match meta.kind {
             BackendKind::Wasm32 => {

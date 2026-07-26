@@ -643,19 +643,14 @@ impl SCG {
     pub fn find_path(&self, source: NodeId, target: NodeId) -> Option<bool> {
         let &source_idx = self.node_id_to_index.get(&source)?;
         let &target_idx = self.node_id_to_index.get(&target)?;
-        Some(has_path_connecting(
-            &self.graph,
-            source_idx,
-            target_idx,
-        ))
+        Some(has_path_connecting(&self.graph, source_idx, target_idx))
     }
 
     /// Returns a topological ordering of the nodes in the graph.
     ///
     /// Returns an error if the graph contains a cycle.
     pub fn topological_sort(&self) -> Result<Vec<NodeId>, SCGError> {
-        let sorted: Vec<NodeIndex> =
-            toposort(&self.graph).map_err(|_| SCGError::CycleDetected)?;
+        let sorted: Vec<NodeIndex> = toposort(&self.graph).map_err(|_| SCGError::CycleDetected)?;
         let result: Vec<NodeId> = sorted
             .into_iter()
             .filter_map(|idx| self.node_index_to_id.get(&idx).copied())
@@ -974,7 +969,9 @@ impl Default for SCG {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{AllocationNode, ComputationKind, ComputationNode, DeallocationNode, PhantomNode};
+    use crate::node::{
+        AllocationNode, ComputationKind, ComputationNode, DeallocationNode, PhantomNode,
+    };
     use crate::region::DeploymentTarget;
 
     fn make_program_point() -> ProgramPoint {
@@ -1362,7 +1359,10 @@ mod tests {
         scg.add_edge(n4, n2, EdgeKind::DataFlow).unwrap();
 
         // toposort must now fail.
-        assert!(matches!(scg.topological_sort(), Err(SCGError::CycleDetected)));
+        assert!(matches!(
+            scg.topological_sort(),
+            Err(SCGError::CycleDetected)
+        ));
         assert!(scg.has_cycles());
 
         // topological_sort_with_cycles must still return all 4 nodes (storage:

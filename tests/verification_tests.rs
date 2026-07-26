@@ -4,7 +4,7 @@
 //! the bitvector verification framework — not by a hardcoded `verified: true`
 //! flag. Each rule is exhaustively checked over all 8-bit inputs.
 
-use vuma_codegen::bv_verify::{verify_all_rules, assert_all_rules_sound, count_verified};
+use vuma_codegen::bv_verify::{assert_all_rules_sound, count_verified, verify_all_rules};
 
 #[test]
 fn wave7_all_rules_verified_sound() {
@@ -22,15 +22,26 @@ fn wave7_all_rules_verified_sound() {
 #[test]
 fn wave7_verify_count_meets_minimum() {
     let (sound, total) = count_verified();
-    assert!(total >= 16, "expected at least 16 verified rules, got {}", total);
-    assert_eq!(sound, total, "all {} rules should be sound, only {} are", total, sound);
+    assert!(
+        total >= 16,
+        "expected at least 16 verified rules, got {}",
+        total
+    );
+    assert_eq!(
+        sound, total,
+        "all {} rules should be sound, only {} are",
+        total, sound
+    );
 }
 
 #[test]
 fn wave7_assert_all_rules_sound_api() {
     // The assert_all_rules_sound() function is the API that production code
     // can call to gate rule application on verification. It must return Ok.
-    assert!(assert_all_rules_sound().is_ok(), "all rules should be sound");
+    assert!(
+        assert_all_rules_sound().is_ok(),
+        "all rules should be sound"
+    );
 }
 
 #[test]
@@ -52,15 +63,14 @@ fn wave7_verification_evaluates_all_cases() {
 #[test]
 fn wave7_verification_detects_unsound_rules() {
     // Sanity check: the verifier must detect deliberately unsound rules.
-    use vuma_codegen::bv_verify::{verify_rule_1var, eval_binop};
+    use vuma_codegen::bv_verify::{eval_binop, verify_rule_1var};
     use vuma_codegen::ir::BinOpKind;
 
     // Claim: x + 1 == x (FALSE for all x except... let's see)
-    let result = verify_rule_1var(
-        "bogus",
-        |x| eval_binop(BinOpKind::Add, x, 1),
-        |x| x,
-    );
+    let result = verify_rule_1var("bogus", |x| eval_binop(BinOpKind::Add, x, 1), |x| x);
     assert!(!result.sound, "x+1==x must be detected as unsound");
-    assert!(result.counterexample.is_some(), "must provide a counterexample");
+    assert!(
+        result.counterexample.is_some(),
+        "must provide a counterexample"
+    );
 }

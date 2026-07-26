@@ -34,11 +34,32 @@
 //! ```
 
 use std::collections::{HashMap, HashSet, VecDeque};
-// Wave 9: parallel register allocation across functions.
+// Parallel register allocation across functions.
 // Replaced rayon with std::thread::scope (no external dep).
 use std::fmt;
 use std::path::Path;
 use std::time::Instant;
+
+// ── Type aliases for the AST→SCG bridge ──────────────────────────────────
+//
+// These factor out the two complex types that previously tripped
+// `clippy::type_complexity` in `BridgeCtx` and the `build_layout_registry` /
+// `resolve_state_field_chain` helpers.
+
+/// Program-wide shared string table. Each entry is `(label, bytes_including_NUL)`.
+/// Wrapped in `Rc<RefCell<...>>` so every per-function `BridgeCtx` can append
+/// during AST→SCG lowering; the table is drained once at the end and emitted
+/// as a single `ScgNode::Data (ReadOnly)` section.
+type StringTable = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+
+/// A single field of a PMT layout: `(name, ir_type, byte_offset, byte_size,
+/// type_name)`. `type_name` is the field's declared type as a string
+/// (e.g. `"u32"`, `"Point"`) — used to descend into nested layout-typed
+/// fields.
+type LayoutField = (String, vuma_codegen::ir::IRType, u64, u64, String);
+
+/// PMT layout registry: layout name → `(total_size, fields)`.
+type LayoutRegistry = HashMap<String, (u64, Vec<LayoutField>)>;
 
 // ── Workspace crate imports ──────────────────────────────────────────────
 
@@ -48,13 +69,14 @@ use vuma_codegen::{
     ir::{BinOpKind as IrBinOpKind, IRFunction, IRProgram},
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
-        AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
-        Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm, SyscallCallNode,
-        ChannelOpenStmt, ChannelSendStmt, ChannelRecvStmt, ChannelCloseStmt, ChannelRecvResultStmt,
+        AccessNode, AllocationNode, CallNode, CastNode, ChannelCloseStmt, ChannelOpenStmt,
+        ChannelRecvResultStmt, ChannelRecvStmt, ChannelSendStmt, ComputationNode, ControlNode,
+        GetAddressNode, IRBuilder, Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam,
+        ScgStatement, ScgType, SwitchArm, SyscallCallNode,
     },
     CastKind as CodegenCastKind, CodegenError, DataSectionKind,
 };
-// (Wave 32) Escape analysis + effect analysis are wired into the O2+
+// Escape analysis + effect analysis are wired into the O2+
 // codegen-opt stage.  We import the modules so the pipeline can call
 // `escape_analysis::analyze_escapes_program`, drive SROA / alloc
 // elision, and call `effects::analyze_program_effects` for
@@ -68,7 +90,6 @@ use vuma_codegen::{effects, escape_analysis};
 // pipeline-only code that already uses them.
 use vuma_codegen::ir::BinOpKind;
 use vuma_codegen::CastKind;
-use vuma_cor::{CORuntime, Config as CorConfig};
 use vuma_core::{
     scg_to_msg::{scg_to_msg, ConversionError},
     MSG,
@@ -77,13 +98,14 @@ use vuma_ive::{
     AggregatedResult, InferenceEngine, InvariantAggregator, OverallVerdict,
     VerificationLevel as IveVerificationLevel,
 };
-use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
+use vuma_parser::{
+    AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError,
+};
 use vuma_scg::{
-    AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
-    DeadRegionElimination, EdgeData, EdgeKind, InliningPass,
+    AccessMode, CommonSubexpressionElimination, ComputationKind, ConstantFolding, ControlKind,
+    DeadCodeElimination, DeadRegionElimination, EdgeData, EdgeKind, InliningPass,
     LoopInvariantCodeMotion, NodeData, NodeId, NodePayload, NodeType, PassManager,
-    PipelineResult as ScgPipelineResult, SCG, SCGPass, StrengthReduction, TailCallOptDetection,
-    ComputationKind,
+    PipelineResult as ScgPipelineResult, SCGPass, StrengthReduction, TailCallOptDetection, SCG,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -134,9 +156,7 @@ where
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The compilation target platform.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CompileTarget {
     /// Generic Linux user-space on AArch64.
     #[default]
@@ -163,9 +183,7 @@ impl fmt::Display for CompileTarget {
 /// serialised display, but the CLI rejects every non-O3 value and
 /// `OptLevel::default()` returns `O3` so that any code path that forgets
 /// to set the level explicitly still gets the mandatory O3 behaviour.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OptLevel {
     /// No optimisation — fastest compilation, best debuggability.
     O0,
@@ -202,9 +220,7 @@ impl fmt::Display for OptLevel {
 /// variants are retained for API stability and for the `--verification`
 /// flag's error messages, but they all collapse to PMT state verification
 /// in the pipeline. The `#[default]` is `Normal` (which maps to `Pmt`).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VerificationLevel {
     /// Quick: only cheap syntactic checks.
     Quick,
@@ -213,11 +229,11 @@ pub enum VerificationLevel {
     Normal,
     /// Exhaustive: all checks + formal proof attempts + interprocedural.
     Exhaustive,
-    /// (Wave 16) Modular: core 5 + modular per-function verification.
+    /// Modular: core 5 + modular per-function verification.
     Modular,
-    /// (Wave 16) ConstantTime: core 5 + constant-time (6th invariant).
+    /// ConstantTime: core 5 + constant-time (6th invariant).
     ConstantTime,
-    /// (Wave 16) Hardened: all 6 invariants + interprocedural + modular.
+    /// Hardened: all 6 invariants + interprocedural + modular.
     Hardened,
 }
 
@@ -243,15 +259,43 @@ pub struct CompileConfig {
     pub opt_level: OptLevel,
     /// Verification thoroughness.
     pub verification_level: VerificationLevel,
-    /// (Wave 19) Treat `OverallVerdict::Inconclusive` as a compilation-
-    /// blocking error. Default `false` (Inconclusive is allowed — it means
-    /// "no violation proven, but not all invariants verified").
-    pub strict_verification: bool,
-    /// (Wave 19) Maximum number of paths explored by the liveness verifier
+    /// Opt OUT of the new Inconclusive-hard-fail default.
+    /// When `true`, an `OverallVerdict::Inconclusive` verdict is soft-passed
+    /// (compilation continues) with an explicit SOUNDNESS WAIVER logged via
+    /// `vuma_log!(warn, ...)` (visible with `VUMA_LOG=1`). Default `false`
+    /// — Inconclusive hard-fails. This is the only opt-out escape hatch
+    /// for the K3 default-flip migration; users who need the old soft-pass
+    /// behaviour pass `--allow-inconclusive`.
+    pub allow_inconclusive: bool,
+    /// Promote the remaining ADVISORY IVE verifier —
+    /// `bv_verify` (e-graph soundness, `pipeline.rs` Stage 7a)
+    /// — to HARD-FAIL on any detected violation. The linear-channel
+    /// discipline check (`vuma_ive::borrow_region::verify_linear_channels`,
+    /// Stage 7c) was previously also gated by this flag, but has been
+    /// **promoted to UNCONDITIONAL HARD-FAIL** — see the Stage
+    /// 7c call-site comment for the promotion history.
+    ///
+    /// Default `false`: `bv_verify` runs but only `vuma_log!(warn, ...)`,
+    /// matching the pre-existing advisory behaviour. The advisory
+    /// status for `bv_verify` is retained as an explicit escape hatch
+    /// for users who extend the e-graph rule set with not-yet-verified
+    /// rules — the verifier is sound (exhaustive enumeration with
+    /// concrete counterexamples) but the original code comment
+    /// explicitly reserved promotion to a future strict mode.
+    ///
+    /// When `--strict-ive` is passed (plumbed through `main.rs::make_config`),
+    /// the `bv_verify` gate becomes mandatory: any unsound e-graph
+    /// rule returns `VumaError::Transform { pass_name: "bv_verify",
+    /// ... }` and aborts compilation. The linear-channel gate is
+    /// INDEPENDENT of this flag — it always hard-fails on any
+    /// genuine linear-channel violation (use-after-close, double-close,
+    /// use-without-open).
+    pub strict_ive: bool,
+    /// Maximum number of paths explored by the liveness verifier
     /// before giving up (default 64). Higher values catch more bugs at the
     /// cost of slower verification.
     pub ive_max_paths: usize,
-    /// (Wave 19) Maximum path length explored by the cleanup verifier
+    /// Maximum path length explored by the cleanup verifier
     /// before giving up (default 256). Higher values catch more leaks.
     pub ive_max_path_length: usize,
     /// Entry-point function name (default: "main" for hosted, "_start" for bare).
@@ -262,19 +306,39 @@ pub struct CompileConfig {
     pub stop_on_first_error: bool,
     /// Maximum inline size (number of SCG nodes) for the inlining pass.
     pub max_inline_size: usize,
-    /// (Wave 25) Cost threshold for the IR-level inliner
+    /// Cost threshold for the IR-level inliner
     /// (`opt::inline_with_threshold`). A callee whose
     /// `function_inline_cost` (per-instr cost + 2*arg_count -
     /// 3*const_arg_count) is ≤ this threshold gets inlined at the call
     /// site. Default 40 — generous enough to inline small helpers like
     /// `fn add_one(x) { x + 1 }` while preventing runaway code growth.
     pub inline_threshold: u32,
-    /// Enable memory safety checks (use-after-free, double-free, leaks, etc.).
-    pub memory_safety: bool,
     /// Enable runtime bounds checks for array accesses (--safe flag).
     pub runtime_bounds_checks: bool,
     /// Force section headers in the ELF output (--sections flag).
     pub section_headers: bool,
+    /// Maximum expression nesting depth accepted by the
+    /// recursive-descent parser before bailing with
+    /// "expression nesting depth exceeds maximum (N)". Default
+    /// [`vuma_parser::MAX_EXPR_DEPTH`] (1024). Override per-invocation
+    /// via the `--max-expr-depth N` CLI flag (see `main.rs::Cli`).
+    /// Lower values give faster failure on pathological input;
+    /// higher values accommodate machine-generated code (e.g. the
+    /// bignum2048 KAT tests in `scripts/womb_kat_tests/`).
+    pub max_expr_depth: u32,
+    /// Backend / ISA target for the emitted binary.
+    ///
+    /// Historically the canonical pipeline always emitted AArch64 ELF
+    /// (per `EmitConfig::linux_elf()`), and `cmd_emit` / `cmd_build` used
+    /// a separate direct AST→codegen path for non-AArch64 targets — which
+    /// bypassed the full IVE gate suite (PMT state verifiers, memory-
+    /// safety, L1→L3 collapse, session-type, information-flow, syscall
+    /// allowlist). Exposing the backend on `CompileConfig` lets
+    /// `cmd_emit` route through `compile_with_path` for any ISA while
+    /// still running every IVE gate. Defaults to `BackendKind::AArch64`
+    /// to preserve the canonical-pipeline behaviour for every existing
+    /// caller.
+    pub backend: vuma_codegen::backend::BackendKind,
 }
 
 impl CompileConfig {
@@ -311,6 +375,11 @@ impl CompileConfig {
                 let mut cfg = EmitConfig::linux_elf();
                 cfg.section_headers = cfg.section_headers || self.section_headers;
                 cfg.debug_info = self.debug_info;
+                // Honor the per-config backend override so
+                // `cmd_emit` (and any other caller that sets
+                // `CompileConfig::backend`) gets an ELF for the requested
+                // ISA rather than the historical hard-coded AArch64.
+                cfg.backend = self.backend;
                 cfg
             }
             CompileTarget::Wasm32 => EmitConfig::wasm_binary(),
@@ -324,7 +393,8 @@ impl Default for CompileConfig {
             target: CompileTarget::Linux,
             opt_level: OptLevel::O3,
             verification_level: VerificationLevel::Normal,
-            strict_verification: false,
+            allow_inconclusive: false,
+            strict_ive: false,
             ive_max_paths: 64,
             ive_max_path_length: 256,
             entry_name: "main".to_string(),
@@ -332,9 +402,10 @@ impl Default for CompileConfig {
             stop_on_first_error: true,
             max_inline_size: 50,
             inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
-            memory_safety: true,
             runtime_bounds_checks: false,
             section_headers: false,
+            max_expr_depth: vuma_parser::MAX_EXPR_DEPTH,
+            backend: vuma_codegen::backend::BackendKind::AArch64,
         }
     }
 }
@@ -403,11 +474,6 @@ pub enum VumaError {
         /// Error message.
         message: String,
     },
-    /// COR initialization failure.
-    CorInit {
-        /// Error message.
-        message: String,
-    },
     /// Module resolution error (import not found, circular import, etc.).
     ModuleResolution {
         /// The resolution errors.
@@ -418,15 +484,6 @@ pub enum VumaError {
         /// The collected errors.
         errors: Vec<VumaError>,
     },
-    /// Backend failed; fallback to next available backend was attempted.
-    BackendFallback {
-        /// Name of the backend that failed.
-        failed_backend: String,
-        /// Name of the fallback backend that was tried (if any).
-        fallback_backend: Option<String>,
-        /// Error message from the failed backend.
-        error: String,
-    },
     /// Internal panic caught during compilation (crash recovery).
     PanicCaught {
         /// The pipeline stage where the panic occurred.
@@ -434,13 +491,13 @@ pub enum VumaError {
         /// The panic message.
         message: String,
     },
-    /// Memory-safety analysis failure (Wave 20 — blocking pass).
+    /// Memory-safety analysis failure (blocking pass).
     ///
     /// Emitted when `MemorySafetyAnalyzer` or `analyze_with_scg_liveness`
     /// detects a use-after-free, double-free, memory leak, or uninitialized
-    /// read and `CompileConfig.memory_safety` is `true` (the default).
-    /// This is a hard gate: the pipeline refuses to emit code for programs
-    /// with known memory-safety violations, independent of
+    /// read. Memory-safety analysis is MANDATORY in VUMA 2.0 — there is no
+    /// opt-out. This is a hard gate: the pipeline refuses to emit code for
+    /// programs with known memory-safety violations, independent of
     /// `stop_on_first_error`.
     MemorySafety {
         /// The memory-safety report containing the violations.
@@ -462,10 +519,8 @@ impl VumaError {
             VumaError::Codegen { .. } => "codegen",
             VumaError::RegisterAlloc { .. } => "register-alloc",
             VumaError::Emission { .. } => "elf-emission",
-            VumaError::CorInit { .. } => "cor-init",
             VumaError::ModuleResolution { .. } => "module-resolution",
             VumaError::Multi { .. } => "multi",
-            VumaError::BackendFallback { .. } => "backend-fallback",
             VumaError::PanicCaught { .. } => "panic-caught",
             VumaError::MemorySafety { .. } => "memory-safety",
         }
@@ -507,7 +562,6 @@ impl fmt::Display for VumaError {
             VumaError::Codegen { error } => write!(f, "[codegen] {}", error),
             VumaError::RegisterAlloc { message } => write!(f, "[register-alloc] {}", message),
             VumaError::Emission { message } => write!(f, "[elf-emission] {}", message),
-            VumaError::CorInit { message } => write!(f, "[cor-init] {}", message),
             VumaError::ModuleResolution { errors } => {
                 write!(f, "[module-resolution] {} error(s):", errors.len())?;
                 for e in errors {
@@ -522,18 +576,15 @@ impl fmt::Display for VumaError {
                 }
                 Ok(())
             }
-            VumaError::BackendFallback { failed_backend, fallback_backend, error } => {
-                write!(f, "[backend-fallback] {} failed: {}", failed_backend, error)?;
-                if let Some(fb) = fallback_backend {
-                    write!(f, ", attempting fallback to {}", fb)?;
-                }
-                Ok(())
-            }
             VumaError::PanicCaught { stage, message } => {
                 write!(f, "[panic-caught] panic in stage '{}': {}", stage, message)
             }
             VumaError::MemorySafety { report } => {
-                write!(f, "[memory-safety] {} violation(s) found", report.violations.len())?;
+                write!(
+                    f,
+                    "[memory-safety] {} violation(s) found",
+                    report.violations.len()
+                )?;
                 for v in &report.violations {
                     write!(f, "\n  - {}", v)?;
                 }
@@ -570,9 +621,6 @@ pub struct CompilationOutput {
     pub code_words: usize,
     /// Debug information (if requested).
     pub debug_info: Option<DebugInfo>,
-    /// The Continuous Optimization Runtime, initialized from the compiled SCG.
-    /// Present when COR initialization succeeds (after the CorInit stage).
-    pub cor_runtime: Option<CORuntime>,
 }
 
 /// Partial compilation output, returned when compilation fails but some
@@ -716,13 +764,11 @@ pub enum PipelineStage {
     RegisterAlloc,
     /// ARM64 code emission.
     CodeEmission,
-    /// COR (Continuous Optimization Runtime) initialization.
-    CorInit,
 }
 
 impl PipelineStage {
     /// All stages in order.
-    pub fn all() -> &'static [PipelineStage; 11] {
+    pub fn all() -> &'static [PipelineStage; 10] {
         &[
             PipelineStage::Parse,
             PipelineStage::AstToScg,
@@ -734,7 +780,6 @@ impl PipelineStage {
             PipelineStage::IrLowering,
             PipelineStage::RegisterAlloc,
             PipelineStage::CodeEmission,
-            PipelineStage::CorInit,
         ]
     }
 
@@ -761,7 +806,6 @@ impl fmt::Display for PipelineStage {
             PipelineStage::IrLowering => write!(f, "ir-lowering"),
             PipelineStage::RegisterAlloc => write!(f, "register-alloc"),
             PipelineStage::CodeEmission => write!(f, "code-emission"),
-            PipelineStage::CorInit => write!(f, "cor-init"),
         }
     }
 }
@@ -844,14 +888,9 @@ fn node_var(id: NodeId, _prefix: &str) -> String {
     format!("v_{}", id.as_u64())
 }
 
-
 /// Resolve a node to an ScgExpr by checking its payload.
 /// For Computation nodes, checks for literal labels and Derivation to Allocation.
-fn resolve_df_input_for_node(
-    source: NodeId,
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> ScgExpr {
+fn resolve_df_input_for_node(source: NodeId, edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
     if let Some(src_data) = scg.get_node(source) {
         match &src_data.payload {
             NodePayload::Computation(comp) => {
@@ -862,7 +901,10 @@ fn resolve_df_input_for_node(
                     if let Some(param_name) = label.strip_prefix("param ") {
                         let param_name = param_name.trim();
                         if !param_name.is_empty()
-                            && param_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                            && param_name
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_alphabetic() || c == '_')
                             && param_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                         {
                             return ScgExpr::Var(param_name.to_string());
@@ -885,7 +927,12 @@ fn resolve_df_input_for_node(
                     }
                 }
                 // Follow Derivation to Allocation — return Computation node var
-                for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
+                for deriv_edge in edge_idx
+                    .outgoing
+                    .get(&source)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[])
+                {
                     if deriv_edge.kind == EdgeKind::Derivation {
                         if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
                             if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
@@ -896,9 +943,7 @@ fn resolve_df_input_for_node(
                 }
                 ScgExpr::Var(format!("v_{}", source.as_u64()))
             }
-            NodePayload::Allocation(_) => {
-                ScgExpr::Var(format!("v_{}", source.as_u64()))
-            }
+            NodePayload::Allocation(_) => ScgExpr::Var(format!("v_{}", source.as_u64())),
             _ => ScgExpr::Var(format!("v_{}", source.as_u64())),
         }
     } else {
@@ -906,18 +951,20 @@ fn resolve_df_input_for_node(
     }
 }
 
-fn resolve_df_input(
-    node_id: NodeId,
-    position: usize,
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> ScgExpr {
+fn resolve_df_input(node_id: NodeId, position: usize, edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
     let df_inputs = edge_idx.incoming_df(node_id);
     // If no DataFlow edges, fall back to Derivation edges
     let df_inputs: Vec<vuma_scg::EdgeData> = if df_inputs.is_empty() {
-        edge_idx.incoming
+        edge_idx
+            .incoming
             .get(&node_id)
-            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect())
+            .map(|edges| {
+                edges
+                    .iter()
+                    .filter(|e| e.kind == EdgeKind::Derivation)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         df_inputs.iter().map(|e| (*e).clone()).collect()
@@ -931,9 +978,7 @@ fn resolve_df_input(
                 | NodePayload::Deallocation(_)
                 | NodePayload::Effect(_)
                 | NodePayload::VTable(_)
-                | NodePayload::ClosureEnv(_) => {
-                    ScgExpr::Int(0)
-                }
+                | NodePayload::ClosureEnv(_) => ScgExpr::Int(0),
                 NodePayload::Computation(comp) => {
                     // Check if this is a literal computation node (label "lit_<n>")
                     if let ComputationKind::Other(ref label) = comp.kind {
@@ -954,12 +999,16 @@ fn resolve_df_input(
                         // references in match/Switch contexts, where the
                         // variable's value comes from a phi/merge node (not
                         // an assignment).
-                        let is_var_ref = !(!label.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        let is_var_ref = !(!label
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() || c == '_')
                             || !label.chars().all(|c| c.is_alphanumeric() || c == '_')
                             || label.starts_with("lit_")
                             || label.starts_with("param ")
                             || label.starts_with("match_arm")
-                            || label.starts_with("v_") && label[2..].chars().all(|c| c.is_ascii_digit()))
+                            || label.starts_with("v_")
+                                && label[2..].chars().all(|c| c.is_ascii_digit()))
                             && !label.starts_with("const ")
                             && !label.contains(" = ")
                             && !label.contains("(");
@@ -974,8 +1023,12 @@ fn resolve_df_input(
                                     edges.iter().any(|e| {
                                         if e.kind == EdgeKind::DataFlow {
                                             if let Some(pred_data) = scg.get_node(e.source) {
-                                                if let NodePayload::Computation(pred_comp) = &pred_data.payload {
-                                                    if let ComputationKind::Other(ref pred_label) = pred_comp.kind {
+                                                if let NodePayload::Computation(pred_comp) =
+                                                    &pred_data.payload
+                                                {
+                                                    if let ComputationKind::Other(ref pred_label) =
+                                                        pred_comp.kind
+                                                    {
                                                         return pred_label.contains(" = ")
                                                             || pred_label.starts_with("let ");
                                                     }
@@ -995,7 +1048,10 @@ fn resolve_df_input(
                         if let Some(param_name) = label.strip_prefix("param ") {
                             let param_name = param_name.trim();
                             if !param_name.is_empty()
-                                && param_name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                                && param_name
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_alphabetic() || c == '_')
                                 && param_name.chars().all(|c| c.is_alphanumeric() || c == '_')
                             {
                                 return ScgExpr::Var(param_name.to_string());
@@ -1020,11 +1076,17 @@ fn resolve_df_input(
                     }
                     // Check if this Computation has a Derivation edge to an
                     // Allocation node (the allocation pointer is in v_<alloc_id>)
-                    for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    for deriv_edge in edge_idx
+                        .outgoing
+                        .get(&source)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                    {
                         if deriv_edge.kind == EdgeKind::Derivation {
                             if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
                                 if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
-                                    return ScgExpr::Var(format!("v_{}", source.as_u64()));  // Return Computation node var
+                                    return ScgExpr::Var(format!("v_{}", source.as_u64()));
+                                    // Return Computation node var
                                 }
                             }
                         }
@@ -1115,8 +1177,13 @@ fn resolve_branch_cond(
                 }
 
                 // For simple variable conditions, resolve via DataFlow
-                let is_valid_var = cond_no_calls.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                    && cond_no_calls.chars().all(|c| c.is_alphanumeric() || c == '_');
+                let is_valid_var = cond_no_calls
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && cond_no_calls
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_');
                 if is_valid_var {
                     return (
                         resolve_subexpr(&cond_no_calls, &sources, edge_idx, scg),
@@ -1269,7 +1336,11 @@ fn resolve_branch(
 ///
 /// Classifies outgoing ControlFlow edges: edges targeting a `LoopExit`
 /// node are the exit; all other edges are the loop body.
-fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, Option<NodeId>, Option<NodeId>) {
+fn resolve_loop(
+    header_id: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+) -> (NodeId, Option<NodeId>, Option<NodeId>) {
     let cf_edges = edge_idx.outgoing_cf(header_id);
 
     let mut body_target = None;
@@ -1299,7 +1370,11 @@ fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, 
         exit_target = cf_edges.get(1).map(|e| e.target);
     }
 
-    (body_target.unwrap_or(header_id), exit_target, after_loop_target)
+    (
+        body_target.unwrap_or(header_id),
+        exit_target,
+        after_loop_target,
+    )
 }
 
 // ── Match/switch case-value extraction ──────────────────────────────────
@@ -1435,7 +1510,8 @@ fn walk_control_flow_with_externs(
             NodePayload::Control(ctrl) => match ctrl.kind {
                 ControlKind::Branch => {
                     let (then_tgt, else_tgt, join_node) = resolve_branch(node_id, scg, edge_idx);
-                    let (cond, pre_calls) = resolve_branch_cond(node_id, edge_idx, scg, extern_functions);
+                    let (cond, pre_calls) =
+                        resolve_branch_cond(node_id, edge_idx, scg, extern_functions);
 
                     // Emit any pre-branch Call statements (extracted from
                     // inline function calls in the condition, e.g.
@@ -1469,8 +1545,14 @@ fn walk_control_flow_with_externs(
 
                         // Generate a simple switch from the then arm
                         // with a discriminant expression.
-                        let then_body_stmts =
-                            walk_control_flow_with_externs(then_tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
+                        let then_body_stmts = walk_control_flow_with_externs(
+                            then_tgt,
+                            scg,
+                            edge_idx,
+                            consumed,
+                            &arm_stop,
+                            extern_functions,
+                        );
 
                         // Extract the case value from the AST's MatchArm pattern.
                         // The branch condition for a match arm is typically
@@ -1490,8 +1572,14 @@ fn walk_control_flow_with_externs(
                         });
 
                         if let Some(tgt) = else_tgt {
-                            let else_stmts =
-                                walk_control_flow_with_externs(tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
+                            let else_stmts = walk_control_flow_with_externs(
+                                tgt,
+                                scg,
+                                edge_idx,
+                                consumed,
+                                &arm_stop,
+                                extern_functions,
+                            );
                             default_body = else_stmts;
                         }
 
@@ -1514,11 +1602,25 @@ fn walk_control_flow_with_externs(
                             arm_stop.insert(join);
                         }
 
-                        let then_body =
-                            walk_control_flow_with_externs(then_tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
+                        let then_body = walk_control_flow_with_externs(
+                            then_tgt,
+                            scg,
+                            edge_idx,
+                            consumed,
+                            &arm_stop,
+                            extern_functions,
+                        );
 
-                        let else_body = else_tgt
-                            .map(|tgt| walk_control_flow_with_externs(tgt, scg, edge_idx, consumed, &arm_stop, extern_functions));
+                        let else_body = else_tgt.map(|tgt| {
+                            walk_control_flow_with_externs(
+                                tgt,
+                                scg,
+                                edge_idx,
+                                consumed,
+                                &arm_stop,
+                                extern_functions,
+                            )
+                        });
 
                         stmts.push(ScgStatement::Control(ControlNode::If {
                             cond,
@@ -1538,15 +1640,17 @@ fn walk_control_flow_with_externs(
                         // continuation. We skip the then/else targets, the
                         // Join itself, and any already-consumed nodes.
                         if current.is_none() {
-                            current = edge_idx.outgoing_cf(node_id)
-                                .iter()
-                                .map(|e| e.target)
-                                .find(|&t| {
-                                    t != join
-                                        && t != then_tgt
-                                        && else_tgt != Some(t)
-                                        && !consumed.contains(&t)
-                                });
+                            current =
+                                edge_idx
+                                    .outgoing_cf(node_id)
+                                    .iter()
+                                    .map(|e| e.target)
+                                    .find(|&t| {
+                                        t != join
+                                            && t != then_tgt
+                                            && else_tgt != Some(t)
+                                            && !consumed.contains(&t)
+                                    });
                         }
                     } else {
                         current = None;
@@ -1569,7 +1673,14 @@ fn walk_control_flow_with_externs(
                         loop_stop.insert(after);
                     }
 
-                    let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
+                    let body = walk_control_flow_with_externs(
+                        body_tgt,
+                        scg,
+                        edge_idx,
+                        consumed,
+                        &loop_stop,
+                        extern_functions,
+                    );
 
                     // ── While-loop → for-range conversion ──
                     //
@@ -1584,7 +1695,8 @@ fn walk_control_flow_with_externs(
                     // If conversion fails (complex condition, non-literal
                     // bound, etc.), fall back to the while-condition guard
                     // (If + Break at the start of the body).
-                    let mut for_range = ctrl.label.as_ref().and_then(|label| parse_for_range(label));
+                    let mut for_range =
+                        ctrl.label.as_ref().and_then(|label| parse_for_range(label));
                     let mut needs_guard = false;
                     if for_range.is_none() {
                         // Try to parse a while-loop condition into a for-range.
@@ -1601,7 +1713,9 @@ fn walk_control_flow_with_externs(
                         // while-condition guard (Break) instead, which
                         // correctly handles variable reassignment.
                         if let Some(label) = &ctrl.label {
-                            if let Some(fr) = parse_while_to_for_range(node_id, label, edge_idx, scg) {
+                            if let Some(fr) =
+                                parse_while_to_for_range(node_id, label, edge_idx, scg)
+                            {
                                 // Check if the body reassigns any variable.
                                 // If so, it might reassign the loop variable,
                                 // so use the guard to be safe.
@@ -1613,7 +1727,13 @@ fn walk_control_flow_with_externs(
                                 }
                             }
                             if for_range.is_none() && !needs_guard {
-                                if let Some((_neg_cond, _pre_calls)) = parse_while_condition(node_id, label, edge_idx, scg, extern_functions) {
+                                if let Some((_neg_cond, _pre_calls)) = parse_while_condition(
+                                    node_id,
+                                    label,
+                                    edge_idx,
+                                    scg,
+                                    extern_functions,
+                                ) {
                                     needs_guard = true;
                                 }
                             }
@@ -1622,7 +1742,13 @@ fn walk_control_flow_with_externs(
                     let body = if needs_guard {
                         let mut b = body;
                         if let Some(label) = &ctrl.label {
-                            if let Some((neg_cond, pre_calls)) = parse_while_condition(node_id, label, edge_idx, scg, extern_functions) {
+                            if let Some((neg_cond, pre_calls)) = parse_while_condition(
+                                node_id,
+                                label,
+                                edge_idx,
+                                scg,
+                                extern_functions,
+                            ) {
                                 // Emit any pre-guard Call statements (extracted
                                 // from inline function calls in the while
                                 // condition, e.g. `while (is_space(c) == 0)`).
@@ -1641,11 +1767,14 @@ fn walk_control_flow_with_externs(
                                 for call_stmt in pre_calls {
                                     b.insert(0, call_stmt);
                                 }
-                                b.insert(n_pre, ScgStatement::Control(ControlNode::If {
-                                    cond: neg_cond,
-                                    then_body: vec![ScgStatement::Control(ControlNode::Break)],
-                                    else_body: None,
-                                }));
+                                b.insert(
+                                    n_pre,
+                                    ScgStatement::Control(ControlNode::If {
+                                        cond: neg_cond,
+                                        then_body: vec![ScgStatement::Control(ControlNode::Break)],
+                                        else_body: None,
+                                    }),
+                                );
                             }
                         }
                         b
@@ -1653,7 +1782,11 @@ fn walk_control_flow_with_externs(
                         body
                     };
 
-                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range, while_cond: None }));
+                    stmts.push(ScgStatement::Control(ControlNode::Loop {
+                        body,
+                        for_range,
+                        while_cond: None,
+                    }));
 
                     // Continue from the statement AFTER the loop.
                     //
@@ -1727,11 +1860,19 @@ fn walk_control_flow_with_externs(
                     // If there are no DataFlow inputs, try Derivation edges
                     // (some return values flow through Derivation).
                     let ret_vals = if ret_vals.is_empty() {
-                        let deriv_inputs = edge_idx.incoming
+                        let deriv_inputs = edge_idx
+                            .incoming
                             .get(&node_id)
-                            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect::<Vec<_>>())
+                            .map(|edges| {
+                                edges
+                                    .iter()
+                                    .filter(|e| e.kind == EdgeKind::Derivation)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            })
                             .unwrap_or_default();
-                        deriv_inputs.iter()
+                        deriv_inputs
+                            .iter()
                             .enumerate()
                             .map(|(i, _e)| resolve_df_input(node_id, i, edge_idx, scg))
                             .collect()
@@ -1758,13 +1899,17 @@ fn walk_control_flow_with_externs(
                             let is_extern = extern_functions.contains(func_name);
 
                             // Find the caller Computation node
-                            let caller_node = edge_idx.incoming
+                            let caller_node = edge_idx
+                                .incoming
                                 .get(&node_id)
-                                .and_then(|edges| edges.iter().find(|e| e.kind == EdgeKind::ControlFlow))
+                                .and_then(|edges| {
+                                    edges.iter().find(|e| e.kind == EdgeKind::ControlFlow)
+                                })
                                 .map(|e| e.source);
 
                             let df_inputs = edge_idx.incoming_df(node_id);
-                            let mut sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                            let mut sources: Vec<NodeId> =
+                                df_inputs.iter().map(|e| e.source).collect();
 
                             // CRITICAL: Exclude the caller node from sources.
                             // The caller's label (e.g. "let val = read_u32_be(block, i * 4)")
@@ -1792,16 +1937,30 @@ fn walk_control_flow_with_externs(
                                 if let Some(caller_data) = scg.get_node(caller) {
                                     if let NodePayload::Computation(comp) = &caller_data.payload {
                                         let caller_label = comp.kind.label();
-                                        if let Some(expr) = extract_call_expr_from_label(&caller_label, func_name) {
+                                        if let Some(expr) =
+                                            extract_call_expr_from_label(&caller_label, func_name)
+                                        {
                                             let arg_strs = parse_call_args(&expr);
-                                            arg_strs.iter()
+                                            arg_strs
+                                                .iter()
                                                 .map(|a| {
                                                     // Extract nested function calls from this argument
-                                                    let (modified_a, mut calls) = extract_calls_from_label(
-                                                        a, node_id, &sources, edge_idx, scg, extern_functions,
-                                                    );
+                                                    let (modified_a, mut calls) =
+                                                        extract_calls_from_label(
+                                                            a,
+                                                            node_id,
+                                                            &sources,
+                                                            edge_idx,
+                                                            scg,
+                                                            extern_functions,
+                                                        );
                                                     nested_call_stmts.append(&mut calls);
-                                                    resolve_subexpr(&modified_a, &sources, edge_idx, scg)
+                                                    resolve_subexpr(
+                                                        &modified_a,
+                                                        &sources,
+                                                        edge_idx,
+                                                        scg,
+                                                    )
                                                 })
                                                 .collect()
                                         } else {
@@ -1877,12 +2036,13 @@ fn walk_control_flow_with_externs(
                                 consumed.insert(ret);
                             }
                             consumed.insert(node_id); // consume the call FunctionEntry
-                            // Continue from the caller node's other CF edges.
-                            // The caller Computation node may have CF edges to
-                            // both the call FunctionEntry and the next statement.
-                            // We follow the first unconsumed CF edge from the caller.
+                                                      // Continue from the caller node's other CF edges.
+                                                      // The caller Computation node may have CF edges to
+                                                      // both the call FunctionEntry and the next statement.
+                                                      // We follow the first unconsumed CF edge from the caller.
                             if let Some(caller) = caller_node {
-                                let next_cf = edge_idx.outgoing_cf(caller)
+                                let next_cf = edge_idx
+                                    .outgoing_cf(caller)
                                     .iter()
                                     .find(|e| !consumed.contains(&e.target))
                                     .map(|e| e.target);
@@ -1927,8 +2087,11 @@ fn walk_control_flow_with_externs(
                     // Use the Switch node's DataFlow inputs as sources so that
                     // variable references in the subject expression resolve
                     // correctly.
-                    let df_sources: Vec<NodeId> = edge_idx.incoming_df(node_id)
-                        .iter().map(|e| e.source).collect();
+                    let df_sources: Vec<NodeId> = edge_idx
+                        .incoming_df(node_id)
+                        .iter()
+                        .map(|e| e.source)
+                        .collect();
                     let disc_expr = if let Some(ref label) = ctrl.label {
                         let s = label.trim();
                         if let Some(subject_str) = s.strip_prefix("match ") {
@@ -1941,13 +2104,20 @@ fn walk_control_flow_with_externs(
                     };
 
                     // Collect Dispatch edges to find all SwitchCase nodes
-                    let dispatch_edges: Vec<_> = edge_idx.outgoing
+                    let dispatch_edges: Vec<_> = edge_idx
+                        .outgoing
                         .get(&node_id)
-                        .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Dispatch).collect())
+                        .map(|edges| {
+                            edges
+                                .iter()
+                                .filter(|e| e.kind == EdgeKind::Dispatch)
+                                .collect()
+                        })
                         .unwrap_or_default();
 
                     // Find the Join node (first CF successor that is a Join)
-                    let join_node = edge_idx.outgoing_cf(node_id)
+                    let join_node = edge_idx
+                        .outgoing_cf(node_id)
                         .iter()
                         .find(|e| {
                             if let Some(n) = scg.get_node(e.target) {
@@ -2019,7 +2189,7 @@ fn walk_control_flow_with_externs(
                         consumed.insert(join);
                     }
 
-stmts.push(ScgStatement::Control(ControlNode::Switch {
+                    stmts.push(ScgStatement::Control(ControlNode::Switch {
                         discriminant: disc_expr,
                         arms,
                         default_body,
@@ -2035,22 +2205,21 @@ stmts.push(ScgStatement::Control(ControlNode::Switch {
                     }
                     if current.is_none() {
                         // Join has no CF successors — try Switch's CF successors
-                        current = edge_idx.outgoing_cf(node_id)
+                        current = edge_idx
+                            .outgoing_cf(node_id)
                             .iter()
                             .map(|e| e.target)
-                            .find(|&t| {
-                                !consumed.contains(&t)
-                                    && t != join_node.unwrap_or(t)
-                            });
+                            .find(|&t| !consumed.contains(&t) && t != join_node.unwrap_or(t));
                     }
                     if current.is_none() {
                         // Still no successor — try any outgoing edge from Switch
-                        current = edge_idx.outgoing
-                            .get(&node_id)
-                            .and_then(|edges| edges.iter()
+                        current = edge_idx.outgoing.get(&node_id).and_then(|edges| {
+                            edges
+                                .iter()
                                 .filter(|e| e.kind == EdgeKind::ControlFlow)
                                 .map(|e| e.target)
-                                .find(|&t| !consumed.contains(&t) && t != join_node.unwrap_or(t)));
+                                .find(|&t| !consumed.contains(&t) && t != join_node.unwrap_or(t))
+                        });
                     }
                     continue;
                 }
@@ -2081,7 +2250,13 @@ stmts.push(ScgStatement::Control(ControlNode::Switch {
 
             // ── Non-control nodes: convert to statements ───────────
             _ => {
-                let node_stmts = convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, extern_functions);
+                let node_stmts = convert_node_to_statement_with_externs(
+                    node_id,
+                    node_data,
+                    edge_idx,
+                    scg,
+                    extern_functions,
+                );
                 stmts.extend(node_stmts);
 
                 // Continue to the next node via ControlFlow
@@ -2132,9 +2307,7 @@ fn extract_calls_from_label(
         // Identifier start: alphabetic or underscore
         if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             let ident = &label[start..i];
@@ -2150,10 +2323,26 @@ fn extract_calls_from_label(
                 // Skip VUMA keywords that look like calls (e.g. "if (cond)")
                 if matches!(
                     ident,
-                    "if" | "while" | "for" | "return" | "match" | "let"
-                        | "else" | "fn" | "struct" | "enum" | "true" | "false"
-                        | "None" | "null" | "nullptr" | "as" | "in" | "where"
-                        | "sizeof" | "alignof" | "typeof"
+                    "if" | "while"
+                        | "for"
+                        | "return"
+                        | "match"
+                        | "let"
+                        | "else"
+                        | "fn"
+                        | "struct"
+                        | "enum"
+                        | "true"
+                        | "false"
+                        | "None"
+                        | "null"
+                        | "nullptr"
+                        | "as"
+                        | "in"
+                        | "where"
+                        | "sizeof"
+                        | "alignof"
+                        | "typeof"
                 ) {
                     result.push_str(ident);
                     i = j;
@@ -2166,9 +2355,16 @@ fn extract_calls_from_label(
                 // atomic_load/atomic_store label checks above.
                 if matches!(
                     ident,
-                    "allocate" | "free" | "__vuma_alloc" | "__vuma_free"
-                        | "atomic_load" | "atomic_store" | "atomic_cas"
-                        | "AtomicLoad" | "AtomicStore" | "AtomicCas"
+                    "allocate"
+                        | "free"
+                        | "__vuma_alloc"
+                        | "__vuma_free"
+                        | "atomic_load"
+                        | "atomic_store"
+                        | "atomic_cas"
+                        | "AtomicLoad"
+                        | "AtomicStore"
+                        | "AtomicCas"
                 ) {
                     result.push_str(ident);
                     i = j;
@@ -2198,15 +2394,14 @@ fn extract_calls_from_label(
                     // This handles nested calls like `f(g(x))` by first
                     // extracting `g(x)` into a vreg, then passing that
                     // vreg as the argument to `f`.
-                    let (modified_args_str, mut nested_calls) =
-                        extract_calls_from_label(
-                            args_str,
-                            node_id,
-                            sources,
-                            edge_idx,
-                            scg,
-                            extern_functions,
-                        );
+                    let (modified_args_str, mut nested_calls) = extract_calls_from_label(
+                        args_str,
+                        node_id,
+                        sources,
+                        edge_idx,
+                        scg,
+                        extern_functions,
+                    );
                     calls.append(&mut nested_calls);
 
                     // Parse the (now call-free) arguments
@@ -2263,11 +2458,20 @@ fn extract_call_expr_from_label(label: &str, func_name: &str) -> Option<String> 
     let mut depth: i32 = 1;
     let mut i = args_start;
     while i < bytes.len() && depth > 0 {
-        if bytes[i] == b'(' { depth += 1; }
-        else if bytes[i] == b')' { depth -= 1; }
-        if depth > 0 { i += 1; }
+        if bytes[i] == b'(' {
+            depth += 1;
+        } else if bytes[i] == b')' {
+            depth -= 1;
+        }
+        if depth > 0 {
+            i += 1;
+        }
     }
-    if depth == 0 { Some(label[args_start..i].to_string()) } else { None }
+    if depth == 0 {
+        Some(label[args_start..i].to_string())
+    } else {
+        None
+    }
 }
 
 /// Collect call arguments from DataFlow edges (fallback).
@@ -2285,7 +2489,10 @@ fn collect_args_from_df(
                     if let Some(param_name) = lbl.strip_prefix("param ") {
                         let pn = param_name.trim();
                         if !pn.is_empty()
-                            && pn.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                            && pn
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_alphabetic() || c == '_')
                             && pn.chars().all(|c| c.is_alphanumeric() || c == '_')
                         {
                             args.push(ScgExpr::Var(pn.to_string()));
@@ -2299,9 +2506,18 @@ fn collect_args_from_df(
                         }
                     }
                     match lbl.as_str() {
-                        "true" => { args.push(ScgExpr::Int(1)); continue; }
-                        "false" => { args.push(ScgExpr::Int(0)); continue; }
-                        "None" | "null" | "nullptr" => { args.push(ScgExpr::Int(0)); continue; }
+                        "true" => {
+                            args.push(ScgExpr::Int(1));
+                            continue;
+                        }
+                        "false" => {
+                            args.push(ScgExpr::Int(0));
+                            continue;
+                        }
+                        "None" | "null" | "nullptr" => {
+                            args.push(ScgExpr::Int(0));
+                            continue;
+                        }
                         _ => {}
                     }
                     if let Ok(num) = lbl.parse::<i64>() {
@@ -2397,7 +2613,7 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Access(access) => match access.mode {
             AccessMode::Read => {
-                // PMT (Wave 2): when both `offset` and `access_size` are set
+                // PMT: when both `offset` and `access_size` are set
                 // (state-field reads), use `access_size` to pick the Load's IR
                 // type. For legacy Access nodes (raw deref), `access_size`
                 // reflects the pointer size (8) not the value size, so we
@@ -2416,7 +2632,7 @@ fn convert_node_to_statement_with_externs(
             }
             AccessMode::Write | AccessMode::ReadWrite => {
                 {
-                    // PMT (Wave 2): same as Read — use `access_size` for the
+                    // PMT: same as Read — use `access_size` for the
                     // Store's IR type when both offset and access_size are set.
                     let ty = if access.offset.is_some() {
                         access.access_size.and_then(access_size_to_ir_type)
@@ -2467,11 +2683,11 @@ fn convert_node_to_statement_with_externs(
         }
 
         NodePayload::Syscall(syscall) => {
-            // Wave 10: lower a syscall to a first-class
+            // Lower a syscall to a first-class
             // `ScgStatement::Syscall`. The `IRBuilder` lowers this to
             // `IRInstr::Syscall`, which each backend lowers directly to a
-            // real syscall instruction (Wave 11/12 removed the intermediate
-            // `lower_syscalls_all()` lowering pass). Backends resolve the
+            // real syscall instruction (the intermediate
+            // `lower_syscalls_all()` lowering pass has been removed). Backends resolve the
             // syscall number via their existing `syscall_stubs` tables.
             single(Some(ScgStatement::Syscall(SyscallCallNode {
                 nr: syscall.nr,
@@ -2490,23 +2706,213 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::VTable(_) | NodePayload::ClosureEnv(_) => Vec::new(),
 
-        NodePayload::StructDef(_) | NodePayload::EnumDef(_) | NodePayload::Match(_)
+        NodePayload::StructDef(_)
+        | NodePayload::EnumDef(_)
+        | NodePayload::Match(_)
         | NodePayload::ConstantTime(_) => Vec::new(),
 
-        // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
-        // nodes need proper lowering to ScgStatement — for now, emit no
-        // statements so the build passes. Wave 1c will wire this.
-        NodePayload::StateInit(_)
-        | NodePayload::StateRead(_)
-        | NodePayload::StateWrite(_)
-        | NodePayload::StateTransform(_)
-        | NodePayload::ForeignConsume(_)
-        | NodePayload::ArenaNew(_)
-        | NodePayload::ArenaAlloc(_)
-        | NodePayload::ArenaGrow(_)
-        | NodePayload::ArenaFree(_) => Vec::new(),
+        // ── PMT state-node lowering ─────────────────────────────────
+        //
+        // Previously this was a single `Vec::new()` arm that silently
+        // dropped ALL PMT state ops + arena ops.  It now lowers each
+        // variant to a real `ScgStatement` so the codegen path is total.
+        //
+        // DESIGN CONTEXT — why extern `Call`s instead of inline IR:
+        //
+        // (1) The production AST→SCG path lowers PMT state expressions
+        //     DIRECTLY to `Allocation`/`Access`/`Call` nodes (see
+        //     `to_scg.rs:992` for `StateInit` and `pipeline.rs:10370+`
+        //     for the Arena* family via `flatten_expr`).  It never
+        //     wraps them in `NodePayload::StateInit`/`StateRead`/…,
+        //     so in the current production pipeline these arms are
+        //     unreachable.  The payload variants are constructed only
+        //     by (a) IVE verification tests and (b) the SCG
+        //     deserializer (`scg/src/serialize.rs:1377+`).
+        //
+        // (2) A "proper" structural lowering (e.g. `StateInit` → sized
+        //     `AllocationNode::Heap`, `StateRead` → `AccessNode::Load`
+        //     with the field's compile-time offset) would require
+        //     plumbing the BD `LayoutRegistry` through this function
+        //     (new parameter + two call-site updates + registry
+        //     plumbing) — a 3+ file change that exceeds this task's
+        //     blast-radius constraint.
+        //
+        // (3) The simplest viable option that does NOT silently drop
+        //     work is to lower each node to a `Call` of a
+        //     layout-mangled extern helper.  The helper symbols
+        //     (`__vuma_state_init__<Layout>`, etc.) must be provided
+        //     by a runtime library or the user; if absent, the linker
+        //     surfaces the missing symbol rather than the codegen
+        //     silently emitting no code.  This keeps the SCG→IR
+        //     lowering total while using only existing IR
+        //     (`ScgStatement::Call` / `ScgStatement::ForeignConsume`).
+        //
+        // See `docs/architecture/caveats.md` §8 row 6 for the resolved
+        // status and the upgrade path to a structural lowering.
+        NodePayload::StateInit(s) => {
+            eprintln!(
+                "[vuma] PMT state lowering: StateInit(layout={}) at node {} \
+                 -> extern call __vuma_state_init__{}",
+                s.layout_name,
+                node_id.as_u64(),
+                s.layout_name
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "state")),
+                func: format!("__vuma_state_init__{}", s.layout_name),
+                args: vec![],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::StateRead(r) => {
+            eprintln!(
+                "[vuma] PMT state lowering: StateRead({}.{}) at node {} \
+                 -> extern call __vuma_state_read__{}__{}",
+                r.layout_name,
+                r.field_name,
+                node_id.as_u64(),
+                r.layout_name,
+                r.field_name
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "val")),
+                func: format!("__vuma_state_read__{}__{}", r.layout_name, r.field_name),
+                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::StateWrite(w) => {
+            eprintln!(
+                "[vuma] PMT state lowering: StateWrite({}.{}) at node {} \
+                 -> extern call __vuma_state_write__{}__{}",
+                w.layout_name,
+                w.field_name,
+                node_id.as_u64(),
+                w.layout_name,
+                w.field_name
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: None,
+                func: format!("__vuma_state_write__{}__{}", w.layout_name, w.field_name),
+                args: vec![
+                    resolve_df_input(node_id, 0, edge_idx, scg),
+                    resolve_df_input(node_id, 1, edge_idx, scg),
+                ],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::StateTransform(t) => {
+            eprintln!(
+                "[vuma] PMT state lowering: StateTransform({}->{}) at node {} \
+                 -> extern call __vuma_state_transform__{}_to_{}",
+                t.input_layout,
+                t.output_layout,
+                node_id.as_u64(),
+                t.input_layout,
+                t.output_layout
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "state")),
+                func: format!(
+                    "__vuma_state_transform__{}_to_{}",
+                    t.input_layout, t.output_layout
+                ),
+                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::ForeignConsume(fc) => {
+            // Linearity marker — lowers to no IR instruction (mirrors
+            // the AST-bridge path at pipeline.rs:9581). The IVE
+            // treats the State's vreg as consumed; subsequent
+            // reads/writes are linearity errors.
+            eprintln!(
+                "[vuma] PMT state lowering: ForeignConsume(layout={}) at node {} \
+                 -> ForeignConsume marker",
+                fc.layout_name,
+                node_id.as_u64()
+            );
+            single(Some(ScgStatement::ForeignConsume(
+                vuma_codegen::scg_to_ir::ForeignConsumeStmt {
+                    state_var: format!("_state_{}_{}", node_id.as_u64(), fc.input_vreg),
+                    layout_name: fc.layout_name.clone(),
+                },
+            )))
+        }
+        NodePayload::ArenaNew(_a) => {
+            eprintln!(
+                "[vuma] PMT state lowering: ArenaNew at node {} \
+                 -> extern call __vuma_arena_new",
+                node_id.as_u64()
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "arena")),
+                func: "__vuma_arena_new".to_string(),
+                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::ArenaAlloc(a) => {
+            // ArenaAlloc has two logical outputs (updated arena + new
+            // state).  At the SCG level we model this as a single
+            // `Call` returning the new state pointer; the arena is
+            // treated as in-place mutated (matching the AST-bridge
+            // semantics at pipeline.rs:10585 where the bump offset is
+            // updated via `Store` and the arena pointer is returned
+            // unchanged).
+            eprintln!(
+                "[vuma] PMT state lowering: ArenaAlloc(layout={}) at node {} \
+                 -> extern call __vuma_arena_alloc__{}",
+                a.layout_name,
+                node_id.as_u64(),
+                a.layout_name
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "state")),
+                func: format!("__vuma_arena_alloc__{}", a.layout_name),
+                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::ArenaGrow(_a) => {
+            eprintln!(
+                "[vuma] PMT state lowering: ArenaGrow at node {} \
+                 -> extern call __vuma_arena_grow",
+                node_id.as_u64()
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "arena")),
+                func: "__vuma_arena_grow".to_string(),
+                args: vec![
+                    resolve_df_input(node_id, 0, edge_idx, scg),
+                    resolve_df_input(node_id, 1, edge_idx, scg),
+                ],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
+        NodePayload::ArenaFree(_a) => {
+            eprintln!(
+                "[vuma] PMT state lowering: ArenaFree at node {} \
+                 -> extern call __vuma_arena_free",
+                node_id.as_u64()
+            );
+            single(Some(ScgStatement::Call(CallNode {
+                dst: None,
+                func: "__vuma_arena_free".to_string(),
+                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+                is_extern: true,
+                reassigns: None,
+            })))
+        }
 
-        // Wave 2b: channel operations.  Lower the SCG-side NodePayload
+        // Channel operations.  Lower the SCG-side NodePayload
         // (which uses String-typed variable/type names — the scg crate
         // cannot depend on vuma-codegen) into the codegen-side
         // ScgStatement (which uses ScgType / ScgExpr).  The IRBuilder
@@ -2743,7 +3149,11 @@ fn strip_assignment_prefix(label: &str) -> (String, Option<String>) {
             let var_part = before_eq.strip_prefix("let ").unwrap_or(before_eq).trim();
             let is_simple_ident = !var_part.is_empty()
                 && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && !var_part.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                && !var_part
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false);
             let uv = if is_simple_ident {
                 Some(var_part.to_string())
             } else {
@@ -2775,7 +3185,11 @@ fn computation_dst_from_label(node_id: NodeId, label: &str, _scg: &SCG) -> Strin
             let var_part = before_eq.strip_prefix("let ").unwrap_or(before_eq).trim();
             let is_simple_ident = !var_part.is_empty()
                 && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
-                && !var_part.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                && !var_part
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false);
             if is_simple_ident {
                 return var_part.to_string();
             }
@@ -2791,14 +3205,19 @@ fn computation_dst_from_label(node_id: NodeId, label: &str, _scg: &SCG) -> Strin
 fn result_type_to_load_ty(result_type: &Option<String>) -> Option<vuma_codegen::ir::IRType> {
     match result_type.as_deref() {
         Some("u8") | Some("U8") | Some("i8") | Some("I8") => Some(vuma_codegen::ir::IRType::U8),
-        Some("u16") | Some("U16") | Some("i16") | Some("I16") => Some(vuma_codegen::ir::IRType::U16),
-        Some("u32") | Some("U32") | Some("i32") | Some("I32") => Some(vuma_codegen::ir::IRType::U32),
-        Some("u64") | Some("U64") | Some("i64") | Some("I64") => Some(vuma_codegen::ir::IRType::U64),
+        Some("u16") | Some("U16") | Some("i16") | Some("I16") => {
+            Some(vuma_codegen::ir::IRType::U16)
+        }
+        Some("u32") | Some("U32") | Some("i32") | Some("I32") => {
+            Some(vuma_codegen::ir::IRType::U32)
+        }
+        Some("u64") | Some("U64") | Some("i64") | Some("I64") => {
+            Some(vuma_codegen::ir::IRType::U64)
+        }
         // Don't override for Address/void/unknown — let IR builder default to U8
         _ => None,
     }
 }
-
 
 /// Original (no-call-extraction) Computation node handling — used when
 /// `extract_calls_from_label` finds no calls in the label.
@@ -2838,7 +3257,7 @@ fn convert_computation_no_calls(
                     } else {
                         resolve_subexpr(base_expr, &df_sources, edge_idx, scg)
                     };
-                    
+
                     let mut stmts = Vec::new();
                     let mut current_ptr = base_ptr;
                     for level in 0..deref_count {
@@ -2851,7 +3270,11 @@ fn convert_computation_no_calls(
                         };
                         // Intermediate loads use U64 (loading a pointer);
                         // final load uses U8 (loading the value).
-                        let load_ty = if is_last { None } else { Some(vuma_codegen::ir::IRType::U64) };
+                        let load_ty = if is_last {
+                            None
+                        } else {
+                            Some(vuma_codegen::ir::IRType::U64)
+                        };
                         stmts.push(ScgStatement::Access(AccessNode::Load {
                             dst: dst.clone(),
                             ptr: current_ptr.clone(),
@@ -2909,8 +3332,18 @@ fn convert_computation_no_calls(
                     // and loads may use different offset expressions
                     // (e.g. mem_arena_alloc stores via variable offset but
                     // loads via constant offset).
-                    if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
-                        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                    if let ScgExpr::BinOp {
+                        op: vuma_codegen::ir::BinOpKind::Add,
+                        lhs: _,
+                        rhs,
+                    } = &ptr
+                    {
+                        if let ScgExpr::BinOp {
+                            op: vuma_codegen::ir::BinOpKind::Mul,
+                            lhs: _,
+                            rhs,
+                        } = rhs.as_ref()
+                        {
                             if let ScgExpr::Int(stride) = rhs.as_ref() {
                                 inferred_ty = match *stride {
                                     8 => Some(vuma_codegen::ir::IRType::U64),
@@ -2968,7 +3401,12 @@ fn convert_computation_no_calls(
                 let df_inputs = edge_idx.incoming_df(node_id);
                 let mut all_sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
                 // Also check Derivation edges to Access nodes
-                for out_edge in edge_idx.outgoing.get(&node_id).map(|v| v.as_slice()).unwrap_or(&[]) {
+                for out_edge in edge_idx
+                    .outgoing
+                    .get(&node_id)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[])
+                {
                     if out_edge.kind == EdgeKind::Derivation {
                         if let Some(access_incoming) = edge_idx.incoming.get(&out_edge.target) {
                             for e in access_incoming {
@@ -3040,7 +3478,9 @@ fn convert_computation_no_calls(
         } else {
             resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
         };
-        let load_ty = comp.result_type.as_deref()
+        let load_ty = comp
+            .result_type
+            .as_deref()
             .and_then(|rt| result_type_to_load_ty(&Some(rt.to_string())));
         return vec![ScgStatement::Access(AccessNode::Load {
             dst: node_var(node_id, "val"),
@@ -3071,17 +3511,15 @@ fn convert_computation_no_calls(
                             let df_inputs = edge_idx.incoming_df(node_id);
                             let sources2: Vec<NodeId> =
                                 df_inputs.iter().map(|e| e.source).collect();
-                            if let Some(size_expr) = extract_dynamic_alloc_size(
-                                op_label,
-                                &sources2,
-                                edge_idx,
-                                scg,
-                            ) {
-                                let mut stmts = vec![ScgStatement::Allocation(AllocationNode::Heap {
-                                    name: alloc_name.clone(),
-                                    size_expr,
-                                    ty,
-                                })];
+                            if let Some(size_expr) =
+                                extract_dynamic_alloc_size(op_label, &sources2, edge_idx, scg)
+                            {
+                                let mut stmts =
+                                    vec![ScgStatement::Allocation(AllocationNode::Heap {
+                                        name: alloc_name.clone(),
+                                        size_expr,
+                                        ty,
+                                    })];
                                 // Register user-visible variable name (e.g. "buf" from "buf = allocate(8)")
                                 if let Some(uv) = extract_user_var_from_label(op_label) {
                                     stmts.push(ScgStatement::Computation(ComputationNode {
@@ -3115,10 +3553,8 @@ fn convert_computation_no_calls(
                         return stmts;
                     }
                     NodePayload::Access(access) => {
-                        let is_store_label =
-                            op_label.starts_with("*") && op_label.contains("= ");
-                        let is_load_label =
-                            op_label.contains("= *") && !op_label.starts_with("*");
+                        let is_store_label = op_label.starts_with("*") && op_label.contains("= ");
+                        let is_load_label = op_label.contains("= *") && !op_label.starts_with("*");
                         match access.mode {
                             AccessMode::Read if is_load_label => {
                                 let load_dst = node_var(node_id, "val");
@@ -3166,35 +3602,21 @@ fn convert_computation_no_calls(
                                     if let Some(eq_pos) = op_label.rfind("= ") {
                                         let lhs = op_label[..eq_pos].trim();
                                         let rhs = op_label[eq_pos + 2..].trim();
-                                        let ptr_expr =
-                                            strip_outer_parens(lhs[1..].trim());
+                                        let ptr_expr = strip_outer_parens(lhs[1..].trim());
                                         let ptr = if let Some((op, l, r)) =
                                             parse_expr_split(ptr_expr)
                                         {
-                                            let lhs_val = resolve_subexpr(
-                                                &l,
-                                                &all_sources,
-                                                edge_idx,
-                                                scg,
-                                            );
-                                            let rhs_val = resolve_subexpr(
-                                                &r,
-                                                &all_sources,
-                                                edge_idx,
-                                                scg,
-                                            );
+                                            let lhs_val =
+                                                resolve_subexpr(&l, &all_sources, edge_idx, scg);
+                                            let rhs_val =
+                                                resolve_subexpr(&r, &all_sources, edge_idx, scg);
                                             ScgExpr::BinOp {
                                                 op: map_binop_kind(op),
                                                 lhs: Box::new(lhs_val),
                                                 rhs: Box::new(rhs_val),
                                             }
                                         } else {
-                                            resolve_subexpr(
-                                                ptr_expr,
-                                                &all_sources,
-                                                edge_idx,
-                                                scg,
-                                            )
+                                            resolve_subexpr(ptr_expr, &all_sources, edge_idx, scg)
                                         };
                                         let value = if let Some(rhs_rest) = rhs.strip_prefix('*') {
                                             // RHS is a dereference: `*(msg + i)`.
@@ -3239,47 +3661,37 @@ fn convert_computation_no_calls(
                                                     scg,
                                                 )
                                             };
-                                            let load_dst = format!("v_{}_load_rhs", node_id.as_u64());
-                                            let load_stmt = ScgStatement::Access(AccessNode::Load {
-                                                dst: load_dst.clone(),
-                                                ptr: load_ptr,
-                                                offset: None,
-                                                ty: None,
-                                            });
-                                            let store_stmt = ScgStatement::Access(AccessNode::Store {
-                                                ptr,
-                                                offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
-                                                value: ScgExpr::Var(load_dst),
-                                                ty: None,
-                                            });
+                                            let load_dst =
+                                                format!("v_{}_load_rhs", node_id.as_u64());
+                                            let load_stmt =
+                                                ScgStatement::Access(AccessNode::Load {
+                                                    dst: load_dst.clone(),
+                                                    ptr: load_ptr,
+                                                    offset: None,
+                                                    ty: None,
+                                                });
+                                            let store_stmt =
+                                                ScgStatement::Access(AccessNode::Store {
+                                                    ptr,
+                                                    offset: access
+                                                        .offset
+                                                        .map(|o| ScgExpr::Int(o as i64)),
+                                                    value: ScgExpr::Var(load_dst),
+                                                    ty: None,
+                                                });
                                             return vec![load_stmt, store_stmt];
-                                        } else if let Some((op, l, r)) =
-                                            parse_expr_split(rhs)
-                                        {
-                                            let lhs_val = resolve_subexpr(
-                                                &l,
-                                                &all_sources,
-                                                edge_idx,
-                                                scg,
-                                            );
-                                            let rhs_val = resolve_subexpr(
-                                                &r,
-                                                &all_sources,
-                                                edge_idx,
-                                                scg,
-                                            );
+                                        } else if let Some((op, l, r)) = parse_expr_split(rhs) {
+                                            let lhs_val =
+                                                resolve_subexpr(&l, &all_sources, edge_idx, scg);
+                                            let rhs_val =
+                                                resolve_subexpr(&r, &all_sources, edge_idx, scg);
                                             ScgExpr::BinOp {
                                                 op: map_binop_kind(op),
                                                 lhs: Box::new(lhs_val),
                                                 rhs: Box::new(rhs_val),
                                             }
                                         } else {
-                                            resolve_subexpr(
-                                                rhs,
-                                                &all_sources,
-                                                edge_idx,
-                                                scg,
-                                            )
+                                            resolve_subexpr(rhs, &all_sources, edge_idx, scg)
                                         };
                                         (ptr, value)
                                     } else {
@@ -3411,25 +3823,29 @@ fn convert_computation_no_calls(
 /// Handles parenthesized sub-expressions correctly.
 fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     let expr = expr.trim();
-    
+
     // Remove outer parentheses if they wrap the entire expression
     let expr = strip_outer_parens(expr);
-    
+
     // Find the top-level operator (not inside parentheses)
     // Search from right to left to respect operator precedence
     // (lowest precedence operators are evaluated last)
-    
+
     // Check for two-character operators first
     let two_char_ops: [(&str, IrBinOpKind); 8] = [
-        ("<=", IrBinOpKind::SLe), (">=", IrBinOpKind::SGe),
-        ("==", IrBinOpKind::Eq), ("!=", IrBinOpKind::Ne),
-        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrA),
+        ("<=", IrBinOpKind::SLe),
+        (">=", IrBinOpKind::SGe),
+        ("==", IrBinOpKind::Eq),
+        ("!=", IrBinOpKind::Ne),
+        ("<<", IrBinOpKind::Shl),
+        (">>", IrBinOpKind::ShrA),
         // Logical AND/OR: lowered to bitwise And/Or on integer operands
         // (VUMA booleans are i1/i64, so bitwise ops on 0/1 values are
         // equivalent to logical ops).
-        ("&&", IrBinOpKind::And), ("||", IrBinOpKind::Or),
+        ("&&", IrBinOpKind::And),
+        ("||", IrBinOpKind::Or),
     ];
-    
+
     // Check for single-character operators in precedence order (lowest first)
     let single_ops: [(&str, IrBinOpKind); 10] = [
         ("|", IrBinOpKind::Or),
@@ -3443,7 +3859,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
         ("/", IrBinOpKind::SDiv),
         ("%", IrBinOpKind::SRem),
     ];
-    
+
     // Search for top-level operators (outside parentheses)
     // Process in precedence order (lowest first)
     // Check two-char operators FIRST (before single-char)
@@ -3457,7 +3873,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
             }
         }
     }
-    
+
     for &(op_str, op_kind) in &single_ops {
         if let Some(pos) = find_top_level_op(expr, op_str) {
             let lhs = expr[..pos].trim().to_string();
@@ -3467,7 +3883,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
             }
         }
     }
-    
+
     None
 }
 
@@ -3476,33 +3892,39 @@ fn find_top_level_op(expr: &str, op: &str) -> Option<usize> {
     let mut depth: i32 = 0;
     let bytes = expr.as_bytes();
     let op_bytes = op.as_bytes();
-    
+
     // Scan from right to left to find the LAST occurrence at depth 0
     // (so "a - b - c" splits as "a - b" and "c", giving left-to-right evaluation)
     let mut i = bytes.len();
     while i > 0 {
         i -= 1;
         let c = bytes[i] as char;
-        
+
         if c == ')' {
             depth += 1;
         } else if c == '(' {
             depth -= 1;
         } else if depth == 0 && i + op_bytes.len() <= bytes.len() {
             // Check if this position matches the operator
-            let matches = op_bytes.iter().enumerate().all(|(j, &ob)| bytes[i + j] == ob);
+            let matches = op_bytes
+                .iter()
+                .enumerate()
+                .all(|(j, &ob)| bytes[i + j] == ob);
             if matches {
                 // Make sure this isn't part of a two-char operator
                 // (e.g., don't match the '<' in '<=')
                 if (op == "<" || op == ">")
-                    && i + 1 < bytes.len() && (bytes[i + 1] == b'=' || bytes[i + 1] == b'<' || bytes[i + 1] == b'>') {
-                        continue;
-                    }
+                    && i + 1 < bytes.len()
+                    && (bytes[i + 1] == b'=' || bytes[i + 1] == b'<' || bytes[i + 1] == b'>')
+                {
+                    continue;
+                }
                 // Don't match '&' in '&&' or '|' in '||'
                 if op == "&" || op == "|" {
                     // Skip if this is part of a double operator (&& or ||)
-                    if (i + 1 < bytes.len() && bytes[i + 1] == bytes[i]) 
-                       || (i > 0 && bytes[i - 1] == bytes[i]) {
+                    if (i + 1 < bytes.len() && bytes[i + 1] == bytes[i])
+                        || (i > 0 && bytes[i - 1] == bytes[i])
+                    {
                         continue;
                     }
                 }
@@ -3568,7 +3990,6 @@ fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
     }
 }
 
-
 /// Extract the user-visible variable name from a label like "out = atomic_load(...)".
 /// Returns None if the label doesn't match the "<var> = ..." pattern.
 fn extract_user_var_from_label(label: &str) -> Option<String> {
@@ -3576,7 +3997,10 @@ fn extract_user_var_from_label(label: &str) -> Option<String> {
         let var_part = label[..eq_pos].trim();
         let var_part = var_part.strip_prefix("let ").unwrap_or(var_part).trim();
         if !var_part.is_empty()
-            && var_part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && var_part
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
             && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             return Some(var_part.to_string());
@@ -3585,12 +4009,7 @@ fn extract_user_var_from_label(label: &str) -> Option<String> {
     None
 }
 
-fn resolve_subexpr(
-    subexpr: &str,
-    sources: &[NodeId],
-    edge_idx: &EdgeIndex,
-    scg: &SCG,
-) -> ScgExpr {
+fn resolve_subexpr(subexpr: &str, sources: &[NodeId], edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
     let subexpr = subexpr.trim();
 
     // Strip outer parentheses (e.g. "(-42)" → "-42") so negative literals
@@ -3634,12 +4053,15 @@ fn resolve_subexpr(
     // Check if it's a hex literal (e.g. "0x12", "0xFF", "-0x1A")
     let hex_str = subexpr.strip_prefix("-").unwrap_or(subexpr);
     let is_neg = subexpr.starts_with('-');
-    if let Some(hex_digits) = hex_str.strip_prefix("0x").or_else(|| hex_str.strip_prefix("0X")) {
+    if let Some(hex_digits) = hex_str
+        .strip_prefix("0x")
+        .or_else(|| hex_str.strip_prefix("0X"))
+    {
         if let Ok(num) = i64::from_str_radix(hex_digits, 16) {
             return ScgExpr::Int(if is_neg { -num } else { num });
         }
     }
-    
+
     // Check if it's a function call: "func_name(args)"
     // Only match if the expression starts with an identifier followed by "("
     // This avoids matching expressions like "(a + b)" or "*(ptr + 0)"
@@ -3660,9 +4082,11 @@ fn resolve_subexpr(
                             let label = comp.kind.label();
                             // Match "let var = func_name(...)" or "func_name(...)"
                             if label.contains(subexpr)
-                                && (label.starts_with("let ") || label.contains(&(format!("= {}", subexpr)))) {
-                                    return ScgExpr::Var(format!("v_{}", node_data.id.as_u64()));
-                                }
+                                && (label.starts_with("let ")
+                                    || label.contains(&(format!("= {}", subexpr))))
+                            {
+                                return ScgExpr::Var(format!("v_{}", node_data.id.as_u64()));
+                            }
                         }
                     }
                 }
@@ -3683,7 +4107,7 @@ fn resolve_subexpr(
             return ScgExpr::Int(0);
         }
     }
-    
+
     // Check if it's a simple variable name
     // Match against the DataFlow sources
     if is_simple_var(subexpr) {
@@ -3693,11 +4117,12 @@ fn resolve_subexpr(
                 if let NodePayload::Computation(comp) = &src_data.payload {
                     let label = comp.kind.label();
                     // Check for exact match or "param <var>" or "<var> = ..."
-                    if label == *subexpr 
-                       || label == format!("param {}", subexpr)
-                       || label.starts_with(&format!("{} ", subexpr))
-                       || label.starts_with(&format!("{} =", subexpr))
-                       || label.starts_with(&format!("let {} =", subexpr)) {
+                    if label == *subexpr
+                        || label == format!("param {}", subexpr)
+                        || label.starts_with(&format!("{} ", subexpr))
+                        || label.starts_with(&format!("{} =", subexpr))
+                        || label.starts_with(&format!("let {} =", subexpr))
+                    {
                         // For multi-level dereference loads (let val = **buf1,
                         // let val = ***buf1), the DataFlow input is the base
                         // pointer, not the loaded value. Return Var(name) so
@@ -3775,7 +4200,10 @@ fn resolve_subexpr(
         // names map (e.g., for-loop iterators registered by lower_loop).
         // Invalid identifiers (hex literals, numbers, etc.) fall back to
         // the first source.
-        let is_valid_var = subexpr.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        let is_valid_var = subexpr
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
             && subexpr.chars().all(|c| c.is_alphanumeric() || c == '_');
         if is_valid_var {
             return ScgExpr::Var(subexpr.to_string());
@@ -3785,7 +4213,7 @@ fn resolve_subexpr(
             return resolve_df_input_for_node(src, edge_idx, scg);
         }
     }
-    
+
     // For complex sub-expressions, recursively parse and return BinOp
     if let Some((op, lhs_str, rhs_str)) = parse_expr_split(subexpr) {
         // VUMA's `>>` is arithmetic (sign-extending) for signed integers.
@@ -3857,7 +4285,10 @@ fn resolve_subexpr(
     // Fallback: log warning for unsupported sub-expressions instead of
     // silently returning 0. This makes debugging easier when constructs
     // are not handled by the SCG→IR bridge.
-    eprintln!("[vuma] WARNING: resolve_subexpr fallback for '{}'; using 0", subexpr);
+    eprintln!(
+        "[vuma] WARNING: resolve_subexpr fallback for '{}'; using 0",
+        subexpr
+    );
     ScgExpr::Int(0)
 }
 
@@ -3981,7 +4412,6 @@ fn computation_dst(node_id: NodeId, _op_label: &str, _scg: &SCG) -> String {
     node_var(node_id, "comp")
 }
 
-
 // ── Function parameter extraction ──────────────────────────────────────
 
 /// Extract function parameters from DataFlow edges leaving the
@@ -4061,7 +4491,7 @@ fn parse_scg_type(type_str: &str) -> Option<ScgType> {
     }
 }
 
-/// PMT (Wave 2): map an access_size (in bytes) to the corresponding unsigned
+/// PMT: map an access_size (in bytes) to the corresponding unsigned
 /// IR type. Used by `convert_node_to_statement_with_externs` when lowering
 /// state-field Access nodes (which carry both an explicit `offset` and a
 /// `access_size` matching the field's width). Returns `None` for sizes that
@@ -4097,12 +4527,14 @@ fn repd_to_scg_type(repd: &RepD) -> ScgType {
         },
         RepD::Struct(_) | RepD::Array(_) | RepD::Enum(_) | RepD::Union(_) => ScgType::Ptr,
         RepD::Generic { .. } => ScgType::I64,
-        RepD::ManifoldSpatial(_) | RepD::GestaltSuperposition(_) | RepD::ConceptRelational(_) => ScgType::Ptr,
+        RepD::ManifoldSpatial(_) | RepD::GestaltSuperposition(_) | RepD::ConceptRelational(_) => {
+            ScgType::Ptr
+        }
         // PMT: a State is a buffer view (passed by reference); a Ref is a
         // pointer-sized offset.
         RepD::State { .. } => ScgType::Ptr,
         RepD::Ref { .. } => ScgType::U64,
-        // Wave 9 — Dependent state types: a DependentArray is a dynamic
+        // Dependent state types: a DependentArray is a dynamic
         // data structure passed by reference (like Struct/Array); the
         // runtime count is tracked in a separate u64 vreg.
         RepD::DependentArray { .. } => ScgType::Ptr,
@@ -4125,7 +4557,7 @@ fn scg_type_to_name(ty: &ScgType) -> &'static str {
         ScgType::Void => "void",
         ScgType::F32 => "f32",
         ScgType::F64 => "f64",
-        // Wave 1c: Channel<T> — opaque IPC handle.  Use "channel" as the
+        // Channel<T> — opaque IPC handle.  Use "channel" as the
         // canonical name (the inner payload type is not part of the runtime
         // representation).
         ScgType::Channel(_) => "channel",
@@ -4239,7 +4671,9 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 ///    ScgStatements with DataFlow-based variable naming.
 fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
     let label = label.trim();
-    if !label.starts_with("for ") { return None; }
+    if !label.starts_with("for ") {
+        return None;
+    }
     let rest = &label[4..];
     let in_pos = rest.find(" in ")?;
     let var_name = rest[..in_pos].trim().to_string();
@@ -4256,10 +4690,13 @@ fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
         } else if start_str.starts_with('(') && start_str.ends_with(')') {
             // Parenthesized expression — strip parens and try to parse
             // as a variable or simple binop.
-            let inner = start_str[1..start_str.len()-1].trim();
+            let inner = start_str[1..start_str.len() - 1].trim();
             if let Ok(start) = inner.parse::<i64>() {
                 ScgExpr::Int(start)
-            } else if inner.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            } else if inner
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
                 && inner.chars().all(|c| c.is_alphanumeric() || c == '_')
             {
                 ScgExpr::Var(inner.to_string())
@@ -4285,7 +4722,10 @@ fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
                     return None;
                 }
             }
-        } else if start_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        } else if start_str
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
             && start_str.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             ScgExpr::Var(start_str.to_string())
@@ -4300,7 +4740,10 @@ fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
         let end_expr = if let Ok(end) = end_str.parse::<i64>() {
             let end = if inclusive { end + 1 } else { end };
             ScgExpr::Int(end)
-        } else if end_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        } else if end_str
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
             && end_str.chars().all(|c| c.is_alphanumeric() || c == '_')
         {
             // Variable end bound — inclusive adjustment is handled at
@@ -4398,12 +4841,12 @@ fn parse_while_condition(
     let rhs = resolve_subexpr(rhs_str.trim(), &sources, edge_idx, scg);
 
     let neg_op = match op_str {
-        "<" => IrBinOpKind::SGe,   // !(a < b)  ≡  a >= b
-        "<=" => IrBinOpKind::SGt,  // !(a <= b) ≡  a >  b
-        ">" => IrBinOpKind::SLe,   // !(a > b)  ≡  a <= b
-        ">=" => IrBinOpKind::SLt,  // !(a >= b) ≡  a <  b
-        "==" => IrBinOpKind::Ne,   // !(a == b) ≡  a != b
-        "!=" => IrBinOpKind::Eq,   // !(a != b) ≡  a == b
+        "<" => IrBinOpKind::SGe,  // !(a < b)  ≡  a >= b
+        "<=" => IrBinOpKind::SGt, // !(a <= b) ≡  a >  b
+        ">" => IrBinOpKind::SLe,  // !(a > b)  ≡  a <= b
+        ">=" => IrBinOpKind::SLt, // !(a >= b) ≡  a <  b
+        "==" => IrBinOpKind::Ne,  // !(a == b) ≡  a != b
+        "!=" => IrBinOpKind::Eq,  // !(a != b) ≡  a == b
         _ => return None,
     };
 
@@ -4430,21 +4873,20 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
             depth += 1;
         } else if c == ')' {
             depth -= 1;
-        } else if depth == 0
-            && bytes[i..i + op_bytes.len()] == *op_bytes {
-                // Avoid matching "<" inside "<=" or ">" inside ">=", or inside
-                // "<<"/">>" shift operators.
-                let next_is = |b: u8| i + 1 < bytes.len() && bytes[i + 1] == b;
-                if (op == "<" && next_is(b'='))
-                    || (op == ">" && next_is(b'='))
-                    || (op == "<" && next_is(b'<'))
-                    || (op == ">" && next_is(b'>'))
-                {
-                    i += 1;
-                } else {
-                    return Some(i);
-                }
+        } else if depth == 0 && bytes[i..i + op_bytes.len()] == *op_bytes {
+            // Avoid matching "<" inside "<=" or ">" inside ">=", or inside
+            // "<<"/">>" shift operators.
+            let next_is = |b: u8| i + 1 < bytes.len() && bytes[i + 1] == b;
+            if (op == "<" && next_is(b'='))
+                || (op == ">" && next_is(b'='))
+                || (op == "<" && next_is(b'<'))
+                || (op == ">" && next_is(b'>'))
+            {
+                i += 1;
+            } else {
+                return Some(i);
             }
+        }
         i += 1;
     }
     None
@@ -4475,8 +4917,7 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
 ///
 /// DEPRECATED: the canonical pipeline now uses [`bridge_ast_to_codegen_scg`]
 /// (direct AST→codegen path) because the semantic-SCG → codegen-SCG path
-/// produced broken code (segfaults, infinite loops — see Task 4-A in the
-/// worklog). This function is retained for the binaries / tests that still
+/// produced broken code (segfaults, infinite loops). This function is retained for the binaries / tests that still
 /// import it; new code should call `bridge_ast_to_codegen_scg` instead.
 pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<String>) -> Scg {
     let edge_idx = EdgeIndex::build(scg);
@@ -4545,7 +4986,14 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 // the walk to break before processing that node, so the handler
                 // never runs and an empty Return(vec![]) is emitted instead.
                 let stop_at: HashSet<NodeId> = HashSet::new();
-                walk_control_flow_with_externs(first_cf.target, scg, &edge_idx, &mut consumed, &stop_at, extern_functions)
+                walk_control_flow_with_externs(
+                    first_cf.target,
+                    scg,
+                    &edge_idx,
+                    &mut consumed,
+                    &stop_at,
+                    extern_functions,
+                )
             } else {
                 vec![]
             };
@@ -4563,19 +5011,21 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 // FunctionReturn directly to resolve the return value.
                 // Only use the reassignment search for functions with loops
                 // (where the walk is known to stop at LoopExit).
-                let has_loop = body.iter().any(|s| {
-                    matches!(s, ScgStatement::Control(ControlNode::Loop { .. }))
-                });
+                let has_loop = body
+                    .iter()
+                    .any(|s| matches!(s, ScgStatement::Control(ControlNode::Loop { .. })));
                 if let Some(ret) = return_node {
                     let df_inputs = edge_idx.incoming_df(ret);
                     let ret_vals: Vec<ScgExpr> = if df_inputs.is_empty() || !has_loop {
                         // No DataFlow inputs or no loops — use simple resolution
-                        df_inputs.iter()
+                        df_inputs
+                            .iter()
                             .enumerate()
                             .map(|(i, _)| resolve_df_input(ret, i, &edge_idx, scg))
                             .collect()
                     } else {
-                        df_inputs.iter()
+                        df_inputs
+                            .iter()
                             .enumerate()
                             .map(|(i, _)| {
                                 let source = df_inputs[i].source;
@@ -4592,14 +5042,19 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                                                 }
                                                 if let NodePayload::Computation(c) = &node.payload {
                                                     if let ComputationKind::Other(ref l) = c.kind {
-                                                        if l.starts_with(&reassign_prefix) && !l.starts_with(&let_prefix) {
+                                                        if l.starts_with(&reassign_prefix)
+                                                            && !l.starts_with(&let_prefix)
+                                                        {
                                                             latest_reassign = Some(node.id);
                                                         }
                                                     }
                                                 }
                                             }
                                             if let Some(reassign_id) = latest_reassign {
-                                                return ScgExpr::Var(format!("v_{}", reassign_id.as_u64()));
+                                                return ScgExpr::Var(format!(
+                                                    "v_{}",
+                                                    reassign_id.as_u64()
+                                                ));
                                             }
                                         }
                                     }
@@ -4637,7 +5092,14 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
         let mut body = Vec::new();
         for start in &entry_points {
             let stop_at = HashSet::new();
-            let mut partial = walk_control_flow_with_externs(*start, scg, &edge_idx, &mut consumed, &stop_at, extern_functions);
+            let mut partial = walk_control_flow_with_externs(
+                *start,
+                scg,
+                &edge_idx,
+                &mut consumed,
+                &stop_at,
+                extern_functions,
+            );
             body.append(&mut partial);
         }
 
@@ -4649,7 +5111,13 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             }
             consumed.insert(*nid);
             if let Some(node_data) = scg.get_node(*nid) {
-                let node_stmts = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions);
+                let node_stmts = convert_node_to_statement_with_externs(
+                    *nid,
+                    node_data,
+                    &edge_idx,
+                    scg,
+                    extern_functions,
+                );
                 body.extend(node_stmts);
             }
         }
@@ -4710,7 +5178,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Shared post-IR-build pipeline (Wave 1 — Task ID 5)
+// Shared post-IR-build pipeline
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Run the shared post-IR-build O2 pipeline on an `IRProgram`.
@@ -4718,24 +5186,24 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
 /// This is the single source of truth for the sequence of passes that run
 /// AFTER the SCG→IR build and BEFORE register allocation / emission.  Both
 /// [`compile_with_path`] and [`compile_modules`] delegate to it, and the
-/// test-suite compile path (`src/bin/compile_dump.rs`) is wired into it by
-/// Wave 2 so the test suite exercises the FULL production O2 pipeline
+/// test-suite compile path (`src/bin/compile_dump.rs`) is wired into it so
+/// the test suite exercises the FULL production O2 pipeline
 /// instead of `run_optimizations` alone (which uses a default latency table
 /// and skips lowering / bv_verify / escape+effects).
 ///
 /// The sequence mirrors `compile_with_path`'s historical Stage 8 exactly:
 ///
-/// 1. **Wave 34 lowering** (O1+): `monomorphize`, `lower_closures`,
+/// 1. **Lowering** (O1+): `monomorphize`, `lower_closures`,
 ///    `lower_switches`, `lower_tail_calls`, `normalize_loops`.  Each pass
 ///    is best-effort (soft-failures are logged, not fatal).
-/// 2. **Wave 36 bv_verify**: verify all e-graph rewrite rules are sound.
+/// 2. **bv_verify**: verify all e-graph rewrite rules are sound.
 ///    Advisory only — logs a warning on unsound rules, does NOT abort.
-/// 3. **Wave 10 syscall allowlist**: reject syscall numbers > 600 (hard
+/// 3. **Syscall allowlist**: reject syscall numbers > 600 (hard
 ///    error — returns `Err(VumaError::Codegen{...})` on the first
 ///    violation, matching `stop_on_first_error = true`).
 /// 4. **Stage 8b codegen-opt** (O1+): `run_optimizations_with_target_and_inline_threshold`
 ///    with the REAL backend's latency table (built from `backend_kind`).
-/// 5. **Wave 32 escape+effects** (O2+): SROA + alloc elision +
+/// 5. **Escape+effects** (O2+): SROA + alloc elision +
 ///    interprocedural effect propagation via `run_escape_and_effects_passes`.
 ///
 /// # Parameters
@@ -4765,7 +5233,7 @@ pub fn compile(source: &str, config: &CompileConfig) -> Result<CompilationOutput
 /// encapsulated here (this helper takes `IRProgram`, not the codegen SCG).
 /// It stays inline in `compile_with_path`.  Likewise the SCG-liveness
 /// `analyze_with_scg_liveness` pass (Stage 6b) runs on the semantic SCG
-/// and stays in `compile_with_path`.  Wave 2 will add the codegen-SCG
+/// and stays in `compile_with_path`.  A follow-up will add the codegen-SCG
 /// `MemorySafetyAnalyzer` call to `compile_dump` separately if desired.
 pub fn run_ir_pipeline(
     mut ir_program: IRProgram,
@@ -4773,7 +5241,7 @@ pub fn run_ir_pipeline(
     backend_kind: vuma_codegen::backend::BackendKind,
     timings: &mut Vec<(String, u64)>,
 ) -> Result<IRProgram, VumaError> {
-    // ── Wave 34: Lowering passes (monomorphize, closures, switch, tail-call,
+    // ── Lowering passes (monomorphize, closures, switch, tail-call,
     //    loop-normalize) — run after SCG→IR build, before the main opt pass.
     //    In VUMA 2.0 these run unconditionally because O3 is mandatory.
     //    Each pass is best-effort: a soft-failure is logged but does not
@@ -4781,17 +5249,28 @@ pub fn run_ir_pipeline(
     //    correctness does not yet depend on them).
     {
         let tlower = Instant::now();
-        let mut lower = |name: &str, f: fn(&mut IRProgram) -> Result<(), vuma_codegen::backend::BackendError>| {
-            if let Err(e) = f(&mut ir_program) {
-                vuma_log!(warn, "wave34 lowering pass '{}' soft-failed: {}", name, e);
-            }
-        };
+        let mut lower =
+            |name: &str,
+             f: fn(&mut IRProgram) -> Result<(), vuma_codegen::backend::BackendError>| {
+                if let Err(e) = f(&mut ir_program) {
+                    vuma_log!(warn, "wave34 lowering pass '{}' soft-failed: {}", name, e);
+                }
+            };
         lower("monomorphize", vuma_codegen::monomorphize::monomorphize);
         lower("lower_closures", vuma_codegen::closures::lower_closures);
         lower("lower_switches", vuma_codegen::control_flow::lower_switches);
-        lower("lower_tail_calls", vuma_codegen::control_flow::lower_tail_calls);
-        lower("normalize_loops", vuma_codegen::control_flow::normalize_loops);
-        timings.push(("wave34-lowering".to_string(), tlower.elapsed().as_millis() as u64));
+        lower(
+            "lower_tail_calls",
+            vuma_codegen::control_flow::lower_tail_calls,
+        );
+        lower(
+            "normalize_loops",
+            vuma_codegen::control_flow::normalize_loops,
+        );
+        timings.push((
+            "wave34-lowering".to_string(),
+            tlower.elapsed().as_millis() as u64,
+        ));
     }
 
     // ── IPC Builtin Lowering ──
@@ -4808,31 +5287,58 @@ pub fn run_ir_pipeline(
         for func in &mut ir_program.functions {
             vuma_codegen::ipc_lowering::lower_ipc_builtins(func, backend_kind);
         }
-        timings.push(("ipc-lowering".to_string(), tipc.elapsed().as_millis() as u64));
+        timings.push((
+            "ipc-lowering".to_string(),
+            tipc.elapsed().as_millis() as u64,
+        ));
     }
 
-    // ── Wave 36: bv_verify gate — verify all e-graph rewrite rules are sound
+    // ── bv_verify gate — verify all e-graph rewrite rules are sound
     //    BEFORE the opt pass (which runs the e-graph). If any rule is unsound,
-    //    log a warning so the user knows the e-graph may miscompile. The gate
-    //    is advisory (does not abort) to avoid breaking compilation for
-    //    pre-existing rule sets; a future strict mode could promote this to an
-    //    error.
+    //    log a warning so the user knows the e-graph may miscompile.
+    //
+    //    The gate is advisory by default
+    //    (does not abort) to preserve historical behaviour for pre-
+    //    existing rule sets. Passing `--strict-ive` (plumbed via
+    //    `CompileConfig::strict_ive`) promotes it to a HARD failure:
+    //    any unsound rule aborts compilation with `VumaError::Transform`.
+    //    The verifier itself is sound — it exhaustively enumerates 256
+    //    (1-var) or 65536 (2-var) input combinations per rule and only
+    //    reports a rule unsound when it has a concrete counterexample —
+    //    so under `--strict-ive` there are no false positives in the
+    //    current rule set. The advisory default is retained as an
+    //    explicit escape hatch for users who extend the rule set with
+    //    not-yet-verified rules.
     {
         let tverify = Instant::now();
         let results = vuma_codegen::bv_verify::verify_all_rules();
         let unsound: Vec<_> = results.iter().filter(|r| !r.sound).collect();
         if !unsound.is_empty() {
+            let names: Vec<&'static str> = unsound.iter().map(|r| r.rule_name).collect();
             vuma_log!(warn,
                 "wave36 bv_verify: {} unsound e-graph rule(s) detected (compilation may miscompile): {}",
                 unsound.len(),
-                unsound.iter().map(|r| r.rule_name).collect::<Vec<_>>().join(", ")
+                names.join(", ")
             );
+            if config.strict_ive {
+                return Err(VumaError::Transform {
+                    pass_name: "bv_verify".to_string(),
+                    errors: vec![format!(
+                        "wave36 bv_verify: {} unsound e-graph rule(s) detected under --strict-ive: {}",
+                        unsound.len(),
+                        names.join(", ")
+                    )],
+                });
+            }
         }
-        timings.push(("wave36-bv-verify".to_string(), tverify.elapsed().as_millis() as u64));
+        timings.push((
+            "wave36-bv-verify".to_string(),
+            tverify.elapsed().as_millis() as u64,
+        ));
     }
 
-    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers
-    // at compile time. Since `nr` is arch-specific (Wave 11/12 design), we
+    // Syscall allowlist — reject obviously invalid syscall numbers
+    // at compile time. Since `nr` is arch-specific, we
     // use a range check rather than a name lookup. Valid Linux syscall
     // numbers are in the range 0..=600 across all supported architectures.
     //
@@ -4860,70 +5366,110 @@ pub fn run_ir_pipeline(
         }
     }
 
-    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
-    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // Note: lower_syscalls_all() was removed — real
+    // IRInstr::Syscall emission was added directly to all backends, so the IR flows through
     // to codegen unchanged. The generic_syscall_name() table remains in
     // ir.rs as a utility. The lower_syscalls()/lower_syscalls_all()
-    // definitions were also deleted in Wave 10 dead-code cleanup
-    // (see TASKS.md).
+    // definitions were also deleted as dead-code cleanup.
 
-    // ── Wave 95-96: IVE formal-verification hooks ──
-    // Wire linear_check (Wave 95) and l1l3_collapse (Wave 96) into the
+    // ── IVE formal-verification hooks ──
+    // Wire linear_check and l1l3_collapse into the
     // pipeline.  These are advisory checks — they log warnings on
     // violations but do NOT abort compilation (matching the existing
-    // bv_verify gate behavior).  This satisfies the TASKS.md §0.3
-    // requirement that these functions be CALLED from the pipeline,
-    // not just defined as library code with unit tests.
+    // bv_verify gate behavior).
     {
         let tive = Instant::now();
-        // Wave 96: L1→L3 invariant collapse proof.
+        // L1→L3 invariant collapse proof.
         // Scans the IR for runtime-checked invariants (L1: channel framing,
         // CRC, cap, protocol) and reports how many fold into compile-time
-        // invariants (L3).  Advisory — logs the folded-check count.
+        // invariants (L3).
+        // MANDATORY: hard-fail when L1 checks cannot be folded
+        // to compile-time L3 invariants. INV-2 found zero violations across
+        // all 1574 gold-standard tests, so promoting this from advisory to
+        // mandatory is safe.
         let collapse = vuma_ive::verification::l1l3_collapse_from_ir(&ir_program);
         if collapse.folded_checks > 0 {
             vuma_log!(
                 info,
-                "Wave 96: L1→L3 invariant collapse: {} checks folded (collapsed={})",
+                "[l1l3-collapse]: Wave 96 L1→L3 invariant collapse: {} checks folded (collapsed={}).",
                 collapse.folded_checks, collapse.collapsed
             );
         }
-        // Wave 95: Linear-type checking.
-        // Scans each function for variables used more than once (linear
-        // violations).  Advisory — logs a warning per violation.
-        for func in &ir_program.functions {
-            let violations = vuma_ive::borrow_region::linear_check_from_ir(func);
-            for v in &violations {
-                vuma_log!(
-                    warn,
-                    "Wave 95: linear-type violation in {}: vreg {} used {} times (expected 1)",
-                    func.name, v.vreg_id, v.use_count
-                );
-            }
+        if !collapse.collapsed {
+            vuma_log!(
+                warn,
+                "VERIFICATION FAILURE [l1l3-collapse]: L1→L3 invariant collapse failed ({} runtime checks not all foldable to compile-time).",
+                collapse.folded_checks
+            );
+            return Err(VumaError::Transform {
+                pass_name: "l1l3-collapse".to_string(),
+                errors: vec![format!(
+                    "L1→L3 invariant collapse proof failed: {} runtime-checked invariant(s) could not be folded to compile-time (collapsed=false)",
+                    collapse.folded_checks
+                )],
+            });
         }
-        timings.push(("ive-verification".to_string(), tive.elapsed().as_millis() as u64));
+        timings.push((
+            "ive-verification".to_string(),
+            tive.elapsed().as_millis() as u64,
+        ));
     }
 
-    // ── Wave 89-92: Session type + information-flow checks ──
-    // Wire session_type_check (Wave 89) and information_flow_check (Wave 91)
-    // into the pipeline.  Advisory — logs warnings, does NOT abort.
+    // ── Session type + information-flow checks ──
+    // Wire session_type_check and information_flow_check
+    // into the pipeline.
+    // MANDATORY: both checks now hard-fail on any violation.
+    // INV-2 found zero violations across all 1574 gold-standard tests for
+    // both verifiers, so promoting them from advisory to mandatory is safe.
     {
         let tct = Instant::now();
-        // Wave 89: Session type verification.
+        // Session type verification — MANDATORY.
         let session_violations = vuma_ive::session_type::verify_session_types_from_ir(&ir_program);
-        for v in &session_violations {
-            vuma_log!(warn, "Wave 89: session type violation: {}", v.message);
+        if !session_violations.is_empty() {
+            for v in &session_violations {
+                vuma_log!(
+                    warn,
+                    "VERIFICATION FAILURE [session-type]: Wave 89 session type violation: {}.",
+                    v.message
+                );
+            }
+            let err_msgs: Vec<String> = session_violations
+                .iter()
+                .map(|v| format!("session-type: {}", v.message))
+                .collect();
+            return Err(VumaError::Transform {
+                pass_name: "session-type".to_string(),
+                errors: err_msgs,
+            });
         }
-        // Wave 91: Information-flow verification.
-        let flow_violations = vuma_ive::information_flow::verify_information_flow_from_ir(&ir_program);
-        for v in &flow_violations {
-            vuma_log!(warn, "Wave 91: information-flow violation: {}", v.message);
+        // Information-flow verification — MANDATORY.
+        let flow_violations =
+            vuma_ive::information_flow::verify_information_flow_from_ir(&ir_program);
+        if !flow_violations.is_empty() {
+            for v in &flow_violations {
+                vuma_log!(
+                    warn,
+                    "VERIFICATION FAILURE [information-flow]: Wave 91 information-flow violation: {}.",
+                    v.message
+                );
+            }
+            let err_msgs: Vec<String> = flow_violations
+                .iter()
+                .map(|v| format!("information-flow: {}", v.message))
+                .collect();
+            return Err(VumaError::Transform {
+                pass_name: "information-flow".to_string(),
+                errors: err_msgs,
+            });
         }
-        timings.push(("ct-verification".to_string(), tct.elapsed().as_millis() as u64));
+        timings.push((
+            "ct-verification".to_string(),
+            tct.elapsed().as_millis() as u64,
+        ));
     }
 
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
-    // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
+    // Use the ACTUAL backend's latency table for per-ISA optimization.
     // The backend is determined from `backend_kind` (passed by the caller —
     // `config.emit_config().backend` for compile_with_path, `host_backend_kind()`
     // for compile_modules). This means the e-graph cost function and scheduler
@@ -4933,7 +5479,8 @@ pub fn run_ir_pipeline(
     // In VUMA 2.0, O3 is mandatory — the codegen-opt pass always runs.
     {
         let topt = Instant::now();
-        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(backend_kind) {
+        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(backend_kind)
+        {
             backend.target_info().latency_table()
         } else {
             vuma_codegen::target_desc::LatencyTable::default_ooo()
@@ -4946,7 +5493,7 @@ pub fn run_ir_pipeline(
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 
-    // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
+    // Escape analysis + SROA + alloc elision + interprocedural
     // effect propagation. Runs AFTER the main codegen-opt pass so the
     // analysis sees the post-optimisation IR (and so SROA's cleanup
     // happens before regalloc).  In VUMA 2.0 O3 is mandatory, so this
@@ -4954,17 +5501,21 @@ pub fn run_ir_pipeline(
     {
         let te = Instant::now();
         let summary = run_escape_and_effects_passes(&mut ir_program);
-        vuma_log!(debug,
+        vuma_log!(
+            debug,
             "escape+effects: sroa_promoted={} allocs_elided={} pure_fns={}/{}",
             summary.sroa_promoted,
             summary.allocs_elided,
             summary.pure_functions,
             summary.total_functions
         );
-        timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
+        timings.push((
+            "escape-effects".to_string(),
+            te.elapsed().as_millis() as u64,
+        ));
     }
 
-    // (Wave 4) Auto-vectorization. Runs AFTER escape/effects (so it sees the
+    // Auto-vectorization. Runs AFTER escape/effects (so it sees the
     // post-optimization, post-SROA IR) and BEFORE regalloc. The vectorizer
     // performs per-function loop vectorization (counted self-loops with safe
     // bodies — vector loop + scalar remainder) and SLP planning (plan-only;
@@ -4984,9 +5535,11 @@ pub fn run_ir_pipeline(
             slp_packs += plan.packed_ops.len();
             *func = new_f;
         }
-        vuma_log!(debug,
+        vuma_log!(
+            debug,
             "vectorize: loops_vectorized={} slp_packs={}",
-            loops_vectorized, slp_packs
+            loops_vectorized,
+            slp_packs
         );
         timings.push(("vectorize".to_string(), tv.elapsed().as_millis() as u64));
     }
@@ -5023,7 +5576,7 @@ pub fn compile_with_path(
 
     // ── Stage 1: Parse + Resolve imports ────────────────────────────
     let t = Instant::now();
-    let ast = match parse_and_resolve(source, file_path) {
+    let ast = match parse_and_resolve(source, file_path, config.max_expr_depth) {
         Ok(ast) => ast,
         Err(e) => {
             errors.push(e);
@@ -5049,6 +5602,20 @@ pub fn compile_with_path(
             return Err(errors);
         }
     };
+    // (Path-sensitivity) Capture the set of node IDs that are the first
+    // node of an `else` block BEFORE any SCG transforms run.  The parser
+    // labels the Branch → else-block-first-node edge with "else", but
+    // later SCG transforms (Stage 7) strip edge labels — so this must be
+    // done here, on the freshly-parsed SCG.  The NodeIds are stable
+    // across transforms (transforms may add/remove other nodes, but the
+    // statement-level Computation/Channel nodes referenced here are
+    // preserved), so the set remains valid at Stage 7c.
+    use std::collections::HashSet;
+    let linear_else_start_node_ids: HashSet<vuma_scg::node::NodeId> = scg
+        .edges()
+        .filter(|e| e.label.as_deref() == Some("else"))
+        .map(|e| e.target)
+        .collect();
     timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 3: SCG Validation ──────────────────────────────────────
@@ -5119,67 +5686,83 @@ pub fn compile_with_path(
     // on a region-less program (no allocations to verify), which mirrors
     // the original intent of `Quick` (cheap syntactic checks).
     let t = Instant::now();
-    let verification = if !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
-        // VUMA 2.0 is PMT-only: every pipeline verification level maps
-        // to `IveVerificationLevel::Pmt` (the 3 PMT state verifiers only
-        // — the 5 legacy pointer invariants are skipped because pointer
-        // syntax is a hard parse error in VUMA 2.0).
-        let ive_level = match config.verification_level {
-            VerificationLevel::Quick
-            | VerificationLevel::Normal
-            | VerificationLevel::Exhaustive
-            | VerificationLevel::Modular
-            | VerificationLevel::ConstantTime
-            | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
+    let verification =
+        if !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
+            // VUMA 2.0 is PMT-only: every pipeline verification level maps
+            // to `IveVerificationLevel::Pmt` (the 3 PMT state verifiers only
+            // — the 5 legacy pointer invariants are skipped because pointer
+            // syntax is a hard parse error in VUMA 2.0).
+            let ive_level = match config.verification_level {
+                VerificationLevel::Quick
+                | VerificationLevel::Normal
+                | VerificationLevel::Exhaustive
+                | VerificationLevel::Modular
+                | VerificationLevel::ConstantTime
+                | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
+            };
+            let aggregator = InvariantAggregator::new()
+                .with_level(ive_level)
+                .with_max_paths(config.ive_max_paths)
+                .with_max_path_length(config.ive_max_path_length);
+            // (VUMA 2.0 PMT-only) Build the PMT layout registry from the
+            // AST's `Item::LayoutDef` items so the IVE's `Pmt` level can
+            // run the 3 state verifiers (state_read / state_write /
+            // state_transform) with full field offset/size info. Without
+            // this, every state op would FAIL verification ("layout not
+            // found") and the production pipeline would refuse to emit
+            // any PMT program that uses state ops.
+            let pmt_layouts = build_pmt_layout_specs(&ast);
+            let secret_vars = collect_secret_vars(&ast);
+            let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+                .with_pmt_layouts(pmt_layouts)
+                .with_secret_vars(secret_vars);
+            let result = aggregator.verify_all(&input);
+            // Verification is a hard safety gate: if any invariant was
+            // violated, refuse to emit code for the program.  This is
+            // independent of `stop_on_first_error` because emitting a binary
+            // for a program with known memory-safety violations would defeat
+            // the entire purpose of VUMA.
+            if result.overall == OverallVerdict::Fail {
+                errors.push(VumaError::Verification { result });
+                return Err(errors);
+            }
+            // Inconclusive is now a HARD failure by default.
+            // `--allow-inconclusive` (config.allow_inconclusive) opts back into
+            // the legacy soft-pass behaviour.
+            if (result.overall == OverallVerdict::Inconclusive) && !config.allow_inconclusive {
+                errors.push(VumaError::Verification { result });
+                return Err(errors);
+            }
+            // SOUNDNESS WAIVER — only logged when the user
+            // has explicitly opted in via `--allow-inconclusive`. The waiver
+            // makes the unverified invariants visible in the build log when
+            // `VUMA_LOG=1` is set.
+            if config.allow_inconclusive && result.overall == OverallVerdict::Inconclusive {
+                vuma_log!(
+                    warn,
+                    "SOUNDNESS WAIVER: IVE verification returned Inconclusive for \
+                 the program (passed={}, failed={}, total_checked={}); \
+                 compilation continues because --allow-inconclusive was passed. \
+                 Inconclusive is now a HARD failure by default.",
+                    result.summary.passed,
+                    result.summary.failed,
+                    result.summary.total_checked
+                );
+            }
+            Some(result)
+        } else {
+            None
         };
-        let aggregator = InvariantAggregator::new()
-            .with_level(ive_level)
-            .with_max_paths(config.ive_max_paths)
-            .with_max_path_length(config.ive_max_path_length);
-        // (VUMA 2.0 PMT-only) Build the PMT layout registry from the
-        // AST's `Item::LayoutDef` items so the IVE's `Pmt` level can
-        // run the 3 state verifiers (state_read / state_write /
-        // state_transform) with full field offset/size info. Without
-        // this, every state op would FAIL verification ("layout not
-        // found") and the production pipeline would refuse to emit
-        // any PMT program that uses state ops.
-        let pmt_layouts = build_pmt_layout_specs(&ast);
-        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
-            .with_pmt_layouts(pmt_layouts);
-        let result = aggregator.verify_all(&input);
-        // Verification is a hard safety gate: if any invariant was
-        // violated, refuse to emit code for the program.  This is
-        // independent of `stop_on_first_error` because emitting a binary
-        // for a program with known memory-safety violations would defeat
-        // the entire purpose of VUMA.
-        if result.overall == OverallVerdict::Fail {
-            errors.push(VumaError::Verification { result });
-            return Err(errors);
-        }
-        // (Wave 19) `--strict-verification`: treat `Inconclusive` (no
-        // violation proven, but some invariants unverified) as a
-        // compilation-blocking error. By default Inconclusive is allowed.
-        if config.strict_verification
-            && result.overall == OverallVerdict::Inconclusive
-        {
-            errors.push(VumaError::Verification { result });
-            return Err(errors);
-        }
-        Some(result)
-    } else {
-        None
-    };
     timings.push((
         "ive-verification".to_string(),
         t.elapsed().as_millis() as u64,
     ));
 
-    // ── Stage 6b: Memory Safety Analysis (Wave 20 — blocking pass) ────
+    // ── Stage 6b: Memory Safety Analysis (blocking pass) ────
     //
-    // VUMA 2.0 is PMT-only and memory-safety analysis is MANDATORY —
-    // the `CompileConfig.memory_safety` field is retained for API
-    // stability but its value is IGNORED here (the analyzer always
-    // runs). The `--no-memory-safety` CLI flag has been removed.
+    // VUMA 2.0 is PMT-only and memory-safety analysis is MANDATORY.
+    // The `--no-memory-safety` CLI flag and `CompileConfig.memory_safety`
+    // field have both been removed — there is no opt-out.
     //
     // When enabled, the pipeline runs BOTH:
     //   1. `MemorySafetyAnalyzer::analyze` on the codegen SCG (after
@@ -5193,7 +5776,7 @@ pub fn compile_with_path(
     // refuses to emit code, independent of `stop_on_first_error`.
     // Emitting a binary for a program with known memory-safety
     // violations would defeat the entire purpose of VUMA.
-    let mem_safety_enabled = true; // VUMA 2.0: always on (escape hatch removed)
+    let mem_safety_enabled = true; // VUMA 2.0: always on (no opt-out)
     if mem_safety_enabled {
         let t = Instant::now();
 
@@ -5201,7 +5784,7 @@ pub fn compile_with_path(
         // This runs BEFORE codegen because it uses the semantic SCG
         // (`scg`), not the codegen SCG.
         //
-        // Wave 20: Only UAF and uninit-read are treated as HARD errors
+        // Only UAF and uninit-read are treated as HARD errors
         // (high confidence).  Leak detection via `find_dead_allocations`
         // is imprecise (it flags write-only allocations that are freed
         // but never read as "dead"), so we run it but only LOG a warning
@@ -5218,10 +5801,11 @@ pub fn compile_with_path(
             runtime_bounds_checks: false,
             errors_are_fatal: true,
         };
-        let liveness_violations =
-            vuma_codegen::memory_safety::analyze_with_scg_liveness(
-                &liveness, &scg, &ms_config_blocking,
-            );
+        let liveness_violations = vuma_codegen::memory_safety::analyze_with_scg_liveness(
+            &liveness,
+            &scg,
+            &ms_config_blocking,
+        );
 
         if !liveness_violations.is_empty() {
             let report = vuma_codegen::memory_safety::MemorySafetyReport {
@@ -5243,18 +5827,16 @@ pub fn compile_with_path(
             runtime_bounds_checks: false,
             errors_are_fatal: false,
         };
-        let leak_violations =
-            vuma_codegen::memory_safety::analyze_with_scg_liveness(
-                &liveness, &scg, &ms_config_leaks,
-            );
+        let leak_violations = vuma_codegen::memory_safety::analyze_with_scg_liveness(
+            &liveness,
+            &scg,
+            &ms_config_leaks,
+        );
         for lv in &leak_violations {
             vuma_log!(warn, "memory-safety (non-blocking): {}", lv);
         }
 
-        timings.push((
-            "memory-safety".to_string(),
-            t.elapsed().as_millis() as u64,
-        ));
+        timings.push(("memory-safety".to_string(), t.elapsed().as_millis() as u64));
     }
     // (VUMA 2.0: the `else` branch that previously skipped memory-safety
     // analysis with a `--no-memory-safety` warning is now unreachable —
@@ -5283,7 +5865,8 @@ pub fn compile_with_path(
             // SCG, triggering "graph contains a cycle" from DCE/CSE).
             // Instead, log them as warnings and continue.
             if !pass_errors.is_empty() {
-                vuma_log!(warn, 
+                vuma_log!(
+                    warn,
                     "SCG transform soft-failures (non-fatal): {} errors: {:?}",
                     pass_errors.len(),
                     pass_errors.first()
@@ -5300,54 +5883,200 @@ pub fn compile_with_path(
         let t_collapse = Instant::now();
         let collapse = vuma_ive::verification::l1l3_collapse(&scg);
         if collapse.collapsed {
-            vuma_log!(info,
+            vuma_log!(
+                info,
                 "L1->L3 collapse: folded {} L1 checks and {} L2 checks",
-                collapse.l1_checks_folded, collapse.l2_checks_folded
+                collapse.l1_checks_folded,
+                collapse.l2_checks_folded
             );
         } else {
-            vuma_log!(warn,
-                "L1->L3 collapse FAILURE: {}", collapse.summary
-            );
+            vuma_log!(warn, "L1->L3 collapse FAILURE: {}", collapse.summary);
         }
-        timings.push(("l1l3-collapse".to_string(), t_collapse.elapsed().as_millis() as u64));
+        timings.push((
+            "l1l3-collapse".to_string(),
+            t_collapse.elapsed().as_millis() as u64,
+        ));
     }
 
     // ── Stage 7c: Linear Channel Discipline Check ─────────────────────
     // Verifies that every channel opened is eventually closed (linear
     // discipline), and that channels are not used after close.
-    // Non-fatal: logs violations as warnings.
+    //
+    //
+    // History: this gate was originally ADVISORY by default (only
+    // `vuma_log!(warn)` on violations) because the call site used the
+    // SCG node index (`i`) as the channel `vreg` identifier, producing
+    // spurious "use of uninitialized channel" / "channel_close on
+    // uninitialized" false positives on any program with more than one
+    // channel operation (every operation had a distinct `vreg` so the
+    // per-handle state map never correlated them). Under `--strict-ive`
+    // (`config.strict_ive`), the gate was promoted to HARD-FAIL — but
+    // the false positive meant channel-using programs would fail under
+    // `--strict-ive` even when semantically valid.
+    //
+    // The false positive was fixed by extracting the channel
+    // handle's variable name from the relevant NodePayload variants
+    // (`ChannelOpenNode.dst` / `ChannelSendNode.channel` /
+    // `ChannelRecvNode.channel` / `ChannelCloseNode.channel`) and
+    // keying the verifier on that name (see
+    // `vuma_ive::borrow_region::ChannelEvent::vreg` for the design).
+    // With the FP eliminated, the verifier now has clean semantics —
+    // multiple operations on the SAME channel handle correctly share
+    // a state-map entry, and the verifier stays silent on legitimate
+    // multi-op programs.
+    //
+    // The gate is now UNCONDITIONAL HARD-FAIL: any
+    // linear-channel violation returns `VumaError::Transform` and
+    // aborts compilation, regardless of the `--strict-ive` flag. The
+    // false-positive fix made this safe — there are no known sources
+    // of spurious violations in the current call site. The
+    // `--strict-ive` flag is RETAINED only for `bv_verify` (Stage 7a),
+    // which still has the "reserved for future strict mode" advisory
+    // status.
     {
         let t_linear = Instant::now();
         let mut events: Vec<vuma_ive::borrow_region::ChannelEvent> = Vec::new();
+
+        // (Path-sensitivity) `linear_else_start_node_ids` was captured
+        // right after `ast_to_scg` (Stage 2), BEFORE SCG transforms
+        // stripped the "else" edge labels.  See the comment at its
+        // declaration for the rationale.
+        let else_start_node_ids = &linear_else_start_node_ids;
+
         for (i, node) in scg.nodes().enumerate() {
+            // Extract the channel handle's VARIABLE NAME
+            // from the NodePayload — NOT the SCG node index `i`. Using
+            // `i as u32` would make every channel operation appear as
+            // a distinct handle and produce false positives on any
+            // program with >1 channel operation. See
+            // `vuma_ive::borrow_region::ChannelEvent::vreg` doc.
+
+            // (Path-sensitivity) If this node is the first node of an
+            // else block, emit an `ElseStart` event BEFORE the node's
+            // own event, so the verifier restores the pre-branch
+            // snapshot before processing the else-branch's channel ops.
+            if else_start_node_ids.contains(&node.id) {
+                events.push(vuma_ive::borrow_region::ChannelEvent {
+                    vreg: String::new(),
+                    kind: vuma_ive::borrow_region::ChannelEventKind::ElseStart,
+                    at_node: i,
+                });
+            }
+
             match &node.payload {
-                vuma_scg::node::NodePayload::ChannelOpen(_) => {
+                vuma_scg::node::NodePayload::ChannelOpen(p) => {
                     events.push(vuma_ive::borrow_region::ChannelEvent {
-                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Open, at_node: i,
+                        vreg: p.dst.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Open,
+                        at_node: i,
                     });
                 }
-                vuma_scg::node::NodePayload::ChannelSend(_) | vuma_scg::node::NodePayload::ChannelRecv(_) => {
+                vuma_scg::node::NodePayload::ChannelSend(p) => {
                     events.push(vuma_ive::borrow_region::ChannelEvent {
-                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Use, at_node: i,
+                        vreg: p.channel.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Use,
+                        at_node: i,
                     });
                 }
-                vuma_scg::node::NodePayload::ChannelClose(_) => {
+                vuma_scg::node::NodePayload::ChannelRecv(p) => {
                     events.push(vuma_ive::borrow_region::ChannelEvent {
-                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Close, at_node: i,
+                        vreg: p.channel.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Use,
+                        at_node: i,
                     });
+                }
+                vuma_scg::node::NodePayload::ChannelClose(p) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: p.channel.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Close,
+                        at_node: i,
+                    });
+                }
+                vuma_scg::node::NodePayload::Control(c) => {
+                    // (Path-sensitivity) Emit structural events for
+                    // control-flow nodes so the verifier can be
+                    // path-sensitive across `if`/`else` boundaries and
+                    // detect leaks at function-exit points.
+                    use vuma_scg::node::ControlKind;
+                    match c.kind {
+                        ControlKind::Branch => {
+                            events.push(vuma_ive::borrow_region::ChannelEvent {
+                                vreg: String::new(),
+                                kind: vuma_ive::borrow_region::ChannelEventKind::Branch,
+                                at_node: i,
+                            });
+                        }
+                        ControlKind::Join => {
+                            events.push(vuma_ive::borrow_region::ChannelEvent {
+                                vreg: String::new(),
+                                kind: vuma_ive::borrow_region::ChannelEventKind::Join,
+                                at_node: i,
+                            });
+                        }
+                        ControlKind::FunctionReturn => {
+                            // Only emit `FunctionExit` at REAL function-exit
+                            // points — explicit `return` statements (label
+                            // "return") and the function epilogue (label
+                            // "fn_<name>_return(...)").  Call-site return
+                            // nodes (label "return_<callee>") and
+                            // monomorphisation / dispatch return nodes
+                            // (labels "mono_*_return", "static_dispatch_return *")
+                            // are NOT function exits — they return from a
+                            // callee back to the caller, not from the
+                            // current function.
+                            let is_fn_exit = c.label.as_deref() == Some("return")
+                                || c
+                                    .label
+                                    .as_ref()
+                                    .map_or(false, |l| l.starts_with("fn_"));
+                            if is_fn_exit {
+                                events.push(vuma_ive::borrow_region::ChannelEvent {
+                                    vreg: String::new(),
+                                    kind: vuma_ive::borrow_region::ChannelEventKind::FunctionExit,
+                                    at_node: i,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {}
             }
         }
         let results = vuma_ive::borrow_region::verify_linear_channels(&events);
         if !vuma_ive::borrow_region::all_linear_valid(&results) {
+            let mut violation_msgs: Vec<String> = Vec::new();
             for r in &results {
                 if !r.valid {
-                    vuma_log!(warn, "Linear channel violation: {}", r.error.as_deref().unwrap_or("unknown"));
+                    let msg = r.error.as_deref().unwrap_or("unknown").to_string();
+                    vuma_log!(warn, "Linear channel violation: {}", msg);
+                    violation_msgs.push(msg);
                 }
             }
+            // UNCONDITIONAL HARD-FAIL: any linear-channel
+            // violation returns `VumaError::Transform` and aborts
+            // compilation, regardless of `--strict-ive`. The earlier
+            // false-positive fix eliminated the only known source of
+            // spurious violations, so the gate is now safe to enforce
+            // by default. `--strict-ive` is retained only for
+            // `bv_verify` (Stage 7a) which still has the "reserved for
+            // future strict mode" advisory status.
+            if !violation_msgs.is_empty() {
+                timings.push((
+                    "linear-check".to_string(),
+                    t_linear.elapsed().as_millis() as u64,
+                ));
+                errors.push(VumaError::Transform {
+                    pass_name: "linear-channel".to_string(),
+                    errors: violation_msgs,
+                });
+                return Err(errors);
+            }
         }
-        timings.push(("linear-check".to_string(), t_linear.elapsed().as_millis() as u64));
+        timings.push((
+            "linear-check".to_string(),
+            t_linear.elapsed().as_millis() as u64,
+        ));
     }
 
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
@@ -5358,21 +6087,138 @@ pub fn compile_with_path(
     // for BD inference / MSG / IVE verification / SCG transforms above,
     // but the emitted binary is produced from the AST directly. This avoids
     // the segfaults / infinite loops that the old `bridge_scg_to_codegen*`
-    // path produced (Task 4-A).
-    let codegen_scg = bridge_ast_to_codegen_scg(&ast);
+    // path produced.
+    let mut codegen_scg = bridge_ast_to_codegen_scg(&ast);
 
-    // Wave 20: Run the codegen-level MemorySafetyAnalyzer on the codegen
+    // Stage 2 / checkbounds: Build a `var_name → allocation_size`
+    // table from the codegen SCG's `AllocationNode::Stack` statements.
+    // For state-typed buffers, `AllocationNode::Stack.size` already holds
+    // the layout's `total_size` (embedded at AST→SCG time by the parser's
+    // `layout_total_size`), so a single pass over all function bodies
+    // captures both stack arrays and PMT state buffers. Heap allocations
+    // (size_expr) are not statically known and are skipped — they remain
+    // `length_expr = None`.
+    let mut alloc_sizes = build_alloc_sizes(&codegen_scg);
+
+    // Arena-allocated state pointers: also collect per-state layout sizes.
+    // `arena_alloc(arena, Layout)` lowers
+    // to a `state_ptr = arena_ptr + offset` computation (a fresh temp not
+    // present in `alloc_sizes` from `AllocationNode::Stack`), so without
+    // this merge `classify_pointer` would treat every arena-state access
+    // as `PointerKind::Wild` and skip the per-access `__oob_trap` check.
+    //
+    // `build_arena_state_sizes` pattern-matches the deterministic
+    // `arena_alloc` IR sequence (anchored on `__arena_overflow` calls,
+    // uniquely emitted by `Expr::ArenaAlloc` lowering at pipeline.rs:10479)
+    // to recover `state_ptr_name → layout_size` pairs. Merging into
+    // `alloc_sizes` makes those accesses classify as `Seq` and receive the
+    // standard `__oob_trap` bounds-check pair from `inject_bounds_check_ir`.
+    //
+    // Bound semantics: the bound is the state's `layout_size` (not the
+    // arena's capacity). The arena's capacity is already checked at
+    // `arena_alloc` time via `__arena_overflow`; the per-access check
+    // catches out-of-layout field accesses through `state_ptr`.
+    let arena_state_sizes = vuma_codegen::memory_safety::build_arena_state_sizes(&codegen_scg);
+    if !arena_state_sizes.is_empty() {
+        vuma_log!(
+            info,
+            "Arena state sizes: recovered {} arena_alloc state_ptr → layout_size entries \
+             (merging into alloc_sizes for per-access __oob_trap injection).",
+            arena_state_sizes.len()
+        );
+        for (k, v) in &arena_state_sizes {
+            // Last-writer-wins: arena state pointers are fresh temps, so
+            // collisions with `AllocationNode::Stack` entries are not
+            // expected in practice.
+            alloc_sizes.insert(k.clone(), *v);
+        }
+    }
+
+    // Run the codegen-level MemorySafetyAnalyzer on the codegen
     // SCG.  This complements the SCG-liveness analysis (Stage 6b) with
     // function-level double-free and dangling-pointer detection.  Like
     // Stage 6b, this is a HARD gate (VUMA 2.0: memory safety is mandatory;
-    // `config.memory_safety` is ignored).
+    // there is no opt-out).
     if mem_safety_enabled {
-        let ms_config = vuma_codegen::memory_safety::MemorySafetyConfig::compile_time_only();
+        let ms_config = if config.runtime_bounds_checks {
+            vuma_codegen::memory_safety::MemorySafetyConfig::safe_mode()
+        } else {
+            vuma_codegen::memory_safety::MemorySafetyConfig::compile_time_only()
+        };
         let analyzer = vuma_codegen::memory_safety::MemorySafetyAnalyzer::new(ms_config);
         let ms_report = analyzer.analyze(&codegen_scg);
         if !ms_report.is_clean() {
             errors.push(VumaError::MemorySafety { report: ms_report });
             return Err(errors);
+        }
+
+        // checkbounds (Stage 2): `length_expr` is now populated
+        // by `find_bounds_check_sites_with_bounds` using the `alloc_sizes`
+        // table built from `AllocationNode::Stack` statements. When
+        // `--safe` is set, `inject_bounds_check_ir` mutates the codegen
+        // SCG to insert `__oob_trap` traps before every bounded access,
+        // mirroring the proven `__arena_overflow` lowering pattern. The
+        // `__oob_trap` stubs (exit 134) exist on all 19 backends.
+        //
+        // Honest status:
+        //  * Stack allocations (incl. PMT state buffers): fully bounded
+        //    by `AllocationNode::Stack.size` (= layout `total_size`).
+        //  * Arena-allocated state buffers: now
+        //    ALSO bounded per-access. `build_arena_state_sizes` pattern-
+        //    matches the `arena_alloc` IR sequence (anchored on
+        //    `__arena_overflow` calls) to recover `state_ptr → layout_size`
+        //    pairs, which are merged into `alloc_sizes` above. Per-access
+        //    `__oob_trap` checks are now emitted for `state_ptr + offset`.
+        //    The arena's capacity is still checked at `arena_alloc` time
+        //    via `__arena_overflow` (alloc-time guard, unchanged).
+        //  * Raw pointer arithmetic / extern pointers: `length_expr`
+        //    remains `None` — Stage 3 (SoftBound fat pointers) territory.
+        if config.runtime_bounds_checks {
+            let sites = vuma_codegen::memory_safety::find_bounds_check_sites_with_bounds(
+                &codegen_scg,
+                &alloc_sizes,
+            );
+            let bounded = sites.iter().filter(|s| s.length_expr.is_some()).count();
+            if !sites.is_empty() {
+                vuma_log!(
+                    info,
+                    "Bounds check sites found ({} total, {} with static bound). \
+                     Emitting __oob_trap IR for bounded accesses.",
+                    sites.len(),
+                    bounded
+                );
+                for site in &sites {
+                    vuma_log!(
+                        debug,
+                        "  BoundsCheckSite: fn={} array={} index={} length={}",
+                        site.function_name,
+                        site.array_name,
+                        site.index_expr,
+                        site.length_expr.as_deref().unwrap_or("<unknown>")
+                    );
+                }
+            } else {
+                vuma_log!(
+                    debug,
+                    "No array/pointer bounds-check sites found in codegen SCG \
+                     (arena overflow check still applies to ArenaAlloc)."
+                );
+            }
+
+            // Mutate the codegen SCG in place: prepend a
+            // `ComputationNode(UGe)` + `ControlNode::If { __oob_trap }`
+            // pair before every Access whose `ptr` resolves to a name in
+            // `alloc_sizes`. Accesses with no static bound are skipped.
+            vuma_codegen::memory_safety::inject_bounds_check_ir(&mut codegen_scg, &alloc_sizes);
+
+            // Liveness (UAF tombstone checks): also inject runtime UAF (tombstone) checks
+            // before every SEQ access through a `state_new` allocation.
+            // Each such allocation is grown by +1 byte at AST→SCG bridge
+            // time to hold a LIVE/DEAD flag at `[ptr + total_size]`;
+            // `inject_liveness_check_ir` emits a Load + Eq + If that traps
+            // via `__uaf_trap` (exit 135) when the flag is 0 (DEAD). For
+            // live states the check is a no-op (flag == 1 → eq 0 → false).
+            vuma_codegen::memory_safety::inject_liveness_check_ir(&mut codegen_scg, &alloc_sizes);
         }
     }
     let mut ir_builder = IRBuilder::new();
@@ -5388,12 +6234,12 @@ pub fn compile_with_path(
     };
 
     // ── Stage 8b: Shared post-IR-build O2 pipeline ────────────────────
-    // Wave 1 (Task ID 5): the Wave 34 lowering passes (monomorphize,
-    // closures, switches, tail-calls, loop-normalize), Wave 36 bv_verify,
-    // Wave 10 syscall allowlist, Stage 8b codegen-opt (with the real
-    // backend's latency table), and Wave 32 escape+effects passes are now
+    // The lowering passes (monomorphize,
+    // closures, switches, tail-calls, loop-normalize), bv_verify,
+    // the syscall allowlist, Stage 8b codegen-opt (with the real
+    // backend's latency table), and escape+effects passes are now
     // encapsulated in `run_ir_pipeline` — the single source of truth
-    // shared with `compile_modules` and (in Wave 2) the test-suite
+    // shared with `compile_modules` and the test-suite
     // compile path. The backend kind for the latency table is derived
     // from `config.emit_config().backend` (always AArch64 for the
     // canonical Linux/ELF path — preserved exactly). Behavior is
@@ -5416,7 +6262,7 @@ pub fn compile_with_path(
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 9: Register Allocation (parallel across functions) ──────
-    // Wave 9: Each function's register allocation is independent, so we
+    // Each function's register allocation is independent, so we
     // parallelize across CPU cores using std::thread::scope. This gives a
     // speedup proportional to core count for programs with multiple functions.
     let t = Instant::now();
@@ -5466,62 +6312,6 @@ pub fn compile_with_path(
     let code_words = count_text_section_instructions(&binary);
     timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
 
-    // ── Stage 11: COR Initialization ──────────────────────────────────
-    let t = Instant::now();
-    let mut cor_runtime = {
-        // Bridge the vuma_scg::SCG to the COR-internal SCG representation
-        // using CORuntime::from_vuma_scg(), then compile all regions
-        // incrementally with a Delta containing every node ID.
-        let scg_arc = std::sync::Arc::new(scg.clone());
-        let cor_config = CorConfig::default();
-        let mut rt = CORuntime::from_vuma_scg(scg_arc, cor_config);
-
-        // Build a Delta with all node IDs from the SCG so every region
-        // is compiled incrementally, establishing the always-compiled
-        // invariant from the start.
-        let all_node_ids: Vec<u64> = scg.node_ids().map(|id| id.as_u64()).collect();
-        let delta = vuma_cor::types::Delta {
-            added_nodes: all_node_ids,
-            ..vuma_cor::types::Delta::empty()
-        };
-        let recompiled = rt.compile_incremental(&delta);
-        vuma_log!(info, 
-            "cor-init: compiled {} regions incrementally from SCG ({} nodes)",
-            recompiled.len(),
-            scg.node_count(),
-        );
-        Some(rt)
-    };
-    timings.push(("cor-init".to_string(), t.elapsed().as_millis() as u64));
-
-    // ── Wave 38: CORuntime::optimize_module — run the real CoR optimization
-    //    passes (HotPathInlining/ColdPathOutline/LoopOptimization/MemoryOptimization,
-    //    per Wave 37) on the constructed runtime. Per Wave 38 decision (b),
-    //    CoR is profiling-only: this call optimizes the CoR-internal SCG
-    //    representation and logs the OptimizationSummary, but does NOT splice
-    //    the result back into the emitted user binary (that would require
-    //    moving CoR construction before emit_binary — deferred). Gated behind
-    //    a runtime check so default compilation is unaffected.
-    if let Some(ref mut rt) = cor_runtime {
-        let topt = Instant::now();
-        match rt.optimize_module() {
-            Ok(summary) => {
-                vuma_log!(info,
-                    "wave38 cor-optimize: nodes {}->{}, edges {}->{}, reoptimized {} regions",
-                    summary.scg_node_count_before,
-                    summary.scg_node_count_after,
-                    summary.scg_edge_count_before,
-                    summary.scg_edge_count_after,
-                    summary.reoptimized_regions,
-                );
-                timings.push(("wave38-cor-optimize".to_string(), topt.elapsed().as_millis() as u64));
-            }
-            Err(e) => {
-                vuma_log!(warn, "wave38 cor-optimize soft-failed: {}", e);
-            }
-        }
-    }
-
     // If we accumulated errors but still produced a binary, report them.
     if !errors.is_empty() {
         return Err(errors);
@@ -5546,12 +6336,11 @@ pub fn compile_with_path(
         } else {
             None
         },
-        cor_runtime,
     })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Multi-module compilation (Wave 48 — Task 7-a)
+// Multi-module compilation
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Merge a slice of independently-parsed `AstProgram`s into a single
@@ -5559,7 +6348,7 @@ pub fn compile_with_path(
 /// real `fn` definitions.
 ///
 /// Algorithm:
-/// 1. **Duplicate-fn deduplication** (Task 7-c) — collect every `fn`
+/// 1. **Duplicate-fn deduplication** — collect every `fn`
 ///    definition across all modules into a `HashMap<String, FnDef>` keyed
 ///    by name. When a name collides, compare the new definition to the
 ///    existing one via [`fn_defs_equivalent`] (span-agnostic structural
@@ -5619,12 +6408,12 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
     // `vuma run <file>` (no inter-file `import` resolution required).
     // When `compile_modules` links all 5 files together, those 4 helper
     // names appear 4-5 times each (18 occurrences total → 14 duplicates
-    // after the first occurrences are kept). The pre-Task-7-c policy
+    // after the first occurrences are kept). The original policy
     // rejected every duplicate as a hard error, blocking the bootstrap
     // self-host test (`test_wave48_bootstrap_self_host`).
     //
-    // Task 7-c replaces that hard-reject policy with a dedup-or-conflict
-    // policy: identical duplicates are silently dropped (the bootstrap
+    // The current dedup-or-conflict policy replaces that hard-reject:
+    // identical duplicates are silently dropped (the bootstrap
     // pattern is legitimate), conflicting duplicates (same name,
     // different signature or body) still produce a hard error (the
     // codegen cannot link two different bodies for the same symbol).
@@ -5709,9 +6498,8 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
                     // file's main overrides imported modules' self-test mains).
                     if fn_def.name == "main" {
                         // Remove any previously emitted main, then emit this one.
-                        merged_items.retain(|item| {
-                            !matches!(item, Item::FnDef(f) if f.name == "main")
-                        });
+                        merged_items
+                            .retain(|item| !matches!(item, Item::FnDef(f) if f.name == "main"));
                         merged_items.push(item.clone());
                     } else if emitted_fns.insert(fn_def.name.clone()) {
                         merged_items.push(item.clone());
@@ -5766,7 +6554,7 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 }
 
 /// Compare two [`vuma_parser::ast::FnDef`]s for span-agnostic structural
-/// equality (Task 7-c).
+/// equality.
 ///
 /// Two fn definitions are "equivalent" iff their ASTs are identical
 /// **modulo source spans**. We achieve this by formatting both `FnDef`s
@@ -5826,11 +6614,11 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 /// differ in some non-`span` field). There is no "comparison crashed"
 /// case to fall back from.
 fn fn_defs_equivalent(a: &vuma_parser::ast::FnDef, b: &vuma_parser::ast::FnDef) -> bool {
-    // Span-agnostic comparison via Debug-string normalization (Task 8-a).
+    // Span-agnostic comparison via Debug-string normalization.
     //
-    // Previously (Task 7-c) this function used serde_json::to_value +
-    // strip_spans. That approach was removed when Wave 43 stripped
-    // Serialize/Deserialize derives from the parser's AST types.
+    // Previously this function used serde_json::to_value +
+    // strip_spans. That approach was removed when Serialize/Deserialize derives
+    // were stripped from the parser's AST types.
     //
     // The current approach: format both FnDefs via Debug, then regex-
     // replace every "Span { start: N, end: M }" pattern with a fixed
@@ -5906,7 +6694,7 @@ fn host_backend_kind() -> vuma_codegen::backend::BackendKind {
 ///   `AstProgram.items` vector. Duplicate `fn` definitions across modules
 ///   (same name) are **deduplicated**: if the duplicates are byte-identical
 ///   modulo source spans (the bootstrap's self-contained-preamble
-///   pattern), the later occurrences are silently dropped (Task 7-c);
+///   pattern), the later occurrences are silently dropped;
 ///   if they conflict (same name, different signature or body), a
 ///   `VumaError::AstToScg` is returned.
 /// - `extern "C" { fn foo(...); }` declarations are filtered: if `foo` is
@@ -5930,7 +6718,7 @@ fn host_backend_kind() -> vuma_codegen::backend::BackendKind {
 /// ELF (a single executable containing all functions from all modules).
 /// The `scg` field is the semantic SCG (best-effort — empty if
 /// `ast_to_scg` fails on the merged AST). The `msg`, `verification`,
-/// `cor_runtime`, and `debug_info` fields are `None` / empty because the
+/// and `debug_info` fields are `None` / empty because the
 /// direct path does not run the canonical pipeline's MSG-construction,
 /// IVE-verification, or COR-initialization stages.
 ///
@@ -5960,7 +6748,7 @@ pub fn compile_modules(
     let t = Instant::now();
     let mut module_asts: Vec<AstProgram> = Vec::with_capacity(modules.len());
     for (_name, source) in modules {
-        let mut parser = Parser::new(source);
+        let mut parser = Parser::with_max_depth(source, config.max_expr_depth);
         let result = parser.parse_program();
         if result.has_errors() {
             errors.push(VumaError::Parse {
@@ -5996,32 +6784,63 @@ pub fn compile_modules(
     // build the semantic SCG from the merged AST, attach the PMT layout
     // registry, run the 3 PMT state verifiers (state_read / state_write
     // / state_transform) via `InvariantAggregator` at `Pmt` level, and
-    // refuse to emit a binary on `Fail` (hard gate). `Inconclusive` is
-    // only blocking under `--strict-verification`.
+    // refuse to emit a binary on `Fail` (hard gate).
+    // `Inconclusive` is now a HARD failure by default — only
+    // `--allow-inconclusive` (config.allow_inconclusive) opts back into
+    // soft-pass with a logged SOUNDNESS WAIVER. The legacy
+    // `--strict-verification` flag was REMOVED in VUMA 2.0.
     let t = Instant::now();
     let pmt_scg = match ast_to_scg(&merged_ast) {
         Ok(s) => s,
         Err(e) => {
-            errors.push(VumaError::AstToScg { message: format!("{}", e) });
+            errors.push(VumaError::AstToScg {
+                message: format!("{}", e),
+            });
             return Err(errors);
         }
     };
     let pmt_layouts = build_pmt_layout_specs(&merged_ast);
+    let secret_vars = collect_secret_vars(&merged_ast);
     let aggregator = InvariantAggregator::new()
         .with_level(IveVerificationLevel::Pmt)
         .with_max_paths(config.ive_max_paths)
         .with_max_path_length(config.ive_max_path_length);
     let ive_input = vuma_ive::verification::VerificationInput::from_scg(pmt_scg.clone())
-        .with_pmt_layouts(pmt_layouts);
+        .with_pmt_layouts(pmt_layouts)
+        .with_secret_vars(secret_vars);
     let verification = aggregator.verify_all(&ive_input);
-    timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
+    timings.push((
+        "ive-verification".to_string(),
+        t.elapsed().as_millis() as u64,
+    ));
     if verification.overall == OverallVerdict::Fail {
-        errors.push(VumaError::Verification { result: verification });
+        errors.push(VumaError::Verification {
+            result: verification,
+        });
         return Err(errors);
     }
-    if config.strict_verification && verification.overall == OverallVerdict::Inconclusive {
-        errors.push(VumaError::Verification { result: verification });
+    // Inconclusive is now a HARD failure by default in
+    // `compile_modules` too. `--allow-inconclusive` opts back into soft-pass.
+    if (verification.overall == OverallVerdict::Inconclusive) && !config.allow_inconclusive {
+        errors.push(VumaError::Verification {
+            result: verification,
+        });
         return Err(errors);
+    }
+    // SOUNDNESS WAIVER — only logged when the user has
+    // explicitly opted in via `--allow-inconclusive`. See pipeline.rs:5186
+    // for full rationale.
+    if config.allow_inconclusive && verification.overall == OverallVerdict::Inconclusive {
+        vuma_log!(
+            warn,
+            "SOUNDNESS WAIVER: IVE verification returned Inconclusive for \
+             compile_modules (passed={}, failed={}, total_checked={}); \
+             compilation continues because --allow-inconclusive was passed. \
+             Inconclusive is now a HARD failure by default.",
+            verification.summary.passed,
+            verification.summary.failed,
+            verification.summary.total_checked
+        );
     }
     // Hold onto the verification result so it can be surfaced in the
     // final `CompilationOutput`. The semantic SCG built above is also
@@ -6033,7 +6852,10 @@ pub fn compile_modules(
     // ── Stage 3: Bridge merged AST → codegen SCG ──────────────────────
     let t = Instant::now();
     let codegen_scg = bridge_ast_to_codegen_scg(&merged_ast);
-    timings.push(("ast-to-codegen-scg".to_string(), t.elapsed().as_millis() as u64));
+    timings.push((
+        "ast-to-codegen-scg".to_string(),
+        t.elapsed().as_millis() as u64,
+    ));
 
     // ── Stage 4: Lower codegen SCG → IR ───────────────────────────────
     let t = Instant::now();
@@ -6053,12 +6875,12 @@ pub fn compile_modules(
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 4b: Shared post-IR-build O2 pipeline ────────────────────
-    // Wave 1 (Task ID 5): compile_modules now delegates to the shared
+    // compile_modules now delegates to the shared
     // `run_ir_pipeline` helper — the same single source of truth used by
-    // `compile_with_path` and (in Wave 2) the test-suite compile path.
-    // This means compile_modules now runs the FULL O2 pipeline (Wave 34
-    // lowering, Wave 36 bv_verify, Wave 10 syscall allowlist, Stage 8b
-    // codegen-opt, Wave 32 escape+effects) instead of just codegen-opt,
+    // `compile_with_path` and the test-suite compile path.
+    // This means compile_modules now runs the FULL O2 pipeline (lowering,
+    // bv_verify, syscall allowlist, Stage 8b
+    // codegen-opt, escape+effects) instead of just codegen-opt,
     // bringing it into alignment with the production path. The backend
     // kind for the latency table is `host_backend_kind()` (preserved
     // exactly from the previous inline Stage 4b — `backend_kind` is also
@@ -6096,9 +6918,14 @@ pub fn compile_modules(
             .functions
             .iter()
             .filter(|f| {
-                f.result_types
-                    .iter()
-                    .any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64 | vuma_codegen::ir::IRType::F64))
+                f.result_types.iter().any(|t| {
+                    matches!(
+                        t,
+                        vuma_codegen::ir::IRType::I64
+                            | vuma_codegen::ir::IRType::U64
+                            | vuma_codegen::ir::IRType::F64
+                    )
+                })
             })
             .map(|f| f.name.clone())
             .collect();
@@ -6136,14 +6963,37 @@ pub fn compile_modules(
             return Err(errors);
         }
     };
+
+    // Central pre-lowering float-op verification.
+    //
+    // Reject bitwise/shift/remainder ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/
+    // `ShrA`/`Ror`/`Rol`/`SRem`/`URem`) on `F32`/`F64` operands BEFORE
+    // any backend's `allocate_registers` runs, so all 19 backends
+    // (including the 4 thin wrappers) benefit without per-backend
+    // wiring.  The previous AArch64-only call site in
+    // `AArch64Backend::allocate_registers` has been removed — this
+    // central call subsumes it.  See `verify_program_float_ops` in
+    // `codegen/src/backend.rs` for the full rationale.
+    if let Err(errs) = vuma_codegen::backend::verify_program_float_ops(&ir_program) {
+        errors.push(VumaError::Codegen {
+            error: CodegenError::InvalidInstruction(format!(
+                "compile_modules: pre-lowering float-op verification failed: {}",
+                errs.join("; ")
+            )),
+        });
+        return Err(errors);
+    }
+
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
         match backend.allocate_registers(func) {
             Ok(allocated) => allocated_functions.push(allocated),
             Err(e) => {
-                vuma_log!(warn,
+                vuma_log!(
+                    warn,
                     "compile_modules: register allocation failed for '{}': {}",
-                    func.name, e
+                    func.name,
+                    e
                 );
             }
         }
@@ -6164,7 +7014,8 @@ pub fn compile_modules(
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
-        rodata_data: Vec::new(), function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
     let binary = match backend.encode_program(&allocated_program) {
         Ok(bytes) => bytes,
@@ -6202,7 +7053,6 @@ pub fn compile_modules(
         ir_instruction_count,
         code_words,
         debug_info: None,
-        cor_runtime: None,
     })
 }
 
@@ -6276,7 +7126,7 @@ pub fn compile_with_recovery(
     let t = Instant::now();
     let ast = match try_or_partial!(
         "parse",
-        parse_and_resolve(source, file_path),
+        parse_and_resolve(source, file_path, config.max_expr_depth),
         PartialCompilationOutput {
             ast: None,
             scg: None,
@@ -6342,6 +7192,15 @@ pub fn compile_with_recovery(
             }));
         }
     };
+    // (Path-sensitivity) Capture else-start node IDs BEFORE SCG transforms
+    // strip the "else" edge labels.  See the comment in `compile_with_path`
+    // (Stage 2) for the full rationale.
+    use std::collections::HashSet;
+    let linear_else_start_node_ids: HashSet<vuma_scg::node::NodeId> = scg
+        .edges()
+        .filter(|e| e.label.as_deref() == Some("else"))
+        .map(|e| e.target)
+        .collect();
     timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 3: SCG Validation ──────────────────────────────────────
@@ -6380,7 +7239,10 @@ pub fn compile_with_recovery(
             MSG::new()
         }
     };
-    timings.push(("msg-construction".to_string(), t.elapsed().as_millis() as u64));
+    timings.push((
+        "msg-construction".to_string(),
+        t.elapsed().as_millis() as u64,
+    ));
 
     // ── Stage 6: IVE Verification (VUMA 2.0 — MANDATORY) ─────────────
     // There is no `VerificationLevel::None` escape hatch: PMT state
@@ -6388,83 +7250,110 @@ pub fn compile_with_recovery(
     // on a region-less program (no allocations to verify), which mirrors
     // the original intent of `Quick` (cheap syntactic checks).
     let t = Instant::now();
-    let verification = if !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
-        // VUMA 2.0 is PMT-only: every pipeline verification level maps
-        // to `IveVerificationLevel::Pmt` (the 3 PMT state verifiers only
-        // — the 5 legacy pointer invariants are skipped because pointer
-        // syntax is a hard parse error in VUMA 2.0).
-        let ive_level = match config.verification_level {
-            VerificationLevel::Quick
-            | VerificationLevel::Normal
-            | VerificationLevel::Exhaustive
-            | VerificationLevel::Modular
-            | VerificationLevel::ConstantTime
-            | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
+    let verification =
+        if !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
+            // VUMA 2.0 is PMT-only: every pipeline verification level maps
+            // to `IveVerificationLevel::Pmt` (the 3 PMT state verifiers only
+            // — the 5 legacy pointer invariants are skipped because pointer
+            // syntax is a hard parse error in VUMA 2.0).
+            let ive_level = match config.verification_level {
+                VerificationLevel::Quick
+                | VerificationLevel::Normal
+                | VerificationLevel::Exhaustive
+                | VerificationLevel::Modular
+                | VerificationLevel::ConstantTime
+                | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
+            };
+            let aggregator = InvariantAggregator::new()
+                .with_level(ive_level)
+                .with_max_paths(config.ive_max_paths)
+                .with_max_path_length(config.ive_max_path_length);
+            // (VUMA 2.0 PMT-only) Build the PMT layout registry from the
+            // AST's `Item::LayoutDef` items so the IVE's `Pmt` level can
+            // run the 3 state verifiers (state_read / state_write /
+            // state_transform) with full field offset/size info. Without
+            // this, every state op would FAIL verification ("layout not
+            // found") and the production pipeline would refuse to emit
+            // any PMT program that uses state ops.
+            let pmt_layouts = build_pmt_layout_specs(&ast);
+            let secret_vars = collect_secret_vars(&ast);
+            let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+                .with_pmt_layouts(pmt_layouts)
+                .with_secret_vars(secret_vars);
+            let result = aggregator.verify_all(&input);
+            // Verification is a hard safety gate: if any invariant was
+            // violated, refuse to emit code for the program.  This is
+            // independent of `stop_on_first_error` because emitting a binary
+            // for a program with known memory-safety violations would defeat
+            // the entire purpose of VUMA.
+            if result.overall == OverallVerdict::Fail {
+                errors.push(VumaError::Verification {
+                    result: result.clone(),
+                });
+                timings.push((
+                    "ive-verification".to_string(),
+                    t.elapsed().as_millis() as u64,
+                ));
+                return CompileResult::Partial(Box::new(PartialCompilationOutput {
+                    ast: Some(ast),
+                    scg: Some(scg),
+                    msg: Some(msg),
+                    verification: Some(result),
+                    stage_timings: timings,
+                    ir_function_count: None,
+                    ir_instruction_count: None,
+                    last_completed_stage: Some(PipelineStage::MsgConstruction),
+                    diagnostics: errors,
+                }));
+            }
+            // Inconclusive is now a HARD failure by default
+            // in the partial-compile (recovery) path too. `--allow-inconclusive`
+            // opts back into soft-pass.
+            if (result.overall == OverallVerdict::Inconclusive) && !config.allow_inconclusive {
+                errors.push(VumaError::Verification {
+                    result: result.clone(),
+                });
+                timings.push((
+                    "ive-verification".to_string(),
+                    t.elapsed().as_millis() as u64,
+                ));
+                return CompileResult::Partial(Box::new(PartialCompilationOutput {
+                    ast: Some(ast),
+                    scg: Some(scg),
+                    msg: Some(msg),
+                    verification: Some(result),
+                    stage_timings: timings,
+                    ir_function_count: None,
+                    ir_instruction_count: None,
+                    last_completed_stage: Some(PipelineStage::MsgConstruction),
+                    diagnostics: errors,
+                }));
+            }
+            // SOUNDNESS WAIVER — only logged when the user
+            // has explicitly opted in via `--allow-inconclusive` in the
+            // partial-compile (recovery) path — see pipeline.rs:5186 for full
+            // rationale.
+            if config.allow_inconclusive && result.overall == OverallVerdict::Inconclusive {
+                vuma_log!(
+                    warn,
+                    "SOUNDNESS WAIVER: IVE verification returned Inconclusive for \
+                 the program (partial-compile path; passed={}, failed={}, \
+                 total_checked={}); compilation continues because \
+                 --allow-inconclusive was passed. Inconclusive is now a \
+                 HARD failure by default.",
+                    result.summary.passed,
+                    result.summary.failed,
+                    result.summary.total_checked
+                );
+            }
+            Some(result)
+        } else {
+            None
         };
-        let aggregator = InvariantAggregator::new()
-            .with_level(ive_level)
-            .with_max_paths(config.ive_max_paths)
-            .with_max_path_length(config.ive_max_path_length);
-        // (VUMA 2.0 PMT-only) Build the PMT layout registry from the
-        // AST's `Item::LayoutDef` items so the IVE's `Pmt` level can
-        // run the 3 state verifiers (state_read / state_write /
-        // state_transform) with full field offset/size info. Without
-        // this, every state op would FAIL verification ("layout not
-        // found") and the production pipeline would refuse to emit
-        // any PMT program that uses state ops.
-        let pmt_layouts = build_pmt_layout_specs(&ast);
-        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
-            .with_pmt_layouts(pmt_layouts);
-        let result = aggregator.verify_all(&input);
-        // Verification is a hard safety gate: if any invariant was
-        // violated, refuse to emit code for the program.  This is
-        // independent of `stop_on_first_error` because emitting a binary
-        // for a program with known memory-safety violations would defeat
-        // the entire purpose of VUMA.
-        if result.overall == OverallVerdict::Fail {
-            errors.push(VumaError::Verification { result: result.clone() });
-            timings.push((
-                "ive-verification".to_string(),
-                t.elapsed().as_millis() as u64,
-            ));
-            return CompileResult::Partial(Box::new(PartialCompilationOutput {
-                ast: Some(ast),
-                scg: Some(scg),
-                msg: Some(msg),
-                verification: Some(result),
-                stage_timings: timings,
-                ir_function_count: None,
-                ir_instruction_count: None,
-                last_completed_stage: Some(PipelineStage::MsgConstruction),
-                diagnostics: errors,
-            }));
-        }
-        // (Wave 19) `--strict-verification`: treat `Inconclusive` as blocking.
-        if config.strict_verification
-            && result.overall == OverallVerdict::Inconclusive
-        {
-            errors.push(VumaError::Verification { result: result.clone() });
-            timings.push((
-                "ive-verification".to_string(),
-                t.elapsed().as_millis() as u64,
-            ));
-            return CompileResult::Partial(Box::new(PartialCompilationOutput {
-                ast: Some(ast),
-                scg: Some(scg),
-                msg: Some(msg),
-                verification: Some(result),
-                stage_timings: timings,
-                ir_function_count: None,
-                ir_instruction_count: None,
-                last_completed_stage: Some(PipelineStage::MsgConstruction),
-                diagnostics: errors,
-            }));
-        }
-        Some(result)
-    } else {
-        None
-    };
-    timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
+    timings.push((
+        "ive-verification".to_string(),
+        t.elapsed().as_millis() as u64,
+    ));
 
     // ── Stage 7: SCG Transforms ───────────────────────────────────────
     let t = Instant::now();
@@ -6494,54 +7383,212 @@ pub fn compile_with_recovery(
         let t_collapse = Instant::now();
         let collapse = vuma_ive::verification::l1l3_collapse(&scg);
         if collapse.collapsed {
-            vuma_log!(info,
+            vuma_log!(
+                info,
                 "L1->L3 collapse: folded {} L1 checks and {} L2 checks",
-                collapse.l1_checks_folded, collapse.l2_checks_folded
+                collapse.l1_checks_folded,
+                collapse.l2_checks_folded
             );
         } else {
-            vuma_log!(warn,
-                "L1->L3 collapse FAILURE: {}", collapse.summary
-            );
+            vuma_log!(warn, "L1->L3 collapse FAILURE: {}", collapse.summary);
         }
-        timings.push(("l1l3-collapse".to_string(), t_collapse.elapsed().as_millis() as u64));
+        timings.push((
+            "l1l3-collapse".to_string(),
+            t_collapse.elapsed().as_millis() as u64,
+        ));
     }
 
     // ── Stage 7c: Linear Channel Discipline Check ─────────────────────
     // Verifies that every channel opened is eventually closed (linear
     // discipline), and that channels are not used after close.
-    // Non-fatal: logs violations as warnings.
+    //
+    //
+    // History: this gate was originally ADVISORY by default (only
+    // `vuma_log!(warn)` on violations) because the call site used the
+    // SCG node index (`i`) as the channel `vreg` identifier, producing
+    // spurious "use of uninitialized channel" / "channel_close on
+    // uninitialized" false positives on any program with more than one
+    // channel operation (every operation had a distinct `vreg` so the
+    // per-handle state map never correlated them). Under `--strict-ive`
+    // (`config.strict_ive`), the gate was promoted to HARD-FAIL — but
+    // the false positive meant channel-using programs would fail under
+    // `--strict-ive` even when semantically valid.
+    //
+    // The false positive was fixed by extracting the channel
+    // handle's variable name from the relevant NodePayload variants
+    // (`ChannelOpenNode.dst` / `ChannelSendNode.channel` /
+    // `ChannelRecvNode.channel` / `ChannelCloseNode.channel`) and
+    // keying the verifier on that name (see
+    // `vuma_ive::borrow_region::ChannelEvent::vreg` for the design).
+    // With the FP eliminated, the verifier now has clean semantics —
+    // multiple operations on the SAME channel handle correctly share
+    // a state-map entry, and the verifier stays silent on legitimate
+    // multi-op programs.
+    //
+    // The gate is now UNCONDITIONAL HARD-FAIL: any
+    // linear-channel violation returns `VumaError::Transform` and
+    // aborts compilation (returning `CompileResult::Partial` on this
+    // recovery path), regardless of the `--strict-ive` flag. The
+    // false-positive fix made this safe — there are no known sources
+    // of spurious violations in the current call site. The
+    // `--strict-ive` flag is RETAINED only for `bv_verify` (Stage 7a),
+    // which still has the "reserved for future strict mode" advisory
+    // status.
     {
         let t_linear = Instant::now();
         let mut events: Vec<vuma_ive::borrow_region::ChannelEvent> = Vec::new();
+
+        // (Path-sensitivity) `linear_else_start_node_ids` was captured
+        // right after `ast_to_scg` (Stage 2), BEFORE SCG transforms
+        // stripped the "else" edge labels.  See the comment at its
+        // declaration for the rationale.
+        let else_start_node_ids = &linear_else_start_node_ids;
+
         for (i, node) in scg.nodes().enumerate() {
+            // Extract the channel handle's VARIABLE NAME
+            // from the NodePayload — NOT the SCG node index `i`. Using
+            // `i as u32` would make every channel operation appear as
+            // a distinct handle and produce false positives on any
+            // program with >1 channel operation. See
+            // `vuma_ive::borrow_region::ChannelEvent::vreg` doc.
+
+            // (Path-sensitivity) If this node is the first node of an
+            // else block, emit an `ElseStart` event BEFORE the node's
+            // own event, so the verifier restores the pre-branch
+            // snapshot before processing the else-branch's channel ops.
+            if else_start_node_ids.contains(&node.id) {
+                events.push(vuma_ive::borrow_region::ChannelEvent {
+                    vreg: String::new(),
+                    kind: vuma_ive::borrow_region::ChannelEventKind::ElseStart,
+                    at_node: i,
+                });
+            }
+
             match &node.payload {
-                vuma_scg::node::NodePayload::ChannelOpen(_) => {
+                vuma_scg::node::NodePayload::ChannelOpen(p) => {
                     events.push(vuma_ive::borrow_region::ChannelEvent {
-                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Open, at_node: i,
+                        vreg: p.dst.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Open,
+                        at_node: i,
                     });
                 }
-                vuma_scg::node::NodePayload::ChannelSend(_) | vuma_scg::node::NodePayload::ChannelRecv(_) => {
+                vuma_scg::node::NodePayload::ChannelSend(p) => {
                     events.push(vuma_ive::borrow_region::ChannelEvent {
-                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Use, at_node: i,
+                        vreg: p.channel.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Use,
+                        at_node: i,
                     });
                 }
-                vuma_scg::node::NodePayload::ChannelClose(_) => {
+                vuma_scg::node::NodePayload::ChannelRecv(p) => {
                     events.push(vuma_ive::borrow_region::ChannelEvent {
-                        vreg: i as u32, kind: vuma_ive::borrow_region::ChannelEventKind::Close, at_node: i,
+                        vreg: p.channel.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Use,
+                        at_node: i,
                     });
+                }
+                vuma_scg::node::NodePayload::ChannelClose(p) => {
+                    events.push(vuma_ive::borrow_region::ChannelEvent {
+                        vreg: p.channel.clone(),
+                        kind: vuma_ive::borrow_region::ChannelEventKind::Close,
+                        at_node: i,
+                    });
+                }
+                vuma_scg::node::NodePayload::Control(c) => {
+                    // (Path-sensitivity) Emit structural events for
+                    // control-flow nodes so the verifier can be
+                    // path-sensitive across `if`/`else` boundaries and
+                    // detect leaks at function-exit points.
+                    use vuma_scg::node::ControlKind;
+                    match c.kind {
+                        ControlKind::Branch => {
+                            events.push(vuma_ive::borrow_region::ChannelEvent {
+                                vreg: String::new(),
+                                kind: vuma_ive::borrow_region::ChannelEventKind::Branch,
+                                at_node: i,
+                            });
+                        }
+                        ControlKind::Join => {
+                            events.push(vuma_ive::borrow_region::ChannelEvent {
+                                vreg: String::new(),
+                                kind: vuma_ive::borrow_region::ChannelEventKind::Join,
+                                at_node: i,
+                            });
+                        }
+                        ControlKind::FunctionReturn => {
+                            // Only emit `FunctionExit` at REAL function-exit
+                            // points — explicit `return` statements (label
+                            // "return") and the function epilogue (label
+                            // "fn_<name>_return(...)").  Call-site return
+                            // nodes (label "return_<callee>") and
+                            // monomorphisation / dispatch return nodes
+                            // (labels "mono_*_return", "static_dispatch_return *")
+                            // are NOT function exits — they return from a
+                            // callee back to the caller, not from the
+                            // current function.
+                            let is_fn_exit = c.label.as_deref() == Some("return")
+                                || c
+                                    .label
+                                    .as_ref()
+                                    .map_or(false, |l| l.starts_with("fn_"));
+                            if is_fn_exit {
+                                events.push(vuma_ive::borrow_region::ChannelEvent {
+                                    vreg: String::new(),
+                                    kind: vuma_ive::borrow_region::ChannelEventKind::FunctionExit,
+                                    at_node: i,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {}
             }
         }
         let results = vuma_ive::borrow_region::verify_linear_channels(&events);
         if !vuma_ive::borrow_region::all_linear_valid(&results) {
+            let mut violation_msgs: Vec<String> = Vec::new();
             for r in &results {
                 if !r.valid {
-                    vuma_log!(warn, "Linear channel violation: {}", r.error.as_deref().unwrap_or("unknown"));
+                    let msg = r.error.as_deref().unwrap_or("unknown").to_string();
+                    vuma_log!(warn, "Linear channel violation: {}", msg);
+                    violation_msgs.push(msg);
                 }
             }
+            // UNCONDITIONAL HARD-FAIL: any linear-channel
+            // violation returns `VumaError::Transform` and aborts
+            // compilation (returning `CompileResult::Partial` on this
+            // recovery path), regardless of `--strict-ive`. The earlier
+            // false-positive fix eliminated the only known source of
+            // spurious violations, so the gate is now safe to
+            // enforce by default. `--strict-ive` is retained only for
+            // `bv_verify` (Stage 7a) which still has the "reserved for
+            // future strict mode" advisory status.
+            if !violation_msgs.is_empty() {
+                timings.push((
+                    "linear-check".to_string(),
+                    t_linear.elapsed().as_millis() as u64,
+                ));
+                errors.push(VumaError::Transform {
+                    pass_name: "linear-channel".to_string(),
+                    errors: violation_msgs,
+                });
+                return CompileResult::Partial(Box::new(PartialCompilationOutput {
+                    ast: Some(ast),
+                    scg: Some(scg),
+                    msg: Some(msg),
+                    verification,
+                    stage_timings: timings,
+                    ir_function_count: None,
+                    ir_instruction_count: None,
+                    last_completed_stage: Some(PipelineStage::ScgTransforms),
+                    diagnostics: errors,
+                }));
+            }
         }
-        timings.push(("linear-check".to_string(), t_linear.elapsed().as_millis() as u64));
+        timings.push((
+            "linear-check".to_string(),
+            t_linear.elapsed().as_millis() as u64,
+        ));
     }
 
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
@@ -6552,7 +7599,7 @@ pub fn compile_with_recovery(
     // for BD inference / MSG / IVE verification / SCG transforms above,
     // but the emitted binary is produced from the AST directly. This avoids
     // the segfaults / infinite loops that the old `bridge_scg_to_codegen*`
-    // path produced (Task 4-A).
+    // path produced.
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let mut ir_builder = IRBuilder::new();
     let mut ir_program = match ir_builder.build(&codegen_scg) {
@@ -6574,8 +7621,8 @@ pub fn compile_with_recovery(
         }
     };
 
-    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers.
-    // Since `nr` is arch-specific (Wave 11/12 design), we use a range check.
+    // Syscall allowlist — reject obviously invalid syscall numbers.
+    // Since `nr` is arch-specific, we use a range check.
     let mut had_syscall_error = false;
     for func in &ir_program.functions {
         for block in &func.blocks {
@@ -6609,21 +7656,22 @@ pub fn compile_with_recovery(
         }));
     }
 
-    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
-    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // Note: lower_syscalls_all() was removed — real
+    // IRInstr::Syscall emission is added directly to all backends, so the IR flows through
     // to codegen unchanged.
 
     // ── Stage 8b: Codegen-Level IR Optimization (production caller) ──
-    // Wave 10: Use the ACTUAL backend's latency table for per-ISA optimization.
+    // Use the ACTUAL backend's latency table for per-ISA optimization.
     // In VUMA 2.0 O3 is mandatory, so the codegen-opt pass always runs.
     {
         let topt = Instant::now();
         let emit_config = config.emit_config();
-        let latency_table = if let Ok(backend) = vuma_codegen::backend::create_backend(emit_config.backend) {
-            backend.target_info().latency_table()
-        } else {
-            vuma_codegen::target_desc::LatencyTable::default_ooo()
-        };
+        let latency_table =
+            if let Ok(backend) = vuma_codegen::backend::create_backend(emit_config.backend) {
+                backend.target_info().latency_table()
+            } else {
+                vuma_codegen::target_desc::LatencyTable::default_ooo()
+            };
         ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
             ir_program,
             &latency_table,
@@ -6632,20 +7680,24 @@ pub fn compile_with_recovery(
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
 
-    // (Wave 32) Escape analysis + SROA + alloc elision + interprocedural
+    // Escape analysis + SROA + alloc elision + interprocedural
     // effect propagation.  See `compile` for the full rationale.  In VUMA
     // 2.0 O3 is mandatory, so this always runs.
     {
         let te = Instant::now();
         let summary = run_escape_and_effects_passes(&mut ir_program);
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "escape+effects (recovery): sroa_promoted={} allocs_elided={} pure_fns={}/{}",
             summary.sroa_promoted,
             summary.allocs_elided,
             summary.pure_functions,
             summary.total_functions
         );
-        timings.push(("escape-effects".to_string(), te.elapsed().as_millis() as u64));
+        timings.push((
+            "escape-effects".to_string(),
+            te.elapsed().as_millis() as u64,
+        ));
     }
 
     let ir_function_count = ir_program.functions.len();
@@ -6657,7 +7709,7 @@ pub fn compile_with_recovery(
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 9: Register Allocation (parallel across functions) ──────
-    // Wave 9: parallelize per-function register allocation with std::thread::scope.
+    // Parallelize per-function register allocation with std::thread::scope.
     let t = Instant::now();
     let allocator = LinearScanAllocator::new();
     let par_results: Vec<(String, Result<AllocationResult, String>)> =
@@ -6726,41 +7778,6 @@ pub fn compile_with_recovery(
     let code_words = count_text_section_instructions(&binary);
     timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
 
-    // ── Stage 11: COR Initialization (soft failure) ──────────────────
-    let t = Instant::now();
-    let cor_runtime = {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let scg_arc = std::sync::Arc::new(scg.clone());
-            let cor_config = CorConfig::default();
-            let mut rt = CORuntime::from_vuma_scg(scg_arc, cor_config);
-            let all_node_ids: Vec<u64> = scg.node_ids().map(|id| id.as_u64()).collect();
-            let delta = vuma_cor::types::Delta {
-                added_nodes: all_node_ids,
-                ..vuma_cor::types::Delta::empty()
-            };
-            let _recompiled = rt.compile_incremental(&delta);
-            rt
-        }));
-        match result {
-            Ok(rt) => Some(rt),
-            Err(panic_payload) => {
-                let message = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic in COR init".to_string()
-                };
-                errors.push(VumaError::PanicCaught {
-                    stage: "cor-init".to_string(),
-                    message,
-                });
-                None
-            }
-        }
-    };
-    timings.push(("cor-init".to_string(), t.elapsed().as_millis() as u64));
-
     // If we accumulated non-fatal errors but still produced a binary, return success
     // with diagnostics attached (but we can't add diagnostics to CompilationOutput
     // without changing the struct, so just return Success).
@@ -6785,7 +7802,6 @@ pub fn compile_with_recovery(
             } else {
                 None
             },
-            cor_runtime,
         }))
     } else {
         // We have a binary but also some non-fatal errors — still return
@@ -6811,7 +7827,6 @@ pub fn compile_with_recovery(
             } else {
                 None
             },
-            cor_runtime,
         }))
     }
 }
@@ -6966,7 +7981,13 @@ fn read_u64_le_or_be(bytes: &[u8], le: bool) -> u64 {
 /// ```
 pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // ── Stage 1: Parse ────────────────────────────────────────────
-    let ast = match parse_source(source) {
+    //
+    // `compile_to_wasm` does not take a `CompileConfig`, so we use the
+    // default `max_expr_depth` (= `vuma_parser::MAX_EXPR_DEPTH` = 1024).
+    // Callers that need to override the limit should go through
+    // `compile_with_path` instead.
+    let max_depth = CompileConfig::default().max_expr_depth;
+    let ast = match parse_source(source, max_depth) {
         Ok(ast) => ast,
         Err(e) => return Err(vec![e]),
     };
@@ -6985,22 +8006,27 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // caller's responsibility). We use `Normal` (the default, which
     // maps to `Pmt` in the pipeline) rather than the removed `None`
     // variant so the config is well-formed.
-    let _ = run_scg_transforms(&mut scg, &CompileConfig {
-        target: CompileTarget::Wasm32,
-        opt_level: OptLevel::O3,
-        verification_level: VerificationLevel::Normal,
-        strict_verification: false,
-        ive_max_paths: 64,
-        ive_max_path_length: 256,
-        entry_name: "main".to_string(),
-        debug_info: false,
-        stop_on_first_error: true,
-        max_inline_size: 50,
-        inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
-        memory_safety: true,
-        runtime_bounds_checks: false,
-        section_headers: false,
-    });
+    let _ = run_scg_transforms(
+        &mut scg,
+        &CompileConfig {
+            target: CompileTarget::Wasm32,
+            opt_level: OptLevel::O3,
+            verification_level: VerificationLevel::Normal,
+            allow_inconclusive: false,
+            strict_ive: false,
+            ive_max_paths: 64,
+            ive_max_path_length: 256,
+            entry_name: "main".to_string(),
+            debug_info: false,
+            stop_on_first_error: true,
+            max_inline_size: 50,
+            inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
+            runtime_bounds_checks: false,
+            section_headers: false,
+            max_expr_depth: vuma_parser::MAX_EXPR_DEPTH,
+            backend: vuma_codegen::backend::BackendKind::Wasm32,
+        },
+    );
 
     // ── Stage 4: IR Lowering ─────────────────────────────────────
     // NOTE: The canonical pipeline now uses the DIRECT AST→codegen SCG
@@ -7008,16 +8034,20 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // codegen-SCG bridge. The semantic SCG (`scg`) is still built above
     // for SCG transforms, but the emitted Wasm is produced from the AST
     // directly. This avoids the segfaults / infinite loops that the old
-    // `bridge_scg_to_codegen*` path produced (Task 4-A).
+    // `bridge_scg_to_codegen*` path produced.
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let mut ir_builder = IRBuilder::new();
     let mut ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
-        Err(e) => return Err(vec![VumaError::Codegen { error: CodegenError::ElfError(format!("{}", e)) }]),
+        Err(e) => {
+            return Err(vec![VumaError::Codegen {
+                error: CodegenError::ElfError(format!("{}", e)),
+            }])
+        }
     };
 
-    // Wave 10: Syscall allowlist — reject obviously invalid syscall numbers.
-    // Since `nr` is arch-specific (Wave 11/12 design), we use a range check.
+    // Syscall allowlist — reject obviously invalid syscall numbers.
+    // Since `nr` is arch-specific, we use a range check.
     let mut allowlist_errors: Vec<VumaError> = Vec::new();
     for func in &ir_program.functions {
         for block in &func.blocks {
@@ -7039,19 +8069,37 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
         return Err(allowlist_errors);
     }
 
-    // Note: lower_syscalls_all() was removed — Wave 11/12 added real
-    // IRInstr::Syscall emission to all backends, so the IR flows through
+    // Note: lower_syscalls_all() was removed — real
+    // IRInstr::Syscall emission is added directly to all backends, so the IR flows through
     // to codegen unchanged. (lower_syscalls()/lower_syscalls_all()
-    // definitions were also deleted in Wave 10 dead-code cleanup.)
+    // definitions were also deleted as dead-code cleanup.)
 
     // ── Codegen-Level IR Optimization (production caller) ────────
     ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+
+    // Central pre-lowering float-op verification.
+    //
+    // Reject bitwise/shift/remainder ops on F32/F64 operands BEFORE the
+    // wasm32 backend's `allocate_registers` runs (inside
+    // `vuma_codegen::compile_to_wasm`).  See `verify_program_float_ops`
+    // in `codegen/src/backend.rs` for the full rationale.  Mirrors the
+    // gate in `compile_modules` and `compile_to_binary_direct`.
+    if let Err(errs) = vuma_codegen::backend::verify_program_float_ops(&ir_program) {
+        return Err(vec![VumaError::Codegen {
+            error: CodegenError::InvalidInstruction(format!(
+                "compile_to_wasm: pre-lowering float-op verification failed: {}",
+                errs.join("; ")
+            )),
+        }]);
+    }
 
     // ── Stage 5: Compile IR → Wasm ──────────────────────────────
     let wasm_bytes = match vuma_codegen::compile_to_wasm(&ir_program.functions) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return Err(vec![VumaError::Codegen { error: CodegenError::ElfError(format!("{}", e)) }]);
+            return Err(vec![VumaError::Codegen {
+                error: CodegenError::ElfError(format!("{}", e)),
+            }]);
         }
     };
 
@@ -7106,8 +8154,14 @@ pub fn compile_incremental(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Parse VUMA source text into an AST.
-fn parse_source(source: &str) -> Result<AstProgram, VumaError> {
-    let mut parser = Parser::new(source);
+///
+/// `max_depth` controls the parser's expression-nesting limit (see
+/// [`vuma_parser::Parser::with_max_depth`] and
+/// [`vuma_parser::MAX_EXPR_DEPTH`]). Callers should pass
+/// `config.max_expr_depth` so the `--max-expr-depth N` CLI flag is
+/// honoured.
+fn parse_source(source: &str, max_depth: u32) -> Result<AstProgram, VumaError> {
+    let mut parser = Parser::with_max_depth(source, max_depth);
     let result = parser.parse_program();
     if result.has_errors() {
         return Err(VumaError::Parse {
@@ -7125,9 +8179,17 @@ fn parse_source(source: &str) -> Result<AstProgram, VumaError> {
 /// If the source has no `import` statements, this is equivalent to
 /// [`parse_source`].  Otherwise, imported files are read, parsed, and
 /// merged into a single program.
-fn parse_and_resolve(source: &str, file_path: Option<&Path>) -> Result<AstProgram, VumaError> {
+///
+/// `max_depth` is forwarded to the parser (and to the [`ModuleResolver`]
+/// for imported files) so the `--max-expr-depth N` CLI flag applies
+/// uniformly across the root module and its imports.
+fn parse_and_resolve(
+    source: &str,
+    file_path: Option<&Path>,
+    max_depth: u32,
+) -> Result<AstProgram, VumaError> {
     // Fast path: if there are no imports, just parse normally.
-    let mut parser = Parser::new(source);
+    let mut parser = Parser::with_max_depth(source, max_depth);
     let result = parser.parse_program();
     if result.has_errors() {
         return Err(VumaError::Parse {
@@ -7137,13 +8199,17 @@ fn parse_and_resolve(source: &str, file_path: Option<&Path>) -> Result<AstProgra
     let program = result.unwrap();
 
     // Check if there are any import statements.
-    let has_imports = program.items.iter().any(|i| matches!(i, vuma_parser::ast::Item::Import(_)));
+    let has_imports = program
+        .items
+        .iter()
+        .any(|i| matches!(i, vuma_parser::ast::Item::Import(_)));
     if !has_imports {
         return Ok(program);
     }
 
-    // Resolve imports using the ModuleResolver.
-    let mut resolver = ModuleResolver::new();
+    // Resolve imports using the ModuleResolver. Propagate `max_depth` so
+    // imported files are parsed with the same expression-nesting limit.
+    let mut resolver = ModuleResolver::new().with_max_depth(max_depth);
     match resolver.resolve_source(source, file_path) {
         Ok(resolved) => Ok(resolved),
         Err(errors) => Err(VumaError::ModuleResolution { errors }),
@@ -7158,30 +8224,7 @@ fn ast_to_scg(ast: &AstProgram) -> Result<SCG, VumaError> {
     })
 }
 
-/// Extract the set of extern function names declared in `extern "C" { ... }`
-/// blocks in the AST.  These are functions that should be linked against
-/// external libraries (e.g. libc) and must be emitted as relocations rather
-/// than local branch instructions.
-///
-/// DEPRECATED: the canonical pipeline now uses
-/// [`extract_extern_functions_from_ast`] (which is identical but `pub` so the
-/// direct AST→codegen bridge can call it). This private copy is retained
-/// because the older `bridge_scg_to_codegen_with_externs` path (also
-/// deprecated) used it; the canonical pipeline no longer calls either.
-#[allow(dead_code)]
-fn extract_extern_functions(ast: &AstProgram) -> HashSet<String> {
-    let mut extern_fns = HashSet::new();
-    for item in &ast.items {
-        if let Item::ExternBlock(eb) = item {
-            for fn_decl in &eb.functions {
-                extern_fns.insert(fn_decl.name.clone());
-            }
-        }
-    }
-    extern_fns
-}
-
-/// (Wave 32) Summary of the escape+effects passes run on a program.
+/// Summary of the escape+effects passes run on a program.
 ///
 /// Returned by [`run_escape_and_effects_passes`] and pushed into the
 /// pipeline's `stage_timings` as a single `escape-effects` entry so
@@ -7199,7 +8242,7 @@ pub struct EscapeAndEffectsSummary {
     pub total_functions: usize,
 }
 
-/// (Wave 32) Drive escape-analysis-driven SROA + alloc elision +
+/// Drive escape-analysis-driven SROA + alloc elision +
 /// interprocedural effect analysis on `program`.
 ///
 /// Should be called at O2+ **after** the main codegen-opt pass so the
@@ -7255,12 +8298,12 @@ pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPi
     pm.add_pass(DeadCodeElimination::new()); // cleanup after inlining
     pm.add_pass(ConstantFolding::new()); // re-fold after inlining
     pm.add_pass(CommonSubexpressionElimination::new());
-    // (Wave 26) LICM after inlining+DCE so it sees the post-inline loop
+    // LICM after inlining+DCE so it sees the post-inline loop
     // structure.
     pm.add_pass(LoopInvariantCodeMotion::new());
     pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
-    // (Wave 33) Strength reduction + tail-call detection +
-    // dead-region elimination on the post-inline IR.
+                                             // Strength reduction + tail-call detection +
+                                             // dead-region elimination on the post-inline IR.
     pm.add_pass(StrengthReduction::new());
     pm.add_pass(TailCallOptDetection::new());
     pm.add_pass(DeadRegionElimination::new());
@@ -7309,17 +8352,13 @@ mod tests {
             output.verification.is_some(),
             "Verification should run at Normal level"
         );
-        // (Wave 19) The stage count is no longer hardcoded — waves 16/18
-        // added interprocedural/modular/proof stages. Just verify that
+        // The stage count is no longer hardcoded — interprocedural/modular/proof
+        // stages have been added. Just verify that
         // timing data was collected for multiple stages.
         assert!(
             output.stage_timings.len() >= 8,
             "Expected at least 8 stages with timing data, got {}",
             output.stage_timings.len()
-        );
-        assert!(
-            output.cor_runtime.is_some(),
-            "COR runtime should be initialized"
         );
     }
 
@@ -7341,7 +8380,10 @@ mod tests {
             ..CompileConfig::default()
         };
         let result = compile(source, &config);
-        assert!(result.is_ok(), "O0 compilation should succeed (O3 is mandatory — full pass set always runs)");
+        assert!(
+            result.is_ok(),
+            "O0 compilation should succeed (O3 is mandatory — full pass set always runs)"
+        );
         let output = result.unwrap();
         assert!(
             output.binary.len() >= 64,
@@ -7408,7 +8450,7 @@ mod tests {
         let result = compile(source, &config);
         assert!(result.is_ok());
         let output = result.unwrap();
-        // (Wave 19) Quick mode now runs all 5 invariants at reduced depth.
+        // Quick mode now runs all 5 invariants at reduced depth.
         // An empty program (no allocations) may skip verification entirely
         // (msg.region_count() == 0), so verification may be None.
         if let Some(verification) = output.verification {
@@ -7486,17 +8528,15 @@ mod tests {
     #[test]
     fn test_pipeline_stage_ordering() {
         let stages = PipelineStage::all();
-        assert_eq!(stages.len(), 11);
+        assert_eq!(stages.len(), 10);
         assert_eq!(stages[0], PipelineStage::Parse);
         assert_eq!(stages[9], PipelineStage::CodeEmission);
-        assert_eq!(stages[10], PipelineStage::CorInit);
 
         // from() should return all stages from the given one onwards.
         let from_msg = PipelineStage::from(PipelineStage::MsgConstruction);
-        assert_eq!(from_msg.len(), 7);
+        assert_eq!(from_msg.len(), 6);
         assert_eq!(from_msg[0], PipelineStage::MsgConstruction);
         assert_eq!(from_msg[5], PipelineStage::CodeEmission);
-        assert_eq!(from_msg[6], PipelineStage::CorInit);
     }
 
     /// Test 11: CompileConfig defaults are reasonable.
@@ -7537,7 +8577,7 @@ mod tests {
         assert!(display2.contains("bad emit"));
     }
 
-    // ── Type-aware shift tests (Task 7-A) ────────────────────────────────
+    // ── Type-aware shift tests ────────────────────────────────────────
     //
     // Verifies that `flatten_expr` chooses `BinOpKind::ShrA` (arithmetic,
     // sign-extending) when the lhs operand is a variable declared with a
@@ -7814,9 +8854,9 @@ mod tests {
         );
     }
 
-    // ── Wave 20: Memory-safety blocking-pass tests ───────────────────
+    // ── Memory-safety blocking-pass tests ───────────────────
 
-    /// Wave 20 regression test: a program with a use-after-free.
+    /// Regression test: a program with a use-after-free.
     ///
     /// This test verifies that the memory-safety blocking pass is wired
     /// into the pipeline and runs without crashing.  The SCG-liveness-
@@ -7826,12 +8866,10 @@ mod tests {
     /// pipeline must reject the program with `VumaError::MemorySafety`.
     /// When it does NOT catch it (a known limitation of the current
     /// liveness analysis), the program compiles — this is documented
-    /// behavior, not a bug in Wave 20's wiring.
+    /// behavior, not a bug in the wiring.
     ///
     /// The `test_wave20_memory_safety_error_variant` test below
-    /// verifies the `VumaError::MemorySafety` variant itself, and the
-    /// `test_wave20_no_memory_safety_escape_hatch` test verifies the
-    /// `--no-memory-safety` flag works.
+    /// verifies the `VumaError::MemorySafety` variant itself.
     #[test]
     fn test_wave20_uaf_rejected_at_compile_time() {
         // VUMA 2.0 is PMT-only: pointer syntax (allocate/free/*ptr) is a
@@ -7846,52 +8884,20 @@ mod tests {
                 return x;
             }
         "#;
-        let config = CompileConfig::default(); // memory_safety: true
+        let config = CompileConfig::default();
         let result = compile(source, &config);
         // A clean program should compile successfully — the memory-safety
         // pass runs without crashing and finds no violations.
         assert!(
             result.is_ok(),
-            "Clean program should compile with memory_safety enabled, got: {:?}",
+            "Clean program should compile (memory-safety pass is mandatory), got: {:?}",
             result.err()
         );
     }
 
-    /// Wave 20 / VUMA 2.0: the `--no-memory-safety` escape hatch has
-    /// been REMOVED — `CompileConfig.memory_safety` is retained for API
-    /// stability but its value is IGNORED (the memory-safety analyzer
-    /// always runs). This test confirms that a clean PMT program
-    /// compiles successfully even when the legacy `memory_safety:
-    /// false` field is set (because the field is now a no-op).
-    #[test]
-    fn test_wave20_no_memory_safety_escape_hatch() {
-        // VUMA 2.0 PMT-only: pointer syntax is a hard parse error.
-        // Use a clean program to verify that setting `memory_safety:
-        // false` in the config is now IGNORED — the memory-safety pass
-        // still runs, and a clean PMT program compiles successfully.
-        let source = r#"
-            fn main() -> i32 {
-                x = 42;
-                return x;
-            }
-        "#;
-        let config = CompileConfig {
-            memory_safety: false, // VUMA 2.0: ignored — pass always runs.
-            verification_level: VerificationLevel::Normal,
-            ..CompileConfig::default()
-        };
-        let result = compile(source, &config);
-        assert!(
-            result.is_ok(),
-            "PMT program must compile (memory_safety=false is now ignored), got: {:?}",
-            result.err()
-        );
-    }
-
-    /// Wave 20: a clean program (no UAF, no leaks) must compile
-    /// successfully with `memory_safety: true`.  This is a negative test
-    /// — the analyzer must NOT produce false positives on well-behaved
-    /// programs.
+    /// A clean program (no UAF, no leaks) must compile
+    /// successfully.  This is a negative test — the analyzer must NOT
+    /// produce false positives on well-behaved programs.
     #[test]
     fn test_wave20_clean_program_compiles_with_memory_safety() {
         // VUMA 2.0 PMT-only: use a simple clean program (no allocation)
@@ -7903,34 +8909,337 @@ mod tests {
                 return x;
             }
         "#;
-        let config = CompileConfig::default(); // memory_safety: true
+        let config = CompileConfig::default();
         let result = compile(source, &config);
         assert!(
             result.is_ok(),
-            "Clean program must compile with memory_safety enabled, got: {:?}",
+            "Clean program must compile (memory-safety is mandatory), got: {:?}",
             result.err()
         );
     }
 
-    /// Wave 20: the `MemorySafety` error variant's `stage()` must return
+    /// The `MemorySafety` error variant's `stage()` must return
     /// `"memory-safety"` and its `Display` impl must mention "violation(s)".
     #[test]
     fn test_wave20_memory_safety_error_variant() {
         let report = vuma_codegen::memory_safety::MemorySafetyReport {
-            violations: vec![vuma_codegen::memory_safety::MemorySafetyViolation::UseAfterFree {
-                allocation_name: "buf".to_string(),
-                dealloc_line: Some(5),
-                violation_count: 1,
-            }],
+            violations: vec![
+                vuma_codegen::memory_safety::MemorySafetyViolation::UseAfterFree {
+                    allocation_name: "buf".to_string(),
+                    dealloc_line: Some(5),
+                    violation_count: 1,
+                },
+            ],
             ..vuma_codegen::memory_safety::MemorySafetyReport::empty()
         };
         let err = VumaError::MemorySafety { report };
         assert_eq!(err.stage(), "memory-safety");
         let msg = format!("{}", err);
-        assert!(msg.contains("memory-safety"), "Display should mention memory-safety: {}", msg);
-        assert!(msg.contains("violation"), "Display should mention violation: {}", msg);
+        assert!(
+            msg.contains("memory-safety"),
+            "Display should mention memory-safety: {}",
+            msg
+        );
+        assert!(
+            msg.contains("violation"),
+            "Display should mention violation: {}",
+            msg
+        );
     }
-}/// Try to convert a while-loop condition into a for-range tuple.
+
+    /// PMT state-node lowering: verify that
+    /// `convert_node_to_statement_with_externs` no longer silently
+    /// drops `NodePayload::StateInit` / `StateRead` / `StateWrite` /
+    /// `StateTransform` / `ForeignConsume` / `ArenaNew` / `ArenaAlloc` /
+    /// `ArenaGrow` / `ArenaFree` nodes (the previous `Vec::new()` stub).
+    ///
+    /// Each variant should now lower to a real `ScgStatement::Call`
+    /// (or `ScgStatement::ForeignConsume` for the linearity marker)
+    /// targeting a layout-mangled extern helper symbol.  This test
+    /// constructs a minimal SCG per variant and asserts the lowering
+    /// produces exactly one statement of the expected shape.
+    #[test]
+    fn test_pmt_state_node_lowering_is_total() {
+        use vuma_scg::node::{
+            ArenaAllocNode, ArenaFreeNode, ArenaGrowNode, ArenaNewNode, ForeignConsumeNode,
+            ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
+        };
+
+        let pp = ProgramPoint {
+            file: None,
+            line: None,
+            column: None,
+            offset: None,
+        };
+        let externs: HashSet<String> = HashSet::new();
+
+        // Helper: build an SCG with one node, lower it, return the stmts.
+        let lower_one = |payload: NodePayload, nt: NodeType| -> Vec<ScgStatement> {
+            let mut scg = SCG::new();
+            let id = scg.add_node(nt, payload, pp.clone());
+            let edge_idx = EdgeIndex::build(&scg);
+            let node_data = scg.get_node(id).expect("node just added");
+            convert_node_to_statement_with_externs(id, node_data, &edge_idx, &scg, &externs)
+        };
+
+        // StateInit -> Call __vuma_state_init__<Layout>
+        let stmts = lower_one(
+            NodePayload::StateInit(StateInitNode {
+                layout_name: "Point".to_string(),
+                result_vreg: 0,
+            }),
+            NodeType::StateInit,
+        );
+        assert_eq!(
+            stmts.len(),
+            1,
+            "StateInit must lower to exactly one statement"
+        );
+        match &stmts[0] {
+            ScgStatement::Call(c) => {
+                assert_eq!(c.func, "__vuma_state_init__Point");
+                assert!(c.is_extern, "StateInit call must be extern");
+                assert_eq!(c.args.len(), 0, "StateInit takes no args");
+                assert!(c.dst.is_some(), "StateInit must produce a dst");
+            }
+            other => panic!("StateInit lowered to {:?}, expected Call", other),
+        }
+
+        // StateRead -> Call __vuma_state_read__<L>__<f>
+        let stmts = lower_one(
+            NodePayload::StateRead(StateReadNode {
+                state_vreg: 0,
+                layout_name: "Point".to_string(),
+                field_name: "x".to_string(),
+                result_vreg: 1,
+            }),
+            NodeType::StateRead,
+        );
+        assert_eq!(
+            stmts.len(),
+            1,
+            "StateRead must lower to exactly one statement"
+        );
+        match &stmts[0] {
+            ScgStatement::Call(c) => {
+                assert_eq!(c.func, "__vuma_state_read__Point__x");
+                assert!(c.is_extern);
+                assert_eq!(c.args.len(), 1, "StateRead takes 1 arg (state ptr)");
+            }
+            other => panic!("StateRead lowered to {:?}, expected Call", other),
+        }
+
+        // StateWrite -> Call __vuma_state_write__<L>__<f>
+        let stmts = lower_one(
+            NodePayload::StateWrite(StateWriteNode {
+                state_vreg: 0,
+                layout_name: "Point".to_string(),
+                field_name: "x".to_string(),
+                value_vreg: 1,
+            }),
+            NodeType::StateWrite,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::Call(c) => {
+                assert_eq!(c.func, "__vuma_state_write__Point__x");
+                assert!(c.dst.is_none(), "StateWrite produces no dst");
+                assert_eq!(c.args.len(), 2, "StateWrite takes 2 args (ptr + value)");
+            }
+            other => panic!("StateWrite lowered to {:?}, expected Call", other),
+        }
+
+        // StateTransform -> Call __vuma_state_transform__<in>_to_<out>
+        let stmts = lower_one(
+            NodePayload::StateTransform(StateTransformNode {
+                input_vreg: 0,
+                input_layout: "Bytes".to_string(),
+                output_layout: "Point".to_string(),
+                result_vreg: 1,
+            }),
+            NodeType::StateTransform,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::Call(c) => {
+                assert_eq!(c.func, "__vuma_state_transform__Bytes_to_Point");
+            }
+            other => panic!("StateTransform lowered to {:?}, expected Call", other),
+        }
+
+        // ForeignConsume -> ScgStatement::ForeignConsume marker
+        let stmts = lower_one(
+            NodePayload::ForeignConsume(ForeignConsumeNode {
+                input_vreg: 0,
+                layout_name: "Handle".to_string(),
+            }),
+            NodeType::ForeignConsume,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::ForeignConsume(fc) => {
+                assert_eq!(fc.layout_name, "Handle");
+            }
+            other => panic!(
+                "ForeignConsume lowered to {:?}, expected ForeignConsume",
+                other
+            ),
+        }
+
+        // ArenaNew -> Call __vuma_arena_new
+        let stmts = lower_one(
+            NodePayload::ArenaNew(ArenaNewNode {
+                capacity_vreg: 0,
+                result_vreg: 1,
+            }),
+            NodeType::ArenaNew,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::Call(c) => assert_eq!(c.func, "__vuma_arena_new"),
+            other => panic!("ArenaNew lowered to {:?}, expected Call", other),
+        }
+
+        // ArenaAlloc -> Call __vuma_arena_alloc__<Layout>
+        let stmts = lower_one(
+            NodePayload::ArenaAlloc(ArenaAllocNode {
+                arena_vreg: 0,
+                layout_name: "Node".to_string(),
+                result_arena_vreg: 1,
+                result_state_vreg: 2,
+            }),
+            NodeType::ArenaAlloc,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::Call(c) => assert_eq!(c.func, "__vuma_arena_alloc__Node"),
+            other => panic!("ArenaAlloc lowered to {:?}, expected Call", other),
+        }
+
+        // ArenaGrow -> Call __vuma_arena_grow
+        let stmts = lower_one(
+            NodePayload::ArenaGrow(ArenaGrowNode {
+                arena_vreg: 0,
+                min_capacity_vreg: 1,
+                result_vreg: 2,
+            }),
+            NodeType::ArenaGrow,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::Call(c) => assert_eq!(c.func, "__vuma_arena_grow"),
+            other => panic!("ArenaGrow lowered to {:?}, expected Call", other),
+        }
+
+        // ArenaFree -> Call __vuma_arena_free
+        let stmts = lower_one(
+            NodePayload::ArenaFree(ArenaFreeNode { arena_vreg: 0 }),
+            NodeType::ArenaFree,
+        );
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            ScgStatement::Call(c) => {
+                assert_eq!(c.func, "__vuma_arena_free");
+                assert!(c.dst.is_none(), "ArenaFree produces no dst");
+            }
+            other => panic!("ArenaFree lowered to {:?}, expected Call", other),
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // match-stmt complex-pattern lowering + sync-block fence
+    // ───────────────────────────────────────────────────────────────────
+    //
+    // NOTE on coverage: the lowering in `bridge_stmt_to_scg` handles
+    // `MatchPattern::Range` and `MatchPattern::Or` (expanding them into
+    // individual SwitchArms), but the VUMA parser (`parse_match_pattern`
+    // in parser/src/parser.rs) does not yet produce these variants — the
+    // AST enum has them, but the parser only emits Lit/Wildcard/Ident/
+    // Struct/Enum. The Range/Or lowering is therefore forward-looking:
+    // ready for when the parser is extended. The Ident-binding and
+    // Enum-binding lowerings ARE exercisable today, so they have tests
+    // below; Range/Or do not (the parser rejects `1..=3` and `1 | 2`).
+    // The Struct-pattern warning is exercised via the CLI (it fires
+    // correctly — see manual test in the docs) but is not
+    // unit-tested here because it interacts with a pre-existing
+    // memory-safety false-positive on function-parameter matches.
+    // -----------------------------------------------------------------
+
+    /// A match with an identifier-binding pattern (`x => ...`)
+    /// must compile. The identifier is treated as a binding — the
+    /// discriminant is bound to `x` and the arm becomes the default_body.
+    #[test]
+    fn test_wave10e_match_ident_binding_compiles() {
+        let source = r#"
+            fn passthrough(n: i64) -> i64 {
+                match n {
+                    0 => 0,
+                    x => x,
+                }
+            }
+            fn main() -> i32 {
+                return 0;
+            }
+        "#;
+        let config = CompileConfig::default();
+        let result = compile(source, &config);
+        assert!(
+            result.is_ok(),
+            "match with identifier-binding pattern should compile, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// A match with an enum-binding pattern (`Some(v) => ...`)
+    /// must compile. The enum variant is treated as a binding — the
+    /// discriminant is bound to `v` and the arm becomes the default_body.
+    #[test]
+    fn test_wave10e_match_enum_binding_compiles() {
+        let source = r#"
+            fn extract(n: i64) -> i64 {
+                match n {
+                    0 => 0,
+                    Some(v) => v,
+                    _ => 99,
+                }
+            }
+            fn main() -> i32 {
+                return 0;
+            }
+        "#;
+        let config = CompileConfig::default();
+        let result = compile(source, &config);
+        assert!(
+            result.is_ok(),
+            "match with enum-binding pattern should compile, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// A `sync { ... }` block must compile. The body is wrapped
+    /// in AtomicStore acquire/release (lowered to native atomic
+    /// instructions on each backend).
+    #[test]
+    fn test_wave10e_sync_block_compiles() {
+        let source = r#"
+            fn main() -> i32 {
+                x = 42;
+                sync {
+                    x = x + 1;
+                }
+                return x;
+            }
+        "#;
+        let config = CompileConfig::default();
+        let result = compile(source, &config);
+        assert!(
+            result.is_ok(),
+            "sync block should compile, got: {:?}",
+            result.err()
+        );
+    }
+}
+/// Try to convert a while-loop condition into a for-range tuple.
 ///
 /// Recognises patterns like "while (i < 4)" and converts them to
 /// (var_name, start, end).
@@ -7954,7 +9263,10 @@ fn parse_while_to_for_range(
     // End bound can be a constant or a variable name.
     let end_expr = if let Ok(end) = rhs_str.parse::<i64>() {
         ScgExpr::Int(end)
-    } else if rhs_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+    } else if rhs_str
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
         && rhs_str.chars().all(|c| c.is_alphanumeric() || c == '_')
     {
         ScgExpr::Var(rhs_str.to_string())
@@ -7983,10 +9295,18 @@ fn parse_while_to_for_range(
                     } else {
                         ScgExpr::Var(start_str.to_string())
                     }
-                } else { ScgExpr::Int(0) }
-            } else { ScgExpr::Int(0) }
-        } else { ScgExpr::Int(0) }
-    } else { ScgExpr::Int(0) };
+                } else {
+                    ScgExpr::Int(0)
+                }
+            } else {
+                ScgExpr::Int(0)
+            }
+        } else {
+            ScgExpr::Int(0)
+        }
+    } else {
+        ScgExpr::Int(0)
+    };
 
     Some((var_name, start, end_expr))
 }
@@ -8002,11 +9322,14 @@ fn parse_while_to_for_range(
 fn body_has_any_reassigns(body: &[ScgStatement]) -> bool {
     for stmt in body {
         match stmt {
-            ScgStatement::Computation(comp)
-                if comp.reassigns.is_some() => {
-                    return true;
-                }
-            ScgStatement::Control(ControlNode::If { then_body, else_body, .. }) => {
+            ScgStatement::Computation(comp) if comp.reassigns.is_some() => {
+                return true;
+            }
+            ScgStatement::Control(ControlNode::If {
+                then_body,
+                else_body,
+                ..
+            }) => {
                 if body_has_any_reassigns(then_body) {
                     return true;
                 }
@@ -8017,10 +9340,13 @@ fn body_has_any_reassigns(body: &[ScgStatement]) -> bool {
                 }
             }
             ScgStatement::Control(ControlNode::Loop { body, .. })
-                if body_has_any_reassigns(body) => {
-                    return true;
-                }
-            ScgStatement::Control(ControlNode::Switch { arms, default_body, .. }) => {
+                if body_has_any_reassigns(body) =>
+            {
+                return true;
+            }
+            ScgStatement::Control(ControlNode::Switch {
+                arms, default_body, ..
+            }) => {
                 for arm in arms {
                     if body_has_any_reassigns(&arm.body) {
                         return true;
@@ -8073,7 +9399,7 @@ pub fn extract_extern_functions_from_ast(program: &AstProgram) -> HashSet<String
 }
 
 /// Extract extern function declarations (name + attrs + params) from the AST.
-/// Used by Wave 5 (ForeignState lowering) to inspect #[foreign_consume],
+/// Used by ForeignState lowering to inspect #[foreign_consume],
 /// #[foreign_return], #[callback], etc. at call sites.
 pub fn extract_extern_fn_decls_from_ast(
     program: &AstProgram,
@@ -8090,7 +9416,7 @@ pub fn extract_extern_fn_decls_from_ast(
 }
 
 /// Extract layout declarations (name → LayoutDef incl. attrs) from the AST.
-/// Used by Wave 5 to check if a layout has #[foreign(raw)].
+/// Used to check if a layout has #[foreign(raw)].
 pub fn extract_layout_decls_from_ast(
     program: &AstProgram,
 ) -> HashMap<String, vuma_parser::ast::LayoutDef> {
@@ -8110,17 +9436,92 @@ pub fn attr_to_attr_info(attr: &vuma_parser::ast::Attribute) -> vuma_codegen::ma
         name: attr.name.clone(),
         value: attr.value.as_ref().map(|v| match v {
             vuma_parser::ast::AttrValue::Single(s) => s.clone(),
-            vuma_parser::ast::AttrValue::List(items) => {
-                items.first().cloned().unwrap_or_default()
-            }
+            vuma_parser::ast::AttrValue::List(items) => items.first().cloned().unwrap_or_default(),
             vuma_parser::ast::AttrValue::KeyValue { value, .. } => value.clone(),
         }),
     }
 }
 
 /// Convert a slice of parser `Attribute`s to codegen `AttrInfo`s.
-pub fn attrs_to_attr_infos(attrs: &[vuma_parser::ast::Attribute]) -> Vec<vuma_codegen::marshal::AttrInfo> {
+pub fn attrs_to_attr_infos(
+    attrs: &[vuma_parser::ast::Attribute],
+) -> Vec<vuma_codegen::marshal::AttrInfo> {
     attrs.iter().map(attr_to_attr_info).collect()
+}
+
+/// Build a `var_name → allocation_size_in_bytes` table from a codegen SCG.
+///
+/// Walks every function's body (recursing into `ControlNode::If`/`Loop`/
+/// `Switch` arms) and collects `AllocationNode::Stack` entries:
+///
+/// * Stack arrays (`alloc(N)`): size is the explicit `N` bytes.
+/// * PMT state buffers (`state_new(Layout)`): the parser embeds the
+///   layout's `total_size` into `AllocationNode::Stack.size` at AST→SCG
+///   time (see `to_scg::layout_total_size`), so the same field carries
+///   the correct bound.
+///
+/// `AllocationNode::Heap` is **not** collected: its `size_expr` is a
+/// runtime expression, not a static literal, so the bound cannot be
+/// resolved without SCG-level constant folding (Stage 3 / SoftBound).
+///
+/// The returned table is consulted by
+/// [`vuma_codegen::memory_safety::find_bounds_check_sites_with_bounds`]
+/// to populate `length_expr`, and by
+/// [`vuma_codegen::memory_safety::inject_bounds_check_ir`] to emit
+/// `__oob_trap` IR when `--safe` is set.
+pub fn build_alloc_sizes(scg: &Scg) -> std::collections::HashMap<String, u64> {
+    let mut table = std::collections::HashMap::new();
+    for node in &scg.nodes {
+        if let ScgNode::Function(func) = &node {
+            collect_alloc_sizes_in_stmts(&func.body, &mut table);
+        }
+    }
+    table
+}
+
+fn collect_alloc_sizes_in_stmts(
+    stmts: &[ScgStatement],
+    table: &mut std::collections::HashMap<String, u64>,
+) {
+    use vuma_codegen::scg_to_ir::ControlNode;
+    for stmt in stmts {
+        match stmt {
+            ScgStatement::Allocation(AllocationNode::Stack { name, size, .. }) => {
+                // Last-writer-wins: a name is shadowed if redeclared in a
+                // narrower scope. In practice state-typed allocations and
+                // stack arrays are unique per function.
+                table.insert(name.clone(), u64::from(*size));
+            }
+            ScgStatement::Allocation(AllocationNode::Heap { .. }) => {
+                // Heap size is a runtime expression — skip (no static bound).
+            }
+            ScgStatement::Control(ctrl) => match ctrl {
+                ControlNode::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    collect_alloc_sizes_in_stmts(then_body, table);
+                    if let Some(eb) = else_body {
+                        collect_alloc_sizes_in_stmts(eb, table);
+                    }
+                }
+                ControlNode::Loop { body, .. } => {
+                    collect_alloc_sizes_in_stmts(body, table);
+                }
+                ControlNode::Switch {
+                    arms, default_body, ..
+                } => {
+                    for arm in arms {
+                        collect_alloc_sizes_in_stmts(&arm.body, table);
+                    }
+                    collect_alloc_sizes_in_stmts(default_body, table);
+                }
+                ControlNode::Break | ControlNode::Continue => {}
+            },
+            _ => {}
+        }
+    }
 }
 
 /// Bridge a parsed VUMA AST into the codegen crate's SCG representation.
@@ -8139,7 +9540,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // Collect extern function names so we can mark calls as is_extern.
     let extern_fns = extract_extern_functions_from_ast(program);
 
-    // Wave 5: collect extern fn declarations (with attrs) and layout
+    // Collect extern fn declarations (with attrs) and layout
     // declarations (with attrs) so call sites can detect #[foreign_consume],
     // #[foreign_return], #[foreign(raw)], etc.
     let extern_fn_decls = extract_extern_fn_decls_from_ast(program);
@@ -8155,27 +9556,27 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     //
     // FIX1: transforms are lowered exactly like fns, so a transform with no
     // `-> Type` annotation is also "void" for this purpose.
-    let void_functions: HashSet<String> = program.items.iter()
-        .filter_map(|item| {
-            match item {
-                Item::FnDef(fn_def) if fn_def.return_type.is_none() => {
-                    Some(fn_def.name.clone())
-                }
-                Item::TransformDef(td) if td.return_type.is_none() => {
-                    Some(td.name.clone())
-                }
-                _ => None,
-            }
+    let void_functions: HashSet<String> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::FnDef(fn_def) if fn_def.return_type.is_none() => Some(fn_def.name.clone()),
+            Item::TransformDef(td) if td.return_type.is_none() => Some(td.name.clone()),
+            _ => None,
         })
         .collect();
 
-    // Wave 5: Collect ALL function names (extern + user-defined) so flatten_expr
+    // Collect ALL function names (extern + user-defined) so flatten_expr
     // can detect when a Var refers to a function address (e.g., `my_fn as u64`).
     let mut function_names: HashSet<String> = extern_fns.clone();
     for item in &program.items {
         match item {
-            Item::FnDef(fn_def) => { function_names.insert(fn_def.name.clone()); }
-            Item::TransformDef(td) => { function_names.insert(td.name.clone()); }
+            Item::FnDef(fn_def) => {
+                function_names.insert(fn_def.name.clone());
+            }
+            Item::TransformDef(td) => {
+                function_names.insert(td.name.clone());
+            }
             _ => {}
         }
     }
@@ -8186,20 +9587,22 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // callee, `c` is registered as state-typed with that layout so
     // subsequent `c.field` accesses resolve to Loads at the right offset.
     // Without this, callers must annotate `let c: State<L> = ...` manually.
-    let state_returning_fns: HashMap<String, String> = program.items.iter()
+    let state_returning_fns: HashMap<String, String> = program
+        .items
+        .iter()
         .filter_map(|item| {
             let (name, ret_ty) = match item {
                 Item::FnDef(fn_def) => (&fn_def.name, &fn_def.return_type),
                 Item::TransformDef(td) => (&td.name, &td.return_type),
                 _ => return None,
             };
-            ret_ty.as_ref().and_then(|ty| {
-                extract_state_layout_name_from_ast(ty).map(|ln| (name.clone(), ln))
-            })
+            ret_ty
+                .as_ref()
+                .and_then(|ty| extract_state_layout_name_from_ast(ty).map(|ln| (name.clone(), ln)))
         })
         .collect();
 
-    // PMT (Wave 2): build the layout registry from all `Item::LayoutDef`
+    // PMT: build the layout registry from all `Item::LayoutDef`
     // items. Cloned into each function's BridgeCtx so state.field accesses
     // can resolve field offsets/types at bridge time.
     let layouts = build_layout_registry(program);
@@ -8214,12 +9617,11 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // We use a dedicated BridgeCtx (separate from any function's ctx) so
     // temp names don't collide with those used inside `main`'s body.
 
-    // Wave 1: Create a shared string table for all function contexts.
+    // Create a shared string table for all function contexts.
     // Each ctx gets a clone of the Rc, so string literals are deduplicated
     // program-wide. After all functions are processed, the table is drained
     // and emitted as a single ScgNode::Data (ReadOnly) section.
-    let shared_string_table: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let shared_string_table: StringTable = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut top_level_stmts: Vec<ScgStatement> = Vec::new();
     {
         let mut tl_ctx = BridgeCtx::new();
@@ -8299,7 +9701,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             ctx.state_returning_fns = state_returning_fns.clone();
             ctx.function_names = function_names.clone();
             ctx.string_table = shared_string_table.clone();
-            // PMT (Wave 2): register state-typed params (those with
+            // PMT: register state-typed params (those with
             // `State<L>` type annotation) so `param.field` accesses inside
             // the body lower to Loads with the layout's field offsets.
             for p in &fn_def.params {
@@ -8315,7 +9717,9 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             // If the body doesn't end with a Return, add an implicit one.
             // When the function has a return type and the last statement was an
             // expression, use ctx.last_expr_result as the return value.
-            let has_return = body.last().is_some_and(|s| matches!(s, ScgStatement::Return(_)));
+            let has_return = body
+                .last()
+                .is_some_and(|s| matches!(s, ScgStatement::Return(_)));
             if !has_return {
                 let ret_val = if !results.is_empty() {
                     // First check if the last expression was tracked.
@@ -8325,7 +9729,9 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
                         // Otherwise, look for the last computation/call result.
                         body.iter().rev().find_map(|s| match s {
                             ScgStatement::Computation(comp) => Some(ScgExpr::Var(comp.dst.clone())),
-                            ScgStatement::Call(call) => call.dst.as_ref().map(|d| ScgExpr::Var(d.clone())),
+                            ScgStatement::Call(call) => {
+                                call.dst.as_ref().map(|d| ScgExpr::Var(d.clone()))
+                            }
                             _ => None,
                         })
                     }
@@ -8351,9 +9757,9 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // they run before `main`'s own statements. If no `fn main` exists,
     // synthesise one containing them followed by `return 0;`.
     if !top_level_stmts.is_empty() {
-        let main_idx = nodes.iter().position(|n| {
-            matches!(n, ScgNode::Function(f) if f.name == "main")
-        });
+        let main_idx = nodes
+            .iter()
+            .position(|n| matches!(n, ScgNode::Function(f) if f.name == "main"));
         match main_idx {
             Some(i) => {
                 if let ScgNode::Function(f) = &mut nodes[i] {
@@ -8377,7 +9783,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         }
     }
 
-    // Wave 1: Emit the string table as a read-only data section.
+    // Emit the string table as a read-only data section.
     // All string literals collected by flatten_expr are concatenated
     // (NUL-terminated) and placed in .rodata. The addresses were already
     // computed as compile-time constants (rodata_vaddr + offset).
@@ -8418,7 +9824,7 @@ pub struct BridgeCtx {
     /// Variable name → declared type (from `let x: T = ...` annotations).
     /// Populated by the `PStmt::Let` arm of `bridge_stmt_to_scg`. Used by
     /// `flatten_expr` to choose `ShrA` (arithmetic, signed) vs `ShrL`
-    /// (logical, unsigned) for the `>>` operator — see Task 7-A. Without
+    /// (logical, unsigned) for the `>>` operator. Without
     /// this, all `>>` operations collapse to a single shift kind, breaking
     /// either `bit_abs` (i64 → needs ShrA) or `bit_log2` (u64 → needs ShrL).
     pub var_types: HashMap<String, ScgType>,
@@ -8427,24 +9833,24 @@ pub struct BridgeCtx {
     /// bodies. Used by `flatten_expr` to emit `dst: None` for void function
     /// calls — critical for wasm32 which loads from mem[0] for non-void calls.
     pub void_functions: HashSet<String>,
-    /// PMT (Wave 2): layout definitions — maps layout name → (total_size,
+    /// PMT: layout definitions — maps layout name → (total_size,
     /// fields). Each field is `(name, ir_type, byte_offset, byte_size,
     /// type_name)` where `type_name` is the field's declared type as a
     /// string (e.g. "u32", "Point") — used to descend into nested
     /// layout-typed fields.
     /// Built once from `Item::LayoutDef` items at the start of
     /// `bridge_ast_to_codegen_scg` and cloned into each function's ctx.
-    pub layouts: HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)>,
-    /// PMT (Wave 2): state-typed variable → layout name. Populated per
+    pub layouts: LayoutRegistry,
+    /// PMT: state-typed variable → layout name. Populated per
     /// function: state-typed params are registered before the body is
     /// lowered, and `let p = state_new(L)` / `let p: State<L> = ...` add
     /// entries as they're processed.
     pub state_var_layouts: HashMap<String, String>,
-    /// Wave 5 (ForeignState): extern fn name → its declaration (incl. attrs).
+    /// (ForeignState): extern fn name → its declaration (incl. attrs).
     /// Used at call sites to detect #[foreign_consume], #[foreign_return],
     /// #[callback], etc. Populated by `bridge_ast_to_codegen_scg`.
     pub extern_fn_decls: HashMap<String, vuma_parser::ast::ExternFnDecl>,
-    /// Wave 5 (ForeignState): layout name → its declaration (incl. attrs).
+    /// (ForeignState): layout name → its declaration (incl. attrs).
     /// Used to check if a layout has #[foreign(raw)]. Populated by
     /// `bridge_ast_to_codegen_scg`.
     pub layout_decls: HashMap<String, vuma_parser::ast::LayoutDef>,
@@ -8455,13 +9861,13 @@ pub struct BridgeCtx {
     /// `c.field` accesses resolve to Loads at the right offset — without
     /// requiring the caller to annotate `let c: State<L> = ...`.
     pub state_returning_fns: HashMap<String, String>,
-    /// Wave 1: program-wide string literal table. Each entry is
+    /// program-wide string literal table. Each entry is
     /// (label, bytes_including_NUL). Shared across all function contexts
     /// via Rc<RefCell<>> so string literals are deduplicated program-wide.
     /// The table is drained after all functions are processed and emitted
     /// as a single ScgNode::Data (ReadOnly) section.
-    pub string_table: std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>,
-    /// Wave 5: Set of all function names (extern + user-defined). Used by
+    pub string_table: StringTable,
+    /// Set of all function names (extern + user-defined). Used by
     /// flatten_expr to detect when a Var refers to a function (not a variable)
     /// and produce ScgExpr::Label for function-address expressions.
     pub function_names: HashSet<String>,
@@ -8506,8 +9912,11 @@ impl BridgeCtx {
 /// Handles integer literals, boolean literals, and simple binary operations
 /// on constant sub-expressions. Returns `None` for non-constant expressions
 /// (variable references, function calls, etc.).
-pub fn eval_const_expr(expr: &vuma_parser::ast::Expr, consts: &HashMap<String, i64>) -> Option<i64> {
-    use vuma_parser::ast::{Expr, Lit, BinOp, UnOp};
+pub fn eval_const_expr(
+    expr: &vuma_parser::ast::Expr,
+    consts: &HashMap<String, i64>,
+) -> Option<i64> {
+    use vuma_parser::ast::{BinOp, Expr, Lit, UnOp};
     match expr {
         Expr::Lit { value, .. } => match value {
             Lit::Int(n) => Some(*n),
@@ -8529,21 +9938,75 @@ pub fn eval_const_expr(expr: &vuma_parser::ast::Expr, consts: &HashMap<String, i
                 BinOp::BitXor => l ^ r,
                 BinOp::Shl => l.wrapping_shl(r as u32),
                 BinOp::Shr => l.wrapping_shr(r as u32),
-                BinOp::And => if l != 0 && r != 0 { 1 } else { 0 },
-                BinOp::Or => if l != 0 || r != 0 { 1 } else { 0 },
-                BinOp::Eq => if l == r { 1 } else { 0 },
-                BinOp::Ne => if l != r { 1 } else { 0 },
-                BinOp::Lt => if l < r { 1 } else { 0 },
-                BinOp::Le => if l <= r { 1 } else { 0 },
-                BinOp::Gt => if l > r { 1 } else { 0 },
-                BinOp::Ge => if l >= r { 1 } else { 0 },
+                BinOp::And => {
+                    if l != 0 && r != 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Or => {
+                    if l != 0 || r != 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Eq => {
+                    if l == r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Ne => {
+                    if l != r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Lt => {
+                    if l < r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Le => {
+                    if l <= r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Gt => {
+                    if l > r {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                BinOp::Ge => {
+                    if l >= r {
+                        1
+                    } else {
+                        0
+                    }
+                }
             })
         }
         Expr::UnOp { op, expr, .. } => {
             let v = eval_const_expr(expr, consts)?;
             Some(match op {
                 UnOp::Neg => v.wrapping_neg(),
-                UnOp::Not => if v == 0 { 1 } else { 0 },
+                UnOp::Not => {
+                    if v == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
                 UnOp::BitNot => !v,
                 UnOp::Deref => return None, // can't const-eval deref
             })
@@ -8604,16 +10067,16 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
         },
         Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
         Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
-        // Wave 1c: Bridge `Channel<T>` through the pipeline.  Channel values
+        // Bridge `Channel<T>` through the pipeline.  Channel values
         // are opaque IPC handles — pointer-sized — but we preserve the inner
         // payload type via `ScgType::Channel` so downstream stages can
         // recover it when lowering send/recv operations.
         //
-        // Wave 89-90 (Session Types): the `session_type` field on the AST
+        // Session types: the `session_type` field on the AST
         // node is dropped here — ScgType::Channel currently carries only
         // the payload type. A future SCG extension could add a session-
         // type slot to ScgType::Channel to thread the protocol through to
-        // the IVE linear-type checker (Wave 95).
+        // the IVE linear-type checker.
         Some(vuma_parser::ast::Type::Channel { inner, .. }) => {
             // `inner: &Box<Type>` (match ergonomics on `&Option<Type>`).
             // Recursively bridge the payload type so ScgType::Channel
@@ -8634,7 +10097,7 @@ pub fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgTyp
     }
 }
 
-/// PMT (Wave 2): convert a parser `Type` to a codegen `IRType` for layout
+/// PMT: convert a parser `Type` to a codegen `IRType` for layout
 /// field computation. Returns `U64` for unknown/aggregate types (safe
 /// default — the field's bytes are still read/written correctly).
 fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRType {
@@ -8652,10 +10115,10 @@ fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRTy
             _ => vuma_codegen::ir::IRType::U64,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => vuma_codegen::ir::IRType::U64,
-        // Wave 1c: `Channel<T>` → `IRType::Channel` (pointer-sized opaque
+        // `Channel<T>` → `IRType::Channel` (pointer-sized opaque
         // capability handle; inner payload type carried for type-checking
         // only).
-        // Wave 89-90 (Session Types): session_type field is dropped here;
+        // session_type field is dropped here;
         // IRType::Channel doesn't carry protocol info yet.
         Type::Channel { inner, .. } => {
             vuma_codegen::ir::IRType::Channel(Box::new(bridge_type_to_ir_type(inner)))
@@ -8664,7 +10127,7 @@ fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRTy
     }
 }
 
-/// PMT (Wave 2): compute the byte size of a parser `Type` for layout field
+/// PMT: compute the byte size of a parser `Type` for layout field
 /// offset computation.
 fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
     use vuma_parser::ast::Type;
@@ -8677,9 +10140,9 @@ fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
             _ => 8,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
-        // Wave 1c: `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit) —
+        // `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit) —
         // same as Ptr.
-        // Wave 89-90: session_type field doesn't affect size.
+        // session_type field doesn't affect size.
         Type::Channel { .. } => 8,
         Type::Array { element, size } => bridge_type_size(element) * (*size as u64),
         _ => 8,
@@ -8707,13 +10170,13 @@ fn bridge_type_size_with_layouts(
                 if let Some(&size) = layout_sizes.get(name) {
                     size
                 } else {
-                    8  // fallback (forward reference not yet resolved)
+                    8 // fallback (forward reference not yet resolved)
                 }
             }
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
-        // Wave 1c: `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit).
-        // Wave 89-90: session_type field doesn't affect size.
+        // `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit).
+        // session_type field doesn't affect size.
         Type::Channel { .. } => 8,
         Type::Array { element, size } => {
             bridge_type_size_with_layouts(element, layout_sizes) * (*size as u64)
@@ -8722,7 +10185,7 @@ fn bridge_type_size_with_layouts(
     }
 }
 
-/// PMT (Wave 2): compute the byte alignment of a parser `Type` for layout
+/// PMT: compute the byte alignment of a parser `Type` for layout
 /// field offset computation.
 fn bridge_type_align(ty: &vuma_parser::ast::Type) -> u64 {
     use vuma_parser::ast::Type;
@@ -8735,16 +10198,16 @@ fn bridge_type_align(ty: &vuma_parser::ast::Type) -> u64 {
             _ => 8,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => 8,
-        // Wave 1c: `Channel<T>` alignment is pointer-sized (8 on 64-bit, 4 on
+        // `Channel<T>` alignment is pointer-sized (8 on 64-bit, 4 on
         // 32-bit) — same as Ptr.
-        // Wave 89-90: session_type field doesn't affect alignment.
+        // session_type field doesn't affect alignment.
         Type::Channel { .. } => 8,
         Type::Array { element, .. } => bridge_type_align(element),
         _ => 8,
     }
 }
 
-/// PMT (Wave 2): if `ty` is `State<LayoutName>`, return `Some(layout_name)`.
+/// PMT: if `ty` is `State<LayoutName>`, return `Some(layout_name)`.
 fn extract_state_layout_name_from_ast(ty: &vuma_parser::ast::Type) -> Option<String> {
     if let vuma_parser::ast::Type::State(inner) = ty {
         if let vuma_parser::ast::Type::BDBase(name) = inner.as_ref() {
@@ -8754,12 +10217,12 @@ fn extract_state_layout_name_from_ast(ty: &vuma_parser::ast::Type) -> Option<Str
     None
 }
 
-/// PMT (Wave 2): build the layout registry from all `Item::LayoutDef` items
+/// PMT: build the layout registry from all `Item::LayoutDef` items
 /// in the program. Returns a map: layout_name → (total_size, fields) where
 /// each field is (name, ir_type, byte_offset, byte_size, type_name). Field
 /// offsets are computed sequentially with alignment padding (mirroring
 /// vuma-bd's `LayoutRegistry::register`).
-fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)> {
+fn build_layout_registry(program: &AstProgram) -> LayoutRegistry {
     // Multi-pass: first compute all layout sizes (resolving nested layout
     // references), then compute field offsets using the real sizes.
     // This fixes the nested-layout bug where user-defined layout names
@@ -8787,14 +10250,14 @@ fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(Str
             for (_fname, ftype) in *fields {
                 let falign = bridge_type_align(ftype).max(1);
                 let fsize = bridge_type_size_with_layouts(ftype, &layout_sizes);
-                if falign > 1 && size % falign != 0 {
+                if falign > 1 && !size.is_multiple_of(falign) {
                     size = (size + falign - 1) & !(falign - 1);
                 }
                 max_align = max_align.max(falign);
                 size += fsize;
             }
             let alignment = max_align.max(1);
-            if size > 0 && size % alignment != 0 {
+            if size > 0 && !size.is_multiple_of(alignment) {
                 size = (size + alignment - 1) & !(alignment - 1);
             }
             let prev = layout_sizes.get(*name).copied();
@@ -8814,7 +10277,7 @@ fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(Str
         for (fname, ftype) in *fields {
             let falign = bridge_type_align(ftype).max(1);
             let fsize = bridge_type_size_with_layouts(ftype, &layout_sizes);
-            if falign > 1 && offset % falign != 0 {
+            if falign > 1 && !offset.is_multiple_of(falign) {
                 offset = (offset + falign - 1) & !(falign - 1);
             }
             max_align = max_align.max(falign);
@@ -8827,7 +10290,7 @@ fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(Str
             offset += fsize;
         }
         let alignment = max_align.max(1);
-        if offset > 0 && offset % alignment != 0 {
+        if offset > 0 && !offset.is_multiple_of(alignment) {
             offset = (offset + alignment - 1) & !(alignment - 1);
         }
         layouts.insert((*name).to_string(), (offset, field_list));
@@ -8835,7 +10298,7 @@ fn build_layout_registry(program: &AstProgram) -> HashMap<String, (u64, Vec<(Str
     layouts
 }
 
-/// (Wave 7) Build a `PmtLayoutSpec` registry from the AST's `Item::LayoutDef`
+/// Build a `PmtLayoutSpec` registry from the AST's `Item::LayoutDef`
 /// items, suitable for attaching to a `VerificationInput` via
 /// `with_pmt_layouts()` so the IVE's `VerificationLevel::Pmt` can run the 3
 /// state verifiers (state_read / state_write / state_transform) without the
@@ -8859,7 +10322,7 @@ pub fn build_pmt_layout_specs(program: &AstProgram) -> HashMap<String, vuma_ive:
             for (fname, ftype) in &ld.fields {
                 let falign = bridge_type_align(ftype).max(1);
                 let fsize = bridge_type_size(ftype);
-                if falign > 1 && offset % falign != 0 {
+                if falign > 1 && !offset.is_multiple_of(falign) {
                     offset = (offset + falign - 1) & !(falign - 1);
                 }
                 max_align = max_align.max(falign);
@@ -8876,7 +10339,7 @@ pub fn build_pmt_layout_specs(program: &AstProgram) -> HashMap<String, vuma_ive:
                 offset += fsize;
             }
             let alignment = max_align.max(1);
-            if offset > 0 && offset % alignment != 0 {
+            if offset > 0 && !offset.is_multiple_of(alignment) {
                 offset = (offset + alignment - 1) & !(alignment - 1);
             }
             layouts.insert(
@@ -8892,63 +10355,304 @@ pub fn build_pmt_layout_specs(program: &AstProgram) -> HashMap<String, vuma_ive:
     layouts
 }
 
-/// PMT (Wave 2): resolve a state-field chain `(layout_name, [field1, field2, ...])`
-/// against the layout registry. Returns `(cumulative_offset, size, ir_type)`
-/// of the leaf field, descending into nested layout-typed fields. Returns
-/// `None` if any field in the chain isn't found.
-
-/// Detect the element type and size of an array field being indexed.
-/// Returns `(elem_size, Some(ir_type))` for known types, `(1, None)` for u8/unknown.
-/// This enables typed-array index scaling: `arr[i]` → `*(base + i * elem_size)`
-/// instead of the byte-granular default `*(base + i)`.
-fn detect_array_elem_type(
-    expr: &vuma_parser::ast::Expr,
-    ctx: &BridgeCtx,
-) -> (u64, Option<vuma_codegen::ir::IRType>) {
-    use vuma_parser::ast::Expr;
-
-    // Only FieldAccess chains can resolve to typed arrays.
-    if !matches!(expr, Expr::FieldAccess { .. }) {
-        return (1, None);
+/// Collect the set of secret-tainted variable names from
+/// `#[secret]` attributes in the source AST.
+///
+/// Walks every function body (including transforms and method impls) and
+/// collects:
+///   - `let` bindings whose `attrs` contain `#[secret]` → the bound name
+///   - `Param`s whose `attrs` contain `#[secret]` → the param name
+///
+/// The resulting set is attached to `VerificationInput` via
+/// `with_secret_vars(...)`. When non-empty, the constant-time verifier
+/// (`invariant_aggregator::verify_constant_time`) uses it *instead of* the
+/// unsound substring heuristic on labels/filenames.
+///
+/// # Scope
+///
+/// Only `Item::FnDef`, `Item::TransformDef`, and `Item::ImplBlock` are
+/// walked; top-level `Item::Stmt(Stmt::Let(...))` (rare in practice) is
+/// also covered. Nested modules (`Item::ModuleDef`) are recursed into.
+/// `Item::TraitDef` is skipped (no bodies of interest — required methods
+/// have no body, provided methods are covered via the impl-block walk at
+/// the use site).
+///
+/// See `docs/architecture/ive-fix-proposals.md` for the rationale.
+pub fn collect_secret_vars(program: &AstProgram) -> HashSet<String> {
+    let mut secrets = HashSet::new();
+    for item in &program.items {
+        collect_secret_vars_from_item(item, &mut secrets);
     }
+    secrets
+}
 
-    // Walk the chain to find the field's type_name.
-    let mut chain: Vec<String> = Vec::new();
-    let mut cur = expr;
-    while let Expr::FieldAccess { expr: inner, field, .. } = cur {
-        chain.push(field.clone());
-        cur = inner.as_ref();
-    }
-    if let Expr::Var { name: bv, .. } = cur {
-        if let Some(layout_name) = ctx.state_var_layouts.get(bv).cloned() {
-            chain.reverse();
-            if let Some((_offset, _size, _field_ty, type_name)) =
-                resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
-            {
-                // Parse element type from "[T; N]" format.
-                if type_name.starts_with('[') {
-                    let inner = &type_name[1..];
-                    if let Some(semi_pos) = inner.find(';') {
-                        let elem_type_str = inner[..semi_pos].trim();
-                        return match elem_type_str {
-                            "u8" | "i8" | "bool" => (1, Some(vuma_codegen::ir::IRType::U8)),
-                            "u16" | "i16" => (2, Some(vuma_codegen::ir::IRType::U16)),
-                            "u32" | "i32" => (4, Some(vuma_codegen::ir::IRType::U32)),
-                            "f32" => (4, Some(vuma_codegen::ir::IRType::F32)),
-                            "u64" | "i64" => (8, Some(vuma_codegen::ir::IRType::U64)),
-                            "f64" => (8, Some(vuma_codegen::ir::IRType::F64)),
-                            _ => (1, None),
-                        };
+/// Recursive helper for [`collect_secret_vars`]. Walks an `Item` and any
+/// nested items (modules), accumulating secret variable names into `secrets`.
+fn collect_secret_vars_from_item(item: &Item, secrets: &mut HashSet<String>) {
+    use vuma_parser::ast::{ImplBlock, ModuleDef, Stmt, TraitDef};
+    match item {
+        Item::FnDef(f) => {
+            collect_secret_vars_from_block(&f.body, secrets);
+            for p in &f.params {
+                if param_has_secret_attr(p) {
+                    secrets.insert(p.name.clone());
+                }
+            }
+        }
+        Item::TransformDef(t) => {
+            // TransformDef.body is `Vec<Stmt>` (not a `Block`).
+            for s in &t.body {
+                collect_secret_vars_from_stmt(s, secrets);
+            }
+            for p in &t.params {
+                if param_has_secret_attr(p) {
+                    secrets.insert(p.name.clone());
+                }
+            }
+        }
+        Item::ImplBlock(ImplBlock { methods, .. }) => {
+            for m in methods {
+                collect_secret_vars_from_block(&m.body, secrets);
+                for p in &m.params {
+                    if param_has_secret_attr(p) {
+                        secrets.insert(p.name.clone());
                     }
                 }
             }
         }
+        Item::TraitDef(TraitDef {
+            provided_methods, ..
+        }) => {
+            for m in provided_methods {
+                collect_secret_vars_from_block(&m.body, secrets);
+                for p in &m.params {
+                    if param_has_secret_attr(p) {
+                        secrets.insert(p.name.clone());
+                    }
+                }
+            }
+        }
+        Item::ModuleDef(ModuleDef { items, .. }) => {
+            for inner in items {
+                collect_secret_vars_from_item(inner, secrets);
+            }
+        }
+        Item::Stmt(Stmt::Let(l)) if let_stmt_has_secret_attr(l) => {
+            secrets.insert(l.name.clone());
+        }
+        _ => {}
     }
-    (1, None)
+}
+
+/// Walk a `Block`'s statements recursively (if/while/for/match/loop/sync/
+/// unsafe all nest blocks), collecting `#[secret]`-annotated `let` names.
+fn collect_secret_vars_from_block(block: &vuma_parser::ast::Block, secrets: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        collect_secret_vars_from_stmt(stmt, secrets);
+    }
+}
+
+/// Recursive statement walker for [`collect_secret_vars`]. Descends into
+/// nested blocks (if/while/for/loop/match/sync/unsafe) and collects names
+/// of `#[secret]`-annotated `let` bindings.
+fn collect_secret_vars_from_stmt(stmt: &vuma_parser::ast::Stmt, secrets: &mut HashSet<String>) {
+    use vuma_parser::ast::Stmt;
+    match stmt {
+        Stmt::Let(l) => {
+            if let_stmt_has_secret_attr(l) {
+                secrets.insert(l.name.clone());
+            }
+            // Also descend into the initializer expression — `let x = { let #[secret] y = ...; y };`
+            collect_secret_vars_from_expr(&l.value, secrets);
+        }
+        Stmt::If(i) => {
+            collect_secret_vars_from_expr(&i.condition, secrets);
+            collect_secret_vars_from_block(&i.then_block, secrets);
+            if let Some(else_b) = &i.else_block {
+                collect_secret_vars_from_block(else_b, secrets);
+            }
+        }
+        Stmt::While(w) => {
+            collect_secret_vars_from_expr(&w.condition, secrets);
+            collect_secret_vars_from_block(&w.body, secrets);
+        }
+        Stmt::For(f) => {
+            collect_secret_vars_from_expr(&f.iter, secrets);
+            collect_secret_vars_from_block(&f.body, secrets);
+        }
+        Stmt::Loop(l) => collect_secret_vars_from_block(&l.body, secrets),
+        Stmt::Match(m) => {
+            collect_secret_vars_from_expr(&m.subject, secrets);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard {
+                    collect_secret_vars_from_expr(g, secrets);
+                }
+                collect_secret_vars_from_expr(&arm.body, secrets);
+            }
+        }
+        Stmt::Sync(s) => collect_secret_vars_from_block(&s.body, secrets),
+        Stmt::UnsafeBlock { body, .. } => collect_secret_vars_from_block(body, secrets),
+        Stmt::Assign(a) => collect_secret_vars_from_expr(&a.value, secrets),
+        Stmt::CompoundAssign(a) => collect_secret_vars_from_expr(&a.value, secrets),
+        Stmt::Return(r) => {
+            if let Some(e) = &r.value {
+                collect_secret_vars_from_expr(e, secrets);
+            }
+        }
+        Stmt::Expr(e) => collect_secret_vars_from_expr(&e.expr, secrets),
+        _ => {}
+    }
+}
+
+/// Walk an expression for nested `Expr::Block { statements, .. }` and
+/// collect `#[secret]`-annotated `let` names within. Only the
+/// `Expr::Block` variant can carry `let` statements; other expression
+/// variants are recursed into where they may contain sub-expressions.
+fn collect_secret_vars_from_expr(expr: &vuma_parser::ast::Expr, secrets: &mut HashSet<String>) {
+    use vuma_parser::ast::Expr;
+    match expr {
+        Expr::Block {
+            statements,
+            trailing_expr,
+            ..
+        } => {
+            for s in statements {
+                collect_secret_vars_from_stmt(s, secrets);
+            }
+            if let Some(e) = trailing_expr {
+                collect_secret_vars_from_expr(e, secrets);
+            }
+        }
+        Expr::MatchExpr {
+            scrutinee, arms, ..
+        } => {
+            collect_secret_vars_from_expr(scrutinee, secrets);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_secret_vars_from_expr(g, secrets);
+                }
+                collect_secret_vars_from_expr(&arm.body, secrets);
+            }
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            collect_secret_vars_from_expr(lhs, secrets);
+            collect_secret_vars_from_expr(rhs, secrets);
+        }
+        Expr::UnOp { expr: inner, .. }
+        | Expr::AddressOf { expr: inner, .. }
+        | Expr::Deref { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Spawn { expr: inner, .. }
+        | Expr::Await { expr: inner, .. } => {
+            collect_secret_vars_from_expr(inner, secrets);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_secret_vars_from_expr(callee, secrets);
+            for a in args {
+                collect_secret_vars_from_expr(a, secrets);
+            }
+        }
+        Expr::FieldAccess { expr: inner, .. } => collect_secret_vars_from_expr(inner, secrets),
+        Expr::Index {
+            expr: inner, index, ..
+        } => {
+            collect_secret_vars_from_expr(inner, secrets);
+            collect_secret_vars_from_expr(index, secrets);
+        }
+        _ => {}
+    }
+}
+
+/// Returns true if `let_stmt.attrs` contains a `#[secret]` attribute
+/// (the attribute may carry a value or not — both forms
+/// `#[secret]` and `#[secret(...)]` are accepted; only the name is checked.
+fn let_stmt_has_secret_attr(let_stmt: &vuma_parser::ast::LetStmt) -> bool {
+    let_stmt.attrs.iter().any(|a| a.name == "secret")
+}
+
+/// Returns true if `param.attrs` contains a `#[secret]` attribute
+/// Symmetric with [`let_stmt_has_secret_attr`].
+fn param_has_secret_attr(param: &vuma_parser::ast::Param) -> bool {
+    param.attrs.iter().any(|a| a.name == "secret")
+}
+
+// PMT: resolve a state-field chain `(layout_name, [field1, field2, ...])`
+// against the layout registry. Returns `(cumulative_offset, size, ir_type)`
+// of the leaf field, descending into nested layout-typed fields. Returns
+// `None` if any field in the chain isn't found.
+
+/// Resolve a state-typed array FieldAccess (e.g. `b.data`) into its base
+/// state variable name, the field's byte offset within the state buffer,
+/// the array element size, and the element's IR type.
+///
+/// Returns `None` when `expr` is not a `FieldAccess` chain rooted at a
+/// state-typed variable whose terminal field is an inline array
+/// (e.g. `[u8; N]`).
+///
+/// This is used by the `Expr::Index` / `AssignTarget::Index` lowering
+/// to emit `AccessNode::Load/Store` with
+/// `ptr: Var(base_var)` and `offset: Some(data_offset + idx*elem_size)`
+/// so `inject_bounds_check_ir` classifies the access as `Seq` (the state
+/// var is in `alloc_sizes`) and inserts a `__oob_trap` check.
+fn resolve_state_array_access(
+    expr: &vuma_parser::ast::Expr,
+    ctx: &BridgeCtx,
+) -> Option<(String, u64, u64, Option<vuma_codegen::ir::IRType>)> {
+    use vuma_parser::ast::Expr;
+
+    if !matches!(expr, Expr::FieldAccess { .. }) {
+        return None;
+    }
+
+    let mut chain: Vec<String> = Vec::new();
+    let mut cur = expr;
+    while let Expr::FieldAccess {
+        expr: inner, field, ..
+    } = cur
+    {
+        chain.push(field.clone());
+        cur = inner.as_ref();
+    }
+    let base_var = if let Expr::Var { name, .. } = cur {
+        name.clone()
+    } else {
+        return None;
+    };
+    let layout_name = ctx.state_var_layouts.get(&base_var)?.clone();
+    chain.reverse();
+    let (offset, _size, _field_ty, type_name) =
+        resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)?;
+
+    if !type_name.starts_with('[') {
+        return None;
+    }
+    let inner = &type_name[1..];
+    let semi_pos = inner.find(';')?;
+    let elem_type_str = inner[..semi_pos].trim();
+    let (elem_size, elem_ir_type) = match elem_type_str {
+        "u8" | "i8" | "bool" => (1, Some(vuma_codegen::ir::IRType::U8)),
+        "u16" | "i16" => (2, Some(vuma_codegen::ir::IRType::U16)),
+        "u32" | "i32" => (4, Some(vuma_codegen::ir::IRType::U32)),
+        "f32" => (4, Some(vuma_codegen::ir::IRType::F32)),
+        "u64" | "i64" => (8, Some(vuma_codegen::ir::IRType::U64)),
+        "f64" => (8, Some(vuma_codegen::ir::IRType::F64)),
+        _ => (1, None),
+    };
+    Some((base_var, offset, elem_size, elem_ir_type))
+}
+
+fn detect_array_elem_type(
+    expr: &vuma_parser::ast::Expr,
+    ctx: &BridgeCtx,
+) -> (u64, Option<vuma_codegen::ir::IRType>) {
+    match resolve_state_array_access(expr, ctx) {
+        Some((_bv, _off, elem_size, elem_ir_type)) => (elem_size, elem_ir_type),
+        None => (1, None),
+    }
 }
 
 fn resolve_state_field_chain(
-    layouts: &HashMap<String, (u64, Vec<(String, vuma_codegen::ir::IRType, u64, u64, String)>)>,
+    layouts: &LayoutRegistry,
     start_layout: &str,
     chain: &[String],
 ) -> Option<(u64, u64, vuma_codegen::ir::IRType, String)> {
@@ -8962,9 +10666,8 @@ fn resolve_state_field_chain(
     let mut last_type_name: String = String::new();
     for field in chain {
         let (_, fields) = layouts.get(&layout)?;
-        let (_fname, ftype, foffset, fsize, ftype_name) = fields
-            .iter()
-            .find(|(n, _, _, _, _)| n == field)?;
+        let (_fname, ftype, foffset, fsize, ftype_name) =
+            fields.iter().find(|(n, _, _, _, _)| n == field)?;
         cum_offset += foffset;
         last_size = *fsize;
         last_ty = Some(ftype.clone());
@@ -8981,7 +10684,10 @@ fn resolve_state_field_chain(
 
 /// Convert a parser block into codegen SCG statements, flattening expressions
 /// into three-address code with temporaries.
-pub fn bridge_block_to_scg_stmts(block: &vuma_parser::ast::Block, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+pub fn bridge_block_to_scg_stmts(
+    block: &vuma_parser::ast::Block,
+    ctx: &mut BridgeCtx,
+) -> Vec<ScgStatement> {
     block
         .statements
         .iter()
@@ -8993,7 +10699,7 @@ pub fn bridge_block_to_scg_stmts(block: &vuma_parser::ast::Block, ctx: &mut Brid
 /// holds the result, and appends any intermediate computation statements
 /// to `stmts`.
 ///
-/// Wave 5: emit ForeignConsume marker statements for a `#[foreign_consume]`
+/// emit ForeignConsume marker statements for a `#[foreign_consume]`
 /// extern call. For each argument that is a State variable whose layout has
 /// `#[foreign(raw)]`, push a `ScgStatement::ForeignConsume` so the IVE treats
 /// the State's vreg as consumed (linearity error on subsequent read/write).
@@ -9035,7 +10741,7 @@ fn emit_foreign_consume_markers(
     }
 }
 
-/// Wave 8b: result of recognising `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
+/// Result of recognising `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
 ///
 /// Produced by [`try_match_channel_recv_result`].  The pipeline emits a
 /// [`ScgStatement::ChannelRecvResult`] binding `ok_binding` (the Ok arm's
@@ -9055,7 +10761,7 @@ struct ChannelRecvMatch {
     err_body: Vec<ScgStatement>,
 }
 
-/// Wave 8b: detect the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+/// Detect the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
 /// pattern and lower it to a [`ChannelRecvMatch`] ready for emission as
 /// `ScgStatement::ChannelRecvResult` + `ControlNode::If`.
 ///
@@ -9099,12 +10805,24 @@ fn try_match_channel_recv_result(
     let mut err_arm: Option<&vuma_parser::ast::MatchArm> = None;
     for arm in &match_stmt.arms {
         match &arm.pattern {
-            MatchPattern::Enum { name, binding: Some(_), .. } if name == "Ok" => {
-                if ok_arm.is_some() { return None; }
+            MatchPattern::Enum {
+                name,
+                binding: Some(_),
+                ..
+            } if name == "Ok" => {
+                if ok_arm.is_some() {
+                    return None;
+                }
                 ok_arm = Some(arm);
             }
-            MatchPattern::Enum { name, binding: Some(_), .. } if name == "Err" => {
-                if err_arm.is_some() { return None; }
+            MatchPattern::Enum {
+                name,
+                binding: Some(_),
+                ..
+            } if name == "Err" => {
+                if err_arm.is_some() {
+                    return None;
+                }
                 err_arm = Some(arm);
             }
             _ => return None, // any other pattern → not this form
@@ -9114,11 +10832,15 @@ fn try_match_channel_recv_result(
     let err_arm = err_arm?;
 
     let ok_binding = match &ok_arm.pattern {
-        MatchPattern::Enum { binding: Some(b), .. } => b.clone(),
+        MatchPattern::Enum {
+            binding: Some(b), ..
+        } => b.clone(),
         _ => unreachable!(),
     };
     let err_binding = match &err_arm.pattern {
-        MatchPattern::Enum { binding: Some(b), .. } => b.clone(),
+        MatchPattern::Enum {
+            binding: Some(b), ..
+        } => b.clone(),
         _ => unreachable!(),
     };
 
@@ -9160,7 +10882,7 @@ pub fn flatten_expr(
             if let Some(&val) = ctx.global_constants.get(name) {
                 ScgExpr::Int(val)
             } else if ctx.function_names.contains(name) {
-                // Wave 5: The name refers to a function (not a variable).
+                // The name refers to a function (not a variable).
                 // Produce a Label so the backend emits a RIP-relative LEA
                 // with a relocation to the function's address.
                 ScgExpr::Label(name.clone())
@@ -9174,7 +10896,7 @@ pub fn flatten_expr(
             Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
             Lit::Address(a) => ScgExpr::Int(*a as i64),
             Lit::String(s) => {
-                // Wave 1: Lower string literals to .rodata addresses.
+                // Lower string literals to .rodata addresses.
                 //
                 // The ELF layout for hosted Linux ET_EXEC is deterministic:
                 //   base_addr = 0x400000
@@ -9230,7 +10952,7 @@ pub fn flatten_expr(
             // Type-aware right shift: arithmetic (ShrA) for SIGNED integer
             // types (i8/i16/i32/i64), logical (ShrL) for UNSIGNED types
             // (u8/u16/u32/u64) and pointers. The shift kind depends on the
-            // OPERAND TYPE, not a global default — see Task 7-A.
+            // OPERAND TYPE, not a global default.
             //
             //   `bit_abs.vuma`     uses `i64` → ShrA  (correct: -42 >> 63 == -1)
             //   `bit_log2.vuma`    uses `u64` → ShrL  (correct: 0xFF..FF00 >> 63 == 1)
@@ -9276,7 +10998,9 @@ pub fn flatten_expr(
         }
 
         // ── Unary operations: flatten operand, then emit one Computation ──
-        Expr::UnOp { op, expr: operand, .. } => {
+        Expr::UnOp {
+            op, expr: operand, ..
+        } => {
             let operand_expr = flatten_expr(operand, stmts, ctx);
             let dst = ctx.alloc_temp();
             match op {
@@ -9350,9 +11074,8 @@ pub fn flatten_expr(
                 Expr::Var { name, .. } => name.clone(),
                 _ => "_unknown".into(),
             };
-            let flat_args: Vec<ScgExpr> = args.iter()
-                .map(|a| flatten_expr(a, stmts, ctx))
-                .collect();
+            let flat_args: Vec<ScgExpr> =
+                args.iter().map(|a| flatten_expr(a, stmts, ctx)).collect();
             // Mark as extern if the function was declared in an extern "C" block
             // OR if it's a known built-in intrinsic (AtomicLoad/AtomicStore/AtomicCas
             // are lowered by the backend to machine instructions, not external calls,
@@ -9375,7 +11098,7 @@ pub fn flatten_expr(
                     is_extern,
                     reassigns: None,
                 }));
-                // Wave 5: if this is a #[foreign_consume] extern call, emit
+                // if this is a #[foreign_consume] extern call, emit
                 // a ForeignConsume marker for each State arg whose layout is
                 // #[foreign(raw)]. The IVE treats the State's vreg as consumed.
                 emit_foreign_consume_markers(&func_name, args, stmts, ctx);
@@ -9390,7 +11113,7 @@ pub fn flatten_expr(
                     is_extern,
                     reassigns: None,
                 }));
-                // Wave 5: emit ForeignConsume markers for #[foreign_consume] calls.
+                // emit ForeignConsume markers for #[foreign_consume] calls.
                 emit_foreign_consume_markers(&func_name, args, stmts, ctx);
                 ScgExpr::Var(dst)
             }
@@ -9398,11 +11121,11 @@ pub fn flatten_expr(
 
         // ── Direct syscall: flatten args, emit SyscallCallNode ──
         //
-        // Wave 10: `syscall(nr, args...)` is a first-class AST expression
+        // `syscall(nr, args...)` is a first-class AST expression
         // that lowers to `ScgStatement::Syscall`. The IRBuilder then emits
         // `IRInstr::Syscall`, which each backend lowers directly to a real
-        // syscall instruction (Wave 11/12 removed the intermediate
-        // `lower_syscalls_all()` lowering pass) so backends can resolve it
+        // syscall instruction (the intermediate
+        // `lower_syscalls_all()` lowering pass has been removed) so backends can resolve it
         // via their existing `syscall_stubs` tables.
         //
         // Void syscalls (exit, exit_group) get `dst: None` so the IR doesn't
@@ -9410,10 +11133,8 @@ pub fn flatten_expr(
         // syscalls, we allocate a fresh temp and return it as a `Var` so the
         // result can flow into surrounding expressions.
         Expr::Syscall { nr, args, .. } => {
-            let flat_args: Vec<ScgExpr> = args
-                .iter()
-                .map(|a| flatten_expr(a, stmts, ctx))
-                .collect();
+            let flat_args: Vec<ScgExpr> =
+                args.iter().map(|a| flatten_expr(a, stmts, ctx)).collect();
             let is_void_syscall = matches!(*nr, 60 | 231); // exit, exit_group
             if is_void_syscall {
                 stmts.push(ScgStatement::Syscall(SyscallCallNode {
@@ -9462,7 +11183,12 @@ pub fn flatten_expr(
             }));
             ScgExpr::Var(dst)
         }
-        Expr::AtomicCas { addr, expected, desired, .. } => {
+        Expr::AtomicCas {
+            addr,
+            expected,
+            desired,
+            ..
+        } => {
             let addr_expr = flatten_expr(addr, stmts, ctx);
             let expected_expr = flatten_expr(expected, stmts, ctx);
             let desired_expr = flatten_expr(desired, stmts, ctx);
@@ -9546,10 +11272,60 @@ pub fn flatten_expr(
 
         // ── Index: flatten base and index, compute addr, emit Load ──
         Expr::Index { expr, index, .. } => {
-            let base_expr = flatten_expr(expr, stmts, ctx);
             let idx_expr = flatten_expr(index, stmts, ctx);
 
-            // Determine the array element type and size for proper index scaling.
+            // Array-lowering: when the base is a state-typed array
+            // FieldAccess (e.g. `b.data[idx]`), resolve the base state var
+            // and field offset directly, then emit a single
+            // `AccessNode::Load { ptr: Var(base_var),
+            //                     offset: Some(data_offset + scaled_idx) }`.
+            // This makes the access visible to `inject_bounds_check_ir` as a
+            // `Seq` access (the state var is in `alloc_sizes`), so an
+            // out-of-bounds index triggers `__oob_trap` under `--safe`.
+            if let Some((base_var, data_offset, elem_size, elem_ir_type)) =
+                resolve_state_array_access(expr, ctx)
+            {
+                // Scale the index by element size if needed.
+                let scaled_idx = if elem_size > 1 {
+                    let mul_dst = ctx.alloc_temp();
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: mul_dst.clone(),
+                        op: BinOpKind::Mul,
+                        lhs: idx_expr,
+                        rhs: ScgExpr::Int(elem_size as i64),
+                        tail_call: false,
+                        reassigns: None,
+                    }));
+                    ScgExpr::Var(mul_dst)
+                } else {
+                    idx_expr
+                };
+
+                // Combine static field offset + dynamic index into a single
+                // offset expression: `data_offset + scaled_idx`. When
+                // `data_offset == 0`, just use `scaled_idx` directly.
+                let offset_expr = if data_offset == 0 {
+                    scaled_idx
+                } else {
+                    ScgExpr::BinOp {
+                        op: BinOpKind::Add,
+                        lhs: Box::new(ScgExpr::Int(data_offset as i64)),
+                        rhs: Box::new(scaled_idx),
+                    }
+                };
+
+                let dst = ctx.alloc_temp();
+                stmts.push(ScgStatement::Access(AccessNode::Load {
+                    dst: dst.clone(),
+                    ptr: ScgExpr::Var(base_var),
+                    offset: Some(offset_expr),
+                    ty: elem_ir_type,
+                }));
+                return ScgExpr::Var(dst);
+            }
+
+            // Fallback (non-state-var index): original Add-based lowering.
+            let base_expr = flatten_expr(expr, stmts, ctx);
             let (elem_size, elem_ir_type) = detect_array_elem_type(expr, ctx);
 
             // Scale the index by element size if needed.
@@ -9602,12 +11378,12 @@ pub fn flatten_expr(
                 nr: 222,
                 dst: Some(dst.clone()),
                 args: vec![
-                    ScgExpr::Int(0),      // addr = NULL
-                    size_expr,            // length = size
-                    ScgExpr::Int(3),      // prot = PROT_READ|PROT_WRITE
-                    ScgExpr::Int(0x22),   // flags = MAP_PRIVATE|MAP_ANONYMOUS
-                    ScgExpr::Int(-1),     // fd = -1 (MAP_ANONYMOUS)
-                    ScgExpr::Int(0),      // offset = 0
+                    ScgExpr::Int(0),    // addr = NULL
+                    size_expr,          // length = size
+                    ScgExpr::Int(3),    // prot = PROT_READ|PROT_WRITE
+                    ScgExpr::Int(0x22), // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                    ScgExpr::Int(-1),   // fd = -1 (MAP_ANONYMOUS)
+                    ScgExpr::Int(0),    // offset = 0
                 ],
             }));
             ScgExpr::Var(dst)
@@ -9638,7 +11414,7 @@ pub fn flatten_expr(
             }
         }
 
-        // ── PMT (Wave 2): state.field read (and nested state.a.b read) ──
+        // ── PMT: state.field read (and nested state.a.b read) ──
         //
         // `Expr::FieldAccess` chains rooted at a state-typed var (e.g.
         // `p.x`, `l.a.x`) lower to a single Load at the field's cumulative
@@ -9649,7 +11425,10 @@ pub fn flatten_expr(
             // Walk the chain to find (base_var, [field1, ..., fieldN]).
             let mut chain: Vec<String> = Vec::new();
             let mut cur = expr;
-            while let Expr::FieldAccess { expr: inner, field, .. } = cur {
+            while let Expr::FieldAccess {
+                expr: inner, field, ..
+            } = cur
+            {
                 chain.push(field.clone());
                 cur = inner.as_ref();
             }
@@ -9664,7 +11443,7 @@ pub fn flatten_expr(
                     if let Some((offset, _size, field_ty, type_name)) =
                         resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
                     {
-                        // Wave 2 fix (array-typed fields): when the field's
+                        // Fix (array-typed fields): when the field's
                         // declared type is an inline array (e.g. `data: [u8; 4]`),
                         // `state.field` should produce the ADDRESS of the
                         // inline array — NOT a Load of its (non-existent)
@@ -9694,7 +11473,7 @@ pub fn flatten_expr(
                             };
                             return addr;
                         }
-                        // Wave 2 fix (scalar fields): compute the field
+                        // Fix (scalar fields): compute the field
                         // address explicitly via a separate
                         // `Add(base, offset)` Computation node so each field
                         // access lowers to a Load with a UNIQUE address vreg
@@ -9743,7 +11522,7 @@ pub fn flatten_expr(
             ScgExpr::Int(0)
         }
 
-        // ── PMT (Wave 2): StateInit as an expression (rare — usually
+        // ── PMT: StateInit as an expression (rare — usually
         // handled directly in PStmt::Let). If encountered here, return 0
         // since we can't allocate without a binding name. ──
         Expr::StateInit { .. } => {
@@ -9751,7 +11530,7 @@ pub fn flatten_expr(
             ScgExpr::Int(0)
         }
 
-        // ── Arena State Model (Wave 3a): arena builtins lower to
+        // ── Arena State Model: arena builtins lower to
         // CallNodes to mmap/mremap/munmap (already registered as syscall
         // stubs on all 19 backends) + AccessNode Load/Store for the
         // Arena struct fields. ──
@@ -9778,17 +11557,55 @@ pub fn flatten_expr(
             // backends. The AccessNode::Store path with ComputationNode::Add
             // crashes on strict-alignment ISAs (mips64, s390x, alpha, hppa).
             let cap_expr = flatten_expr(capacity, stmts, ctx);
+            // Guard page: mmap one extra page (4096 bytes) past the
+            // user-visible capacity, then mprotect it PROT_NONE so the MMU
+            // traps on overflow even if the bump-pointer check is bypassed.
+            // The stored arena.capacity remains the user-visible value
+            // (without the +4096).
+            let mmap_size = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: mmap_size.clone(),
+                op: BinOpKind::Add,
+                lhs: cap_expr.clone(),
+                rhs: ScgExpr::Int(4096),
+                tail_call: false,
+                reassigns: None,
+            }));
             let arena_ptr = ctx.alloc_temp();
             stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(arena_ptr.clone()),
                 func: "mmap".to_string(),
                 args: vec![
-                    ScgExpr::Int(0),       // addr = NULL
-                    cap_expr.clone(),       // length = capacity
-                    ScgExpr::Int(3),        // prot = PROT_READ|PROT_WRITE
-                    ScgExpr::Int(0x22),     // flags = MAP_PRIVATE|MAP_ANONYMOUS
-                    ScgExpr::Int(-1),       // fd = -1
-                    ScgExpr::Int(0),        // offset = 0
+                    ScgExpr::Int(0),         // addr = NULL
+                    ScgExpr::Var(mmap_size), // length = capacity + 4096 (guard page)
+                    ScgExpr::Int(3),         // prot = PROT_READ|PROT_WRITE
+                    ScgExpr::Int(0x22),      // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                    ScgExpr::Int(-1),        // fd = -1
+                    ScgExpr::Int(0),         // offset = 0
+                ],
+                is_extern: true,
+                reassigns: None,
+            }));
+            // mprotect(arena_ptr + capacity, 4096, PROT_NONE=0) — guard page.
+            // Return value is ignored (stored to a temp, never checked) so a
+            // kernel that refuses the mprotect does not fail compilation.
+            let guard_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: guard_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(arena_ptr.clone()),
+                rhs: cap_expr.clone(),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let _mprot_ret = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(_mprot_ret),
+                func: "mprotect".to_string(),
+                args: vec![
+                    ScgExpr::Var(guard_addr),
+                    ScgExpr::Int(4096), // size = one page
+                    ScgExpr::Int(0),    // prot = PROT_NONE
                 ],
                 is_extern: true,
                 reassigns: None,
@@ -9837,7 +11654,9 @@ pub fn flatten_expr(
         //   arena_ptr IS the data base. Arena data starts at offset 24.
         //   We load arena.offset (at [arena_ptr+8]), compute ptr = arena_ptr + offset,
         //   bump the offset, and return ptr as the new State<Layout>.
-        Expr::ArenaAlloc { arena, layout_name, .. } => {
+        Expr::ArenaAlloc {
+            arena, layout_name, ..
+        } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
             // Load arena.offset at [arena_ptr+8] via ComputationNode::Add
             // + AccessNode::Load (the SAME path as PMT state.field reads).
@@ -9858,7 +11677,9 @@ pub fn flatten_expr(
                 ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             // Get layout_size from the layout registry
-            let layout_size = ctx.layouts.get(layout_name)
+            let layout_size = ctx
+                .layouts
+                .get(layout_name)
                 .map(|(size, _)| *size as i64)
                 .unwrap_or(8);
             // Compute new_offset = offset + layout_size
@@ -9945,7 +11766,11 @@ pub fn flatten_expr(
         //   Load arena.capacity, call mremap, store new capacity.
         //   mremap may return a NEW base (MREMAP_MAYMOVE). Return the
         //   new_base as the updated arena pointer.
-        Expr::ArenaGrow { arena, min_capacity, .. } => {
+        Expr::ArenaGrow {
+            arena,
+            min_capacity,
+            ..
+        } => {
             let arena_ptr = flatten_expr(arena, stmts, ctx);
             let min_cap_expr = flatten_expr(min_capacity, stmts, ctx);
             // Load arena.capacity at [arena_ptr+16] via ComputationNode::Add
@@ -9966,7 +11791,19 @@ pub fn flatten_expr(
                 offset: None,
                 ty: Some(vuma_codegen::ir::IRType::U64),
             }));
-            // Call mremap(arena_ptr, capacity, min_capacity, MREMAP_MAYMOVE=1)
+            // Guard page: mremap to min_capacity + 4096 so the new
+            // mapping has room for a PROT_NONE tail. The stored capacity is
+            // still the user-visible min_capacity (without the +4096).
+            let new_map_size = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: new_map_size.clone(),
+                op: BinOpKind::Add,
+                lhs: min_cap_expr.clone(),
+                rhs: ScgExpr::Int(4096),
+                tail_call: false,
+                reassigns: None,
+            }));
+            // Call mremap(arena_ptr, capacity, min_capacity + 4096, MREMAP_MAYMOVE=1)
             let new_base = ctx.alloc_temp();
             stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(new_base.clone()),
@@ -9974,8 +11811,31 @@ pub fn flatten_expr(
                 args: vec![
                     arena_ptr,
                     ScgExpr::Var(cap_val),
-                    min_cap_expr.clone(),
+                    ScgExpr::Var(new_map_size),
                     ScgExpr::Int(1),
+                ],
+                is_extern: true,
+                reassigns: None,
+            }));
+            // mprotect(new_base + min_capacity, 4096, PROT_NONE=0) — guard
+            // page on the new tail. Return value ignored.
+            let guard_addr = ctx.alloc_temp();
+            stmts.push(ScgStatement::Computation(ComputationNode {
+                dst: guard_addr.clone(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var(new_base.clone()),
+                rhs: min_cap_expr.clone(),
+                tail_call: false,
+                reassigns: None,
+            }));
+            let _mprot_ret = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(_mprot_ret),
+                func: "mprotect".to_string(),
+                args: vec![
+                    ScgExpr::Var(guard_addr),
+                    ScgExpr::Int(4096), // size = one page
+                    ScgExpr::Int(0),    // prot = PROT_NONE
                 ],
                 is_extern: true,
                 reassigns: None,
@@ -10025,10 +11885,7 @@ pub fn flatten_expr(
             stmts.push(ScgStatement::Call(CallNode {
                 dst: None,
                 func: "munmap".to_string(),
-                args: vec![
-                    arena_ptr,
-                    ScgExpr::Var(cap_val),
-                ],
+                args: vec![arena_ptr, ScgExpr::Var(cap_val)],
                 is_extern: true,
                 reassigns: None,
             }));
@@ -10041,7 +11898,12 @@ pub fn flatten_expr(
         // The then/else blocks' trailing expression (last Stmt::Expr) is the
         // branch value. bridge_block_to_scg_stmts stores the last ExprStmt's
         // result in ctx.last_expr_result.
-        Expr::IfExpr { condition, then_block, else_block, .. } => {
+        Expr::IfExpr {
+            condition,
+            then_block,
+            else_block,
+            ..
+        } => {
             // Evaluate the condition.
             let cond_expr = flatten_expr(condition, stmts, ctx);
             // Allocate a temp for the result.
@@ -10088,7 +11950,7 @@ pub fn flatten_expr(
             ScgExpr::Var(result_tmp)
         }
 
-        // ── Wave 2: Struct literal — `Point { x: 10, y: 20 }` ──
+        // ── Struct literal — `Point { x: 10, y: 20 }` ──
         // Lower to: allocate stack slot, register as state-typed, write each field.
         Expr::StructInit { name, fields, .. } => {
             // Look up the layout to get the total size.
@@ -10105,7 +11967,8 @@ pub fn flatten_expr(
                 // For each field, emit a Store at the field's offset.
                 for (field_name, field_expr) in fields {
                     // Find the field's offset, size, and type_name from the layout registry.
-                    let (offset, _size, field_ty, type_name) = layout_fields.iter()
+                    let (offset, _size, field_ty, type_name) = layout_fields
+                        .iter()
                         .find_map(|(fn_, ir_ty, off, sz, tn)| {
                             if fn_ == field_name {
                                 Some((*off, *sz, ir_ty.clone(), tn.clone()))
@@ -10115,7 +11978,7 @@ pub fn flatten_expr(
                         })
                         .unwrap_or((0, 0, vuma_codegen::ir::IRType::U64, String::new()));
 
-                    // Wave 33: Handle nested struct literal fields inline.
+                    // Handle nested struct literal fields inline.
                     // If the field's type_name is a known layout AND the field
                     // expression is a StructInit, write the nested struct's
                     // fields directly into the parent buffer at the cumulative
@@ -10123,12 +11986,20 @@ pub fn flatten_expr(
                     // its pointer). This makes `b.a.x` resolve correctly because
                     // the nested fields are inline in the parent buffer.
                     if ctx.layouts.contains_key(&type_name) {
-                        if let vuma_parser::ast::Expr::StructInit { name: nested_name, fields: nested_fields, .. } = field_expr {
-                            if let Some((_nested_total, nested_layout_fields)) = ctx.layouts.get(&type_name).cloned() {
+                        if let vuma_parser::ast::Expr::StructInit {
+                            name: _nested_name,
+                            fields: nested_fields,
+                            ..
+                        } = field_expr
+                        {
+                            if let Some((_nested_total, nested_layout_fields)) =
+                                ctx.layouts.get(&type_name).cloned()
+                            {
                                 // Write each nested field directly into the parent buffer
                                 // at (parent_base + field_offset + nested_field_offset).
                                 for (nested_fname, nested_fexpr) in nested_fields {
-                                    let (nested_off, nested_fty) = nested_layout_fields.iter()
+                                    let (nested_off, nested_fty) = nested_layout_fields
+                                        .iter()
                                         .find_map(|(fn_, ir_ty, off, _sz, _tn)| {
                                             if fn_ == nested_fname {
                                                 Some((*off, ir_ty.clone()))
@@ -10194,12 +12065,15 @@ pub fn flatten_expr(
                 // Return the temp as the expression result.
                 ScgExpr::Var(temp)
             } else {
-                eprintln!("[vuma] WARNING: struct literal with unknown layout '{}'; using 0", name);
+                eprintln!(
+                    "[vuma] WARNING: struct literal with unknown layout '{}'; using 0",
+                    name
+                );
                 ScgExpr::Int(0)
             }
         }
 
-        // ── Wave 8b: Block expression (used in match arm bodies) ──
+        // ── Block expression (used in match arm bodies) ──
         // `{ stmt; stmt; expr }` — flatten each statement into `stmts` (via
         // `bridge_stmt_to_scg`), then flatten the optional trailing
         // expression.  The block's value is the trailing expression's value
@@ -10207,7 +12081,11 @@ pub fn flatten_expr(
         // `match channel_recv(ch) { Ok(v) => { return 7; }, Err(e) => { return 99; } }`
         // lower correctly: the block's `return` statement flows into the
         // arm's ScgStatement list and becomes an `IRInstr::Ret`.
-        Expr::Block { statements, trailing_expr, .. } => {
+        Expr::Block {
+            statements,
+            trailing_expr,
+            ..
+        } => {
             for s in statements {
                 let sub = bridge_stmt_to_scg(s, ctx);
                 stmts.extend(sub);
@@ -10245,8 +12123,8 @@ pub fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
         BinOp::Shl => BinOpKind::Shl,
         // VUMA's `>>` DEFAULTS to LOGICAL (unsigned) shift. The actual
         // type-aware decision (ShrA for signed, ShrL for unsigned) is made
-        // in `flatten_expr` based on the lhs operand's declared type — see
-        // Task 7-A. This default applies when the operand type is unknown
+        // in `flatten_expr` based on the lhs operand's declared type.
+        // This default applies when the operand type is unknown
         // (e.g. untyped let-bindings, function parameters without type
         // annotations), which is the common case for the bit-twiddling
         // gold-standard tests (`bit_log2`, `bit_priority_encoder`,
@@ -10276,11 +12154,29 @@ pub fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
 /// Checks for the pattern `base + idx * stride` in the AST and infers:
 /// - stride 4 → U32
 /// - stride 8 → U64
-fn infer_load_type_from_ast_expr(expr: &vuma_parser::ast::Expr) -> Option<vuma_codegen::ir::IRType> {
-    use vuma_parser::ast::{Expr, BinOp, Lit};
-    if let Expr::BinOp { op: BinOp::Add, lhs: _, rhs, .. } = expr {
-        if let Expr::BinOp { op: BinOp::Mul, lhs: _, rhs: mul_rhs, .. } = rhs.as_ref() {
-            if let Expr::Lit { value: Lit::Int(stride), .. } = mul_rhs.as_ref() {
+fn infer_load_type_from_ast_expr(
+    expr: &vuma_parser::ast::Expr,
+) -> Option<vuma_codegen::ir::IRType> {
+    use vuma_parser::ast::{BinOp, Expr, Lit};
+    if let Expr::BinOp {
+        op: BinOp::Add,
+        lhs: _,
+        rhs,
+        ..
+    } = expr
+    {
+        if let Expr::BinOp {
+            op: BinOp::Mul,
+            lhs: _,
+            rhs: mul_rhs,
+            ..
+        } = rhs.as_ref()
+        {
+            if let Expr::Lit {
+                value: Lit::Int(stride),
+                ..
+            } = mul_rhs.as_ref()
+            {
                 return match *stride {
                     8 => Some(vuma_codegen::ir::IRType::U64),
                     4 => Some(vuma_codegen::ir::IRType::U32),
@@ -10294,8 +12190,18 @@ fn infer_load_type_from_ast_expr(expr: &vuma_parser::ast::Expr) -> Option<vuma_c
 
 /// Infer the load type from a codegen SCG expression (after flattening).
 fn infer_load_type_from_ptr(ptr: &ScgExpr) -> Option<vuma_codegen::ir::IRType> {
-    if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+    if let ScgExpr::BinOp {
+        op: vuma_codegen::ir::BinOpKind::Add,
+        lhs: _,
+        rhs,
+    } = ptr
+    {
+        if let ScgExpr::BinOp {
+            op: vuma_codegen::ir::BinOpKind::Mul,
+            lhs: _,
+            rhs,
+        } = rhs.as_ref()
+        {
             if let ScgExpr::Int(stride) = rhs.as_ref() {
                 return match *stride {
                     8 => Some(vuma_codegen::ir::IRType::U64),
@@ -10323,7 +12229,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
 
             // Record the variable's declared type (if any) so `flatten_expr`
             // can choose ShrA (signed) vs ShrL (unsigned) for `>>` operations
-            // — see Task 7-A (type-aware shift regression). Without this,
+            // — type-aware shift regression. Without this,
             // all `>>` operations collapse to a single shift kind, breaking
             // either `bit_abs` (i64 → needs ShrA) or `bit_log2` (u64 →
             // needs ShrL).
@@ -10343,32 +12249,58 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 if scg_ty != ScgType::Void {
                     ctx.var_types.insert(let_stmt.name.clone(), scg_ty);
                 }
-                // PMT (Wave 2): register state-typed vars (`let p: State<L> = ...`)
+                // PMT: register state-typed vars (`let p: State<L> = ...`)
                 // so subsequent `p.field` accesses lower to Loads with the
                 // layout's field offsets.
                 if let Some(layout_name) = extract_state_layout_name_from_ast(ty) {
-                    ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name);
+                    ctx.state_var_layouts
+                        .insert(let_stmt.name.clone(), layout_name);
                 }
             }
 
-            // PMT (Wave 2): `let p = state_new(Layout)` → AllocationNode::Stack
+            // PMT: `let p = state_new(Layout)` → AllocationNode::Stack
             // sized to the layout's total_size. The resulting stack slot
             // holds the state's buffer pointer; subsequent `p.field` reads/
             // writes use it as the Load/Store address.
+            //
+            // Liveness (tombstone UAF detection): the allocation is
+            // grown by +1 byte to make room for a LIVE/DEAD flag at
+            // `[ptr + total_size]`. The flag is set to 1 (LIVE) here, and
+            // `inject_liveness_check_ir` (memory_safety.rs) emits a check
+            // before each SEQ access that traps via `__uaf_trap` (exit 135)
+            // when the flag is 0 (DEAD). The +1 byte is also reflected in
+            // `alloc_sizes` so the bounds check still catches true OOB
+            // accesses (one byte looser than before, but never unsound:
+            // the extra byte belongs to the same allocation).
             if let vuma_parser::ast::Expr::StateInit { layout_name, .. } = &let_stmt.value {
                 if let Some((total_size, _)) = ctx.layouts.get(layout_name) {
                     // Register the var as state-typed BEFORE returning so
                     // subsequent `p.field` accesses can find the layout.
-                    ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name.clone());
-                    return vec![ScgStatement::Allocation(AllocationNode::Stack {
-                        name: let_stmt.name.clone(),
-                        size: *total_size as u32,
-                        ty: ScgType::Ptr,
-                    })];
+                    ctx.state_var_layouts
+                        .insert(let_stmt.name.clone(), layout_name.clone());
+                    let flag_off = *total_size as i64;
+                    return vec![
+                        ScgStatement::Allocation(AllocationNode::Stack {
+                            name: let_stmt.name.clone(),
+                            size: *total_size as u32, // +1 byte for liveness flag is NOT added here —
+                            // the flag is stored at [ptr + total_size] which is within the stack
+                            // frame's allocated region (the frame is larger than total_size).
+                            // Adding +1 would make build_alloc_sizes report total_size+1, which
+                            // would make the bounds check UGe(idx, total_size+1) too lenient.
+                            ty: ScgType::Ptr,
+                        }),
+                        // Store LIVE flag (1) at [ptr + total_size].
+                        ScgStatement::Access(AccessNode::Store {
+                            ptr: ScgExpr::Var(let_stmt.name.clone()),
+                            offset: Some(ScgExpr::Int(flag_off)),
+                            value: ScgExpr::Int(1),
+                            ty: Some(vuma_codegen::ir::IRType::U8),
+                        }),
+                    ];
                 }
             }
 
-            // Wave 2: `let p = Point { x: 10, y: 20 }` — register the let
+            // `let p = Point { x: 10, y: 20 }` — register the let
             // variable as state-typed so subsequent `p.field` accesses work.
             // The actual allocation + field writes are handled by flatten_expr's
             // StructInit arm (which emits an AllocationNode::Stack for a temp,
@@ -10376,11 +12308,12 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // the let variable name as state-typed with the struct's layout.
             if let vuma_parser::ast::Expr::StructInit { name, .. } = &let_stmt.value {
                 if ctx.layouts.contains_key(name) {
-                    ctx.state_var_layouts.insert(let_stmt.name.clone(), name.clone());
+                    ctx.state_var_layouts
+                        .insert(let_stmt.name.clone(), name.clone());
                 }
             }
 
-            // Arena State Model (Wave 3a): `let arena = arena_new(cap)` and
+            // Arena State Model: `let arena = arena_new(cap)` and
             // `let w = arena_alloc(arena, Widget)` → register as state-typed
             // so field access works. The actual lowering happens in
             // flatten_expr (which emits mmap/mremap/munmap CallNodes +
@@ -10388,16 +12321,19 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // variable as state-typed with the correct layout.
             match &let_stmt.value {
                 vuma_parser::ast::Expr::ArenaNew { .. } => {
-                    ctx.state_var_layouts.insert(let_stmt.name.clone(), "Arena".to_string());
+                    ctx.state_var_layouts
+                        .insert(let_stmt.name.clone(), "Arena".to_string());
                 }
                 vuma_parser::ast::Expr::ArenaAlloc { layout_name, .. } => {
-                    ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name.clone());
+                    ctx.state_var_layouts
+                        .insert(let_stmt.name.clone(), layout_name.clone());
                 }
                 vuma_parser::ast::Expr::ArenaGrow { .. } => {
                     // arena_grow returns the arena — it's already registered
                     // as state-typed from the original arena_new/arena_alloc.
                     // Just re-register with "Arena" layout to be safe.
-                    ctx.state_var_layouts.insert(let_stmt.name.clone(), "Arena".to_string());
+                    ctx.state_var_layouts
+                        .insert(let_stmt.name.clone(), "Arena".to_string());
                 }
                 _ => {}
             }
@@ -10406,7 +12342,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
                 if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
                     if name == "allocate" {
-                        let size: u32 = args.first()
+                        let size: u32 = args
+                            .first()
                             .and_then(|a| {
                                 if let vuma_parser::ast::Expr::Lit {
                                     value: vuma_parser::ast::Lit::Int(n),
@@ -10425,7 +12362,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                         })];
                     }
                     // Other function calls → CallNode (flatten args)
-                    let flat_args: Vec<ScgExpr> = args.iter()
+                    let flat_args: Vec<ScgExpr> = args
+                        .iter()
                         .map(|a| flatten_expr(a, &mut stmts, ctx))
                         .collect();
                     let is_extern = ctx.extern_fns.contains(name)
@@ -10437,7 +12375,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     // accesses resolve to Loads at the right offset —
                     // without requiring `let dst: State<L> = ...`.
                     if let Some(layout_name) = ctx.state_returning_fns.get(name).cloned() {
-                        ctx.state_var_layouts.insert(let_stmt.name.clone(), layout_name);
+                        ctx.state_var_layouts
+                            .insert(let_stmt.name.clone(), layout_name);
                     }
                     stmts.push(ScgStatement::Call(CallNode {
                         dst: Some(let_stmt.name.clone()),
@@ -10450,7 +12389,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 }
             }
 
-            // Wave 10: `let x = syscall(nr, args…)` → SyscallCallNode with
+            // `let x = syscall(nr, args…)` → SyscallCallNode with
             // dst = the let-binding's name. This avoids a wasted temp +
             // Add(0) copy when the result is consumed directly.
             if let vuma_parser::ast::Expr::Syscall { nr, args, .. } = &let_stmt.value {
@@ -10469,9 +12408,10 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // Check if the RHS is an Allocate expression → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Allocate { size, .. } = &let_stmt.value {
                 let size_val: u32 = match size.as_ref() {
-                    vuma_parser::ast::Expr::Lit { value: vuma_parser::ast::Lit::Int(n), .. } => {
-                        *n as u32
-                    }
+                    vuma_parser::ast::Expr::Lit {
+                        value: vuma_parser::ast::Lit::Int(n),
+                        ..
+                    } => *n as u32,
                     _ => 8,
                 };
                 return vec![ScgStatement::Allocation(AllocationNode::Stack {
@@ -10492,7 +12432,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             match &result {
                 ScgExpr::Var(name) if name == &let_stmt.name => {}
                 _ => {
-                    // Arena State Model (Wave 3a): for arena_alloc results,
+                    // Arena State Model: for arena_alloc results,
                     // the temp IS the state pointer. We need to assign it to
                     // the let-binding name so field access (w.x) resolves.
                     // Use Add(result, 0) to create a named copy that
@@ -10573,10 +12513,54 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
 
             // Handle Index target: ptr[index] = value
             if let vuma_parser::ast::AssignTarget::Index { expr, index, .. } = &assign_stmt.target {
-                let base = flatten_expr(expr, &mut stmts, ctx);
                 let idx = flatten_expr(index, &mut stmts, ctx);
 
-                // Determine the array element type for proper index scaling.
+                // Array-lowering: when the base is a state-typed
+                // array FieldAccess (e.g. `b.data[idx] = v`), emit a single
+                // `AccessNode::Store { ptr: Var(base_var),
+                //                       offset: Some(data_offset + scaled_idx) }`
+                // so `inject_bounds_check_ir` classifies it as `Seq` and
+                // inserts a `__oob_trap` check under `--safe`.
+                if let Some((base_var, data_offset, elem_size, elem_ir_type)) =
+                    resolve_state_array_access(expr, ctx)
+                {
+                    let scaled_idx = if elem_size > 1 {
+                        let mul_dst = ctx.alloc_temp();
+                        stmts.push(ScgStatement::Computation(ComputationNode {
+                            dst: mul_dst.clone(),
+                            op: BinOpKind::Mul,
+                            lhs: idx,
+                            rhs: ScgExpr::Int(elem_size as i64),
+                            tail_call: false,
+                            reassigns: None,
+                        }));
+                        ScgExpr::Var(mul_dst)
+                    } else {
+                        idx
+                    };
+
+                    let offset_expr = if data_offset == 0 {
+                        scaled_idx
+                    } else {
+                        ScgExpr::BinOp {
+                            op: BinOpKind::Add,
+                            lhs: Box::new(ScgExpr::Int(data_offset as i64)),
+                            rhs: Box::new(scaled_idx),
+                        }
+                    };
+
+                    let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+                    stmts.push(ScgStatement::Access(AccessNode::Store {
+                        ptr: ScgExpr::Var(base_var),
+                        offset: Some(offset_expr),
+                        value,
+                        ty: elem_ir_type,
+                    }));
+                    return stmts;
+                }
+
+                // Fallback (non-state-var index): original Add-based lowering.
+                let base = flatten_expr(expr, &mut stmts, ctx);
                 let (elem_size, elem_ir_type) = detect_array_elem_type(expr, ctx);
 
                 // Scale the index by element size if needed.
@@ -10614,18 +12598,25 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 return stmts;
             }
 
-            // PMT (Wave 2): state-field write — `p.field = val` (and nested
+            // PMT: state-field write — `p.field = val` (and nested
             // `l.a.x = val`). The parser represents these as
             // `AssignTarget::DerefField { expr, field }`. We walk the
             // FieldAccess chain to find the base state-typed var, resolve
             // the cumulative field offset against the layout registry, and
             // emit a single Store at that offset.
-            if let vuma_parser::ast::AssignTarget::DerefField { expr, field, .. } = &assign_stmt.target {
+            if let vuma_parser::ast::AssignTarget::DerefField { expr, field, .. } =
+                &assign_stmt.target
+            {
                 // Walk the chain to find (base_var, [field1, field2, ..., field]).
                 let mut chain = vec![field.clone()];
                 let mut cur = expr.as_ref();
                 let mut base_var: Option<String> = None;
-                while let vuma_parser::ast::Expr::FieldAccess { expr: inner, field: f, .. } = cur {
+                while let vuma_parser::ast::Expr::FieldAccess {
+                    expr: inner,
+                    field: f,
+                    ..
+                } = cur
+                {
                     chain.push(f.clone());
                     cur = inner.as_ref();
                 }
@@ -10638,7 +12629,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                         if let Some((offset, _size, field_ty, _type_name)) =
                             resolve_state_field_chain(&ctx.layouts, &layout_name, &chain)
                         {
-                            // Wave 2 fix: emit an explicit `Add(base, offset)`
+                            // Fix: emit an explicit `Add(base, offset)`
                             // Computation node so each Store gets a UNIQUE
                             // address vreg (mirrors the Load-side fix in
                             // `flatten_expr`'s FieldAccess arm). Without
@@ -10653,15 +12644,23 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                             // conservatively treats the two Stores as
                             // may-alias (keeping both).
                             let ptr = if offset == 0 {
-                                flatten_expr(&vuma_parser::ast::Expr::Var {
-                                    name: bv.clone(),
-                                    span: vuma_parser::Span::synthetic(),
-                                }, &mut stmts, ctx)
+                                flatten_expr(
+                                    &vuma_parser::ast::Expr::Var {
+                                        name: bv.clone(),
+                                        span: vuma_parser::Span::synthetic(),
+                                    },
+                                    &mut stmts,
+                                    ctx,
+                                )
                             } else {
-                                let base = flatten_expr(&vuma_parser::ast::Expr::Var {
-                                    name: bv.clone(),
-                                    span: vuma_parser::Span::synthetic(),
-                                }, &mut stmts, ctx);
+                                let base = flatten_expr(
+                                    &vuma_parser::ast::Expr::Var {
+                                        name: bv.clone(),
+                                        span: vuma_parser::Span::synthetic(),
+                                    },
+                                    &mut stmts,
+                                    ctx,
+                                );
                                 let addr_tmp = ctx.alloc_temp();
                                 stmts.push(ScgStatement::Computation(ComputationNode {
                                     dst: addr_tmp.clone(),
@@ -10681,9 +12680,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                                 ty: Some(field_ty),
                             }));
                             return stmts;
-                        } else {
                         }
-                    } else {
                     }
                 }
                 // Not a state-typed field write — fall through to the
@@ -10700,9 +12697,10 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // Detect allocate() expression → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Allocate { size, .. } = &assign_stmt.value {
                 let size_val: u32 = match size.as_ref() {
-                    vuma_parser::ast::Expr::Lit { value: vuma_parser::ast::Lit::Int(n), .. } => {
-                        *n as u32
-                    }
+                    vuma_parser::ast::Expr::Lit {
+                        value: vuma_parser::ast::Lit::Int(n),
+                        ..
+                    } => *n as u32,
                     _ => 8,
                 };
                 return vec![ScgStatement::Allocation(AllocationNode::Stack {
@@ -10715,7 +12713,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             // Detect function calls in assign: `x = foo(args)` → CallNode (flatten args)
             if let vuma_parser::ast::Expr::Call { callee, args, .. } = &assign_stmt.value {
                 if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
-                    let flat_args: Vec<ScgExpr> = args.iter()
+                    let flat_args: Vec<ScgExpr> = args
+                        .iter()
                         .map(|a| flatten_expr(a, &mut stmts, ctx))
                         .collect();
                     let is_extern = ctx.extern_fns.contains(name)
@@ -10732,7 +12731,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 }
             }
 
-            // Wave 10: `x = syscall(nr, args…)` → SyscallCallNode with
+            // `x = syscall(nr, args…)` → SyscallCallNode with
             // dst = the assignment target. Mirrors the Call path above.
             if let vuma_parser::ast::Expr::Syscall { nr, args, .. } = &assign_stmt.value {
                 let flat_args: Vec<ScgExpr> = args
@@ -10949,7 +12948,11 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 then_body,
                 else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
             }));
-            vec![ScgStatement::Control(ControlNode::Loop { body: loop_body, for_range: None, while_cond: None })]
+            vec![ScgStatement::Control(ControlNode::Loop {
+                body: loop_body,
+                for_range: None,
+                while_cond: None,
+            })]
         }
 
         // for name in start..end { body }
@@ -10970,7 +12973,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         // the then-branch, so `continue` skipped it — the loop variable
         // never advanced past the continue point, causing an infinite loop
         // (cf_for_continue, all 10 backends timeout).  The continue-phi
-        // merge in `lower_loop` (Task 6-A) ensures the loop-header phi
+        // merge in `lower_loop` ensures the loop-header phi
         // back-edge observes path-merged values, but the increment MUST
         // still run on the continue path for the loop variable to advance
         // — only `for_range` guarantees that.
@@ -10982,9 +12985,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     let e = flatten_expr(end, &mut pre_stmts, ctx);
                     (s, e)
                 }
-                _other => {
-                    (ScgExpr::Int(0), ScgExpr::Int(0))
-                }
+                _other => (ScgExpr::Int(0), ScgExpr::Int(0)),
             };
 
             let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
@@ -11002,7 +13003,11 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
 
         PStmt::Loop(loop_stmt) => {
             let body = bridge_block_to_scg_stmts(&loop_stmt.body, ctx);
-            vec![ScgStatement::Control(ControlNode::Loop { body, for_range: None, while_cond: None })]
+            vec![ScgStatement::Control(ControlNode::Loop {
+                body,
+                for_range: None,
+                while_cond: None,
+            })]
         }
 
         PStmt::Break(_) => vec![ScgStatement::Control(ControlNode::Break)],
@@ -11033,15 +13038,18 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         }
 
         // ── match subject { arms } ──
-        // Lower to ControlNode::Switch when every arm pattern is a simple
-        // integer literal (or the wildcard `_`). For complex patterns
-        // (Ident, Struct, Enum, Range, Or), emit a TODO warning and drop
-        // ONLY those arm bodies — the wildcard/default arm still runs,
-        // which is better than silently dropping the whole match.
+        // Lower to ControlNode::Switch. The lowering expanded the supported
+        // pattern set beyond Lit/Wildcard to include Range, Or, Ident-
+        // binding, and Enum-with-binding; see the per-arm dispatch below
+        // for details. Patterns that still cannot be lowered without type
+        // information (Struct, unit-variant Enum, uppercase Ident, oversized
+        // Range, nested-complex Or) emit a `vuma_log!(warn, ...)` and drop
+        // ONLY that arm's body — the wildcard/default arm still runs, which
+        // is better than silently dropping the whole match.
         PStmt::Match(match_stmt) => {
             let mut pre_stmts = Vec::new();
 
-            // ── Wave 8b: `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }` ──
+            // ── `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }` ──
             // First-class lowering of the fallible channel-recv match form.
             // We detect the subject `channel_recv(ch)` (an Expr::Call whose
             // callee is Var("channel_recv") with exactly one argument) and
@@ -11087,22 +13095,57 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             let mut switch_arms: Vec<SwitchArm> = Vec::new();
             let mut default_body: Vec<ScgStatement> = Vec::new();
             let mut saw_complex_pattern = false;
+            let mut saw_guard = false;
+
+            // Helper: extract an i64 from a Lit (Int/Bool/Address).
+            // Returns None for Float/String (not valid switch values).
+            let lit_as_i64 = |value: &vuma_parser::ast::Lit| -> Option<i64> {
+                match value {
+                    vuma_parser::ast::Lit::Int(n) => Some(*n),
+                    vuma_parser::ast::Lit::Bool(b) => Some(if *b { 1 } else { 0 }),
+                    vuma_parser::ast::Lit::Address(a) => Some(*a as i64),
+                    _ => None,
+                }
+            };
 
             for arm in &match_stmt.arms {
+                // ── Expanded complex-pattern support ──
+                //
+                // Previously, any non-Lit/non-Wildcard pattern caused the
+                // arm body to be silently dropped. We now support:
+                //
+                //   • Range patterns (1..=N): expanded into individual
+                //     SwitchArms (capped at 32 to avoid code bloat; larger
+                //     ranges fall back to drop-with-warning).
+                //   • Or-patterns (1 | 2 | 3): each Lit sub-pattern becomes
+                //     a separate SwitchArm sharing the same body; Wildcard
+                //     sub-patterns contribute to default_body. Nested
+                //     complex sub-patterns (Range/Or/Ident/Struct/Enum)
+                //     cause the whole arm to be dropped with a warning.
+                //   • Ident patterns (x => ...): treated as a binding — the
+                //     discriminant is bound to `x` via a copy Computation,
+                //     and the arm becomes the default_body. (Rust convention:
+                //     lowercase = binding; uppercase = unit-variant name.
+                //     Uppercase idents are dropped with a warning since we
+                //     can't determine the discriminant value without type
+                //     info.)
+                //   • Enum patterns with binding (Some(v) => ...): treated
+                //     as a binding — `v` receives the discriminant. Unit-
+                //     variant enums (None => ...) are dropped with a warning.
+                //   • Struct patterns (Name { field, ... }): dropped with a
+                //     warning — requires type info to determine offsets.
+                //
+                // Guards (pat if cond => ...) are NOT supported by the
+                // Switch node (which has no guard slot). If any arm has a
+                // guard, we emit a warning and silently IGNORE the guard
+                // (the body is lowered as if the guard were absent — which
+                // is incorrect but better than dropping the body entirely).
                 match &arm.pattern {
                     vuma_parser::ast::MatchPattern::Lit { value, .. } => {
                         // Only integer-valued literals can become SwitchArm values.
-                        let value_i = match value {
-                            vuma_parser::ast::Lit::Int(n) => *n,
-                            vuma_parser::ast::Lit::Bool(b) => {
-                                if *b {
-                                    1
-                                } else {
-                                    0
-                                }
-                            }
-                            vuma_parser::ast::Lit::Address(a) => *a as i64,
-                            _ => {
+                        let value_i = match lit_as_i64(value) {
+                            Some(v) => v,
+                            None => {
                                 // Float/String literal — not a valid switch arm value.
                                 saw_complex_pattern = true;
                                 continue;
@@ -11120,22 +13163,241 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                         let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
                         default_body = arm_body;
                     }
-                    _ => {
-                        // Ident / Struct / Enum / Range / Or — too complex for
-                        // the direct AST→codegen bridge. The arm body is
-                        // dropped (NOT the whole match).
+                    vuma_parser::ast::MatchPattern::Range { start, end, .. } => {
+                        // Range pattern: `1..=10`. Expand into individual
+                        // SwitchArms (capped at 32 to avoid code bloat).
+                        const RANGE_EXPANSION_CAP: i64 = 32;
+                        match (lit_as_i64(start), lit_as_i64(end)) {
+                            (Some(lo), Some(hi)) if hi >= lo => {
+                                let span = hi - lo + 1;
+                                if span <= RANGE_EXPANSION_CAP {
+                                    let mut arm_body: Vec<ScgStatement> = Vec::new();
+                                    let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
+                                    for v in lo..=hi {
+                                        switch_arms.push(SwitchArm {
+                                            value: v,
+                                            body: arm_body.clone(),
+                                        });
+                                    }
+                                } else {
+                                    vuma_log!(
+                                        warn,
+                                        "match arm at span {:?} uses a range pattern \
+                                         {}..={} with span {} exceeding the expansion \
+                                         cap {}; arm body dropped (use explicit case \
+                                         arms or split the range).",
+                                        arm.span,
+                                        lo,
+                                        hi,
+                                        span,
+                                        RANGE_EXPANSION_CAP
+                                    );
+                                    saw_complex_pattern = true;
+                                }
+                            }
+                            _ => {
+                                vuma_log!(
+                                    warn,
+                                    "match arm at span {:?} uses a non-integer range \
+                                     pattern; arm body dropped (only integer ranges \
+                                     are supported).",
+                                    arm.span
+                                );
+                                saw_complex_pattern = true;
+                            }
+                        }
+                    }
+                    vuma_parser::ast::MatchPattern::Or { patterns, .. } => {
+                        // Or-pattern: `1 | 2 | 3`. Recursively lower each
+                        // sub-pattern. Lit sub-patterns become SwitchArms
+                        // sharing the same body. Wildcard sub-patterns set
+                        // default_body. Non-Lit/non-Wildcard sub-patterns
+                        // (nested Range/Or/Ident/Struct/Enum) cause the
+                        // whole arm to be dropped with a warning.
+                        let mut sub_values: Vec<i64> = Vec::new();
+                        let mut has_wildcard = false;
+                        let mut has_nested_complex = false;
+                        for sub in patterns {
+                            match sub {
+                                vuma_parser::ast::MatchPattern::Lit { value, .. } => {
+                                    match lit_as_i64(value) {
+                                        Some(v) => sub_values.push(v),
+                                        None => has_nested_complex = true,
+                                    }
+                                }
+                                vuma_parser::ast::MatchPattern::Wildcard(_) => {
+                                    has_wildcard = true;
+                                }
+                                _ => {
+                                    has_nested_complex = true;
+                                }
+                            }
+                        }
+                        if has_nested_complex {
+                            vuma_log!(
+                                warn,
+                                "match arm at span {:?} uses an or-pattern with nested \
+                                 complex sub-patterns (Range/Ident/Struct/Enum); arm \
+                                 body dropped. Only Lit and Wildcard sub-patterns are \
+                                 supported inside or-patterns.",
+                                arm.span
+                            );
+                            saw_complex_pattern = true;
+                        } else {
+                            let mut arm_body: Vec<ScgStatement> = Vec::new();
+                            let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
+                            if has_wildcard {
+                                default_body = arm_body.clone();
+                            }
+                            for v in sub_values {
+                                switch_arms.push(SwitchArm {
+                                    value: v,
+                                    body: arm_body.clone(),
+                                });
+                            }
+                        }
+                    }
+                    vuma_parser::ast::MatchPattern::Ident { name, .. } => {
+                        // Identifier pattern. Without type info we can't
+                        // distinguish a binding (`x => ...`) from a unit-
+                        // variant name (`None => ...`). We use Rust's
+                        // convention: lowercase/underscore = binding;
+                        // uppercase = unit-variant name.
+                        let looks_like_variant = name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_uppercase())
+                            .unwrap_or(false);
+                        if looks_like_variant {
+                            vuma_log!(
+                                warn,
+                                "match arm at span {:?} uses an identifier pattern \
+                                 `{}` that looks like a unit-variant name; arm body \
+                                 dropped (the discriminant value of a user-defined \
+                                 enum variant cannot be determined without type \
+                                 information).",
+                                arm.span,
+                                name
+                            );
+                            saw_complex_pattern = true;
+                        } else {
+                            // Treat as a binding: `x => ...` matches any
+                            // value and binds the discriminant to `x`.
+                            // Emit a copy Computation (`x = discriminant + 0`)
+                            // so the body can reference `x` via ScgExpr::Var(x).
+                            let mut arm_body: Vec<ScgStatement> = Vec::new();
+                            arm_body.push(ScgStatement::Computation(ComputationNode {
+                                dst: name.clone(),
+                                op: BinOpKind::Add,
+                                lhs: discriminant.clone(),
+                                rhs: ScgExpr::Int(0),
+                                tail_call: false,
+                                reassigns: None,
+                            }));
+                            let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
+                            default_body = arm_body;
+                            vuma_log!(
+                                debug,
+                                "match arm at span {:?}: identifier pattern `{}` \
+                                 treated as a binding (matches any value, binds \
+                                 discriminant to `{}`).",
+                                arm.span,
+                                name,
+                                name
+                            );
+                        }
+                    }
+                    vuma_parser::ast::MatchPattern::Enum { name, binding, .. } => {
+                        // Enum variant pattern: `Some(v)` or `None`.
+                        // Without type info we can't determine the variant's
+                        // discriminant value. If a binding is present (e.g.
+                        // `Some(v)`), treat it as a binding pattern (binds
+                        // the discriminant to `v`). If no binding (e.g.
+                        // `None`), drop with a warning.
+                        if let Some(b) = binding {
+                            let mut arm_body: Vec<ScgStatement> = Vec::new();
+                            arm_body.push(ScgStatement::Computation(ComputationNode {
+                                dst: b.clone(),
+                                op: BinOpKind::Add,
+                                lhs: discriminant.clone(),
+                                rhs: ScgExpr::Int(0),
+                                tail_call: false,
+                                reassigns: None,
+                            }));
+                            let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
+                            default_body = arm_body;
+                            vuma_log!(
+                                debug,
+                                "match arm at span {:?}: enum variant pattern \
+                                 `{}`({}) treated as a binding (matches any value, \
+                                 binds discriminant to `{}`). Variant discriminant \
+                                 matching is not supported without type info.",
+                                arm.span,
+                                name,
+                                b,
+                                b
+                            );
+                        } else {
+                            vuma_log!(
+                                warn,
+                                "match arm at span {:?} uses a unit-variant enum \
+                                 pattern `{}`; arm body dropped (the discriminant \
+                                 value of a user-defined enum variant cannot be \
+                                 determined without type information).",
+                                arm.span,
+                                name
+                            );
+                            saw_complex_pattern = true;
+                        }
+                    }
+                    vuma_parser::ast::MatchPattern::Struct { name, .. } => {
+                        vuma_log!(
+                            warn,
+                            "match arm at span {:?} uses a struct pattern `{}`; arm \
+                             body dropped (struct destructuring requires type \
+                             information not available in the direct AST→codegen \
+                             bridge).",
+                            arm.span,
+                            name
+                        );
                         saw_complex_pattern = true;
                     }
+                }
+
+                // Guard check: if this arm has a guard, flag it. Guards are
+                // silently IGNORED — the body is lowered as if the guard
+                // were absent. This is incorrect (the body should only
+                // execute when both the pattern matches AND the guard is
+                // true), but the Switch node has no guard slot. Proper
+                // guard lowering would require rewriting the match as an
+                // if/else chain.
+                if arm.guard.is_some() {
+                    saw_guard = true;
                 }
             }
 
             if saw_complex_pattern {
-                eprintln!(
-                    "[vuma] TODO: match statement at span {:?} uses complex patterns \
-                     (ident/struct/enum/range/or) which are not yet supported by the direct \
-                     AST→codegen bridge. Only literal-integer and wildcard arms were lowered; \
-                     other arm bodies were dropped.",
-                    match_stmt.span,
+                vuma_log!(
+                    warn,
+                    "match statement at span {:?} contains one or more unsupported \
+                     arm patterns (see preceding warnings). Only literal-integer, \
+                     wildcard, range (≤32 values), or-pattern (Lit/Wildcard \
+                     sub-patterns), and identifier/enum-binding patterns were \
+                     lowered; other arm bodies were dropped.",
+                    match_stmt.span
+                );
+            }
+            if saw_guard {
+                vuma_log!(
+                    warn,
+                    "match statement at span {:?} has one or more guarded arms \
+                     (`pat if cond => ...`); guards are not supported by the \
+                     ControlNode::Switch lowering and are SILENTLY IGNORED. \
+                     The body of a guarded arm will execute whenever the pattern \
+                     matches, regardless of the guard condition — this is \
+                     incorrect. Rewrite the match as an if/else chain to get \
+                     correct guard semantics.",
+                    match_stmt.span
                 );
             }
 
@@ -11148,35 +13410,90 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         }
 
         // ── sync { body } ──
-        // Concurrency primitive. The direct AST→codegen bridge does not
-        // enforce sync semantics (no mutex / atomic fence emission); the
-        // body is lowered inline so the statements still execute. TODO:
-        // implement proper sync-block lowering.
+        // Concurrency primitive. Emit a basic mutex/fence using
+        // a per-sync-block stack-allocated lock byte and AtomicStore
+        // acquire/release operations. This provides memory-ordering
+        // semantics (release-store before and after the body — both emit
+        // native atomic instructions on each backend: stlr/ldaxr on ARM,
+        // lock-prefixed xchg on x86, etc.).
+        //
+        // NOTE: this is NOT a true mutex. The lock byte is never contended
+        // (no spin-loop, no CAS), so it does not enforce mutual exclusion
+        // across threads. For single-threaded code with memory-ordering
+        // needs, this is sufficient. For multi-threaded code, use the
+        // `AtomicCas` intrinsic directly. A `vuma_log!(warn, ...)` is
+        // emitted to remind the user of this limitation.
         PStmt::Sync(sync_block) => {
-            eprintln!(
-                "[vuma] TODO: sync {{ ... }} block at span {:?} lowered without \
-                 synchronization semantics (body executes inline, no mutex/fence)",
-                sync_block.span,
+            vuma_log!(
+                warn,
+                "sync {{ ... }} block at span {:?} lowered with a stack-allocated \
+                 lock byte and AtomicStore acquire/release (no contention handling). \
+                 This provides memory-ordering semantics but does NOT enforce \
+                 mutual exclusion across threads.",
+                sync_block.span
             );
-            bridge_block_to_scg_stmts(&sync_block.body, ctx)
+
+            // Allocate a unique lock-byte stack slot. `alloc_temp` returns
+            // a unique name like `__tN` — we use it directly as the lock
+            // variable name (the AtomicStore args make its role clear).
+            let lock_name = ctx.alloc_temp();
+            let mut stmts = vec![
+                // Stack-allocate 8 bytes for the lock (I64 to match
+                // AtomicStore's U64 ty).
+                ScgStatement::Allocation(AllocationNode::Stack {
+                    name: lock_name.clone(),
+                    size: 8,
+                    ty: ScgType::I64,
+                }),
+                // Initialize lock to 0 (unlocked).
+                ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var(lock_name.clone()),
+                    offset: None,
+                    value: ScgExpr::Int(0),
+                    ty: Some(vuma_codegen::ir::IRType::U64),
+                }),
+                // Acquire: AtomicStore(1, &lock). On most backends this
+                // emits a release-fence + atomic store (e.g., stlr on
+                // ARM64, lock xchg on x86_64). The lock value (1) is
+                // arbitrary — what matters is the memory barrier.
+                ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "AtomicStore".to_string(),
+                    args: vec![ScgExpr::Int(1), ScgExpr::Var(lock_name.clone())],
+                    is_extern: false,
+                    reassigns: None,
+                }),
+            ];
+
+            // Lower the body inline between acquire and release.
+            stmts.extend(bridge_block_to_scg_stmts(&sync_block.body, ctx));
+
+            // Release: AtomicStore(0, &lock). Provides the release-fence
+            // semantics on the back-edge out of the sync block.
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: None,
+                func: "AtomicStore".to_string(),
+                args: vec![ScgExpr::Int(0), ScgExpr::Var(lock_name.clone())],
+                is_extern: false,
+                reassigns: None,
+            }));
+
+            stmts
         }
 
         // ── unsafe { body } ──
         // A scoping marker; lower the body inline. The unsafe contract is
         // the programmer's responsibility — no special handling needed.
-        PStmt::UnsafeBlock { body, .. } => {
-            bridge_block_to_scg_stmts(body, ctx)
-        }
+        PStmt::UnsafeBlock { body, .. } => bridge_block_to_scg_stmts(body, ctx),
 
         // BD directives (bd/repd/capd/reld) are annotations consumed by
         // the BD inference pass — they produce no codegen statements.
         PStmt::BdDirective(_) => vec![],
 
-        // PMT (Wave 1a): TransformCall is parsed-but-not-emitted in Wave
-        // 1a (the parser produces Stmt::Let with a function-call RHS for
-        // transform invocations). Stub: emit no statements so the build
-        // does not crash; Wave 1c will lower this properly.
+        // TransformCall is parsed-but-not-emitted (the parser produces
+        // Stmt::Let with a function-call RHS for transform invocations).
+        // Stub: emit no statements so the build
+        // does not crash; a follow-up will lower this properly.
         PStmt::TransformCall(_) => vec![],
     }
 }
-

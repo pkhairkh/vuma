@@ -174,7 +174,11 @@ impl SecurityLabel {
 
     /// Least upper bound of two labels.
     pub fn join(self, other: SecurityLabel) -> SecurityLabel {
-        if self >= other { self } else { other }
+        if self >= other {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -2045,7 +2049,8 @@ impl IRInstr {
             IRInstr::Select {
                 cond,
                 true_val,
-                false_val, ty: _,
+                false_val,
+                ty: _,
                 ..
             } => {
                 let mut r = cond.as_register().into_iter().collect::<Vec<_>>();
@@ -2078,7 +2083,12 @@ impl IRInstr {
                 r.extend(addr.as_register());
                 r
             }
-            IRInstr::AtomicCas { addr, expected, desired, .. } => {
+            IRInstr::AtomicCas {
+                addr,
+                expected,
+                desired,
+                ..
+            } => {
                 let mut r = addr.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(expected.as_register());
                 r.extend(desired.as_register());
@@ -2110,27 +2120,53 @@ impl IRInstr {
 impl fmt::Display for IRInstr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IRInstr::Load { dst, addr, offset, ty } => {
+            IRInstr::Load {
+                dst,
+                addr,
+                offset,
+                ty,
+            } => {
                 if *offset != 0 {
                     write!(f, "{} = load [{} + {}] ({})", dst, addr, offset, ty)
                 } else {
                     write!(f, "{} = load {} ({})", dst, addr, ty)
                 }
             }
-            IRInstr::Store { value, addr, offset, ty } => {
+            IRInstr::Store {
+                value,
+                addr,
+                offset,
+                ty,
+            } => {
                 if *offset != 0 {
                     write!(f, "store {}, [{} + {}] ({})", value, addr, offset, ty)
                 } else {
                     write!(f, "store {}, {} ({})", value, addr, ty)
                 }
             }
-            IRInstr::BinOp { op, dst, lhs, rhs, ty: _ } => {
+            IRInstr::BinOp {
+                op,
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => {
                 write!(f, "{} = {} {}, {}", dst, op, lhs, rhs)
             }
-            IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
+            IRInstr::UnaryOp {
+                op,
+                dst,
+                operand,
+                ty: _,
+            } => {
                 write!(f, "{} = {} {}", dst, op, operand)
             }
-            IRInstr::Call { dst, func, args, is_extern } => {
+            IRInstr::Call {
+                dst,
+                func,
+                args,
+                is_extern,
+            } => {
                 let args_str = args
                     .iter()
                     .map(|a| format!("{}", a))
@@ -2144,12 +2180,16 @@ impl fmt::Display for IRInstr {
             }
             IRInstr::Alloc { dst, size } => write!(f, "{} = alloc {}", dst, size),
             IRInstr::Free { ptr } => write!(f, "free {}", ptr),
-            IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
-                match (from_ty, to_ty) {
-                    (Some(ft), Some(_tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
-                    _ => write!(f, "{} = {} {}", dst, kind, src),
-                }
-            }
+            IRInstr::Cast {
+                kind,
+                dst,
+                src,
+                from_ty,
+                to_ty,
+            } => match (from_ty, to_ty) {
+                (Some(ft), Some(_tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
+                _ => write!(f, "{} = {} {}", dst, kind, src),
+            },
             IRInstr::Phi { dst, incoming } => {
                 let pairs = incoming
                     .iter()
@@ -2168,19 +2208,41 @@ impl fmt::Display for IRInstr {
                 dst,
                 cond,
                 true_val,
-                false_val, ty: _,
+                false_val,
+                ty: _,
             } => {
                 write!(f, "{} = select {}, {}, {}", dst, cond, true_val, false_val)
             }
-            IRInstr::Add { dst, lhs, rhs, ty: _ } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
-            IRInstr::Sub { dst, lhs, rhs, ty: _ } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
-            IRInstr::Mul { dst, lhs, rhs, ty: _ } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
-            IRInstr::Div { dst, lhs, rhs, ty: _ } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
+            IRInstr::Add {
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => write!(f, "{} = add {}, {}", dst, lhs, rhs),
+            IRInstr::Sub {
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => write!(f, "{} = sub {}, {}", dst, lhs, rhs),
+            IRInstr::Mul {
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => write!(f, "{} = mul {}, {}", dst, lhs, rhs),
+            IRInstr::Div {
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => write!(f, "{} = div {}, {}", dst, lhs, rhs),
             IRInstr::Cmp {
                 kind,
                 dst,
                 lhs,
-                rhs, ty: _,
+                rhs,
+                ty: _,
             } => {
                 write!(f, "{} = {} {}, {}", dst, kind, lhs, rhs)
             }
@@ -2227,8 +2289,18 @@ impl fmt::Display for IRInstr {
             IRInstr::AtomicStore { value, addr, ty } => {
                 write!(f, "atomic_store {}, {} ({})", value, addr, ty)
             }
-            IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
-                write!(f, "{} = atomic_cas {}, {}, {} ({})", dst, addr, expected, desired, ty)
+            IRInstr::AtomicCas {
+                dst,
+                addr,
+                expected,
+                desired,
+                ty,
+            } => {
+                write!(
+                    f,
+                    "{} = atomic_cas {}, {}, {} ({})",
+                    dst, addr, expected, desired, ty
+                )
             }
             IRInstr::Syscall { nr, args, dst } => {
                 let args_str = args
@@ -2241,8 +2313,19 @@ impl fmt::Display for IRInstr {
                     None => write!(f, "syscall {}({})", nr, args_str),
                 }
             }
-            IRInstr::VectorOp { op, lanes, elem_size, dst, lhs, rhs } => {
-                write!(f, "{} = {}<{}x{}> {}, {}", dst, op, lanes, elem_size, lhs, rhs)
+            IRInstr::VectorOp {
+                op,
+                lanes,
+                elem_size,
+                dst,
+                lhs,
+                rhs,
+            } => {
+                write!(
+                    f,
+                    "{} = {}<{}x{}> {}, {}",
+                    dst, op, lanes, elem_size, lhs, rhs
+                )
             }
             IRInstr::ChannelOpen { dst, elem_ty } => {
                 write!(f, "{} = channel_open {}", dst, elem_ty)
@@ -2256,12 +2339,26 @@ impl fmt::Display for IRInstr {
                 None => write!(f, "{} = channel_recv {}", dst, ch),
             },
             IRInstr::ChannelClose { ch } => write!(f, "channel_close {}", ch),
-            IRInstr::ChannelRecvTimeout { ch, dst, ty, timeout_ms } => match ty {
-                Some(t) => write!(f, "{} = channel_recv_timeout {}, {} ({})", dst, ch, timeout_ms, t),
+            IRInstr::ChannelRecvTimeout {
+                ch,
+                dst,
+                ty,
+                timeout_ms,
+            } => match ty {
+                Some(t) => write!(
+                    f,
+                    "{} = channel_recv_timeout {}, {} ({})",
+                    dst, ch, timeout_ms, t
+                ),
                 None => write!(f, "{} = channel_recv_timeout {}, {}", dst, ch, timeout_ms),
             },
             // Wave 8b: fallible recv producing (value, err) pair.
-            IRInstr::ChannelRecvResult { ch, dst, err_dst, ty } => match ty {
+            IRInstr::ChannelRecvResult {
+                ch,
+                dst,
+                err_dst,
+                ty,
+            } => match ty {
                 Some(t) => write!(
                     f,
                     "({}, {}) = channel_recv_result {} ({})",
@@ -2270,21 +2367,35 @@ impl fmt::Display for IRInstr {
                 None => write!(f, "({}, {}) = channel_recv_result {}", dst, err_dst, ch),
             },
             // Wave 93-94: zk-STARK proof generation.
-            IRInstr::StarkProof { input, dst, constraints } => {
+            IRInstr::StarkProof {
+                input,
+                dst,
+                constraints,
+            } => {
                 if constraints.is_empty() {
                     write!(f, "{} = stark_prove {}", dst, input)
                 } else {
                     let cs: Vec<String> = constraints.iter().map(|c| c.to_string()).collect();
                     write!(f, "{} = stark_prove {}, [{}]", dst, input, cs.join(", "))
                 }
-            },
-            IRInstr::CallIndirect { dst, func_ptr, args } => {
+            }
+            IRInstr::CallIndirect {
+                dst,
+                func_ptr,
+                args,
+            } => {
                 let args_str: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 match dst {
-                    Some(d) => write!(f, "{} = call_indirect {}({})", d, func_ptr, args_str.join(", ")),
+                    Some(d) => write!(
+                        f,
+                        "{} = call_indirect {}({})",
+                        d,
+                        func_ptr,
+                        args_str.join(", ")
+                    ),
                     None => write!(f, "call_indirect {}({})", func_ptr, args_str.join(", ")),
                 }
-            },
+            }
         }
     }
 }
@@ -2438,11 +2549,11 @@ pub fn generic_syscall_name(nr: u32) -> Option<&'static str> {
         113 => Some("clock_gettime"),
         115 => Some("clock_nanosleep"),
         // ── Misc ──
-        160 => Some("uname"),  // legacy
-        214 => Some("brk"),    // legacy
+        160 => Some("uname"), // legacy
+        214 => Some("brk"),   // legacy
         220 => Some("clone"),
         221 => Some("execve"),
-        223 => Some("mmap"),   // legacy
+        223 => Some("mmap"), // legacy
         228 => Some("clock_gettime"),
         231 => Some("exit_group"),
         232 => Some("epoll_create1"),
@@ -3152,8 +3263,14 @@ mod tests {
 
         // Wave 1a: Channel<T> is pointer-sized.
         assert_eq!(size_of(&IRType::Channel(Box::new(IRType::I32))), 8);
-        assert_eq!(size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 4), 4);
-        assert_eq!(size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 8), 8);
+        assert_eq!(
+            size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 4),
+            4
+        );
+        assert_eq!(
+            size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 8),
+            8
+        );
         // Inner payload type does not affect size.
         assert_eq!(
             size_of(&IRType::Channel(Box::new(IRType::I8))),
@@ -3461,7 +3578,10 @@ mod tests {
 
         // as_address_32bit
         assert_eq!(IRValue::Address(0x1000).as_address_32bit(), Some(0x1000u32));
-        assert_eq!(IRValue::Address(0xFFFFFFFF).as_address_32bit(), Some(0xFFFFFFFFu32));
+        assert_eq!(
+            IRValue::Address(0xFFFFFFFF).as_address_32bit(),
+            Some(0xFFFFFFFFu32)
+        );
         assert_eq!(IRValue::Address(0x100000000).as_address_32bit(), None); // > 32-bit
 
         // HFA detection
@@ -3477,5 +3597,33 @@ mod tests {
             fields: vec![IRType::F64, IRType::I32],
         };
         assert!(!not_hfa.is_hfa());
+    }
+
+    // ── [Task 9-d / Caveats §6 row 3] Negative-path test (real panic) ──
+    //
+    // `IRFunction::current_block()` calls `.expect("IRFunction must
+    // have at least one block")` on the `blocks` Vec (line 2841).
+    // This is one of the few genuine panic paths in codegen reachable
+    // through the public API (the `blocks` field is `pub`, so a caller
+    // can clear it).  Without this `#[should_panic]` test, a refactor
+    // that swallowed the panic (e.g. by returning a sentinel block or
+    // by silently re-adding an entry block) would silently corrupt
+    // downstream codegen — every emitter assumes `current_block()`
+    // returns a valid block.
+
+    /// `IRFunction::current_block()` panics with the literal
+    /// "IRFunction must have at least one block" if the `blocks` Vec
+    /// is empty.  We bypass the constructor's invariant (which always
+    /// pushes an entry block) by clearing the Vec through the public
+    /// field, then assert the panic fires with the expected message.
+    #[test]
+    #[should_panic(expected = "IRFunction must have at least one block")]
+    fn test_negative_current_block_panics_on_empty_blocks() {
+        let mut func = IRFunction::new("empty_blocks_panic_test");
+        // Constructor pushes an entry block; clear it via the public
+        // field to drive the `.expect()` panic in `current_block`.
+        func.blocks.clear();
+        // Must panic — there is no fallback block.
+        let _ = func.current_block();
     }
 }

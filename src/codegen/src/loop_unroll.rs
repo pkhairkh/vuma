@@ -1,10 +1,10 @@
-//! # Correct Loop Unrolling (Wave 13b + Wave 30)
+//! # Correct Loop Unrolling
 //!
-//! Replaces the miscompiling vectorizer (Wave 13) which duplicated the
-//! loop body 4× without adjusting the trip count — a miscompilation that
-//! turned `for i in 0..N { body }` into `for i in 0..N { body; body; body; body }`.
+//! Replaces the miscompiling vectorizer which duplicated the loop body
+//! 4× without adjusting the trip count — a miscompilation that turned
+//! `for i in 0..N { body }` into `for i in 0..N { body; body; body; body }`.
 //!
-//! ## Wave 30 additions
+//! ## Additions
 //!
 //! - **Multi-block loop unrolling with block-graph rewiring.** The previous
 //!   implementation bailed on any loop with body blocks (the `return None` at
@@ -62,11 +62,11 @@
 //! analyze. This means it only unrolls loops it can PROVE correct, and
 //! leaves everything else untouched. No miscompilation is possible.
 
-use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, BinOpKind, CmpKind};
+use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
 use crate::regalloc::{LoopDetector, LoopInfo};
 
 // ─────────────────────────────────────────────────────────────────────────
-// Constants & cost model (Wave 30)
+// Constants & cost model
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Default unroll factor when the trip count is unknown.
@@ -82,7 +82,7 @@ const FULL_UNROLL_THRESHOLD: u64 = 8;
 const UNROLL_CODE_SIZE_BUDGET: u32 = 500;
 
 // ─────────────────────────────────────────────────────────────────────────
-// Scalar Evolution (SCEV) — Wave 30
+// Scalar Evolution (SCEV)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// An affine recurrence chain `{start, +, step}` over a loop.
@@ -193,11 +193,19 @@ pub fn analyze_trip_count(func: &IRFunction, loop_info: &LoopInfo) -> TripCount 
         {
             if let (IRValue::Register(d), IRValue::Register(l)) = (dst, lhs) {
                 if *l == phi_vreg {
-                    step = Some(if matches!(instr, IRInstr::BinOp { op: BinOpKind::Sub, .. }) {
-                        -*c
-                    } else {
-                        *c
-                    });
+                    step = Some(
+                        if matches!(
+                            instr,
+                            IRInstr::BinOp {
+                                op: BinOpKind::Sub,
+                                ..
+                            }
+                        ) {
+                            -*c
+                        } else {
+                            *c
+                        },
+                    );
                     i_next_vreg = Some(*d);
                     break;
                 }
@@ -254,11 +262,7 @@ pub fn analyze_trip_count(func: &IRFunction, loop_info: &LoopInfo) -> TripCount 
         None => return TripCount::Unknown,
     };
     let (kind, end) = match cmp {
-        IRInstr::Cmp {
-            kind,
-            rhs,
-            ..
-        } => {
+        IRInstr::Cmp { kind, rhs, .. } => {
             let end = match rhs {
                 IRValue::Immediate(c) => *c,
                 _ => return TripCount::Unknown, // end must be a constant for Known.
@@ -386,18 +390,17 @@ pub fn compute_unroll_factor(trip_count: &TripCount, body_size: usize) -> u32 {
 ///    `try_unroll_block`, which duplicates the body in-place and changes
 ///    the IV step from +1 to +F.
 /// 2. **2-block natural loops** (header + latch, no body blocks): handled
-///    by `try_unroll_general_loop` (the existing Wave 13b path).
+///    by `try_unroll_general_loop` (the existing 2-block unrolling path).
 /// 3. **Multi-block natural loops** (header + body + latch): handled by
-///    `try_unroll_multiblock_loop` (NEW in Wave 30), which clones the
-///    body+lid sequence `factor` times and rewires the block graph.
+///    `try_unroll_multiblock_loop`, which clones the body+lid sequence
+///    `factor` times and rewires the block graph.
 ///
 /// All three patterns require a detectable induction variable and bail out
 /// for any loop they cannot fully analyze (no miscompilation possible).
 /// The unroll factor is derived from trip-count analysis (affine SCEV)
 /// and capped by a code-size budget.
 pub fn unroll_loops(mut func: IRFunction) -> IRFunction {
-    // Phase 1: Unroll multi-block natural loops (NEW in Wave 30) and 2-block
-    // natural loops (Wave 13b).
+    // Phase 1: Unroll multi-block natural loops and 2-block natural loops.
     let loops = LoopDetector::detect_with_induction_vars(&func);
     for loop_info in &loops {
         if loop_info.blocks.len() == 1 {
@@ -418,7 +421,7 @@ pub fn unroll_loops(mut func: IRFunction) -> IRFunction {
         }
     }
 
-    // Phase 2: Unroll single-block self-loops (the original Wave 13b path).
+    // Phase 2: Unroll single-block self-loops (the original path).
     // Use the trip-count-derived factor when available.
     let mut changed = true;
     let max_iterations = 3;
@@ -449,7 +452,7 @@ pub fn unroll_loops(mut func: IRFunction) -> IRFunction {
         }
     }
 
-    // Phase 3: Unroll-and-jam (Wave 30) — delegates to the real
+    // Phase 3: Unroll-and-jam — delegates to the real
     // conservative `try_unroll_and_jam` implementation below.
     func = try_unroll_and_jam(func);
 
@@ -467,7 +470,7 @@ fn compute_loop_body_size(func: &IRFunction, loop_info: &LoopInfo) -> usize {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Multi-block loop unrolling (NEW in Wave 30)
+// Multi-block loop unrolling
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Attempt to unroll a multi-block natural loop by `factor`, with block-graph
@@ -508,7 +511,10 @@ fn try_unroll_multiblock_loop(
     }
 
     // Find the header block.
-    let header_idx = func.blocks.iter().position(|b| b.label == loop_info.header)?;
+    let header_idx = func
+        .blocks
+        .iter()
+        .position(|b| b.label == loop_info.header)?;
     let header = &func.blocks[header_idx];
 
     // The header must start with a Phi (the induction variable).
@@ -529,7 +535,10 @@ fn try_unroll_multiblock_loop(
     };
 
     // Find the latch block.
-    let latch_idx = func.blocks.iter().position(|b| b.label == loop_info.latch)?;
+    let latch_idx = func
+        .blocks
+        .iter()
+        .position(|b| b.label == loop_info.latch)?;
     let latch = &func.blocks[latch_idx];
 
     // Find `i_next = i + 1` in the latch.
@@ -595,9 +604,7 @@ fn try_unroll_multiblock_loop(
         .blocks
         .iter()
         .map(|b| b.label.clone())
-        .filter(|l| {
-            loop_info.blocks.contains(l) && l != &loop_info.header && l != &loop_info.latch
-        })
+        .filter(|l| loop_info.blocks.contains(l) && l != &loop_info.header && l != &loop_info.latch)
         .collect();
 
     for block_label in &loop_info.blocks {
@@ -638,9 +645,9 @@ fn try_unroll_multiblock_loop(
         .unwrap_or_else(|| loop_info.latch.clone());
 
     // Remove the original body and latch blocks from new_func.
-    new_func.blocks.retain(|b| {
-        !body_labels.contains(&b.label) && b.label != loop_info.latch
-    });
+    new_func
+        .blocks
+        .retain(|b| !body_labels.contains(&b.label) && b.label != loop_info.latch);
 
     // Find the header in new_func (its index may have shifted).
     let new_header_idx = new_func
@@ -816,7 +823,7 @@ fn is_safe_for_unroll(instr: &IRInstr) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Unroll-and-jam (Wave 30 — conservative implementation)
+// Unroll-and-jam (conservative implementation)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Unroll-and-jam: unroll the outer loop of a nested loop and place the
@@ -825,7 +832,7 @@ fn is_safe_for_unroll(instr: &IRInstr) -> bool {
 /// outer-loop-carried dependencies — it improves data locality and exposes
 /// vectorization opportunities.
 ///
-/// ## Conservative scope (Wave 30)
+/// ## Conservative scope
 ///
 /// This implementation is deliberately conservative. It only fires when ALL
 /// of the following hold:
@@ -925,11 +932,7 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
             let outer_extra: Vec<&String> = outer
                 .blocks
                 .iter()
-                .filter(|l| {
-                    **l != outer.header
-                        && **l != outer.latch
-                        && !inner.blocks.contains(*l)
-                })
+                .filter(|l| **l != outer.header && **l != outer.latch && !inner.blocks.contains(*l))
                 .collect();
             if !outer_extra.is_empty() {
                 continue;
@@ -1184,7 +1187,11 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
             if !is_safe_for_unroll(instr) {
                 return func; // (a) unsafe instruction.
             }
-            if let IRInstr::Store { addr: IRValue::Register(r), .. } = instr {
+            if let IRInstr::Store {
+                addr: IRValue::Register(r),
+                ..
+            } = instr
+            {
                 if outer_tainted.contains(r) {
                     return func; // (b) outer-loop-carried store.
                 }
@@ -1218,9 +1225,7 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
         .blocks
         .iter()
         .filter(|b| {
-            inner.blocks.contains(&b.label)
-                && b.label != inner.header
-                && b.label != inner.latch
+            inner.blocks.contains(&b.label) && b.label != inner.header && b.label != inner.latch
         })
         .cloned()
         .collect();
@@ -1229,9 +1234,7 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
 
     // Remove the original inner blocks from new_func (we'll add the
     // duplicated versions after the outer header).
-    new_func
-        .blocks
-        .retain(|b| !inner.blocks.contains(&b.label));
+    new_func.blocks.retain(|b| !inner.blocks.contains(&b.label));
 
     // Find the outer header index in new_func (its position may have shifted
     // because we removed inner blocks, but the outer header is NOT an inner
@@ -1374,12 +1377,8 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
             }
             // Rewire the terminator: jump/branch targets to inner body/latch
             // blocks get the _u{k} suffix.
-            new_b.terminator = rewire_inner_terminator(
-                &orig_b.terminator,
-                k,
-                &inner_body_labels,
-                &inner.latch,
-            );
+            new_b.terminator =
+                rewire_inner_terminator(&orig_b.terminator, k, &inner_body_labels, &inner.latch);
             new_b.source_line = orig_b.source_line;
             new_blocks.push(new_b);
         }
@@ -1408,7 +1407,11 @@ fn try_unroll_and_jam(func: IRFunction) -> IRFunction {
                 // Also update the cmp's lhs (which is inner_iv_next) to
                 // inner_iv_next_k for k > 0.
                 if k > 0 {
-                    if let IRInstr::Cmp { lhs: IRValue::Register(r), .. } = &mut cloned {
+                    if let IRInstr::Cmp {
+                        lhs: IRValue::Register(r),
+                        ..
+                    } = &mut cloned
+                    {
                         if *r == inner_iv_next {
                             *r = inner_iv_next_k;
                         }
@@ -1533,13 +1536,13 @@ fn renumber_dst(instr: &mut IRInstr, next_vreg: &mut u32) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 2-block unrolling (Wave 13b, retained)
+// 2-block unrolling (retained)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Attempt to unroll a general (header + latch, no body) natural loop by
 /// `factor`.
 ///
-/// This is the original Wave 13b path for 2-block loops. Multi-block loops
+/// This is the original path for 2-block loops. Multi-block loops
 /// (with body blocks) are handled by `try_unroll_multiblock_loop`.
 fn try_unroll_general_loop(
     func: &IRFunction,
@@ -1551,7 +1554,10 @@ fn try_unroll_general_loop(
     }
 
     // Find the header block.
-    let header_idx = func.blocks.iter().position(|b| b.label == loop_info.header)?;
+    let header_idx = func
+        .blocks
+        .iter()
+        .position(|b| b.label == loop_info.header)?;
     let header = &func.blocks[header_idx];
 
     if header.instructions.is_empty() {
@@ -1582,7 +1588,10 @@ fn try_unroll_general_loop(
     }
 
     // Find the increment in the latch.
-    let latch_idx = func.blocks.iter().position(|b| b.label == loop_info.latch)?;
+    let latch_idx = func
+        .blocks
+        .iter()
+        .position(|b| b.label == loop_info.latch)?;
     let latch = &func.blocks[latch_idx];
 
     let mut increment_instr_idx = None;
@@ -1612,9 +1621,7 @@ fn try_unroll_general_loop(
         .blocks
         .iter()
         .map(|b| b.label.clone())
-        .filter(|l| {
-            loop_info.blocks.contains(l) && l != &loop_info.header && l != &loop_info.latch
-        })
+        .filter(|l| loop_info.blocks.contains(l) && l != &loop_info.header && l != &loop_info.latch)
         .collect();
     if !body_labels.is_empty() {
         return None; // Multi-block — use try_unroll_multiblock_loop instead.
@@ -1685,7 +1692,7 @@ fn try_unroll_general_loop(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Single-block unrolling (Wave 13b, retained)
+// Single-block unrolling (retained)
 // ─────────────────────────────────────────────────────────────────────────
 
 pub fn try_unroll_block(block: &IRBlock, factor: u32) -> Option<IRBlock> {
@@ -1776,7 +1783,12 @@ pub fn try_unroll_block(block: &IRBlock, factor: u32) -> Option<IRBlock> {
 
     let mut cmp_idx = None;
     for (i, instr) in instrs.iter().enumerate() {
-        if let IRInstr::Cmp { dst: IRValue::Register(d), lhs, .. } = instr {
+        if let IRInstr::Cmp {
+            dst: IRValue::Register(d),
+            lhs,
+            ..
+        } = instr
+        {
             if *d == cond_vreg {
                 if let IRValue::Register(l) = lhs {
                     if *l == i_new_vreg {
@@ -1914,8 +1926,10 @@ fn substitute_vreg(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32) {
             sub_val(rhs, old_vreg, new_vreg);
             let _ = dst;
         }
-        IRInstr::Add { dst, lhs, rhs, .. } | IRInstr::Sub { dst, lhs, rhs, .. }
-        | IRInstr::Mul { dst, lhs, rhs, .. } | IRInstr::Div { dst, lhs, rhs, .. } => {
+        IRInstr::Add { dst, lhs, rhs, .. }
+        | IRInstr::Sub { dst, lhs, rhs, .. }
+        | IRInstr::Mul { dst, lhs, rhs, .. }
+        | IRInstr::Div { dst, lhs, rhs, .. } => {
             sub_val(lhs, old_vreg, new_vreg);
             sub_val(rhs, old_vreg, new_vreg);
             let _ = dst;
@@ -1942,7 +1956,13 @@ fn substitute_vreg(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32) {
             sub_val(src, old_vreg, new_vreg);
             let _ = dst;
         }
-        IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+        IRInstr::Select {
+            dst,
+            cond,
+            true_val,
+            false_val,
+            ..
+        } => {
             sub_val(cond, old_vreg, new_vreg);
             sub_val(true_val, old_vreg, new_vreg);
             sub_val(false_val, old_vreg, new_vreg);
@@ -1979,7 +1999,10 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
                 *r = fresh;
             }
         }
-        IRInstr::Cmp { dst: IRValue::Register(r), .. } => {
+        IRInstr::Cmp {
+            dst: IRValue::Register(r),
+            ..
+        } => {
             *r = fresh;
         }
         IRInstr::Phi { dst: _, .. } => {
@@ -1997,7 +2020,7 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, BinOpKind, CmpKind};
+    use crate::ir::{BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
     use crate::regalloc::LoopInfo;
     use std::collections::HashSet;
 
@@ -2444,7 +2467,10 @@ mod tests {
         // Trip count > threshold → min(8, trip/2).
         let tc = TripCount::Known(100);
         let factor = compute_unroll_factor(&tc, 5);
-        assert_eq!(factor, 8, "large trip count should cap at MAX_UNROLL_FACTOR=8");
+        assert_eq!(
+            factor, 8,
+            "large trip count should cap at MAX_UNROLL_FACTOR=8"
+        );
     }
 
     #[test]
@@ -2500,7 +2526,10 @@ mod tests {
             .unwrap();
         match &header.terminator {
             IRTerminator::Jump(t) => assert_eq!(t, "latch_u0"),
-            other => panic!("header terminator should be Jump(latch_u0), got {:?}", other),
+            other => panic!(
+                "header terminator should be Jump(latch_u0), got {:?}",
+                other
+            ),
         }
         // latch_u0 should Jump to latch_u1 (unconditional).
         let latch_u0 = unrolled
@@ -2524,7 +2553,10 @@ mod tests {
                 false_block,
                 ..
             } => {
-                assert_eq!(true_block, "header", "latch_u1 should branch back to header");
+                assert_eq!(
+                    true_block, "header",
+                    "latch_u1 should branch back to header"
+                );
                 assert_eq!(false_block, "exit", "latch_u1 should exit to 'exit'");
             }
             other => panic!("latch_u1 should Branch, got {:?}", other),
@@ -2545,8 +2577,16 @@ mod tests {
         assert!(labels.contains(&"header"), "header missing: {:?}", labels);
         assert!(labels.contains(&"body_u0"), "body_u0 missing: {:?}", labels);
         assert!(labels.contains(&"body_u1"), "body_u1 missing: {:?}", labels);
-        assert!(labels.contains(&"latch_u0"), "latch_u0 missing: {:?}", labels);
-        assert!(labels.contains(&"latch_u1"), "latch_u1 missing: {:?}", labels);
+        assert!(
+            labels.contains(&"latch_u0"),
+            "latch_u0 missing: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"latch_u1"),
+            "latch_u1 missing: {:?}",
+            labels
+        );
         // Header → body_u0.
         let header = unrolled
             .blocks
@@ -2642,18 +2682,21 @@ mod tests {
                 (IRValue::Register(8), "latch".to_string()),
             ],
         });
-        // body: i*4
-        header.instructions.push(IRInstr::BinOp {
+        header.terminator = IRTerminator::Jump("latch".to_string());
+        func.blocks.push(header);
+
+        let mut latch = IRBlock::new("latch");
+        // body: i*4 — placed in the LATCH (not the header) because the
+        // multi-block unroller clones body + latch blocks (NOT the
+        // header). Putting the body in the header would leave it
+        // un-cloned and the test would under-count `Mul` copies.
+        latch.instructions.push(IRInstr::BinOp {
             op: BinOpKind::Mul,
             dst: IRValue::Register(5),
             lhs: IRValue::Register(4),
             rhs: IRValue::Immediate(4),
             ty: None,
         });
-        header.terminator = IRTerminator::Jump("latch".to_string());
-        func.blocks.push(header);
-
-        let mut latch = IRBlock::new("latch");
         latch.instructions.push(IRInstr::BinOp {
             op: BinOpKind::Add,
             dst: IRValue::Register(8),
@@ -2738,7 +2781,7 @@ mod tests {
         let _ = mul_count;
     }
 
-    // ── Unroll-and-jam tests (Wave 30) ─────────────────────────────────
+    // ── Unroll-and-jam tests ─────────────────────────────────────
 
     #[test]
     fn test_unroll_and_jam_is_noop_for_single_loop() {
@@ -2776,9 +2819,12 @@ mod tests {
             result.blocks.len()
         );
 
-        let labels: Vec<&str> =
-            result.blocks.iter().map(|b| b.label.as_str()).collect();
-        assert!(labels.contains(&"outer_header"), "outer_header missing: {:?}", labels);
+        let labels: Vec<&str> = result.blocks.iter().map(|b| b.label.as_str()).collect();
+        assert!(
+            labels.contains(&"outer_header"),
+            "outer_header missing: {:?}",
+            labels
+        );
         assert!(
             labels.contains(&"inner_header_u0"),
             "inner_header_u0 missing: {:?}",
@@ -2789,7 +2835,11 @@ mod tests {
             "inner_header_u1 missing: {:?}",
             labels
         );
-        assert!(labels.contains(&"between_u1"), "between_u1 missing: {:?}", labels);
+        assert!(
+            labels.contains(&"between_u1"),
+            "between_u1 missing: {:?}",
+            labels
+        );
         assert!(
             labels.contains(&"inner_latch_u0"),
             "inner_latch_u0 missing: {:?}",
@@ -2966,7 +3016,7 @@ mod tests {
         );
     }
 
-    // ── Existing tests (Wave 13b regression) ───────────────────────────
+    // ── Existing tests (regression) ─────────────────────────────
 
     #[test]
     fn test_unroller_bails_on_non_loop() {

@@ -1,0 +1,34 @@
+// oob_array_read — Array read out of bounds (requires --safe)
+// Expected exit code: 134
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+//
+// Bounds Wave 1 SAFE-ONLY negative test: allocate a 4-byte buffer
+// (`[u8; 4]`) and read past its end at index 10. With `--safe`, the
+// injected `UGe(idx, 4)` bounds check evaluates to true (10 >= 4) and
+// dispatches to `__oob_trap`, which aborts with exit code 134
+// (SIGABRT, 128 + 6).
+//
+// IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
+// standard suite because it only passes when compiled with `--safe`.
+// Without `--safe`, the OOB access is undefined behaviour: the
+// process may crash (SIGSEGV → exit 139), may silently read garbage,
+// or may even return a value. The expected exit code below assumes
+// `--safe` was passed at compile time.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocation (PMT idiom)
+//   - `[u8; 4]` array field with a known 4-byte size
+//   - out-of-bounds Load (read) at index 10 — index is a runtime
+//     variable so O3 cannot trivially DCE the access; the injected
+//     `UGe(idx, 4)` check folds to true and the trap branch survives
+//     DCE because it is statically reachable.
+//   - exit 134 == SIGABRT (128 + 6) emitted by `__oob_trap`.
+
+layout Buf = { data: [u8; 4] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    // Read past the 4-byte array — should trap with exit 134 when --safe
+    let idx = 10;
+    return b.data[idx];
+}

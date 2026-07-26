@@ -19,13 +19,12 @@
 //!    can reason about type flow.
 //! 4. **Direction clarity**: Edges clearly indicate data flow direction.
 
-
 use crate::callgraph::CallGraph;
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
 use crate::llm_json::{
-    self, build_array, build_object, json_bool, json_opt_string, json_opt_u64, json_str,
-    json_u64, json_u64_array, json_usize, JsonValue,
+    self, build_array, build_object, json_bool, json_opt_string, json_opt_u64, json_str, json_u64,
+    json_u64_array, json_usize, JsonValue,
 };
 use crate::node::{AccessMode, NodeData, NodeId, NodePayload, ProgramPoint};
 
@@ -250,7 +249,10 @@ impl SCG {
                             let is_call_or_return = self.edges().any(|e| {
                                 e.source == current
                                     && e.target == succ
-                                    && matches!(e.kind, EdgeKind::Call { .. } | EdgeKind::Return { .. })
+                                    && matches!(
+                                        e.kind,
+                                        EdgeKind::Call { .. } | EdgeKind::Return { .. }
+                                    )
                             });
                             if (is_cf || is_df) && !is_call_or_return {
                                 queue.push_back(succ);
@@ -286,10 +288,7 @@ impl SCG {
                 node_type: format!("{}", n.node_type),
                 operation: node_operation(n),
                 result_type: node_result_type(n),
-                inputs: node_inputs
-                    .get(&n.id.as_u64())
-                    .cloned()
-                    .unwrap_or_default(),
+                inputs: node_inputs.get(&n.id.as_u64()).cloned().unwrap_or_default(),
                 outputs: node_outputs
                     .get(&n.id.as_u64())
                     .cloned()
@@ -314,9 +313,7 @@ impl SCG {
         // Build functions
         let mut functions = Vec::new();
         for fid in call_graph.functions() {
-            let name = call_graph
-                .function_label(fid)
-                .map(|s| s.to_string());
+            let name = call_graph.function_label(fid).map(|s| s.to_string());
             let return_node_id = call_graph.function_return(fid).map(|n| n.as_u64());
 
             // Collect nodes belonging to this function
@@ -333,7 +330,9 @@ impl SCG {
                 .iter()
                 .map(|cge| LlmCallTarget {
                     callee_entry_node_id: cge.callee.0.as_u64(),
-                    callee_name: call_graph.function_label(&cge.callee).map(|s| s.to_string()),
+                    callee_name: call_graph
+                        .function_label(&cge.callee)
+                        .map(|s| s.to_string()),
                 })
                 .collect();
 
@@ -411,18 +410,22 @@ impl LlmScgJson {
     pub fn to_json_value(&self) -> JsonValue {
         build_object(vec![
             ("summary".to_string(), self.summary.to_json_value()),
-            ("nodes".to_string(), build_array(
-                self.nodes.iter().map(|n| n.to_json_value()).collect(),
-            )),
-            ("edges".to_string(), build_array(
-                self.edges.iter().map(|e| e.to_json_value()).collect(),
-            )),
-            ("functions".to_string(), build_array(
-                self.functions.iter().map(|f| f.to_json_value()).collect(),
-            )),
-            ("regions".to_string(), build_array(
-                self.regions.iter().map(|r| r.to_json_value()).collect(),
-            )),
+            (
+                "nodes".to_string(),
+                build_array(self.nodes.iter().map(|n| n.to_json_value()).collect()),
+            ),
+            (
+                "edges".to_string(),
+                build_array(self.edges.iter().map(|e| e.to_json_value()).collect()),
+            ),
+            (
+                "functions".to_string(),
+                build_array(self.functions.iter().map(|f| f.to_json_value()).collect()),
+            ),
+            (
+                "regions".to_string(),
+                build_array(self.regions.iter().map(|r| r.to_json_value()).collect()),
+            ),
         ])
     }
 
@@ -436,9 +439,7 @@ impl LlmScgJson {
     }
 
     fn from_json_value(value: &JsonValue) -> Result<Self, String> {
-        let summary = value
-            .get("summary")
-            .ok_or("missing 'summary'")?;
+        let summary = value.get("summary").ok_or("missing 'summary'")?;
         let nodes = value
             .get("nodes")
             .and_then(|v| v.as_array())
@@ -482,7 +483,10 @@ impl LlmSummary {
         let mut entries: Vec<(String, JsonValue)> = vec![
             ("total_nodes".to_string(), json_usize(self.total_nodes)),
             ("total_edges".to_string(), json_usize(self.total_edges)),
-            ("total_functions".to_string(), json_usize(self.total_functions)),
+            (
+                "total_functions".to_string(),
+                json_usize(self.total_functions),
+            ),
             ("total_regions".to_string(), json_usize(self.total_regions)),
         ];
         // `node_type_counts` is a BTreeMap — serde_json serializes BTreeMap
@@ -538,7 +542,10 @@ impl LlmNode {
             ("id".to_string(), json_u64(self.id)),
             ("node_type".to_string(), json_str(&self.node_type)),
             ("operation".to_string(), json_str(&self.operation)),
-            ("result_type".to_string(), json_opt_string(&self.result_type)),
+            (
+                "result_type".to_string(),
+                json_opt_string(&self.result_type),
+            ),
             ("inputs".to_string(), json_u64_array(&self.inputs)),
             ("outputs".to_string(), json_u64_array(&self.outputs)),
             (
@@ -673,7 +680,10 @@ impl LlmFunction {
     fn to_json_value(&self) -> JsonValue {
         build_object(vec![
             ("entry_node_id".to_string(), json_u64(self.entry_node_id)),
-            ("return_node_id".to_string(), json_opt_u64(&self.return_node_id)),
+            (
+                "return_node_id".to_string(),
+                json_opt_u64(&self.return_node_id),
+            ),
             ("name".to_string(), json_opt_string(&self.name)),
             ("nodes".to_string(), json_u64_array(&self.nodes)),
             (
@@ -735,8 +745,14 @@ impl LlmFunction {
 impl LlmCallTarget {
     fn to_json_value(&self) -> JsonValue {
         build_object(vec![
-            ("callee_entry_node_id".to_string(), json_u64(self.callee_entry_node_id)),
-            ("callee_name".to_string(), json_opt_string(&self.callee_name)),
+            (
+                "callee_entry_node_id".to_string(),
+                json_u64(self.callee_entry_node_id),
+            ),
+            (
+                "callee_name".to_string(),
+                json_opt_string(&self.callee_name),
+            ),
         ])
     }
 
@@ -760,8 +776,14 @@ impl LlmRegion {
     fn to_json_value(&self) -> JsonValue {
         build_object(vec![
             ("id".to_string(), json_u64(self.id)),
-            ("deployment_target".to_string(), json_str(&self.deployment_target)),
-            ("security_boundary".to_string(), json_bool(self.security_boundary)),
+            (
+                "deployment_target".to_string(),
+                json_str(&self.deployment_target),
+            ),
+            (
+                "security_boundary".to_string(),
+                json_bool(self.security_boundary),
+            ),
             ("nodes".to_string(), json_u64_array(&self.nodes)),
         ])
     }
@@ -834,10 +856,7 @@ fn format_llm_as_text(llm: &LlmScgJson) -> String {
         out.push_str("--- Functions ---\n\n");
         for func in &llm.functions {
             let default_name = format!("func_{}", func.entry_node_id);
-            let name = func
-                .name
-                .as_deref()
-                .unwrap_or(&default_name);
+            let name = func.name.as_deref().unwrap_or(&default_name);
             out.push_str(&format!("Function: {}\n", name));
             out.push_str(&format!(
                 "  Entry: node_{}  Return: {}\n",
@@ -864,11 +883,11 @@ fn format_llm_as_text(llm: &LlmScgJson) -> String {
                 out.push_str("  Calls:\n");
                 for call in &func.calls {
                     let default_callee = format!("func_{}", call.callee_entry_node_id);
-                    let callee_name = call
-                        .callee_name
-                        .as_deref()
-                        .unwrap_or(&default_callee);
-                    out.push_str(&format!("    -> {} (node_{})\n", callee_name, call.callee_entry_node_id));
+                    let callee_name = call.callee_name.as_deref().unwrap_or(&default_callee);
+                    out.push_str(&format!(
+                        "    -> {} (node_{})\n",
+                        callee_name, call.callee_entry_node_id
+                    ));
                 }
             }
             if !func.called_by.is_empty() {
@@ -902,7 +921,10 @@ fn format_llm_as_text(llm: &LlmScgJson) -> String {
             if let Some(ref loc) = node.source_location {
                 if loc.file.is_some() || loc.line.is_some() {
                     let file = loc.file.as_deref().unwrap_or("?");
-                    let line = loc.line.map(|l| l.to_string()).unwrap_or_else(|| "?".to_string());
+                    let line = loc
+                        .line
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "?".to_string());
                     out.push_str(&format!("  Location: {}:{}\n", file, line));
                 }
             }
@@ -934,10 +956,7 @@ fn format_llm_as_text(llm: &LlmScgJson) -> String {
     if !llm.edges.is_empty() {
         out.push_str("--- Data Flow ---\n\n");
         for edge in &llm.edges {
-            let label = edge
-                .label
-                .as_deref()
-                .unwrap_or("");
+            let label = edge.label.as_deref().unwrap_or("");
             let label_suffix = if label.is_empty() {
                 String::new()
             } else {
@@ -968,7 +987,8 @@ fn format_llm_as_text(llm: &LlmScgJson) -> String {
             if !region.nodes.is_empty() {
                 out.push_str(&format!(
                     "  Nodes: {}\n",
-                    region.nodes
+                    region
+                        .nodes
                         .iter()
                         .map(|id| format!("node_{}", id))
                         .collect::<Vec<_>>()
@@ -1003,10 +1023,7 @@ fn node_operation(node: &NodeData) -> String {
                 AccessMode::Write => "write",
                 AccessMode::ReadWrite => "read_write",
             };
-            let offset = a
-                .offset
-                .map(|o| format!("+{}", o))
-                .unwrap_or_default();
+            let offset = a.offset.map(|o| format!("+{}", o)).unwrap_or_default();
             format!("{}{} @region_{}", mode, offset, a.region_id.as_u64())
         }
         NodePayload::Cast(c) => format!("cast {} -> {}", c.from_type, c.to_type),
@@ -1027,39 +1044,82 @@ fn node_operation(node: &NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
-        // PMT (Wave 1b): minimal stubs so this match stays exhaustive.
-        // Wave 1b will replace these with proper descriptions.
-        NodePayload::StateInit(s) => format!("state_init({})", s.layout_name),
-        NodePayload::StateRead(s) => {
-            format!("state_read({}.{})", s.layout_name, s.field_name)
+        // PMT (Wave 1b → resolved by Task 10-a): full descriptions for
+        // the PMT / Arena / Channel node payloads. Each description
+        // inlines the virtual registers and layout/type names an LLM
+        // needs to reason about data flow through the node, mirroring
+        // the level of detail `Allocation` and `Access` provide.
+        NodePayload::StateInit(s) => format!(
+            "state_init(layout={}, result=%{})",
+            s.layout_name, s.result_vreg
+        ),
+        NodePayload::StateRead(s) => format!(
+            "state_read(state=%{}, layout={}, field={}, result=%{})",
+            s.state_vreg, s.layout_name, s.field_name, s.result_vreg
+        ),
+        NodePayload::StateWrite(s) => format!(
+            "state_write(state=%{}, layout={}, field={}, value=%{})",
+            s.state_vreg, s.layout_name, s.field_name, s.value_vreg
+        ),
+        NodePayload::StateTransform(s) => format!(
+            "state_transform(input=%{}, {} -> {}, result=%{})",
+            s.input_vreg, s.input_layout, s.output_layout, s.result_vreg
+        ),
+        NodePayload::ForeignConsume(s) => format!(
+            "foreign_consume(input=%{}, layout={})",
+            s.input_vreg, s.layout_name
+        ),
+        NodePayload::ArenaNew(a) => format!(
+            "arena_new(capacity=%{}, result=%{})",
+            a.capacity_vreg, a.result_vreg
+        ),
+        NodePayload::ArenaAlloc(a) => format!(
+            "arena_alloc(arena=%{}, layout={}, result_arena=%{}, result_state=%{})",
+            a.arena_vreg, a.layout_name, a.result_arena_vreg, a.result_state_vreg
+        ),
+        NodePayload::ArenaGrow(a) => format!(
+            "arena_grow(arena=%{}, min_capacity=%{}, result=%{})",
+            a.arena_vreg, a.min_capacity_vreg, a.result_vreg
+        ),
+        NodePayload::ArenaFree(a) => format!("arena_free(arena=%{})", a.arena_vreg),
+        NodePayload::ChannelOpen(c) => format!("channel_open<{}>(dst={})", c.elem_type, c.dst),
+        NodePayload::ChannelSend(c) => format!(
+            "channel_send<{}>(ch={}, msg={})",
+            c.ty, c.channel, c.message
+        ),
+        NodePayload::ChannelRecv(c) => {
+            format!("channel_recv<{}>(ch={}, dst={})", c.ty, c.channel, c.dst)
         }
-        NodePayload::StateWrite(s) => {
-            format!("state_write({}.{})", s.layout_name, s.field_name)
-        }
-        NodePayload::StateTransform(s) => {
-            format!("state_transform({} -> {})", s.input_layout, s.output_layout)
-        }
-        NodePayload::ForeignConsume(s) => {
-            format!("foreign_consume({})", s.layout_name)
-        }
-        NodePayload::ArenaNew(_) => "arena_new".to_string(),
-        NodePayload::ArenaAlloc(s) => format!("arena_alloc({})", s.layout_name),
-        NodePayload::ArenaGrow(_) => "arena_grow".to_string(),
-        NodePayload::ArenaFree(_) => "arena_free".to_string(),
-        NodePayload::ChannelOpen(c) => format!("channel_open<{}>", c.elem_type),
-        NodePayload::ChannelSend(c) => format!("channel_send({}, {})", c.channel, c.message),
-        NodePayload::ChannelRecv(c) => format!("channel_recv({})", c.channel),
-        NodePayload::ChannelClose(c) => format!("channel_close({})", c.channel),
+        NodePayload::ChannelClose(c) => format!("channel_close(ch={})", c.channel),
     }
 }
 
 /// Extract the result type from a node, if applicable.
+///
+/// For PMT / Arena / Channel nodes (Task 10-a) the result type is
+/// synthesized from the payload's layout / element-type name so the
+/// LLM JSON output records what each node produces (e.g.
+/// `State<Point>`, `State<Arena>`, `Channel<u32>`).
 fn node_result_type(node: &NodeData) -> Option<String> {
     match &node.payload {
         NodePayload::Computation(c) => c.result_type.clone(),
         NodePayload::Allocation(a) => a.type_name.clone(),
         NodePayload::Cast(c) => Some(c.to_type.clone()),
         NodePayload::Access(a) => a.access_size.map(|s| format!("{}B", s)),
+        // PMT state nodes.
+        NodePayload::StateInit(s) => Some(format!("State<{}>", s.layout_name)),
+        // StateRead produces the field's value, but the field's type is
+        // resolved against the BD `LayoutRegistry` at codegen time and
+        // is not carried on the node, so we expose the layout instead.
+        NodePayload::StateRead(s) => Some(format!("State<{}>::{}", s.layout_name, s.field_name)),
+        // StateWrite / ForeignConsume / ArenaFree / ChannelSend /
+        // ChannelClose are void (no result).
+        NodePayload::StateTransform(s) => Some(format!("State<{}>", s.output_layout)),
+        NodePayload::ArenaNew(_) => Some("State<Arena>".to_string()),
+        NodePayload::ArenaAlloc(a) => Some(format!("State<{}>", a.layout_name)),
+        NodePayload::ArenaGrow(_) => Some("State<Arena>".to_string()),
+        NodePayload::ChannelOpen(c) => Some(format!("Channel<{}>", c.elem_type)),
+        NodePayload::ChannelRecv(c) => Some(c.ty.clone()),
         _ => None,
     }
 }
@@ -1085,8 +1145,11 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AllocationNode, ComputationKind, ComputationNode, ControlKind, ControlNode, DeallocationNode,
-        NodePayload, NodeType, ProgramPoint,
+        AllocationNode, ArenaAllocNode, ArenaFreeNode, ArenaGrowNode, ArenaNewNode,
+        ChannelCloseNode, ChannelOpenNode, ChannelRecvNode, ChannelSendNode, ComputationKind,
+        ComputationNode, ControlKind, ControlNode, DeallocationNode, ForeignConsumeNode,
+        NodePayload, NodeType, ProgramPoint, StateInitNode, StateReadNode, StateTransformNode,
+        StateWriteNode,
     };
     use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -1376,5 +1439,238 @@ mod tests {
             .unwrap();
         assert_eq!(dealloc_node.operation, "dealloc");
         assert!(dealloc_node.inputs.contains(&alloc.as_u64()));
+    }
+
+    // ── [Task 10-a / Caveats §8 row 1] PMT / Arena / Channel descriptions ──
+    //
+    // Caveats §8 row 1 flagged the `NodePayload::StateInit` …
+    // `ChannelClose` arms of `node_operation` (and the corresponding
+    // `_ => None` fall-through in `node_result_type`) as a "PMT minimal
+    // stub".  This test exercises every PMT / Arena / Channel payload
+    // through `SCG::to_json` and asserts the operation string carries
+    // the virtual registers + layout/type names an LLM needs, AND that
+    // `result_type` is synthesized where the node produces a value.
+    #[test]
+    fn test_to_json_pmt_arena_channel_payloads_have_full_descriptions() {
+        let mut scg = SCG::new();
+
+        // PMT state nodes.
+        let state_init = scg.add_node(
+            NodeType::StateInit,
+            NodePayload::StateInit(StateInitNode {
+                layout_name: "Point".to_string(),
+                result_vreg: 1,
+            }),
+            pp(),
+        );
+        let state_read = scg.add_node(
+            NodeType::StateRead,
+            NodePayload::StateRead(StateReadNode {
+                state_vreg: 1,
+                layout_name: "Point".to_string(),
+                field_name: "x".to_string(),
+                result_vreg: 2,
+            }),
+            pp(),
+        );
+        let state_write = scg.add_node(
+            NodeType::StateWrite,
+            NodePayload::StateWrite(StateWriteNode {
+                state_vreg: 1,
+                layout_name: "Point".to_string(),
+                field_name: "y".to_string(),
+                value_vreg: 3,
+            }),
+            pp(),
+        );
+        let state_transform = scg.add_node(
+            NodeType::StateTransform,
+            NodePayload::StateTransform(StateTransformNode {
+                input_vreg: 4,
+                input_layout: "Bytes".to_string(),
+                output_layout: "Point".to_string(),
+                result_vreg: 5,
+            }),
+            pp(),
+        );
+        let foreign_consume = scg.add_node(
+            NodeType::ForeignConsume,
+            NodePayload::ForeignConsume(ForeignConsumeNode {
+                input_vreg: 6,
+                layout_name: "Sqlite3".to_string(),
+            }),
+            pp(),
+        );
+
+        // Arena nodes.
+        let arena_new = scg.add_node(
+            NodeType::ArenaNew,
+            NodePayload::ArenaNew(ArenaNewNode {
+                capacity_vreg: 7,
+                result_vreg: 8,
+            }),
+            pp(),
+        );
+        let arena_alloc = scg.add_node(
+            NodeType::ArenaAlloc,
+            NodePayload::ArenaAlloc(ArenaAllocNode {
+                arena_vreg: 8,
+                layout_name: "U64".to_string(),
+                result_arena_vreg: 9,
+                result_state_vreg: 10,
+            }),
+            pp(),
+        );
+        let arena_grow = scg.add_node(
+            NodeType::ArenaGrow,
+            NodePayload::ArenaGrow(ArenaGrowNode {
+                arena_vreg: 9,
+                min_capacity_vreg: 11,
+                result_vreg: 12,
+            }),
+            pp(),
+        );
+        let arena_free = scg.add_node(
+            NodeType::ArenaFree,
+            NodePayload::ArenaFree(ArenaFreeNode { arena_vreg: 12 }),
+            pp(),
+        );
+
+        // Channel nodes.
+        let channel_open = scg.add_node(
+            NodeType::ChannelOpen,
+            NodePayload::ChannelOpen(ChannelOpenNode {
+                dst: "ch".to_string(),
+                elem_type: "u32".to_string(),
+            }),
+            pp(),
+        );
+        let channel_send = scg.add_node(
+            NodeType::ChannelSend,
+            NodePayload::ChannelSend(ChannelSendNode {
+                channel: "ch".to_string(),
+                message: "msg".to_string(),
+                ty: "u32".to_string(),
+            }),
+            pp(),
+        );
+        let channel_recv = scg.add_node(
+            NodeType::ChannelRecv,
+            NodePayload::ChannelRecv(ChannelRecvNode {
+                dst: "out".to_string(),
+                channel: "ch".to_string(),
+                ty: "u32".to_string(),
+            }),
+            pp(),
+        );
+        let channel_close = scg.add_node(
+            NodeType::ChannelClose,
+            NodePayload::ChannelClose(ChannelCloseNode {
+                channel: "ch".to_string(),
+            }),
+            pp(),
+        );
+
+        let json = scg.to_json();
+        let parsed: LlmScgJson = LlmScgJson::from_json_str(&json).unwrap();
+
+        // Helper to look up a node by its NodeType string label.
+        let find = |label: &str| -> &LlmNode {
+            parsed
+                .nodes
+                .iter()
+                .find(|n| n.node_type == label)
+                .unwrap_or_else(|| panic!("expected a {} node in the JSON output", label))
+        };
+
+        // PMT state nodes: operation strings must inline vregs + layout/field.
+        let n = find("StateInit");
+        assert_eq!(n.operation, "state_init(layout=Point, result=%1)");
+        assert_eq!(n.result_type, Some("State<Point>".to_string()));
+
+        let n = find("StateRead");
+        assert_eq!(
+            n.operation,
+            "state_read(state=%1, layout=Point, field=x, result=%2)"
+        );
+        assert_eq!(n.result_type, Some("State<Point>::x".to_string()));
+
+        let n = find("StateWrite");
+        assert_eq!(
+            n.operation,
+            "state_write(state=%1, layout=Point, field=y, value=%3)"
+        );
+        // StateWrite is void.
+        assert_eq!(n.result_type, None);
+
+        let n = find("StateTransform");
+        assert_eq!(
+            n.operation,
+            "state_transform(input=%4, Bytes -> Point, result=%5)"
+        );
+        assert_eq!(n.result_type, Some("State<Point>".to_string()));
+
+        let n = find("ForeignConsume");
+        assert_eq!(n.operation, "foreign_consume(input=%6, layout=Sqlite3)");
+        // ForeignConsume is void.
+        assert_eq!(n.result_type, None);
+
+        // Arena nodes.
+        let n = find("ArenaNew");
+        assert_eq!(n.operation, "arena_new(capacity=%7, result=%8)");
+        assert_eq!(n.result_type, Some("State<Arena>".to_string()));
+
+        let n = find("ArenaAlloc");
+        assert_eq!(
+            n.operation,
+            "arena_alloc(arena=%8, layout=U64, result_arena=%9, result_state=%10)"
+        );
+        assert_eq!(n.result_type, Some("State<U64>".to_string()));
+
+        let n = find("ArenaGrow");
+        assert_eq!(
+            n.operation,
+            "arena_grow(arena=%9, min_capacity=%11, result=%12)"
+        );
+        assert_eq!(n.result_type, Some("State<Arena>".to_string()));
+
+        let n = find("ArenaFree");
+        assert_eq!(n.operation, "arena_free(arena=%12)");
+        assert_eq!(n.result_type, None);
+
+        // Channel nodes.
+        let n = find("ChannelOpen");
+        assert_eq!(n.operation, "channel_open<u32>(dst=ch)");
+        assert_eq!(n.result_type, Some("Channel<u32>".to_string()));
+
+        let n = find("ChannelSend");
+        assert_eq!(n.operation, "channel_send<u32>(ch=ch, msg=msg)");
+        // ChannelSend is void.
+        assert_eq!(n.result_type, None);
+
+        let n = find("ChannelRecv");
+        assert_eq!(n.operation, "channel_recv<u32>(ch=ch, dst=out)");
+        assert_eq!(n.result_type, Some("u32".to_string()));
+
+        let n = find("ChannelClose");
+        assert_eq!(n.operation, "channel_close(ch=ch)");
+        assert_eq!(n.result_type, None);
+
+        // Sanity-check the 13 PMT/Arena/Channel nodes were all emitted.
+        assert_eq!(parsed.summary.total_nodes, 13);
+        // Touch the node ids so they're not optimized out of the SCG.
+        assert!(state_init.as_u64() < u64::MAX);
+        assert!(state_read.as_u64() < u64::MAX);
+        assert!(state_write.as_u64() < u64::MAX);
+        assert!(state_transform.as_u64() < u64::MAX);
+        assert!(foreign_consume.as_u64() < u64::MAX);
+        assert!(arena_new.as_u64() < u64::MAX);
+        assert!(arena_alloc.as_u64() < u64::MAX);
+        assert!(arena_grow.as_u64() < u64::MAX);
+        assert!(arena_free.as_u64() < u64::MAX);
+        assert!(channel_open.as_u64() < u64::MAX);
+        assert!(channel_send.as_u64() < u64::MAX);
+        assert!(channel_recv.as_u64() < u64::MAX);
+        assert!(channel_close.as_u64() < u64::MAX);
     }
 }

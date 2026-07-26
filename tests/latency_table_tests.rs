@@ -5,7 +5,9 @@
 //! ISA where multiply is cheap, `x*2` stays as `x*2`; on an ISA where
 //! multiply is expensive, `x*2` is strength-reduced to `x+x`.
 
-use vuma_codegen::egraph::{target_cost_fn, default_cost, EGraph, ENode, RewriteRule, standard_rules};
+use vuma_codegen::egraph::{
+    default_cost, standard_rules, target_cost_fn, EGraph, ENode, RewriteRule,
+};
 use vuma_codegen::ir::BinOpKind;
 use vuma_codegen::target_desc::LatencyTable;
 
@@ -57,7 +59,9 @@ fn wave10_expensive_mul_isa_strength_reduces() {
             // cheaper than Mul (20-cycle) on m68k.
         }
         ENode::BinOp(BinOpKind::Mul, _, _) => {
-            panic!("m68k: x*2 should be strength-reduced to x+x (mul=20, add=1), but stayed as Mul");
+            panic!(
+                "m68k: x*2 should be strength-reduced to x+x (mul=20, add=1), but stayed as Mul"
+            );
         }
         other => panic!("m68k: expected Add or Mul, got {:?}", other),
     }
@@ -91,11 +95,22 @@ fn wave10_all_19_isas_have_latency_tables() {
     ];
 
     let required_categories = [
-        "arithmetic", "logical", "shift", "load", "store",
-        "branch", "multiply", "divide", "fp_simd",
+        "arithmetic",
+        "logical",
+        "shift",
+        "load",
+        "store",
+        "branch",
+        "multiply",
+        "divide",
+        "fp_simd",
     ];
 
-    assert_eq!(tables.len(), 19, "must have 19 ISA tables (one per BackendKind)");
+    assert_eq!(
+        tables.len(),
+        19,
+        "must have 19 ISA tables (one per BackendKind)"
+    );
 
     for (isa, table) in &tables {
         assert!(
@@ -145,7 +160,7 @@ fn wave10_target_cost_fn_uses_latency() {
     // when given different latency tables. This proves the cost function
     // is actually wired to the table.
     let cheap_mul = LatencyTable::default_ooo(); // mul=3
-    let expensive_mul = LatencyTable::m68k();     // mul=20
+    let expensive_mul = LatencyTable::m68k(); // mul=20
 
     let cheap_cost = target_cost_fn(&cheap_mul);
     let expensive_cost = target_cost_fn(&expensive_mul);

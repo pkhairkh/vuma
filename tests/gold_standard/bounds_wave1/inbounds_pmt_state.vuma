@@ -1,0 +1,30 @@
+// inbounds_pmt_state — PMT state buffer access within bounds
+// Expected exit code: 42
+//
+// Bounds Wave 1 positive test: PMT state with three u32 fields
+// (offsets 0, 4, 8 — total 12 bytes). Write a=10, b=20, c=12 and
+// return their sum (10+20+12 = 42). Field accesses are SAFE pointers
+// (no offset, statically-known layout), so the bounds-check injection
+// pass classifies them as `PointerKind::Safe` and emits no `__oob_trap`.
+//
+// With or without `--safe`, field access on a `state_new(MyBuf)`
+// instance is always well-defined: the layout is closed, the offsets
+// are compile-time constants, and the field-access expression lowers
+// to a fixed-offset Load/Store.
+//
+// VUMA Key Concepts:
+//   - PMT (Programs as Memory Transformations) state
+//   - `state_new(MyBuf)` allocation
+//   - field access via `s.a`, `s.b`, `s.c` (no `[]` index)
+//   - SAFE pointer classification — no bounds check emitted
+//   - 3 Stores (offsets 0/4/8) + 2 Adds + 1 Load return
+
+layout MyBuf = { a: u32, b: u32, c: u32 }
+
+fn main() -> i32 {
+    let s = state_new(MyBuf);
+    s.a = 10;
+    s.b = 20;
+    s.c = 12;
+    return s.a + s.b + s.c;
+}

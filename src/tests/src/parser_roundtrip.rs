@@ -192,9 +192,11 @@ fn test_for_loop() {
         vuma_parser::Item::FnDef(fndef) => {
             assert_eq!(fndef.name, "loop_test");
             // Body should contain a for statement.
-            let has_for = fndef.body.statements.iter().any(|s| {
-                matches!(s, vuma_parser::Stmt::For(_))
-            });
+            let has_for = fndef
+                .body
+                .statements
+                .iter()
+                .any(|s| matches!(s, vuma_parser::Stmt::For(_)));
             assert!(has_for, "body should contain a for loop");
         }
         other => panic!("expected FnDef, got {:?}", other),
@@ -222,15 +224,21 @@ fn test_nested_function_calls() {
     let program = parse(source);
 
     // Should have two function definitions.
-    assert_eq!(program.items.len(), 2, "should have inner and outer functions");
+    assert_eq!(
+        program.items.len(),
+        2,
+        "should have inner and outer functions"
+    );
 
     // Verify both are function definitions.
-    let fn_names: Vec<&str> = program.items.iter().map(|item| {
-        match item {
+    let fn_names: Vec<&str> = program
+        .items
+        .iter()
+        .map(|item| match item {
             vuma_parser::Item::FnDef(f) => f.name.as_str(),
             _ => "<not a fn>",
-        }
-    }).collect();
+        })
+        .collect();
     assert!(fn_names.contains(&"inner"), "should have 'inner' function");
     assert!(fn_names.contains(&"outer"), "should have 'outer' function");
 
@@ -257,9 +265,11 @@ fn test_u32_masking() {
         vuma_parser::Item::FnDef(fndef) => {
             assert_eq!(fndef.name, "masked_add");
             // Body should have a return statement.
-            let has_return = fndef.body.statements.iter().any(|s| {
-                matches!(s, vuma_parser::Stmt::Return(_))
-            });
+            let has_return = fndef
+                .body
+                .statements
+                .iter()
+                .any(|s| matches!(s, vuma_parser::Stmt::Return(_)));
             assert!(has_return, "body should contain a return statement");
         }
         other => panic!("expected FnDef, got {:?}", other),
@@ -382,15 +392,17 @@ fn test_sha256d_parse() {
     );
 
     // Verify "main" exists.
-    let has_main = program.items.iter().any(|item| {
-        matches!(item, vuma_parser::Item::FnDef(f) if f.name == "main")
-    });
+    let has_main = program
+        .items
+        .iter()
+        .any(|item| matches!(item, vuma_parser::Item::FnDef(f) if f.name == "main"));
     assert!(has_main, "sha256d should define a 'main' function");
 
     // Verify "sha256d" exists.
-    let has_sha256d = program.items.iter().any(|item| {
-        matches!(item, vuma_parser::Item::FnDef(f) if f.name == "sha256d")
-    });
+    let has_sha256d = program
+        .items
+        .iter()
+        .any(|item| matches!(item, vuma_parser::Item::FnDef(f) if f.name == "sha256d"));
     assert!(has_sha256d, "sha256d should define a 'sha256d' function");
 
     // Round-trip through SCG.

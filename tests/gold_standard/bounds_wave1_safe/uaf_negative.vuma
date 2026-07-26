@@ -1,0 +1,62 @@
+// uaf_negative — UAF prevention via IVE linearity (legal pattern)
+// Expected exit code: 42
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+//
+// UAF Wave 1 SAFE-ONLY positive test: documents the LEGAL transform
+// pattern (consume input → produce output → use output, never the
+// input). The IVE rejects the ILLEGAL pattern (write/read after
+// consume) at compile time via `state_write::verify_state_writes`
+// and `state_read::verify_state_reads` — see
+// `pmt_wave3_negative/write_after_consume.vuma` for the rejected
+// form (which fails IVE verification rather than running).
+//
+// Note: the `transform` keyword is parsed but not yet lowered to a
+// callable form (PMT Wave 1a limitation — see
+// `pmt_wave2/transform_id.vuma` and `pmt_wave5/transform_identity.vuma`
+// for the same adaptation). To exercise the same state-operation
+// pipeline (StateInit → Alloc, StateWrite → Store, StateRead → Load)
+// that a real transform would run on, this test uses a regular
+// `fn to_buf2(p: State<Buf>) -> State<Buf2>` that semantically plays
+// the role of a transform: it reads `p` (the "consumed" input),
+// allocates a fresh `Buf2` (the "produced" output), copies the
+// payload over, and returns the new state. The caller then uses
+// `b2` (the produced state), never `b` (the "consumed" one).
+//
+// Runtime UAF detection (`__uaf_trap`, exit 135) is currently a
+// dormant stub on all 16 backends — UAF is enforced at compile time
+// via IVE linearity only (§5 of pmt-formal-spec.md). When runtime
+// liveness IR is wired in (planned: `inject_liveness_check_ir` in
+// `memory_safety.rs`, mirroring `inject_bounds_check_ir`), this
+// test will still pass — the legal pattern keeps the liveness flag
+// LIVE for `b2` reads (and `b` is never read after the call).
+//
+// VUMA Key Concepts:
+//   - state_new(Buf) allocates a typed buffer (LIVE)
+//   - "transform" via regular fn taking State<Buf> → State<Buf2>
+//   - callee reads p.data[0] (the "consume" phase)
+//   - callee allocates a fresh Buf2 and writes to it (the "produce" phase)
+//   - caller uses the produced state (b2), never the consumed one (b)
+//   - no UAF → exit 42 (b2.data[0] was copied from b.data[0] = 42)
+
+layout Buf = { data: [u8; 8] }
+layout Buf2 = { data: [u8; 8] }
+
+fn to_buf2(p: State<Buf>) -> State<Buf2> {
+    // In a real `transform`, this body would CONSUME `p` (mark DEAD)
+    // and PRODUCE a fresh State<Buf2> (mark LIVE). With the regular
+    // `fn` lowering, the caller's `b` pointer is still valid — but
+    // the *program* never reads `b` after the call, mirroring the
+    // legal transform pattern that IVE enforces for `transform` bodies.
+    let q = state_new(Buf2);
+    q.data[0] = p.data[0];
+    return q;
+}
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 42;
+    let b2 = to_buf2(b);
+    // b is "consumed" — we do NOT access b.data[0] here (that would
+    // be UAF, rejected by IVE at compile time). Use the produced b2.
+    return b2.data[0];
+}

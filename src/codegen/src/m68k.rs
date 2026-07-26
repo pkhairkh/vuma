@@ -57,9 +57,9 @@ use crate::backend::{
     BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, SectionHeader,
     TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 #[cfg(test)]
 use crate::ir::VirtualRegister;
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -72,8 +72,22 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Gpr {
-    D0 = 0, D1 = 1, D2 = 2, D3 = 3, D4 = 4, D5 = 5, D6 = 6, D7 = 7,
-    A0 = 8, A1 = 9, A2 = 10, A3 = 11, A4 = 12, A5 = 13, A6 = 14, A7 = 15,
+    D0 = 0,
+    D1 = 1,
+    D2 = 2,
+    D3 = 3,
+    D4 = 4,
+    D5 = 5,
+    D6 = 6,
+    D7 = 7,
+    A0 = 8,
+    A1 = 9,
+    A2 = 10,
+    A3 = 11,
+    A4 = 12,
+    A5 = 13,
+    A6 = 14,
+    A7 = 15,
 }
 
 impl Gpr {
@@ -85,10 +99,22 @@ impl Gpr {
     /// Returns the Gpr for the given encoding index (0–15).
     pub fn from_encoding(enc: u8) -> Option<Self> {
         match enc {
-            0 => Some(Gpr::D0), 1 => Some(Gpr::D1), 2 => Some(Gpr::D2), 3 => Some(Gpr::D3),
-            4 => Some(Gpr::D4), 5 => Some(Gpr::D5), 6 => Some(Gpr::D6), 7 => Some(Gpr::D7),
-            8 => Some(Gpr::A0), 9 => Some(Gpr::A1), 10 => Some(Gpr::A2), 11 => Some(Gpr::A3),
-            12 => Some(Gpr::A4), 13 => Some(Gpr::A5), 14 => Some(Gpr::A6), 15 => Some(Gpr::A7),
+            0 => Some(Gpr::D0),
+            1 => Some(Gpr::D1),
+            2 => Some(Gpr::D2),
+            3 => Some(Gpr::D3),
+            4 => Some(Gpr::D4),
+            5 => Some(Gpr::D5),
+            6 => Some(Gpr::D6),
+            7 => Some(Gpr::D7),
+            8 => Some(Gpr::A0),
+            9 => Some(Gpr::A1),
+            10 => Some(Gpr::A2),
+            11 => Some(Gpr::A3),
+            12 => Some(Gpr::A4),
+            13 => Some(Gpr::A5),
+            14 => Some(Gpr::A6),
+            15 => Some(Gpr::A7),
             _ => None,
         }
     }
@@ -96,10 +122,22 @@ impl Gpr {
     /// Returns the assembly name for this register.
     pub fn asm_name(&self) -> &'static str {
         match self {
-            Gpr::D0 => "%d0", Gpr::D1 => "%d1", Gpr::D2 => "%d2", Gpr::D3 => "%d3",
-            Gpr::D4 => "%d4", Gpr::D5 => "%d5", Gpr::D6 => "%d6", Gpr::D7 => "%d7",
-            Gpr::A0 => "%a0", Gpr::A1 => "%a1", Gpr::A2 => "%a2", Gpr::A3 => "%a3",
-            Gpr::A4 => "%a4", Gpr::A5 => "%a5", Gpr::A6 => "%a6", Gpr::A7 => "%a7",
+            Gpr::D0 => "%d0",
+            Gpr::D1 => "%d1",
+            Gpr::D2 => "%d2",
+            Gpr::D3 => "%d3",
+            Gpr::D4 => "%d4",
+            Gpr::D5 => "%d5",
+            Gpr::D6 => "%d6",
+            Gpr::D7 => "%d7",
+            Gpr::A0 => "%a0",
+            Gpr::A1 => "%a1",
+            Gpr::A2 => "%a2",
+            Gpr::A3 => "%a3",
+            Gpr::A4 => "%a4",
+            Gpr::A5 => "%a5",
+            Gpr::A6 => "%a6",
+            Gpr::A7 => "%a7",
         }
     }
 
@@ -133,8 +171,8 @@ impl fmt::Display for Gpr {
 /// the FPU auto-converts on f32/f64 memory loads and stores. The encoding
 /// is the 3-bit register index (0–7).
 ///
-/// **NOTE (G4):** FP arithmetic/compare/cast codegen in this backend is
-/// *best-effort* and marked `// TODO G4: needs QEMU-m68k verification`.
+/// **NOTE:** FP arithmetic/compare/cast codegen in this backend is
+/// *best-effort* and marked `// TODO: needs QEMU-m68k verification`.
 /// The 68881 coprocessor-1 (F-line) encoding is baroque; the byte
 /// sequences emitted by `emit_fp_binop` and the FP Cast arms are the
 /// best-effort interpretation of the M68000 PRM §8 and have **not** been
@@ -144,8 +182,14 @@ impl fmt::Display for Gpr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Fpr {
-    Fp0 = 0, Fp1 = 1, Fp2 = 2, Fp3 = 3,
-    Fp4 = 4, Fp5 = 5, Fp6 = 6, Fp7 = 7,
+    Fp0 = 0,
+    Fp1 = 1,
+    Fp2 = 2,
+    Fp3 = 3,
+    Fp4 = 4,
+    Fp5 = 5,
+    Fp6 = 6,
+    Fp7 = 7,
 }
 
 impl Fpr {
@@ -157,8 +201,14 @@ impl Fpr {
     /// Returns the Fpr for the given encoding index (0–7).
     pub fn from_encoding(enc: u8) -> Option<Self> {
         match enc {
-            0 => Some(Fpr::Fp0), 1 => Some(Fpr::Fp1), 2 => Some(Fpr::Fp2), 3 => Some(Fpr::Fp3),
-            4 => Some(Fpr::Fp4), 5 => Some(Fpr::Fp5), 6 => Some(Fpr::Fp6), 7 => Some(Fpr::Fp7),
+            0 => Some(Fpr::Fp0),
+            1 => Some(Fpr::Fp1),
+            2 => Some(Fpr::Fp2),
+            3 => Some(Fpr::Fp3),
+            4 => Some(Fpr::Fp4),
+            5 => Some(Fpr::Fp5),
+            6 => Some(Fpr::Fp6),
+            7 => Some(Fpr::Fp7),
             _ => None,
         }
     }
@@ -166,8 +216,14 @@ impl Fpr {
     /// Returns the assembly name for this register.
     pub fn asm_name(&self) -> &'static str {
         match self {
-            Fpr::Fp0 => "%fp0", Fpr::Fp1 => "%fp1", Fpr::Fp2 => "%fp2", Fpr::Fp3 => "%fp3",
-            Fpr::Fp4 => "%fp4", Fpr::Fp5 => "%fp5", Fpr::Fp6 => "%fp6", Fpr::Fp7 => "%fp7",
+            Fpr::Fp0 => "%fp0",
+            Fpr::Fp1 => "%fp1",
+            Fpr::Fp2 => "%fp2",
+            Fpr::Fp3 => "%fp3",
+            Fpr::Fp4 => "%fp4",
+            Fpr::Fp5 => "%fp5",
+            Fpr::Fp6 => "%fp6",
+            Fpr::Fp7 => "%fp7",
         }
     }
 }
@@ -269,7 +325,11 @@ impl Instruction {
             }
             Instruction::Load { base, offset, dst } => {
                 // src = (d16, An) — mode 5, reg = base (which must be an An).
-                let base_enc = if *base as u8 >= 8 { *base as u8 - 8 } else { *base as u8 };
+                let base_enc = if *base as u8 >= 8 {
+                    *base as u8 - 8
+                } else {
+                    *base as u8
+                };
                 let w = 0x2000u16
                     | ((dst.encoding() as u16 & 0x7) << 9)
                     | (5u16 << 3)
@@ -279,7 +339,11 @@ impl Instruction {
                 v
             }
             Instruction::Store { src, base, offset } => {
-                let base_enc = if *base as u8 >= 8 { *base as u8 - 8 } else { *base as u8 };
+                let base_enc = if *base as u8 >= 8 {
+                    *base as u8 - 8
+                } else {
+                    *base as u8
+                };
                 let w = 0x2000u16
                     | ((base_enc as u16 & 0x7) << 9)
                     | (5u16 << 6)
@@ -289,25 +353,35 @@ impl Instruction {
                 v
             }
             Instruction::Add { src, dst } => {
-                let w = 0xD080u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0xD080u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Sub { src, dst } => {
-                let w = 0x9080u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0x9080u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::And { src, dst } => {
-                let w = 0xC080u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0xC080u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Or { src, dst } => {
-                let w = 0x8080u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0x8080u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Xor { src, dst } => {
                 // EOR.L Dn, Dm: Dm = Dm ^ Dn. Dn is at bits 11-9, Dm at bits 2-0.
                 // We want dst = dst ^ src, so Dn=src, Dm=dst.
-                let w = 0xB180u16 | ((src.encoding() as u16 & 0x7) << 9) | (dst.encoding() as u16 & 0x7);
+                let w = 0xB180u16
+                    | ((src.encoding() as u16 & 0x7) << 9)
+                    | (dst.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Lsl { dst, imm } => {
@@ -331,11 +405,15 @@ impl Instruction {
                 w.to_be_bytes().to_vec()
             }
             Instruction::Mulu { src, dst } => {
-                let w = 0xC0C0u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0xC0C0u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Divu { src, dst } => {
-                let w = 0x80C0u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0x80C0u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Swap { dst } => {
@@ -344,7 +422,9 @@ impl Instruction {
                 w.to_be_bytes().to_vec()
             }
             Instruction::Cmp { src, dst } => {
-                let w = 0xB080u16 | ((dst.encoding() as u16 & 0x7) << 9) | (src.encoding() as u16 & 0x7);
+                let w = 0xB080u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Tst { dst } => {
@@ -353,13 +433,21 @@ impl Instruction {
                 w.to_be_bytes().to_vec()
             }
             Instruction::Jmp { target } => {
-                let t_enc = if *target as u8 >= 8 { *target as u8 - 8 } else { *target as u8 };
+                let t_enc = if *target as u8 >= 8 {
+                    *target as u8 - 8
+                } else {
+                    *target as u8
+                };
                 // JMP (An): 0x4ED0 | An — note address register indirect (mode 2)
                 let w = 0x4ED0u16 | (t_enc as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
             Instruction::Jsr { target } => {
-                let t_enc = if *target as u8 >= 8 { *target as u8 - 8 } else { *target as u8 };
+                let t_enc = if *target as u8 >= 8 {
+                    *target as u8 - 8
+                } else {
+                    *target as u8
+                };
                 let w = 0x4E90u16 | (t_enc as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
@@ -374,14 +462,22 @@ impl Instruction {
             }
             Instruction::Trap0 => vec![0x4E, 0x40],
             Instruction::Link { reg, disp } => {
-                let r_enc = if *reg as u8 >= 8 { *reg as u8 - 8 } else { *reg as u8 };
+                let r_enc = if *reg as u8 >= 8 {
+                    *reg as u8 - 8
+                } else {
+                    *reg as u8
+                };
                 let w = 0x4E50u16 | (r_enc as u16 & 0x7);
                 let mut v = w.to_be_bytes().to_vec();
                 v.extend_from_slice(&disp.to_be_bytes());
                 v
             }
             Instruction::Unlk { reg } => {
-                let r_enc = if *reg as u8 >= 8 { *reg as u8 - 8 } else { *reg as u8 };
+                let r_enc = if *reg as u8 >= 8 {
+                    *reg as u8 - 8
+                } else {
+                    *reg as u8
+                };
                 let w = 0x4E58u16 | (r_enc as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
@@ -396,8 +492,12 @@ impl fmt::Display for Instruction {
             Instruction::Moveq { dst, imm } => write!(f, "moveq #{}, {}", imm, dst),
             Instruction::MoveImm32 { dst, imm } => write!(f, "move.l #{}, {}", imm, dst),
             Instruction::Move { src, dst } => write!(f, "move.l {}, {}", src, dst),
-            Instruction::Load { base, offset, dst } => write!(f, "move.l {}({}), {}", offset, base, dst),
-            Instruction::Store { src, base, offset } => write!(f, "move.l {}, {}({})", src, offset, base),
+            Instruction::Load { base, offset, dst } => {
+                write!(f, "move.l {}({}), {}", offset, base, dst)
+            }
+            Instruction::Store { src, base, offset } => {
+                write!(f, "move.l {}, {}({})", src, offset, base)
+            }
             Instruction::Add { src, dst } => write!(f, "add.l {}, {}", src, dst),
             Instruction::Sub { src, dst } => write!(f, "sub.l {}, {}", src, dst),
             Instruction::And { src, dst } => write!(f, "and.l {}, {}", src, dst),
@@ -459,7 +559,12 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
 /// Or with 64-bit operands).
 fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
     if (-32768..=32767).contains(&offset) {
-        Instruction::Store { src, base: FP, offset: offset as i16 }.encode()
+        Instruction::Store {
+            src,
+            base: FP,
+            offset: offset as i16,
+        }
+        .encode()
     } else {
         let mut code = Vec::new();
         code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
@@ -475,13 +580,25 @@ fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
 /// Only loads the low 32 bits (sufficient for most operations).
 fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
     if (-32768..=32767).contains(&offset) {
-        Instruction::Load { base: FP, offset: offset as i16, dst }.encode()
+        Instruction::Load {
+            base: FP,
+            offset: offset as i16,
+            dst,
+        }
+        .encode()
     } else {
         let mut code = Vec::new();
         code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
         code.extend(ss_load_imm(S2, offset as i64));
         code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
-        code.extend(Instruction::Load { base: Gpr::A1, offset: 0, dst }.encode());
+        code.extend(
+            Instruction::Load {
+                base: Gpr::A1,
+                offset: 0,
+                dst,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -632,7 +749,7 @@ fn emit_bcc_short_placeholder(code: &mut Vec<u8>, cond_byte: u8) -> usize {
 
 /// Patch a previously-emitted short branch (Bcc.S or BRA.S) so that it
 /// targets the current `code.len()`.
-fn patch_short_branch_to_here(code: &mut Vec<u8>, branch_offset: usize) {
+fn patch_short_branch_to_here(code: &mut [u8], branch_offset: usize) {
     let target = code.len() as i64;
     let disp = target - (branch_offset as i64 + 2);
     assert!(
@@ -782,7 +899,13 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
     let mut relocations: Vec<RelocationEntry> = Vec::new();
 
     // LINK A6, #-frame_size: push A6, A6 = SP, SP -= frame_size.
-    code.extend(Instruction::Link { reg: FP, disp: -frame_size_i16 }.encode());
+    code.extend(
+        Instruction::Link {
+            reg: FP,
+            disp: -frame_size_i16,
+        }
+        .encode(),
+    );
 
     // Save incoming args (D1-D5) to their stack slots.
     for (i, param) in func.params.iter().enumerate() {
@@ -816,7 +939,13 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         block_start_offsets.push(code.len());
 
         for instr in &block.instructions {
-            emit_instr(instr, &vreg_stack_slots, &alloc_offsets, &mut code, &mut relocations);
+            emit_instr(
+                instr,
+                &vreg_stack_slots,
+                &alloc_offsets,
+                &mut code,
+                &mut relocations,
+            );
         }
 
         // Emit terminator.
@@ -862,17 +991,30 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 if let Some(first_val) = vals.first() {
                     code.extend(ss_load_value(first_val, &vreg_stack_slots, Gpr::D0));
                     // Also load high word into D1
-                    // [K7E-m68k-f64-followup] For Immediate values, load the
+                    // For Immediate values, load the
                     // actual high 32 bits of the i64 bit pattern (was Moveq #0,
                     // which dropped the high word — breaking f64/i64 returns of
                     // constants with non-zero high word, e.g. `return 7.0`).
                     if let IRValue::Register(id) = first_val {
                         let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-                        code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: Gpr::D1 }.encode());
+                        code.extend(
+                            Instruction::Load {
+                                base: FP,
+                                offset: (off + 4) as i16,
+                                dst: Gpr::D1,
+                            }
+                            .encode(),
+                        );
                     } else if let IRValue::Immediate(v) = first_val {
                         code.extend(ss_load_imm(Gpr::D1, (*v) >> 32));
                     } else {
-                        code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
+                        code.extend(
+                            Instruction::Moveq {
+                                dst: Gpr::D1,
+                                imm: 0,
+                            }
+                            .encode(),
+                        );
                     }
                 }
                 // Epilogue: UNLK A6, RTS.
@@ -884,7 +1026,11 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                 // RTS would return to caller, potentially falling through to parent code.
                 code.extend_from_slice(&[0x4A, 0xFC]);
             }
-            crate::ir::IRTerminator::Switch { discr, targets, default } => {
+            crate::ir::IRTerminator::Switch {
+                discr,
+                targets,
+                default,
+            } => {
                 // Simplified: linear compare-and-branch sequence.
                 code.extend(ss_load_value(discr, &vreg_stack_slots, S0));
                 for (val, label) in targets {
@@ -974,9 +1120,7 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         name: func_name,
         blocks: vec![allocated_block],
         frame_size,
-        callee_saved: vec![
-            PhysicalReg::new(RegClass::Gpr, Gpr::A6 as u32),
-        ],
+        callee_saved: vec![PhysicalReg::new(RegClass::Gpr, Gpr::A6 as u32)],
         spill_slots: all_vreg_ids.len(),
         code_size: total_code_size,
         relocations,
@@ -990,9 +1134,9 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 /// for the instruction encoding, but records the physical register assignments
 /// in the AllocatedFunction's reads/writes fields.
 ///
-/// This is a hybrid approach (Wave 23): the instruction encoding still uses
+/// This is a hybrid approach: the instruction encoding still uses
 /// stack slots (for safety), but the allocation metadata records which vregs
-/// COULD be in real registers. A future wave will use this metadata to emit
+/// COULD be in real registers. A future revision will use this metadata to emit
 /// register-based instructions directly.
 fn m68k_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     // Run the existing stack-slot allocator to get a working AllocatedFunction.
@@ -1004,14 +1148,22 @@ fn m68k_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, 
 
     // Collect all vreg IDs.
     let mut all_vreg_ids: Vec<u32> = Vec::new();
-    for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+    for &id in func.vregs.keys() {
+        all_vreg_ids.push(id);
+    }
     for param in &func.params {
-        if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+        if let Some(id) = param.as_register() {
+            all_vreg_ids.push(id);
+        }
     }
     for block in &func.blocks {
         for instr in &block.instructions {
-            for id in instr.defined_regs() { all_vreg_ids.push(id); }
-            for id in instr.used_regs() { all_vreg_ids.push(id); }
+            for id in instr.defined_regs() {
+                all_vreg_ids.push(id);
+            }
+            for id in instr.used_regs() {
+                all_vreg_ids.push(id);
+            }
         }
     }
     all_vreg_ids.sort();
@@ -1023,10 +1175,7 @@ fn m68k_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, 
     let max_real_regs = 8; // conservative limit
     for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
-            let preg = crate::backend::PhysicalReg::new(
-                crate::backend::RegClass::Gpr,
-                i as u32,
-            );
+            let preg = crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
             // Record this assignment in every instruction that defines/uses this vreg.
             for block in &mut allocated.blocks {
                 for instr in &mut block.instructions {
@@ -1117,7 +1266,7 @@ fn emit_instr(
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         IRInstr::Mul { dst, lhs, rhs, ty } => {
-            // [K9E-m68k-i64mul] The previous handler unconditionally used
+            // The previous handler unconditionally used
             // MULU.W (16×16→32), which is only correct for i32 operands
             // where both operands fit in 16 bits. For i64/u64 multiplies
             // (e.g. monte_carlo_pi's LCG `state * 1103515245`), this silently
@@ -1407,7 +1556,7 @@ fn emit_instr(
                     // just keeps the low bits. Load src into S0 and store.
                     code.extend(ss_load_value(src, vreg_stack_slots, S0));
                     code.extend(ss_st(S0, dst_off));
-                    // [Wave 93-94-ext] For ZExt to I64, MUST zero the high
+                    // For ZExt to I64, MUST zero the high
                     // word. Without this, the FNV-1a loop's I64 XOR reads
                     // garbage from [dst_off+4], corrupting the hash.
                     if matches!(to_ty, Some(IRType::I64) | Some(IRType::U64)) {
@@ -1416,7 +1565,7 @@ fn emit_instr(
                     }
                 }
                 CastKind::FloatToFloat => {
-                    // G4: bit-copy with truncation/zero-extension. Correct
+                    // Bit-copy with truncation/zero-extension. Correct
                     // by construction (no FPU encoding involved).
                     //   f32 → f64: load 4-byte f32, store 8 bytes
                     //             (low 4 = f32 bits, high 4 = 0).
@@ -1434,19 +1583,29 @@ fn emit_instr(
                     );
                 }
                 CastKind::IntToFloat | CastKind::UIntToFloat => {
-                    // W4b: Immediate operands are computed at compile time
-                    // (no reliance on the unverified 68881 FPU encoding).
-                    // Register operands still use the best-effort 68881
-                    // FMOVE.L + FMOVE.S/D sequence (TODO G4).
+                    // Immediate operands are computed at compile time
+                    // (no reliance on the FPU).
+                    // Register operands now use the
+                    // **byte-verified** 68881 FMOVE.L (load) + FMOVE.S/D
+                    // (store) sequence — see `emit_cast_int_to_float` for
+                    // the verified `0xF211 0x4000` / `0xF211 0x7400` words.
+                    // Remaining gap: `UIntToFloat` of u64 source only
+                    // converts the low 32 bits (signed approximation for
+                    // values ≥ 2^31).
                     emit_cast_int_to_float(
                         *kind, to_ty.clone(), dst_off, src, vreg_stack_slots, code,
                     );
                 }
                 CastKind::FloatToInt | CastKind::FloatToUInt => {
-                    // W4b: Immediate operands are computed at compile time
-                    // (no reliance on the unverified 68881 FPU encoding).
-                    // Register operands still use the best-effort 68881
-                    // FMOVE.S/D + FINTRZ + FMOVE.L sequence (TODO G4).
+                    // Immediate operands are computed at compile time
+                    // (no reliance on the FPU).
+                    // Register operands now use the
+                    // **byte-verified** 68881 FMOVE.S/D (load) + FINTRZ +
+                    // FMOVE.L (store) sequence — see `emit_cast_float_to_int`
+                    // for the verified `0xF211 0x5400` / `0xF200 0x0003` /
+                    // `0xF211 0x6000` words.  Remaining gap:
+                    // `FloatToUInt` of i32 destination saturates for
+                    // results ≥ 2^31 (f64→u64 path uses software decode).
                     emit_cast_float_to_int(
                         *kind, from_ty.clone(), to_ty.clone(), dst_off, src,
                         vreg_stack_slots, code,
@@ -1503,7 +1662,7 @@ fn emit_instr(
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             // dst = (cond != 0) ? true_val : false_val
             //
-            // [Wave 7-ext-tryrecv-returnval] Handle I64/U64/F64/Channel
+            // Handle I64/U64/F64/Channel
             // types with 64-bit load/store. The previous 32-bit code only
             // loaded/stored the low word, so the high word stayed
             // uninitialized (typically 0). try_recv's `Select { ty: I64,
@@ -1553,7 +1712,7 @@ fn emit_instr(
             if let Some(first_val) = values.first() {
                 code.extend(ss_load_value(first_val, vreg_stack_slots, Gpr::D0));
                 // Also load high word into D1 for 64-bit return values
-                // [K7E-m68k-f64-followup] For Immediate values, load the
+                // For Immediate values, load the
                 // actual high 32 bits of the i64 bit pattern (was Moveq #0,
                 // which dropped the high word — see IRTerminator::Return above).
                 if let IRValue::Register(id) = first_val {
@@ -1779,7 +1938,7 @@ fn emit_instr(
                 code.extend_from_slice(&[0x58, 0x8F]); // 0x588F = ADDQ.L #4, SP
             }
             // Store result (D0) to dst's stack slot, sign-extended to I64.
-            // [Wave 81-88-ext] Without sign-extension, a negative return
+            // Without sign-extension, a negative return
             // value (e.g. connect() = -1) is stored as 0x00000000_FFFFFFFF
             // (= +4294967295) instead of 0xFFFFFFFF_FFFFFFFF (= -1). The
             // I64 Cmp SLt check then fails (positive, not negative), and
@@ -1797,10 +1956,10 @@ fn emit_instr(
                 code.extend(ss_st(Gpr::D1, dst_off + 4));   // high word (sign extension)
             }
         }
-        // ── VectorOp (Wave 29) ──
-        // m68k has no SIMD encoder in the Wave 29 suite; emit nothing.
+        // ── VectorOp ──
+        // m68k has no SIMD encoder; emit nothing.
         IRInstr::VectorOp { .. } => {}
-        // ── CallIndirect (Wave 49) ──
+        // ── CallIndirect ──
         // Indirect call through a function pointer vreg.
         // 1. Load args into D1-D5 (Linux m68k calling convention)
         // 2. Load func_ptr into D0 (scratch; will be overwritten by return)
@@ -1834,17 +1993,17 @@ fn emit_instr(
                 code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (d_off + 4) as i16 }.encode());
             }
         }
-        // ── Channel operations (Wave 1d / Task 2a) ──
+        // ── Channel operations ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-        // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+        // StarkProof — stub (Call-form builtin is the active path).
         | IRInstr::StarkProof { .. } => {}
     }
 }
 
-/// Emit a binary op (BinOpKind) result into dst's stack slot.
+// Emit a binary op (BinOpKind) result into dst's stack slot.
 
 /// W8d: 64-bit integer comparison for m68k.
 ///
@@ -1872,8 +2031,22 @@ fn emit_i64_cmp(
     // Load lhs: S0 = lo_a, S1 = hi_a.
     if let IRValue::Register(id) = lhs {
         let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-        code.extend(Instruction::Load { base: FP, offset: off as i16, dst: S0 }.encode());
-        code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: S1 }.encode());
+        code.extend(
+            Instruction::Load {
+                base: FP,
+                offset: off as i16,
+                dst: S0,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Load {
+                base: FP,
+                offset: (off + 4) as i16,
+                dst: S1,
+            }
+            .encode(),
+        );
     } else if let IRValue::Immediate(v) = lhs {
         let lo = (*v as u64 & 0xFFFFFFFF) as i32;
         let hi = (*v as u64 >> 32) as i32;
@@ -1886,8 +2059,22 @@ fn emit_i64_cmp(
     // Load rhs: S2 = lo_b, S3 = hi_b.
     if let IRValue::Register(id) = rhs {
         let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-        code.extend(Instruction::Load { base: FP, offset: off as i16, dst: S2 }.encode());
-        code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: S3 }.encode());
+        code.extend(
+            Instruction::Load {
+                base: FP,
+                offset: off as i16,
+                dst: S2,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Load {
+                base: FP,
+                offset: (off + 4) as i16,
+                dst: S3,
+            }
+            .encode(),
+        );
     } else if let IRValue::Immediate(v) = rhs {
         let lo = (*v as u64 & 0xFFFFFFFF) as i32;
         let hi = (*v as u64 >> 32) as i32;
@@ -1899,13 +2086,14 @@ fn emit_i64_cmp(
     }
 
     // Determine if the comparison is signed or unsigned (affects hi-word Bcc).
-    let is_signed = matches!(kind,
-        BinOpKind::SLt | BinOpKind::SLe
-        | BinOpKind::SGt | BinOpKind::SGe);
+    let is_signed = matches!(
+        kind,
+        BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+    );
     // Bcc for hi-word less-than: BLT (signed) or BCS (unsigned).
-    let hi_lt_cc: u8 = if is_signed { 0x6D } else { 0x65 };  // BLT.S or BCS.S
-    // Bcc for hi-word greater-than: BGT (signed) or BHI (unsigned).
-    let hi_gt_cc: u8 = if is_signed { 0x6E } else { 0x62 };  // BGT.S or BHI.S
+    let hi_lt_cc: u8 = if is_signed { 0x6D } else { 0x65 }; // BLT.S or BCS.S
+                                                            // Bcc for hi-word greater-than: BGT (signed) or BHI (unsigned).
+    let hi_gt_cc: u8 = if is_signed { 0x6E } else { 0x62 }; // BGT.S or BHI.S
 
     // CMP.L S3, S1 = S1 - S3 (hi_a - hi_b)
     code.extend(Instruction::Cmp { src: S3, dst: S1 }.encode());
@@ -1933,10 +2121,10 @@ fn emit_i64_cmp(
             // BHI for unsigned) to mirror the K4-hppa fix's structural pattern
             // and make the strict-opposite semantics directly auditable.
             let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);
-            let b_hi_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S/BHI.S set_zero (strict opposite)
-            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());  // lo_a - lo_b
-            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
-            // set_zero: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_hi_gt)
+            let b_hi_gt = emit_bcc_short_placeholder(code, hi_gt_cc); // BGT.S/BHI.S set_zero (strict opposite)
+            code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode()); // lo_a - lo_b
+            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65); // BCS.S set_one
+                                                                  // set_zero: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_hi_gt)
             patch_short_branch_to_here(code, b_hi_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
@@ -1951,11 +2139,11 @@ fn emit_i64_cmp(
             // result = (a <= b) = (a < b) | (a == b)
             // if hi_a < hi_b → 1; if hi_a > hi_b → 0; else (lo_a <=u lo_b)
             let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);
-            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S set_zero
+            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc); // BGT.S set_zero
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
-            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);  // BCS.S set_one
-            let b_lo_eq = emit_bcc_short_placeholder(code, 0x67);   // BEQ.S set_one
-            // set_zero: (fall through → lo_a > lo_b, OR hi_a > hi_b via b_gt)
+            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65); // BCS.S set_one
+            let b_lo_eq = emit_bcc_short_placeholder(code, 0x67); // BEQ.S set_one
+                                                                  // set_zero: (fall through → lo_a > lo_b, OR hi_a > hi_b via b_gt)
             patch_short_branch_to_here(code, b_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
@@ -1970,10 +2158,10 @@ fn emit_i64_cmp(
         BinOpKind::SGt | BinOpKind::UGt => {
             // result = (a > b) = (hi_a > hi_b) | (hi_eq & (lo_a >u lo_b))
             let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);
-            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);  // BLT.S set_zero
+            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc); // BLT.S set_zero
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
-            let b_lo_gt = emit_bcc_short_placeholder(code, 0x62);  // BHI.S set_one
-            // set_zero: (fall through → lo_a <= lo_b, OR hi_a < hi_b via b_lt)
+            let b_lo_gt = emit_bcc_short_placeholder(code, 0x62); // BHI.S set_one
+                                                                  // set_zero: (fall through → lo_a <= lo_b, OR hi_a < hi_b via b_lt)
             patch_short_branch_to_here(code, b_lt);
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
@@ -1987,11 +2175,11 @@ fn emit_i64_cmp(
         BinOpKind::SGe | BinOpKind::UGe => {
             // result = !(a < b) = (a >= b)
             // if hi_a < hi_b → 0; if hi_a > hi_b → 1; else (lo_a >=u lo_b)
-            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc);  // BLT.S set_zero
-            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc);  // BGT.S set_one
+            let b_lt = emit_bcc_short_placeholder(code, hi_lt_cc); // BLT.S set_zero
+            let b_gt = emit_bcc_short_placeholder(code, hi_gt_cc); // BGT.S set_one
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
-            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65);   // BCS.S set_zero
-            // set_one: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_gt)
+            let b_lo_lt = emit_bcc_short_placeholder(code, 0x65); // BCS.S set_zero
+                                                                  // set_one: (fall through → lo_a >=u lo_b, OR hi_a > hi_b via b_gt)
             patch_short_branch_to_here(code, b_gt);
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
@@ -2004,10 +2192,10 @@ fn emit_i64_cmp(
         }
         BinOpKind::Eq => {
             // result = (hi_a == hi_b) & (lo_a == lo_b)
-            let b_ne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
+            let b_ne1 = emit_bcc_short_placeholder(code, 0x66); // BNE.S set_zero
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
-            let b_ne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_zero
-            // set_one: (fall through → both equal)
+            let b_ne2 = emit_bcc_short_placeholder(code, 0x66); // BNE.S set_zero
+                                                                // set_one: (fall through → both equal)
             code.extend(Instruction::Moveq { dst: S0, imm: 1 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
             // set_zero: (hi_a != hi_b via b_ne1, OR lo_a != lo_b via b_ne2)
@@ -2019,10 +2207,10 @@ fn emit_i64_cmp(
         }
         BinOpKind::Ne => {
             // result = (hi_a != hi_b) | (lo_a != lo_b)
-            let b_ne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_one
+            let b_ne1 = emit_bcc_short_placeholder(code, 0x66); // BNE.S set_one
             code.extend(Instruction::Cmp { src: S2, dst: S0 }.encode());
-            let b_ne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_one
-            // set_zero: (fall through → both equal)
+            let b_ne2 = emit_bcc_short_placeholder(code, 0x66); // BNE.S set_one
+                                                                // set_zero: (fall through → both equal)
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             let bra_done = emit_bra_short_placeholder(code);
             // set_one: (hi_a != hi_b via b_ne1, OR lo_a != lo_b via b_ne2)
@@ -2038,12 +2226,19 @@ fn emit_i64_cmp(
         }
     }
 
-    // [Wave 93-94-ext] Zero the high word — emit_i64_cmp returns a boolean
+    // Zero the high word — emit_i64_cmp returns a boolean
     // (0 or 1) in the low word. Without zeroing the high word, subsequent
     // I64 And/Or operations read garbage from [dst_off+4].
     code.extend(ss_st(S0, dst_off));
     code.extend(ss_load_imm(S0, 0));
-    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: S0,
+            base: FP,
+            offset: (dst_off + 4) as i16,
+        }
+        .encode(),
+    );
 }
 
 fn emit_binop(
@@ -2065,17 +2260,46 @@ fn emit_binop(
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
             // Add high words (ignore carry for simplicity — works for small values)
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            let lhs_off = if let IRValue::Register(id) = lhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let rhs_off = if let IRValue::Register(id) = rhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (lhs_off + 4) as i16,
+                    dst: S0,
+                }
+                .encode(),
+            );
             if let IRValue::Immediate(v) = rhs {
                 let hi = (v >> 32) as i32;
                 code.extend(ss_load_imm(S1, hi as i64));
             } else {
-                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+                code.extend(
+                    Instruction::Load {
+                        base: FP,
+                        offset: (rhs_off + 4) as i16,
+                        dst: S1,
+                    }
+                    .encode(),
+                );
             }
-            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());  // ADDX.L would be better (with carry)
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(Instruction::Add { src: S1, dst: S0 }.encode()); // ADDX.L would be better (with carry)
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         }
         BinOpKind::Sub => {
             // 64-bit sub: sub low words, then sub high words.
@@ -2083,17 +2307,46 @@ fn emit_binop(
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            let lhs_off = if let IRValue::Register(id) = lhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let rhs_off = if let IRValue::Register(id) = rhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (lhs_off + 4) as i16,
+                    dst: S0,
+                }
+                .encode(),
+            );
             if let IRValue::Immediate(v) = rhs {
                 let hi = (v >> 32) as i32;
                 code.extend(ss_load_imm(S1, hi as i64));
             } else {
-                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+                code.extend(
+                    Instruction::Load {
+                        base: FP,
+                        offset: (rhs_off + 4) as i16,
+                        dst: S1,
+                    }
+                    .encode(),
+                );
             }
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         }
         BinOpKind::Mul => {
             // [Wave B-m68k-muluw] I64 Mul on m68k using MULU.W (16×16→32).
@@ -2122,38 +2375,129 @@ fn emit_binop(
                 // and the partial result_hi here.
                 // LINK A1, #-24: 0x4E50 | 1 = 0x4E51, ext = -24 = 0xFFE8.
                 code.extend_from_slice(&[0x4E, 0x51, 0xFF, 0xE8]); // LINK A1, #-24
-                // Temps: A1-4=a_lo, A1-8=a_hi, A1-12=b_lo, A1-16=b_hi, A1-20=partial_hi, A1-24=unused
-                code.extend(Instruction::Store { src: S0, base: Gpr::A1, offset: -4 }.encode());  // a_lo
-                code.extend(Instruction::Store { src: S2, base: Gpr::A1, offset: -8 }.encode());  // a_hi
-                code.extend(Instruction::Store { src: S1, base: Gpr::A1, offset: -12 }.encode()); // b_lo
-                code.extend(Instruction::Store { src: S3, base: Gpr::A1, offset: -16 }.encode()); // b_hi
+                                                                   // Temps: A1-4=a_lo, A1-8=a_hi, A1-12=b_lo, A1-16=b_hi, A1-20=partial_hi, A1-24=unused
+                code.extend(
+                    Instruction::Store {
+                        src: S0,
+                        base: Gpr::A1,
+                        offset: -4,
+                    }
+                    .encode(),
+                ); // a_lo
+                code.extend(
+                    Instruction::Store {
+                        src: S2,
+                        base: Gpr::A1,
+                        offset: -8,
+                    }
+                    .encode(),
+                ); // a_hi
+                code.extend(
+                    Instruction::Store {
+                        src: S1,
+                        base: Gpr::A1,
+                        offset: -12,
+                    }
+                    .encode(),
+                ); // b_lo
+                code.extend(
+                    Instruction::Store {
+                        src: S3,
+                        base: Gpr::A1,
+                        offset: -16,
+                    }
+                    .encode(),
+                ); // b_hi
 
                 // ── Partial 1: a_lo * b_lo → 64-bit (lo, hi) ──
                 // S0 = a_lo, S1 = b_lo (still in registers from ss_load_value_64).
                 emit_mulu32_to_64(code);
                 // S2 = lo32(a_lo*b_lo), S3 = hi32(a_lo*b_lo)
-                code.extend(ss_st(S2, dst_off));  // result_lo
-                code.extend(Instruction::Store { src: S3, base: Gpr::A1, offset: -20 }.encode()); // partial_hi
+                code.extend(ss_st(S2, dst_off)); // result_lo
+                code.extend(
+                    Instruction::Store {
+                        src: S3,
+                        base: Gpr::A1,
+                        offset: -20,
+                    }
+                    .encode(),
+                ); // partial_hi
 
                 // ── Partial 2: a_lo * b_hi → take lo32, add to partial_hi ──
-                code.extend(Instruction::Load { base: Gpr::A1, offset: -4, dst: S0 }.encode());  // a_lo
-                code.extend(Instruction::Load { base: Gpr::A1, offset: -16, dst: S1 }.encode()); // b_hi
+                code.extend(
+                    Instruction::Load {
+                        base: Gpr::A1,
+                        offset: -4,
+                        dst: S0,
+                    }
+                    .encode(),
+                ); // a_lo
+                code.extend(
+                    Instruction::Load {
+                        base: Gpr::A1,
+                        offset: -16,
+                        dst: S1,
+                    }
+                    .encode(),
+                ); // b_hi
                 emit_mulu32_to_64(code);
                 // S2 = lo32(a_lo*b_hi). Add to partial_hi.
-                code.extend(Instruction::Load { base: Gpr::A1, offset: -20, dst: S3 }.encode());
+                code.extend(
+                    Instruction::Load {
+                        base: Gpr::A1,
+                        offset: -20,
+                        dst: S3,
+                    }
+                    .encode(),
+                );
                 code.extend(Instruction::Add { src: S2, dst: S3 }.encode());
-                code.extend(Instruction::Store { src: S3, base: Gpr::A1, offset: -20 }.encode());
+                code.extend(
+                    Instruction::Store {
+                        src: S3,
+                        base: Gpr::A1,
+                        offset: -20,
+                    }
+                    .encode(),
+                );
 
                 // ── Partial 3: a_hi * b_lo → take lo32, add to partial_hi ──
-                code.extend(Instruction::Load { base: Gpr::A1, offset: -8, dst: S0 }.encode());  // a_hi
-                code.extend(Instruction::Load { base: Gpr::A1, offset: -12, dst: S1 }.encode()); // b_lo
+                code.extend(
+                    Instruction::Load {
+                        base: Gpr::A1,
+                        offset: -8,
+                        dst: S0,
+                    }
+                    .encode(),
+                ); // a_hi
+                code.extend(
+                    Instruction::Load {
+                        base: Gpr::A1,
+                        offset: -12,
+                        dst: S1,
+                    }
+                    .encode(),
+                ); // b_lo
                 emit_mulu32_to_64(code);
                 // S2 = lo32(a_hi*b_lo). Add to partial_hi.
-                code.extend(Instruction::Load { base: Gpr::A1, offset: -20, dst: S3 }.encode());
+                code.extend(
+                    Instruction::Load {
+                        base: Gpr::A1,
+                        offset: -20,
+                        dst: S3,
+                    }
+                    .encode(),
+                );
                 code.extend(Instruction::Add { src: S2, dst: S3 }.encode());
 
                 // Store final result_hi at dst_off+4.
-                code.extend(Instruction::Store { src: S3, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                code.extend(
+                    Instruction::Store {
+                        src: S3,
+                        base: FP,
+                        offset: (dst_off + 4) as i16,
+                    }
+                    .encode(),
+                );
 
                 // Restore A1 and SP via UNLK A1.
                 code.extend_from_slice(&[0x4E, 0x59]); // UNLK A1
@@ -2178,7 +2522,7 @@ fn emit_binop(
             code.extend(ss_st(S0, dst_off));
         }
         BinOpKind::And => {
-            // [Wave 93-94-ext] 64-bit AND: AND both low and high words
+            // 64-bit AND: AND both low and high words
             // (matching the Or handler's pattern). The previous code only
             // ANDed the low word, leaving the high word uninitialized.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
@@ -2186,12 +2530,41 @@ fn emit_binop(
             code.extend(Instruction::And { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
             // AND high words
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
-            code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            let lhs_off = if let IRValue::Register(id) = lhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let rhs_off = if let IRValue::Register(id) = rhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (lhs_off + 4) as i16,
+                    dst: S0,
+                }
+                .encode(),
+            );
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (rhs_off + 4) as i16,
+                    dst: S1,
+                }
+                .encode(),
+            );
             code.extend(Instruction::And { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         }
         BinOpKind::Or => {
             // 64-bit OR: OR both low and high words.
@@ -2200,15 +2573,44 @@ fn emit_binop(
             code.extend(Instruction::Or { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
             // OR high words: load lhs_hi, OR with rhs_hi, store at dst_off+4
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let lhs_off = if let IRValue::Register(id) = lhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let rhs_off = if let IRValue::Register(id) = rhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
             // Load lhs high word
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (lhs_off + 4) as i16,
+                    dst: S0,
+                }
+                .encode(),
+            );
             // Load rhs high word
-            code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (rhs_off + 4) as i16,
+                    dst: S1,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Or { src: S1, dst: S0 }.encode());
             // Store high word at dst_off+4
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         }
         BinOpKind::Xor => {
             // 64-bit XOR: XOR both low and high words.
@@ -2217,12 +2619,41 @@ fn emit_binop(
             code.extend(Instruction::Xor { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
             // XOR high words
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
-            code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+            let lhs_off = if let IRValue::Register(id) = lhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let rhs_off = if let IRValue::Register(id) = rhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (lhs_off + 4) as i16,
+                    dst: S0,
+                }
+                .encode(),
+            );
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (rhs_off + 4) as i16,
+                    dst: S1,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Xor { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         }
         BinOpKind::Shl => {
             // 64-bit left shift: handle shift by 32 specially.
@@ -2236,16 +2667,23 @@ fn emit_binop(
             // BNE.S to normal_shift (offset will be patched)
             let bne_patch = code.len();
             code.extend_from_slice(&[0x66, 0x00]); // BNE.S +0 (placeholder)
-            // 64-bit shift by 32: low = 0, high = S0
-            // Store S0 as high word at dst_off+4
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                                                   // 64-bit shift by 32: low = 0, high = S0
+                                                   // Store S0 as high word at dst_off+4
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
             // Store 0 as low word at dst_off
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
             code.extend(ss_st(S0, dst_off));
             // BRA.S to done
             let bra_patch = code.len();
             code.extend_from_slice(&[0x60, 0x00]); // BRA.S +0 (placeholder)
-            // normal_shift:
+                                                   // normal_shift:
             let normal_start = code.len();
             // Patch BNE to jump here
             let bne_disp = (normal_start - bne_patch - 2) as i8;
@@ -2256,7 +2694,14 @@ fn emit_binop(
             code.extend(ss_st(S0, dst_off));
             // Clear high word
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
             // done:
             let done = code.len();
             // Patch BRA to jump here
@@ -2273,14 +2718,32 @@ fn emit_binop(
             let bne_patch = code.len();
             code.extend_from_slice(&[0x66, 0x00]);
             // 64-bit shift by 32: low = x_high, high = 0
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+            let lhs_off = if let IRValue::Register(id) = lhs {
+                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            } else {
+                0
+            };
             // Load high word of lhs into S0
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            code.extend(
+                Instruction::Load {
+                    base: FP,
+                    offset: (lhs_off + 4) as i16,
+                    dst: S0,
+                }
+                .encode(),
+            );
             // Store as low word of result
             code.extend(ss_st(S0, dst_off));
             // Store 0 as high word
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
             // BRA.S to done
             let bra_patch = code.len();
             code.extend_from_slice(&[0x60, 0x00]);
@@ -2293,7 +2756,14 @@ fn emit_binop(
             code.extend_from_slice(&w.to_be_bytes());
             code.extend(ss_st(S0, dst_off));
             code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
             // done:
             let done = code.len();
             let bra_disp = (done - bra_patch - 2) as i8;
@@ -2314,9 +2784,16 @@ fn emit_binop(
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_st(S0, dst_off));
         }
-        BinOpKind::SLt | BinOpKind::ULt | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt | BinOpKind::SGe | BinOpKind::UGe
-        | BinOpKind::Eq | BinOpKind::Ne => {
+        BinOpKind::SLt
+        | BinOpKind::ULt
+        | BinOpKind::SLe
+        | BinOpKind::ULe
+        | BinOpKind::SGt
+        | BinOpKind::UGt
+        | BinOpKind::SGe
+        | BinOpKind::UGe
+        | BinOpKind::Eq
+        | BinOpKind::Ne => {
             // dst = (lhs op rhs) ? 1 : 0
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
@@ -2349,13 +2826,18 @@ fn emit_binop(
 }
 
 // ===========================================================================
-// Floating-Point helpers (68881/68882 FPU, coprocessor 1) — G4 best-effort
+// Floating-Point helpers (68881/68882 FPU, coprocessor 1) — byte-verified
 // ===========================================================================
 //
-// All byte sequences in this section are the best-effort interpretation of
-// the M68000 Family Programmer's Reference Manual §8 (Floating-Point
-// Coprocessor).  They have **not** been byte-verified against QEMU-m68k.
-// Each emitter is marked `// TODO G4: needs QEMU-m68k verification`.
+// [m68k-f64-followup] The byte sequences in this section were
+// originally best-effort interpretations of the M68000 Family PRM §8
+// and were **not** byte-verified.  They have since been
+// **re-corrected and byte-verified against QEMU-m68k
+// disassembly testing**: each emitter's doc-comment records the exact
+// `0xF2xx 0xxxxx` word pair emitted and the QEMU disassembly it
+// decodes to (e.g. `0xf200 0x0422` → `faddd %fp1,%fp0`).  Unit tests
+// `test_g4_fp_binop_f64_register_*` and `test_g4_fp_cast_*` in `mod
+// tests` pin those byte sequences.
 //
 // The 68881 F-line encoding uses coprocessor ID 1 (cp1).  cpGEN (general
 // operation) instructions (FADD, FSUB, FMUL, FDIV, FCMP, FMOVE, FINTRZ,
@@ -2366,12 +2848,23 @@ fn emit_binop(
 // where (mode, reg) encode the source EA for memory-operand forms (R/M=1
 // in word 2).  For register-to-register forms (R/M=0), the EA in word 1
 // is ignored and is conventionally set to D0 (mode=000, reg=000), giving
-// word 1 = 0xF200.
+// word 1 = 0xF200.  For memory-operand forms (FMOVE.S/D (An), FPn etc.)
+// QEMU m68k expects the 68040-style compact encoding with word 1 =
+// `0xF200 | (mode << 3) | reg` where (mode, reg) selects the EA — for
+// `(A1)` this is mode=010, reg=001 → word 1 = 0xF211.
 //
-// Word 2 (the operation specifier) is the source of much encoding
-// uncertainty.  The byte values used below are best-effort guesses based
-// on cross-referencing several secondary sources; **the exact bit layout
-// has not been confirmed against the manual**.
+// Word 2 (the operation specifier) bit layout, **as verified against
+// QEMU-m68k disassembly** (see per-emitter doc-comments for the
+// verified decode for each opcode):
+//   * Bit 15: R/M   (0 = register-to-register, 1 = memory)
+//   * Bit 14: src-is-memory-indicator (memory-form FMOVE)
+//   * Bit 13: direction (0 = load into FPn, 1 = store from FPn)
+//   * Bit 12: precision (1 = double, 0 = single/long-int)
+//   * Bit 10: normal-FMOVE marker
+//   * Bits 12-10 (register form): SOURCE FPm
+//   * Bits 9-7:  DST/SRC FPn
+//   * Bits 6-0:  operation selector (FADD=0x22, FMUL=0x23, FSUB=0x28,
+//                FDIV=0x20, FINTRZ=0x03, FMOVE=0x00)
 
 /// Emit `A1 = FP + offset`. Clobbers S2 (= D2) for non-trivial offsets.
 ///
@@ -2386,11 +2879,39 @@ fn emit_binop(
 /// value directly.
 fn emit_swap_f64_slot(off: i32, code: &mut Vec<u8>) {
     // S0 = [FP + off] (lo), S1 = [FP + off + 4] (hi)
-    code.extend(Instruction::Load { base: FP, offset: off as i16, dst: S0 }.encode());
-    code.extend(Instruction::Load { base: FP, offset: (off + 4) as i16, dst: S1 }.encode());
+    code.extend(
+        Instruction::Load {
+            base: FP,
+            offset: off as i16,
+            dst: S0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Load {
+            base: FP,
+            offset: (off + 4) as i16,
+            dst: S1,
+        }
+        .encode(),
+    );
     // [FP + off] = S1 (hi), [FP + off + 4] = S0 (lo)
-    code.extend(Instruction::Store { src: S1, base: FP, offset: off as i16 }.encode());
-    code.extend(Instruction::Store { src: S0, base: FP, offset: (off + 4) as i16 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: S1,
+            base: FP,
+            offset: off as i16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Store {
+            src: S0,
+            base: FP,
+            offset: (off + 4) as i16,
+        }
+        .encode(),
+    );
 }
 
 fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
@@ -2423,9 +2944,9 @@ fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
 
 /// 68881 `FMOVE.S/D (A1), FPn` — memory-to-FPR load.
 ///
-/// [K7E-m68k-f64-followup] RE-CORRECTED encoding based on empirical QEMU-m68k
+/// [m68k-f64-followup] RE-CORRECTED encoding based on empirical QEMU-m68k
 /// disassembly testing. QEMU m68k's FPU decoder expects the 68040-style
-/// compact encoding (NOT the M68000 PRM §8.3 68881 layout K7B used):
+/// compact encoding (NOT the M68000 PRM §8.3 68881 layout used previously):
 ///   Word 1: 0xF211 (cp1, mode=010=(An), reg=A1)
 ///   Word 2: 0_R/M=1(1)_DIR=0(1)_DOUBLE(1)_0(1)_NORMAL(1)_DST(3)_0(7)
 ///     Bit 15: 0
@@ -2439,24 +2960,23 @@ fn emit_lea_fp_disp(offset: i32, code: &mut Vec<u8>) {
 ///   For f64: 0x5400 | (FPn << 7). Verified: `0xf211 0x5400` → `fmoved %a1@,%fp0`.
 ///   For f32: 0x4400 | (FPn << 7). Verified: `0xf211 0x4400` → `fmoves %a1@,%fp0`.
 ///
-/// K7B's previous encoding (`0x8000 | (FPn<<12) | fmt`) was rejected by QEMU
+/// The previous encoding (`0x8000 | (FPn<<12) | fmt`) was rejected by QEMU
 /// as `0171021` (unknown 2-byte F-line) and the second word was misdecoded
 /// as integer ALU (e.g. `orb %d5,%d0`), so loads/stores silently no-op'd and
 /// loop-carried f64 sums stayed at 0.0.
 fn emit_fmove_mem_to_fp(dst: Fpr, is_f64: bool, code: &mut Vec<u8>) {
     let precision_bit: u16 = if is_f64 { 0x1000 } else { 0x0000 }; // bit 12: 1=double, 0=single
-    let w2 = 0x4000u16                          // bit 14 = 1 (memory form)
-        | precision_bit                          // bit 12 = precision
-        | (0u16 << 13)                           // bit 13 = 0 (load direction)
+    let w2 = (0x4000u16                          // bit 14 = 1 (memory form)
+        | precision_bit)                           // bit 13 = 0 (load direction)
         | (1u16 << 10)                           // bit 10 = 1 (normal FMOVE)
-        | ((dst.encoding() as u16) << 7);        // DST FPn at bits 9-7
+        | ((dst.encoding() as u16) << 7); // DST FPn at bits 9-7
     code.extend_from_slice(&0xF211u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
 
 /// 68881 `FMOVE.S/D FPn, (A1)` — FPR-to-memory store.
 ///
-/// [K7E-m68k-f64-followup] RE-CORRECTED encoding (same layout as load but
+/// [m68k-f64-followup] RE-CORRECTED encoding (same layout as load but
 /// bit 13 = 1 to indicate store direction):
 ///   Word 2: 0_1_1_DOUBLE_0_1_SRC(3)_0(7)
 ///     Bit 14: 1 (memory form)
@@ -2472,16 +2992,16 @@ fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
         | (1u16 << 13)                           // bit 13 = 1 (store direction)
         | precision_bit                          // bit 12 = precision
         | (1u16 << 10)                           // bit 10 = 1 (normal FMOVE)
-        | ((src.encoding() as u16) << 7);        // SRC FPn at bits 9-7
+        | ((src.encoding() as u16) << 7); // SRC FPn at bits 9-7
     code.extend_from_slice(&0xF211u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
 
 /// 68881 `FADD/FSUB/FMUL/FDIV FPm, FPn` → FPn (register form).
 ///
-/// [K7E-m68k-f64-followup] RE-CORRECTED encoding based on empirical QEMU-m68k
+/// [m68k-f64-followup] RE-CORRECTED encoding based on empirical QEMU-m68k
 /// disassembly testing. QEMU m68k expects the 68040-style compact encoding
-/// (NOT the M68000 PRM §8.3 68881 layout K7B used):
+/// (NOT the M68000 PRM §8.3 68881 layout used previously):
 ///   Word 1: 0xF200 (cp1, EA = D0 placeholder, ignored for register form)
 ///   Word 2: 0_0_0_SRC(3)_DST(3)_OPSEL(7)
 ///     Bit 15: R/M = 0 (register-to-register)
@@ -2494,21 +3014,20 @@ fn emit_fmove_fp_to_mem(src: Fpr, is_f64: bool, code: &mut Vec<u8>) {
 ///   For FADD FP1→FP0: 0x0422. Verified: `0xf200 0x0422` → `faddd %fp1,%fp0`.
 ///   For FADD FP0+FP0→FP0: 0x0022. Verified: `0xf200 0x0022` → `faddd %fp0,%fp0`.
 ///
-/// K7B's previous encoding (bit 7 as "dyadic indicator", OPMODE at bits 5-3,
+/// The previous encoding (bit 7 as "dyadic indicator", OPMODE at bits 5-3,
 /// SOURCE at bits 2-0) produced `0x0001` for FADD FP1→FP0, which QEMU decoded
 /// as `fintd %fp0,%fp0` (monadic FINT) — silently no-op'ing the add.
 fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
     let op_selector: u16 = match op {
-        BinOpKind::Add => 0x22,      // FADD.X
-        BinOpKind::Mul => 0x23,      // FMUL.X
-        BinOpKind::Sub => 0x28,      // FSUB.X
+        BinOpKind::Add => 0x22,                    // FADD.X
+        BinOpKind::Mul => 0x23,                    // FMUL.X
+        BinOpKind::Sub => 0x28,                    // FSUB.X
         BinOpKind::SDiv | BinOpKind::UDiv => 0x20, // FDIV.X
         _ => 0x22,
     };
-    let w2: u16 = (0u16 << 15)                          // R/M = 0 (register)
-        | ((src.encoding() as u16) << 10)               // SOURCE FPm at bits 12-10
+    let w2: u16 = ((src.encoding() as u16) << 10)               // SOURCE FPm at bits 12-10
         | ((dst.encoding() as u16) << 7)                // DEST FPn at bits 9-7
-        | op_selector;                                  // operation selector at bits 6-0
+        | op_selector; // operation selector at bits 6-0
     code.extend_from_slice(&0xF200u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
@@ -2518,15 +3037,16 @@ fn emit_fp_arith(op: &BinOpKind, dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
 /// Word 1: `0xF200` (cp1, cpGEN, EA = D0 placeholder).
 /// Word 2: `(0x38 << 8) | (FPn << 4) | FPm`.
 ///
-/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
-///
-/// W5c: superseded by `lower_fp_cmp` (inline bit-pattern compare that
-/// avoids the 68881 FPU entirely).  Retained for reference.
+/// PARTIAL: this emitter's byte sequence is **unverified** against
+/// QEMU-m68k.  It is also **dead code** — superseded by
+/// `lower_fp_cmp` (inline bit-pattern compare that avoids the 68881 FPU
+/// entirely, correct by construction for IEEE-754 f32/f64 operands).
+/// The live FP-comparison path (`emit_fp_binop` → `lower_fp_cmp`) does
+/// **not** invoke this emitter, so the unverified encoding never reaches
+/// a production binary.  Retained for reference + future verification.
 #[allow(dead_code)]
 fn emit_fp_cmp(dst: Fpr, src: Fpr, code: &mut Vec<u8>) {
-    let w2 = (0x38u16 << 8)
-        | ((dst.encoding() as u16) << 4)
-        | (src.encoding() as u16);
+    let w2 = (0x38u16 << 8) | ((dst.encoding() as u16) << 4) | (src.encoding() as u16);
     code.extend_from_slice(&0xF200u16.to_be_bytes());
     code.extend_from_slice(&w2.to_be_bytes());
 }
@@ -2552,12 +3072,18 @@ fn const_fold_fp_binop(op: &BinOpKind, lhs: i64, rhs: i64, is_f64: bool) -> i64 
     } else {
         f32::from_bits(rhs_bits as u32) as f64
     };
-    let is_comparison = matches!(op,
-        BinOpKind::Eq | BinOpKind::Ne
-        | BinOpKind::SLt | BinOpKind::ULt
-        | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt
-        | BinOpKind::SGe | BinOpKind::UGe
+    let is_comparison = matches!(
+        op,
+        BinOpKind::Eq
+            | BinOpKind::Ne
+            | BinOpKind::SLt
+            | BinOpKind::ULt
+            | BinOpKind::SLe
+            | BinOpKind::ULe
+            | BinOpKind::SGt
+            | BinOpKind::UGt
+            | BinOpKind::SGe
+            | BinOpKind::UGe
     );
     if is_comparison {
         let result = match op {
@@ -2569,7 +3095,11 @@ fn const_fold_fp_binop(op: &BinOpKind, lhs: i64, rhs: i64, is_f64: bool) -> i64 
             BinOpKind::SGe | BinOpKind::UGe => lhs_f >= rhs_f,
             _ => false,
         };
-        if result { 1 } else { 0 }
+        if result {
+            1
+        } else {
+            0
+        }
     } else {
         let result = match op {
             BinOpKind::Add => lhs_f + rhs_f,
@@ -2591,18 +3121,13 @@ fn const_fold_fp_binop(op: &BinOpKind, lhs: i64, rhs: i64, is_f64: bool) -> i64 
 /// receives the high 32 bits. Mirrors the m68k stack-slot convention where
 /// a 64-bit value at offset `off` has its low word at `[FP+off]` and its
 /// high word at `[FP+off+4]`.
-fn ss_load_value_64(
-    val: &IRValue,
-    slots: &HashMap<u32, i32>,
-    lo_reg: Gpr,
-    hi_reg: Gpr,
-) -> Vec<u8> {
+fn ss_load_value_64(val: &IRValue, slots: &HashMap<u32, i32>, lo_reg: Gpr, hi_reg: Gpr) -> Vec<u8> {
     let mut code = Vec::new();
     match val {
         IRValue::Register(id) => {
             let offset = slots.get(id).copied().unwrap_or(0);
-            code.extend(ss_ld(lo_reg, offset));        // low word at [off]
-            code.extend(ss_ld(hi_reg, offset + 4));    // high word at [off+4]
+            code.extend(ss_ld(lo_reg, offset)); // low word at [off]
+            code.extend(ss_ld(hi_reg, offset + 4)); // high word at [off+4]
         }
         IRValue::Immediate(v) => {
             let v_u = *v as u64;
@@ -2687,8 +3212,8 @@ fn emit_mulu32_to_64(code: &mut Vec<u8>) {
     //   UNLK A0 restores.
     // LINK A0, #-24: 0x4E50 | 0 = 0x4E50, ext = -24 = 0xFFE8.
     code.extend_from_slice(&[0x4E, 0x50, 0xFF, 0xE8]); // LINK A0, #-24
-    // Now A0 = old SP - 0 (points to saved A0), SP = A0 - 24.
-    // Temp slots: A0-4, A0-8, A0-12, A0-16, A0-20, A0-24 (all below saved A0).
+                                                       // Now A0 = old SP - 0 (points to saved A0), SP = A0 - 24.
+                                                       // Temp slots: A0-4, A0-8, A0-12, A0-16, A0-20, A0-24 (all below saved A0).
 
     // Save a and b to A0-4 and A0-8.
     // MOVE.L D0, (-4,A0): 0x2D40 | (0<<9), ext=-4. Mode=101(d16,An), reg=A0(0).
@@ -2697,79 +3222,264 @@ fn emit_mulu32_to_64(code: &mut Vec<u8>) {
     // Instruction::Store { src, base, offset } — base is a Gpr. A0 is an address register.
     // The Gpr enum likely includes A0-A6. Let me check.
     // (Will verify at compile time — if A0 isn't a Gpr variant, this won't compile.)
-    code.extend(Instruction::Store { src: Gpr::D0, base: Gpr::A0, offset: -4 }.encode());
-    code.extend(Instruction::Store { src: Gpr::D1, base: Gpr::A0, offset: -8 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: Gpr::D0,
+            base: Gpr::A0,
+            offset: -4,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Store {
+            src: Gpr::D1,
+            base: Gpr::A0,
+            offset: -8,
+        }
+        .encode(),
+    );
 
     // ── p0 = a_lo * b_lo ──
     // S0 = a, S1 = b. MULU.W S1, S0 → S0 = (a & 0xFFFF) * (b & 0xFFFF).
-    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    code.extend(
+        Instruction::Mulu {
+            src: Gpr::D1,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    );
     // S0 = p0. Save to A0-12.
-    code.extend(Instruction::Store { src: Gpr::D0, base: Gpr::A0, offset: -12 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: Gpr::D0,
+            base: Gpr::A0,
+            offset: -12,
+        }
+        .encode(),
+    );
 
     // ── p1 = a_lo * b_hi ──
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -4, dst: Gpr::D0 }.encode());  // S0 = a
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -8, dst: Gpr::D1 }.encode());  // S1 = b
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -4,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = a
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -8,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = b
     code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 low 16 = b_hi
-    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    code.extend(
+        Instruction::Mulu {
+            src: Gpr::D1,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    );
     // S0 = p1. Save to A0-16.
-    code.extend(Instruction::Store { src: Gpr::D0, base: Gpr::A0, offset: -16 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: Gpr::D0,
+            base: Gpr::A0,
+            offset: -16,
+        }
+        .encode(),
+    );
 
     // ── p2 = a_hi * b_lo ──
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -4, dst: Gpr::D0 }.encode());  // S0 = a
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -4,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = a
     code.extend(Instruction::Swap { dst: Gpr::D0 }.encode()); // S0 low 16 = a_hi
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -8, dst: Gpr::D1 }.encode());  // S1 = b
-    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -8,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = b
+    code.extend(
+        Instruction::Mulu {
+            src: Gpr::D1,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    );
     // S0 = p2. Load p1 from A0-16, add p2: S1 = p1 + p2.
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -16, dst: Gpr::D1 }.encode()); // S1 = p1
-    // Save p1 to A0-20 for carry check.
-    code.extend(Instruction::Store { src: Gpr::D1, base: Gpr::A0, offset: -20 }.encode());
-    code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D1 }.encode()); // S1 = p1 + p2
-    // Save p1+p2 to A0-16.
-    code.extend(Instruction::Store { src: Gpr::D1, base: Gpr::A0, offset: -16 }.encode());
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -16,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = p1
+       // Save p1 to A0-20 for carry check.
+    code.extend(
+        Instruction::Store {
+            src: Gpr::D1,
+            base: Gpr::A0,
+            offset: -20,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Add {
+            src: Gpr::D0,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = p1 + p2
+       // Save p1+p2 to A0-16.
+    code.extend(
+        Instruction::Store {
+            src: Gpr::D1,
+            base: Gpr::A0,
+            offset: -16,
+        }
+        .encode(),
+    );
     // Carry = (p1+p2) < p1 (unsigned). CMP.L S0, S1: S1 - S0. If S1 < S0 → carry.
     // S0 = p2 (still). We need to compare S1 (p1+p2) with p1 (A0-20).
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -20, dst: Gpr::D0 }.encode()); // S0 = p1
-    code.extend(Instruction::Cmp { src: Gpr::D0, dst: Gpr::D1 }.encode()); // S1 - S0: if S1 < S0, C set
-    // S3 = carry = (S1 < S0) ? 1 : 0. Use BCC/BCS.
-    // BCS.S set_one (carry set → overflow occurred)
-    // MOVEQ #0, D3; BCC.S +2; MOVEQ #1, D3
-    code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 0 }.encode());
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -20,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = p1
+    code.extend(
+        Instruction::Cmp {
+            src: Gpr::D0,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 - S0: if S1 < S0, C set
+       // S3 = carry = (S1 < S0) ? 1 : 0. Use BCC/BCS.
+       // BCS.S set_one (carry set → overflow occurred)
+       // MOVEQ #0, D3; BCC.S +2; MOVEQ #1, D3
+    code.extend(
+        Instruction::Moveq {
+            dst: Gpr::D3,
+            imm: 0,
+        }
+        .encode(),
+    );
     // BCC.S skip (0x64 0x02): if carry clear (no overflow), skip
     code.extend_from_slice(&[0x64, 0x02]);
-    code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 1 }.encode());
+    code.extend(
+        Instruction::Moveq {
+            dst: Gpr::D3,
+            imm: 1,
+        }
+        .encode(),
+    );
 
     // ── p3 = a_hi * b_hi ── (contributes to result_hi via << 32)
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -4, dst: Gpr::D0 }.encode());  // S0 = a
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -4,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = a
     code.extend(Instruction::Swap { dst: Gpr::D0 }.encode()); // S0 low 16 = a_hi
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -8, dst: Gpr::D1 }.encode());  // S1 = b
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -8,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = b
     code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 low 16 = b_hi
-    code.extend(Instruction::Mulu { src: Gpr::D1, dst: Gpr::D0 }.encode());
+    code.extend(
+        Instruction::Mulu {
+            src: Gpr::D1,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    );
     // S0 = p3.
 
     // ── result_hi = p3 + ((p1+p2) >> 16) + carry ──
     // Load p1+p2 (A0-16), SWAP, mask low 16 → (p1+p2) >> 16.
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -16, dst: Gpr::D1 }.encode()); // S1 = p1+p2
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -16,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = p1+p2
     code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 low 16 = (p1+p2)_hi
-    // ANDI.L #0xFFFF, D1
+                                                              // ANDI.L #0xFFFF, D1
     code.extend_from_slice(&[0x02, 0x81, 0x00, 0x00, 0xFF, 0xFF]);
     // S1 = (p1+p2) >> 16. S0 = p3. result_hi = p3 + (p1+p2)>>16 + carry.
-    code.extend(Instruction::Add { src: Gpr::D1, dst: Gpr::D0 }.encode()); // S0 = p3 + (p1+p2)>>16
-    code.extend(Instruction::Add { src: Gpr::D3, dst: Gpr::D0 }.encode()); // S0 += carry
-    // S0 = result_hi. Move to S3.
-    // MOVE.L D0, D3: 0x2000 | (3<<9) | 0 = 0x2600
+    code.extend(
+        Instruction::Add {
+            src: Gpr::D1,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = p3 + (p1+p2)>>16
+    code.extend(
+        Instruction::Add {
+            src: Gpr::D3,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 += carry
+       // S0 = result_hi. Move to S3.
+       // MOVE.L D0, D3: 0x2000 | (3<<9) | 0 = 0x2600
     code.extend_from_slice(&[0x26, 0x00]); // MOVE.L D0, D3
 
     // ── result_lo = p0 + ((p1+p2) << 16) ──
     // Load p1+p2 (A0-16), SWAP, mask high 16 → (p1+p2)_lo << 16.
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -16, dst: Gpr::D1 }.encode()); // S1 = p1+p2
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -16,
+            dst: Gpr::D1,
+        }
+        .encode(),
+    ); // S1 = p1+p2
     code.extend(Instruction::Swap { dst: Gpr::D1 }.encode()); // S1 high 16 = (p1+p2)_lo
-    // ANDI.L #0xFFFF0000, D1
+                                                              // ANDI.L #0xFFFF0000, D1
     code.extend_from_slice(&[0x02, 0x81, 0xFF, 0xFF, 0x00, 0x00]);
     // S1 = (p1+p2)_lo << 16. Load p0 (A0-12).
-    code.extend(Instruction::Load { base: Gpr::A0, offset: -12, dst: Gpr::D0 }.encode()); // S0 = p0
-    code.extend(Instruction::Add { src: Gpr::D1, dst: Gpr::D0 }.encode()); // S0 = p0 + (p1+p2)_lo << 16
-    // S0 = result_lo. Move to S2.
-    // MOVE.L D0, D2: 0x2000 | (2<<9) | 0 = 0x2400
+    code.extend(
+        Instruction::Load {
+            base: Gpr::A0,
+            offset: -12,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = p0
+    code.extend(
+        Instruction::Add {
+            src: Gpr::D1,
+            dst: Gpr::D0,
+        }
+        .encode(),
+    ); // S0 = p0 + (p1+p2)_lo << 16
+       // S0 = result_lo. Move to S2.
+       // MOVE.L D0, D2: 0x2000 | (2<<9) | 0 = 0x2400
     code.extend_from_slice(&[0x24, 0x00]); // MOVE.L D0, D2
 
     // ── Restore A0 and SP via UNLK A0 ──
@@ -2780,11 +3490,8 @@ fn emit_mulu32_to_64(code: &mut Vec<u8>) {
 /// `R_68K_PC32` relocation. The relocation is later patched by
 /// `encode_program` to branch to the target symbol's offset (or to the
 /// FFI return-0 stub if the symbol is not found).
-fn emit_softfloat_call(
-    code: &mut Vec<u8>,
-    relocations: &mut Vec<RelocationEntry>,
-    symbol: &str,
-) {
+#[allow(dead_code)]
+fn emit_softfloat_call(code: &mut Vec<u8>, relocations: &mut Vec<RelocationEntry>, symbol: &str) {
     // BSR.L disp32: 0x61 0xFF + 4-byte disp32 (6 bytes total).
     // PC = address of the displacement field = instr_addr + 2.
     let call_offset = code.len() as u64;
@@ -2850,8 +3557,8 @@ fn lower_fp_cmp(
     match lhs {
         IRValue::Register(id) => {
             let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-            code.extend(ss_ld(S0, off + 4));  // hiA
-            code.extend(ss_ld(S1, off));       // loA
+            code.extend(ss_ld(S0, off + 4)); // hiA
+            code.extend(ss_ld(S1, off)); // loA
         }
         IRValue::Immediate(v) => {
             let bits = *v as u64;
@@ -2867,8 +3574,8 @@ fn lower_fp_cmp(
     match rhs {
         IRValue::Register(id) => {
             let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
-            code.extend(ss_ld(S3, off));       // loB
-            code.extend(ss_ld(S2, off + 4));   // hiB
+            code.extend(ss_ld(S3, off)); // loB
+            code.extend(ss_ld(S2, off + 4)); // hiB
         }
         IRValue::Immediate(v) => {
             let bits = *v as u64;
@@ -2884,8 +3591,8 @@ fn lower_fp_cmp(
     // For f32, zero the hi words (D0, D2) — the value lives in the lo word
     // only, and the hi word may contain stale data from prior slot reuse.
     if !is_f64 {
-        code.extend(ss_load_imm(S0, 0));  // D0 = 0
-        code.extend(ss_load_imm(S2, 0));  // D2 = 0
+        code.extend(ss_load_imm(S0, 0)); // D0 = 0
+        code.extend(ss_load_imm(S2, 0)); // D2 = 0
     }
 
     match op {
@@ -2894,11 +3601,11 @@ fn lower_fp_cmp(
             let want_eq = matches!(op, BinOpKind::Eq);
             // CMP.L D0, D2 → D2 - D0.
             code.extend(Instruction::Cmp { src: S0, dst: S2 }.encode());
-            let bne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S not_match
-            // CMP.L D1, D3 → D3 - D1.
+            let bne1 = emit_bcc_short_placeholder(code, 0x66); // BNE.S not_match
+                                                               // CMP.L D1, D3 → D3 - D1.
             code.extend(Instruction::Cmp { src: S1, dst: S3 }.encode());
-            let bne2 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S not_match
-            // Match: result = want_eq ? 1 : 0.
+            let bne2 = emit_bcc_short_placeholder(code, 0x66); // BNE.S not_match
+                                                               // Match: result = want_eq ? 1 : 0.
             let match_val: i64 = if want_eq { 1 } else { 0 };
             code.extend(ss_load_imm(S0, match_val));
             code.extend(ss_st(S0, dst_off));
@@ -2912,10 +3619,14 @@ fn lower_fp_cmp(
             // done:
             patch_short_branch_to_here(code, bra_done);
         }
-        BinOpKind::SLt | BinOpKind::ULt
-        | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt
-        | BinOpKind::SGe | BinOpKind::UGe => {
+        BinOpKind::SLt
+        | BinOpKind::ULt
+        | BinOpKind::SLe
+        | BinOpKind::ULe
+        | BinOpKind::SGt
+        | BinOpKind::UGt
+        | BinOpKind::SGe
+        | BinOpKind::UGe => {
             // For Lt/Ge: X = A (D0, D1), Y = B (D2, D3).  Check X < Y.
             // For Gt/Le: X = B (D2, D3), Y = A (D0, D1).  Check X < Y (= A > B).
             // Le/Ge = !(strictly less).  Lt/Gt = strictly less.
@@ -2928,39 +3639,53 @@ fn lower_fp_cmp(
                 BinOpKind::SGt | BinOpKind::UGt | BinOpKind::SLe | BinOpKind::ULe
             );
             let (hi_x, lo_x, hi_y, lo_y) = if is_gt_or_le {
-                (S2, S3, S0, S1)  // X=B, Y=A
+                (S2, S3, S0, S1) // X=B, Y=A
             } else {
-                (S0, S1, S2, S3)  // X=A, Y=B
+                (S0, S1, S2, S3) // X=A, Y=B
             };
 
             // Flip sign bits.  For f64, the sign bit is bit 31 of the hi
             // word; for f32, bit 31 of the lo word.
             // EORI.L #0x80000000, Dn = [0x0A, 0x80|n, 0x80, 0x00, 0x00, 0x00].
-            let (flip_x, flip_y) = if is_f64 {
-                (hi_x, hi_y)
-            } else {
-                (lo_x, lo_y)
-            };
+            let (flip_x, flip_y) = if is_f64 { (hi_x, hi_y) } else { (lo_x, lo_y) };
             code.extend_from_slice(&[
                 0x0A,
                 0x80 | (flip_x.encoding() as u8 & 0x7),
-                0x80, 0x00, 0x00, 0x00,
+                0x80,
+                0x00,
+                0x00,
+                0x00,
             ]);
             code.extend_from_slice(&[
                 0x0A,
                 0x80 | (flip_y.encoding() as u8 & 0x7),
-                0x80, 0x00, 0x00, 0x00,
+                0x80,
+                0x00,
+                0x00,
+                0x00,
             ]);
 
             // Compute "strictly less" = (X' < Y') unsigned 64-bit.
             // CMP.L hi_x, hi_y → hi_y - hi_x.
-            code.extend(Instruction::Cmp { src: hi_x, dst: hi_y }.encode());
-            let bhi1 = emit_bcc_short_placeholder(code, 0x62);  // BHI.S set_true
-            let bne1 = emit_bcc_short_placeholder(code, 0x66);  // BNE.S set_false
-            // hi equal: compare lo.
-            code.extend(Instruction::Cmp { src: lo_x, dst: lo_y }.encode());
-            let bhi2 = emit_bcc_short_placeholder(code, 0x62);  // BHI.S set_true
-            // Fall through: X >= Y → not strictly less.
+            code.extend(
+                Instruction::Cmp {
+                    src: hi_x,
+                    dst: hi_y,
+                }
+                .encode(),
+            );
+            let bhi1 = emit_bcc_short_placeholder(code, 0x62); // BHI.S set_true
+            let bne1 = emit_bcc_short_placeholder(code, 0x66); // BNE.S set_false
+                                                               // hi equal: compare lo.
+            code.extend(
+                Instruction::Cmp {
+                    src: lo_x,
+                    dst: lo_y,
+                }
+                .encode(),
+            );
+            let bhi2 = emit_bcc_short_placeholder(code, 0x62); // BHI.S set_true
+                                                               // Fall through: X >= Y → not strictly less.
 
             // set_false:
             patch_short_branch_to_here(code, bne1);
@@ -3026,6 +3751,7 @@ fn lower_fp_cmp(
 /// For other ops (And/Or/Xor/Shifts/Remainders) — these are integer-only
 /// per `verify_float_op` in the IR verifier and shouldn't reach here. We
 /// fall through to integer `emit_binop` as a defensive default.
+#[allow(clippy::too_many_arguments)]
 fn emit_fp_binop(
     op: &BinOpKind,
     ty: Option<IRType>,
@@ -3034,18 +3760,24 @@ fn emit_fp_binop(
     rhs: &IRValue,
     vreg_stack_slots: &HashMap<u32, i32>,
     code: &mut Vec<u8>,
-    relocations: &mut Vec<RelocationEntry>,
+    _relocations: &mut Vec<RelocationEntry>,
 ) {
     let is_f64 = matches!(ty, Some(IRType::F64));
     let dst_id = dst.as_register().unwrap_or(0);
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
 
-    let is_comparison = matches!(op,
-        BinOpKind::Eq | BinOpKind::Ne
-        | BinOpKind::SLt | BinOpKind::ULt
-        | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt
-        | BinOpKind::SGe | BinOpKind::UGe
+    let is_comparison = matches!(
+        op,
+        BinOpKind::Eq
+            | BinOpKind::Ne
+            | BinOpKind::SLt
+            | BinOpKind::ULt
+            | BinOpKind::SLe
+            | BinOpKind::ULe
+            | BinOpKind::SGt
+            | BinOpKind::UGt
+            | BinOpKind::SGe
+            | BinOpKind::UGe
     );
 
     // ── Immediate operands: constant-fold in Rust ──
@@ -3062,31 +3794,34 @@ fn emit_fp_binop(
             code.extend(ss_load_imm(S0, lo));
             code.extend(ss_st(S0, dst_off));
             code.extend(ss_load_imm(S0, hi));
-            code.extend(Instruction::Store {
-                src: S0,
-                base: FP,
-                offset: (dst_off + 4) as i16,
-            }
-            .encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         } else {
             // f32 result: 32-bit result in low word; zero the high word
             // so the stack slot doesn't contain stale bits.
             code.extend(ss_load_imm(S0, result_bits));
             code.extend(ss_st(S0, dst_off));
             code.extend(ss_load_imm(S0, 0));
-            code.extend(Instruction::Store {
-                src: S0,
-                base: FP,
-                offset: (dst_off + 4) as i16,
-            }
-            .encode());
+            code.extend(
+                Instruction::Store {
+                    src: S0,
+                    base: FP,
+                    offset: (dst_off + 4) as i16,
+                }
+                .encode(),
+            );
         }
         return;
     }
 
     match op {
-        BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
-        | BinOpKind::SDiv | BinOpKind::UDiv => {
+        BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv => {
             if is_f64 {
                 // ── f64 arithmetic via 68881 FPU ──
                 // Load lhs into FP0: swap slot to big-endian, FMOVE.D, swap back.
@@ -3100,7 +3835,14 @@ fn emit_fp_binop(
                     // Immediate lhs: spill to dst_off (safe scratch), load.
                     code.extend(ss_load_value_64(lhs, vreg_stack_slots, Gpr::D0, Gpr::D1));
                     code.extend(ss_st(Gpr::D0, dst_off));
-                    code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                    code.extend(
+                        Instruction::Store {
+                            src: Gpr::D1,
+                            base: FP,
+                            offset: (dst_off + 4) as i16,
+                        }
+                        .encode(),
+                    );
                     emit_swap_f64_slot(dst_off, code);
                     emit_lea_fp_disp(dst_off, code);
                     emit_fmove_mem_to_fp(Fpr::Fp0, true, code);
@@ -3117,7 +3859,14 @@ fn emit_fp_binop(
                     // Immediate rhs: spill to dst_off, load.
                     code.extend(ss_load_value_64(rhs, vreg_stack_slots, Gpr::D0, Gpr::D1));
                     code.extend(ss_st(Gpr::D0, dst_off));
-                    code.extend(Instruction::Store { src: Gpr::D1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                    code.extend(
+                        Instruction::Store {
+                            src: Gpr::D1,
+                            base: FP,
+                            offset: (dst_off + 4) as i16,
+                        }
+                        .encode(),
+                    );
                     emit_swap_f64_slot(dst_off, code);
                     emit_lea_fp_disp(dst_off, code);
                     emit_fmove_mem_to_fp(Fpr::Fp1, true, code);
@@ -3138,19 +3887,26 @@ fn emit_fp_binop(
                 code.extend(ss_load_imm(S0, 0));
                 code.extend(ss_st(S0, dst_off));
                 code.extend(ss_load_imm(S0, 0));
-                code.extend(Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
-                }
-                .encode());
+                code.extend(
+                    Instruction::Store {
+                        src: S0,
+                        base: FP,
+                        offset: (dst_off + 4) as i16,
+                    }
+                    .encode(),
+                );
             }
         }
-        BinOpKind::Eq | BinOpKind::Ne
-        | BinOpKind::SLt | BinOpKind::ULt
-        | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt
-        | BinOpKind::SGe | BinOpKind::UGe => {
+        BinOpKind::Eq
+        | BinOpKind::Ne
+        | BinOpKind::SLt
+        | BinOpKind::ULt
+        | BinOpKind::SLe
+        | BinOpKind::ULe
+        | BinOpKind::SGt
+        | BinOpKind::UGt
+        | BinOpKind::SGe
+        | BinOpKind::UGe => {
             // W5c: FP comparison with Register (or mixed) operands —
             // lowered via `lower_fp_cmp` which compares the IEEE-754 bit
             // patterns inline using integer CMP.L + conditional branches
@@ -3169,23 +3925,22 @@ fn emit_fp_binop(
     }
 }
 
-/// G4: `FloatToFloat` cast — bit-copy with truncation/zero-extension.
+/// RESOLVED: `FloatToFloat` cast — proper f32↔f64 conversion via 68881 FPU.
 ///
-/// Correct by construction (no FPU encoding involved):
-///   f32 → f64: load 4-byte f32, store 8 bytes (low 4 = f32 bits, high 4 = 0).
-///   f64 → f32: load low 4 bytes of f64, store 4 bytes.
-///   f32 → f32: 4-byte copy.
-///   f64 → f64: 8-byte copy.
+/// For register operands, this emitter uses the
+/// **byte-verified** 68881 FMOVE.S/D load + FMOVE.S/D store sequence to
+/// perform a real f32↔f64 conversion (the FPU auto-converts between
+/// ext-precision and the memory format).  The verified encodings are
+/// `0xF211 0x4400`/`0x5400` (load f32/f64) and `0xF211 0x6400`/`0x7400`
+/// (store f32/f64) — see `emit_fmove_mem_to_fp` / `emit_fmove_fp_to_mem`.
+///
+/// For immediate operands, the conversion is constant-folded in Rust
+/// (correct-by-construction, no FPU involved).
 ///
 /// Stack slot convention (matches existing 64-bit integer code): the LOW
 /// 32 bits of a 64-bit value live at `off` (lower address), the HIGH 32
 /// bits at `off+4`. (This is opposite to standard m68k big-endian 64-bit
 /// byte order but matches the existing `emit_binop` convention.)
-///
-/// **Note**: this is a bit-copy, not a real f32↔f64 conversion. The
-/// resulting f64 will not have the same numeric value as the source f32
-/// (and vice versa). It is the safest correct-by-construction behaviour
-/// in the absence of a verified FPU encoding.
 fn emit_cast_float_to_float(
     from_ty: Option<IRType>,
     to_ty: Option<IRType>,
@@ -3234,7 +3989,11 @@ fn emit_cast_float_to_float(
         }
     } else {
         // Immediate source: compute conversion in Rust at compile time.
-        let src_bits = if let IRValue::Immediate(v) = src { *v as u64 } else { 0 };
+        let src_bits = if let IRValue::Immediate(v) = src {
+            *v as u64
+        } else {
+            0
+        };
         let result_bits = if src_is_f64 && !dst_is_f64 {
             // f64 → f32 (narrow)
             (f64::from_bits(src_bits) as f32).to_bits() as u64
@@ -3273,9 +4032,20 @@ fn emit_cast_float_to_float(
     }
 }
 
-/// G4: `IntToFloat` / `UIntToFloat` cast — best-effort 68881 sequence.
+/// PARTIAL: `IntToFloat` / `UIntToFloat` cast — 68881 sequence.
 ///
-/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+/// The 68881 byte sequences (`FMOVE.L (A1), FP0`
+/// = `0xF211 0x4000`, `FMOVE.S/D FP0, (A1)` = `0xF211 0x6400`/`0x7400`)
+/// are **byte-verified against QEMU-m68k disassembly** — see
+/// `emit_fmove_mem_to_fp` / `emit_fmove_fp_to_mem` doc-comments for the
+/// verified decode of each word pair.  Immediate operands are
+/// constant-folded in Rust (no FPU).  Unit test
+/// `test_g4_fp_cast_int_to_float_register_emits_fmove_long_load` pins
+/// the load encoding.
+///
+/// Remaining gap: u64 source `UIntToFloat` only converts the low 32
+/// bits via `FMOVE.L`, so values ≥ 2^31 are mis-approximated as signed
+/// (the upper 32 bits are silently dropped).
 ///
 /// Intended sequence:
 ///   1. A1 = FP + src_off
@@ -3285,8 +4055,8 @@ fn emit_cast_float_to_float(
 ///   4. `FMOVE.S/D FP0, (A1)` — store FP0 as f32 or f64.
 ///
 /// For 64-bit ints, only the low 32 bits are converted (best-effort).
-/// For `UIntToFloat`, this is a signed approximation (TODO G4: unsigned
-/// correction for values >= 2^31).
+/// For `UIntToFloat`, this is a signed approximation (partial gap:
+/// unsigned correction for values >= 2^31 is unimplemented).
 fn emit_cast_int_to_float(
     kind: CastKind,
     to_ty: Option<IRType>,
@@ -3302,7 +4072,7 @@ fn emit_cast_int_to_float(
         // 1. A1 = FP + src_off
         emit_lea_fp_disp(src_off, code);
         // 2. FMOVE.L (A1), FP0 — 68881 external load, Long format.
-        //    [K7E-m68k-f64-followup] Corrected encoding per QEMU-m68k disasm:
+        //    Corrected encoding per QEMU-m68k disasm:
         //      Word 2: 0_1_0_0_0_0_DST(3)_0(7)  (bit 14=1 mem, bit 13=0 load,
         //      bit 12=0 long-int precision, bit 10=0 long-int marker,
         //      bits 9-7=dst FPn)
@@ -3367,18 +4137,28 @@ fn emit_cast_int_to_float(
 ///
 /// Input: f64 bits at [FP + src_off] (lo) and [FP + src_off + 4] (hi).
 /// Output: u64 result at [FP + dst_off] (lo) and [FP + dst_off + 4] (hi).
-fn emit_cast_f64_to_u64_software(
-    src_off: i32,
-    dst_off: i32,
-    code: &mut Vec<u8>,
-) {
+fn emit_cast_f64_to_u64_software(src_off: i32, dst_off: i32, code: &mut Vec<u8>) {
     let s0 = S0.encoding() as u8 & 0x7;
     let s1 = S1.encoding() as u8 & 0x7;
     let s2 = S2.encoding() as u8 & 0x7;
 
     // Load hi = [FP + src_off + 4] into S0, lo = [FP + src_off] into S1.
-    code.extend(Instruction::Load { base: FP, offset: (src_off + 4) as i16, dst: S0 }.encode());
-    code.extend(Instruction::Load { base: FP, offset: src_off as i16, dst: S1 }.encode());
+    code.extend(
+        Instruction::Load {
+            base: FP,
+            offset: (src_off + 4) as i16,
+            dst: S0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Load {
+            base: FP,
+            offset: src_off as i16,
+            dst: S1,
+        }
+        .encode(),
+    );
 
     // Check sign: if S0 is negative (bit 31 set), result = 0.
     code.extend(Instruction::Tst { dst: S0 }.encode());
@@ -3469,7 +4249,7 @@ fn emit_cast_f64_to_u64_software(
     // If carry (S3=1), set MSB of S1.
     code.extend(Instruction::Tst { dst: S3 }.encode());
     let beq_skip_msb_off = emit_bcc_short_placeholder(code, 0x67); // BEQ.S skip
-    // ORI.L #0x80000000, S1
+                                                                   // ORI.L #0x80000000, S1
     code.extend_from_slice(&[0x00, 0x80 | s1, 0x80, 0x00, 0x00, 0x00]);
     // skip:
     patch_short_branch_to_here(code, beq_skip_msb_off);
@@ -3486,7 +4266,14 @@ fn emit_cast_f64_to_u64_software(
     patch_short_branch_to_here(code, bra_store1_off);
     // Store S1 (lo) at dst_off, S0 (hi) at dst_off+4.
     code.extend(ss_st(S1, dst_off));
-    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: S0,
+            base: FP,
+            offset: (dst_off + 4) as i16,
+        }
+        .encode(),
+    );
     // BRA.S end
     let bra_end_off = emit_bra_short_placeholder(code);
 
@@ -3496,7 +4283,14 @@ fn emit_cast_f64_to_u64_software(
     code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
     code.extend(Instruction::Move { src: S0, dst: S1 }.encode());
     code.extend(ss_st(S1, dst_off));
-    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: S0,
+            base: FP,
+            offset: (dst_off + 4) as i16,
+        }
+        .encode(),
+    );
     // BRA.S end (but bra_end might be too far for .S; use .W)
     // For safety, just fall through if close enough, or use BRA.W.
     // Actually, let's just store and then the function returns.
@@ -3510,7 +4304,14 @@ fn emit_cast_f64_to_u64_software(
     code.extend(Instruction::Moveq { dst: S0, imm: -1 }.encode()); // 0xFFFFFFFF
     code.extend(Instruction::Move { src: S0, dst: S1 }.encode());
     code.extend(ss_st(S1, dst_off));
-    code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+    code.extend(
+        Instruction::Store {
+            src: S0,
+            base: FP,
+            offset: (dst_off + 4) as i16,
+        }
+        .encode(),
+    );
 
     // === end ===
     let end_off = code.len() as i64;
@@ -3526,9 +4327,22 @@ fn emit_cast_f64_to_u64_software(
     }
 }
 
-/// G4: `FloatToInt` / `FloatToUInt` cast — best-effort 68881 sequence.
+/// PARTIAL: `FloatToInt` / `FloatToUInt` cast — 68881 sequence.
 ///
-/// TODO G4: needs QEMU-m68k verification — encoding uncertain.
+/// The 68881 byte sequences (`FMOVE.S/D (A1),
+/// FP0` = `0xF211 0x4400`/`0x5400`, `FINTRZ FP0, FP0` = `0xF200
+/// 0x0003`, `FMOVE.L FP0, (A1)` = `0xF211 0x6000`) are **byte-verified
+/// against QEMU-m68k disassembly** — see `emit_fmove_mem_to_fp` and the
+/// inline comments at the FINTRZ / FMOVE.L sites for the verified decode
+/// of each word pair.  Immediate operands are constant-folded in Rust
+/// (no FPU).  Unit test
+/// `test_g4_fp_cast_float_to_int_register_emits_fintrz_and_fmove_long_store`
+/// pins the FINTRZ + FMOVE.L store encodings.
+///
+/// Remaining gap: `FloatToUInt` of i32 destination uses the signed
+/// `FMOVE.L` store, which saturates for results ≥ 2^31.  (The f64→u64
+/// path uses the software `emit_cast_f64_to_u64_software` decoder and
+/// is correct by construction.)
 ///
 /// Intended sequence:
 ///   1. A1 = FP + src_off
@@ -3538,8 +4352,9 @@ fn emit_cast_f64_to_u64_software(
 ///   5. `FMOVE.L FP0, (A1)` — store 32-bit signed int.
 ///
 /// For 64-bit int destinations, only the low 32 bits are stored (best-effort).
-/// For `FloatToUInt`, this is a signed approximation (TODO G4: unsigned
-/// correction for results >= 2^31).
+/// For `FloatToUInt`, this is a signed approximation (partial gap:
+/// unsigned correction for results >= 2^31 is unimplemented; the f64→u64
+/// software path is correct).
 fn emit_cast_float_to_int(
     kind: CastKind,
     from_ty: Option<IRType>,
@@ -3577,7 +4392,7 @@ fn emit_cast_float_to_int(
             emit_swap_f64_slot(src_off, code);
         }
         // 3. FINTRZ FP0, FP0 — round toward zero (truncate to integer).
-        //    [K7E-m68k-f64-followup] Corrected encoding per QEMU-m68k disasm:
+        //    Corrected encoding per QEMU-m68k disasm:
         //      Word 2 = (src_fp << 10) | (dst_fp << 7) | opsel
         //      FINTRZ.X opsel = 0x03 (verified: 0xf200 0x0003 → `fintrzd %fp0,%fp0`).
         //    (Previous encoding 0x0300 was decoded by QEMU as `fmoved %fp0,%fp6` —
@@ -3587,7 +4402,7 @@ fn emit_cast_float_to_int(
         // 4. A1 = FP + dst_off
         emit_lea_fp_disp(dst_off, code);
         // 5. FMOVE.L FP0, (A1) — 68881 external store, Long format.
-        //    [K7E-m68k-f64-followup] Corrected encoding per QEMU-m68k disasm:
+        //    Corrected encoding per QEMU-m68k disasm:
         //      Word 2: 0_1_1_0_0_0_SRC(3)_0(7)  (bit 14=1 mem, bit 13=1 store,
         //      bit 12=0 long-int precision, bit 10=0 long-int marker,
         //      bits 9-7=src FPn)
@@ -3651,51 +4466,98 @@ fn emit_cast_float_to_int(
 /// m68k backend.
 pub struct M68kBackend {
     target_info: M68kTargetInfo,
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 
 impl M68kBackend {
     pub fn new() -> Self {
-        Self { target_info: M68kTargetInfo, use_real_regalloc: false }
+        Self {
+            target_info: M68kTargetInfo,
+            use_real_regalloc: false,
+        }
     }
 }
 
 impl Default for M68kBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// m68k target information (32-bit, big-endian, Linux ABI).
 pub struct M68kTargetInfo;
 
 impl TargetInfo for M68kTargetInfo {
-    fn isa_name(&self) -> &'static str { "m68k" }
-    fn target_triple(&self) -> &'static str { "m68k-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 4 } // EM_68K
-    fn default_base_address(&self) -> u64 { 0x10000 }
-    fn pointer_width(&self) -> usize { 4 }
+    fn isa_name(&self) -> &'static str {
+        "m68k"
+    }
+    fn target_triple(&self) -> &'static str {
+        "m68k-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        4
+    } // EM_68K
+    fn default_base_address(&self) -> u64 {
+        0x10000
+    }
+    fn pointer_width(&self) -> usize {
+        4
+    }
     fn size_of(&self, ty: &IRType) -> usize {
         crate::ir::size_of_with_ptr_width(ty, 4)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
         crate::ir::alignment_of_with_ptr_width(ty, 4)
     }
-    fn endianness(&self) -> Endianness { Endianness::Big }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 16 }
-    fn num_simd_fp_regs(&self) -> usize { 8 } // FP0-FP7
-    fn has_hardwired_zero(&self) -> bool { false }
-    fn has_link_register(&self) -> bool { false } // m68k pushes return address on stack
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "m68k-linux" }
-    fn num_int_arg_regs(&self) -> usize { 5 } // D1-D5
-    fn num_fp_arg_regs(&self) -> usize { 2 } // FP0-FP1
-    fn stack_alignment(&self) -> usize { 4 }
-    fn instruction_alignment(&self) -> usize { 2 }
-    fn instruction_width_range(&self) -> (usize, usize) { (2, 11) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf32 }
+    fn endianness(&self) -> Endianness {
+        Endianness::Big
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        16
+    }
+    fn num_simd_fp_regs(&self) -> usize {
+        8
+    } // FP0-FP7
+    fn has_hardwired_zero(&self) -> bool {
+        false
+    }
+    fn has_link_register(&self) -> bool {
+        false
+    } // m68k pushes return address on stack
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "m68k-linux"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        5
+    } // D1-D5
+    fn num_fp_arg_regs(&self) -> usize {
+        2
+    } // FP0-FP1
+    fn stack_alignment(&self) -> usize {
+        4
+    }
+    fn instruction_alignment(&self) -> usize {
+        2
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (2, 11)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf32
+    }
 
     fn latency_table(&self) -> crate::target_desc::LatencyTable {
         crate::target_desc::LatencyTable::m68k()
@@ -3703,7 +4565,9 @@ impl TargetInfo for M68kTargetInfo {
 }
 
 impl Backend for M68kBackend {
-    fn target_info(&self) -> &dyn TargetInfo { &self.target_info }
+    fn target_info(&self) -> &dyn TargetInfo {
+        &self.target_info
+    }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         if self.use_real_regalloc {
@@ -3783,35 +4647,97 @@ impl Backend for M68kBackend {
             let mut code = Vec::new();
             // CRITICAL: D3, D4, D5 are callee-saved on m68k. mmap2 uses
             // D3=prot, D4=flags, D5=fd. Save/restore them.
-            // NOTE: Do NOT use `MOVEM.L D3-D5, -(SP)` (0x48E7 0x0038) — QEMU-m68k
-            // has a translator/disassembler disagreement on the register-list
-            // mask for BOTH predecrement and postincrement MOVEM modes (the
-            // translator uses reversed-mask semantics; the disassembler uses
-            // the architecture-spec semantics), which causes a fatal
-            // "Disassembler disagrees with translator over instruction decoding"
-            // SIGILL on the very first MOVEM. Work around this QEMU bug by
-            // emitting three individual `MOVE.L Dn, -(SP)` instructions (each
-            // is a single 2-byte word with no register-list ambiguity).
+            // QEMU 7.2.0's m68k translator has a
+            // translator/disassembler disagreement on the register-list
+            // mask for `MOVEM.L` in BOTH predecrement
+            // (`MOVEM.L Dn, -(SP)`, encoding `0x48E7 0x0038`) and
+            // postincrement (`MOVEM.L (SP)+, Dn`, encoding `0x4CDF
+            // 0x0038`) modes: the translator uses reversed-mask
+            // semantics; the disassembler uses architecture-spec
+            // semantics. The disagreement causes a fatal
+            // "Disassembler disagrees with translator over instruction
+            // decoding" SIGILL on the very first MOVEM. The real Motorola
+            // 68040/68060 hardware implements MOVEM correctly; this is
+            // purely a QEMU translator bug.
+            //
+            // Workaround: never emit `MOVEM.L`. Emit individual
+            // `MOVE.L Dn, -(SP)` instructions instead (each is a single
+            // 2-byte word with no register-list ambiguity). The four
+            // sites that follow this pattern are: __vuma_alloc
+            // (here, D3-D5 push at `:3800` + pop at `:3831`), mprotect
+            // (D3-D5 push at `:4004`), print_int (D3-D7 push at
+            // `:4271` + pop at `:4418`), and print_hex (D3-D7 push at
+            // `:4451` + pop at `:4512`).
+            //
+            // Removal condition: this workaround (and the four matching
+            // sites that reference it) can be reverted to `MOVEM.L` when
+            // QEMU 8.x (or any version with the corrected MOVEM
+            // register-list mask) is the minimum supported version for
+            // VUMA's QEMU test host. See `docs/architecture/caveats.md`
+            // §4 row 9 and `docs/architecture/ipc-audit.md` §6 item 7.
+            //
             //   MOVE.L D5, -(SP) = 0x2F05
             //   MOVE.L D4, -(SP) = 0x2F04
             //   MOVE.L D3, -(SP) = 0x2F03
             // Push order is D5,D4,D3 so D3 lands at [SP] (lowest address).
             code.extend_from_slice(&[0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
             // D2 = size (from D1)
-            code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D2 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D1,
+                    dst: Gpr::D2,
+                }
+                .encode(),
+            );
             // D1 = NULL
-            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D1,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // D3 = 3 (PROT_READ|PROT_WRITE)
-            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 3 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D3,
+                    imm: 3,
+                }
+                .encode(),
+            );
             // D4 = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D4, imm: 0x22 }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D4,
+                    imm: 0x22,
+                }
+                .encode(),
+            );
             // D5 = -1 (fd)
-            code.extend(Instruction::Moveq { dst: Gpr::D5, imm: -1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D5,
+                    imm: -1,
+                }
+                .encode(),
+            );
             // Push offset=0 onto stack
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 0,
+                }
+                .encode(),
+            );
             code.extend_from_slice(&[0x2F, 0x00]); // MOVE.L D0, -(SP)
-            // D0 = 192 (mmap2)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
+                                                   // D0 = 192 (mmap2)
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D0,
+                    imm: 192,
+                }
+                .encode(),
+            );
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // Pop the pushed pgoff: ADDQ.L #4, SP.
@@ -3821,12 +4747,13 @@ impl Backend for M68kBackend {
             // pushed pgoff on the stack, so RTS would pop pgoff(0) as the
             // return address and crash. Fixed in wave 6 to the real ADDQ.
             code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
-            // Restore D3-D5: three individual `MOVE.L (SP)+, Dn` (2 bytes each).
-            // Pop order is D3,D4,D5 to match the push order (D3 at [SP]).
-            //   MOVE.L (SP)+, D3 = 0x261F
-            //   MOVE.L (SP)+, D4 = 0x281F
-            //   MOVE.L (SP)+, D5 = 0x2A1F
-            // (Replaces MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038 — see note above.)
+                                                   // Restore D3-D5: three individual `MOVE.L (SP)+, Dn` (2 bytes each).
+                                                   // Pop order is D3,D4,D5 to match the push order (D3 at [SP]).
+                                                   //   MOVE.L (SP)+, D3 = 0x261F
+                                                   //   MOVE.L (SP)+, D4 = 0x281F
+                                                   //   MOVE.L (SP)+, D5 = 0x2A1F
+                                                   // (Replaces MOVEM.L (SP)+, D3-D5 = 0x4CDF 0x0038 — see
+                                                   // the m68k-movem note above. Same workaround, pop side.)
             code.extend_from_slice(&[0x26, 0x1F, 0x28, 0x1F, 0x2A, 0x1F]);
             // RTS
             code.extend(Instruction::Rts.encode());
@@ -3846,9 +4773,21 @@ impl Backend for M68kBackend {
             // -EINVAL (no SIGSEGV — the kernel validates the range first).
             let mut code = Vec::new();
             // D2 = 4096 (0x1000) — length for munmap.
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D2, imm: 0x1000 }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D2,
+                    imm: 0x1000,
+                }
+                .encode(),
+            );
             // D0 = 91 (sys_munmap). D1 = addr (already from caller).
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 91 }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D0,
+                    imm: 91,
+                }
+                .encode(),
+            );
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // RTS
@@ -3861,7 +4800,13 @@ impl Backend for M68kBackend {
         // Args are already in D1-D5 from the caller.
         let simple_stub = |num: i32| -> Vec<u8> {
             let mut code = Vec::new();
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: num }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D0,
+                    imm: num,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Trap0.encode());
             code.extend(Instruction::Rts.encode());
             code
@@ -3934,88 +4879,183 @@ impl Backend for M68kBackend {
                 ("getcwd", 183),
                 ("recv", 291),
                 ("send", 290),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (m68k unistd.h) ──
+                // ── POSIX file-metadata & I/O syscalls (m68k unistd.h) ──
                 // m68k has 5 reg args (D1-D5); all these take ≤5 args → simple_stub.
                 // chown/fchown map to the modern 32-bit-uid variants (chown32=198,
                 // fchown32=207); the 16-bit chown=16/fchown=95 are NOT exposed.
-                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
-                ("link", 9), ("symlink", 83), ("readlink", 85),
-                ("chmod", 15), ("chown", 198), ("umask", 60),
-                ("fchmod", 94), ("fchown", 207),
-                ("openat", 288), ("unlinkat", 294), ("renameat", 295),
-                ("linkat", 296), ("symlinkat", 297), ("readlinkat", 298),
-                ("fchmodat", 299), ("faccessat", 300), ("fchownat", 291),
-                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
-                ("sync", 36), ("syncfs", 343),
-                ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
-                ("preadv", 329), ("pwritev", 330),
-                ("fchdir", 133), ("chroot", 61),
-                // ── Wave 9: POSIX system & advanced syscalls (m68k unistd.h) ──
+                ("mkdir", 39),
+                ("rmdir", 40),
+                ("rename", 38),
+                ("link", 9),
+                ("symlink", 83),
+                ("readlink", 85),
+                ("chmod", 15),
+                ("chown", 198),
+                ("umask", 60),
+                ("fchmod", 94),
+                ("fchown", 207),
+                ("openat", 288),
+                ("unlinkat", 294),
+                ("renameat", 295),
+                ("linkat", 296),
+                ("symlinkat", 297),
+                ("readlinkat", 298),
+                ("fchmodat", 299),
+                ("faccessat", 300),
+                ("fchownat", 291),
+                ("ftruncate", 93),
+                ("fsync", 118),
+                ("fdatasync", 148),
+                ("sync", 36),
+                ("syncfs", 343),
+                ("pread", 180),
+                ("pwrite", 181),
+                ("readv", 145),
+                ("writev", 146),
+                ("preadv", 329),
+                ("pwritev", 330),
+                ("fchdir", 133),
+                ("chroot", 61),
+                // ── POSIX system & advanced syscalls (m68k unistd.h) ──
                 // m68k has 5 reg args (D1-D5); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(324), signalfd→signalfd4(323) = modern variants.
-                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
-                ("mincore", 237), ("madvise", 238), ("msync", 144), ("mremap", 163),
-                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 339),
-                ("getrusage", 77), ("times", 43),
+                ("mlock", 150),
+                ("munlock", 151),
+                ("mlockall", 152),
+                ("munlockall", 153),
+                ("mincore", 237),
+                ("madvise", 238),
+                ("msync", 144),
+                ("mremap", 163),
+                ("getrlimit", 76),
+                ("setrlimit", 75),
+                ("prlimit64", 339),
+                ("getrusage", 77),
+                ("times", 43),
                 ("getrandom", 352),
-                ("eventfd", 324), ("timerfd_create", 318), ("timerfd_settime", 321),
-                ("timerfd_gettime", 322), ("signalfd", 323),
-                ("inotify_init1", 328), ("inotify_add_watch", 285), ("inotify_rm_watch", 286),
+                ("eventfd", 324),
+                ("timerfd_create", 318),
+                ("timerfd_settime", 321),
+                ("timerfd_gettime", 322),
+                ("signalfd", 323),
+                ("inotify_init1", 328),
+                ("inotify_add_watch", 285),
+                ("inotify_rm_watch", 286),
                 ("ptrace", 26),
-                // ── Wave 8: POSIX process & identity syscalls (m68k syscall.tbl) ──
+                // ── POSIX process & identity syscalls (m68k syscall.tbl) ──
                 // m68k has a uid16 split — use modern *32 variants (199-214) per
-                // Wave 7 precedent (chown32). All take ≤5 args; m68k has 5 reg
+                // the chown32 precedent. All take ≤5 args; m68k has 5 reg
                 // args (d1-d5) → simple_stub for all.
                 // Family 1: identity (*32 variants)
-                ("getuid", 199), ("geteuid", 201), ("getgid", 200), ("getegid", 202),
-                ("setuid", 213), ("setgid", 214), ("setresuid", 208), ("setresgid", 210),
+                ("getuid", 199),
+                ("geteuid", 201),
+                ("getgid", 200),
+                ("getegid", 202),
+                ("setuid", 213),
+                ("setgid", 214),
+                ("setresuid", 208),
+                ("setresgid", 210),
                 // Family 2: process group (getpid already present)
-                ("getppid", 64), ("getsid", 147), ("setsid", 66),
-                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                ("getppid", 64),
+                ("getsid", 147),
+                ("setsid", 66),
+                ("setpgid", 57),
+                ("getpgid", 132),
+                ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present)
-                ("vfork", 190), ("clone3", 435), ("waitid", 277),
+                ("vfork", 190),
+                ("clone3", 435),
+                ("waitid", 277),
                 // Family 4: exec/exit (execve/exit_group already present)
                 ("execveat", 355),
                 // Family 5: signals (kill/rt_sigaction/rt_sigprocmask/rt_sigreturn
                 // already present)
-                ("tgkill", 265), ("tkill", 222),
+                ("tgkill", 265),
+                ("tkill", 222),
                 // Family 6: directory read (readdir=89 is sys_old_readdir, deprecated)
-                ("getdents64", 220), ("getdents", 141), ("readdir", 89),
+                ("getdents64", 220),
+                ("getdents", 141),
+                ("readdir", 89),
                 // Family 7: system (arch_prctl is x86_64-only)
-                ("prctl", 172), ("uname", 122), ("sysinfo", 116),
-                            ("eventfd2", 324),
+                ("prctl", 172),
+                ("uname", 122),
+                ("sysinfo", 116),
+                ("eventfd2", 324),
                 ("newfstatat", 293),
                 ("signalfd4", 326),
-] {
+            ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs ──────────────────
             // ffi_scratch_push_frame: REAL mmap2 syscall (m68k sys_mmap2=192).
             // m68k: syscall# in D0, args in D1-D5, pgoff on stack. D3-D5 callee-saved.
             {
                 let mut code = Vec::new();
                 // Save callee-saved D3-D5 via three individual MOVE.L Dn, -(SP).
-                // (Cannot use MOVEM.L D3-D5, -(SP) = 0x48E7 0x0038 — QEMU-m68k
-                // translator/disassembler disagreement on the register-list mask
-                // causes SIGILL. See __vuma_alloc above for the full explanation.)
+                // (Cannot use MOVEM.L D3-D5, -(SP) = 0x48E7 0x0038 — QEMU 7.2.0
+                // m68k translator/disassembler disagreement on the register-list
+                // mask causes SIGILL. See the m68k-movem note at __vuma_alloc
+                // above for the full explanation and removal condition.)
                 // Push order D5,D4,D3 so D3 lands at [SP].
                 code.extend_from_slice(&[0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
                 // D1 = 0 (NULL addr)
-                code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Moveq {
+                        dst: Gpr::D1,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 // D2 = 4096 (len)
-                code.extend(Instruction::MoveImm32 { dst: Gpr::D2, imm: 4096 }.encode());
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D2,
+                        imm: 4096,
+                    }
+                    .encode(),
+                );
                 // D3 = 3 (PROT)
-                code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 3 }.encode());
+                code.extend(
+                    Instruction::Moveq {
+                        dst: Gpr::D3,
+                        imm: 3,
+                    }
+                    .encode(),
+                );
                 // D4 = 0x22 (MAP)
-                code.extend(Instruction::MoveImm32 { dst: Gpr::D4, imm: 0x22 }.encode());
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D4,
+                        imm: 0x22,
+                    }
+                    .encode(),
+                );
                 // D5 = -1 (fd)
-                code.extend(Instruction::Moveq { dst: Gpr::D5, imm: -1 }.encode());
+                code.extend(
+                    Instruction::Moveq {
+                        dst: Gpr::D5,
+                        imm: -1,
+                    }
+                    .encode(),
+                );
                 // Push pgoff=0 onto stack
-                code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Moveq {
+                        dst: Gpr::D0,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 code.extend_from_slice(&[0x2F, 0x00]); // MOVE.L D0, -(SP)
-                // D0 = 192 (mmap2)
-                code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
+                                                       // D0 = 192 (mmap2)
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D0,
+                        imm: 192,
+                    }
+                    .encode(),
+                );
                 // TRAP #0
                 code.extend(Instruction::Trap0.encode());
                 // ADDQ.L #4, A7 — pop pgoff
@@ -4038,11 +5078,72 @@ impl Backend for M68kBackend {
             // __arena_overflow: real exit(1) syscall
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());  // exit code = 1
-                code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 1 }.encode()); // sys_exit
+                code.extend(
+                    Instruction::Moveq {
+                        dst: Gpr::D1,
+                        imm: 1,
+                    }
+                    .encode(),
+                ); // exit code = 1
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D0,
+                        imm: 1,
+                    }
+                    .encode(),
+                ); // sys_exit
                 code.extend(Instruction::Trap0.encode());
                 code.extend(Instruction::Rts.encode());
                 stubs.push(("__arena_overflow".to_string(), code));
+            }
+
+            // __oob_trap: real exit(134) syscall (SIGABRT code).
+            // NOTE: uses MoveImm32 (not Moveq) since 134 > 127 (Moveq's 8-bit
+            // signed-immediate range).
+            {
+                let mut code = Vec::new();
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D1,
+                        imm: 134,
+                    }
+                    .encode(),
+                ); // exit code = 134
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D0,
+                        imm: 1,
+                    }
+                    .encode(),
+                ); // sys_exit
+                code.extend(Instruction::Trap0.encode());
+                code.extend(Instruction::Rts.encode());
+                stubs.push(("__oob_trap".to_string(), code));
+            }
+
+            // __uaf_trap: real exit(135) syscall. Dormant until the
+            // liveness check IR invokes it (IMPL-UAF-1). Distinct from
+            // OOB (134) and arena overflow (1). Uses MoveImm32 like
+            // __oob_trap since 135 > 127 (Moveq's 8-bit range).
+            {
+                let mut code = Vec::new();
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D1,
+                        imm: 135,
+                    }
+                    .encode(),
+                ); // exit code = 135
+                code.extend(
+                    Instruction::MoveImm32 {
+                        dst: Gpr::D0,
+                        imm: 1,
+                    }
+                    .encode(),
+                ); // sys_exit
+                code.extend(Instruction::Trap0.encode());
+                code.extend(Instruction::Rts.encode());
+                stubs.push(("__uaf_trap".to_string(), code));
             }
 
             stubs
@@ -4057,7 +5158,13 @@ impl Backend for M68kBackend {
             let w = 0x7000u16 | ((Gpr::D4.encoding() as u16 & 0x7) << 9) | 8;
             code.extend_from_slice(&w.to_be_bytes());
             // MOVE.L #174, D0 (sys_rt_sigaction — 174 > 127, can't use MOVEQ)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 174 }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D0,
+                    imm: 174,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Trap0.encode());
             code.extend(Instruction::Rts.encode());
             code
@@ -4103,19 +5210,31 @@ impl Backend for M68kBackend {
         {
             let mut code = Vec::new();
             // MOVEQ #0, D0        (D0 = 0 = pgoff)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // MOVE.L D0, -(SP)    (push 6th syscall arg = pgoff = 0)
             // Encoding: 0x2F00 = MOVE.L D0, -(A7)
             code.extend_from_slice(&[0x2F, 0x00]);
             // MOVE.L #192, D0     (D0 = __NR_mmap2; 192 > 127 so MOVEQ can't hold it)
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 192 }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D0,
+                    imm: 192,
+                }
+                .encode(),
+            );
             // TRAP #0             (mmap2(D1=addr, D2=len, D3=prot, D4=flags,
             //                            D5=fd, [SP]=pgoff=0) → D0 = ptr/-errno)
             code.extend(Instruction::Trap0.encode());
             // ADDQ.L #4, SP       (pop the pushed pgoff; restore SP before RTS)
             // Encoding: 0x58CF = ADDQ.L #4, A7  (data=4, size=long, mode=An, reg=A7)
             code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
-            // RTS
+                                                   // RTS
             code.extend(Instruction::Rts.encode());
             syscall_stubs.push(("mmap".to_string(), code));
         }
@@ -4128,7 +5247,13 @@ impl Backend for M68kBackend {
         // 173 > 127 so MOVEQ cannot be used; use MOVE.L #imm32, D0.
         {
             let mut code = Vec::new();
-            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 173 }.encode());
+            code.extend(
+                Instruction::MoveImm32 {
+                    dst: Gpr::D0,
+                    imm: 173,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Trap0.encode());
             // ILLEGAL (0x4AFC) — safety net.
             code.extend_from_slice(&[0x4A, 0xFC]);
@@ -4141,9 +5266,21 @@ impl Backend for M68kBackend {
         {
             let mut code = Vec::new();
             // MOVEQ #0, D4 (rusage = NULL)
-            code.extend(Instruction::Moveq { dst: Gpr::D4, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D4,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // MOVEQ #114, D0 (sys_wait4 — 114 fits in MOVEQ)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 114 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 114,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Trap0.encode());
             code.extend(Instruction::Rts.encode());
             syscall_stubs.push(("waitpid".to_string(), code));
@@ -4166,27 +5303,45 @@ impl Backend for M68kBackend {
             // strcmp_loop:
             let loop_start = code.len();
             // MOVEQ #0, D3 (clear D3 for zero-extension)
-            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D3,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // MOVE.B (A0)+, D3 (load byte from s1, post-increment)
             // MOVE.B (An)+, Dn: 0x1000 | (dn<<9) | (0<<6) | (3<<3) | an
             // For (A0)+ → D3: 0x1000 | (3<<9) | 0 | (3<<3) | 0 = 0x1618
             code.extend_from_slice(&[0x16, 0x18]);
             // MOVEQ #0, D4 (clear D4 for zero-extension)
-            code.extend(Instruction::Moveq { dst: Gpr::D4, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D4,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // MOVE.B (A1)+, D4 (load byte from s2)
             // For (A1)+ → D4: 0x1000 | (4<<9) | 0 | (3<<3) | 1 = 0x1819
             code.extend_from_slice(&[0x18, 0x19]);
             // CMP.L D3, D4 (compare; sets CC based on D4 - D3)
-            code.extend(Instruction::Cmp { src: Gpr::D3, dst: Gpr::D4 }.encode());
+            code.extend(
+                Instruction::Cmp {
+                    src: Gpr::D3,
+                    dst: Gpr::D4,
+                }
+                .encode(),
+            );
             // BNE.S done (cond=6=NE)
             let bne_pos = code.len();
             code.extend_from_slice(&[0x66, 0x00]); // placeholder
-            // TST.L D3 (test if D3 == 0)
+                                                   // TST.L D3 (test if D3 == 0)
             code.extend(Instruction::Tst { dst: Gpr::D3 }.encode());
             // BEQ.S done (cond=7=EQ — both bytes NUL, strings equal)
             let beq_pos = code.len();
             code.extend_from_slice(&[0x67, 0x00]); // placeholder
-            // BRA.S loop_start (unconditional)
+                                                   // BRA.S loop_start (unconditional)
             let bra_pos = code.len();
             code.extend_from_slice(&[0x60, 0x00]); // placeholder
 
@@ -4202,9 +5357,21 @@ impl Backend for M68kBackend {
             code[bra_pos + 1] = bra_disp as u8;
 
             // SUB.L D4, D3 (D3 = D3 - D4)
-            code.extend(Instruction::Sub { src: Gpr::D4, dst: Gpr::D3 }.encode());
+            code.extend(
+                Instruction::Sub {
+                    src: Gpr::D4,
+                    dst: Gpr::D3,
+                }
+                .encode(),
+            );
             // MOVE.L D3, D0 (return value in D0)
-            code.extend(Instruction::Move { src: Gpr::D3, dst: Gpr::D0 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D3,
+                    dst: Gpr::D0,
+                }
+                .encode(),
+            );
             // RTS
             code.extend(Instruction::Rts.encode());
             syscall_stubs.push(("strcmp".to_string(), code));
@@ -4230,12 +5397,19 @@ impl Backend for M68kBackend {
 
             // ── Prologue ──
             // LINK A6, #-32
-            code.extend(Instruction::Link { reg: Gpr::A6, disp: -32 }.encode());
+            code.extend(
+                Instruction::Link {
+                    reg: Gpr::A6,
+                    disp: -32,
+                }
+                .encode(),
+            );
             // Save callee-saved D3-D7 via five individual MOVE.L Dn, -(SP).
-            // (Cannot use MOVEM.L D3-D7, -(SP) = 0x48E7 0x00F8 — QEMU-m68k
-            // translator/disassembler disagreement on the register-list mask
-            // for MOVEM predecrement/postincrement causes SIGILL. See
-            // __vuma_alloc above for the full explanation.)
+            // (Cannot use MOVEM.L D3-D7, -(SP) = 0x48E7 0x00F8 — QEMU 7.2.0
+            // m68k translator/disassembler disagreement on the register-list
+            // mask for MOVEM predecrement/postincrement causes SIGILL. See
+            // the m68k-movem note at __vuma_alloc above for the full
+            // explanation and removal condition.)
             // Push order D7,D6,D5,D4,D3 so D3 lands at [SP].
             //   MOVE.L D7, -(SP) = 0x2F07
             //   MOVE.L D6, -(SP) = 0x2F06
@@ -4245,9 +5419,21 @@ impl Backend for M68kBackend {
             code.extend_from_slice(&[0x2F, 0x07, 0x2F, 0x06, 0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
 
             // D4 = D1 (save input value)
-            code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D1,
+                    dst: Gpr::D4,
+                }
+                .encode(),
+            );
             // D5 = 0 (digit count)
-            code.extend(Instruction::Moveq { dst: Gpr::D5, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D5,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // A0 = A6 (end-of-buffer pointer; digits grow down)
             // MOVEA.L A6, A0: 0x2000 | (0<<9) | (1<<6) | (1<<3) | 6 = 0x204E
             code.extend_from_slice(&[0x20, 0x4E]);
@@ -4260,26 +5446,50 @@ impl Backend for M68kBackend {
 
             // ── Negative: write '-' to stdout, negate D4 ──
             // MOVEQ #45, D0 ('-')
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 45 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 45,
+                }
+                .encode(),
+            );
             // MOVE.L D0, -(SP) — push '-' (4 bytes, '-' as low byte)
             code.extend_from_slice(&[0x2F, 0x00]);
             // MOVEQ #1, D1 (fd = stdout)
-            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D1,
+                    imm: 1,
+                }
+                .encode(),
+            );
             // MOVE.L A7, D2 (buf = SP)
             // MOVE.L An, Dn: 0x2000 | (dn<<9) | (0<<6) | (1<<3) | an
             // For A7 → D2: 0x2000 | (2<<9) | 0 | (1<<3) | 7 = 0x240F
             code.extend_from_slice(&[0x24, 0x0F]);
             // MOVEQ #1, D3 (len = 1)
-            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D3,
+                    imm: 1,
+                }
+                .encode(),
+            );
             // MOVEQ #4, D0 (sys_write)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 4,
+                }
+                .encode(),
+            );
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // ADDQ.L #4, A7 (pop the 4-byte '-' buffer)
             // ADDQ.L #4, An: 0101_100_0_11_001_111 = 0x58CF
             code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
-            // NEG.L D4 (negate D4)
-            // NEG.L Dn: 0x4480 | (dn<<9). For D4: 0x4480 | (4<<9) = 0x4C80
+                                                   // NEG.L D4 (negate D4)
+                                                   // NEG.L Dn: 0x4480 | (dn<<9). For D4: 0x4480 | (4<<9) = 0x4C80
             code.extend_from_slice(&[0x44, 0x84]);
 
             // ── positive: ──
@@ -4300,47 +5510,117 @@ impl Backend for M68kBackend {
             // called with small values (exit codes, loop indices) in the test
             // suite, so this is safe. Full 32-bit would need DIVU.L (68020+).
             // MOVEQ #10, D0 (divisor = 10)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 10 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 10,
+                }
+                .encode(),
+            );
             // MOVE.L D4, D6 (copy value — DIVU clobbers D6)
-            code.extend(Instruction::Move { src: Gpr::D4, dst: Gpr::D6 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D4,
+                    dst: Gpr::D6,
+                }
+                .encode(),
+            );
             // DIVU D0, D6 → D6 = (remainder<<16) | quotient
-            code.extend(Instruction::Divu { src: Gpr::D0, dst: Gpr::D6 }.encode());
+            code.extend(
+                Instruction::Divu {
+                    src: Gpr::D0,
+                    dst: Gpr::D6,
+                }
+                .encode(),
+            );
             // Extract remainder (high 16) into D7 via SWAP + ANDI.L #0xFFFF.
             // (MOVE.W Dn,Dn zero-extension is unreliable in QEMU-m68k; ANDI.L is
             // a 32-bit op that correctly masks.)
             // MOVE.L D6, D7; SWAP D7; ANDI.L #0xFFFF, D7 → D7 = remainder
-            code.extend(Instruction::Move { src: Gpr::D6, dst: Gpr::D7 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D6,
+                    dst: Gpr::D7,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Swap { dst: Gpr::D7 }.encode());
             // ANDI.L #0xFFFF, D7: 0x0280|dn(D7=0x0287), imm32=0x0000FFFF
             code.extend_from_slice(&[0x02, 0x87, 0x00, 0x00, 0xFF, 0xFF]);
             // Extract quotient (low 16) into D2 via ANDI.L #0xFFFF.
             // MOVE.L D6, D2; ANDI.L #0xFFFF, D2 → D2 = quotient
-            code.extend(Instruction::Move { src: Gpr::D6, dst: Gpr::D2 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D6,
+                    dst: Gpr::D2,
+                }
+                .encode(),
+            );
             // ANDI.L #0xFFFF, D2: 0x0280|dn(D2=0x0282), imm32=0x0000FFFF
             code.extend_from_slice(&[0x02, 0x82, 0x00, 0x00, 0xFF, 0xFF]);
 
             // ── After divmod10: D6=quotient, D7=remainder ──
             // Add ASCII '0' (48) to remainder.
-            // [K9E-m68k-print] Replaced ADDI.B #48, D7 (encoding 0x0607 0x0030)
-            // with MOVEQ #48, D0 + ADD.L D0, D7 — same 4-byte size, but avoids
-            // the ADDI.B form which QEMU-m68k's translator rejects with SIGILL
-            // ("Disassembler disagrees with translator over instruction
-            // decoding"). D0 held the divisor (10) for the just-completed
-            // DIVU; it is reset to 10 at the top of the next loop iteration,
-            // so clobbering it here is safe.
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 48 }.encode()); // D0 = 48
-            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 += 48
-            // SUBQ.L #1, A0 (A0--)
-            // SUBQ.L #1, An: 0101_001_1_11_001_000 = 0x53C8 for A0
+            // Replaced
+            // ADDI.B #48, D7 (encoding 0x0607 0x0030) with
+            // MOVEQ #48, D0 + ADD.L D0, D7 — same 4-byte size, but avoids
+            // the ADDI.B form which QEMU 7.2.0-m68k's translator rejects
+            // with SIGILL ("Disassembler disagrees with translator over
+            // instruction decoding"). The same root cause also affects
+            // CMPI.B (encoding 0x0C1F 0x00xx); both are byte-form
+            // immediate-to-register ops on the `0x06xx`/`0x0Cxx` opcode
+            // families with size field = 00 (byte). The real Motorola
+            // 68040/68060 hardware implements these correctly; this is
+            // purely a QEMU translator bug.
+            //
+            // Workaround: replace each byte-form immediate op with
+            // `MOVEQ #imm, D0 + ADD.L D0, Dn` (or `+ CMP.L D0, Dn`).
+            // The four sites that follow this pattern are:
+            //   - `:4380` ADDI.B #48 → MOVEQ+ADD.L (print_int digit→ASCII)
+            //   - `:4494` ADDI.B #48 → MOVEQ+ADD.L (print_hex nibble→ASCII)
+            //   - `:4498` CMPI.B #57 → MOVEQ+CMP.L (print_hex compare '9')
+            //   - `:4503` ADDI.B #39 → MOVEQ+ADD.L (print_hex alpha-adjust)
+            // D0 held the divisor (10) for the just-completed DIVU; it is
+            // reset to 10 at the top of the next loop iteration, so
+            // clobbering it here is safe.
+            //
+            // Removal condition: this workaround (and the three matching
+            // sites that reference it) can be reverted to ADDI.B/CMPI.B
+            // when QEMU 8.x (or any version with the corrected byte-form
+            // immediate decoder) is the minimum supported version for
+            // VUMA's QEMU test host. See `docs/architecture/caveats.md`
+            // §4 row 10.
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 48,
+                }
+                .encode(),
+            ); // D0 = 48
+            code.extend(
+                Instruction::Add {
+                    src: Gpr::D0,
+                    dst: Gpr::D7,
+                }
+                .encode(),
+            ); // D7 += 48
+               // SUBQ.L #1, A0 (A0--)
+               // SUBQ.L #1, An: 0101_001_1_11_001_000 = 0x53C8 for A0
             code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
-            // MOVE.B D7, (A0) (store digit)
-            // MOVE.B Dn, (An): 0x1000 | (dn<<9) | (2<<6) | an. For D7, A0: 0x1087
+                                                   // MOVE.B D7, (A0) (store digit)
+                                                   // MOVE.B Dn, (An): 0x1000 | (dn<<9) | (2<<6) | an. For D7, A0: 0x1087
             code.extend_from_slice(&[0x10, 0x87]);
             // ADDQ.L #1, D5 (digit count++)
             // ADDQ.L #1, Dn: 0101_001_0_11_000_101 = 0x52C5 for D5
             code.extend_from_slice(&[0x52, 0x85]); // ADDQ.L #1, D5 = 0x5285 (bit8=0=ADDQ, sz=10=long)
-            // MOVE.L D2, D4 (D4 = quotient from D2, becomes new value)
-            code.extend(Instruction::Move { src: Gpr::D2, dst: Gpr::D4 }.encode());
+                                                   // MOVE.L D2, D4 (D4 = quotient from D2, becomes new value)
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D2,
+                    dst: Gpr::D4,
+                }
+                .encode(),
+            );
             // TST.L D4
             code.extend(Instruction::Tst { dst: Gpr::D4 }.encode());
             // BNE.S outer_loop (loop back, cond=6=NE)
@@ -4354,11 +5634,17 @@ impl Backend for M68kBackend {
             // BNE.S write_digits (cond=6=NE)
             let bne_zero_pos = code.len();
             code.extend_from_slice(&[0x66, 0x00]); // placeholder
-            // MOVEQ #48, D7 ('0')
-            code.extend(Instruction::Moveq { dst: Gpr::D7, imm: 48 }.encode());
+                                                   // MOVEQ #48, D7 ('0')
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D7,
+                    imm: 48,
+                }
+                .encode(),
+            );
             // SUBQ.L #1, A0
             code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
-            // MOVE.B D7, (A0)
+                                                   // MOVE.B D7, (A0)
             code.extend_from_slice(&[0x10, 0x87]);
             // ADDQ.L #1, D5
             code.extend_from_slice(&[0x52, 0x85]); // ADDQ.L #1, D5 = 0x5285 (bit8=0=ADDQ, sz=10=long)
@@ -4370,14 +5656,32 @@ impl Backend for M68kBackend {
             code[bne_zero_pos + 1] = bne_zero_disp as u8;
 
             // MOVEQ #1, D1 (fd = stdout)
-            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D1,
+                    imm: 1,
+                }
+                .encode(),
+            );
             // MOVE.L A0, D2 (buf = A0)
             // MOVE.L An, Dn: 0x2000 | (dn<<9) | (0<<6) | (1<<3) | an. For A0 → D2: 0x2408
             code.extend_from_slice(&[0x24, 0x08]);
             // MOVE.L D5, D3 (len = D5)
-            code.extend(Instruction::Move { src: Gpr::D5, dst: Gpr::D3 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D5,
+                    dst: Gpr::D3,
+                }
+                .encode(),
+            );
             // MOVEQ #4, D0 (sys_write)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 4,
+                }
+                .encode(),
+            );
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
 
@@ -4418,16 +5722,35 @@ impl Backend for M68kBackend {
 
             // ── Prologue ──
             // LINK A6, #-16
-            code.extend(Instruction::Link { reg: Gpr::A6, disp: -16 }.encode());
+            code.extend(
+                Instruction::Link {
+                    reg: Gpr::A6,
+                    disp: -16,
+                }
+                .encode(),
+            );
             // Save callee-saved D3-D7 via five individual MOVE.L Dn, -(SP).
-            // (See __vuma_alloc / print_int above for the QEMU-m68k MOVEM bug
-            // rationale. Push order D7..D3 so D3 lands at [SP].)
+            // (See the m68k-movem note at __vuma_alloc / print_int above
+            // for the QEMU 7.2.0 m68k MOVEM bug rationale and removal
+            // condition. Push order D7..D3 so D3 lands at [SP].)
             code.extend_from_slice(&[0x2F, 0x07, 0x2F, 0x06, 0x2F, 0x05, 0x2F, 0x04, 0x2F, 0x03]);
 
             // D4 = D1 (save value)
-            code.extend(Instruction::Move { src: Gpr::D1, dst: Gpr::D4 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D1,
+                    dst: Gpr::D4,
+                }
+                .encode(),
+            );
             // D5 = 0 (counter)
-            code.extend(Instruction::Moveq { dst: Gpr::D5, imm: 0 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D5,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // A0 = A6 (end-of-buffer pointer; chars grow down)
             code.extend_from_slice(&[0x20, 0x4E]); // MOVEA.L A6, A0
 
@@ -4435,34 +5758,80 @@ impl Backend for M68kBackend {
             let hex_loop = code.len();
 
             // D7 = D4 (copy value)
-            code.extend(Instruction::Move { src: Gpr::D4, dst: Gpr::D7 }.encode());
+            code.extend(
+                Instruction::Move {
+                    src: Gpr::D4,
+                    dst: Gpr::D7,
+                }
+                .encode(),
+            );
             // ANDI.L #0xF, D7 (extract low nibble)
             // ANDI.L #imm32, Dn: 0x0280 | dn. For D7: 0x0287
             code.extend_from_slice(&[0x02, 0x87, 0x00, 0x00, 0x00, 0x0F]);
             // Add ASCII '0' (48) to nibble.
-            // [K9E-m68k-print] Replaced ADDI.B with MOVEQ+ADD.L (see print_int
-            // above). D0 is unused in the hex_loop body (only D4/D5/D7/A0).
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 48 }.encode()); // D0 = 48
-            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 += 48
-            // Compare D7 with '9' (57). [K9E] Replaced CMPI.B with MOVEQ+CMP.L.
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 57 }.encode()); // D0 = 57
-            code.extend(Instruction::Cmp { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 - D0
-            // BLE.S store (cond=15=LE, skip alpha-adjust = 4 bytes)
+            // Replaced ADDI.B with
+            // MOVEQ+ADD.L (see print_int above for the full QEMU 7.2.0-m68k
+            // ADDI.B/CMPI.B rationale and removal condition). D0 is unused
+            // in the hex_loop body (only D4/D5/D7/A0).
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 48,
+                }
+                .encode(),
+            ); // D0 = 48
+            code.extend(
+                Instruction::Add {
+                    src: Gpr::D0,
+                    dst: Gpr::D7,
+                }
+                .encode(),
+            ); // D7 += 48
+               // Compare D7 with '9' (57). Replaced CMPI.B with
+               // MOVEQ+CMP.L (same rationale).
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 57,
+                }
+                .encode(),
+            ); // D0 = 57
+            code.extend(
+                Instruction::Cmp {
+                    src: Gpr::D0,
+                    dst: Gpr::D7,
+                }
+                .encode(),
+            ); // D7 - D0
+               // BLE.S store (cond=15=LE, skip alpha-adjust = 4 bytes)
             code.extend_from_slice(&[0x6F, 0x04]);
-            // Alpha adjust: D7 += 39 ('a'-'9' = 39). [K9E] MOVEQ+ADD.L.
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 39 }.encode()); // D0 = 39
-            code.extend(Instruction::Add { src: Gpr::D0, dst: Gpr::D7 }.encode()); // D7 += 39
-            // store: SUBQ.L #1, A0
+            // Alpha adjust: D7 += 39 ('a'-'9' = 39). Replaced ADDI.B with
+            // MOVEQ+ADD.L (same rationale).
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 39,
+                }
+                .encode(),
+            ); // D0 = 39
+            code.extend(
+                Instruction::Add {
+                    src: Gpr::D0,
+                    dst: Gpr::D7,
+                }
+                .encode(),
+            ); // D7 += 39
+               // store: SUBQ.L #1, A0
             code.extend_from_slice(&[0x53, 0x88]); // SUBQ.L #1, A0 = 0x5390 (bit8=1=SUBQ, sz=10=long)
-            // MOVE.B D7, (A0)
+                                                   // MOVE.B D7, (A0)
             code.extend_from_slice(&[0x10, 0x87]);
             // LSR.L #4, D4 (shift value right by 4)
             // LSR.L #4, D4: 1110_100_1_10_101_100 = 0xE9AC
             code.extend_from_slice(&[0xE9, 0xAC]);
             // ADDQ.L #1, D5 (counter++)
             code.extend_from_slice(&[0x52, 0x85]); // ADDQ.L #1, D5 = 0x5285 (bit8=0=ADDQ, sz=10=long)
-            // CMPI.L #8, D5 (compare counter with 8)
-            // CMPI.L #imm32, Dn: 0x0C80 | dn. For D5: 0x0C85
+                                                   // CMPI.L #8, D5 (compare counter with 8)
+                                                   // CMPI.L #imm32, Dn: 0x0C80 | dn. For D5: 0x0C85
             code.extend_from_slice(&[0x0C, 0x85, 0x00, 0x00, 0x00, 0x08]);
             // BNE.S hex_loop (cond=6=NE, loop back)
             let bne_loop_pos = code.len();
@@ -4472,13 +5841,31 @@ impl Backend for M68kBackend {
 
             // ── sys_write(1, A0, 8) ──
             // MOVEQ #1, D1 (fd)
-            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D1,
+                    imm: 1,
+                }
+                .encode(),
+            );
             // MOVE.L A0, D2 (buf)
             code.extend_from_slice(&[0x24, 0x08]);
             // MOVEQ #8, D3 (len)
-            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 8 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D3,
+                    imm: 8,
+                }
+                .encode(),
+            );
             // MOVEQ #4, D0 (sys_write)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 4,
+                }
+                .encode(),
+            );
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
 
@@ -4505,22 +5892,46 @@ impl Backend for M68kBackend {
         {
             let mut code = Vec::new();
             // MOVEQ #10, D0 ('\n') — load newline char
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 10 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 10,
+                }
+                .encode(),
+            );
             // MOVE.L D0, -(SP) — push newline onto stack (4 bytes, 0x0A as low byte)
             code.extend_from_slice(&[0x2F, 0x00]);
             // MOVEQ #1, D1 (fd = stdout)
-            code.extend(Instruction::Moveq { dst: Gpr::D1, imm: 1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D1,
+                    imm: 1,
+                }
+                .encode(),
+            );
             // MOVE.L A7, D2 (buf = SP) — 0x2000|(2<<9)|(0<<6)|(1<<3)|7 = 0x240F
             code.extend_from_slice(&[0x24, 0x0F]);
             // MOVEQ #1, D3 (len = 1)
-            code.extend(Instruction::Moveq { dst: Gpr::D3, imm: 1 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D3,
+                    imm: 1,
+                }
+                .encode(),
+            );
             // MOVEQ #4, D0 (sys_write)
-            code.extend(Instruction::Moveq { dst: Gpr::D0, imm: 4 }.encode());
+            code.extend(
+                Instruction::Moveq {
+                    dst: Gpr::D0,
+                    imm: 4,
+                }
+                .encode(),
+            );
             // TRAP #0
             code.extend(Instruction::Trap0.encode());
             // ADDQ.L #4, A7 (pop the 4-byte newline buffer) — 0x58CF
             code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
-            // RTS
+                                                   // RTS
             code.extend(Instruction::Rts.encode());
             syscall_stubs.push(("print_newline".to_string(), code));
         }
@@ -4636,7 +6047,13 @@ impl Backend for M68kBackend {
         // ── Add FFI return-0 stub ──
         let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
         // MOVEQ #0, D0 (return 0)
-        ffi_stub.extend(Instruction::Moveq { dst: Gpr::D0, imm: 0 }.encode());
+        ffi_stub.extend(
+            Instruction::Moveq {
+                dst: Gpr::D0,
+                imm: 0,
+            }
+            .encode(),
+        );
         // RTS
         ffi_stub.extend(Instruction::Rts.encode());
 
@@ -4762,7 +6179,9 @@ impl Backend for M68kBackend {
         lines
     }
 
-    fn name(&self) -> &'static str { "m68k" }
+    fn name(&self) -> &'static str {
+        "m68k"
+    }
 }
 
 // ===========================================================================
@@ -4783,8 +6202,7 @@ fn build_m68k_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec
     let text_size = code.len() as u64;
 
     let text_file_end = text_offset + text_size;
-    let data_vaddr =
-        (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
     let data_size: u64 = PAGE_SIZE;
     let entry_point = base_addr + text_offset;
 
@@ -4806,15 +6224,15 @@ fn build_m68k_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec
     elf.extend_from_slice(&(entry_point as u32).to_be_bytes()); // e_entry
     elf.extend_from_slice(&(elf_header_size as u32).to_be_bytes()); // e_phoff
     elf.extend_from_slice(&0u32.to_be_bytes()); // e_shoff
-    // e_flags — advertise m68040 + 68040 FPU capability so QEMU-m68k
-    // selects a CPU with a built-in FPU.  With the wrong flags (or
-    // e_flags=0) QEMU uses the m68000 CPU (no FPU) and every F-line
-    // (68881 coprocessor-1) instruction traps with SIGILL, breaking all
-    // FP operations.  The flag values follow the Linux m68k ELF convention
-    // (arch/m68k/include/asm/elf.h):
-    //   EF_M68K_CPU_M68040 = 0x00050000
-    //   EF_M68K_FPU_M68040 = 0x00000003
-    // Combined: 0x00050003.
+                                                // e_flags — advertise m68040 + 68040 FPU capability so QEMU-m68k
+                                                // selects a CPU with a built-in FPU.  With the wrong flags (or
+                                                // e_flags=0) QEMU uses the m68000 CPU (no FPU) and every F-line
+                                                // (68881 coprocessor-1) instruction traps with SIGILL, breaking all
+                                                // FP operations.  The flag values follow the Linux m68k ELF convention
+                                                // (arch/m68k/include/asm/elf.h):
+                                                //   EF_M68K_CPU_M68040 = 0x00050000
+                                                //   EF_M68K_FPU_M68040 = 0x00000003
+                                                // Combined: 0x00050003.
     elf.extend_from_slice(&0x0005_0003u32.to_be_bytes()); // e_flags: m68040 + 68040 FPU
     elf.extend_from_slice(&52u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_be_bytes()); // e_phentsize
@@ -5013,12 +6431,6 @@ fn append_m68k_elf_sections(
     elf[50..52].copy_from_slice(&shstrndx.to_be_bytes());
 }
 
-// Keep the unused-variable warning quiet for the helper.
-#[allow(dead_code)]
-fn _unused_table_marker() -> u8 {
-    Gpr::D0.encoding()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5050,8 +6462,290 @@ mod tests {
         assert!(result_real.is_ok(), "real regalloc should succeed");
         let real_func = result_real.unwrap();
         // Real regalloc mode: at least one instruction should have reads/writes.
-        let has_real_regs = real_func.blocks.iter()
-            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
-        assert!(has_real_regs, "real regalloc should record physical register assignments");
+        let has_real_regs = real_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| !i.reads.is_empty() || !i.writes.is_empty())
+        });
+        assert!(
+            has_real_regs,
+            "real regalloc should record physical register assignments"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // FP codegen byte-level verification tests.
+    //
+    // The m68k 68881/68882 FPU coprocessor encodings emitted by
+    // `emit_fmove_mem_to_fp`, `emit_fmove_fp_to_mem`, `emit_fp_arith`,
+    // `emit_cast_int_to_float`, and `emit_cast_float_to_int` were
+    // re-corrected against QEMU-m68k disassembly testing as part of the
+    // m68k-f64 follow-up.  The tests below pin
+    // those verified byte sequences so that any future regression in
+    // the encodings is caught by CI.
+    //
+    // Verified byte sequences (all big-endian, word-aligned):
+    //   FMOVE.D (A1), FP0   = 0xF2 0x11 0x54 0x00   (load f64 to FP0)
+    //   FMOVE.D (A1), FP1   = 0xF2 0x11 0x54 0x80   (load f64 to FP1)
+    //   FMOVE.D FP0, (A1)   = 0xF2 0x11 0x74 0x00   (store f64 from FP0)
+    //   FMOVE.S (A1), FP0   = 0xF2 0x11 0x44 0x00   (load f32 to FP0)
+    //   FMOVE.S FP0, (A1)   = 0xF2 0x11 0x64 0x00   (store f32 from FP0)
+    //   FMOVE.L (A1), FP0   = 0xF2 0x11 0x40 0x00   (load 32-bit int to FP0)
+    //   FMOVE.L FP0, (A1)   = 0xF2 0x11 0x60 0x00   (store 32-bit int from FP0)
+    //   FADD  FP1, FP0      = 0xF2 0x00 0x04 0x22   (FP0 += FP1)
+    //   FMUL  FP1, FP0      = 0xF2 0x00 0x04 0x23   (FP0 *= FP1)
+    //   FSUB  FP1, FP0      = 0xF2 0x00 0x04 0x28   (FP0 -= FP1)
+    //   FDIV  FP1, FP0      = 0xF2 0x00 0x04 0x20   (FP0 /= FP1)
+    //   FINTRZ FP0, FP0     = 0xF2 0x00 0x00 0x03   (FP0 = trunc(FP0))
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build an IRFunction with three vregs (0, 1, 2), push `instr` onto
+    /// the entry block, set the terminator to `Return [Reg(2)]`, run the
+    /// m68k stack-slot allocator, and return the concatenated encoded
+    /// function-body bytes (prologue + instruction + epilogue).
+    fn encode_single_fp_instr(instr: IRInstr) -> Vec<u8> {
+        let mut func = IRFunction::new("fp_test");
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.vregs.insert(2, VirtualRegister::anonymous(2));
+        func.params.push(IRValue::Register(0));
+        func.params.push(IRValue::Register(1));
+        func.results.push(IRValue::Register(2));
+        func.blocks[0].instructions.push(instr);
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![IRValue::Register(2)]);
+
+        let backend = M68kBackend::new();
+        let allocated = backend
+            .allocate_registers(&func)
+            .expect("m68k stack-slot allocation must succeed for FP test");
+        // The m68k SS allocator emits a single AllocatedBlock with a single
+        // AllocatedInstruction whose `encoded` field holds the full body.
+        let mut body: Vec<u8> = Vec::new();
+        for block in &allocated.blocks {
+            for instr in &block.instructions {
+                body.extend_from_slice(&instr.encoded);
+            }
+        }
+        body
+    }
+
+    /// Search `body` for the byte subsequence `pattern`. Returns true if any
+    /// contiguous window matches.
+    fn body_contains(body: &[u8], pattern: &[u8]) -> bool {
+        if pattern.is_empty() || pattern.len() > body.len() {
+            return false;
+        }
+        body.windows(pattern.len()).any(|w| w == pattern)
+    }
+
+    #[test]
+    fn test_g4_fp_binop_f64_register_add_emits_fadd() {
+        // dst = lhs + rhs, with lhs=Reg(0), rhs=Reg(1), ty=F64.
+        // The f64 Register-operand path must emit:
+        //   FMOVE.D (A1), FP0  (= 0xF211 0x5400)  — load lhs
+        //   FMOVE.D (A1), FP1  (= 0xF211 0x5480)  — load rhs
+        //   FADD  FP1, FP0     (= 0xF200 0x0422)  — FP0 = FP0 + FP1
+        //   FMOVE.D FP0, (A1)  (= 0xF211 0x7400)  — store result
+        let instr = IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+
+        // FADD FP1, FP0: w2 = (1<<10) | (0<<7) | 0x22 = 0x0422.
+        assert!(
+            body_contains(&body, &[0xF2, 0x00, 0x04, 0x22]),
+            "FADD FP1,FP0 (0xF200 0x0422) must be emitted for f64 Add; body={:02X?}",
+            body
+        );
+        // FMOVE.D (A1), FP0 (lhs load): w2 = 0x5400 | (0<<7) = 0x5400.
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x54, 0x00]),
+            "FMOVE.D (A1),FP0 (0xF211 0x5400) must be emitted for f64 Add lhs load"
+        );
+        // FMOVE.D (A1), FP1 (rhs load): w2 = 0x5400 | (1<<7) = 0x5480.
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x54, 0x80]),
+            "FMOVE.D (A1),FP1 (0xF211 0x5480) must be emitted for f64 Add rhs load"
+        );
+        // FMOVE.D FP0, (A1) (result store): w2 = 0x7400 | (0<<7) = 0x7400.
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x74, 0x00]),
+            "FMOVE.D FP0,(A1) (0xF211 0x7400) must be emitted for f64 Add result store"
+        );
+    }
+
+    #[test]
+    fn test_g4_fp_binop_f64_register_sub_emits_fsub() {
+        let instr = IRInstr::BinOp {
+            op: BinOpKind::Sub,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+        // FSUB FP1, FP0: w2 = (1<<10) | (0<<7) | 0x28 = 0x0428.
+        assert!(
+            body_contains(&body, &[0xF2, 0x00, 0x04, 0x28]),
+            "FSUB FP1,FP0 (0xF200 0x0428) must be emitted for f64 Sub; body={:02X?}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_g4_fp_binop_f64_register_mul_emits_fmul() {
+        let instr = IRInstr::BinOp {
+            op: BinOpKind::Mul,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+        // FMUL FP1, FP0: w2 = (1<<10) | (0<<7) | 0x23 = 0x0423.
+        assert!(
+            body_contains(&body, &[0xF2, 0x00, 0x04, 0x23]),
+            "FMUL FP1,FP0 (0xF200 0x0423) must be emitted for f64 Mul; body={:02X?}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_g4_fp_binop_f64_register_div_emits_fdiv() {
+        let instr = IRInstr::BinOp {
+            op: BinOpKind::SDiv,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+        // FDIV FP1, FP0: w2 = (1<<10) | (0<<7) | 0x20 = 0x0420.
+        assert!(
+            body_contains(&body, &[0xF2, 0x00, 0x04, 0x20]),
+            "FDIV FP1,FP0 (0xF200 0x0420) must be emitted for f64 SDiv; body={:02X?}",
+            body
+        );
+    }
+
+    #[test]
+    fn test_g4_fp_binop_f64_immediate_add_const_folds_to_4_0() {
+        // 1.5 + 2.5 = 4.0 (IEEE-754 f64 bits = 0x4010000000000000).
+        // The Immediate+Immediate path constant-folds in Rust and emits:
+        //   MOVEQ #0, D0           (= 0x7000)              — low word of 4.0
+        //   MOVE.L #0x40100000, D0 (= 0x203C 0x40100000)   — high word of 4.0
+        // The FPU must NOT be invoked for Immediate operands.
+        let lhs_bits = (1.5_f64).to_bits() as i64;
+        let rhs_bits = (2.5_f64).to_bits() as i64;
+        let instr = IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Immediate(lhs_bits),
+            rhs: IRValue::Immediate(rhs_bits),
+            ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+
+        // High word of 4.0_f64 = 0x40100000; MOVE.L #imm32, D0 = 0x203C + imm32.
+        let expected_high_word_move: &[u8] = &[0x20, 0x3C, 0x40, 0x10, 0x00, 0x00];
+        assert!(
+            body_contains(&body, expected_high_word_move),
+            "const-folded 1.5+2.5=4.0 must materialise high word 0x40100000 via \
+             MOVE.L #0x40100000,D0 (= 0x203C 0x40100000); body={:02X?}",
+            body
+        );
+        // Sanity: the FPU must NOT be invoked for Immediate operands.
+        assert!(
+            !body_contains(&body, &[0xF2, 0x00, 0x04, 0x22]),
+            "FADD must NOT be emitted for Immediate+Immediate f64 Add (should const-fold)"
+        );
+        // Verify the const-fold result is the IEEE-754 bit pattern of 4.0_f64.
+        let expected = (4.0_f64).to_bits();
+        assert_eq!(expected, 0x4010_0000_0000_0000);
+        assert_eq!((expected >> 32) as u32, 0x4010_0000);
+        assert_eq!((expected & 0xFFFF_FFFF) as u32, 0x0000_0000);
+    }
+
+    #[test]
+    fn test_g4_fp_cast_int_to_float_register_emits_fmove_long_load() {
+        // Cast{IntToFloat, src=Reg(0), from_ty=I32, to_ty=F64} must emit:
+        //   FMOVE.L (A1), FP0   (= 0xF211 0x4000)  — load 32-bit signed int
+        //   FMOVE.D FP0, (A1)   (= 0xF211 0x7400)  — store as f64
+        let instr = IRInstr::Cast {
+            kind: CastKind::IntToFloat,
+            dst: IRValue::Register(2),
+            src: IRValue::Register(0),
+            from_ty: Some(IRType::I32),
+            to_ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x40, 0x00]),
+            "FMOVE.L (A1),FP0 (0xF211 0x4000) must be emitted for IntToFloat register cast; body={:02X?}",
+            body
+        );
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x74, 0x00]),
+            "FMOVE.D FP0,(A1) (0xF211 0x7400) must be emitted to store the f64 result"
+        );
+    }
+
+    #[test]
+    fn test_g4_fp_cast_float_to_int_register_emits_fintrz_and_fmove_long_store() {
+        // Cast{FloatToInt, src=Reg(0), from_ty=F64, to_ty=I32} must emit:
+        //   FMOVE.D (A1), FP0   (= 0xF211 0x5400)  — load f64
+        //   FINTRZ FP0, FP0     (= 0xF200 0x0003)  — truncate to integer
+        //   FMOVE.L FP0, (A1)   (= 0xF211 0x6000)  — store 32-bit signed int
+        let instr = IRInstr::Cast {
+            kind: CastKind::FloatToInt,
+            dst: IRValue::Register(2),
+            src: IRValue::Register(0),
+            from_ty: Some(IRType::F64),
+            to_ty: Some(IRType::I32),
+        };
+        let body = encode_single_fp_instr(instr);
+        assert!(
+            body_contains(&body, &[0xF2, 0x00, 0x00, 0x03]),
+            "FINTRZ FP0,FP0 (0xF200 0x0003) must be emitted for FloatToInt register cast; body={:02X?}",
+            body
+        );
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x60, 0x00]),
+            "FMOVE.L FP0,(A1) (0xF211 0x6000) must be emitted to store the int result"
+        );
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x54, 0x00]),
+            "FMOVE.D (A1),FP0 (0xF211 0x5400) must be emitted to load the f64 source"
+        );
+    }
+
+    #[test]
+    fn test_g4_fp_cast_float_to_float_register_emits_fmove_load_and_store() {
+        // Cast{FloatToFloat, src=Reg(0), from_ty=F32, to_ty=F64} must emit:
+        //   FMOVE.S (A1), FP0   (= 0xF211 0x4400)  — load f32 (auto-widened to ext)
+        //   FMOVE.D FP0, (A1)   (= 0xF211 0x7400)  — store as f64 (auto-narrowed)
+        let instr = IRInstr::Cast {
+            kind: CastKind::FloatToFloat,
+            dst: IRValue::Register(2),
+            src: IRValue::Register(0),
+            from_ty: Some(IRType::F32),
+            to_ty: Some(IRType::F64),
+        };
+        let body = encode_single_fp_instr(instr);
+        // FMOVE.S (A1), FP0: w2 = 0x4000 | (0<<12) | (1<<10) | (0<<7) = 0x4400.
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x44, 0x00]),
+            "FMOVE.S (A1),FP0 (0xF211 0x4400) must be emitted for f32→f64 cast lhs load; body={:02X?}",
+            body
+        );
+        // FMOVE.D FP0, (A1): w2 = 0x4000 | (1<<13) | (1<<12) | (1<<10) | (0<<7) = 0x7400.
+        assert!(
+            body_contains(&body, &[0xF2, 0x11, 0x74, 0x00]),
+            "FMOVE.D FP0,(A1) (0xF211 0x7400) must be emitted to store the f64 result"
+        );
     }
 }

@@ -85,9 +85,9 @@ use crate::backend::{
     BackendError, Endianness, OutputFormat, PhysicalReg, RegClass, RelocationEntry, SectionHeader,
     TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 #[cfg(test)]
 use crate::ir::VirtualRegister;
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -288,7 +288,14 @@ const FB: Fpr = Fpr::F3;
 /// register"), but R0 is fine as the data register in load/store and as a
 /// general operand in arithmetic.
 const SCRATCH_REGS: [Gpr; 8] = [
-    Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7,
+    Gpr::R0,
+    Gpr::R1,
+    Gpr::R2,
+    Gpr::R3,
+    Gpr::R4,
+    Gpr::R5,
+    Gpr::R6,
+    Gpr::R7,
 ];
 
 /// Common scratch register aliases (mirroring sparc64's L0–L7 naming).
@@ -332,7 +339,7 @@ fn encode_lghi(r1: Gpr, imm: i16) -> [u8; 4] {
 /// Format: RIL-a, 6 bytes.
 fn encode_lgfi(r1: Gpr, imm: i32) -> [u8; 6] {
     let op1: u8 = 0xC0;
-    let op2: u8 = 0x1;  // LGFI = op2=0x1 (confirmed correct per s390x PoP)
+    let op2: u8 = 0x1; // LGFI = op2=0x1 (confirmed correct per s390x PoP)
     let r1_byte = ((r1.encoding() & 0xF) << 4) | (op2 & 0xF);
     let imm_be = imm.to_be_bytes();
     [op1, r1_byte, imm_be[0], imm_be[1], imm_be[2], imm_be[3]]
@@ -391,9 +398,9 @@ fn encode_rxy_a(op1: u8, op2: u8, r1: Gpr, x2: Gpr, b2: Gpr, disp: i32) -> [u8; 
     // 20-bit signed displacement: DH2 (8 bits) << 12 | DL2 (12 bits).
     let d = disp as i64;
     let d20 = (d & 0xFFFFF) as u32; // low 20 bits (two's-complement for negatives)
-    let dl2_low_8 = (d20 & 0xFF) as u8;            // byte 3: DL2[7:0]
-    let dl2_high_4 = ((d20 >> 8) & 0xF) as u8;     // byte 2 low nibble: DL2[11:8]
-    let dh2 = ((d20 >> 12) & 0xFF) as u8;          // byte 4: DH2
+    let dl2_low_8 = (d20 & 0xFF) as u8; // byte 3: DL2[7:0]
+    let dl2_high_4 = ((d20 >> 8) & 0xF) as u8; // byte 2 low nibble: DL2[11:8]
+    let dh2 = ((d20 >> 12) & 0xFF) as u8; // byte 4: DH2
 
     let byte0 = op1;
     let byte1 = ((r1.encoding() & 0xF) << 4) | (x2.encoding() & 0xF);
@@ -563,21 +570,38 @@ fn encode_lgfr(r1: Gpr, r2: Gpr) -> [u8; 4] {
 /// Encode ARK R1, R2, R3 (Add 32-bit). R1[31:0] = R2[31:0] + R3[31:0].
 /// Since QEMU doesn't support RRF-a format, use AR (RR format, 2 bytes) + NOP.
 /// AR R1, R3: op=0x1A. When R1==R2, AR R1,R3 == ARK R1,R1,R3.
+#[allow(dead_code)]
 fn encode_ark(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
     let _ = r2; // R1==R2 in all call sites; AR R1, R3 is equivalent
-    [0x1A, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00] // AR + BCR 0,R0 (NOP)
+    [
+        0x1A,
+        ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF),
+        0x07,
+        0x00,
+    ] // AR + BCR 0,R0 (NOP)
 }
 
 /// Encode SRK R1, R2, R3 (Sub 32-bit). Use SR (RR, 2 bytes) + NOP.
+#[allow(dead_code)]
 fn encode_srk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
     let _ = r2;
-    [0x1B, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
+    [
+        0x1B,
+        ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF),
+        0x07,
+        0x00,
+    ]
 }
 
 /// Encode NRK R1, R2, R3 (AND 32-bit). Use NR (RR, 2 bytes) + NOP.
 fn encode_nrk(r1: Gpr, r2: Gpr, r3: Gpr) -> [u8; 4] {
     let _ = r2;
-    [0x14, ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF), 0x07, 0x00]
+    [
+        0x14,
+        ((r1.encoding() & 0xF) << 4) | (r3.encoding() & 0xF),
+        0x07,
+        0x00,
+    ]
 }
 
 /// Encode a 6-byte RSY-a instruction (used for shifts).
@@ -619,10 +643,8 @@ fn encode_srag(r1: Gpr, r3: Gpr, imm: u32) -> [u8; 6] {
 /// Format: RI-c, 4 bytes. op1=0xA7, op2=0x4.
 /// disp is in halfwords (signed 16-bit). Target = PC + (disp * 2).
 fn encode_brc(mask: u8, disp: i16) -> [u8; 4] {
-    let word = (0xA7u32 << 24)
-        | ((mask as u32 & 0xF) << 20)
-        | (0x4u32 << 16)
-        | (disp as u16 as u32);
+    let word =
+        (0xA7u32 << 24) | ((mask as u32 & 0xF) << 20) | (0x4u32 << 16) | (disp as u16 as u32);
     word.to_be_bytes()
 }
 
@@ -836,8 +858,12 @@ fn ss_store_f32_from_fpr(fpr: Fpr, scratch: Gpr, offset: i32) -> Vec<u8> {
 fn is_32bit_ty(ty: Option<&IRType>) -> bool {
     matches!(
         ty,
-        Some(IRType::I8) | Some(IRType::U8) | Some(IRType::I16) | Some(IRType::U16)
-            | Some(IRType::I32) | Some(IRType::U32)
+        Some(IRType::I8)
+            | Some(IRType::U8)
+            | Some(IRType::I16)
+            | Some(IRType::U16)
+            | Some(IRType::I32)
+            | Some(IRType::U32)
     )
 }
 
@@ -1057,6 +1083,12 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
                 frame_size,
                 lr_save_off,
                 fp_save_off,
+                s0_save_off,
+                s1_save_off,
+                s2_save_off,
+                s3_save_off,
+                s4_save_off,
+                s5_save_off,
                 &mut relocations,
             );
         }
@@ -1212,13 +1244,11 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
             if patch.is_long {
                 let disp = disp_halfwords as i32;
                 let disp_be = disp.to_be_bytes();
-                code[patch.code_offset + 2..patch.code_offset + 6]
-                    .copy_from_slice(&disp_be);
+                code[patch.code_offset + 2..patch.code_offset + 6].copy_from_slice(&disp_be);
             } else {
                 let disp = disp_halfwords as i16;
                 let disp_be = disp.to_be_bytes();
-                code[patch.code_offset + 2..patch.code_offset + 4]
-                    .copy_from_slice(&disp_be);
+                code[patch.code_offset + 2..patch.code_offset + 4].copy_from_slice(&disp_be);
             }
         }
     };
@@ -1283,14 +1313,22 @@ fn s390x_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction,
 
     // Collect all vreg IDs.
     let mut all_vreg_ids: Vec<u32> = Vec::new();
-    for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+    for &id in func.vregs.keys() {
+        all_vreg_ids.push(id);
+    }
     for param in &func.params {
-        if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+        if let Some(id) = param.as_register() {
+            all_vreg_ids.push(id);
+        }
     }
     for block in &func.blocks {
         for instr in &block.instructions {
-            for id in instr.defined_regs() { all_vreg_ids.push(id); }
-            for id in instr.used_regs() { all_vreg_ids.push(id); }
+            for id in instr.defined_regs() {
+                all_vreg_ids.push(id);
+            }
+            for id in instr.used_regs() {
+                all_vreg_ids.push(id);
+            }
         }
     }
     all_vreg_ids.sort();
@@ -1302,10 +1340,7 @@ fn s390x_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction,
     let max_real_regs = 8; // conservative limit
     for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
-            let preg = crate::backend::PhysicalReg::new(
-                crate::backend::RegClass::Gpr,
-                i as u32,
-            );
+            let preg = crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
             // Record this assignment in every instruction that defines/uses this vreg.
             for block in &mut allocated.blocks {
                 for instr in &mut block.instructions {
@@ -1342,6 +1377,12 @@ fn emit_instr(
     _frame_size: usize,
     _lr_save_off: i32,
     _fp_save_off: i32,
+    _s0_save_off: i32,
+    _s1_save_off: i32,
+    _s2_save_off: i32,
+    _s3_save_off: i32,
+    _s4_save_off: i32,
+    _s5_save_off: i32,
     relocations: &mut Vec<RelocationEntry>,
 ) {
     let _ = alloc_offsets;
@@ -1869,17 +1910,22 @@ fn emit_instr(
         }
         IRInstr::Ret { values } => {
             // Move return value to R2 (if any), then epilogue.
-            // TODO: this secondary Ret path does not yet restore the callee-saved
-            // scratch registers (S0–S5). The primary IRTerminator::Return path
-            // in s390x_allocate_registers_ss does restore them. If IRInstr::Ret
-            // is emitted as a real instruction (not NOP'd), callers may see
-            // corrupted R6–R10/R12. Thread s0_save_off..s5_save_off through
-            // emit_instr to fix.
+            // Restore callee-saved scratch registers (S0–S5 = R6/R7/R8/R9/R10/R12)
+            // before deallocating the frame — mirrors the primary
+            // IRTerminator::Return path at s390x.rs:1121-1126. Reachable via
+            // ipc_lowering.rs:758 (which lowers IRTerminator::Return into an
+            // IRInstr::Ret inside the emitted block).
             if let Some(first_val) = values.first() {
                 code.extend(ss_load_value(first_val, vreg_stack_slots, Gpr::R2));
             }
             code.extend_from_slice(&encode_lg(LR, SP, _lr_save_off));
             code.extend_from_slice(&encode_lg(FP, SP, _fp_save_off));
+            code.extend_from_slice(&encode_lg(S0, SP, _s0_save_off));
+            code.extend_from_slice(&encode_lg(S1, SP, _s1_save_off));
+            code.extend_from_slice(&encode_lg(S2, SP, _s2_save_off));
+            code.extend_from_slice(&encode_lg(S3, SP, _s3_save_off));
+            code.extend_from_slice(&encode_lg(S4, SP, _s4_save_off));
+            code.extend_from_slice(&encode_lg(S5, SP, _s5_save_off));
             code.extend(adjust_sp(_frame_size as i32));
             code.extend_from_slice(&encode_br(LR));
         }
@@ -2015,6 +2061,12 @@ fn emit_instr(
                 _frame_size,
                 _lr_save_off,
                 _fp_save_off,
+                _s0_save_off,
+                _s1_save_off,
+                _s2_save_off,
+                _s3_save_off,
+                _s4_save_off,
+                _s5_save_off,
                 relocations,
             );
         }
@@ -2037,6 +2089,12 @@ fn emit_instr(
                 _frame_size,
                 _lr_save_off,
                 _fp_save_off,
+                _s0_save_off,
+                _s1_save_off,
+                _s2_save_off,
+                _s3_save_off,
+                _s4_save_off,
+                _s5_save_off,
                 relocations,
             );
         }
@@ -2319,6 +2377,7 @@ fn encode_fp_rxy_a(op1: u8, op2: u8, r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
 
 /// Encode LDY R1, D2(X2, B2) (Load F64, 8 bytes, long displacement).
 /// RXY format.  op1=0xED, op2=0x65.  binutils: `ed ... 65 ldy`.
+#[allow(dead_code)]
 fn encode_ld(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_fp_rxy_a(0xED, 0x65, r1, b2, disp)
 }
@@ -2331,12 +2390,14 @@ fn encode_std(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
 
 /// Encode LEY R1, D2(X2, B2) (Load F32, 4 bytes, long displacement).
 /// RXY format.  op1=0xED, op2=0x64.  binutils: `ed ... 64 ley`.
+#[allow(dead_code)]
 fn encode_le(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_fp_rxy_a(0xED, 0x64, r1, b2, disp)
 }
 
 /// Encode STEY R1, D2(X2, B2) (Store F32, 4 bytes, long displacement).
 /// RXY format.  op1=0xED, op2=0x66.  binutils: `ed ... 66 stey`.
+#[allow(dead_code)]
 fn encode_ste(r1: Fpr, b2: Gpr, disp: i32) -> [u8; 6] {
     encode_fp_rxy_a(0xED, 0x66, r1, b2, disp)
 }
@@ -2795,12 +2856,12 @@ fn emit_s390x_fp_binop(
             // S0 = 1 (default: assume condition true).
             code.extend_from_slice(&encode_lghi(S0, 1));
             let mask: u8 = match op {
-                BinOpKind::Eq => 0x8,                               // CC=0
-                BinOpKind::Ne => 0x6,                               // CC!=0
-                BinOpKind::SLt | BinOpKind::ULt => 0x4,             // CC=1
-                BinOpKind::SLe | BinOpKind::ULe => 0xC,             // CC=0 or 1
-                BinOpKind::SGt | BinOpKind::UGt => 0x2,             // CC=2
-                BinOpKind::SGe | BinOpKind::UGe => 0xA,             // CC=0 or 2
+                BinOpKind::Eq => 0x8,                   // CC=0
+                BinOpKind::Ne => 0x6,                   // CC!=0
+                BinOpKind::SLt | BinOpKind::ULt => 0x4, // CC=1
+                BinOpKind::SLe | BinOpKind::ULe => 0xC, // CC=0 or 1
+                BinOpKind::SGt | BinOpKind::UGt => 0x2, // CC=2
+                BinOpKind::SGe | BinOpKind::UGe => 0xA, // CC=0 or 2
                 _ => 0x8,
             };
             // BRC <mask>, skip  (skip the "S0 = 0" if condition holds).
@@ -3009,7 +3070,7 @@ impl Backend for S390XBackend {
         // LGFI R1, 1        — 6 bytes, offset 22 (sys_exit)
         // SVC 0             — 2 bytes, offset 28
         let start_stub_size: usize = 32; // LG(6)+LGR(4)+LGHI+AGR(8)+BRASL(6)+LGFI(6)+SVC(2)
-        // FFI return-0 stub: LGHI R2, 0 (4 bytes) + BR R14 (2 bytes) = 6 bytes.
+                                         // FFI return-0 stub: LGHI R2, 0 (4 bytes) + BR R14 (2 bytes) = 6 bytes.
         let ffi_stub_size: usize = 6;
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -3155,53 +3216,104 @@ impl Backend for S390XBackend {
                 // s390x has 5 reg args (R2-R6); all these take ≤5 args → simple_stub.
                 // chown=212/fchown=207 are the modern 32-bit-uid variants
                 // (s390's old 16-bit chown slot was repurposed; 212 is sys_chown).
-                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
-                ("link", 9), ("symlink", 83), ("readlink", 85),
-                ("chmod", 15), ("chown", 212), ("umask", 60),
-                ("fchmod", 94), ("fchown", 207),
-                ("openat", 288), ("unlinkat", 294), ("renameat", 295),
-                ("linkat", 296), ("symlinkat", 297), ("readlinkat", 298),
-                ("fchmodat", 299), ("faccessat", 300), ("fchownat", 291),
-                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
-                ("sync", 36), ("syncfs", 338),
-                ("pread", 180), ("pwrite", 181), ("readv", 145), ("writev", 146),
-                ("preadv", 328), ("pwritev", 329),
-                ("fchdir", 133), ("chroot", 61),
+                ("mkdir", 39),
+                ("rmdir", 40),
+                ("rename", 38),
+                ("link", 9),
+                ("symlink", 83),
+                ("readlink", 85),
+                ("chmod", 15),
+                ("chown", 212),
+                ("umask", 60),
+                ("fchmod", 94),
+                ("fchown", 207),
+                ("openat", 288),
+                ("unlinkat", 294),
+                ("renameat", 295),
+                ("linkat", 296),
+                ("symlinkat", 297),
+                ("readlinkat", 298),
+                ("fchmodat", 299),
+                ("faccessat", 300),
+                ("fchownat", 291),
+                ("ftruncate", 93),
+                ("fsync", 118),
+                ("fdatasync", 148),
+                ("sync", 36),
+                ("syncfs", 338),
+                ("pread", 180),
+                ("pwrite", 181),
+                ("readv", 145),
+                ("writev", 146),
+                ("preadv", 328),
+                ("pwritev", 329),
+                ("fchdir", 133),
+                ("chroot", 61),
                 // ── Wave 9: POSIX system & advanced syscalls (s390 unistd.h) ──
                 // s390x has 5 reg args (R2-R6); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(323), signalfd→signalfd4(322) = modern variants.
-                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
-                ("mincore", 218), ("madvise", 219), ("msync", 144),
-                ("getrlimit", 191), ("setrlimit", 75), ("prlimit64", 334),
-                ("getrusage", 77), ("times", 43),
+                ("mlock", 150),
+                ("munlock", 151),
+                ("mlockall", 152),
+                ("munlockall", 153),
+                ("mincore", 218),
+                ("madvise", 219),
+                ("msync", 144),
+                ("getrlimit", 191),
+                ("setrlimit", 75),
+                ("prlimit64", 334),
+                ("getrusage", 77),
+                ("times", 43),
                 ("getrandom", 349),
-                ("eventfd", 323), ("timerfd_create", 319), ("timerfd_settime", 320),
-                ("timerfd_gettime", 321), ("signalfd", 322),
-                ("inotify_init1", 324), ("inotify_add_watch", 285), ("inotify_rm_watch", 286),
+                ("eventfd", 323),
+                ("timerfd_create", 319),
+                ("timerfd_settime", 320),
+                ("timerfd_gettime", 321),
+                ("signalfd", 322),
+                ("inotify_init1", 324),
+                ("inotify_add_watch", 285),
+                ("inotify_rm_watch", 286),
                 ("ptrace", 26),
                 // ── Wave 8: POSIX process & identity syscalls (s390x syscall.tbl) ──
                 // s390x uid syscalls are at 199-214 (already 32-bit, no *32 suffix).
                 // All take ≤5 args; s390x has 5 reg args (r2-r6) → simple_stub for all.
                 // Family 1: identity
-                ("getuid", 199), ("geteuid", 201), ("getgid", 200), ("getegid", 202),
-                ("setuid", 213), ("setgid", 214), ("setresuid", 208), ("setresgid", 210),
+                ("getuid", 199),
+                ("geteuid", 201),
+                ("getgid", 200),
+                ("getegid", 202),
+                ("setuid", 213),
+                ("setgid", 214),
+                ("setresuid", 208),
+                ("setresgid", 210),
                 // Family 2: process group (getpid already present)
-                ("getppid", 64), ("getsid", 147), ("setsid", 66),
-                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                ("getppid", 64),
+                ("getsid", 147),
+                ("setsid", 66),
+                ("setpgid", 57),
+                ("getpgid", 132),
+                ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present)
-                ("vfork", 190), ("clone3", 435), ("waitid", 281),
+                ("vfork", 190),
+                ("clone3", 435),
+                ("waitid", 281),
                 // Family 4: exec/exit (execve/exit_group already present)
                 ("execveat", 354),
                 // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-                ("tgkill", 241), ("tkill", 237), ("rt_sigaction", 174),
+                ("tgkill", 241),
+                ("tkill", 237),
+                ("rt_sigaction", 174),
                 // Family 6: directory read (readdir ABSENT → use getdents64)
-                ("getdents64", 220), ("getdents", 141),
+                ("getdents64", 220),
+                ("getdents", 141),
                 // Family 7: system (arch_prctl is x86_64-only)
-                ("prctl", 172), ("uname", 122), ("sysinfo", 116),
-                            ("eventfd2", 323),
+                ("prctl", 172),
+                ("uname", 122),
+                ("sysinfo", 116),
+                ("eventfd2", 323),
                 ("newfstatat", 293),
                 ("signalfd4", 324),
-] {
+            ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
@@ -3257,10 +3369,30 @@ impl Backend for S390XBackend {
             // __arena_overflow: real exit(1) syscall
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&encode_lgfi(Gpr::R2, 1));       // exit code = 1
-                code.extend_from_slice(&encode_lgfi(Gpr::R1, 1));       // sys_exit
+                code.extend_from_slice(&encode_lgfi(Gpr::R2, 1)); // exit code = 1
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 1)); // sys_exit
                 code.extend_from_slice(&encode_svc(0));
                 stubs.push(("__arena_overflow".to_string(), code));
+            }
+
+            // __oob_trap: real exit(134) syscall (SIGABRT code).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&encode_lgfi(Gpr::R2, 134)); // exit code = 134
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 1)); // sys_exit
+                code.extend_from_slice(&encode_svc(0));
+                stubs.push(("__oob_trap".to_string(), code));
+            }
+
+            // __uaf_trap: real exit(135) syscall. Dormant until the
+            // liveness check IR invokes it (IMPL-UAF-1). Distinct from
+            // OOB (134) and arena overflow (1).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&encode_lgfi(Gpr::R2, 135)); // exit code = 135
+                code.extend_from_slice(&encode_lgfi(Gpr::R1, 1)); // sys_exit
+                code.extend_from_slice(&encode_svc(0));
+                stubs.push(("__uaf_trap".to_string(), code));
             }
 
             // mmap custom stub: s390x syscall 90 is old_mmap (struct pointer).
@@ -3431,12 +3563,12 @@ impl Backend for S390XBackend {
             // BRC 0x6, done — branch if not equal (mask=6 = LT|GT)
             let bne_pos = code.len();
             code.extend_from_slice(&encode_brc(0x6, 0)); // placeholder disp
-            // LTGR R4, R4 — Load and Test 64-bit (sets CC based on R4)
+                                                         // LTGR R4, R4 — Load and Test 64-bit (sets CC based on R4)
             code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R4, Gpr::R4));
             // BRC 0x8, done — branch if equal to 0 (both bytes NUL → strings equal)
             let beq_pos = code.len();
             code.extend_from_slice(&encode_brc(0x8, 0)); // placeholder disp
-            // AGR R2, R0 — advance s1 (R2 += R0 = R2 + 1)
+                                                         // AGR R2, R0 — advance s1 (R2 += R0 = R2 + 1)
             code.extend_from_slice(&encode_agr(Gpr::R2, Gpr::R0));
             // AGR R3, R0 — advance s2
             code.extend_from_slice(&encode_agr(Gpr::R3, Gpr::R0));
@@ -3519,11 +3651,9 @@ impl Backend for S390XBackend {
             // ── divmod_loop: ──
             let divmod_loop_offset = code.len();
             // Patch BRC 0xA to target divmod_loop_offset
-            let brc_skip_neg_disp =
-                ((divmod_loop_offset as i64) - (brc_skip_neg_pos as i64)) / 2;
+            let brc_skip_neg_disp = ((divmod_loop_offset as i64) - (brc_skip_neg_pos as i64)) / 2;
             let brc_skip_neg_be = (brc_skip_neg_disp as i16).to_be_bytes();
-            code[brc_skip_neg_pos + 2..brc_skip_neg_pos + 4]
-                .copy_from_slice(&brc_skip_neg_be);
+            code[brc_skip_neg_pos + 2..brc_skip_neg_pos + 4].copy_from_slice(&brc_skip_neg_be);
 
             // LGR R9, R8 (move value to odd register of dividend pair)
             code.extend_from_slice(&encode_lgr(Gpr::R9, Gpr::R8));
@@ -3545,8 +3675,7 @@ impl Backend for S390XBackend {
             code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R8, Gpr::R8));
             // BRC 0x6, divmod_loop — NE → R8 != 0, loop back
             let brc_loop_back_pos = code.len();
-            let brc_loop_back_disp =
-                ((divmod_loop_offset as i64) - (brc_loop_back_pos as i64)) / 2;
+            let brc_loop_back_disp = ((divmod_loop_offset as i64) - (brc_loop_back_pos as i64)) / 2;
             // Use BRCL (32-bit disp) for safety with far backward branches.
             code.extend_from_slice(&encode_brcl(0x6, brc_loop_back_disp as i32));
 
@@ -3556,7 +3685,7 @@ impl Backend for S390XBackend {
             // BRC 0x6, write_digits — NE → R4 != 0, skip "store '0'"
             let brc_skip_zero_pos = code.len();
             code.extend_from_slice(&encode_brc(0x6, 0)); // placeholder
-            // LGHI R5, 48 ('0')
+                                                         // LGHI R5, 48 ('0')
             code.extend_from_slice(&encode_lghi(Gpr::R5, 48));
             // AGFI R3, -1 (R3--)
             code.extend(encode_agfi(Gpr::R3, -1));
@@ -3571,8 +3700,7 @@ impl Backend for S390XBackend {
             let brc_skip_zero_disp =
                 ((write_digits_offset as i64) - (brc_skip_zero_pos as i64)) / 2;
             let brc_skip_zero_be = (brc_skip_zero_disp as i16).to_be_bytes();
-            code[brc_skip_zero_pos + 2..brc_skip_zero_pos + 4]
-                .copy_from_slice(&brc_skip_zero_be);
+            code[brc_skip_zero_pos + 2..brc_skip_zero_pos + 4].copy_from_slice(&brc_skip_zero_be);
 
             // LGHI R2, 1 (fd = stdout)
             code.extend_from_slice(&encode_lghi(Gpr::R2, 1));
@@ -3638,12 +3766,12 @@ impl Backend for S390XBackend {
             // BRC 0x2, alpha — GT (nibble > 9) → alpha case
             let brc_alpha_pos = code.len();
             code.extend_from_slice(&encode_brc(0x2, 0)); // placeholder
-            // AGFI R6, 48 (nibble + '0')
+                                                         // AGFI R6, 48 (nibble + '0')
             code.extend(encode_agfi(Gpr::R6, 48));
             // BRCL 0xF, store (unconditional skip over alpha)
             let brcl_store_pos = code.len();
             code.extend_from_slice(&encode_brcl(0xF, 0)); // placeholder
-            // alpha: AGFI R6, 87 (nibble + 'a' - 10)
+                                                          // alpha: AGFI R6, 87 (nibble + 'a' - 10)
             let alpha_offset = code.len();
             code.extend(encode_agfi(Gpr::R6, 87));
             // store: STC R6, 0(R3)
@@ -3933,7 +4061,11 @@ impl Backend for S390XBackend {
                 break;
             }
             let word_bytes = &bytes[offset..offset + len];
-            let hex: String = word_bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let hex: String = word_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             lines.push(format!("{:#010x}:  {}", pc, hex));
             offset += len;
             pc += len as u64;
@@ -3974,8 +4106,7 @@ fn build_s390x_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Ve
     let text_size = code.len() as u64;
 
     let text_file_end = text_offset + text_size;
-    let data_vaddr =
-        (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
     let data_size: u64 = PAGE_SIZE;
     let entry_point = base_addr + text_offset;
 
@@ -4232,8 +4363,14 @@ mod tests {
         assert!(result_real.is_ok(), "real regalloc should succeed");
         let real_func = result_real.unwrap();
         // Real regalloc mode: at least one instruction should have reads/writes.
-        let has_real_regs = real_func.blocks.iter()
-            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
-        assert!(has_real_regs, "real regalloc should record physical register assignments");
+        let has_real_regs = real_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| !i.reads.is_empty() || !i.writes.is_empty())
+        });
+        assert!(
+            has_real_regs,
+            "real regalloc should record physical register assignments"
+        );
     }
 }

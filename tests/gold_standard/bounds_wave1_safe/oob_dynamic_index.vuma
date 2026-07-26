@@ -1,0 +1,36 @@
+// oob_dynamic_index — Dynamic index out of bounds (requires --safe)
+// Expected exit code: 134
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+//
+// Bounds Wave 1 SAFE-ONLY negative test: allocate an 8-byte buffer
+// (`[u8; 8]`), seed indices 0/1, then compute `idx = 1 + 2 + 3 + 4 = 10`
+// at runtime and read `b.data[idx]`. With `--safe`, the injected
+// `UGe(idx, 8)` check evaluates to true (10 >= 8) and dispatches to
+// `__oob_trap`, aborting with exit 134 (SIGABRT, 128 + 6).
+//
+// IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
+// standard suite because it only passes when compiled with `--safe`.
+// Without `--safe`, the OOB access is undefined behaviour. The
+// expected exit code below assumes `--safe` was passed at compile time.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocation
+//   - `[u8; 8]` array field
+//   - runtime-computed index `idx = 1 + 2 + 3 + 4` — even though the
+//     arithmetic folds to a constant 10 at compile time, the resulting
+//     `UGe(10, 8)` check folds to TRUE (out of bounds), so the trap
+//     branch is statically reachable and survives DCE. This is the
+//     complement of `inbounds_dynamic_index.vuma`, where `UGe(2, 32)`
+//     folds to FALSE (in bounds) and the trap branch is DCE'd.
+//   - exit 134 == SIGABRT emitted by `__oob_trap`.
+
+layout Buf = { data: [u8; 8] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 10;
+    b.data[1] = 20;
+    // Read at index that depends on runtime computation
+    let idx = 1 + 2 + 3 + 4;
+    return b.data[idx];
+}

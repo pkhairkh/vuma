@@ -351,10 +351,7 @@ impl SCGDiff {
         }
 
         // Modified functions = those in both old and new that have changed nodes
-        let all_names: HashSet<String> = old_func_names
-            .union(&new_func_names)
-            .cloned()
-            .collect();
+        let all_names: HashSet<String> = old_func_names.union(&new_func_names).cloned().collect();
         for name in &all_names {
             if !affected.added.contains(name) && !affected.removed.contains(name) {
                 affected.modified.push(name.clone());
@@ -419,7 +416,10 @@ impl SCGDiff {
             self.stats.edges_added, self.stats.edges_removed, self.stats.edges_modified,
             self.stats.regions_added, self.stats.regions_removed, self.stats.regions_modified,
         ));
-        out.push_str(&format!("Total changes: {}\n\n", self.stats.total_changes()));
+        out.push_str(&format!(
+            "Total changes: {}\n\n",
+            self.stats.total_changes()
+        ));
 
         // Affected functions
         if !affected.modified.is_empty() {
@@ -429,10 +429,7 @@ impl SCGDiff {
             ));
         }
         if !affected.added.is_empty() {
-            out.push_str(&format!(
-                "Added functions: {}\n",
-                affected.added.join(", ")
-            ));
+            out.push_str(&format!("Added functions: {}\n", affected.added.join(", ")));
         }
         if !affected.removed.is_empty() {
             out.push_str(&format!(
@@ -440,7 +437,10 @@ impl SCGDiff {
                 affected.removed.join(", ")
             ));
         }
-        if !affected.modified.is_empty() || !affected.added.is_empty() || !affected.removed.is_empty() {
+        if !affected.modified.is_empty()
+            || !affected.added.is_empty()
+            || !affected.removed.is_empty()
+        {
             out.push('\n');
         }
 
@@ -534,13 +534,25 @@ impl DiffStats {
         build_object(vec![
             ("nodes_added".to_string(), json_usize(self.nodes_added)),
             ("nodes_removed".to_string(), json_usize(self.nodes_removed)),
-            ("nodes_modified".to_string(), json_usize(self.nodes_modified)),
+            (
+                "nodes_modified".to_string(),
+                json_usize(self.nodes_modified),
+            ),
             ("edges_added".to_string(), json_usize(self.edges_added)),
             ("edges_removed".to_string(), json_usize(self.edges_removed)),
-            ("edges_modified".to_string(), json_usize(self.edges_modified)),
+            (
+                "edges_modified".to_string(),
+                json_usize(self.edges_modified),
+            ),
             ("regions_added".to_string(), json_usize(self.regions_added)),
-            ("regions_removed".to_string(), json_usize(self.regions_removed)),
-            ("regions_modified".to_string(), json_usize(self.regions_modified)),
+            (
+                "regions_removed".to_string(),
+                json_usize(self.regions_removed),
+            ),
+            (
+                "regions_modified".to_string(),
+                json_usize(self.regions_modified),
+            ),
         ])
     }
 }
@@ -1371,7 +1383,9 @@ fn change_to_region_data(change: &ElementChange<SCGRegion>) -> Option<SCGRegion>
 mod tests {
     use super::*;
     use crate::edge::EdgeKind;
-    use crate::node::{ComputationKind, ComputationNode, NodePayload, NodeType, PhantomNode, ProgramPoint};
+    use crate::node::{
+        ComputationKind, ComputationNode, NodePayload, NodeType, PhantomNode, ProgramPoint,
+    };
     use crate::region::{DeploymentTarget, SCGRegion};
 
     /// Helper to create a default program point.

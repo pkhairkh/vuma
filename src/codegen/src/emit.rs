@@ -96,7 +96,7 @@ use crate::Result;
 /// Returns `Ok(())` if no errors, `Err(Vec<String>)` with one message per
 /// offending instruction.
 ///
-/// # Limitations (TODO F2b)
+/// # Limitations (TODO)
 ///
 /// The IR does not currently carry per-value type information
 /// (`VirtualRegister` has only `id` + `name`; `IRValue` is untyped).
@@ -245,8 +245,8 @@ pub fn typecheck_ir(functions: &[IRFunction]) -> std::result::Result<(), Vec<Str
                         }
                     }
 
-                    // Other instructions are out of scope for F2b (their
-                    // `ty: Option<IRType>` fields are checked by F2a /
+                    // Other instructions are out of scope here (their
+                    // `ty: Option<IRType>` fields are checked by other /
                     // future passes).
                     _ => {}
                 }
@@ -304,7 +304,6 @@ enum BranchFormat {
     /// CBZ / CBNZ: 19-bit offset in bits[23:5] (word-aligned, offset = imm19 * 4)
     Cond19,
 }
-
 
 // ---------------------------------------------------------------------------
 // ELF Constants (ARM64 / AArch64)
@@ -827,49 +826,66 @@ pub struct Emitter {
     frame_size: u32,
     /// Registers pinned for the current instruction (auto-unpinned after each instruction).
     instr_pinned_regs: Vec<Register>,
-    /// Wave 10d (aarch64 port): per-function channel sequence counter stack
+    /// (aarch64 port): per-function channel sequence counter stack
     /// slot offset (positive, measured from X29 downward). Zeroed in the
     /// prologue so the first `ChannelSend` emits sequence=0, the second
     /// sequence=1, etc. Mirrors the x86_64 `seq_counter_off` slot
     /// (stack_slot_isel.rs). 0 when no stack-slot function is active.
     seq_counter_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function protocol-state-machine counter
+    /// (aarch64 port): per-function protocol-state-machine counter
     /// slot offset. Zeroed in the prologue (state = 0 = Idle).
     /// channel_recv_proto verifies proto_state == expected before recv'ing.
     proto_state_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function circuit-breaker state slot.
+    /// (aarch64 port): per-function circuit-breaker state slot.
     /// Layout: [state:u32 at +0, failure_count:u32 at +4]. Zeroed in prologue.
     cb_state_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function IRQ routing table base offset.
+    /// (aarch64 port): per-function IRQ routing table base offset.
     /// 8 entries × 16 bytes = 128 bytes. Mirrors x86_64 irq_table_off.
     irq_table_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function IRQ table entry-count slot.
+    /// (aarch64 port): per-function IRQ table entry-count slot.
     irq_table_count_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function hot-swap version table base.
+    /// (aarch64 port): per-function hot-swap version table base.
     /// 8 entries × 16 bytes = 128 bytes.
     hotswap_table_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function hot-swap table entry-count.
+    /// (aarch64 port): per-function hot-swap table entry-count.
     hotswap_table_count_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function STARK proof table base.
+    /// (aarch64 port): per-function STARK proof table base.
     /// 4 entries × 56 bytes = 224 bytes.
     stark_table_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function STARK table entry-count.
+    /// (aarch64 port): per-function STARK table entry-count.
     stark_table_count_off: i32,
-    /// Wave L0-L8 (aarch64 port): per-function formal-verify folded-check
+    /// (aarch64 port): per-function formal-verify folded-check
     /// counter (mirrors x86_64 `formal_verify_count_off`). Each
     /// channel_send/recv/capability_grant/stark_prove/stark_verify
     /// increments this slot at its emit site; `formal_verify()` loads it.
     formal_verify_count_off: i32,
-    /// Wave C (aarch64 port): per-function capability signature (32 bytes).
+    /// (aarch64 port): per-function capability signature (32 bytes).
+    #[allow(dead_code)]
     cap_sig_off: i32,
-    /// Wave C (aarch64 port): per-function capability signature_input buffer.
+    /// (aarch64 port): per-function capability signature_input buffer.
+    #[allow(dead_code)]
     cap_siginput_off: i32,
-    /// Wave C (aarch64 port): per-function capability signature_input length.
+    /// (aarch64 port): per-function capability signature_input length.
+    #[allow(dead_code)]
     cap_siginput_len_off: i32,
-    /// Wave C (aarch64 port): compile-time cap signature (from capability_grant).
+    /// (aarch64 port): compile-time cap signature (from capability_grant).
     cap_grant_sig: Option<[u8; 32]>,
-    /// Wave C (aarch64 port): compile-time cap signature_input bytes.
+    /// (aarch64 port): compile-time cap signature_input bytes.
     cap_grant_sig_input: Option<Vec<u8>>,
+    /// The `BackendKind` this emitter is lowering for. Defaults to
+    /// [`BackendKind::AArch64`] because this module (`emit.rs`) is the
+    /// ARM64/AArch64 code emitter — every instruction it produces (SVC, X0-X5
+    /// arg registers, X8 syscall-number register, etc.) is AArch64-specific.
+    ///
+    /// The field exists so that the syscall-ABI translation at the
+    /// `IRInstr::Syscall` arm consults `self.backend_kind` instead of a
+    /// hard-coded `BackendKind::AArch64` literal: the
+    /// `translate_or_warn` call resolves the VUMA-generic syscall number to
+    /// the target's native numbering, which is identity for AArch64 but
+    /// would diverge for any other `BackendKind`. Callers that reuse this
+    /// emitter for a non-AArch64 target must call
+    /// [`with_backend_kind`](Self::with_backend_kind) before emitting.
+    backend_kind: BackendKind,
 }
 
 impl Emitter {
@@ -901,7 +917,22 @@ impl Emitter {
             cap_siginput_len_off: 0,
             cap_grant_sig: None,
             cap_grant_sig_input: None,
+            // `emit.rs` is the AArch64 emitter; default to AArch64. Callers
+            // reusing this emitter for another target must call
+            // `with_backend_kind` to override.
+            backend_kind: BackendKind::AArch64,
         }
+    }
+
+    /// Override the emitter's `BackendKind` (used by the syscall-ABI
+    /// translation in the `IRInstr::Syscall` arm). The default is
+    /// [`BackendKind::AArch64`], which is correct for the only consumer of
+    /// this emitter today (`AArch64Backend` and its `aarch64_be` wrapper).
+    /// Provided as a builder-style setter so future non-AArch64 reusers can
+    /// opt in without modifying `Emitter::new`'s signature.
+    pub fn with_backend_kind(mut self, kind: BackendKind) -> Self {
+        self.backend_kind = kind;
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -910,15 +941,15 @@ impl Emitter {
 
     /// Emit a single IR function to ARM64 machine code.
     ///
-    /// (Wave 21) If an `AllocationResult` is provided, the register-allocated
+    /// If an `AllocationResult` is provided, the register-allocated
     /// emission path is used (`emit_function_regalloc`), which consults the
     /// pre-computed register assignments, spill code, and coalescing info.
     /// Otherwise, the greedy register allocator is used.
     ///
-    /// (Wave 50) The previous `vreg_count > STACK_SLOT_VREG_THRESHOLD`
+    /// The previous `vreg_count > STACK_SLOT_VREG_THRESHOLD`
     /// dispatch to [`emit_function_stack_slot`](Self::emit_function_stack_slot)
     /// was removed: `STACK_SLOT_VREG_THRESHOLD` had been set to `u32::MAX`
-    /// in Wave 21 (making the greedy path always preferred), so the
+    /// earlier (making the greedy path always preferred), so the
     /// comparison was *always false* and the stack-slot branch was dead
     /// code — flagged by `clippy::absurd_extreme_comparisons`.  The
     /// stack-slot emitter remains available as a public method for callers
@@ -930,11 +961,11 @@ impl Emitter {
         func: &IRFunction,
         alloc: Option<&AllocationResult>,
     ) -> Result<Vec<u32>> {
-        // (Wave 21) Prefer the register-allocated path when results are available.
+        // Prefer the register-allocated path when results are available.
         if let Some(result) = alloc {
             return self.emit_function_regalloc(func, result);
         }
-        // (Wave 5) No AllocationResult — use the stack-slot emitter.
+        // No AllocationResult — use the stack-slot emitter.
         //
         // The greedy allocator (`emit_function_greedy`) has a correctness
         // bug on the fuller O2-pipeline IR (more vregs after
@@ -954,17 +985,17 @@ impl Emitter {
         // The stack-slot emitter (`emit_function_stack_slot`) gives every
         // vreg an explicit stack slot and loads/stores operands for every
         // instruction — no spilling, no stale-register hazard. It is
-        // correct (if slower) and was the production path before Wave 21
-        // switched the default to greedy. Switching back here fixes the
+        // correct (if slower) and was the production path before the default
+        // switched to greedy. Switching back here fixes the
         // aarch64 memory/Alloc SIGSEGV cluster without affecting x86_64
         // (which uses its own emitter in `x86_64/mod.rs`).
         self.emit_function_stack_slot(func)
     }
 
-    /// (Wave 21 / Wave 53) Emit a single IR function using a pre-computed
+    /// Emit a single IR function using a pre-computed
     /// `AllocationResult` from the `LinearScanAllocator`.
     ///
-    /// **Real spill-code emission (Wave 53):** this method now consumes
+    /// **Real spill-code emission:** this method now consumes
     /// the `AllocationResult` and produces emitted bytes that *differ*
     /// from [`emit_function_greedy`](Self::emit_function_greedy) when the
     /// allocator indicates callee-saved register usage, spill code, or
@@ -1053,8 +1084,14 @@ impl Emitter {
         // greedy emitter.  Parameter vregs MUST land in the correct
         // argument registers regardless of what `alloc.vreg_to_preg` says.
         let arg_regs = [
-            Register::X0, Register::X1, Register::X2, Register::X3,
-            Register::X4, Register::X5, Register::X6, Register::X7,
+            Register::X0,
+            Register::X1,
+            Register::X2,
+            Register::X3,
+            Register::X4,
+            Register::X5,
+            Register::X6,
+            Register::X7,
         ];
         for (i, param) in func.params.iter().enumerate() {
             if let IRValue::Register(vreg_id) = param {
@@ -1068,7 +1105,7 @@ impl Emitter {
         // vreg → physreg mapping.  This makes `resolve_reg` return the
         // regalloc-assigned physical register for each vreg rather than
         // picking one on-the-fly from the caller-saved pool.  The updated
-        // `RegAllocator::preassign` (Wave 53) routes callee-saved GPRs
+        // `RegAllocator::preassign` routes callee-saved GPRs
         // (X19–X28) into `callee_saved_used` and removes them from
         // `callee_saved_pool`, so the greedy allocator won't double-assign
         // them.
@@ -1224,7 +1261,8 @@ impl Emitter {
         self.apply_fixups()?;
 
         if has_callee_saved {
-            vuma_log!(debug,
+            vuma_log!(
+                debug,
                 "emit_function_regalloc: emitted {} callee-saved GPR saves/restores + \
                  {} spill-code entries for '{}' (frame_size={}, spill_area={})",
                 alloc.used_callee_saved_gprs.len(),
@@ -1255,8 +1293,14 @@ impl Emitter {
         // We must explicitly assign parameter virtual registers to the
         // correct argument registers so the calling convention is respected.
         let arg_regs = [
-            Register::X0, Register::X1, Register::X2, Register::X3,
-            Register::X4, Register::X5, Register::X6, Register::X7,
+            Register::X0,
+            Register::X1,
+            Register::X2,
+            Register::X3,
+            Register::X4,
+            Register::X5,
+            Register::X6,
+            Register::X7,
         ];
         for (i, param) in func.params.iter().enumerate() {
             if let IRValue::Register(vreg_id) = param {
@@ -1396,7 +1440,7 @@ impl Emitter {
             }
         }
         self.emit_terminator(&block.terminator)?;
-        // (Wave 5) Also unpin any registers that were pinned while emitting
+        // Also unpin any registers that were pinned while emitting
         // the terminator (e.g. `resolve_reg(cond)` in a Branch). Without
         // this, those regs stay pinned across the block boundary and into
         // the next block's first instruction, where `spill()` cannot evict
@@ -1853,7 +1897,7 @@ impl Emitter {
             }
 
             IRInstr::Phi { .. } => {
-                vuma_log!(warn, 
+                vuma_log!(warn,
                     "IRInstr::Phi encountered during emission — should be resolved by SSA pass"
                 );
             }
@@ -1869,7 +1913,7 @@ impl Emitter {
                 // the x86_64 path (mov rax, imm64 + R_X86_64_64). The previous
                 // implementation emitted `BL __vuma_getaddr` — a call to a
                 // runtime stub that does NOT exist, causing SIGILL on aarch64
-                // when driver_isolation used a function pointer (Wave 49).
+                // when driver_isolation used a function pointer.
                 //
                 // We use X9 as the scratch register (matching the stack-slot
                 // path), then MOV X9 → rd if needed.
@@ -2180,12 +2224,18 @@ impl Emitter {
                 })?;
                 self.emit_instruction(Instruction::CSET { rd, cond: crate::arm64::Condition::EQ })?;
             }
-            // ── Syscall (Wave 11) ──────────────────────────────────────────
+            // ── Syscall ──────────────────────────────────────────
             IRInstr::Syscall { nr, args, dst } => {
                 // Translate VUMA-generic (asm-generic) syscall number to the
                 // backend's native numbering. Identity on AArch64.
+                //
+                // (Use `self.backend_kind` instead of a
+                // hard-coded `BackendKind::AArch64` so a future non-AArch64
+                // reuser of this emitter gets the right translation. The
+                // field defaults to `BackendKind::AArch64` — the only
+                // architecture this emitter actually lowers for today.
                 let native_nr =
-                    crate::syscall_abi::translate_or_warn(BackendKind::AArch64, *nr);
+                    crate::syscall_abi::translate_or_warn(self.backend_kind, *nr);
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {
@@ -2203,7 +2253,7 @@ impl Emitter {
                     self.emit_instruction(Instruction::MOV { rd, rm: Register::X0 })?;
                 }
             }
-            // ── VectorOp (Wave 29) ───────────────────────────────────────
+            // ── VectorOp ───────────────────────────────────────
             // SIMD lowering for `IRInstr::VectorOp` — emit a pre-encoded
             // NEON word via `Instruction::NEON_RAW`. The encoder helpers
             // (`encode_neon_add_v4s` / `_sub_v4s` / `_mul_v4s`) produce the
@@ -2228,7 +2278,7 @@ impl Emitter {
                 };
                 self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
             }
-            // ── Channel operations (Wave 1d / Task 2a) ──
+            // ── Channel operations ──
             // The Call-form channel builtins are handled in the `IRInstr::Call`
             // arm. The dedicated `IRInstr::Channel*` arms increment the
             // formal-verify folded-check counter (matching x86_64's behavior
@@ -2238,9 +2288,9 @@ impl Emitter {
                 self.inc_formal_verify_count()?;
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
-            // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+            // StarkProof — stub (Call-form builtin is the active path).
             | IRInstr::StarkProof { .. } => {}
-            // Wave 49: CallIndirect — indirect call through func_ptr vreg.
+            // CallIndirect — indirect call through func_ptr vreg.
             // aarch64 codegen: load func_ptr into X16, BLR X16.
             IRInstr::CallIndirect { dst, func_ptr, args } => {
                 // Load args into X0-X7 (aarch64 calling convention)
@@ -2374,16 +2424,32 @@ impl Emitter {
             BinOpKind::Ror | BinOpKind::Rol => {
                 let rm_reg = self.operand_to_reg(&rm)?;
                 if op == BinOpKind::Ror {
-                    self.emit_instruction_with_width(Instruction::RORV { rd, rn, rm: rm_reg }, width)?;
+                    self.emit_instruction_with_width(
+                        Instruction::RORV { rd, rn, rm: rm_reg },
+                        width,
+                    )?;
                 } else {
                     // ROL by Rm = ROR by -Rm (mod regsize).
                     // SUB X9, XZR, Rm; RORV Rd, Rn, X9
-                    self.emit_instruction_with_width(Instruction::SUB {
-                        rd: Register::X9,
-                        rn: Register::XZR,
-                        rm: Operand::Reg { reg: rm_reg, shift: None },
-                    }, width)?;
-                    self.emit_instruction_with_width(Instruction::RORV { rd, rn, rm: Register::X9 }, width)?;
+                    self.emit_instruction_with_width(
+                        Instruction::SUB {
+                            rd: Register::X9,
+                            rn: Register::XZR,
+                            rm: Operand::Reg {
+                                reg: rm_reg,
+                                shift: None,
+                            },
+                        },
+                        width,
+                    )?;
+                    self.emit_instruction_with_width(
+                        Instruction::RORV {
+                            rd,
+                            rn,
+                            rm: Register::X9,
+                        },
+                        width,
+                    )?;
                 }
             }
             BinOpKind::SRem | BinOpKind::URem => {
@@ -2395,12 +2461,15 @@ impl Emitter {
                 };
                 self.emit_instruction_with_width(div_instr, width)?;
                 // MSUB rd, rd, rm, rn  =>  rd = rn - rd * rm  =  dividend - quotient * divisor
-                self.emit_instruction_with_width(Instruction::MSUB {
-                    rd,
-                    rn: rd,     // quotient (result of DIV)
-                    rm: rm_reg, // divisor
-                    ra: rn,     // dividend
-                }, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::MSUB {
+                        rd,
+                        rn: rd,     // quotient (result of DIV)
+                        rm: rm_reg, // divisor
+                        ra: rn,     // dividend
+                    },
+                    width,
+                )?;
             }
             BinOpKind::SLt
             | BinOpKind::SLe
@@ -2413,13 +2482,16 @@ impl Emitter {
             | BinOpKind::Eq
             | BinOpKind::Ne => {
                 let rm_reg = self.operand_to_reg(&rm)?;
-                self.emit_instruction_with_width(Instruction::CMP {
-                    rn,
-                    rm: Operand::Reg {
-                        reg: rm_reg,
-                        shift: None,
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn,
+                        rm: Operand::Reg {
+                            reg: rm_reg,
+                            shift: None,
+                        },
                     },
-                }, width)?;
+                    width,
+                )?;
                 let cond = binop_kind_to_condition(&op);
                 self.emit_instruction_with_width(Instruction::CSET { rd, cond }, width)?;
             }
@@ -2432,7 +2504,8 @@ impl Emitter {
         match term {
             IRTerminator::Jump(target) => {
                 let fixup_idx = self.code.len();
-                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
+                self.fixups
+                    .push((fixup_idx, target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
             IRTerminator::Branch {
@@ -2442,10 +2515,12 @@ impl Emitter {
             } => {
                 let rt = self.resolve_reg(cond)?;
                 let fixup_cbnz = self.code.len();
-                self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
+                self.fixups
+                    .push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
                 self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
                 let fixup_b = self.code.len();
-                self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
+                self.fixups
+                    .push((fixup_b, false_block.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
             IRTerminator::Return(vals) => {
@@ -2533,10 +2608,10 @@ impl Emitter {
     }
 
     // -----------------------------------------------------------------------
-    // Wave 53: Real spill-code emission helpers
+    // Real spill-code emission helpers
     // -----------------------------------------------------------------------
 
-    /// (Wave 53, Step 2) Emit callee-saved GPR saves in the prologue.
+    /// Emit callee-saved GPR saves in the prologue.
     ///
     /// Emits `SUB SP, SP, #frame_bytes` followed by `STP` pairs (and a
     /// trailing `STR` for an odd count) to save each callee-saved GPR to
@@ -2609,7 +2684,7 @@ impl Emitter {
         Ok(())
     }
 
-    /// (Wave 53, Step 2) Emit callee-saved GPR restores in the epilogue.
+    /// Emit callee-saved GPR restores in the epilogue.
     ///
     /// Emits `LDP` pairs (and a trailing `LDR` for an odd count) to
     /// restore each callee-saved GPR from the stack, followed by
@@ -2678,7 +2753,7 @@ impl Emitter {
         Ok(())
     }
 
-    /// (Wave 53, Step 3) Emit a single spill or reload instruction.
+    /// Emit a single spill or reload instruction.
     ///
     /// For `is_spill = false` (Reload): emits `LDR preg, [X29, #slot.offset]`.
     /// For `is_spill = true`  (Spill):  emits `STR preg, [X29, #slot.offset]`.
@@ -2737,7 +2812,7 @@ impl Emitter {
         Ok(())
     }
 
-    /// (Wave 53, Step 2 + Step 5) Emit a terminator with regalloc-aware
+    /// Emit a terminator with regalloc-aware
     /// callee-saved restores injected into `IRTerminator::Return`.
     ///
     /// For non-`Return` terminators, this delegates to [`emit_terminator`]
@@ -3037,11 +3112,7 @@ impl Emitter {
     /// Uses X9 as a scratch register. If the offset fits in a 12-bit unsigned
     /// immediate (0..4095), emits `ADD X9, rn, #offset`. Otherwise, loads the
     /// offset into X9 with MOVZ/MOVK and then emits `ADD X9, rn, X9`.
-    fn emit_address_with_offset(
-        &mut self,
-        rn: Register,
-        offset: i32,
-    ) -> Result<()> {
+    fn emit_address_with_offset(&mut self, rn: Register, offset: i32) -> Result<()> {
         if offset >= 0 && offset <= 4095 {
             // Small positive offset: ADD X9, rn, #offset
             self.emit_instruction(Instruction::ADD {
@@ -3256,7 +3327,8 @@ impl Emitter {
         match op {
             Operand::Reg { reg, shift: _ } => Ok(*reg),
             Operand::Imm12(v) => {
-                vuma_log!(error, 
+                vuma_log!(
+                    error,
                     "operand_to_reg: expected register operand, got Imm12({v}) — \
                      caller should have spilled the immediate to a scratch register \
                      before invoking this method"
@@ -3323,7 +3395,7 @@ impl Emitter {
         self.cap_grant_sig = None;
         self.cap_grant_sig_input = None;
 
-        // ── Phase 0.5: Scan for capability_grant calls (Wave C: L2 cap sigs) ──
+        // ── Phase 0.5: Scan for capability_grant calls (L2 cap sigs) ──
         //
         // The recv side must recompute the FNV-1a×4 capability signature
         // over the same `signature_input` byte vector the grant used. Since
@@ -3335,7 +3407,10 @@ impl Emitter {
         // on their stack. Mirrors x86_64 stack_slot_isel.rs:811-871.
         'grant_search: for block in &func.blocks {
             for instr in &block.instructions {
-                if let IRInstr::Call { func: fname, args, .. } = instr {
+                if let IRInstr::Call {
+                    func: fname, args, ..
+                } = instr
+                {
                     if fname == "capability_grant" && args.len() == 2 {
                         let resource_id = match &args[0] {
                             IRValue::Immediate(v) => *v as u64,
@@ -3350,11 +3425,17 @@ impl Emitter {
                             read: (perms_raw & 1) != 0,
                             write: (perms_raw & 2) != 0,
                             execute: (perms_raw & 4) != 0,
-                            ..Default::default()
                         };
                         let token = crate::ipc::capability::grant_capability(
-                            resource_id as u128, 1, 1, resource, perms,
-                            0, 0, 3600, b"vuma_dev_signing_key",
+                            resource_id as u128,
+                            1,
+                            1,
+                            resource,
+                            perms,
+                            0,
+                            0,
+                            3600,
+                            b"vuma_dev_signing_key",
                         );
                         // Reconstruct signature_input inline — ipc::capability::signature_input
                         // is module-private, so we duplicate its logic here. The
@@ -3382,8 +3463,7 @@ impl Emitter {
 
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
-        let mut all_vreg_ids: std::collections::HashSet<u32> =
-            std::collections::HashSet::new();
+        let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for &id in func.vregs.keys() {
             all_vreg_ids.insert(id);
         }
@@ -3452,7 +3532,7 @@ impl Emitter {
         // [low address]         ← SP
 
         let mut alloc_offsets: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = 8;  // Reserve [X29, #-8] for FP scratch (STUR D0)
+        let mut current_offset: i32 = 8; // Reserve [X29, #-8] for FP scratch (STUR D0)
         let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
         alloc_vreg_ids.sort();
         for &id in &alloc_vreg_ids {
@@ -3469,7 +3549,7 @@ impl Emitter {
             vreg_stack_slots.insert(id, current_offset); // slot at [X29, #-current_offset]
         }
 
-        // Wave 10d (aarch64 port): reserve an 8-byte stack slot for the
+        // (aarch64 port): reserve an 8-byte stack slot for the
         // per-function channel sequence counter, mirroring the x86_64
         // `seq_counter_off` slot in stack_slot_isel.rs.  Zeroed in the
         // prologue so the first ChannelSend emits sequence=0, the second
@@ -3478,28 +3558,28 @@ impl Emitter {
         current_offset += 8;
         self.seq_counter_off = current_offset;
 
-        // Wave L0-L8 (aarch64 port): reserve the same per-function state
+        // (aarch64 port): reserve the same per-function state
         // slots as the x86_64 backend (stack_slot_isel.rs:1006-1145) so the
         // L1-L8 IPC builtins have a place to keep their state.  All are
         // zeroed in the prologue.
         current_offset += 8;
-        self.proto_state_off = current_offset;            // 8B proto-state slot
+        self.proto_state_off = current_offset; // 8B proto-state slot
         current_offset += 8;
-        self.cb_state_off = current_offset;                // 8B CB state+count
+        self.cb_state_off = current_offset; // 8B CB state+count
         current_offset += 128;
-        self.irq_table_off = current_offset;               // 8×16B IRQ table
+        self.irq_table_off = current_offset; // 8×16B IRQ table
         current_offset += 8;
-        self.irq_table_count_off = current_offset;         // 8B IRQ count
+        self.irq_table_count_off = current_offset; // 8B IRQ count
         current_offset += 128;
-        self.hotswap_table_off = current_offset;           // 8×16B hot-swap table
+        self.hotswap_table_off = current_offset; // 8×16B hot-swap table
         current_offset += 8;
-        self.hotswap_table_count_off = current_offset;     // 8B hot-swap count
+        self.hotswap_table_count_off = current_offset; // 8B hot-swap count
         current_offset += 224;
-        self.stark_table_off = current_offset;             // 4×56B STARK table
+        self.stark_table_off = current_offset; // 4×56B STARK table
         current_offset += 8;
-        self.stark_table_count_off = current_offset;       // 8B STARK count
+        self.stark_table_count_off = current_offset; // 8B STARK count
         current_offset += 8;
-        self.formal_verify_count_off = current_offset;     // 8B folded-check counter
+        self.formal_verify_count_off = current_offset; // 8B folded-check counter
 
         let frame_size = ((current_offset + 15) & !15) as u32;
         self.frame_size = frame_size;
@@ -3561,8 +3641,14 @@ impl Emitter {
 
         // Store function parameters from X0-X7 to their stack slots
         let arg_regs = [
-            Register::X0, Register::X1, Register::X2, Register::X3,
-            Register::X4, Register::X5, Register::X6, Register::X7,
+            Register::X0,
+            Register::X1,
+            Register::X2,
+            Register::X3,
+            Register::X4,
+            Register::X5,
+            Register::X6,
+            Register::X7,
         ];
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
@@ -3573,7 +3659,7 @@ impl Emitter {
             }
         }
 
-        // Wave 10d (aarch64 port): zero the per-function channel sequence
+        // (aarch64 port): zero the per-function channel sequence
         // counter slot so the first ChannelSend starts at sequence=0.
         // Uses X9 (caller-saved scratch, free at this point after the
         // parameter spill above) via `STR XZR, [X29, #-seq_counter_off]`
@@ -3589,7 +3675,7 @@ impl Emitter {
             })?;
         }
 
-        // Wave L0-L8 (aarch64 port): zero the per-function state slots in
+        // (aarch64 port): zero the per-function state slots in
         // the prologue (proto_state, cb_state, irq_table_count,
         // hotswap_table_count, stark_table_count). The IRQ / hot-swap / STARK
         // table DATA regions are left uninitialized — readers only touch
@@ -3613,7 +3699,7 @@ impl Emitter {
             }
         }
 
-        // Wave L0-L8 (aarch64 port): initialize the formal-verify folded-check
+        // (aarch64 port): initialize the formal-verify folded-check
         // counter to the compile-time count of channel/capability/stark
         // builtins in this function (matching x86_64's
         // `formal_verify_folded_count` pre-counter at stack_slot_isel.rs:899).
@@ -3666,7 +3752,8 @@ impl Emitter {
         let phi_map = func.build_phi_map();
 
         for block in &func.blocks {
-            self.label_offsets.insert(block.label.clone(), self.code.len());
+            self.label_offsets
+                .insert(block.label.clone(), self.code.len());
             for instr in &block.instructions {
                 self.ss_emit_instr(
                     instr,
@@ -3811,7 +3898,7 @@ impl Emitter {
     // Stack-slot instruction emission
     // -----------------------------------------------------------------------
 
-    /// Wave 10d (aarch64 port): emit an inline CRC32 loop over the 56-byte
+    /// (aarch64 port): emit an inline CRC32 loop over the 56-byte
     /// L1 frame currently living at `[SP+0..52]` (header + payload), using
     /// polynomial 0xEDB88320 (same as `ipc::crc32`).  The result (a 32-bit
     /// CRC, with the final `!crc` inversion applied) is left in the low
@@ -3840,6 +3927,7 @@ impl Emitter {
     ///
     /// The caller is responsible for storing W11 (the CRC) into `[SP+52]`
     /// on the send side, or comparing W11 with `[SP+52]` on the receive side.
+    #[allow(dead_code)]
     fn emit_crc32_frame_loop_aarch64(&mut self) -> Result<()> {
         // X11 = 0xFFFFFFFF (crc init). Loaded as a 64-bit immediate so the
         // upper 32 bits are zero, keeping the final `^ 0xFFFFFFFF` result in
@@ -4006,11 +4094,12 @@ impl Emitter {
         Ok(())
     }
 
-    // ── Wave L0-L8 (aarch64 port): helper methods for the IPC builtins ──
+    // ── (aarch64 port): helper methods for the IPC builtins ──
 
     /// Emit a `B.cond` with a placeholder offset of 0; return the index in
     /// `self.code` of the placeholder word so the caller can patch it later
     /// via [`patch_bcond`](Self::patch_bcond).
+    #[allow(dead_code)]
     fn emit_bcond_placeholder(&mut self, cond: Condition) -> Result<usize> {
         let idx = self.code.len();
         self.emit_instruction(Instruction::BCond { cond, offset: 0 })?;
@@ -4021,6 +4110,7 @@ impl Emitter {
     /// that it branches to the instruction at `target_idx` (a `self.code`
     /// index). The imm19 field encodes a word offset, so the delta is
     /// `target_idx - patch_idx` (no division by 4).
+    #[allow(dead_code)]
     fn patch_bcond(&mut self, patch_idx: usize, target_idx: usize) {
         let delta_words = (target_idx as i32) - (patch_idx as i32);
         let imm19 = delta_words & 0x7FFFF;
@@ -4029,6 +4119,7 @@ impl Emitter {
     }
 
     /// Emit an unconditional `B` with placeholder offset 0; returns patch idx.
+    #[allow(dead_code)]
     fn emit_b_placeholder(&mut self) -> Result<usize> {
         let idx = self.code.len();
         self.emit_instruction(Instruction::B { offset: 0 })?;
@@ -4036,6 +4127,7 @@ impl Emitter {
     }
 
     /// Patch an unconditional `B` placeholder. imm26 encodes a word offset.
+    #[allow(dead_code)]
     fn patch_b(&mut self, patch_idx: usize, target_idx: usize) {
         let delta_words = (target_idx as i32) - (patch_idx as i32);
         let imm26 = delta_words & 0x3FFFFFF;
@@ -4044,6 +4136,7 @@ impl Emitter {
     }
 
     /// Emit a `CBZ` with placeholder offset 0; returns patch idx.
+    #[allow(dead_code)]
     fn emit_cbz_placeholder(&mut self, rt: Register) -> Result<usize> {
         let idx = self.code.len();
         self.emit_instruction(Instruction::CBZ { rt, offset: 0 })?;
@@ -4051,6 +4144,7 @@ impl Emitter {
     }
 
     /// Patch a `CBZ` placeholder (imm19 word offset, bits[23:5]).
+    #[allow(dead_code)]
     fn patch_cbz(&mut self, patch_idx: usize, target_idx: usize) {
         let delta_words = (target_idx as i32) - (patch_idx as i32);
         let imm19 = delta_words & 0x7FFFF;
@@ -4059,6 +4153,7 @@ impl Emitter {
     }
 
     /// Emit a `CBNZ` with placeholder offset 0; returns patch idx.
+    #[allow(dead_code)]
     fn emit_cbnz_placeholder(&mut self, rt: Register) -> Result<usize> {
         let idx = self.code.len();
         self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
@@ -4066,11 +4161,13 @@ impl Emitter {
     }
 
     /// Patch a `CBNZ` placeholder (imm19 word offset, bits[23:5]).
+    #[allow(dead_code)]
     fn patch_cbnz(&mut self, patch_idx: usize, target_idx: usize) {
         self.patch_cbz(patch_idx, target_idx);
     }
 
     /// Emit a `TBZ` with placeholder offset 0; returns patch idx.
+    #[allow(dead_code)]
     fn emit_tbz_placeholder(&mut self, rt: Register, bit: u32) -> Result<usize> {
         let idx = self.code.len();
         self.emit_instruction(Instruction::TBZ { rt, bit, offset: 0 })?;
@@ -4078,6 +4175,7 @@ impl Emitter {
     }
 
     /// Patch a `TBZ`/`TBNZ` placeholder (imm14 word offset, bits[18:5]).
+    #[allow(dead_code)]
     fn patch_tbz(&mut self, patch_idx: usize, target_idx: usize) {
         let delta_words = (target_idx as i32) - (patch_idx as i32);
         let imm14 = delta_words & 0x3FFF;
@@ -4088,6 +4186,7 @@ impl Emitter {
     /// Emit a Linux syscall on aarch64: `MOVZ X8, #nr; SVC #0`.
     /// Caller is responsible for placing args in X0..X5 beforehand and
     /// reading the result from X0 afterwards.
+    #[allow(dead_code)]
     fn emit_syscall_aarch64(&mut self, nr: i64) -> Result<()> {
         self.emit_load_immediate(Register::X8, nr)?;
         self.emit_instruction(Instruction::SVC { imm16: 0 })?;
@@ -4120,6 +4219,7 @@ impl Emitter {
     ///
     /// Mirrors x86_64 `emit_crc32_range(base, offset, len)` in
     /// stack_slot_isel.rs.
+    #[allow(dead_code)]
     fn emit_crc32_range_aarch64(
         &mut self,
         base_reg: Register,
@@ -4249,7 +4349,7 @@ impl Emitter {
 
     /// Emit an inline FNV-1a 64-bit loop over `[base_reg + byte_offset ..
     /// base_reg + byte_offset + len]`, with an optional 1-byte salt
-    /// prepended to the hash input (the Wave C capability signature uses
+    /// prepended to the hash input (the capability signature uses
     /// salt bytes 0,1,2,3 for the four 8-byte lanes). Result is left in
     /// **X8**. Clobbers X8/X9/X10/X11/X12.
     ///
@@ -4258,6 +4358,7 @@ impl Emitter {
     ///
     /// Mirrors x86_64 `emit_fnv1a_64_loop(base, offset, len, salt)` in
     /// stack_slot_isel.rs.
+    #[allow(dead_code)]
     fn emit_fnv1a_64_loop_aarch64(
         &mut self,
         base_reg: Register,
@@ -4292,7 +4393,7 @@ impl Emitter {
                 },
             })?;
         }
-        // ── Salt byte (Wave C capability signature): hash ^= salt; hash *= prime. ──
+        // ── Salt byte (capability signature): hash ^= salt; hash *= prime. ──
         // X10 = salt (zero-extended).
         self.emit_load_immediate(Register::X10, salt as i64)?;
         // hash ^= salt.
@@ -4362,6 +4463,7 @@ impl Emitter {
     /// matching the x86_64 `emit_fnv1a_64_loop_nosalt` byte-for-byte so
     /// stark_prove's stored verifier_key (computed via the library
     /// StarkProof::new_valid) matches stark_verify's runtime recomputation.
+    #[allow(dead_code)]
     fn emit_fnv1a_64_loop_nosalt_aarch64(
         &mut self,
         base_reg: Register,
@@ -4441,7 +4543,7 @@ impl Emitter {
         Ok(())
     }
 
-    /// Wave L0-L8 (aarch64 port): the poll-then-recv body shared by
+    /// (aarch64 port): the poll-then-recv body shared by
     /// `channel_try_recv` (timeout_ms=Some(0), try_mode=true) and
     /// `channel_recv_timeout` (timeout_ms=None + runtime_timeout_reg=Some(X21),
     /// try_mode=false).
@@ -4463,6 +4565,7 @@ impl Emitter {
     ///   - None: use the value in `runtime_timeout_reg` (caller pre-loads
     ///     it from args[1] before calling — typically Register::X21).
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     fn emit_channel_poll_recv(
         &mut self,
         ch: &IRValue,
@@ -4478,19 +4581,34 @@ impl Emitter {
         // Load read_fd (low 32 bits of handle) into X19 (preserved across poll).
         self.ss_load_value(ch, Register::X19, slots)?;
         self.emit_instruction(Instruction::UBFM {
-            rd: Register::X19, rn: Register::X19, immr: 0, imms: 31,
+            rd: Register::X19,
+            rn: Register::X19,
+            immr: 0,
+            imms: 31,
         })?;
         // 80-byte stack frame: [0..56]=frame, [56..64]=pollfd, [64..80]=spill.
         self.emit_instruction(Instruction::SUB {
-            rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(80),
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(80),
         })?;
         // Build pollfd at [SP+56]: { i32 fd; i16 events; i16 revents; } = 8 bytes.
-        self.emit_instruction(Instruction::STR_W { rt: Register::X19, rn: Register::SP, offset: 56 })?;
+        self.emit_instruction(Instruction::STR_W {
+            rt: Register::X19,
+            rn: Register::SP,
+            offset: 56,
+        })?;
         self.emit_load_immediate(Register::X9, 1)?; // POLLIN
-        self.emit_instruction(Instruction::STR_W { rt: Register::X9, rn: Register::SP, offset: 60 })?;
+        self.emit_instruction(Instruction::STR_W {
+            rt: Register::X9,
+            rn: Register::SP,
+            offset: 60,
+        })?;
         // poll(&pollfd, 1, timeout) — sys_poll=73.
         self.emit_instruction(Instruction::ADD {
-            rd: Register::X0, rn: Register::SP, rm: Operand::Imm12(56),
+            rd: Register::X0,
+            rn: Register::SP,
+            rm: Operand::Imm12(56),
         })?;
         self.emit_load_immediate(Register::X1, 1)?; // nfds
         match timeout_ms {
@@ -4499,51 +4617,115 @@ impl Emitter {
             }
             None => {
                 if let Some(reg) = runtime_timeout_reg {
-                    self.emit_instruction(Instruction::MOV { rd: Register::X2, rm: reg })?;
+                    self.emit_instruction(Instruction::MOV {
+                        rd: Register::X2,
+                        rm: reg,
+                    })?;
                 } else {
                     self.emit_load_immediate(Register::X2, 0)?;
                 }
             }
         }
         self.emit_syscall_aarch64(73)?; // sys_poll
-        // Spill poll result to [SP+72].
-        self.emit_instruction(Instruction::STR_W { rt: Register::X0, rn: Register::SP, offset: 72 })?;
+                                        // Spill poll result to [SP+72].
+        self.emit_instruction(Instruction::STR_W {
+            rt: Register::X0,
+            rn: Register::SP,
+            offset: 72,
+        })?;
         // CMP X0, #0. B.LE no_data_or_err.
-        self.emit_instruction(Instruction::CMP { rn: Register::X0, rm: Operand::Imm12(0) })?;
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X0,
+            rm: Operand::Imm12(0),
+        })?;
         let jle_poll_patch = self.emit_bcond_placeholder(Condition::LE)?;
         // poll > 0: read 56-byte frame. X0 = read_fd (reload from [SP+56]).
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X0, rn: Register::SP, offset: 56 })?;
-        self.emit_instruction(Instruction::MOV { rd: Register::X1, rm: Register::SP })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X0,
+            rn: Register::SP,
+            offset: 56,
+        })?;
+        self.emit_instruction(Instruction::MOV {
+            rd: Register::X1,
+            rm: Register::SP,
+        })?;
         self.emit_load_immediate(Register::X2, 56)?;
         self.emit_syscall_aarch64(63)?; // sys_read
-        // If X0 <= 0, read fail.
-        self.emit_instruction(Instruction::CMP { rn: Register::X0, rm: Operand::Imm12(0) })?;
+                                        // If X0 <= 0, read fail.
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X0,
+            rm: Operand::Imm12(0),
+        })?;
         let jle_read_patch = self.emit_bcond_placeholder(Condition::LE)?;
         // MAGIC check.
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X10, rn: Register::SP, offset: 0 })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X10,
+            rn: Register::SP,
+            offset: 0,
+        })?;
         self.emit_load_immediate(Register::X11, 0x414D5556u64 as i64)?;
-        self.emit_instruction(Instruction::CMP { rn: Register::X10, rm: Operand::reg(Register::X11) })?;
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X10,
+            rm: Operand::reg(Register::X11),
+        })?;
         let jne_magic_patch = self.emit_bcond_placeholder(Condition::NE)?;
         // type_hash check.
         let expected_th = crate::ipc::type_hash("i64");
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X10, rn: Register::SP, offset: 24 })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X10,
+            rn: Register::SP,
+            offset: 24,
+        })?;
         self.emit_load_immediate(Register::X11, (expected_th & 0xFFFFFFFF) as i64)?;
-        self.emit_instruction(Instruction::CMP { rn: Register::X10, rm: Operand::reg(Register::X11) })?;
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X10,
+            rm: Operand::reg(Register::X11),
+        })?;
         let jne_th_lo_patch = self.emit_bcond_placeholder(Condition::NE)?;
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X10, rn: Register::SP, offset: 28 })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X10,
+            rn: Register::SP,
+            offset: 28,
+        })?;
         self.emit_load_immediate(Register::X11, ((expected_th >> 32) & 0xFFFFFFFF) as i64)?;
-        self.emit_instruction(Instruction::CMP { rn: Register::X10, rm: Operand::reg(Register::X11) })?;
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X10,
+            rm: Operand::reg(Register::X11),
+        })?;
         let jne_th_hi_patch = self.emit_bcond_placeholder(Condition::NE)?;
         // CRC32 check.
         self.emit_crc32_frame_loop_aarch64()?;
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X10, rn: Register::SP, offset: 52 })?;
-        self.emit_instruction(Instruction::CMP { rn: Register::X11, rm: Operand::reg(Register::X10) })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X10,
+            rn: Register::SP,
+            offset: 52,
+        })?;
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X11,
+            rm: Operand::reg(Register::X10),
+        })?;
         let jne_crc_patch = self.emit_bcond_placeholder(Condition::NE)?;
         // Success: extract payload [SP+44..52].
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X10, rn: Register::SP, offset: 44 })?;
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X9, rn: Register::SP, offset: 48 })?;
-        self.emit_instruction(Instruction::LSL { rd: Register::X9, rn: Register::X9, rm: Operand::Imm12(32) })?;
-        self.emit_instruction(Instruction::ORR { rd: Register::X10, rn: Register::X10, rm: Register::X9 })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X10,
+            rn: Register::SP,
+            offset: 44,
+        })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X9,
+            rn: Register::SP,
+            offset: 48,
+        })?;
+        self.emit_instruction(Instruction::LSL {
+            rd: Register::X9,
+            rn: Register::X9,
+            rm: Operand::Imm12(32),
+        })?;
+        self.emit_instruction(Instruction::ORR {
+            rd: Register::X10,
+            rn: Register::X10,
+            rm: Register::X9,
+        })?;
         self.ss_store_to_slot(Register::X10, dst_offset)?;
         let jmp_cleanup_patch = self.emit_b_placeholder()?;
         // crc_fail: -6.
@@ -4570,8 +4752,15 @@ impl Emitter {
         let no_data_idx = self.code.len();
         self.patch_bcond(jle_poll_patch, no_data_idx);
         // Reload poll result.
-        self.emit_instruction(Instruction::LDR_W { rt: Register::X9, rn: Register::SP, offset: 72 })?;
-        self.emit_instruction(Instruction::CMP { rn: Register::X9, rm: Operand::Imm12(0) })?;
+        self.emit_instruction(Instruction::LDR_W {
+            rt: Register::X9,
+            rn: Register::SP,
+            offset: 72,
+        })?;
+        self.emit_instruction(Instruction::CMP {
+            rn: Register::X9,
+            rm: Operand::Imm12(0),
+        })?;
         // If poll < 0, store -1 (error). Else (poll == 0), store -2 (EAGAIN).
         let jl_poll_err_patch = self.emit_bcond_placeholder(Condition::LT)?;
         self.emit_load_immediate(Register::X10, -2)?; // EAGAIN
@@ -4591,7 +4780,9 @@ impl Emitter {
         self.patch_b(jmp_cleanup_from_th_patch, cleanup_idx);
         self.patch_b(jmp_cleanup_from_fail_patch, cleanup_idx);
         self.emit_instruction(Instruction::ADD {
-            rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(80),
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(80),
         })?;
         let _ = try_mode;
         Ok(())
@@ -5378,12 +5569,18 @@ impl Emitter {
                 // Store result to dst's stack slot
                 self.ss_store_to_slot(Register::X14, dst_offset)?;
             }
-            // ── Syscall (Wave 11) ──────────────────────────────────────────
+            // ── Syscall ──────────────────────────────────────────
             IRInstr::Syscall { nr, args, dst } => {
                 // Translate VUMA-generic (asm-generic) syscall number to the
                 // backend's native numbering. Identity on AArch64.
+                //
+                // (Use `self.backend_kind` instead of a
+                // hard-coded `BackendKind::AArch64` so a future non-AArch64
+                // reuser of this emitter gets the right translation. The
+                // field defaults to `BackendKind::AArch64` — the only
+                // architecture this emitter actually lowers for today.
                 let native_nr =
-                    crate::syscall_abi::translate_or_warn(BackendKind::AArch64, *nr);
+                    crate::syscall_abi::translate_or_warn(self.backend_kind, *nr);
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {
@@ -5397,13 +5594,35 @@ impl Emitter {
                     self.ss_store_to_slot(Register::X0, dst_offset)?;
                 }
             }
-            // ── VectorOp (Wave 29) ───────────────────────────────────────
-            // SIMD lowering for `IRInstr::VectorOp` happens in the ARM64
-            // `InstructionSelector::select_from_ir` path (arm64.rs), which
-            // pushes a `NEON_RAW` instruction. This stack-slot emit path
-            // treats VectorOp as a no-op (same as Phi/Select/CtSelect/CtEq).
-            IRInstr::VectorOp { .. } => {}
-            // ── Channel operations (Wave 1d / Task 2a) ──
+            // ── VectorOp ───────────────────────────────────────
+            // SIMD lowering for `IRInstr::VectorOp` — emit a pre-encoded
+            // NEON word via `Instruction::NEON_RAW`. The encoder helpers
+            // (`encode_neon_add_v4s` / `_sub_v4s` / `_mul_v4s`) produce the
+            // final 32-bit machine word with fixed V0/V1/V2 operands; full
+            // vector-vreg → physical-V register allocation is deferred.
+            //
+            // This stack-slot emit path is the one actually invoked by
+            // `AArch64Backend::allocate_registers` (via
+            // `emit_function(func, None)` → `emit_function_stack_slot`),
+            // so the NEON bytes must be emitted here too — mirroring the
+            // `emit_ir_instr` arm. The previous no-op arm left SIMD
+            // instructions completely un-emitted on the stack-slot path,
+            // which broke `test_simd_emitted_in_aarch64_isel`.
+            IRInstr::VectorOp { op, .. } => {
+                let (enc, mnemonic): (u32, &'static str) = match op {
+                    crate::ir::VectorOpKind::Add => {
+                        (crate::arm64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
+                    }
+                    crate::ir::VectorOpKind::Sub => {
+                        (crate::arm64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
+                    }
+                    crate::ir::VectorOpKind::Mul => {
+                        (crate::arm64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
+                    }
+                };
+                self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
+            }
+            // ── Channel operations ──
             // The Call-form channel builtins (channel_open/send/recv/close)
             // are handled in the `IRInstr::Call` arm above. The dedicated
             // `IRInstr::Channel*` arms below handle the SCG-NodePayload path
@@ -5419,9 +5638,9 @@ impl Emitter {
                 self.inc_formal_verify_count()?;
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
-            // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+            // StarkProof — stub (Call-form builtin is the active path).
             | IRInstr::StarkProof { .. } => {}
-            // Wave 49: CallIndirect — indirect call through func_ptr vreg.
+            // CallIndirect — indirect call through func_ptr vreg.
             // aarch64 SS-mode: load func_ptr into X16, BLR X16.
             IRInstr::CallIndirect { dst, func_ptr, args } => {
                 // Load args into X0-X7 (aarch64 calling convention)
@@ -5495,12 +5714,23 @@ impl Emitter {
             // FP arithmetic and comparison are the only ops that go through
             // the FP unit; bitwise/shift ops on FP bit patterns fall through
             // to the integer path below.
-            let fp_arith = matches!(op,
-                BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
-                | BinOpKind::SDiv | BinOpKind::UDiv
-                | BinOpKind::Eq | BinOpKind::Ne
-                | BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
-                | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+            let fp_arith = matches!(
+                op,
+                BinOpKind::Add
+                    | BinOpKind::Sub
+                    | BinOpKind::Mul
+                    | BinOpKind::SDiv
+                    | BinOpKind::UDiv
+                    | BinOpKind::Eq
+                    | BinOpKind::Ne
+                    | BinOpKind::SLt
+                    | BinOpKind::SLe
+                    | BinOpKind::SGt
+                    | BinOpKind::SGe
+                    | BinOpKind::ULt
+                    | BinOpKind::ULe
+                    | BinOpKind::UGt
+                    | BinOpKind::UGe
             );
             if fp_arith {
                 // Load operands' bit patterns into X9/X10 (64-bit).
@@ -5508,23 +5738,46 @@ impl Emitter {
                 self.ss_load_value_with_width(rhs, Register::X10, slots, RegWidth::X64)?;
 
                 match op {
-                    BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv => {
+                    BinOpKind::Add
+                    | BinOpKind::Sub
+                    | BinOpKind::Mul
+                    | BinOpKind::SDiv
+                    | BinOpKind::UDiv => {
                         // GPR → FP: FMOV D0, X9 ; FMOV D1, X10
-                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
-                        self.emit_instruction(Instruction::FMOV_DX { vd: 1, rn: Register::X10 })?;
+                        self.emit_instruction(Instruction::FMOV_DX {
+                            vd: 0,
+                            rn: Register::X9,
+                        })?;
+                        self.emit_instruction(Instruction::FMOV_DX {
+                            vd: 1,
+                            rn: Register::X10,
+                        })?;
 
                         let fp_instr = match op {
                             BinOpKind::Add => Instruction::Fadd {
-                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                                rd: Register::X0,
+                                rn: Register::X0,
+                                rm: Register::X1,
+                                double: is_double,
                             },
                             BinOpKind::Sub => Instruction::Fsub {
-                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                                rd: Register::X0,
+                                rn: Register::X0,
+                                rm: Register::X1,
+                                double: is_double,
                             },
                             BinOpKind::Mul => Instruction::Fmul {
-                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                                rd: Register::X0,
+                                rn: Register::X0,
+                                rm: Register::X1,
+                                double: is_double,
                             },
-                            _ => Instruction::Fdiv { // SDiv | UDiv
-                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                            _ => Instruction::Fdiv {
+                                // SDiv | UDiv
+                                rd: Register::X0,
+                                rn: Register::X0,
+                                rm: Register::X1,
+                                double: is_double,
                             },
                         };
                         self.emit_instruction(fp_instr)?;
@@ -5536,28 +5789,49 @@ impl Emitter {
                         // Compute X16 = X29 - dst_offset (handles any offset size).
                         self.ss_emit_slot_addr(Register::X16, dst_offset)?;
                         // STUR D0, [X16, #0]: 0xFC000000 | (imm9=0 << 12) | (Rn=16 << 5) | (Rt=0)
-                        self.emit_instruction(Instruction::NEON_RAW { enc: 0xFC000200, mnemonic: "stur" })?;
+                        self.emit_instruction(Instruction::NEON_RAW {
+                            enc: 0xFC000200,
+                            mnemonic: "stur",
+                        })?;
                         self.emit_instruction(Instruction::LDR {
                             rt: Register::X9,
                             rn: Register::X16,
                             offset: 0,
                         })?;
                     }
-                    BinOpKind::Eq | BinOpKind::Ne
-                    | BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
-                    | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe => {
+                    BinOpKind::Eq
+                    | BinOpKind::Ne
+                    | BinOpKind::SLt
+                    | BinOpKind::SLe
+                    | BinOpKind::SGt
+                    | BinOpKind::SGe
+                    | BinOpKind::ULt
+                    | BinOpKind::ULe
+                    | BinOpKind::UGt
+                    | BinOpKind::UGe => {
                         // GPR → FP for comparison
-                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
-                        self.emit_instruction(Instruction::FMOV_DX { vd: 1, rn: Register::X10 })?;
+                        self.emit_instruction(Instruction::FMOV_DX {
+                            vd: 0,
+                            rn: Register::X9,
+                        })?;
+                        self.emit_instruction(Instruction::FMOV_DX {
+                            vd: 1,
+                            rn: Register::X10,
+                        })?;
                         // FCMP D0, D1 (sets NZCV flags). For FP, signed and
                         // unsigned comparisons are equivalent — the binop
                         // condition codes map naturally.
                         self.emit_instruction(Instruction::Fcmp {
-                            rn: Register::X0, rm: Register::X1, double: is_double,
+                            rn: Register::X0,
+                            rm: Register::X1,
+                            double: is_double,
                         })?;
                         // CSET X9, cond
                         let cond = binop_kind_to_condition(&op);
-                        self.emit_instruction(Instruction::CSET { rd: Register::X9, cond })?;
+                        self.emit_instruction(Instruction::CSET {
+                            rd: Register::X9,
+                            cond,
+                        })?;
                     }
                     _ => unreachable!("fp_arith filter should have excluded this op"),
                 }
@@ -5591,7 +5865,7 @@ impl Emitter {
                 // `strb w11, [x10]` then dereferences the truncated address
                 // → SIGSEGV on aarch64 / aarch64_be / s390x.
                 //
-                // K9G's pointer-vreg propagation in `scg_to_ir.rs` was
+                // The pointer-vreg propagation in `scg_to_ir.rs` was
                 // supposed to set `ty=Some(Ptr)` for pointer arithmetic, but
                 // it doesn't reliably reach every Add emitted for
                 // `state.field[index]` (the bridge produces
@@ -5750,53 +6024,47 @@ impl Emitter {
                     }
                 }
             }
-            BinOpKind::ShrL => {
-                match rhs {
-                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
-                        self.emit_instruction_with_width(
-                            Instruction::LSR {
-                                rd: Register::X9,
-                                rn: Register::X9,
-                                rm: Operand::Imm12(*v as u16),
-                            },
-                            width,
-                        )?;
-                    }
-                    _ => {
-                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
-                        self.ss_emit_lsrv(Register::X9, Register::X9, Register::X10, width)?;
-                    }
+            BinOpKind::ShrL => match rhs {
+                IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                    self.emit_instruction_with_width(
+                        Instruction::LSR {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            rm: Operand::Imm12(*v as u16),
+                        },
+                        width,
+                    )?;
                 }
-            }
-            BinOpKind::ShrA => {
-                match rhs {
-                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
-                        self.emit_instruction_with_width(
-                            Instruction::ASR {
-                                rd: Register::X9,
-                                rn: Register::X9,
-                                rm: Operand::Imm12(*v as u16),
-                            },
-                            width,
-                        )?;
-                    }
-                    _ => {
-                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
-                        self.ss_emit_asrv(Register::X9, Register::X9, Register::X10, width)?;
-                    }
+                _ => {
+                    self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                    self.ss_emit_lsrv(Register::X9, Register::X9, Register::X10, width)?;
                 }
-            }
-            BinOpKind::Ror => {
-                match rhs {
-                    IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
-                        self.ss_emit_ror_imm(Register::X9, Register::X9, *v as u32, width)?;
-                    }
-                    _ => {
-                        self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
-                        self.ss_emit_rorv(Register::X9, Register::X9, Register::X10, width)?;
-                    }
+            },
+            BinOpKind::ShrA => match rhs {
+                IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                    self.emit_instruction_with_width(
+                        Instruction::ASR {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            rm: Operand::Imm12(*v as u16),
+                        },
+                        width,
+                    )?;
                 }
-            }
+                _ => {
+                    self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                    self.ss_emit_asrv(Register::X9, Register::X9, Register::X10, width)?;
+                }
+            },
+            BinOpKind::Ror => match rhs {
+                IRValue::Immediate(v) if *v >= 0 && (*v as u32) <= 63 => {
+                    self.ss_emit_ror_imm(Register::X9, Register::X9, *v as u32, width)?;
+                }
+                _ => {
+                    self.ss_load_value_with_width(rhs, Register::X10, slots, width)?;
+                    self.ss_emit_rorv(Register::X9, Register::X9, Register::X10, width)?;
+                }
+            },
             BinOpKind::Rol => {
                 // ROL by N = ROR by (size - N)
                 match rhs {
@@ -5907,7 +6175,10 @@ impl Emitter {
                 )?;
                 let cond = binop_kind_to_condition(&op);
                 self.emit_instruction_with_width(
-                    Instruction::CSET { rd: Register::X9, cond },
+                    Instruction::CSET {
+                        rd: Register::X9,
+                        cond,
+                    },
                     width,
                 )?;
             }
@@ -5938,27 +6209,39 @@ impl Emitter {
                     }
                 }
                 let fixup_idx = self.code.len();
-                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
+                self.fixups
+                    .push((fixup_idx, target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
-            IRTerminator::Branch { cond, true_block, false_block } => {
+            IRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
                 self.ss_load_value(cond, Register::X9, slots)?;
 
                 // Compute phi copies for both successors.
-                let false_pairs: Vec<&(IRValue, IRValue)> =
-                    phi_map.get(&(false_block.clone(), current_label.to_string()))
-                        .map(|v| v.iter().collect()).unwrap_or_default();
-                let true_pairs: Vec<&(IRValue, IRValue)> =
-                    phi_map.get(&(true_block.clone(), current_label.to_string()))
-                        .map(|v| v.iter().collect()).unwrap_or_default();
+                let false_pairs: Vec<&(IRValue, IRValue)> = phi_map
+                    .get(&(false_block.clone(), current_label.to_string()))
+                    .map(|v| v.iter().collect())
+                    .unwrap_or_default();
+                let true_pairs: Vec<&(IRValue, IRValue)> = phi_map
+                    .get(&(true_block.clone(), current_label.to_string()))
+                    .map(|v| v.iter().collect())
+                    .unwrap_or_default();
 
                 if false_pairs.is_empty() && true_pairs.is_empty() {
                     // Common case (no phis): CBNZ true, B false
                     let fixup_cbnz = self.code.len();
-                    self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
-                    self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                    self.fixups
+                        .push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
+                    self.emit_instruction(Instruction::CBNZ {
+                        rt: Register::X9,
+                        offset: 0,
+                    })?;
                     let fixup_b = self.code.len();
-                    self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
+                    self.fixups
+                        .push((fixup_b, false_block.clone(), BranchFormat::B26));
                     self.emit_instruction(Instruction::B { offset: 0 })?;
                 } else {
                     // Landing-pad pattern (same as IRInstr::CondBranch):
@@ -5968,7 +6251,10 @@ impl Emitter {
                     //   <true copies>  ← CBNZ target
                     //   B true_block
                     let cbnz_word_idx = self.code.len();
-                    self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                    self.emit_instruction(Instruction::CBNZ {
+                        rt: Register::X9,
+                        offset: 0,
+                    })?;
                     // False path
                     for (dst, src) in false_pairs {
                         self.ss_load_value(src, Register::X9, slots)?;
@@ -5977,7 +6263,8 @@ impl Emitter {
                         self.ss_store_to_slot(Register::X9, dst_offset)?;
                     }
                     let b_false_word_idx = self.code.len();
-                    self.fixups.push((b_false_word_idx, false_block.clone(), BranchFormat::B26));
+                    self.fixups
+                        .push((b_false_word_idx, false_block.clone(), BranchFormat::B26));
                     self.emit_instruction(Instruction::B { offset: 0 })?;
                     // True path (CBNZ target)
                     let true_copies_word_idx = self.code.len();
@@ -5988,7 +6275,8 @@ impl Emitter {
                         self.ss_store_to_slot(Register::X9, dst_offset)?;
                     }
                     let b_true_word_idx = self.code.len();
-                    self.fixups.push((b_true_word_idx, true_block.clone(), BranchFormat::B26));
+                    self.fixups
+                        .push((b_true_word_idx, true_block.clone(), BranchFormat::B26));
                     self.emit_instruction(Instruction::B { offset: 0 })?;
                     // Patch the CBNZ offset.
                     let cbnz_offset = (true_copies_word_idx as i32) - (cbnz_word_idx as i32);
@@ -6237,10 +6525,10 @@ fn binop_kind_to_condition(op: &BinOpKind) -> Condition {
 }
 
 // ---------------------------------------------------------------------------
-// Wave 53: Real spill-code emission — copy-elision helper
+// Real spill-code emission — copy-elision helper
 // ---------------------------------------------------------------------------
 
-/// (Wave 53, Step 5) Check whether an IR instruction is a `Cast::BitCast`
+/// Check whether an IR instruction is a `Cast::BitCast`
 /// whose move was eliminated by the `LinearScanAllocator`'s coalescing
 /// pass.
 ///
@@ -6293,7 +6581,7 @@ fn is_eliminated_copy(instr: &IRInstr, alloc: &AllocationResult) -> bool {
 // Frame-size computation
 // ---------------------------------------------------------------------------
 
-// (Wave 50) The `count_vregs` helper that used to live here was removed:
+// The `count_vregs` helper that used to live here was removed:
 // it was only consulted by the dead `vreg_count > STACK_SLOT_VREG_THRESHOLD`
 // dispatch in `emit_function`, and became unused once that branch was
 // deleted.  `compute_frame_size` below performs its own vreg scan inline
@@ -6346,7 +6634,9 @@ fn compute_frame_size(func: &IRFunction) -> u32 {
     // (`next_spill_slot`) never decrements — each call allocates new slots
     // even if previous call's slots were reloaded — so the frame must hold
     // up to `13 * num_calls` slots in the worst case.
-    let num_calls: u32 = func.blocks.iter()
+    let num_calls: u32 = func
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .filter(|i| matches!(i, IRInstr::Call { .. }))
         .count() as u32;
@@ -6410,16 +6700,14 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
         BackendKind::Sparc64 => Ok(30), // R_SPARC_WDISP30
         BackendKind::S390X => Ok(23),
         BackendKind::Mips64Be => Ok(4), // R_MIPS_26
-        BackendKind::ArmEb => Ok(28), // R_ARM_CALL
+        BackendKind::ArmEb => Ok(28),   // R_ARM_CALL
         BackendKind::AArch64Be => Ok(283),
         BackendKind::M68k => Ok(1), // R_68K_32
         BackendKind::Alpha => Ok(2),
         BackendKind::Hppa => Ok(2), // R_PARISC_DIR21L // R_ALPHA_REFQUAD // R_AARCH64_CALL26 (PC-relative 32-bit doubleword / halfword)
-        BackendKind::Wasm32 => {
-            Err(CodegenError::ElfError(
-                "Wasm32 does not use ELF relocations — use emit_wasm() instead".to_string(),
-            ))
-        }
+        BackendKind::Wasm32 => Err(CodegenError::ElfError(
+            "Wasm32 does not use ELF relocations — use emit_wasm() instead".to_string(),
+        )),
     }
 }
 
@@ -6467,7 +6755,7 @@ pub fn emit_elf(
     let is_obj = config.format == OutputFormat::Obj;
     let sec_align = section_alignment_for_backend(config.backend);
 
-    // (Wave 21) Build a function-name → AllocationResult map so the emitter
+    // Build a function-name → AllocationResult map so the emitter
     // can consult pre-computed register assignments during emission.
     let regalloc_map: HashMap<String, &AllocationResult> = regalloc
         .iter()
@@ -6521,7 +6809,12 @@ pub fn emit_elf(
         // ET_EXEC: patch in-function BL relocations; unresolved (external)
         // calls are left as-is (offset 0) and the symbol name is recorded
         // in the symtab/strtab for downstream tooling / debuggers.
-        resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets, config.backend)?;
+        resolve_call_relocs(
+            &mut text_section,
+            &all_call_relocs,
+            &function_offsets,
+            config.backend,
+        )?;
     }
 
     // ---- Step 3: Collect data sections (with proper alignment) ----
@@ -6907,7 +7200,8 @@ pub fn emit_elf(
                     db.add_line_entry(start + block_offset, 1, block.source_line, 0);
                 }
                 block_offset += (block.instructions.len() as u64)
-                    * crate::dwarf::DwarfBuilder::for_backend(config.backend).min_inst_length() as u64;
+                    * crate::dwarf::DwarfBuilder::for_backend(config.backend).min_inst_length()
+                        as u64;
             }
         }
         let sections = db.emit_debug_sections();
@@ -6921,12 +7215,15 @@ pub fn emit_elf(
 ///
 /// The output is the concatenated machine code for all functions, suitable for
 /// loading at address `0x80000` on the AArch64.
-pub fn emit_raw(functions: &[IRFunction], data_sections: &[DataSection], config: &EmitConfig) -> Result<Vec<u8>> {
+pub fn emit_raw(
+    functions: &[IRFunction],
+    data_sections: &[DataSection],
+    config: &EmitConfig,
+) -> Result<Vec<u8>> {
     // Wasm32 should never go through the raw binary emission path.
     if config.backend == BackendKind::Wasm32 || config.format == OutputFormat::Wasm {
         return Err(CodegenError::ElfError(
-            "Wasm32 target cannot produce raw binary output — use emit_wasm() instead"
-                .to_string(),
+            "Wasm32 target cannot produce raw binary output — use emit_wasm() instead".to_string(),
         ));
     }
 
@@ -6946,7 +7243,12 @@ pub fn emit_raw(functions: &[IRFunction], data_sections: &[DataSection], config:
         }
     }
 
-    resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets, config.backend)?;
+    resolve_call_relocs(
+        &mut text_section,
+        &all_call_relocs,
+        &function_offsets,
+        config.backend,
+    )?;
 
     // Append data sections after the text section for bare-metal targets.
     // Each section is aligned to its stated alignment requirement.
@@ -7045,7 +7347,8 @@ pub fn emit_wasm(
         functions: allocated_funcs,
         total_code_size: 0, // computed by the backend during encoding
         total_data_size: 0,
-        rodata_data: Vec::new(), function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     // ── Encode the program into a .wasm module ──
@@ -7075,7 +7378,7 @@ pub fn emit_binary(
     config: &EmitConfig,
     regalloc: &[AllocationResult],
 ) -> Result<Vec<u8>> {
-    // Pre-emit IR typecheck (F2b): verify BinOp/Cast type coherence
+    // Pre-emit IR typecheck: verify BinOp/Cast type coherence
     // before any backend is selected or lowering runs.  Catches missing
     // result types, Cast kind/type mismatches, and (once the IR gains a
     // per-value type table) mixed-width `F32` op `F64` ops that would
@@ -7130,7 +7433,8 @@ fn resolve_call_relocs(
             Some(&off) => off,
             None => {
                 // External symbol — the linker will resolve this.
-                vuma_log!(debug, 
+                vuma_log!(
+                    debug,
                     "call relocation target '{}' is an external symbol — deferring to linker",
                     reloc.target_func
                 );
@@ -7218,7 +7522,10 @@ pub fn section_alignment_for_backend(backend: BackendKind) -> u64 {
 /// every contribution starts at an offset that is a multiple of its
 /// stated alignment.  The overall section alignment is the maximum of
 /// the individual alignments (or the backend default if higher).
-fn collect_data_sections(data_sections: &[DataSection], backend: BackendKind) -> (Vec<u8>, Vec<u8>, u64) {
+fn collect_data_sections(
+    data_sections: &[DataSection],
+    backend: BackendKind,
+) -> (Vec<u8>, Vec<u8>, u64) {
     let default_align = section_alignment_for_backend(backend);
     let mut rodata_section = Vec::new();
     let mut data_section = Vec::new();
@@ -7528,7 +7835,10 @@ mod tests {
         let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
         assert_ne!(e_shoff, 0, "section headers must be present");
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
-        assert_eq!(e_shnum, 8, "expected 8 section headers (null+rodata+text+data+bss+symtab+strtab+shstrtab)");
+        assert_eq!(
+            e_shnum, 8,
+            "expected 8 section headers (null+rodata+text+data+bss+symtab+strtab+shstrtab)"
+        );
         let e_shstrndx = u16::from_le_bytes(elf[62..64].try_into().unwrap());
         assert_eq!(e_shstrndx, 7, "shstrtab at index 7");
     }
@@ -8370,11 +8680,26 @@ mod tests {
 
     #[test]
     fn em_machine_for_backend_mapping() {
-        assert_eq!(em_machine_for_backend(BackendKind::AArch64).unwrap(), EM_AARCH64);
-        assert_eq!(em_machine_for_backend(BackendKind::X86_64).unwrap(), EM_X86_64);
-        assert_eq!(em_machine_for_backend(BackendKind::RiscV64).unwrap(), EM_RISCV);
-        assert_eq!(em_machine_for_backend(BackendKind::Mips64).unwrap(), EM_MIPS);
-        assert_eq!(em_machine_for_backend(BackendKind::PowerPC64).unwrap(), EM_PPC64);
+        assert_eq!(
+            em_machine_for_backend(BackendKind::AArch64).unwrap(),
+            EM_AARCH64
+        );
+        assert_eq!(
+            em_machine_for_backend(BackendKind::X86_64).unwrap(),
+            EM_X86_64
+        );
+        assert_eq!(
+            em_machine_for_backend(BackendKind::RiscV64).unwrap(),
+            EM_RISCV
+        );
+        assert_eq!(
+            em_machine_for_backend(BackendKind::Mips64).unwrap(),
+            EM_MIPS
+        );
+        assert_eq!(
+            em_machine_for_backend(BackendKind::PowerPC64).unwrap(),
+            EM_PPC64
+        );
         assert_eq!(
             em_machine_for_backend(BackendKind::LoongArch64).unwrap(),
             EM_LOONGARCH
@@ -8398,7 +8723,10 @@ mod tests {
             call_reloc_type_for_backend(BackendKind::RiscV64).unwrap(),
             R_RISCV_CALL
         );
-        assert_eq!(call_reloc_type_for_backend(BackendKind::Mips64).unwrap(), R_MIPS_26);
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::Mips64).unwrap(),
+            R_MIPS_26
+        );
         assert_eq!(
             call_reloc_type_for_backend(BackendKind::PowerPC64).unwrap(),
             R_PPC64_REL24
@@ -8407,7 +8735,10 @@ mod tests {
             call_reloc_type_for_backend(BackendKind::LoongArch64).unwrap(),
             R_LARCH_B26
         );
-        assert_eq!(call_reloc_type_for_backend(BackendKind::Arm32).unwrap(), R_ARM_CALL);
+        assert_eq!(
+            call_reloc_type_for_backend(BackendKind::Arm32).unwrap(),
+            R_ARM_CALL
+        );
         // Wasm32 should return an error for ELF relocation type
         assert!(call_reloc_type_for_backend(BackendKind::Wasm32).is_err());
     }
@@ -8642,7 +8973,11 @@ mod tests {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::wasm_binary();
         let result = emit_binary(&funcs, &[], &config, &[]);
-        assert!(result.is_ok(), "emit_binary should succeed for Wasm: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "emit_binary should succeed for Wasm: {:?}",
+            result.err()
+        );
         let wasm_bytes = result.unwrap();
         // Wasm module magic: 0x00 0x61 0x73 0x6D
         assert!(
@@ -8650,8 +8985,16 @@ mod tests {
             "Wasm output should be at least 8 bytes (magic + version), got {}",
             wasm_bytes.len()
         );
-        assert_eq!(&wasm_bytes[0..4], &[0x00, 0x61, 0x73, 0x6D], "Wasm magic number");
-        assert_eq!(&wasm_bytes[4..8], &[0x01, 0x00, 0x00, 0x00], "Wasm version 1");
+        assert_eq!(
+            &wasm_bytes[0..4],
+            &[0x00, 0x61, 0x73, 0x6D],
+            "Wasm magic number"
+        );
+        assert_eq!(
+            &wasm_bytes[4..8],
+            &[0x01, 0x00, 0x00, 0x00],
+            "Wasm version 1"
+        );
     }
 
     /// Verify that emit_wasm produces a valid Wasm module with start function.
@@ -8660,7 +9003,11 @@ mod tests {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::wasm_binary();
         let result = emit_wasm(&funcs, &[], &config);
-        assert!(result.is_ok(), "emit_wasm should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "emit_wasm should succeed: {:?}",
+            result.err()
+        );
         let wasm_bytes = result.unwrap();
         assert!(
             wasm_bytes.len() >= 8,
@@ -8726,14 +9073,12 @@ mod tests {
     fn emit_elf_rodata_before_text_in_memory() {
         // Verify that .rodata has a lower virtual address than .text.
         let funcs = vec![make_return_function("main")];
-        let data_sections = vec![
-            DataSection {
-                name: "rodata".into(),
-                kind: DataSectionKind::ReadOnly,
-                align: 16,
-                data: vec![0xAA; 32],
-            },
-        ];
+        let data_sections = vec![DataSection {
+            name: "rodata".into(),
+            kind: DataSectionKind::ReadOnly,
+            align: 16,
+            data: vec![0xAA; 32],
+        }];
         let config = EmitConfig::linux_elf();
         let elf = emit_elf(&funcs, &data_sections, &config, &[]).unwrap();
 
@@ -8754,8 +9099,16 @@ mod tests {
             // Read the name from .shstrtab
             let e_shstrndx = u16::from_le_bytes(elf[62..64].try_into().unwrap()) as usize;
             let shstrtab_off = e_shoff + e_shstrndx * 64;
-            let shstrtab_offset = u64::from_le_bytes(elf[shstrtab_off + 24..shstrtab_off + 32].try_into().unwrap()) as usize;
-            let shstrtab_size = u64::from_le_bytes(elf[shstrtab_off + 32..shstrtab_off + 40].try_into().unwrap()) as usize;
+            let shstrtab_offset = u64::from_le_bytes(
+                elf[shstrtab_off + 24..shstrtab_off + 32]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let shstrtab_size = u64::from_le_bytes(
+                elf[shstrtab_off + 32..shstrtab_off + 40]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
 
             if sh_name_idx < shstrtab_size {
                 let name_end = elf[shstrtab_offset + sh_name_idx..]
@@ -8763,7 +9116,7 @@ mod tests {
                     .position(|&b| b == 0)
                     .unwrap_or(0);
                 let name = String::from_utf8_lossy(
-                    &elf[shstrtab_offset + sh_name_idx..shstrtab_offset + sh_name_idx + name_end]
+                    &elf[shstrtab_offset + sh_name_idx..shstrtab_offset + sh_name_idx + name_end],
                 );
                 if name == ".rodata" {
                     rodata_vaddr = sh_addr;
@@ -8806,55 +9159,71 @@ mod tests {
 
         // AArch64 default align = 16, so first section padded to 16, second section also 16-aligned
         // First: 2 bytes padded to 16 → 16 bytes, then 8 bytes at offset 16
-        assert!(rodata.len() >= 24, "rodata should be at least 24 bytes with alignment padding");
+        assert!(
+            rodata.len() >= 24,
+            "rodata should be at least 24 bytes with alignment padding"
+        );
     }
 
-    // ── Wave 21: Real register allocation emit-path tests ───────────────
+    // ── Real register allocation emit-path tests ───────────────
 
-    /// (Wave 21) Verify that `emit_function` accepts an `AllocationResult`
+    /// Verify that `emit_function` accepts an `AllocationResult`
     /// and produces non-empty code.  This tests the plumbing that threads
     /// regalloc results through the emit path.
     #[test]
     fn emit_function_with_allocation_result() {
-        use crate::regalloc::{LinearScanAllocator, AllocationResult};
+        use crate::regalloc::{AllocationResult, LinearScanAllocator};
 
         let func = make_return_function("main");
         let allocator = LinearScanAllocator::new();
-        let alloc = allocator.allocate_function(&func).expect("regalloc should succeed");
+        let alloc = allocator
+            .allocate_function(&func)
+            .expect("regalloc should succeed");
 
         let mut emitter = Emitter::new();
-        let code = emitter.emit_function(&func, Some(&alloc)).expect("emission should succeed");
+        let code = emitter
+            .emit_function(&func, Some(&alloc))
+            .expect("emission should succeed");
         assert!(!code.is_empty(), "emitted code should be non-empty");
     }
 
-    /// (Wave 21) Verify that `emit_binary` accepts `&[AllocationResult]`
+    /// Verify that `emit_binary` accepts `&[AllocationResult]`
     /// and produces a valid ELF binary.  This tests the full plumbing from
     /// `emit_binary` → `emit_elf` → `Emitter::emit_function`.
     #[test]
     fn emit_binary_with_regalloc_results() {
-        use crate::regalloc::{LinearScanAllocator, AllocationResult};
+        use crate::regalloc::{AllocationResult, LinearScanAllocator};
 
         let funcs = vec![make_return_function("main")];
         let allocator = LinearScanAllocator::new();
         let regalloc: Vec<AllocationResult> = funcs
             .iter()
-            .map(|f| allocator.allocate_function(f).expect("regalloc should succeed"))
+            .map(|f| {
+                allocator
+                    .allocate_function(f)
+                    .expect("regalloc should succeed")
+            })
             .collect();
 
         let config = EmitConfig::linux_elf();
-        let elf = emit_binary(&funcs, &[], &config, &regalloc).expect("ELF emission should succeed");
-        assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "should be a valid ELF");
+        let elf =
+            emit_binary(&funcs, &[], &config, &regalloc).expect("ELF emission should succeed");
+        assert_eq!(
+            &elf[0..4],
+            &[0x7f, b'E', b'L', b'F'],
+            "should be a valid ELF"
+        );
     }
 
-    /// (Wave 53) Verify that `emit_function_regalloc` consumes the
+    /// Verify that `emit_function_regalloc` consumes the
     /// `AllocationResult` and produces emitted bytes that *differ* from
     /// `emit_function_greedy`, and that the emitted bytes contain
     /// callee-saved register save/restore instructions (STP/LDP pairs
     /// targeting X19-X28 - the ARM64 equivalent of PUSH/POP).
     ///
-    /// This test replaces the Wave 21 `emit_function_regalloc_is_metadata_only`
+    /// This test replaces the `emit_function_regalloc_is_metadata_only`
     /// guard, which asserted the *opposite* (that the bytes were identical).
-    /// Wave 53 changes the contract: `emit_function_regalloc` now really
+    /// The contract changed: `emit_function_regalloc` now really
     /// consumes `alloc.used_callee_saved_gprs`, `alloc.spill_code`, and
     /// `alloc.eliminated_copies`, so the emitted bytes MUST differ when
     /// the allocator reports callee-saved usage.
@@ -8936,7 +9305,8 @@ mod tests {
         // Assertion 2: the bytes MUST differ - proves the AllocationResult
         // influenced the emitted code.
         assert_ne!(
-            code_regalloc, code_greedy,
+            code_regalloc,
+            code_greedy,
             "Wave 53: emit_function_regalloc must produce bytes that DIFFER from \
              emit_function_greedy when the AllocationResult reports callee-saved GPRs \
              or spill code. Got identical bytes (len={}), which means the emit path \
@@ -8999,7 +9369,7 @@ mod tests {
         );
     }
 
-    /// (Wave 21) Verify that `AllocationResult` carries a `function_name`
+    /// Verify that `AllocationResult` carries a `function_name`
     /// field, so the emit path can match results to functions.
     #[test]
     fn allocation_result_has_function_name() {
@@ -9007,73 +9377,24 @@ mod tests {
 
         let func = make_return_function("test_fn");
         let allocator = LinearScanAllocator::new();
-        let alloc = allocator.allocate_function(&func).expect("regalloc should succeed");
-        assert_eq!(alloc.function_name, "test_fn", "AllocationResult.function_name should be set");
+        let alloc = allocator
+            .allocate_function(&func)
+            .expect("regalloc should succeed");
+        assert_eq!(
+            alloc.function_name, "test_fn",
+            "AllocationResult.function_name should be set"
+        );
     }
 
-    /// (Wave 21) Verify that `emit_function` with `None` (no AllocationResult)
+    /// Verify that `emit_function` with `None` (no AllocationResult)
     /// still works (backward-compatible path using the greedy allocator).
     #[test]
     fn emit_function_without_allocation_result() {
         let func = make_return_function("main");
         let mut emitter = Emitter::new();
-        let code = emitter.emit_function(&func, None).expect("emission should succeed");
+        let code = emitter
+            .emit_function(&func, None)
+            .expect("emission should succeed");
         assert!(!code.is_empty(), "emitted code should be non-empty");
     }
 }
-
-// ---------------------------------------------------------------------------
-// Worklog
-// ---------------------------------------------------------------------------
-//
-// 2025-03-04: Enhanced emit.rs for ARM64 ELF/binary emission.
-//
-// Changes:
-// - Added EmitConfig struct with OutputFormat (ELF, Raw, Obj) and Target
-//   (Linux, BareMetal) enums.
-// - Added emit_elf() top-level function producing full ELF64 binaries with:
-//   ELF header (EM_AARCH64, little-endian, static executable),
-//   program headers (LOAD for text + data/bss),
-//   section headers (.text, .rodata, .data, .bss, .symtab, .strtab, .shstrtab),
-//   symbol table (function names with addresses),
-//   and section-header string table.
-// - Added emit_raw() top-level function producing flat binary images for
-//   bare-metal AArch64.
-// - Added CallRelocation struct and relocation resolution: inter-function BL
-//   instructions are recorded during emission and patched after all function
-//   addresses are known.
-// - Extended emit_ir_instr to handle all IRInstr variants including Add, Sub,
-//   Mul, Div, Cmp, Ret, Branch, CondBranch.
-// - Extended BinOpKind match to handle comparison operators (SLt..Ne) with
-//   CMP instruction emission (CSET via CSINC).
-// - Added 15 tests covering: ELF header validity, machine type, exec type,
-//   section headers, symbol table, raw binary, call relocation, EmitConfig
-//   defaults, obj file type, bare-metal OSABI, data sections, legacy
-//   emit_program, empty program, Display traits, base address, multiple
-//   function symbols.
-// - Updated lib.rs to re-export EmitConfig, OutputFormat, Target, emit_elf,
-//   emit_raw.
-//
-// Linker Integration Hardening
-//
-// Changes:
-// - Restructured ELF layout: .rodata is now placed before .text in memory,
-//   matching the natural memory ordering: R data → RX code → RW data.
-// - Changed from 2 to 3 LOAD segments: PF_R for .rodata, PF_R|PF_X for
-//   .text, PF_R|PF_W for .data+.bss.  This provides proper memory
-//   protection granularity (W^X compliance).
-// - Added section_alignment_for_backend() function returning per-arch
-//   alignment: ARM32=4, AArch64=16, x86-64=16, RISC-V=4, MIPS64=8,
-//   PPC64=16, LoongArch64=8.
-// - Enhanced collect_data_sections() to respect per-DataSection alignment
-//   requirements by inserting padding between adjacent contributions.
-//   The overall section alignment is max(section.align, backend_default).
-// - Updated section header table order: null, .rodata, .text, [.rela.text],
-//   .data, .bss, .symtab, .strtab, .shstrtab.
-// - Updated build_shstrtab() to list sections in the new order.
-// - Updated build_symbol_table() to accept text_section_idx parameter
-//   (.text is now at section index 2 instead of 1).
-// - All sh_addralign values now use section_alignment_for_backend() instead
-//   of hardcoded 8/16 values.
-// - Entry point calculation now accounts for the .rodata offset: entry is
-//   text_vaddr + entry_offset (not base_addr + entry_offset).

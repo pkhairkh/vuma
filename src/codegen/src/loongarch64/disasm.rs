@@ -1316,98 +1316,295 @@ mod tests {
     #[test]
     fn test_decode_all_3r_arithmetic() {
         let operands = [
-            Instruction::AddW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::AddD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SubW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SubD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Slt  { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Sltu { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::MulW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::MulD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::DivW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::ModW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::DivWu { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::ModWu { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::DivD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::ModD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::DivDu { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::ModDu { rd: G::A0, rj: G::A1, rk: G::A2 },
+            Instruction::AddW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::AddD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SubW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SubD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Slt {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Sltu {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::MulW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::MulD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::DivW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::ModW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::DivWu {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::ModWu {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::DivD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::ModD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::DivDu {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::ModDu {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
         ];
         for instr in operands {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
-            assert_eq!(format!("{decoded}"), format!("{instr}"), "round-trip failed for {:?}", instr);
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
         }
     }
 
     #[test]
     fn test_decode_all_3r_logical() {
         let operands = [
-            Instruction::And { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Or  { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Xor { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Nor { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Andn { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Orn  { rd: G::A0, rj: G::A1, rk: G::A2 },
+            Instruction::And {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Or {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Xor {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Nor {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Andn {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Orn {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
         ];
         for instr in operands {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
-            assert_eq!(format!("{decoded}"), format!("{instr}"), "round-trip failed for {:?}", instr);
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
         }
     }
 
     #[test]
     fn test_decode_all_3r_shift() {
         let operands = [
-            Instruction::SllW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SrlW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SraW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SllD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SrlD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::SraD { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::RotrW { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::RotrD { rd: G::A0, rj: G::A1, rk: G::A2 },
+            Instruction::SllW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SrlW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SraW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SllD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SrlD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::SraD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::RotrW {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::RotrD {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
         ];
         for instr in operands {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
-            assert_eq!(format!("{decoded}"), format!("{instr}"), "round-trip failed for {:?}", instr);
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
         }
     }
 
     #[test]
     fn test_decode_shift_immediate() {
         let operands = [
-            Instruction::SlliW { rd: G::A0, rj: G::A1, imm8: 5 },
-            Instruction::SrliW { rd: G::A0, rj: G::A1, imm8: 10 },
-            Instruction::SraiW { rd: G::A0, rj: G::A1, imm8: 15 },
-            Instruction::SlliD { rd: G::A0, rj: G::A1, imm8: 20 },
-            Instruction::SrliD { rd: G::A0, rj: G::A1, imm8: 30 },
-            Instruction::SraiD { rd: G::A0, rj: G::A1, imm8: 40 },
+            Instruction::SlliW {
+                rd: G::A0,
+                rj: G::A1,
+                imm8: 5,
+            },
+            Instruction::SrliW {
+                rd: G::A0,
+                rj: G::A1,
+                imm8: 10,
+            },
+            Instruction::SraiW {
+                rd: G::A0,
+                rj: G::A1,
+                imm8: 15,
+            },
+            Instruction::SlliD {
+                rd: G::A0,
+                rj: G::A1,
+                imm8: 20,
+            },
+            Instruction::SrliD {
+                rd: G::A0,
+                rj: G::A1,
+                imm8: 30,
+            },
+            Instruction::SraiD {
+                rd: G::A0,
+                rj: G::A1,
+                imm8: 40,
+            },
         ];
         for instr in operands {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
-            assert_eq!(format!("{decoded}"), format!("{instr}"), "round-trip failed for {:?}", instr);
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
         }
     }
 
     #[test]
     fn test_decode_branches() {
         let operands = [
-            Instruction::Beq { rj: G::A0, rd: G::A1, offs16: 8 },
-            Instruction::Bne { rj: G::A0, rd: G::A1, offs16: -16 },
-            Instruction::Blt { rj: G::A0, rd: G::A1, offs16: 32 },
-            Instruction::Bge { rj: G::A0, rd: G::A1, offs16: -4 },
-            Instruction::Bltu { rj: G::A0, rd: G::A1, offs16: 12 },
-            Instruction::Bgeu { rj: G::A0, rd: G::A1, offs16: -8 },
-            Instruction::Jirl { rd: G::Ra, rj: G::A0, offs16: 4 },
+            Instruction::Beq {
+                rj: G::A0,
+                rd: G::A1,
+                offs16: 8,
+            },
+            Instruction::Bne {
+                rj: G::A0,
+                rd: G::A1,
+                offs16: -16,
+            },
+            Instruction::Blt {
+                rj: G::A0,
+                rd: G::A1,
+                offs16: 32,
+            },
+            Instruction::Bge {
+                rj: G::A0,
+                rd: G::A1,
+                offs16: -4,
+            },
+            Instruction::Bltu {
+                rj: G::A0,
+                rd: G::A1,
+                offs16: 12,
+            },
+            Instruction::Bgeu {
+                rj: G::A0,
+                rd: G::A1,
+                offs16: -8,
+            },
+            Instruction::Jirl {
+                rd: G::Ra,
+                rj: G::A0,
+                offs16: 4,
+            },
         ];
         for instr in operands {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
-            assert_eq!(format!("{decoded}"), format!("{instr}"), "round-trip failed for {:?}", instr);
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
         }
     }
 
@@ -1426,12 +1623,18 @@ mod tests {
 
     #[test]
     fn test_decode_beqz_bnez() {
-        let beqz = Instruction::Beqz { rj: G::A0, offs21: 64 };
+        let beqz = Instruction::Beqz {
+            rj: G::A0,
+            offs21: 64,
+        };
         let bytes = beqz.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{beqz}"));
 
-        let bnez = Instruction::Bnez { rj: G::T0, offs21: -128 };
+        let bnez = Instruction::Bnez {
+            rj: G::T0,
+            offs21: -128,
+        };
         let bytes = bnez.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{bnez}"));
@@ -1439,12 +1642,18 @@ mod tests {
 
     #[test]
     fn test_decode_ext() {
-        let extwh = Instruction::ExtWH { rd: G::A0, rj: G::A1 };
+        let extwh = Instruction::ExtWH {
+            rd: G::A0,
+            rj: G::A1,
+        };
         let bytes = extwh.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{extwh}"));
 
-        let extwb = Instruction::ExtWB { rd: G::A0, rj: G::A1 };
+        let extwb = Instruction::ExtWB {
+            rd: G::A0,
+            rj: G::A1,
+        };
         let bytes = extwb.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{extwb}"));
@@ -1717,11 +1926,28 @@ mod tests {
     fn test_decode_bit_count_and_mask() {
         // 2R bit-count + 3R conditional-select
         for instr in [
-            Instruction::CloD { rd: G::A0, rj: G::A1 },
-            Instruction::CtzD { rd: G::A0, rj: G::A1 },
-            Instruction::PopcntD { rd: G::A0, rj: G::A1 },
-            Instruction::Maskeqz { rd: G::A0, rj: G::A1, rk: G::A2 },
-            Instruction::Masknez { rd: G::A0, rj: G::A1, rk: G::A2 },
+            Instruction::CloD {
+                rd: G::A0,
+                rj: G::A1,
+            },
+            Instruction::CtzD {
+                rd: G::A0,
+                rj: G::A1,
+            },
+            Instruction::PopcntD {
+                rd: G::A0,
+                rj: G::A1,
+            },
+            Instruction::Maskeqz {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
+            Instruction::Masknez {
+                rd: G::A0,
+                rj: G::A1,
+                rk: G::A2,
+            },
         ] {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();
@@ -1739,16 +1965,46 @@ mod tests {
         use crate::loongarch64::Fpr as F;
         // FFINT.* / FTINT.* / FCVT.*
         for instr in [
-            Instruction::FfintSW { fd: F::F0, fj: F::F1 },
-            Instruction::FfintSL { fd: F::F0, fj: F::F1 },
-            Instruction::FfintDW { fd: F::F0, fj: F::F1 },
-            Instruction::FfintDL { fd: F::F0, fj: F::F1 },
-            Instruction::FtintWS { fd: F::F0, fj: F::F1 },
-            Instruction::FtintWD { fd: F::F0, fj: F::F1 },
-            Instruction::FtintLS { fd: F::F0, fj: F::F1 },
-            Instruction::FtintLD { fd: F::F0, fj: F::F1 },
-            Instruction::FcvtDS { fd: F::F0, fj: F::F1 },
-            Instruction::FcvtSD { fd: F::F0, fj: F::F1 },
+            Instruction::FfintSW {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FfintSL {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FfintDW {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FfintDL {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FtintWS {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FtintWD {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FtintLS {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FtintLD {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FcvtDS {
+                fd: F::F0,
+                fj: F::F1,
+            },
+            Instruction::FcvtSD {
+                fd: F::F0,
+                fj: F::F1,
+            },
         ] {
             let bytes = instr.encode();
             let decoded = Instruction::decode(&bytes).unwrap();

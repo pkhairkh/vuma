@@ -61,16 +61,13 @@
 //! out of the capability section of an [`crate::ipc::EncapsulatedMessage`].
 
 pub use crate::ipc::capability::{
-    Resource, MemoryPermissions, CapabilityToken, CapabilitySet,
-    CAPABILITY_TOKEN_SIZE, RESOURCE_OFFSET, RESOURCE_FIELD_SIZE,
-    MAX_RESOURCE_STRING, MAX_DELEGATION_DEPTH,
+    CapabilitySet, CapabilityToken, MemoryPermissions, Resource, CAPABILITY_TOKEN_SIZE,
+    MAX_DELEGATION_DEPTH, MAX_RESOURCE_STRING, RESOURCE_FIELD_SIZE, RESOURCE_OFFSET,
 };
 
 // Re-export the grant/verify/delegate functions (Wave 11b/11c/11d) and
 // the delegation-chain verifier (Wave 33+) for pipeline consumers.
-pub use crate::ipc::capability::{
-    grant_capability, verify_capability, verify_delegation_chain,
-};
+pub use crate::ipc::capability::{grant_capability, verify_capability, verify_delegation_chain};
 
 // ── Wave 33-40: Capability Delegation ───────────────────────────────────
 //
@@ -112,7 +109,6 @@ pub fn delegate_capability(
         read: (reduced_perms & 1) != 0,
         write: (reduced_perms & 2) != 0,
         execute: (reduced_perms & 4) != 0,
-        ..Default::default()
     };
 
     // Mix the parent's token id into the signing key. This binds the
@@ -130,8 +126,8 @@ pub fn delegate_capability(
     // had depth 0; we increment to 1).
     let token = crate::ipc::capability::grant_capability(
         child_id_u128,
-        1,    // source_pid (delegator)
-        2,    // target_pid (delegatee)
+        1, // source_pid (delegator)
+        2, // target_pid (delegatee)
         resource,
         perms,
         1,    // delegation_depth = parent_depth(0) + 1
@@ -176,9 +172,14 @@ mod tests {
         // HMAC-SHA256.
         let token = grant_capability(
             0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF,
-            1, 2,
+            1,
+            2,
             Resource::Channel(42),
-            MemoryPermissions { read: true, write: false, execute: false },
+            MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
             0,
             1000,
             3600,
@@ -188,17 +189,43 @@ mod tests {
         // input is never all-zero). If it were HMAC-SHA256 with a 32-byte
         // key, it would also be 32 non-zero bytes, so this doesn't
         // distinguish — but it does verify the signature was computed.
-        assert_ne!(token.signature, [0u8; 32],
-            "signature must be computed (non-zero)");
+        assert_ne!(
+            token.signature, [0u8; 32],
+            "signature must be computed (non-zero)"
+        );
         // Verify the token round-trips: verify_capability with the same
         // signing key and a `now` within the validity window succeeds.
-        assert!(verify_capability(&token, &[0xAA; 32], 2000, None,
-            &MemoryPermissions { read: true, write: false, execute: false }).is_ok(),
-            "verify_capability must succeed for a valid token");
+        assert!(
+            verify_capability(
+                &token,
+                &[0xAA; 32],
+                2000,
+                None,
+                &MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false
+                }
+            )
+            .is_ok(),
+            "verify_capability must succeed for a valid token"
+        );
         // Verify with a DIFFERENT key fails — the signature is key-sensitive.
-        assert!(verify_capability(&token, &[0xBB; 32], 2000, None,
-            &MemoryPermissions { read: true, write: false, execute: false }).is_err(),
-            "verify_capability must fail with wrong signing key");
+        assert!(
+            verify_capability(
+                &token,
+                &[0xBB; 32],
+                2000,
+                None,
+                &MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false
+                }
+            )
+            .is_err(),
+            "verify_capability must fail with wrong signing key"
+        );
     }
 
     /// Wave 33-40: delegate_capability produces a non-zero child id that

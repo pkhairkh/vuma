@@ -47,7 +47,8 @@ pub fn run_regalloc(func: &IRFunction, isa_name: &str) -> RegAllocResult {
     let target = match registry.get(isa_name) {
         Some(t) => t,
         None => {
-            vuma_log!(debug, 
+            vuma_log!(
+                debug,
                 "emit_function_regalloc: target '{}' not in registry, skipping regalloc",
                 isa_name
             );
@@ -58,7 +59,8 @@ pub fn run_regalloc(func: &IRFunction, isa_name: &str) -> RegAllocResult {
     match allocator.allocate_function(func) {
         Ok(result) => result,
         Err(e) => {
-            vuma_log!(debug, 
+            vuma_log!(
+                debug,
                 "emit_function_regalloc: allocation failed for '{}': {}, using empty result",
                 isa_name,
                 e
@@ -89,10 +91,7 @@ pub fn run_regalloc(func: &IRFunction, isa_name: &str) -> RegAllocResult {
 /// downstream consumers (debuggers, optimizers, future codegen) which
 /// physical registers each instruction *could* use, enabling future
 /// waves to generate register-based code.
-pub fn annotate_with_regalloc(
-    func: &mut AllocatedFunction,
-    alloc: &RegAllocResult,
-) {
+pub fn annotate_with_regalloc(func: &mut AllocatedFunction, alloc: &RegAllocResult) {
     // Collect all vreg → PhysicalReg assignments from the allocation result.
     // We iterate over all instructions and, for each one, look up the
     // physical registers for its defined/used vregs.
@@ -119,8 +118,10 @@ fn annotate_instruction(instr: &mut AllocatedInstruction, alloc: &RegAllocResult
     // entries describe what the regalloc *would* assign (for future use).
     //
     // To avoid duplicates, we use a HashSet to deduplicate.
-    let mut reads_set: std::collections::HashSet<PhysicalReg> = instr.reads.iter().copied().collect();
-    let mut writes_set: std::collections::HashSet<PhysicalReg> = instr.writes.iter().copied().collect();
+    let mut reads_set: std::collections::HashSet<PhysicalReg> =
+        instr.reads.iter().copied().collect();
+    let mut writes_set: std::collections::HashSet<PhysicalReg> =
+        instr.writes.iter().copied().collect();
 
     // The opcode string may contain vreg IDs (e.g., "load %v3 from [rbp-8]").
     // We can't easily parse these, so instead we add ALL allocated physical

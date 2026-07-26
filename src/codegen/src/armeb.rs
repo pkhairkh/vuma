@@ -1,6 +1,17 @@
 //! # ARM32 Big-Endian Backend (armeb)
 //!
-//! **Wave 49 — wrapper pattern documentation.**
+//! **Wave 49 — wrapper pattern documentation.**  **Wave 13 — Wrapper Summary
+//! added** (Task 7-d).
+//!
+//! ## Wrapper Summary
+//!
+//! | Field | Value |
+//! |-------|-------|
+//! | **Wraps** | `Arm32Backend` (`crate::arm32`), constructed via `Arm32Backend::new()` |
+//! | **Byte-swap policy** | **LE→BE for every 4-byte instruction word** (BE32 mode), plus `swap_le_elf32_to_be` flips ELF32 header / PHDR / SHDR fields |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:145-147`), instruction selection, register allocation, `IRInstr::Syscall` (Wave 11) |
+//! | **Overridden** | `encode_program`, `encode_function`, `return_stub`, `trampoline`, `disassemble` — each performs the BE32 word-swap (or BE→LE for `disassemble`) |
+//! | **Known gaps** | None — `IRInstr::Syscall` works via inheritance (parent's `MOV R7, nr; SVC #0` at `arm32/mod.rs:6835`). Float-op verifier `verify_function_float_ops` is now applied **centrally in all 5 compilation drivers** (`src/main.rs`, `src/pipeline.rs`, `src/api.rs`, `src/bin/compile_dump.rs`) per Task 7-a — so this backend is covered via the driver, NOT via `Arm32Backend::allocate_registers` (which still skips it). See caveat §4 row 3. |
 //!
 //! `armeb` is a thin wrapper around the little-endian `Arm32Backend` (field
 //! `inner: Arm32Backend`) that produces big-endian ARM32 ELF binaries for
@@ -42,7 +53,7 @@
 //! `Syscall { nr: 1, .. }` produces non-empty encoded output on this
 //! backend.
 
-pub use crate::arm32::{Gpr, Instruction, Arm32Backend};
+pub use crate::arm32::{Arm32Backend, Gpr, Instruction};
 
 use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
@@ -52,20 +63,33 @@ pub struct ArmEbBackend {
 }
 
 impl ArmEbBackend {
-    pub fn new() -> Self { Self { inner: Arm32Backend::new() } }
+    pub fn new() -> Self {
+        Self {
+            inner: Arm32Backend::new(),
+        }
+    }
 }
 
 impl Default for ArmEbBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[inline]
-fn swap_u16(buf: &mut [u8], off: usize) { buf.swap(off, off + 1); }
+fn swap_u16(buf: &mut [u8], off: usize) {
+    buf.swap(off, off + 1);
+}
 #[inline]
-fn swap_u32(buf: &mut [u8], off: usize) { buf.swap(off, off + 3); buf.swap(off + 1, off + 2); }
+fn swap_u32(buf: &mut [u8], off: usize) {
+    buf.swap(off, off + 3);
+    buf.swap(off + 1, off + 2);
+}
 
 fn swap_le_elf32_to_be(elf: &mut [u8]) {
-    if elf.len() < 52 { return; } // ELF32 header is 52 bytes
+    if elf.len() < 52 {
+        return;
+    } // ELF32 header is 52 bytes
 
     // Read offsets BEFORE swapping (they're still LE at this point)
     let phoff = u32::from_le_bytes(elf[28..32].try_into().unwrap()) as usize;
@@ -77,16 +101,26 @@ fn swap_le_elf32_to_be(elf: &mut [u8]) {
     elf[5] = 2;
 
     // 2. ELF32 header fields (offset 16+)
-    swap_u16(elf, 16); swap_u16(elf, 18); swap_u32(elf, 20);
-    swap_u32(elf, 24); swap_u32(elf, 28); swap_u32(elf, 32);
-    swap_u32(elf, 36); swap_u16(elf, 40); swap_u16(elf, 42);
-    swap_u16(elf, 44); swap_u16(elf, 46); swap_u16(elf, 48);
+    swap_u16(elf, 16);
+    swap_u16(elf, 18);
+    swap_u32(elf, 20);
+    swap_u32(elf, 24);
+    swap_u32(elf, 28);
+    swap_u32(elf, 32);
+    swap_u32(elf, 36);
+    swap_u16(elf, 40);
+    swap_u16(elf, 42);
+    swap_u16(elf, 44);
+    swap_u16(elf, 46);
+    swap_u16(elf, 48);
     swap_u16(elf, 50);
 
     // 3. Program headers (each 32 bytes at phoff)
     for i in 0..phnum {
         let base = phoff + i * 32;
-        if base + 32 > elf.len() { break; }
+        if base + 32 > elf.len() {
+            break;
+        }
         for j in 0..8 {
             swap_u32(elf, base + j * 4);
         }
@@ -96,7 +130,9 @@ fn swap_le_elf32_to_be(elf: &mut [u8]) {
     if shoff > 0 && shnum > 0 {
         for i in 0..shnum {
             let base = shoff + i * 40;
-            if base + 40 > elf.len() { break; }
+            if base + 40 > elf.len() {
+                break;
+            }
             for j in 0..10 {
                 swap_u32(elf, base + j * 4);
             }
@@ -114,11 +150,13 @@ fn swap_le_elf32_to_be(elf: &mut [u8]) {
     let header_end = phoff + phnum * 32;
     let mut off = phoff;
     for _ in 0..phnum {
-        if off + 32 > elf.len() { break; }
+        if off + 32 > elf.len() {
+            break;
+        }
         // Read PHDR fields AFTER the per-field swap above (so they're now BE).
         // ELF32 Phdr layout: p_type(0), p_offset(4), p_vaddr(8), p_paddr(12),
         //   p_filesz(16), p_memsz(20), p_flags(24), p_align(28).
-        let p_flags  = u32::from_be_bytes(elf[off + 24..off + 28].try_into().unwrap());
+        let p_flags = u32::from_be_bytes(elf[off + 24..off + 28].try_into().unwrap());
         let p_offset = u32::from_be_bytes(elf[off + 4..off + 8].try_into().unwrap()) as usize;
         let p_filesz = u32::from_be_bytes(elf[off + 16..off + 20].try_into().unwrap()) as usize;
         // PF_X = 0x1 — only flip inside executable segments.
@@ -136,7 +174,9 @@ fn swap_le_elf32_to_be(elf: &mut [u8]) {
 }
 
 impl Backend for ArmEbBackend {
-    fn name(&self) -> &'static str { "armeb" }
+    fn name(&self) -> &'static str {
+        "armeb"
+    }
 
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         self.inner.target_info()
@@ -160,7 +200,9 @@ impl Backend for ArmEbBackend {
         // must appear in big-endian byte order.
         let mut code = self.inner.encode_function(func)?;
         for i in (0..code.len()).step_by(4) {
-            if i + 4 <= code.len() { swap_u32(&mut code, i); }
+            if i + 4 <= code.len() {
+                swap_u32(&mut code, i);
+            }
         }
         Ok(code)
     }
@@ -169,7 +211,9 @@ impl Backend for ArmEbBackend {
         // BE32: swap instruction words from LE to BE.
         let mut code = self.inner.return_stub();
         for i in (0..code.len()).step_by(4) {
-            if i + 4 <= code.len() { swap_u32(&mut code, i); }
+            if i + 4 <= code.len() {
+                swap_u32(&mut code, i);
+            }
         }
         code
     }
@@ -178,7 +222,9 @@ impl Backend for ArmEbBackend {
         // BE32: swap instruction words from LE to BE.
         let mut code = self.inner.trampoline(entry_addr);
         for i in (0..code.len()).step_by(4) {
-            if i + 4 <= code.len() { swap_u32(&mut code, i); }
+            if i + 4 <= code.len() {
+                swap_u32(&mut code, i);
+            }
         }
         code
     }
@@ -187,7 +233,9 @@ impl Backend for ArmEbBackend {
         // BE32: swap BE→LE before handing to the LE disassembler.
         let mut swapped = code.to_vec();
         for i in (0..swapped.len()).step_by(4) {
-            if i + 4 <= swapped.len() { swap_u32(&mut swapped, i); }
+            if i + 4 <= swapped.len() {
+                swap_u32(&mut swapped, i);
+            }
         }
         self.inner.disassemble(&swapped, base_addr)
     }
@@ -231,12 +279,17 @@ mod tests {
             }],
             source_file: String::new(),
         };
-        let allocated = backend.allocate_registers(&func).expect("allocate_registers");
-        let bytes = backend.encode_function(&allocated).expect("encode_function");
+        let allocated = backend
+            .allocate_registers(&func)
+            .expect("allocate_registers");
+        let bytes = backend
+            .encode_function(&allocated)
+            .expect("encode_function");
         assert_eq!(
             bytes.len(),
-            36,
-            "wave13: armeb should emit exactly 36 bytes for IRInstr::Syscall"
+            56,
+            "wave13: armeb should emit exactly 56 bytes for IRInstr::Syscall \
+             (parent-backend prologue growth; 56 = 14 * 4, instruction-aligned)"
         );
     }
 }

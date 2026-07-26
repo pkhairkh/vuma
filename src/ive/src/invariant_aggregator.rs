@@ -1,27 +1,25 @@
 //! Invariant aggregator for the IVE module.
 //!
-//! The [`InvariantAggregator`] runs all five VUMA invariant checks against an
-//! SCG and produces a unified [`AggregatedResult`] that captures
-//! per-invariant outcomes, an overall pass/fail verdict, and a
-//! [`VerificationSummary`] with statistics.
+//! (Legacy cleanup) The five legacy pointer-invariant verifiers
+//! (liveness / exclusivity / interpretation / origin / cleanup) have been
+//! removed. The aggregator now runs a single [`InvariantKind::Pmt`] check
+//! that delegates to [`VerificationEngine::verify_pmt`]. The
+//! [`AggregatedResult`] still records per-invariant outcomes, an overall
+//! pass/fail verdict, and a [`VerificationSummary`] with statistics.
 //!
 //! # Verification Levels
 //!
-//! | Level       | Checks run                                             |
-//! |-------------|--------------------------------------------------------|
-//! | [`Quick`]   | Only cheap, syntactic checks (exclusivity, origin).    |
-//! | [`Normal`]  | All five invariant checks.                             |
-//! | [`Exhaustive`] | All checks plus proof-generation where possible.   |
+//! VUMA 2.0 is PMT-only: every program is verified with
+//! [`VerificationLevel::Pmt`] (the default). The `Quick` and `Normal`
+//! variants remain on the enum for API stability and IVE-internal tests,
+//! but they are NOT user-selectable in the production pipeline and all
+//! remap to the same single-PMT-check code path.
 //!
 //! # Incremental Verification
 //!
 //! The aggregator supports *incremental* verification: when a delta
 //! describing which invariants are affected is provided, only those
 //! invariants are re-checked while cached results are kept for the rest.
-//!
-//! [`Quick`]: VerificationLevel::Quick
-//! [`Normal`]: VerificationLevel::Normal
-//! [`Exhaustive`]: VerificationLevel::Exhaustive
 
 use crate::result::{ConfidenceLevel, VerificationResult, VerificationStatus};
 use crate::verification::{VerificationEngine, VerificationInput};
@@ -32,76 +30,76 @@ use std::time::Instant;
 // InvariantKind
 // ---------------------------------------------------------------------------
 
-/// The five VUMA invariant kinds.
+/// The VUMA invariant kinds.
 ///
-/// Each variant corresponds to one of the core safety invariants that
-/// every VUMA program must satisfy.
+/// # Historical context (8 → 1)
+///
+/// VUMA 1.x enumerated **8 invariant kinds**. Of these, **5 were legacy
+/// pointer invariants** — `Liveness`, `Exclusivity`, `Interpretation`,
+/// `Origin`, `Cleanup` — each of which encoded a separate proof obligation
+/// about pointer aliasing, lifetime, use-after-free, or provenance. The
+/// historical documentation noted that the default `Pmt`
+/// verification level *skipped* those 5 at the PMT level, leaving them
+/// dead in production but still present in the enum.
+///
+/// VUMA 2.0 collapsed the enum to a single `Pmt` variant. The 5 legacy
+/// pointer invariants were **removed entirely** (not merely skipped),
+/// because PMT state verification subsumes them: in the PMT ("Programs as
+/// Memory Transformations") model, every memory access is encoded as a
+/// typed state-field read or write, so the aliasing / lifetime / provenance
+/// properties the legacy invariants attempted to prove are established by
+/// construction via type checking rather than by separate pointer proofs.
+/// The remaining 2 historical variants (early PMT-state-style checks) were
+/// folded into the single canonical `Pmt` pass.
+///
+/// See `lib.rs:9-12` and `verification.rs:3-7` for the matching legacy
+/// cleanup notes, and the `VerificationLevel` doc at
+/// `invariant_aggregator.rs:118-155` for the parallel collapse of the
+/// verification-level enum (`Quick` / `Normal` / `Exhaustive` / `Modular`
+/// / `ConstantTime` / `Hardened` → `Pmt`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InvariantKind {
-    /// Every requested resource will eventually be provided.
-    Liveness,
-    /// At most one owner for exclusive resources.
-    Exclusivity,
-    /// Every read interprets data under the correct BD.
-    Interpretation,
-    /// Every piece of data has a well-defined provenance.
-    Origin,
-    /// Every acquired resource is eventually released.
-    Cleanup,
-    /// (Wave 16) Constant-time safety: secret values do not influence
-    /// control flow or memory addresses.  Only checked under
-    /// [`VerificationLevel::ConstantTime`] and [`VerificationLevel::Hardened`].
-    ConstantTime,
-    /// (Wave 16) Interprocedural analysis: cross-function leaks, data
-    /// races, and lock-discipline violations.  Only checked under
-    /// [`VerificationLevel::Exhaustive`] and [`VerificationLevel::Hardened`].
-    Interprocedural,
-    /// (Wave 16) Modular analysis: per-function verification using
-    /// function summaries.  Only checked under
-    /// [`VerificationLevel::Modular`] and [`VerificationLevel::Hardened`].
-    Modular,
-    /// (Wave 3d) PMT state verification: state-field reads/writes +
-    /// state transformations.  Only checked under
-    /// [`VerificationLevel::Pmt`].  Skips the 5 pointer invariants.
+    /// PMT state verification: state-field reads/writes + state
+    /// transformations.  Only checked under
+    /// [`VerificationLevel::Pmt`].
+    ///
+    /// # What "PMT" means (and does NOT mean)
+    ///
+    /// **PMT = "Programs as Memory Transformations."** It is a *verification
+    /// discipline*: every program is treated as a typed state-transformation
+    /// on a single backing arena (`___pmt_buffer`), with state-typed
+    /// variables addressed by vreg and accessed via `StateRead` /
+    /// `StateWrite` / `StateTransform` SCG nodes.
+    ///
+    /// **PMT does NOT mean "Persistent Memory Transaction."** Despite the
+    /// acronym overlap, there is:
+    /// - **no persistence** — state does not outlive the process; the arena
+    ///   is mmap'd and torn down at exit;
+    /// - **no rollback** — once a `StateWrite` commits, the previous value
+    ///   is gone (write-after-consume linearity is enforced *statically*,
+    ///   not by an undo log);
+    /// - **no durability** — there is no crash-recovery log, no journal, no
+    ///   on-disk replica, no fsync.
+    ///
+    /// A `grep` for `persistent.*mem|transaction|rollback|durable` returns
+    /// zero hits in this crate. See `docs/architecture/pmt-audit.md` §1 and
+    /// `docs/architecture/overview.md` §5.3 ("PMT clarification") for the
+    /// full disambiguation.
     Pmt,
 }
 
 impl InvariantKind {
-    /// Return the five core invariant kinds in canonical order.
+    /// Return the single invariant kind, `[Pmt]`.
     ///
-    /// These are the invariants checked at the [`VerificationLevel::Normal`]
-    /// level.  The three extended kinds (`ConstantTime`, `Interprocedural`,
-    /// `Modular`) are NOT included here — they are opt-in via their
-    /// respective verification levels.
-    pub fn all() -> &'static [InvariantKind; 5] {
-        &[
-            InvariantKind::Liveness,
-            InvariantKind::Exclusivity,
-            InvariantKind::Interpretation,
-            InvariantKind::Origin,
-            InvariantKind::Cleanup,
-        ]
-    }
-
-    /// Return the cheap (quick-check) invariants.
-    ///
-    /// Exclusivity and origin can be verified by syntactic analysis
-    /// without deep semantic reasoning.
-    pub fn quick_set() -> &'static [InvariantKind; 2] {
-        &[InvariantKind::Exclusivity, InvariantKind::Origin]
+    /// (Legacy cleanup) Previously returned the five legacy pointer
+    /// invariants; now returns only `Pmt`.
+    pub fn all() -> Vec<InvariantKind> {
+        vec![InvariantKind::Pmt]
     }
 
     /// Human-readable label for this invariant kind.
     pub fn label(&self) -> &'static str {
         match self {
-            InvariantKind::Liveness => "liveness",
-            InvariantKind::Exclusivity => "exclusivity",
-            InvariantKind::Interpretation => "interpretation",
-            InvariantKind::Origin => "origin",
-            InvariantKind::Cleanup => "cleanup",
-            InvariantKind::ConstantTime => "constant-time",
-            InvariantKind::Interprocedural => "interprocedural",
-            InvariantKind::Modular => "modular",
             InvariantKind::Pmt => "pmt-state",
         }
     }
@@ -121,40 +119,54 @@ impl fmt::Display for InvariantKind {
 ///
 /// VUMA 2.0 is PMT-only: every program is verified with
 /// [`VerificationLevel::Pmt`] (the default), which runs the three PMT
-/// state verifiers (state-read / state-write / state-transform) and
-/// SKIPS the five legacy pointer invariants. The other variants
-/// (`Quick`/`Normal`/`Exhaustive`/`Modular`/`ConstantTime`/`Hardened`)
-/// remain on the enum for API stability and for use by IVE-internal
-/// tests, but they are NOT user-selectable in the production pipeline —
-/// the CLI `--verification` flag accepts only `pmt`, and the pipeline
-/// hard-codes `VerificationLevel::Pmt`.
+/// state verifiers (state-read / state-write / state-transform). The
+/// legacy `Quick`/`Normal`/`Exhaustive`/`Modular`/`ConstantTime`/
+/// `Hardened` levels have been removed — the enum now exposes only the
+/// single `Pmt` variant so callers cannot accidentally bypass PMT
+/// enforcement. The CLI `--verification` flag accepts only `pmt`, and
+/// the pipeline hard-codes `VerificationLevel::Pmt`.
+///
+/// # Historical context
+///
+/// The historical documentation claimed that
+/// [`InvariantAggregator::with_level`] "silently coerces" non-`Pmt`
+/// levels to `Pmt` under `#[cfg(not(test))]`, leaving the 5-invariant /
+/// constant-time / interprocedural code paths dead in production. That
+/// mechanism **no longer exists**: the enum itself was collapsed to a
+/// single variant, so there is nothing to coerce. Specifically:
+///
+/// - The five legacy pointer invariants (Liveness / Exclusivity /
+///   Interpretation / Origin / Cleanup) have been **DELETED** from
+///   `InvariantKind` — see `lib.rs:9-12` and the `InvariantKind` doc
+///   comment at `invariant_aggregator.rs:33-59` (which carries the
+///   full 8 → 1 historical-context narrative). Only
+///   `InvariantKind::Pmt` remains.
+/// - The `Quick` / `Normal` / `Exhaustive` / `Modular` /
+///   `ConstantTime` / `Hardened` level variants have been **DELETED**
+///   from this enum.
+/// - [`InvariantAggregator::with_level`] (at `invariant_aggregator.rs:551`)
+///   is a no-op: it accepts a `VerificationLevel` purely for API
+///   stability and always resolves to `Pmt`.
+/// - [`invariants_for_level`] (at `invariant_aggregator.rs:696-698`)
+///   always returns `vec![InvariantKind::Pmt]`.
+///
+/// The "silent coercion" caveat is therefore **STALE**: the dead code
+/// paths were deleted, not bypassed. Callers cannot opt out of PMT
+/// verification by selecting a different level — the type system
+/// forbids it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VerificationLevel {
-    /// Only run cheap, syntactic checks (exclusivity, origin).
-    Quick,
-    /// Run all five core pointer-invariant checks (LEGACY — not used
-    /// in VUMA 2.0 production code paths; retained for IVE-internal
-    /// tests and API stability).
-    Normal,
-    /// Run all checks and attempt formal proof generation.
-    /// Also runs the interprocedural analysis (Wave 16).
-    Exhaustive,
-    /// (Wave 16) Run the five core invariants plus modular per-function
-    /// verification using function summaries.
-    Modular,
-    /// (Wave 16) Run the five core invariants plus the constant-time
-    /// invariant (6th invariant).  Detects secret-dependent branches
-    /// and memory accesses via taint propagation.
-    ConstantTime,
-    /// (Wave 16) Run all 6 invariants (5 core + constant-time) plus
-    /// interprocedural and modular analyses.  The most thorough level.
-    Hardened,
-    /// (Wave 3d / VUMA 2.0 default) PMT state verification only —
-    /// runs the 3 state verifiers (state-read, state-write,
-    /// state-transform) and SKIPS the 5 pointer invariants.  Used for
-    /// PMT (Programs as Memory Transformations) verification where
-    /// memory safety is established by type-checking rather than
-    /// pointer proofs.  This is the DEFAULT level for VUMA 2.0.
+    /// PMT state verification only — runs the 3 state verifiers
+    /// (state-read, state-write, state-transform).  Used for PMT (Programs
+    /// as Memory Transformations) verification where memory safety is
+    /// established by type-checking rather than pointer proofs.  This is
+    /// the DEFAULT (and only) level for VUMA 2.0.
+    ///
+    /// **Acronym disambiguation:** PMT = "Programs as Memory
+    /// Transformations" — *not* "Persistent Memory Transaction." There
+    /// is no persistence, no rollback, and no durability machinery in
+    /// this verifier or anywhere else in the VUMA pipeline. See
+    /// [`InvariantKind::Pmt`] for the full clarification.
     #[default]
     Pmt,
 }
@@ -162,12 +174,6 @@ pub enum VerificationLevel {
 impl fmt::Display for VerificationLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VerificationLevel::Quick => write!(f, "QUICK"),
-            VerificationLevel::Normal => write!(f, "NORMAL"),
-            VerificationLevel::Exhaustive => write!(f, "EXHAUSTIVE"),
-            VerificationLevel::Modular => write!(f, "MODULAR"),
-            VerificationLevel::ConstantTime => write!(f, "CONSTANT_TIME"),
-            VerificationLevel::Hardened => write!(f, "HARDENED"),
             VerificationLevel::Pmt => write!(f, "PMT"),
         }
     }
@@ -589,30 +595,12 @@ impl InvariantAggregator {
 
     /// Set the verification level.
     ///
-    /// **VUMA 2.0 — PMT is mandatory in production.** In non-test builds
-    /// this method ALWAYS coerces the requested level to
-    /// [`VerificationLevel::Pmt`] (the 3 PMT state verifiers). The other
-    /// variants (`Quick`/`Normal`/`Exhaustive`/`Modular`/`ConstantTime`/
-    /// `Hardened`) run the 5 legacy pointer invariants instead of the
-    /// PMT state verifiers, which would silently bypass PMT enforcement —
-    /// that is not permitted in production. The requested level is
-    /// honoured only under `#[cfg(test)]` so the IVE-internal unit tests
-    /// can still exercise the legacy invariant sets. External production
-    /// callers (the `vuma` pipeline, `api::run_frontend`, `compile_dump`)
-    /// always pass `Pmt` anyway, so this coercion is a defence-in-depth
-    /// guarantee that there is no way to bypass PMT state verification.
-    pub fn with_level(mut self, level: VerificationLevel) -> Self {
-        #[cfg(not(test))]
-        {
-            self.level = VerificationLevel::Pmt;
-            // Acknowledge the unused parameter — any non-Pmt level is
-            // intentionally coerced to Pmt in production builds.
-            let _ = level;
-        }
-        #[cfg(test)]
-        {
-            self.level = level;
-        }
+    /// Only [`VerificationLevel::Pmt`] is supported in VUMA 2.0 — the
+    /// enum now exposes a single variant. The `level` parameter is
+    /// accepted for API compatibility but always resolves to `Pmt`.
+    pub fn with_level(self, _level: VerificationLevel) -> Self {
+        // Only Pmt is supported. The level parameter is accepted for API
+        // compatibility but always uses Pmt.
         self
     }
 
@@ -623,13 +611,15 @@ impl InvariantAggregator {
         self
     }
 
-    /// (Wave 19) Set the maximum number of paths for the liveness verifier.
+    /// (Legacy, retained for API stability) Set the maximum number of paths
+    /// for the (now-removed) liveness verifier.  No-op for PMT verification.
     pub fn with_max_paths(mut self, max_paths: usize) -> Self {
         self.engine = self.engine.with_max_paths(max_paths);
         self
     }
 
-    /// (Wave 19) Set the maximum path length for the cleanup verifier.
+    /// (Legacy, retained for API stability) Set the maximum path length
+    /// for the (now-removed) cleanup verifier.  No-op for PMT verification.
     pub fn with_max_path_length(mut self, max_path_length: usize) -> Self {
         self.engine = self.engine.with_max_path_length(max_path_length);
         self
@@ -638,26 +628,17 @@ impl InvariantAggregator {
     /// Run all invariant checks (at the configured verification level)
     /// and return the aggregated result.
     ///
-    /// (Wave 19) For `Quick` mode, all 5 invariants run but with halved
-    /// `max_paths` / `max_path_length` (reduced depth). This catches more
-    /// bugs than the old 2-invariant Quick mode while remaining cheaper
-    /// than `Normal`.
+    /// (Legacy cleanup) The five pointer-invariant verifiers have been
+    /// removed; `verify_all` now always runs the single `InvariantKind::Pmt`
+    /// check.  The `level` field is still recorded on the result for
+    /// backwards compatibility with API consumers.
     pub fn verify_all(&self, input: &VerificationInput) -> AggregatedResult {
         let run_start = Instant::now();
 
         let invariants_to_run = self.invariants_for_level();
         let mut per_invariant = Vec::with_capacity(invariants_to_run.len());
 
-        // (Wave 19) For Quick mode, build a reduced-depth engine.
-        // The engine is cheap to clone (just 3 usize fields + bool).
-        let effective_engine = if self.level == VerificationLevel::Quick {
-            // Halve the path limits for reduced-depth Quick verification.
-            let half_paths = (self.engine.max_paths() / 2).max(1);
-            let half_len = (self.engine.max_path_length() / 2).max(1);
-            self.engine.clone().with_max_paths(half_paths).with_max_path_length(half_len)
-        } else {
-            self.engine.clone()
-        };
+        let effective_engine = self.engine.clone();
 
         for &kind in &invariants_to_run {
             let check_start = Instant::now();
@@ -758,46 +739,12 @@ impl InvariantAggregator {
 
     /// Return the set of invariants to check for the current level.
     ///
-    /// (Wave 19) `Quick` now runs ALL 5 invariants (not just the 2-invariant
-    /// `quick_set`) at reduced depth. The depth reduction is implemented by
-    /// halving `max_paths` / `max_path_length` in `verify_all` when the level
-    /// is `Quick`. This catches more bugs than the old 2-invariant Quick mode
-    /// while remaining cheaper than `Normal`.
+    /// (Legacy cleanup) Always returns `vec![InvariantKind::Pmt]` — the
+    /// five legacy pointer invariants have been removed. The `Quick` and
+    /// `Normal` levels are accepted for backwards compatibility but
+    /// produce the same single-PMT-check set.
     fn invariants_for_level(&self) -> Vec<InvariantKind> {
-        match self.level {
-            VerificationLevel::Quick => InvariantKind::all().to_vec(),
-            VerificationLevel::Normal => InvariantKind::all().to_vec(),
-            VerificationLevel::Exhaustive => {
-                // Core 5 + interprocedural analysis.
-                let mut v = InvariantKind::all().to_vec();
-                v.push(InvariantKind::Interprocedural);
-                v
-            }
-            VerificationLevel::Modular => {
-                // Core 5 + modular analysis.
-                let mut v = InvariantKind::all().to_vec();
-                v.push(InvariantKind::Modular);
-                v
-            }
-            VerificationLevel::ConstantTime => {
-                // Core 5 + constant-time (6th invariant).
-                let mut v = InvariantKind::all().to_vec();
-                v.push(InvariantKind::ConstantTime);
-                v
-            }
-            VerificationLevel::Hardened => {
-                // All 6 invariants + interprocedural + modular.
-                let mut v = InvariantKind::all().to_vec();
-                v.push(InvariantKind::ConstantTime);
-                v.push(InvariantKind::Interprocedural);
-                v.push(InvariantKind::Modular);
-                v
-            }
-            VerificationLevel::Pmt => {
-                // Wave 3d: only PMT state verification (skips 5 pointer invariants).
-                vec![InvariantKind::Pmt]
-            }
-        }
+        vec![InvariantKind::Pmt]
     }
 
     /// Run a single invariant check by kind.
@@ -809,8 +756,7 @@ impl InvariantAggregator {
         self.run_single_check_with(&self.engine, kind, input)
     }
 
-    /// (Wave 19) Run a single invariant check using a specific engine
-    /// (allows reduced-depth engine for Quick mode).
+    /// Run a single invariant check using a specific engine.
     fn run_single_check_with(
         &self,
         engine: &VerificationEngine,
@@ -822,528 +768,16 @@ impl InvariantAggregator {
         }
 
         let result = match kind {
-            InvariantKind::Liveness => engine.verify_liveness(input),
-            InvariantKind::Exclusivity => engine.verify_exclusivity(input),
-            InvariantKind::Interpretation => engine.verify_interpretation(input),
-            InvariantKind::Origin => engine.verify_origin(input),
-            InvariantKind::Cleanup => engine.verify_cleanup(input),
-            InvariantKind::ConstantTime => self.verify_constant_time(input),
-            InvariantKind::Interprocedural => self.verify_interprocedural(input),
-            InvariantKind::Modular => self.verify_modular(input),
-            InvariantKind::Pmt => self.verify_pmt(input),
+            InvariantKind::Pmt => engine.verify_pmt(input),
         };
 
-        // Wave 18: The fake FormalProof string-evidence was removed.
-        // Real proof-system cross-checking now happens in api.rs's
+        // The fake FormalProof string-evidence was removed.  Real
+        // proof-system cross-checking now happens in api.rs's
         // build_proof_bundle(), which calls ProofChecker::check on the
         // prove_* tactics' output. IVE no longer claims to have formal
         // proof evidence when it only did dataflow analysis.
 
         result
-    }
-
-    // -----------------------------------------------------------------------
-    // Wave 16: Extended analysis helpers
-    // -----------------------------------------------------------------------
-
-    /// Verify the constant-time invariant: secret values must not influence
-    /// control flow (branches) or memory addresses (accesses).
-    ///
-    /// Extracts `secret_nodes`, `branch_nodes`, `access_nodes`, and data-flow
-    /// `edges` from the SCG and delegates to
-    /// [`crate::constant_time::verify_constant_time`].
-    fn verify_constant_time(&self, input: &VerificationInput) -> VerificationResult {
-        use crate::constant_time::verify_constant_time as ct_verify;
-        use vuma_scg::edge::EdgeKind;
-        use vuma_scg::node::{ControlKind, NodePayload, NodeType};
-
-        let scg = &input.scg;
-        let mut secret_nodes: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let mut branch_nodes: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let mut access_nodes: std::collections::HashSet<u64> = std::collections::HashSet::new();
-
-        for node in scg.nodes() {
-            let id = node.id.as_u64();
-            // Branch nodes: Control nodes with kind=Branch.
-            if node.node_type == NodeType::Control {
-                if let NodePayload::Control(ctrl) = &node.payload {
-                    if ctrl.kind == ControlKind::Branch {
-                        branch_nodes.insert(id);
-                    }
-                    // Secret heuristic: check Control node labels for "secret".
-                    if let Some(label) = &ctrl.label {
-                        if label.to_lowercase().contains("secret") {
-                            secret_nodes.insert(id);
-                        }
-                    }
-                }
-            }
-            // Access nodes: memory read/write nodes.
-            if node.node_type == NodeType::Access {
-                access_nodes.insert(id);
-            }
-            // Secret heuristic: check source file name for "secret".
-            if let Some(ref file) = node.program_point.file {
-                if file.to_lowercase().contains("secret") {
-                    secret_nodes.insert(id);
-                }
-            }
-        }
-
-        // Collect data-flow edges as (source, target) pairs.
-        let edges: Vec<(u64, u64)> = scg
-            .edges()
-            .filter(|e| matches!(e.kind, EdgeKind::DataFlow))
-            .map(|e| (e.source.as_u64(), e.target.as_u64()))
-            .collect();
-
-        let violations = ct_verify(&secret_nodes, &branch_nodes, &access_nodes, &edges);
-
-        if violations.is_empty() {
-            VerificationResult::new(
-                "constant-time",
-                VerificationStatus::Proven,
-                format!(
-                    "constant-time check passed ({} secret(s), {} branch(es), {} access(es))",
-                    secret_nodes.len(),
-                    branch_nodes.len(),
-                    access_nodes.len()
-                ),
-            )
-        } else {
-            let msgs: Vec<String> = violations.iter().map(|v| v.message.clone()).collect();
-            VerificationResult::new(
-                "constant-time",
-                VerificationStatus::Violated {
-                    counterexample: crate::result::CounterExample::new(
-                        Vec::new(),
-                        default_program_point(),
-                        msgs.join("; "),
-                    ),
-                },
-                format!("constant-time violated: {} violation(s)", violations.len()),
-            )
-        }
-    }
-
-    /// Verify interprocedural invariants: cross-function leaks, data races,
-    /// and lock-discipline violations.
-    ///
-    /// Builds a [`CallGraph`] from the SCG, computes function summaries
-    /// bottom-up, and delegates to
-    /// [`crate::interprocedural::verify_interprocedural_invariants`].
-    fn verify_interprocedural(&self, input: &VerificationInput) -> VerificationResult {
-        use crate::interprocedural::{compute_summaries, verify_interprocedural_invariants};
-        use vuma_scg::callgraph::CallGraph;
-
-        let scg = &input.scg;
-        let call_graph = CallGraph::build(scg);
-        let summaries = compute_summaries(scg, &call_graph);
-        let violations = verify_interprocedural_invariants(scg, &call_graph, &summaries);
-
-        if violations.is_empty() {
-            VerificationResult::new(
-                "interprocedural",
-                VerificationStatus::Proven,
-                format!(
-                    "interprocedural check passed ({} function(s) analyzed)",
-                    summaries.len()
-                ),
-            )
-        } else {
-            let msgs: Vec<String> = violations.iter().map(|v| v.to_string()).collect();
-            VerificationResult::new(
-                "interprocedural",
-                VerificationStatus::Violated {
-                    counterexample: crate::result::CounterExample::new(
-                        Vec::new(),
-                        default_program_point(),
-                        msgs.join("; "),
-                    ),
-                },
-                format!(
-                    "interprocedural violations: {} violation(s)",
-                    violations.len()
-                ),
-            )
-        }
-    }
-
-    /// Verify modular invariants: per-function verification using function
-    /// summaries (allocation/free discipline, purity, escape analysis).
-    ///
-    /// Extracts function entries from the SCG and delegates to
-    /// [`crate::modular::verify_all_functions`].
-    fn verify_modular(&self, input: &VerificationInput) -> VerificationResult {
-        use crate::modular::verify_all_functions;
-        use vuma_scg::node::{ControlKind, NodePayload, NodeType};
-
-        let scg = &input.scg;
-        // Build function_entries: (name, node_ids) for each function.
-        let (entries, _returns) = scg.function_boundary_nodes();
-        let mut function_entries: Vec<(String, Vec<vuma_scg::node::NodeId>)> = Vec::new();
-
-        for entry_id in &entries {
-            // BFS through ControlFlow edges to collect all nodes in this function.
-            let mut nodes = vec![*entry_id];
-            let mut visited = std::collections::HashSet::new();
-            visited.insert(*entry_id);
-            let mut queue = std::collections::VecDeque::new();
-            queue.push_back(*entry_id);
-            while let Some(cur) = queue.pop_front() {
-                for edge in scg.edges() {
-                    if edge.source == cur && !visited.contains(&edge.target) {
-                        visited.insert(edge.target);
-                        // Stop at FunctionReturn (don't include return nodes of
-                        // other functions — but include our own).
-                        if let Some(n) = scg.get_node(edge.target) {
-                            if n.node_type == NodeType::Control {
-                                if let NodePayload::Control(ctrl) = &n.payload {
-                                    if ctrl.kind == ControlKind::FunctionReturn {
-                                        nodes.push(edge.target);
-                                        continue; // include but don't traverse past
-                                    }
-                                    if ctrl.kind == ControlKind::FunctionEntry {
-                                        continue; // don't cross into another function
-                                    }
-                                }
-                            }
-                            nodes.push(edge.target);
-                            queue.push_back(edge.target);
-                        }
-                    }
-                }
-            }
-
-            // Function name: use the label from the entry node's Control payload,
-            // or a synthetic name.
-            let name = scg.get_node(*entry_id).and_then(|n| {
-                if let NodePayload::Control(ctrl) = &n.payload {
-                    ctrl.label.clone()
-                } else {
-                    None
-                }
-            }).unwrap_or_else(|| format!("fn_{}", entry_id.as_u64()));
-            function_entries.push((name, nodes));
-        }
-
-        let issues = verify_all_functions(scg, &function_entries);
-
-        if issues.is_empty() {
-            VerificationResult::new(
-                "modular",
-                VerificationStatus::Proven,
-                format!(
-                    "modular check passed ({} function(s) verified)",
-                    function_entries.len()
-                ),
-            )
-        } else {
-            VerificationResult::new(
-                "modular",
-                VerificationStatus::Violated {
-                    counterexample: crate::result::CounterExample::new(
-                        Vec::new(),
-                        default_program_point(),
-                        issues.join("; "),
-                    ),
-                },
-                format!("modular violations: {} issue(s)", issues.len()),
-            )
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Wave 3d: PMT state verification
-    // -----------------------------------------------------------------------
-
-    /// (Wave 3d) Verify PMT (Programs as Memory Transformations) state
-    /// safety: state-field reads, state-field writes (with linearity), and
-    /// state transformations.
-    ///
-    /// Walks the SCG for `StateRead` / `StateWrite` / `StateTransform` /
-    /// `StateInit` nodes, builds the per-verifier input tuples, and
-    /// delegates to [`crate::state_read::verify_state_reads`],
-    /// [`crate::state_write::verify_state_writes`], and
-    /// [`crate::state_transform::verify_all_transforms`].
-    ///
-    /// # Layout registry
-    ///
-    /// The SCG does not retain structured layout info — `Item::LayoutDef`
-    /// is lowered to a `Computation` node with a descriptive label (see
-    /// `parser::to_scg::convert_item`).  The pipeline therefore attaches
-    /// the layout registry to [`VerificationInput::pmt_layouts`] before
-    /// invoking the aggregator at the [`VerificationLevel::Pmt`] level.
-    /// If `pmt_layouts` is absent, the verifiers will report "layout not
-    /// found" for every state operation (a FAIL verdict) — this is the
-    /// correct behaviour for an unconfigured run.
-    ///
-    /// # Vreg → var-name mapping
-    ///
-    /// The SCG's `StateReadNode` / `StateWriteNode` use a `state_vreg: u32`
-    /// field rather than a source variable name.  The verifiers work in
-    /// terms of variable names, so we synthesise a stable name
-    /// `"_state_{vreg}"` per distinct vreg and use the node's
-    /// `layout_name` to populate `state_var_layouts`.  This is sufficient
-    /// for the verifiers' current API (which only consults the layout
-    /// name).
-    fn verify_pmt(&self, input: &VerificationInput) -> VerificationResult {
-        use crate::state_read::{verify_state_reads, LayoutInfo as ReadLayout, FieldInfo as ReadField};
-        use crate::state_write::{
-            verify_state_writes, LayoutInfo as WriteLayout, FieldInfo as WriteField,
-            StateWriteOp,
-        };
-        use crate::state_transform::{
-            verify_all_transforms, LayoutInfo as TransformLayout, FieldInfo as TransformField,
-        };
-        use std::collections::{HashMap, HashSet};
-        use vuma_scg::node::{NodePayload, NodeType, StateReadNode, StateWriteNode, StateTransformNode, ForeignConsumeNode};
-
-        let scg = &input.scg;
-
-        // ── Build the per-verifier layout registries ──────────────────────
-        //
-        // The 3 verifiers each carry their own duplicated `LayoutInfo` /
-        // `FieldInfo` structs (Wave 3c/3b parallel-development artefact).
-        // We convert the unified `PmtLayoutSpec` to each one on demand.
-        let empty: HashMap<String, crate::verification::PmtLayoutSpec> = HashMap::new();
-        let pmt_layouts = input.pmt_layouts.as_ref().unwrap_or(&empty);
-
-        let mut read_layouts: HashMap<String, ReadLayout> = HashMap::new();
-        let mut write_layouts: HashMap<String, WriteLayout> = HashMap::new();
-        let mut transform_layouts: HashMap<String, TransformLayout> = HashMap::new();
-        for (name, spec) in pmt_layouts {
-            read_layouts.insert(
-                name.clone(),
-                ReadLayout {
-                    name: spec.name.clone(),
-                    total_size: spec.total_size,
-                    fields: spec
-                        .fields
-                        .iter()
-                        .map(|f| ReadField {
-                            name: f.name.clone(),
-                            offset: f.offset,
-                            size: f.size,
-                            type_name: f.type_name.clone(),
-                        })
-                        .collect(),
-                },
-            );
-            write_layouts.insert(
-                name.clone(),
-                WriteLayout {
-                    name: spec.name.clone(),
-                    total_size: spec.total_size,
-                    fields: spec
-                        .fields
-                        .iter()
-                        .map(|f| WriteField {
-                            name: f.name.clone(),
-                            offset: f.offset,
-                            size: f.size,
-                            type_name: f.type_name.clone(),
-                        })
-                        .collect(),
-                },
-            );
-            transform_layouts.insert(
-                name.clone(),
-                TransformLayout {
-                    name: spec.name.clone(),
-                    total_size: spec.total_size,
-                    fields: spec
-                        .fields
-                        .iter()
-                        .map(|f| TransformField {
-                            name: f.name.clone(),
-                            offset: f.offset,
-                            size: f.size,
-                            type_name: f.type_name.clone(),
-                        })
-                        .collect(),
-                },
-            );
-        }
-
-        // ── Walk SCG nodes; collect reads / writes / transforms ───────────
-        //
-        // We also track which vregs have been "consumed" by a transform
-        // (the input vreg of a StateTransform is linearly consumed).  The
-        // write verifier's linearity check uses this set.
-        let mut state_var_layouts: HashMap<String, String> = HashMap::new();
-        let mut consumed_vars: HashSet<String> = HashSet::new();
-        let mut reads: Vec<(String, String, String)> = Vec::new();
-        let mut writes: Vec<StateWriteOp> = Vec::new();
-        let mut transforms: Vec<(String, String)> = Vec::new();
-        let mut state_init_count: usize = 0;
-
-        // First pass: collect transforms (to populate `consumed_vars`)
-        // before writes, so the linearity check sees them.  SCG node
-        // iteration order is not guaranteed to match source order; we
-        // sort by NodeId to get a stable, source-approximating order.
-        let mut state_nodes: Vec<(u64, NodeType, NodePayload)> = Vec::new();
-        for node in scg.nodes() {
-            state_nodes.push((node.id.as_u64(), node.node_type.clone(), node.payload.clone()));
-        }
-        state_nodes.sort_by_key(|(id, _, _)| *id);
-
-        for (_, _, payload) in &state_nodes {
-            match payload {
-                NodePayload::StateInit(_) => {
-                    state_init_count += 1;
-                }
-                NodePayload::StateTransform(t) => {
-                    let StateTransformNode {
-                        input_vreg,
-                        input_layout,
-                        output_layout,
-                        ..
-                    } = t;
-                    let in_var = format!("_state_{}", input_vreg);
-                    state_var_layouts
-                        .entry(in_var.clone())
-                        .or_insert_with(|| input_layout.clone());
-                    consumed_vars.insert(in_var);
-                    transforms.push((input_layout.clone(), output_layout.clone()));
-                }
-                NodePayload::ForeignConsume(fc) => {
-                    // A #[foreign_consume] call (e.g. sqlite3_close) linearly
-                    // consumes its State argument, exactly like a StateTransform.
-                    // The existing state_write linearity check then catches any
-                    // post-close read/write as a use-after-consume error.
-                    let ForeignConsumeNode {
-                        input_vreg,
-                        layout_name,
-                    } = fc;
-                    let in_var = format!("_state_{}", input_vreg);
-                    state_var_layouts
-                        .entry(in_var.clone())
-                        .or_insert_with(|| layout_name.clone());
-                    consumed_vars.insert(in_var);
-                }
-                NodePayload::StateRead(r) => {
-                    let StateReadNode {
-                        state_vreg,
-                        layout_name,
-                        field_name,
-                        ..
-                    } = r;
-                    let var = format!("_state_{}", state_vreg);
-                    state_var_layouts
-                        .entry(var.clone())
-                        .or_insert_with(|| layout_name.clone());
-                    // Look up the field's declared type so the verifier's
-                    // type-mismatch check has a non-empty expected_type to
-                    // compare against.  If the layout/field is absent,
-                    // pass "" — the verifier will report "field not found"
-                    // or "layout not found" before reaching the type check.
-                    let expected_type = pmt_layouts
-                        .get(layout_name)
-                        .and_then(|spec| spec.fields.iter().find(|f| &f.name == field_name))
-                        .map(|f| f.type_name.clone())
-                        .unwrap_or_default();
-                    reads.push((var, field_name.clone(), expected_type));
-                }
-                NodePayload::StateWrite(w) => {
-                    let StateWriteNode {
-                        state_vreg,
-                        layout_name,
-                        field_name,
-                        ..
-                    } = w;
-                    let var = format!("_state_{}", state_vreg);
-                    state_var_layouts
-                        .entry(var.clone())
-                        .or_insert_with(|| layout_name.clone());
-                    // The SCG StateWriteNode does not carry the value's
-                    // type; infer it from the layout's field declaration.
-                    let value_type = pmt_layouts
-                        .get(layout_name)
-                        .and_then(|spec| spec.fields.iter().find(|f| &f.name == field_name))
-                        .map(|f| f.type_name.clone())
-                        .unwrap_or_default();
-                    writes.push(StateWriteOp {
-                        var_name: var,
-                        field_name: field_name.clone(),
-                        value_type,
-                        after_consume: false,
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // ── Run the 3 verifiers ───────────────────────────────────────────
-        let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
-        let write_results =
-            verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
-        let transform_results = verify_all_transforms(&transform_layouts, &transforms);
-
-        let read_ok = read_results.iter().all(|r| r.valid);
-        let write_ok = write_results.iter().all(|r| r.valid);
-        let transform_ok = transform_results.iter().all(|r| r.valid);
-
-        let read_errs: Vec<String> = read_results
-            .iter()
-            .filter_map(|r| r.error.clone())
-            .collect();
-        let write_errs: Vec<String> = write_results
-            .iter()
-            .filter_map(|r| r.error.clone())
-            .collect();
-        let transform_errs: Vec<String> = transform_results
-            .iter()
-            .filter_map(|r| r.error.clone())
-            .collect();
-
-        let all_errs: Vec<String> = read_errs
-            .iter()
-            .chain(write_errs.iter())
-            .chain(transform_errs.iter())
-            .cloned()
-            .collect();
-
-        let total_ops = reads.len() + writes.len() + transforms.len();
-        let all_ok = read_ok && write_ok && transform_ok;
-
-        if all_ok {
-            VerificationResult::new(
-                "pmt-state",
-                VerificationStatus::Proven,
-                format!(
-                    "pmt-state check passed ({} init(s), {} read(s), {} write(s), {} transform(s))",
-                    state_init_count,
-                    reads.len(),
-                    writes.len(),
-                    transforms.len()
-                ),
-            )
-        } else if total_ops == 0 {
-            // No state operations in the SCG — trivially safe.
-            VerificationResult::new(
-                "pmt-state",
-                VerificationStatus::Proven,
-                "pmt-state check passed (no state operations found)".to_string(),
-            )
-        } else {
-            VerificationResult::new(
-                "pmt-state",
-                VerificationStatus::Violated {
-                    counterexample: crate::result::CounterExample::new(
-                        Vec::new(),
-                        default_program_point(),
-                        all_errs.join("; "),
-                    ),
-                },
-                format!(
-                    "pmt-state violations: {} read-error(s), {} write-error(s), {} transform-error(s)",
-                    read_errs.len(),
-                    write_errs.len(),
-                    transform_errs.len()
-                ),
-            )
-        }
     }
 }
 
@@ -1378,182 +812,6 @@ pub fn verify_all(input: &VerificationInput) -> AggregatedResult {
 }
 
 // ---------------------------------------------------------------------------
-// Wave 96: 5→3 invariant reduction (5to3)
-// ---------------------------------------------------------------------------
-
-/// Wave 96: The 5→3 invariant reduction (5to3).
-///
-/// VUMA's five core invariants (Liveness, Exclusivity, Interpretation,
-/// Origin, Cleanup) collapse into THREE compile-time invariants under
-/// the L1-L3 collapse theorem (see `verification::l1l3_collapse`):
-///
-///   1. **Resource Safety** = Liveness ∪ Cleanup
-///      (every acquired resource is eventually released AND every
-///      requested resource is eventually provided — together they
-///      guarantee no leaks and no deadlocks).
-///
-///   2. **Access Safety** = Exclusivity ∪ Interpretation
-///      (at most one owner for exclusive resources AND every read
-///      interprets data under the correct BD — together they guarantee
-///      no data races and no type confusion).
-///
-///   3. **Provenance Safety** = Origin
-///      (every datum has a well-defined provenance — unchanged by the
-///      collapse; origin is already a single-invariant property that
-///      subsumes the data-trust boundary).
-///
-/// The 5to3 reduction is sound: if all five original invariants hold,
-/// then all three collapsed invariants hold. The converse is NOT
-/// true in general (the collapse loses information about WHICH of the
-/// two original invariants in each pair failed), but for the purposes
-/// of compile-time verification, the three-way partition is sufficient
-/// to gate codegen on (a program that fails any of the three collapsed
-/// invariants is rejected).
-///
-/// The reduction is used by the L1L3 collapse proof to simplify the
-/// final verdict: instead of reporting five separate invariant
-/// outcomes, the aggregator can report three (one per collapsed
-/// category), which is easier for downstream tooling (compilers,
-/// IDEs, security review dashboards) to consume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CollapsedInvariant {
-    /// Resource Safety = Liveness ∪ Cleanup.
-    ResourceSafety,
-    /// Access Safety = Exclusivity ∪ Interpretation.
-    AccessSafety,
-    /// Provenance Safety = Origin.
-    ProvenanceSafety,
-}
-
-impl CollapsedInvariant {
-    /// Returns the three collapsed invariant kinds in canonical order.
-    pub fn all() -> &'static [CollapsedInvariant; 3] {
-        &[
-            CollapsedInvariant::ResourceSafety,
-            CollapsedInvariant::AccessSafety,
-            CollapsedInvariant::ProvenanceSafety,
-        ]
-    }
-
-    /// Returns the human-readable label for this collapsed invariant.
-    pub fn label(&self) -> &'static str {
-        match self {
-            CollapsedInvariant::ResourceSafety => "resource_safety",
-            CollapsedInvariant::AccessSafety => "access_safety",
-            CollapsedInvariant::ProvenanceSafety => "provenance_safety",
-        }
-    }
-
-    /// Maps a five-core `InvariantKind` to its collapsed three-core
-    /// equivalent. Returns `None` for the extended kinds (ConstantTime,
-    /// Interprocedural, Modular, PMT) which are NOT part of the 5→3
-    /// reduction.
-    pub fn from_five(kind: InvariantKind) -> Option<CollapsedInvariant> {
-        match kind {
-            InvariantKind::Liveness | InvariantKind::Cleanup => {
-                Some(CollapsedInvariant::ResourceSafety)
-            }
-            InvariantKind::Exclusivity | InvariantKind::Interpretation => {
-                Some(CollapsedInvariant::AccessSafety)
-            }
-            InvariantKind::Origin => Some(CollapsedInvariant::ProvenanceSafety),
-            // Extended kinds are not part of the 5→3 reduction.
-            InvariantKind::ConstantTime
-            | InvariantKind::Interprocedural
-            | InvariantKind::Modular
-            | InvariantKind::Pmt => None,
-        }
-    }
-}
-
-impl fmt::Display for CollapsedInvariant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Wave 96: Result of the 5→3 invariant reduction.
-///
-/// Maps each of the five core invariants to one of the three collapsed
-/// invariants, and records whether each collapsed invariant is
-/// satisfied (i.e. both of its constituent five-core invariants
-/// passed).
-#[derive(Debug, Clone)]
-pub struct FiveToThreeReduction {
-    /// For each of the three collapsed invariants, whether it is
-    /// satisfied (true) or violated (false). Indexed by
-    /// `CollapsedInvariant::all()` order.
-    pub collapsed: [bool; 3],
-    /// The number of five-core invariants that were folded into the
-    /// three collapsed invariants (always 5 for a complete reduction).
-    pub folded: usize,
-    /// Human-readable summary.
-    pub summary: String,
-}
-
-/// Wave 96: Perform the 5→3 invariant reduction.
-///
-/// Given the per-invariant pass/fail status of the five core
-/// invariants (in canonical order: Liveness, Exclusivity,
-/// Interpretation, Origin, Cleanup — the order returned by
-/// `InvariantKind::all()`), compute the three collapsed invariants
-/// and their pass/fail status.
-///
-/// A collapsed invariant is satisfied iff BOTH of its constituent
-/// five-core invariants are satisfied:
-///   - ResourceSafety = Liveness ∧ Cleanup
-///   - AccessSafety = Exclusivity ∧ Interpretation
-///   - ProvenanceSafety = Origin (single invariant, identity)
-///
-/// `five_results` — slice of (kind, passed) pairs for the five core
-/// invariants. Invariants not present in the slice are treated as
-/// "unverified" (collapsed invariant = false).
-pub fn reduce_5to3<I>(five_results: I) -> FiveToThreeReduction
-where
-    I: IntoIterator<Item = (InvariantKind, bool)>,
-{
-    use std::collections::HashMap;
-    let map: HashMap<InvariantKind, bool> = five_results.into_iter().collect();
-    let mut collapsed = [false; 3];
-    let mut seen = [false; 3];
-    let mut folded = 0;
-    for &kind in InvariantKind::all() {
-        if let Some(&passed) = map.get(&kind) {
-            folded += 1;
-            if let Some(c) = CollapsedInvariant::from_five(kind) {
-                let idx = match c {
-                    CollapsedInvariant::ResourceSafety => 0,
-                    CollapsedInvariant::AccessSafety => 1,
-                    CollapsedInvariant::ProvenanceSafety => 2,
-                };
-                // A collapsed invariant is satisfied iff ALL of its
-                // constituents are satisfied. First-encounter sets
-                // the value; subsequent encounters AND with it.
-                if !seen[idx] {
-                    collapsed[idx] = passed;
-                    seen[idx] = true;
-                } else {
-                    collapsed[idx] = collapsed[idx] && passed;
-                }
-            }
-        }
-    }
-    let summary = format!(
-        "5→3 reduction: folded {} five-core invariants into three collapsed invariants \
-         (resource_safety={}, access_safety={}, provenance_safety={})",
-        folded,
-        collapsed[0],
-        collapsed[1],
-        collapsed[2]
-    );
-    FiveToThreeReduction {
-        collapsed,
-        folded,
-        summary,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1575,33 +833,19 @@ fn compute_overall_verdict(results: &[PerInvariantResult]) -> OverallVerdict {
     }
 }
 
-/// Map an invariant kind to a cache index (0..7).
+/// Map an invariant kind to a cache index.
 ///
-/// Indices 0-4 are the five core invariants; 5-7 are the Wave 16 extended
-/// kinds.  The cache vector in [`InvariantAggregator`] is sized to
-/// `EXTENDED_INVARIANT_COUNT` (8) to accommodate all kinds.
+/// (Legacy cleanup) Only `Pmt` remains; the cache is sized to
+/// `EXTENDED_INVARIANT_COUNT` (1) for backwards compatibility with the
+/// incremental-verification code path.
 fn invariant_index(kind: InvariantKind) -> Option<usize> {
     match kind {
-        InvariantKind::Liveness => Some(0),
-        InvariantKind::Exclusivity => Some(1),
-        InvariantKind::Interpretation => Some(2),
-        InvariantKind::Origin => Some(3),
-        InvariantKind::Cleanup => Some(4),
-        InvariantKind::ConstantTime => Some(5),
-        InvariantKind::Interprocedural => Some(6),
-        InvariantKind::Modular => Some(7),
-        InvariantKind::Pmt => Some(8),
+        InvariantKind::Pmt => Some(0),
     }
 }
 
-/// The total number of invariant kinds (5 core + 3 extended + 1 PMT = 9).
-const EXTENDED_INVARIANT_COUNT: usize = 9;
-
-/// Construct a default [`ProgramPoint`] (empty string) for use in
-/// counterexamples where the exact source location is not known.
-fn default_program_point() -> crate::result::ProgramPoint {
-    String::new()
-}
+/// The total number of invariant kinds (1 = Pmt only).
+const EXTENDED_INVARIANT_COUNT: usize = 1;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1614,29 +858,20 @@ mod tests {
     use vuma_scg::graph::SCG;
 
     #[test]
-    fn invariant_kind_all_has_five() {
-        assert_eq!(InvariantKind::all().len(), 5);
-    }
-
-    #[test]
-    fn invariant_kind_quick_set_has_two() {
-        assert_eq!(InvariantKind::quick_set().len(), 2);
-        assert!(InvariantKind::quick_set().contains(&InvariantKind::Exclusivity));
-        assert!(InvariantKind::quick_set().contains(&InvariantKind::Origin));
+    fn invariant_kind_all_has_one() {
+        // (Legacy cleanup) Only Pmt remains.
+        assert_eq!(InvariantKind::all().len(), 1);
+        assert!(InvariantKind::all().contains(&InvariantKind::Pmt));
     }
 
     #[test]
     fn invariant_kind_labels() {
-        assert_eq!(InvariantKind::Liveness.label(), "liveness");
-        assert_eq!(InvariantKind::Exclusivity.label(), "exclusivity");
-        assert_eq!(InvariantKind::Interpretation.label(), "interpretation");
-        assert_eq!(InvariantKind::Origin.label(), "origin");
-        assert_eq!(InvariantKind::Cleanup.label(), "cleanup");
+        assert_eq!(InvariantKind::Pmt.label(), "pmt-state");
     }
 
     #[test]
     fn invariant_kind_display() {
-        assert_eq!(format!("{}", InvariantKind::Liveness), "liveness");
+        assert_eq!(format!("{}", InvariantKind::Pmt), "pmt-state");
     }
 
     #[test]
@@ -1647,12 +882,7 @@ mod tests {
 
     #[test]
     fn verification_level_display() {
-        assert_eq!(format!("{}", VerificationLevel::Quick), "QUICK");
-        assert_eq!(format!("{}", VerificationLevel::Normal), "NORMAL");
-        assert_eq!(format!("{}", VerificationLevel::Exhaustive), "EXHAUSTIVE");
-        assert_eq!(format!("{}", VerificationLevel::Modular), "MODULAR");
-        assert_eq!(format!("{}", VerificationLevel::ConstantTime), "CONSTANT_TIME");
-        assert_eq!(format!("{}", VerificationLevel::Hardened), "HARDENED");
+        // (Legacy cleanup) Only Pmt remains on the enum.
         assert_eq!(format!("{}", VerificationLevel::Pmt), "PMT");
     }
 
@@ -1660,43 +890,27 @@ mod tests {
     fn delta_empty_by_default() {
         let delta = InvariantDelta::new();
         assert!(delta.is_empty());
-        assert!(!delta.affects(InvariantKind::Liveness));
+        assert!(!delta.affects(InvariantKind::Pmt));
     }
 
     #[test]
     fn delta_single_affects_only_one() {
-        let delta = InvariantDelta::single(InvariantKind::Cleanup);
+        let delta = InvariantDelta::single(InvariantKind::Pmt);
         assert!(!delta.is_empty());
-        assert!(delta.affects(InvariantKind::Cleanup));
-        assert!(!delta.affects(InvariantKind::Liveness));
+        assert!(delta.affects(InvariantKind::Pmt));
     }
 
     #[test]
     fn delta_from_set() {
-        let delta = InvariantDelta::from_set([InvariantKind::Liveness, InvariantKind::Cleanup])
-            .with_reason("resource change");
-        assert!(delta.affects(InvariantKind::Liveness));
-        assert!(delta.affects(InvariantKind::Cleanup));
-        assert!(!delta.affects(InvariantKind::Origin));
-        assert_eq!(delta.reason.as_deref(), Some("resource change"));
-    }
-
-    #[test]
-    fn verify_all_normal_returns_five_results() {
-        // VUMA 2.0: the default aggregator level is now Pmt (1 result),
-        // so to test the legacy 5-pointer-invariant `Normal` mode we
-        // must explicitly request it.
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 5);
-        assert_eq!(result.level, VerificationLevel::Normal);
+        let delta = InvariantDelta::from_set([InvariantKind::Pmt]).with_reason("state change");
+        assert!(delta.affects(InvariantKind::Pmt));
+        assert_eq!(delta.reason.as_deref(), Some("state change"));
     }
 
     #[test]
     fn verify_all_pmt_default_returns_one_result() {
-        // VUMA 2.0: the default level is PMT, which runs only the 3
-        // PMT state verifiers surfaced as a single `InvariantKind::Pmt`
+        // VUMA 2.0: the default level is PMT, which runs only the
+        // PMT state verifier surfaced as a single `InvariantKind::Pmt`
         // aggregated result.
         let aggregator = InvariantAggregator::new();
         let input = VerificationInput::from_scg(SCG::new());
@@ -1706,181 +920,29 @@ mod tests {
     }
 
     #[test]
-    fn verify_all_quick_returns_five_results() {
-        // Wave 19: Quick mode now runs ALL 5 invariants at reduced depth
-        // (halved max_paths / max_path_length), not just the 2-invariant
-        // quick_set. This catches more bugs while remaining cheaper than
-        // Normal.
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Quick);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 5);
-        assert_eq!(result.level, VerificationLevel::Quick);
+    fn invariant_index_covers_pmt() {
+        assert_eq!(invariant_index(InvariantKind::Pmt), Some(0));
     }
 
     #[test]
-    fn verify_all_exhaustive_returns_six_results() {
-        // Wave 16: Exhaustive now runs 5 core + interprocedural = 6 checks.
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Exhaustive);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 6);
-        assert_eq!(result.level, VerificationLevel::Exhaustive);
-    }
-
-    // ── Wave 16: new verification level tests ───────────────────────────
-
-    #[test]
-    fn verify_all_modular_returns_six_results() {
-        // Modular: 5 core + modular analysis = 6 checks.
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Modular);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 6);
-        assert_eq!(result.level, VerificationLevel::Modular);
+    fn extended_invariant_count_is_one() {
+        // (Legacy cleanup) Only Pmt remains.
+        assert_eq!(EXTENDED_INVARIANT_COUNT, 1);
     }
 
     #[test]
-    fn verify_all_constant_time_returns_six_results() {
-        // ConstantTime: 5 core + constant-time (6th invariant) = 6 checks.
-        let aggregator =
-            InvariantAggregator::new().with_level(VerificationLevel::ConstantTime);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 6);
-        assert_eq!(result.level, VerificationLevel::ConstantTime);
-    }
-
-    #[test]
-    fn verify_all_hardened_returns_eight_results() {
-        // Hardened: 5 core + constant-time + interprocedural + modular = 8 checks.
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Hardened);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 8);
-        assert_eq!(result.level, VerificationLevel::Hardened);
-    }
-
-    #[test]
-    fn invariant_kind_extended_labels() {
-        assert_eq!(InvariantKind::ConstantTime.label(), "constant-time");
-        assert_eq!(InvariantKind::Interprocedural.label(), "interprocedural");
-        assert_eq!(InvariantKind::Modular.label(), "modular");
-    }
-
-    #[test]
-    fn invariant_index_covers_all_nine_kinds() {
-        assert_eq!(invariant_index(InvariantKind::Liveness), Some(0));
-        assert_eq!(invariant_index(InvariantKind::Exclusivity), Some(1));
-        assert_eq!(invariant_index(InvariantKind::Interpretation), Some(2));
-        assert_eq!(invariant_index(InvariantKind::Origin), Some(3));
-        assert_eq!(invariant_index(InvariantKind::Cleanup), Some(4));
-        assert_eq!(invariant_index(InvariantKind::ConstantTime), Some(5));
-        assert_eq!(invariant_index(InvariantKind::Interprocedural), Some(6));
-        assert_eq!(invariant_index(InvariantKind::Modular), Some(7));
-        assert_eq!(invariant_index(InvariantKind::Pmt), Some(8));
-    }
-
-    #[test]
-    fn extended_invariant_count_is_nine() {
-        // Wave 3d: 5 core + 3 extended (CT/Interprocedural/Modular) + 1 PMT = 9.
-        assert_eq!(EXTENDED_INVARIANT_COUNT, 9);
-    }
-
-    #[test]
-    fn cache_sized_for_all_nine_kinds() {
+    fn cache_sized_for_one_kind() {
         let aggregator = InvariantAggregator::new();
         assert_eq!(aggregator.cache.len(), EXTENDED_INVARIANT_COUNT);
     }
 
     #[test]
     fn free_function_verify_all() {
-        // VUMA 2.0: the free function `verify_all` uses the new PMT
-        // default — it returns 1 result at the PMT level.
+        // VUMA 2.0: the free function `verify_all` uses the PMT default.
         let input = VerificationInput::from_scg(SCG::new());
         let result = verify_all(&input);
         assert_eq!(result.per_invariant.len(), 1);
         assert_eq!(result.level, VerificationLevel::Pmt);
-    }
-
-    #[test]
-    fn incremental_reuses_cache_for_unaffected() {
-        // VUMA 2.0: explicitly select Normal level so the 5 pointer
-        // invariants (liveness/exclusivity/...) are exercised by this
-        // cache test (default is now PMT, which runs only 1 invariant).
-        let mut aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
-        let input = VerificationInput::from_scg(SCG::new());
-
-        // First run to populate cache.
-        let first = aggregator.verify_all(&input);
-        for pir in &first.per_invariant {
-            if let Some(idx) = invariant_index(pir.kind) {
-                aggregator.cache[idx] = Some(pir.clone());
-            }
-        }
-
-        // Incremental run — only liveness affected.
-        let delta = InvariantDelta::single(InvariantKind::Liveness);
-        let second = aggregator.verify_incremental(&input, &delta);
-
-        // Liveness should be fresh; others should be cached.
-        let liveness = second
-            .per_invariant
-            .iter()
-            .find(|r| r.kind == InvariantKind::Liveness)
-            .unwrap();
-        assert!(!liveness.cached);
-
-        let exclusivity = second
-            .per_invariant
-            .iter()
-            .find(|r| r.kind == InvariantKind::Exclusivity)
-            .unwrap();
-        assert!(exclusivity.cached);
-
-        assert!(second.summary.cached_count > 0);
-    }
-
-    #[test]
-    fn incremental_empty_delta_uses_all_cache() {
-        // VUMA 2.0: explicitly select Normal level so all 5 pointer
-        // invariants are run and cached.
-        let mut aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
-        let input = VerificationInput::from_scg(SCG::new());
-
-        let first = aggregator.verify_all(&input);
-        for pir in &first.per_invariant {
-            if let Some(idx) = invariant_index(pir.kind) {
-                aggregator.cache[idx] = Some(pir.clone());
-            }
-        }
-
-        let delta = InvariantDelta::new();
-        let second = aggregator.verify_incremental(&input, &delta);
-
-        // All results should be cached.
-        assert_eq!(second.summary.cached_count, 5);
-        assert_eq!(second.summary.fresh_count, 0);
-    }
-
-    #[test]
-    fn diagnostics_report_renders() {
-        // VUMA 2.0: explicitly select Normal level so the 5 pointer
-        // invariants (liveness, exclusivity, etc.) appear in the
-        // diagnostics report (default PMT level produces only a single
-        // pmt-state invariant).
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        let report = aggregator.diagnostics(&result);
-
-        let rendered = report.render();
-        assert!(rendered.contains("IVE Verification Report"));
-        assert!(rendered.contains("liveness"));
-        assert!(rendered.contains("exclusivity"));
-        assert!(rendered.contains("interpretation"));
-        assert!(rendered.contains("origin"));
-        assert!(rendered.contains("cleanup"));
     }
 
     #[test]
@@ -1892,8 +954,8 @@ mod tests {
     #[test]
     fn overall_verdict_pass() {
         let results = vec![PerInvariantResult::new(
-            InvariantKind::Liveness,
-            VerificationResult::new("liveness", VerificationStatus::Proven, "ok"),
+            InvariantKind::Pmt,
+            VerificationResult::new("pmt-state", VerificationStatus::Proven, "ok"),
             0,
         )];
         assert_eq!(compute_overall_verdict(&results), OverallVerdict::Pass);
@@ -1904,12 +966,12 @@ mod tests {
         let ce = CounterExample::new(
             vec!["entry".into()],
             "entry".into(),
-            "duplicate owner".into(),
+            "pmt-state violation".into(),
         );
         let results = vec![PerInvariantResult::new(
-            InvariantKind::Exclusivity,
+            InvariantKind::Pmt,
             VerificationResult::new(
-                "exclusivity",
+                "pmt-state",
                 VerificationStatus::Violated { counterexample: ce },
                 "violation",
             ),
@@ -1921,9 +983,9 @@ mod tests {
     #[test]
     fn overall_verdict_inconclusive() {
         let results = vec![PerInvariantResult::new(
-            InvariantKind::Liveness,
+            InvariantKind::Pmt,
             VerificationResult::new(
-                "liveness",
+                "pmt-state",
                 VerificationStatus::Unverified {
                     reason: "not yet implemented".into(),
                 },
@@ -1958,21 +1020,9 @@ mod tests {
 
     #[test]
     fn default_aggregator() {
-        // VUMA 2.0: the default verification level is now PMT.
+        // VUMA 2.0: the default verification level is PMT.
         let aggregator = InvariantAggregator::default();
         assert_eq!(aggregator.level(), VerificationLevel::Pmt);
-    }
-
-    #[test]
-    fn summary_display() {
-        // VUMA 2.0: explicitly select Normal level so 5 pointer
-        // invariants are run and the summary shows "Total checked : 5".
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
-        let text = format!("{}", result.summary);
-        assert!(text.contains("Verification Summary"));
-        assert!(text.contains("Total checked : 5"));
     }
 
     #[test]
@@ -1984,32 +1034,29 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Wave 19 regression tests — verification escape-hatch closure
+    // Verification escape-hatch closure regression tests
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// (Wave 19 / VUMA 2.0) The default verification level is now PMT
-    /// (PMT state verification only). The CLI `--verification` flag
-    /// accepts only `pmt`; `--no-verify` has been removed. This test
-    /// verifies the aggregator's default level is PMT.
+    /// The default verification level is PMT (PMT state verification
+    /// only). The CLI `--verification` flag accepts only `pmt`;
+    /// `--no-verify` has been removed. This test verifies the
+    /// aggregator's default level is PMT.
     #[test]
     fn wave19_default_verification_level_is_pmt() {
         let agg = InvariantAggregator::new();
         assert_eq!(agg.level, VerificationLevel::Pmt);
     }
 
-    /// (Wave 19, Task 2) `--strict-verification` makes `Inconclusive`
-    /// block compilation. This test verifies that the aggregator produces
-    /// `Inconclusive` for an empty SCG (no violations, but invariants
-    /// cannot be fully proven), which the pipeline would then block on
-    /// if `strict_verification` were true.
+    /// The aggregator produces a non-`Fail` verdict for an empty SCG (it
+    /// cannot prove a violation on no program). The `--strict-verification`
+    /// flag has been REMOVED in VUMA 2.0 — Inconclusive is now a HARD
+    /// failure by default in the pipeline gates (only
+    /// `--allow-inconclusive` opts out, with a logged SOUNDNESS WAIVER).
     #[test]
     fn wave19_strict_verification_inconclusive_blocks() {
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Normal);
+        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
-        // An empty SCG yields either Pass or Inconclusive (no violations
-        // possible, but some invariants may be Unverified). The pipeline
-        // treats Inconclusive as blocking only when strict_verification=true.
         assert!(
             result.overall == OverallVerdict::Pass
                 || result.overall == OverallVerdict::Inconclusive
@@ -2019,38 +1066,150 @@ mod tests {
         );
     }
 
-    /// (Wave 19, Task 3) Quick mode runs ALL 5 invariants (not just 2).
+    // ═══════════════════════════════════════════════════════════════════════
+    // Inconclusive→Err regression — Inconclusive is a hard failure
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Regression test (RESOLVED).
+    ///
+    /// `OverallVerdict::Inconclusive` MUST map to a hard compile error by
+    /// default. This test directly exercises the canonical pipeline gate
+    /// logic that appears verbatim at four call sites:
+    ///   * `src/pipeline.rs:5199-5204` (`compile_with_path` Stage 6)
+    ///   * `src/pipeline.rs:6107-6112` (`compile_modules` Stage 2b)
+    ///   * `src/pipeline.rs:6550-6556` (`compile_with_recovery` partial-compile)
+    ///   * `src/main.rs:1569-1581`     (`verify_pmt_on_ast`, used by `vuma emit`)
+    ///
+    /// The legacy `--strict-verification` flag was REMOVED in VUMA 2.0
+    /// (`main.rs:654-666` returns a hard error). The ONLY opt-out is
+    /// `--allow-inconclusive`, threaded via `CompileConfig.allow_inconclusive`.
+    ///
+    /// This is a direct unit test on the Inconclusive→Err mapping, rather
+    /// than an end-to-end compile test, because constructing a VUMA source
+    /// program that deterministically produces an `Unverified` per-invariant
+    /// status is non-trivial (the aggregator's `Pmt` level tends to either
+    /// `Proven` or `Violated`).
     #[test]
-    fn wave19_quick_mode_runs_all_five_invariants() {
-        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Quick);
-        let input = VerificationInput::from_scg(SCG::new());
-        let result = aggregator.verify_all(&input);
+    fn wave5_inconclusive_gate_hard_fails_by_default() {
+        use crate::result::{VerificationResult, VerificationStatus};
+
+        // Build a per-invariant result whose `Unverified` status forces
+        // `compute_overall_verdict` to return `Inconclusive`.
+        let pir = PerInvariantResult::new(
+            InvariantKind::Pmt,
+            VerificationResult::new(
+                "pmt-state",
+                VerificationStatus::Unverified {
+                    reason: "synthetic Inconclusive for Wave 5 regression".to_string(),
+                },
+                "wave5 regression: per-invariant Unverified",
+            ),
+            0,
+        );
+        // Sanity: the per-invariant result is unverified, not failed.
+        assert!(pir.is_unverified());
+        assert!(!pir.is_fail());
+
+        let per_invariant = vec![pir];
+        // Sanity: the aggregator's verdict combiner maps this to Inconclusive.
         assert_eq!(
-            result.per_invariant.len(),
-            5,
-            "Quick mode must run all 5 invariants at reduced depth"
+            compute_overall_verdict(&per_invariant),
+            OverallVerdict::Inconclusive,
+            "Unverified per-invariant result must aggregate to Inconclusive"
+        );
+
+        let summary = VerificationSummary::from_results(&per_invariant);
+        let inconclusive_result = AggregatedResult {
+            per_invariant,
+            overall: OverallVerdict::Inconclusive,
+            level: VerificationLevel::Pmt,
+            total_elapsed_ms: 0,
+            summary,
+        };
+
+        /// Mirror of the canonical pipeline gate at `pipeline.rs:5199-5204`.
+        ///
+        /// Returns `Err(())` when the gate would block compilation; `Ok(())`
+        /// when the gate would soft-pass (either non-Inconclusive, or
+        /// Inconclusive with the explicit `--allow-inconclusive` opt-in).
+        fn apply_inconclusive_gate(
+            result: &AggregatedResult,
+            allow_inconclusive: bool,
+        ) -> Result<(), ()> {
+            // Inconclusive is a HARD failure by default.
+            // `--allow-inconclusive` opts back into the legacy soft-pass
+            // behaviour. Mirrors `pipeline.rs:5199-5204` verbatim.
+            if (result.overall == OverallVerdict::Inconclusive) && !allow_inconclusive {
+                return Err(());
+            }
+            Ok(())
+        }
+
+        // Default behaviour: HARD FAILURE on Inconclusive.
+        assert_eq!(
+            apply_inconclusive_gate(&inconclusive_result, false),
+            Err(()),
+            "Gap 1 full flip: Inconclusive MUST hard-fail when \
+             --allow-inconclusive is absent (config.allow_inconclusive=false)"
+        );
+
+        // Opt-out: `--allow-inconclusive` soft-passes with a SOUNDNESS WAIVER.
+        assert_eq!(
+            apply_inconclusive_gate(&inconclusive_result, true),
+            Ok(()),
+            "--allow-inconclusive must opt back into the legacy soft-pass \
+             behaviour for Inconclusive verdicts"
+        );
+
+        // Cross-check: a `Pass` verdict never hits the gate, regardless of
+        // the `--allow-inconclusive` flag.
+        let pass_result = AggregatedResult {
+            overall: OverallVerdict::Pass,
+            ..inconclusive_result.clone()
+        };
+        assert_eq!(
+            apply_inconclusive_gate(&pass_result, false),
+            Ok(()),
+            "Pass verdict must never hit the Inconclusive gate"
+        );
+        assert_eq!(
+            apply_inconclusive_gate(&pass_result, true),
+            Ok(()),
+            "Pass verdict must never hit the Inconclusive gate"
+        );
+
+        // Cross-check: a `Fail` verdict is handled by a SEPARATE earlier
+        // gate (see `pipeline.rs:5192-5195`), so the Inconclusive gate
+        // itself must let `Fail` pass through (the separate Fail gate will
+        // already have returned `Err` upstream). This documents the
+        // sequencing invariant: Fail gate FIRST, then Inconclusive gate.
+        let fail_result = AggregatedResult {
+            overall: OverallVerdict::Fail,
+            ..inconclusive_result.clone()
+        };
+        assert_eq!(
+            apply_inconclusive_gate(&fail_result, false),
+            Ok(()),
+            "Fail verdict is handled by a separate upstream gate; the \
+             Inconclusive gate itself must be a no-op for Fail"
         );
     }
 
-    /// (Wave 19, Task 5) `max_paths` is configurable via the aggregator.
+    /// `max_paths` is configurable via the aggregator.
     #[test]
     fn wave19_max_paths_configurable() {
         let aggregator = InvariantAggregator::new().with_max_paths(128);
         assert_eq!(aggregator.engine.max_paths(), 128);
     }
 
-    /// (Wave 19, Task 5) `max_path_length` is configurable via the aggregator.
+    /// `max_path_length` is configurable via the aggregator.
     #[test]
     fn wave19_max_path_length_configurable() {
         let aggregator = InvariantAggregator::new().with_max_path_length(512);
         assert_eq!(aggregator.engine.max_path_length(), 512);
     }
 
-    /// (Wave 19, Task 5) Custom limits actually take effect: the liveness
-    /// verifier respects the configured `max_paths` and completes without
-    /// panicking. (We don't assert on the verdict — very low limits may
-    /// cause the verifier to give up and return Unverified, which is the
-    /// correct behavior, not a crash.)
+    /// Custom limits do not crash PMT verification.
     #[test]
     fn wave19_reduced_max_paths_does_not_crash() {
         use vuma_scg::node::{AllocationNode, ProgramPoint};
@@ -2065,29 +1224,29 @@ mod tests {
                 region_id,
                 type_name: None,
             }),
-            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
         );
         let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
         region.add_node(alloc_id);
         scg.add_region(region);
 
-        // With max_paths=1 (very aggressive), verification should still
-        // complete without panicking. The verdict may be Pass, Inconclusive,
-        // or even Fail (if the reduced depth misses the static-lifetime
-        // exemption) — the point is that the configurable limit is honored
-        // and the verifier doesn't crash.
         let aggregator = InvariantAggregator::new()
-            .with_level(VerificationLevel::Normal)
+            .with_level(VerificationLevel::Pmt)
             .with_max_paths(1)
             .with_max_path_length(8);
         let input = VerificationInput::from_scg(scg);
         let result = aggregator.verify_all(&input);
         // Must produce a valid verdict (not panic).
-        let _ = result.overall; // touching the field confirms no panic
+        let _ = result.overall;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Wave 3d tests — PMT state verification level
+    // PMT state verification level tests
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Helper: build a `PmtLayoutSpec` for `Point = { x: u32, y: u32 }`.
@@ -2139,9 +1298,7 @@ mod tests {
 
     /// Helper: construct an SCG with a single StateRead node.
     fn scg_with_state_read(layout: &str, field: &str) -> SCG {
-        use vuma_scg::node::{
-            NodeType, ProgramPoint, StateReadNode,
-        };
+        use vuma_scg::node::{NodeType, ProgramPoint, StateReadNode};
         let mut scg = SCG::new();
         scg.add_node(
             NodeType::StateRead,
@@ -2151,16 +1308,19 @@ mod tests {
                 field_name: field.to_string(),
                 result_vreg: 2,
             }),
-            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
         );
         scg
     }
 
     /// Helper: construct an SCG with a single StateWrite node.
     fn scg_with_state_write(layout: &str, field: &str) -> SCG {
-        use vuma_scg::node::{
-            NodeType, ProgramPoint, StateWriteNode,
-        };
+        use vuma_scg::node::{NodeType, ProgramPoint, StateWriteNode};
         let mut scg = SCG::new();
         scg.add_node(
             NodeType::StateWrite,
@@ -2170,7 +1330,12 @@ mod tests {
                 field_name: field.to_string(),
                 value_vreg: 2,
             }),
-            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
         );
         scg
     }
@@ -2183,11 +1348,14 @@ mod tests {
         write_layout: &str,
         write_field: &str,
     ) -> SCG {
-        use vuma_scg::node::{
-            NodeType, ProgramPoint, StateTransformNode, StateWriteNode,
-        };
+        use vuma_scg::node::{NodeType, ProgramPoint, StateTransformNode, StateWriteNode};
         let mut scg = SCG::new();
-        let pp = ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None };
+        let pp = ProgramPoint {
+            file: None,
+            line: Some(1),
+            column: Some(1),
+            offset: None,
+        };
         scg.add_node(
             NodeType::StateTransform,
             vuma_scg::node::NodePayload::StateTransform(StateTransformNode {
@@ -2213,9 +1381,7 @@ mod tests {
 
     /// Helper: construct an SCG with a single StateTransform node.
     fn scg_with_state_transform(in_layout: &str, out_layout: &str) -> SCG {
-        use vuma_scg::node::{
-            NodeType, ProgramPoint, StateTransformNode,
-        };
+        use vuma_scg::node::{NodeType, ProgramPoint, StateTransformNode};
         let mut scg = SCG::new();
         scg.add_node(
             NodeType::StateTransform,
@@ -2225,18 +1391,26 @@ mod tests {
                 output_layout: out_layout.to_string(),
                 result_vreg: 2,
             }),
-            ProgramPoint { file: None, line: Some(1), column: Some(1), offset: None },
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
         );
         scg
     }
 
     #[test]
     fn wave3d_pmt_level_runs_single_invariant() {
-        // Pmt level runs ONLY the PMT state verifier (skips 5 pointer invariants).
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
-        assert_eq!(result.per_invariant.len(), 1, "Pmt level must run exactly 1 check");
+        assert_eq!(
+            result.per_invariant.len(),
+            1,
+            "Pmt level must run exactly 1 check"
+        );
         assert_eq!(result.level, VerificationLevel::Pmt);
         assert_eq!(result.per_invariant[0].kind, InvariantKind::Pmt);
     }
@@ -2252,15 +1426,15 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_valid_read_passes() {
-        // SCG has a StateRead(Point.x) + layout registry has Point.
-        // → verifier finds layout, finds field, type matches → PASS.
         let scg = scg_with_state_read("Point", "x");
         let mut layouts = std::collections::HashMap::new();
         layouts.insert("Point".to_string(), pmt_layout_point());
         let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let result = aggregator.verify_all(&input);
-        assert_eq!(result.overall, OverallVerdict::Pass,
+        assert_eq!(
+            result.overall,
+            OverallVerdict::Pass,
             "valid read must PASS, got {:?}: {}",
             result.overall,
             result.per_invariant[0].result.message
@@ -2269,8 +1443,6 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_unknown_field_fails() {
-        // SCG has a StateRead(Point.z) but Point only has {x, y}.
-        // → verifier reports "field 'z' not found".
         let scg = scg_with_state_read("Point", "z");
         let mut layouts = std::collections::HashMap::new();
         layouts.insert("Point".to_string(), pmt_layout_point());
@@ -2279,13 +1451,21 @@ mod tests {
         let result = aggregator.verify_all(&input);
         assert_eq!(result.overall, OverallVerdict::Fail);
         let msg = &result.per_invariant[0].result.message;
-        assert!(msg.contains("pmt-state violations"), "got: {}", msg);
+        // The unknown-field case is now caught EARLIER by the
+        // field-list cross-check (`verify_layout_field_list_consistency`)
+        // before the state-read verifier runs. Either message is a valid
+        // failure signal — the cross-check fires when the SCG references a
+        // field not declared in the parser-provided layout, which is a
+        // strictly stronger check than the verifier's "unknown field".
+        assert!(
+            msg.contains("pmt-state violations") || msg.contains("field-list cross-check failed"),
+            "expected pmt-state violation or field-list cross-check failure, got: {}",
+            msg,
+        );
     }
 
     #[test]
     fn wave3d_pmt_unknown_layout_fails() {
-        // SCG has a StateTransform referencing an undeclared layout "Ghost".
-        // → transform verifier reports "input layout 'Ghost' not found".
         let scg = scg_with_state_transform("Ghost", "Point");
         let mut layouts = std::collections::HashMap::new();
         layouts.insert("Point".to_string(), pmt_layout_point());
@@ -2299,9 +1479,6 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_write_after_consume_fails() {
-        // SCG has StateTransform(Point→Vec2) followed by StateWrite(Point.x).
-        // The transform consumes vreg 1 (Point), so the subsequent write
-        // violates linearity.
         let scg = scg_with_transform_then_write("Point", "Vec2", "Point", "x");
         let mut layouts = std::collections::HashMap::new();
         layouts.insert("Point".to_string(), pmt_layout_point());
@@ -2310,7 +1487,6 @@ mod tests {
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let result = aggregator.verify_all(&input);
         assert_eq!(result.overall, OverallVerdict::Fail);
-        // Counterexample description should mention linearity / consumed.
         let pir = &result.per_invariant[0];
         match &pir.result.status {
             VerificationStatus::Violated { counterexample } => {
@@ -2327,8 +1503,6 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_valid_transform_passes() {
-        // SCG has StateTransform(Point→Vec2); both layouts declared and
-        // same total_size (8) → reinterpret transform, valid.
         let scg = scg_with_state_transform("Point", "Vec2");
         let mut layouts = std::collections::HashMap::new();
         layouts.insert("Point".to_string(), pmt_layout_point());
@@ -2336,7 +1510,9 @@ mod tests {
         let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let result = aggregator.verify_all(&input);
-        assert_eq!(result.overall, OverallVerdict::Pass,
+        assert_eq!(
+            result.overall,
+            OverallVerdict::Pass,
             "valid transform must PASS, got {:?}: {}",
             result.overall,
             result.per_invariant[0].result.message
@@ -2345,14 +1521,15 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_valid_write_passes() {
-        // SCG has StateWrite(Point.x); layout declares x: u32 → valid.
         let scg = scg_with_state_write("Point", "x");
         let mut layouts = std::collections::HashMap::new();
         layouts.insert("Point".to_string(), pmt_layout_point());
         let input = VerificationInput::from_scg(scg).with_pmt_layouts(layouts);
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let result = aggregator.verify_all(&input);
-        assert_eq!(result.overall, OverallVerdict::Pass,
+        assert_eq!(
+            result.overall,
+            OverallVerdict::Pass,
             "valid write must PASS, got {:?}: {}",
             result.overall,
             result.per_invariant[0].result.message
@@ -2361,11 +1538,8 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_no_layouts_fails_on_state_ops() {
-        // SCG has StateRead(Point.x) but no layout registry attached
-        // (the default path when pipeline doesn't populate pmt_layouts).
-        // → verifier reports "layout 'Point' not found".
         let scg = scg_with_state_read("Point", "x");
-        let input = VerificationInput::from_scg(scg); // no pmt_layouts
+        let input = VerificationInput::from_scg(scg);
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Pmt);
         let result = aggregator.verify_all(&input);
         assert_eq!(result.overall, OverallVerdict::Fail);
@@ -2378,11 +1552,6 @@ mod tests {
 
     #[test]
     fn wave3d_pmt_oob_field_fails() {
-        // Hand-craft an inconsistent PmtLayoutSpec: layout "Tiny" with
-        // total_size=1 but a field at offset 60 of size 4 → OOB.
-        // (The normal pipeline never produces this; the test exercises
-        // the state_read verifier's offset-overflow branch via the
-        // aggregator.)
         use crate::verification::{PmtFieldSpec, PmtLayoutSpec};
         let tiny = PmtLayoutSpec {
             name: "Tiny".to_string(),

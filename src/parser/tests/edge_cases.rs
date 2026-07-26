@@ -23,7 +23,11 @@ fn assert_no_panic(source: &str) {
         })
         .expect("failed to spawn parser thread");
     let result = handle.join().expect("parser thread panicked");
-    assert!(result.is_ok(), "parser panicked on input: {:?}", src_for_msg);
+    assert!(
+        result.is_ok(),
+        "parser panicked on input: {:?}",
+        src_for_msg
+    );
 }
 
 /// Helper: assert that parsing `source` succeeds (Ok with or without errors).
@@ -695,7 +699,10 @@ fn test_repd_as_bd_directive_still_works() {
                     assert_eq!(d.name, "Ordered");
                     assert!(d.expr.is_some());
                 }
-                other => panic!("expected BdDirective for `reld(Ordered, y + 1);`, got {:?}", other),
+                other => panic!(
+                    "expected BdDirective for `reld(Ordered, y + 1);`, got {:?}",
+                    other
+                ),
             }
         }
         other => panic!("expected FnDef, got {:?}", other),

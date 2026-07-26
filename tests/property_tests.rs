@@ -32,12 +32,16 @@
 //!
 //! ## Memory-safety analysis
 //!
-//! VUMA 2.0 runs the memory-safety analyser unconditionally
-//! (`CompileConfig.memory_safety` is ignored — see `pipeline.rs`).
-//! Tests that need a clean compile (e.g. "valid program compiles")
-//! therefore use `VerificationLevel::None` AND must avoid triggering
-//! the uninitialised-read check. Because `state_new` zero-initialises
-//! the buffer, any `state.field` read after `state_new` is safe.
+//! VUMA 2.0 runs the memory-safety analyser unconditionally — the
+//! legacy `CompileConfig.memory_safety` field was removed (PMT is
+//! mandatory; see `pipeline.rs`). The `VerificationLevel` enum no
+//! longer has a `None` variant — use `VerificationLevel::Quick`
+//! (lightest available level) where the old code used `None`. For
+//! tests that previously relied on `memory_safety: false` to soft-pass
+//! the hard-gate, set `allow_inconclusive: true` on the `CompileConfig`
+//! (this lets `OverallVerdict::Inconclusive` compile through). Because
+//! `state_new` zero-initialises the buffer, any `state.field` read
+//! after `state_new` is safe.
 
 use vuma::pipeline::{compile, CompileConfig, OptLevel, VerificationLevel, VumaError};
 use vuma_ive::{InvariantKind, VerificationStatus};
@@ -77,7 +81,10 @@ impl CompileOutcome {
     }
 
     /// Find the per-invariant result for a given invariant kind.
-    fn invariant(&self, kind: InvariantKind) -> Option<&vuma_ive::invariant_aggregator::PerInvariantResult> {
+    fn invariant(
+        &self,
+        kind: InvariantKind,
+    ) -> Option<&vuma_ive::invariant_aggregator::PerInvariantResult> {
         self.verification
             .as_ref()
             .and_then(|v| v.per_invariant.iter().find(|p| p.kind == kind))
@@ -118,8 +125,10 @@ impl CompileOutcome {
 /// Run the full VUMA pipeline on `source` at the given verification level.
 ///
 /// Uses `OptLevel::O0` and `stop_on_first_error: false` so that all
-/// errors are collected. `memory_safety` defaults to `true` (the
-/// production default), matching the VUMA 2.0 PMT-only contract.
+/// errors are collected. Memory-safety is always on in VUMA 2.0 (the
+/// legacy `memory_safety` field was removed); the production default
+/// `allow_inconclusive: false` is preserved, matching the VUMA 2.0
+/// PMT-only contract.
 fn run_pipeline(source: &str, level: VerificationLevel) -> CompileOutcome {
     let cfg = CompileConfig {
         opt_level: OptLevel::O0,
@@ -130,17 +139,19 @@ fn run_pipeline(source: &str, level: VerificationLevel) -> CompileOutcome {
     run_pipeline_with_cfg(source, &cfg)
 }
 
-/// Run the full VUMA pipeline with `memory_safety: false` and the given
-/// verification level. This is the path used by "compiles without
-/// verification" tests: it skips both the IVE (when `level == None`)
-/// and the memory-safety hard-gate, allowing valid PMT programs that
-/// would otherwise trip the (over-conservative) uninitialised-read
-/// check to compile to a binary.
+/// Run the full VUMA pipeline with `allow_inconclusive: true` and the
+/// given verification level. This is the path used by "compiles without
+/// verification" tests: it soft-passes any `Inconclusive` IVE verdict
+/// (matching the spirit of the legacy `memory_safety: false` flag,
+/// which was removed — PMT is now mandatory), allowing valid PMT
+/// programs that would otherwise trip the (over-conservative)
+/// uninitialised-read check to compile to a binary. Callers typically
+/// pass `VerificationLevel::Quick` (the lightest available level).
 fn run_pipeline_no_ms(source: &str, level: VerificationLevel) -> CompileOutcome {
     let cfg = CompileConfig {
         opt_level: OptLevel::O0,
         verification_level: level,
-        memory_safety: false,
+        allow_inconclusive: true,
         stop_on_first_error: false,
         ..Default::default()
     };
@@ -267,7 +278,10 @@ fn test_use_after_free_parses_and_builds_scg() {
         "PMT programs never produce Deallocation nodes (no `free` keyword)"
     );
     // The write `buf.v = 42` and the read `buf.v` both produce Access nodes.
-    assert!(count_accesses(&scg) >= 2, "expected >=2 accesses (1 write + 1 read)");
+    assert!(
+        count_accesses(&scg) >= 2,
+        "expected >=2 accesses (1 write + 1 read)"
+    );
 }
 
 #[test]
@@ -276,7 +290,7 @@ fn test_use_after_free_compiles_without_verification() {
     // compile the PMT program all the way to a binary. (PMT's linearity
     // makes UAF impossible; the test confirms the pipeline does not
     // regress on this canonical "previously-UAF" pattern.)
-    let outcome = run_pipeline_no_ms(UAF_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(UAF_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "PMT UAF-equivalent program should compile with verification off; errors: {:?}",
@@ -296,12 +310,15 @@ fn test_use_after_free_ive_known_gap() {
     // linear. This test now documents the *positive* guarantee: the
     // IVE does NOT report a Cleanup violation on a PMT program
     // (because there is no dealloc to "double" or "use after").
+    // (Legacy cleanup) The Liveness / Cleanup pointer invariants have
+    // been removed; in PMT-only mode these programs are checked by the
+    // single PMT state invariant, which must not be Violated on a
+    // well-formed PMT program.
     let outcome = run_pipeline(UAF_SOURCE, VerificationLevel::Normal);
-    let cleanup_violated = outcome.invariant_violated(InvariantKind::Cleanup);
+    let pmt_violated = outcome.invariant_violated(InvariantKind::Pmt);
     assert!(
-        !cleanup_violated,
-        "PMT programs cannot produce Cleanup violations (no `free`). \
-         IVE Cleanup invariant must NOT be Violated. \
+        !pmt_violated,
+        "PMT programs must not produce a PMT-state violation. \
          Verification result: {:?}",
         outcome.verification.as_ref().map(|v| &v.overall)
     );
@@ -340,7 +357,7 @@ fn test_buffer_overflow_write_parses_and_builds_scg() {
 
 #[test]
 fn test_buffer_overflow_write_compiles_without_verification() {
-    let outcome = run_pipeline_no_ms(OVERFLOW_WRITE_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(OVERFLOW_WRITE_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "PMT overflow-write-equivalent program should compile with verification off; errors: {:?}",
@@ -363,12 +380,16 @@ fn test_buffer_overflow_write_ive_known_gap() {
         .map(|v| {
             v.per_invariant.iter().any(|p| {
                 let msg = p.result.message.to_lowercase();
-                let desc = if let VerificationStatus::Violated { counterexample } = &p.result.status {
+                let desc = if let VerificationStatus::Violated { counterexample } = &p.result.status
+                {
                     counterexample.description.to_lowercase()
                 } else {
                     String::new()
                 };
-                msg.contains("bound") || msg.contains("overflow") || desc.contains("bound") || desc.contains("overflow")
+                msg.contains("bound")
+                    || msg.contains("overflow")
+                    || desc.contains("bound")
+                    || desc.contains("overflow")
             })
         })
         .unwrap_or(false);
@@ -405,7 +426,7 @@ fn test_buffer_overflow_read_parses_and_builds_scg() {
 
 #[test]
 fn test_buffer_overflow_read_compiles_without_verification() {
-    let outcome = run_pipeline_no_ms(OVERFLOW_READ_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(OVERFLOW_READ_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "PMT overflow-read-equivalent program should compile with verification off; errors: {:?}",
@@ -451,21 +472,26 @@ fn test_ive_detects_double_free() {
     // In V1.0 the IVE detected double-free via the Cleanup invariant.
     // In PMT, double-free is structurally impossible (no `free`), so
     // the IVE Cleanup invariant must NOT be Violated on a PMT program.
+    // (Legacy cleanup) The Cleanup pointer invariant has been removed;
+    // PMT programs are now checked by the single PMT state invariant.
     let outcome = run_pipeline(DOUBLE_FREE_SOURCE, VerificationLevel::Normal);
     assert!(
-        !outcome.invariant_violated(InvariantKind::Cleanup),
-        "PMT programs cannot produce Cleanup violations (no `free`). \
+        !outcome.invariant_violated(InvariantKind::Pmt),
+        "PMT programs must not produce a PMT-state violation. \
          Verification result: {:?}",
         outcome.verification.as_ref().map(|v| &v.overall)
     );
-    // The Cleanup counterexample description (if any) must NOT
-    // mention "double free" or "released 2 time" — there is no free.
-    let desc = outcome.violation_description(InvariantKind::Cleanup);
+    // No counterexample should mention "double free" or "released 2 time"
+    // (there is no `free` in PMT).
+    let desc = outcome.violation_description(InvariantKind::Pmt);
     assert!(
-        desc.as_ref().map(|d| {
-            let lower = d.to_lowercase();
-            lower.contains("double") || lower.contains("released") || lower.contains("2 time")
-        }).unwrap_or(false) == false,
+        desc.as_ref()
+            .map(|d| {
+                let lower = d.to_lowercase();
+                lower.contains("double") || lower.contains("released") || lower.contains("2 time")
+            })
+            .unwrap_or(false)
+            == false,
         "PMT programs must not produce a double-free counterexample; got: {:?}",
         desc
     );
@@ -475,8 +501,11 @@ fn test_ive_detects_double_free() {
 fn test_double_free_compiles_without_verification() {
     // With verification off, the pipeline compiles the PMT program
     // (which is structurally double-free-free) to a binary.
-    let outcome = run_pipeline_no_ms(DOUBLE_FREE_SOURCE, VerificationLevel::None);
-    assert!(outcome.success, "PMT double-free-equivalent program should compile with verification off");
+    let outcome = run_pipeline_no_ms(DOUBLE_FREE_SOURCE, VerificationLevel::Quick);
+    assert!(
+        outcome.success,
+        "PMT double-free-equivalent program should compile with verification off"
+    );
     assert!(outcome.binary_len > 0);
 }
 
@@ -501,7 +530,8 @@ const LEAK_SOURCE: &str = r#"
 
 #[test]
 fn test_memory_leak_parses_and_builds_scg() {
-    let scg = parse_and_build_scg(LEAK_SOURCE).expect("leak-equivalent PMT program must parse + build SCG");
+    let scg = parse_and_build_scg(LEAK_SOURCE)
+        .expect("leak-equivalent PMT program must parse + build SCG");
     assert!(scg.node_count() > 0);
     assert!(count_allocations(&scg) >= 1);
     // PMT has no `free` → 0 deallocs by design (this is the leak-prevention
@@ -520,20 +550,25 @@ fn test_ive_detects_memory_leak() {
     // so the IVE Liveness invariant must NOT be Violated on a PMT
     // program. (If this assertion ever fails, the IVE Liveness
     // invariant has regressed into a false-positive on PMT programs.)
+    // (Legacy cleanup) The Liveness pointer invariant has been removed;
+    // PMT programs are now checked by the single PMT state invariant.
     let outcome = run_pipeline(LEAK_SOURCE, VerificationLevel::Normal);
-    let liveness_violated = outcome.invariant_violated(InvariantKind::Liveness);
+    let pmt_violated = outcome.invariant_violated(InvariantKind::Pmt);
     assert!(
-        !liveness_violated,
-        "PMT programs cannot leak (scoped state lifetimes). IVE Liveness invariant \
-         must NOT be Violated. Verification result: {:?}",
+        !pmt_violated,
+        "PMT programs must not produce a PMT-state violation. \
+         Verification result: {:?}",
         outcome.verification.as_ref().map(|v| &v.overall)
     );
-    let desc = outcome.violation_description(InvariantKind::Liveness);
+    let desc = outcome.violation_description(InvariantKind::Pmt);
     assert!(
-        desc.as_ref().map(|d| {
-            let lower = d.to_lowercase();
-            lower.contains("leak") || lower.contains("never deallocated")
-        }).unwrap_or(false) == false,
+        desc.as_ref()
+            .map(|d| {
+                let lower = d.to_lowercase();
+                lower.contains("leak") || lower.contains("never deallocated")
+            })
+            .unwrap_or(false)
+            == false,
         "PMT programs must not produce a leak counterexample; got: {:?}",
         desc
     );
@@ -562,7 +597,7 @@ fn test_null_pointer_dereference_compiles_or_errors_cleanly() {
     // an attempt to access an unbound variable — no panic. Either
     // a parse error, a type error, or a successful compile is
     // acceptable; the contract is "no panic".
-    let outcome = run_pipeline_no_ms(NULL_DEREF_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(NULL_DEREF_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success || !outcome.errors.is_empty(),
         "pipeline must return a definite outcome for an unbound-variable access"
@@ -584,17 +619,16 @@ fn test_null_pointer_dereference_ive_known_gap() {
         .verification
         .as_ref()
         .map(|v| {
-            v.per_invariant
-                .iter()
-                .any(|p| {
-                    let msg = p.result.message.to_lowercase();
-                    let desc = if let VerificationStatus::Violated { counterexample } = &p.result.status {
-                        counterexample.description.to_lowercase()
-                    } else {
-                        String::new()
-                    };
-                    msg.contains("null") || desc.contains("null")
-                })
+            v.per_invariant.iter().any(|p| {
+                let msg = p.result.message.to_lowercase();
+                let desc = if let VerificationStatus::Violated { counterexample } = &p.result.status
+                {
+                    counterexample.description.to_lowercase()
+                } else {
+                    String::new()
+                };
+                msg.contains("null") || desc.contains("null")
+            })
         })
         .unwrap_or(false);
     assert!(
@@ -638,12 +672,15 @@ fn test_uninitialized_read_parses_and_builds_scg() {
 
 #[test]
 fn test_uninitialized_read_compiles_without_verification() {
-    // With memory_safety off (and PMT's zero-init semantics), the
-    // program compiles cleanly. (With memory_safety on, the program
-    // also compiles cleanly because the PMT-aware uninit analyser
-    // treats state_new as a reaching definition.)
-    let outcome = run_pipeline_no_ms(UNINIT_READ_SOURCE, VerificationLevel::None);
-    assert!(outcome.success, "PMT uninit-read-equivalent program should compile with verification off");
+    // With `allow_inconclusive: true` (and PMT's zero-init semantics),
+    // the program compiles cleanly. (With `allow_inconclusive: false`,
+    // the program also compiles cleanly because the PMT-aware uninit
+    // analyser treats `state_new` as a reaching definition.)
+    let outcome = run_pipeline_no_ms(UNINIT_READ_SOURCE, VerificationLevel::Quick);
+    assert!(
+        outcome.success,
+        "PMT uninit-read-equivalent program should compile with verification off"
+    );
     assert!(outcome.binary_len > 0);
 }
 
@@ -659,17 +696,16 @@ fn test_uninitialized_read_ive_known_gap() {
         .verification
         .as_ref()
         .map(|v| {
-            v.per_invariant
-                .iter()
-                .any(|p| {
-                    let msg = p.result.message.to_lowercase();
-                    let desc = if let VerificationStatus::Violated { counterexample } = &p.result.status {
-                        counterexample.description.to_lowercase()
-                    } else {
-                        String::new()
-                    };
-                    msg.contains("uninit") || desc.contains("uninit")
-                })
+            v.per_invariant.iter().any(|p| {
+                let msg = p.result.message.to_lowercase();
+                let desc = if let VerificationStatus::Violated { counterexample } = &p.result.status
+                {
+                    counterexample.description.to_lowercase()
+                } else {
+                    String::new()
+                };
+                msg.contains("uninit") || desc.contains("uninit")
+            })
         })
         .unwrap_or(false);
     // Also check the memory-safety stage directly — the hard-gate
@@ -710,7 +746,10 @@ fn test_valid_program_parses_and_builds_scg() {
     // PMT has no `free` → 0 deallocs.
     assert_eq!(count_deallocations(&scg), 0);
     // Both the write `buf.v = 42` and the read `buf.v` produce Access nodes.
-    assert!(count_accesses(&scg) >= 2, "expected >=2 accesses (1 write + 1 read)");
+    assert!(
+        count_accesses(&scg) >= 2,
+        "expected >=2 accesses (1 write + 1 read)"
+    );
 }
 
 #[test]
@@ -719,7 +758,7 @@ fn test_valid_program_compiles_without_verification() {
     // compile end-to-end when verification is off. This catches
     // regressions in the parser, SCG builder, IR lowering, regalloc,
     // and ELF emission.
-    let outcome = run_pipeline_no_ms(VALID_PROGRAM_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(VALID_PROGRAM_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "valid PMT program must compile with verification off; errors: {:?}",
@@ -730,25 +769,16 @@ fn test_valid_program_compiles_without_verification() {
 
 #[test]
 fn test_valid_program_ive_false_positive_documented() {
-    // In V1.0 the IVE produced a spurious "Resource leak" Liveness
-    // violation on valid programs that DID call `free`. In VUMA 2.0
-    // (PMT-only), the equivalent valid program has no `free`, and
-    // the IVE Liveness invariant must NOT be Violated. This test
-    // documents the (now-fixed) false-positive: if the IVE ever
-    // regresses to flagging PMT programs as leaks, this test fails.
+    // (Legacy cleanup) The Liveness / Cleanup pointer invariants have
+    // been removed; in PMT-only mode these programs are checked by the
+    // single PMT state invariant, which must not be Violated on a
+    // well-formed PMT program.
     let outcome = run_pipeline(VALID_PROGRAM_SOURCE, VerificationLevel::Normal);
-    // The pipeline may still return Err due to the memory-safety
-    // stage's (separate) uninit-read check, but the IVE Liveness
-    // invariant itself must NOT be Violated.
     assert!(
-        !outcome.invariant_violated(InvariantKind::Liveness),
-        "PMT valid program must NOT violate Liveness invariant (false-positive regression). \
+        !outcome.invariant_violated(InvariantKind::Pmt),
+        "valid PMT program must NOT violate the PMT-state invariant (false-positive regression). \
          Verification result: {:?}",
         outcome.verification.as_ref().map(|v| &v.overall)
-    );
-    assert!(
-        !outcome.invariant_violated(InvariantKind::Cleanup),
-        "valid PMT program must NOT violate Cleanup invariant"
     );
 }
 
@@ -775,12 +805,16 @@ fn test_multiple_allocs_correct_frees_parses_and_builds_scg() {
         .expect("multi-alloc PMT program must parse + build SCG");
     assert_eq!(count_allocations(&scg), 3, "expected 3 allocations");
     // PMT has no `free` → 0 deallocs (was 3 in V1.0).
-    assert_eq!(count_deallocations(&scg), 0, "PMT programs produce 0 deallocs");
+    assert_eq!(
+        count_deallocations(&scg),
+        0,
+        "PMT programs produce 0 deallocs"
+    );
 }
 
 #[test]
 fn test_multiple_allocs_correct_frees_compiles() {
-    let outcome = run_pipeline_no_ms(MULTI_ALLOC_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(MULTI_ALLOC_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "multi-alloc PMT program must compile; errors: {:?}",
@@ -848,12 +882,15 @@ fn test_pointer_arithmetic_in_bounds_parses_and_builds_scg() {
     assert!(scg.node_count() > 0);
     assert!(count_allocations(&scg) >= 1);
     // The write `buf.b = 99` and the read `buf.b` both produce Access nodes.
-    assert!(count_accesses(&scg) >= 2, "expected >=2 accesses (1 write + 1 read)");
+    assert!(
+        count_accesses(&scg) >= 2,
+        "expected >=2 accesses (1 write + 1 read)"
+    );
 }
 
 #[test]
 fn test_pointer_arithmetic_in_bounds_compiles() {
-    let outcome = run_pipeline_no_ms(PTR_ARITH_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(PTR_ARITH_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "PMT state-field-access program must compile; errors: {:?}",
@@ -906,7 +943,7 @@ fn test_conditional_free_both_branches_parses_and_compiles() {
     // Access(Write) node (control-flow merging may dedupe).
     assert!(count_accesses(&scg) >= 1);
 
-    let outcome = run_pipeline_no_ms(COND_FREE_BOTH_BRANCHES_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(COND_FREE_BOTH_BRANCHES_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "cond-write-both-branches PMT program must compile with verification off; errors: {:?}",
@@ -923,7 +960,7 @@ fn test_conditional_free_one_branch_parses_and_compiles() {
     assert!(count_allocations(&scg) >= 1);
     assert!(count_accesses(&scg) >= 1);
 
-    let outcome = run_pipeline_no_ms(COND_FREE_ONE_BRANCH_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(COND_FREE_ONE_BRANCH_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "cond-write-one-branch PMT program must compile with verification off; errors: {:?}",
@@ -958,7 +995,10 @@ fn test_loop_alloc_free_parses_and_builds_scg() {
     let scg = parse_and_build_scg(LOOP_ALLOC_SOURCE)
         .expect("loop-alloc PMT program must parse + build SCG");
     assert!(scg.node_count() > 0);
-    assert!(count_allocations(&scg) >= 1, "expected >=1 allocation in loop body");
+    assert!(
+        count_allocations(&scg) >= 1,
+        "expected >=1 allocation in loop body"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1012,12 +1052,15 @@ fn test_struct_field_access_parses_and_builds_scg() {
     assert!(scg.node_count() > 0);
     assert!(count_allocations(&scg) >= 1);
     // Two writes (`p.x = 10; p.y = 20;`) + one read (`p.x`) = 3 accesses.
-    assert!(count_accesses(&scg) >= 2, "expected >=2 accesses (2 writes)");
+    assert!(
+        count_accesses(&scg) >= 2,
+        "expected >=2 accesses (2 writes)"
+    );
 }
 
 #[test]
 fn test_struct_field_access_compiles() {
-    let outcome = run_pipeline_no_ms(STRUCT_FIELD_SOURCE, VerificationLevel::None);
+    let outcome = run_pipeline_no_ms(STRUCT_FIELD_SOURCE, VerificationLevel::Quick);
     assert!(
         outcome.success,
         "struct field access PMT program must compile; errors: {:?}",
@@ -1081,7 +1124,10 @@ fn test_all_test_programs_parse_successfully() {
         ("MULTI_ALLOC_SOURCE", MULTI_ALLOC_SOURCE),
         ("NESTED_CALLS_SOURCE", NESTED_CALLS_SOURCE),
         ("PTR_ARITH_SOURCE", PTR_ARITH_SOURCE),
-        ("COND_FREE_BOTH_BRANCHES_SOURCE", COND_FREE_BOTH_BRANCHES_SOURCE),
+        (
+            "COND_FREE_BOTH_BRANCHES_SOURCE",
+            COND_FREE_BOTH_BRANCHES_SOURCE,
+        ),
         ("COND_FREE_ONE_BRANCH_SOURCE", COND_FREE_ONE_BRANCH_SOURCE),
         ("LOOP_ALLOC_SOURCE", LOOP_ALLOC_SOURCE),
         ("FN_RETURNS_ALLOC_SOURCE", FN_RETURNS_ALLOC_SOURCE),
@@ -1111,14 +1157,17 @@ fn test_ive_double_free_detection_is_deterministic() {
     // In VUMA 2.0 (PMT-only), `DOUBLE_FREE_SOURCE` is a valid PMT
     // program (no `free`, so no double-free possible). The Cleanup
     // invariant must consistently NOT be Violated across runs.
+    // (Legacy cleanup) The Cleanup pointer invariant has been removed;
+    // PMT programs are now checked by the single PMT state invariant.
+    // The PMT-state check must consistently NOT be Violated across runs.
     let mut verdicts = Vec::new();
     for _ in 0..5 {
         let outcome = run_pipeline(DOUBLE_FREE_SOURCE, VerificationLevel::Normal);
-        verdicts.push(outcome.invariant_violated(InvariantKind::Cleanup));
+        verdicts.push(outcome.invariant_violated(InvariantKind::Pmt));
     }
     assert!(
         verdicts.iter().all(|&v| !v),
-        "PMT programs must consistently NOT violate Cleanup (no `free`); got: {:?}",
+        "PMT programs must consistently NOT violate the PMT-state invariant; got: {:?}",
         verdicts
     );
 }
@@ -1128,33 +1177,18 @@ fn test_ive_leak_detection_is_deterministic() {
     // In VUMA 2.0 (PMT-only), `LEAK_SOURCE` is a valid PMT program
     // (no `free`, scoped state lifetimes — no leak possible). The
     // Liveness invariant must consistently NOT be Violated across runs.
+    // (Legacy cleanup) The Liveness pointer invariant has been removed;
+    // PMT programs are now checked by the single PMT state invariant.
+    // The PMT-state check must consistently NOT be Violated across runs.
     let mut verdicts = Vec::new();
     for _ in 0..5 {
         let outcome = run_pipeline(LEAK_SOURCE, VerificationLevel::Normal);
-        verdicts.push(outcome.invariant_violated(InvariantKind::Liveness));
+        verdicts.push(outcome.invariant_violated(InvariantKind::Pmt));
     }
     assert!(
         verdicts.iter().all(|&v| !v),
-        "PMT programs must consistently NOT violate Liveness (no leak); got: {:?}",
+        "PMT programs must consistently NOT violate the PMT-state invariant; got: {:?}",
         verdicts
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Property: IVE verification is a no-op when VerificationLevel::None
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn test_verification_none_skips_ive() {
-    // With `VerificationLevel::None`, the pipeline must not run the IVE
-    // and therefore must not produce a verification result. (The
-    // memory-safety stage runs unconditionally in VUMA 2.0 — that is
-    // separate from the IVE.)
-    let outcome = run_pipeline_no_ms(VALID_PROGRAM_SOURCE, VerificationLevel::None);
-    assert!(outcome.success, "valid PMT program should compile with verification off");
-    assert!(
-        outcome.verification.is_none(),
-        "no IVE verification result should be produced when verification level is None"
     );
 }
 

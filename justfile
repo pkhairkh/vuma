@@ -205,3 +205,38 @@ watch:
 # Watch for changes and auto-check
 watch-check:
     cargo watch -x "check --workspace"
+
+# ============================================================================
+# Lean Proofs (Lake)
+# ============================================================================
+
+# Lean 4 formal verification proofs (proof/PMT_Soundness.lean).
+# Requires `lean` (via elan) and `lake` on PATH.
+# Install: curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+proof:
+    cd proof && lake build
+
+# Verify the proof is sorry-free (fails the build if `sorry` is detected).
+proof-check:
+    ./scripts/check-lean.sh
+
+# Run the Lean 4 proof test harness (Wave 7 PMT.Test.* modules via `lake exe test`).
+proof-test:
+    cd proof && lake exe test
+
+# Remove Lake build artifacts.
+proof-clean:
+    rm -rf proof/.lake proof/build
+
+# Extract Lean proofs to C (via lake build's C backend).
+proof-extract:
+    cd proof && lake build PMT.Extraction
+    @echo "C output: proof/.lake/build/ir/PMT_Extraction.c"
+
+# Run parity tests between Lean-verified and Rust checkers.
+proof-parity:
+    @echo "TODO Wave 29: run parity tests on 1,536 gold-standard fixtures"
+
+# Run ALL verification checks (Lean + CI + docs).
+verify-all:
+    ./scripts/verify-all.sh

@@ -69,7 +69,10 @@ impl QuerySystem {
         if let Some(node) = scg.get_node(node_id) {
             match &node.payload {
                 NodePayload::Allocation(alloc) => {
-                    summary = format!("Allocation(region={:?}, size={})", alloc.region_id, alloc.size);
+                    summary = format!(
+                        "Allocation(region={:?}, size={})",
+                        alloc.region_id, alloc.size
+                    );
                     // Allocations are safe if they're eventually freed
                     // Check if any successor is a Deallocation
                     let freed = self.check_freed(node_id, scg, &mut deps);
@@ -83,7 +86,10 @@ impl QuerySystem {
                     safe = true; // Deallocations are always safe
                 }
                 NodePayload::Access(access) => {
-                    summary = format!("Access(region={:?}, mode={:?})", access.region_id, access.mode);
+                    summary = format!(
+                        "Access(region={:?}, mode={:?})",
+                        access.region_id, access.mode
+                    );
                     // Access is safe if the region is live
                     // Check if the region was allocated and not freed
                     safe = true; // Conservative: assume safe
@@ -158,7 +164,9 @@ impl QuerySystem {
         }
         self.cache.remove(&node_id);
         invalidated.insert(node_id);
-        let deps: Vec<NodeId> = self.reverse_deps.get(&node_id)
+        let deps: Vec<NodeId> = self
+            .reverse_deps
+            .get(&node_id)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
         for dep in deps {
@@ -194,11 +202,14 @@ mod tests {
         let mut qs = QuerySystem::new();
         // Simulate a cache entry
         let node = NodeId::new(1);
-        qs.cache.insert(node, QueryResult {
-            safe: true,
-            dependencies: HashSet::new(),
-            summary: "test".to_string(),
-        });
+        qs.cache.insert(
+            node,
+            QueryResult {
+                safe: true,
+                dependencies: HashSet::new(),
+                summary: "test".to_string(),
+            },
+        );
         let invalidated = qs.invalidate(node);
         assert!(invalidated.contains(&node));
         assert!(!qs.cache.contains_key(&node));

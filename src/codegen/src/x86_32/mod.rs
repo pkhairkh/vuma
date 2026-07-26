@@ -32,12 +32,11 @@
 //! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
 
 use crate::backend::{
-    AllocatedFunction, AllocatedProgram, Backend,
-    BackendError, TargetInfo, X86_32TargetInfo,
+    AllocatedFunction, AllocatedProgram, Backend, BackendError, TargetInfo, X86_32TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction};
 #[cfg(test)]
 use crate::ir::IRValue;
+use crate::ir::{BinOpKind, CmpKind, IRFunction};
 #[cfg(test)]
 use crate::ir::{CastKind, IRInstr, IRType, UnaryOpKind};
 use std::collections::{HashMap, HashSet};
@@ -84,10 +83,7 @@ impl Gpr {
     /// (R12–R15 don't exist on x86_32 — kept in enum for source compatibility
     /// but are not real registers.)
     pub fn is_callee_saved(&self) -> bool {
-        matches!(
-            self,
-            Gpr::Rbx | Gpr::Rsi | Gpr::Rdi | Gpr::Rbp
-        )
+        matches!(self, Gpr::Rbx | Gpr::Rsi | Gpr::Rdi | Gpr::Rbp)
     }
 
     /// Returns `true` if this register is an integer argument register.
@@ -310,7 +306,8 @@ pub fn encode_mov_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
 /// load.
 pub fn encode_mov_reg_imm64(dst: Gpr, imm: u64) -> Vec<u8> {
     if imm > 0xFFFF_FFFF {
-        vuma_log!(warn, 
+        vuma_log!(
+            warn,
             "encode_mov_reg_imm64: truncating 64-bit immediate {:#x} to low 32 bits \
              ({:#x}) — x86_32 registers cannot hold 64-bit values; \
              the high 32 bits are lost",
@@ -613,7 +610,11 @@ pub fn encode_jcc_rel32(cc: Cc, offset: i32) -> Vec<u8> {
 /// Encode CMOVcc r64, r64 (REX.W + 0F 4x /r)
 pub fn encode_cmovcc_reg_reg(cc: Cc, dst: Gpr, src: Gpr) -> Vec<u8> {
     // x86_32: No REX prefix. CMOVcc r32, r32 = 0F 40+cc /r
-    let code = vec![0x0F, 0x40 + cc as u8, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0x0F,
+        0x40 + cc as u8,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
@@ -762,7 +763,7 @@ pub fn encode_cqo() -> Vec<u8> {
 /// Encode SUB r64, imm32 (REX.W + 81 /5 + imm)
 pub fn encode_sub_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
     let mut code = Vec::with_capacity(7);
-        code.push(0x81);
+    code.push(0x81);
     code.push(modrm(3, 5, dst.encoding() & 7));
     code.extend_from_slice(&imm.to_le_bytes());
     code
@@ -771,7 +772,7 @@ pub fn encode_sub_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
 /// Encode ADD r64, imm32 (REX.W + 81 /0 + imm)
 pub fn encode_add_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
     let mut code = Vec::with_capacity(7);
-        code.push(0x81);
+    code.push(0x81);
     code.push(modrm(3, 0, dst.encoding() & 7));
     code.extend_from_slice(&imm.to_le_bytes());
     code
@@ -798,7 +799,7 @@ pub fn encode_sbb_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
 /// Encode AND r64, imm32 (REX.W + 81 /4 + imm32)
 pub fn encode_and_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
     let mut code = Vec::with_capacity(7);
-        code.push(0x81);
+    code.push(0x81);
     code.push(modrm(3, 4, dst.encoding() & 7)); // /4 is the AND extension
     code.extend_from_slice(&imm.to_le_bytes());
     code
@@ -807,7 +808,7 @@ pub fn encode_and_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
 /// Encode OR r64, imm32 (REX.W + 81 /1 + imm32)
 pub fn encode_or_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
     let mut code = Vec::with_capacity(7);
-        code.push(0x81);
+    code.push(0x81);
     code.push(modrm(3, 1, dst.encoding() & 7)); // /1 is the OR extension
     code.extend_from_slice(&imm.to_le_bytes());
     code
@@ -816,7 +817,7 @@ pub fn encode_or_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
 /// Encode XOR r64, imm32 (REX.W + 81 /6 + imm32)
 pub fn encode_xor_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
     let mut code = Vec::with_capacity(7);
-        code.push(0x81);
+    code.push(0x81);
     code.push(modrm(3, 6, dst.encoding() & 7)); // /6 is the XOR extension
     code.extend_from_slice(&imm.to_le_bytes());
     code
@@ -914,7 +915,7 @@ pub fn encode_mov_reg32_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOVSX r64, byte [r64 + offset] (REX.W + 0F BE /r with memory operand)
 pub fn encode_movsx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-                code.push(0x0F);
+    code.push(0x0F);
     code.push(0xBE);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -923,7 +924,7 @@ pub fn encode_movsx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOVSX r64, word [r64 + offset] (REX.W + 0F BF /r with memory operand)
 pub fn encode_movsx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-                code.push(0x0F);
+    code.push(0x0F);
     code.push(0xBF);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -932,9 +933,9 @@ pub fn encode_movsx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOV word [r64 + offset], r16 (66 89 /r with memory operand)
 pub fn encode_mov_mem16_reg16(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
     let mut code = Vec::new();
-            // 16-bit operand size prefix
+    // 16-bit operand size prefix
     code.push(0x66);
-        code.push(0x89);
+    code.push(0x89);
     encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
     code
 }
@@ -942,7 +943,7 @@ pub fn encode_mov_mem16_reg16(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
 /// Encode MOVZX r64, word [r64 + offset] (REX.W + 0F B7 /r with memory operand)
 pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-                code.push(0x0F);
+    code.push(0x0F);
     code.push(0xB7);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -954,7 +955,12 @@ pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 
 /// Encode MOVD xmm, r32 (66 0F 6E /r) — move 32-bit GPR low dword into XMM.
 pub fn encode_movd_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
-    let code = vec![0x66, 0x0F, 0x6E, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0x66,
+        0x0F,
+        0x6E,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
@@ -964,7 +970,12 @@ pub fn encode_movd_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// `reg = xmm1` (src) and `rm = r/m32` (dst), so the encoding is
 /// `modrm(3, src, dst)` — the opposite of the `MOVD xmm, r/m32` form.
 pub fn encode_movd_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let code = vec![0x66, 0x0F, 0x7E, modrm(3, src.encoding() & 7, dst.encoding() & 7)];
+    let code = vec![
+        0x66,
+        0x0F,
+        0x7E,
+        modrm(3, src.encoding() & 7, dst.encoding() & 7),
+    ];
     code
 }
 
@@ -983,7 +994,7 @@ pub fn encode_movd_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// a memory operand) — see the FP paths in `stack_slot_isel.rs`.
 pub fn encode_movq_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0x66);
+    code.push(0x66);
     code.push(0x0F);
     code.push(0x6E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1003,7 +1014,7 @@ pub fn encode_movq_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// (src) and `rm = r/m` (dst), so the encoding is `modrm(3, src, dst)`.
 pub fn encode_movq_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0x66);
+    code.push(0x66);
     code.push(0x0F);
     code.push(0x7E);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1086,14 +1097,19 @@ pub fn encode_store_imm32_mem_ebp(offset: i32, imm: i32) -> Vec<u8> {
 
 /// Encode CVTSI2SD xmm, r32 (F2 0F 2A /r) — convert signed 32-bit int to f64.
 pub fn encode_cvtsi2sd_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x2A, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x2A,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode CVTSI2SD xmm, r64 (F2 REX.W 0F 2A /r) — convert signed 64-bit int to f64.
 pub fn encode_cvtsi2sd_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0xF2);
+    code.push(0xF2);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1102,14 +1118,19 @@ pub fn encode_cvtsi2sd_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
 
 /// Encode CVTSI2SS xmm, r32 (F3 0F 2A /r) — convert signed 32-bit int to f32.
 pub fn encode_cvtsi2ss_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x2A, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x2A,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode CVTSI2SS xmm, r64 (F3 REX.W 0F 2A /r) — convert signed 64-bit int to f32.
 pub fn encode_cvtsi2ss_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0xF3);
+    code.push(0xF3);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1118,14 +1139,19 @@ pub fn encode_cvtsi2ss_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
 
 /// Encode CVTSD2SI r32, xmm (F2 0F 2D /r) — convert f64 to signed 32-bit int.
 pub fn encode_cvtsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x2D, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x2D,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode CVTSD2SI r64, xmm (F2 REX.W 0F 2D /r) — convert f64 to signed 64-bit int.
 pub fn encode_cvtsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0xF2);
+    code.push(0xF2);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1134,14 +1160,19 @@ pub fn encode_cvtsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 
 /// Encode CVTSS2SI r32, xmm (F3 0F 2D /r) — convert f32 to signed 32-bit int.
 pub fn encode_cvtss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x2D, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x2D,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode CVTSS2SI r64, xmm (F3 REX.W 0F 2D /r) — convert f32 to signed 64-bit int.
 pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0xF3);
+    code.push(0xF3);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1153,7 +1184,12 @@ pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// `encode_cvtsd2si_r32_xmm`; it matches the C-style float->int cast
 /// semantics represented by the IR's `FloatToInt` / `FloatToUInt`.
 pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x2C, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x2C,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
@@ -1161,7 +1197,7 @@ pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// 64-bit int with truncation (toward zero).
 pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0xF2);
+    code.push(0xF2);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1171,7 +1207,12 @@ pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTTSS2SI r32, xmm (F3 0F 2C /r) — convert f32 to signed 32-bit int
 /// with truncation (toward zero).
 pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x2C, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x2C,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
@@ -1179,7 +1220,7 @@ pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// 64-bit int with truncation (toward zero).
 pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-                code.push(0xF3);
+    code.push(0xF3);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1188,73 +1229,133 @@ pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 
 /// Encode CVTSS2SD xmm, xmm (F3 0F 5A /r) — convert f32 to f64 (widen).
 pub fn encode_cvtss2sd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x5A, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x5A,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode CVTSD2SS xmm, xmm (F2 0F 5A /r) — convert f64 to f32 (narrow).
 pub fn encode_cvtsd2ss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x5A, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x5A,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode ADDSD xmm, xmm (F2 0F 58 /r) — add scalar double-precision floats.
 pub fn encode_addsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x58, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x58,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode ADDSS xmm, xmm (F3 0F 58 /r) — add scalar single-precision floats.
 pub fn encode_addss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x58, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x58,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode SUBSD xmm, xmm (F2 0F 5C /r) — subtract scalar double-precision floats.
 pub fn encode_subsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x5C, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x5C,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode SUBSS xmm, xmm (F3 0F 5C /r) — subtract scalar single-precision floats.
 pub fn encode_subss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x5C, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x5C,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode MULSD xmm, xmm (F2 0F 59 /r) — multiply scalar double-precision floats.
 pub fn encode_mulsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x59, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x59,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode MULSS xmm, xmm (F3 0F 59 /r) — multiply scalar single-precision floats.
 pub fn encode_mulss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x59, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x59,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode DIVSD xmm, xmm (F2 0F 5E /r) — divide scalar double-precision floats.
 pub fn encode_divsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x5E, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x5E,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode DIVSS xmm, xmm (F3 0F 5E /r) — divide scalar single-precision floats.
 pub fn encode_divss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x5E, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x5E,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode SQRTSD xmm, xmm (F2 0F 51 /r) — square root of scalar double.
 pub fn encode_sqrtsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF2, 0x0F, 0x51, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF2,
+        0x0F,
+        0x51,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
 /// Encode SQRTSS xmm, xmm (F3 0F 51 /r) — square root of scalar single.
 pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0xF3, 0x0F, 0x51, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0xF3,
+        0x0F,
+        0x51,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
@@ -1262,7 +1363,12 @@ pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
 /// Sets EFLAGS: ZF=1, PF=1, CF=1 if unordered (NaN); otherwise standard
 /// comparison flags (ZF=1 iff equal, CF=1 iff dst < src).
 pub fn encode_ucomisd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
-    let code = vec![0x66, 0x0F, 0x2E, modrm(3, dst.encoding() & 7, src.encoding() & 7)];
+    let code = vec![
+        0x66,
+        0x0F,
+        0x2E,
+        modrm(3, dst.encoding() & 7, src.encoding() & 7),
+    ];
     code
 }
 
@@ -1850,13 +1956,13 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     // Use 64K alignment for virtual addresses to ensure compatibility with
     // QEMU 10.x on hosts with 16K or 64K page sizes (same fix as other backends).
     const FILE_PAGE_SIZE: u32 = 0x1000; // 4 KB — file offset alignment
-    const VADDR_ALIGN: u32 = 0x10000;   // 64 KB — virtual address alignment
+    const VADDR_ALIGN: u32 = 0x10000; // 64 KB — virtual address alignment
 
     let base_addr: u32 = base_addr as u32;
     let bss_size: u32 = bss_size as u32;
-    let elf_header_size: u32 = 52;  // ELF32 header is 52 bytes (not 64!)
-    let phdr_size: u32 = 32;        // ELF32 Phdr is 32 bytes (not 56!)
-    // +1 for PT_GNU_STACK (always present for non-executable stack)
+    let elf_header_size: u32 = 52; // ELF32 header is 52 bytes (not 64!)
+    let phdr_size: u32 = 32; // ELF32 Phdr is 32 bytes (not 56!)
+                             // +1 for PT_GNU_STACK (always present for non-executable stack)
     let num_phdrs: u32 = if bss_size > 0 { 3 } else { 2 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility.
@@ -1878,30 +1984,30 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     elf.extend_from_slice(&[0u8; 7]);
 
     // --- ELF32 header fields (36 bytes, all u32/u16 — no u64!) ---
-    elf.extend_from_slice(&2u16.to_le_bytes());       // e_type = ET_EXEC
-    elf.extend_from_slice(&3u16.to_le_bytes());        // e_machine = EM_386 (not 62!)
-    elf.extend_from_slice(&1u32.to_le_bytes());        // e_version
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&3u16.to_le_bytes()); // e_machine = EM_386 (not 62!)
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry (u32)
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff (u32)
-    elf.extend_from_slice(&0u32.to_le_bytes());        // e_shoff (u32, no section headers)
-    elf.extend_from_slice(&0u32.to_le_bytes());        // e_flags
-    elf.extend_from_slice(&52u16.to_le_bytes());       // e_ehsize (52 for ELF32)
-    elf.extend_from_slice(&32u16.to_le_bytes());       // e_phentsize (32 for ELF32 Phdr)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_shoff (u32, no section headers)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize (52 for ELF32)
+    elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize (32 for ELF32 Phdr)
     elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes()); // e_phnum
-    elf.extend_from_slice(&40u16.to_le_bytes());       // e_shentsize (40 for ELF32 Shdr)
-    elf.extend_from_slice(&0u16.to_le_bytes());        // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes());        // e_shstrndx
+    elf.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize (40 for ELF32 Shdr)
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD .text (PF_R | PF_X) ---
     // ELF32 Phdr field order: p_type, p_offset, p_vaddr, p_paddr,
     //                         p_filesz, p_memsz, p_flags, p_align
-    elf.extend_from_slice(&1u32.to_le_bytes());        // p_type = PT_LOAD
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset (u32)
-    elf.extend_from_slice(&text_vaddr.to_le_bytes());  // p_vaddr (u32)
-    elf.extend_from_slice(&text_vaddr.to_le_bytes());  // p_paddr (u32)
-    elf.extend_from_slice(&text_size.to_le_bytes());   // p_filesz (u32)
-    elf.extend_from_slice(&text_size.to_le_bytes());   // p_memsz (u32)
-    elf.extend_from_slice(&5u32.to_le_bytes());        // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&text_vaddr.to_le_bytes()); // p_vaddr (u32)
+    elf.extend_from_slice(&text_vaddr.to_le_bytes()); // p_paddr (u32)
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz (u32)
+    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz (u32)
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align (u32)
 
     // --- Program Header 2: LOAD .bss (PF_R | PF_W) ---
@@ -1909,26 +2015,26 @@ fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     // after the text segment to avoid sharing a host page with text.
     if bss_size > 0 {
         let bss_vaddr: u32 = (text_vaddr + text_size).div_ceil(VADDR_ALIGN) * VADDR_ALIGN;
-        elf.extend_from_slice(&1u32.to_le_bytes());        // p_type = PT_LOAD
-        elf.extend_from_slice(&0u32.to_le_bytes());        // p_offset (no file content)
-        elf.extend_from_slice(&bss_vaddr.to_le_bytes());   // p_vaddr (u32)
-        elf.extend_from_slice(&bss_vaddr.to_le_bytes());   // p_paddr (u32)
-        elf.extend_from_slice(&0u32.to_le_bytes());        // p_filesz (BSS is zero-filled)
-        elf.extend_from_slice(&bss_size.to_le_bytes());    // p_memsz (u32)
-        elf.extend_from_slice(&6u32.to_le_bytes());        // p_flags = PF_R | PF_W
+        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        elf.extend_from_slice(&0u32.to_le_bytes()); // p_offset (no file content)
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_vaddr (u32)
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_paddr (u32)
+        elf.extend_from_slice(&0u32.to_le_bytes()); // p_filesz (BSS is zero-filled)
+        elf.extend_from_slice(&bss_size.to_le_bytes()); // p_memsz (u32)
+        elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
         elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align (u32)
     }
 
     // --- Program Header: PT_GNU_STACK (non-executable stack) ---
     // ELF32 Phdr: p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align
     elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
-    elf.extend_from_slice(&0u32.to_le_bytes());        // p_offset
-    elf.extend_from_slice(&0u32.to_le_bytes());        // p_vaddr
-    elf.extend_from_slice(&0u32.to_le_bytes());        // p_paddr
-    elf.extend_from_slice(&0u32.to_le_bytes());        // p_filesz
-    elf.extend_from_slice(&0u32.to_le_bytes());        // p_memsz
-    elf.extend_from_slice(&6u32.to_le_bytes());        // p_flags = PF_R | PF_W (no PF_X)
-    elf.extend_from_slice(&0x4u32.to_le_bytes());      // p_align
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W (no PF_X)
+    elf.extend_from_slice(&0x4u32.to_le_bytes()); // p_align
 
     // --- Padding + Code section ---
     while (elf.len() as u32) < text_offset {
@@ -1994,12 +2100,12 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
-        // push edx (save count before clobbering)
-        code.extend(encode_push(Gpr::Rdx));       // push count
-        // push esi (save buf)
-        code.extend(encode_push(Gpr::Rsi));       // push buf
-        // mov ebx, edi (fd)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
+                                            // push edx (save count before clobbering)
+        code.extend(encode_push(Gpr::Rdx)); // push count
+                                            // push esi (save buf)
+        code.extend(encode_push(Gpr::Rsi)); // push buf
+                                            // mov ebx, edi (fd)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         // pop ecx (buf)
         code.extend(encode_pop(Gpr::Rcx));
@@ -2007,8 +2113,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         // mov eax, 4 (sys_write)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 4));
-        code.extend(encode_syscall());             // int 0x80
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_syscall()); // int 0x80
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("write".to_string(), code));
     }
@@ -2019,7 +2125,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_push(Gpr::Rdx));
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
@@ -2027,7 +2133,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("read".to_string(), code));
     }
@@ -2038,7 +2144,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_push(Gpr::Rdx));
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
@@ -2046,7 +2152,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 5));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("open".to_string(), code));
     }
@@ -2057,11 +2163,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 6));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("close".to_string(), code));
     }
@@ -2073,11 +2179,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // but we keep the pattern uniform for safety).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX (dead code)
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX (dead code)
         code.extend(encode_int3()); // safety guard (exit never returns)
         stubs.push(("exit".to_string(), code));
     }
@@ -2088,11 +2194,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 10));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("unlink".to_string(), code));
     }
@@ -2108,21 +2214,21 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // heap allocation (not stack allocation via Alloc instruction).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                     // save EBX (callee-saved, outermost)
-        // Save EBP (frame pointer)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+                                            // Save EBP (frame pointer)
         code.extend(encode_push(Gpr::Rbp));
         // mmap2(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx));    // EBX = 0 (addr = NULL)
-        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rdi));    // ECX = length = size
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));         // EDX = PROT_READ|PROT_WRITE
-        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22));      // ESI = MAP_PRIVATE|MAP_ANONYMOUS
-        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32));     // EDI = fd = -1
-        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp));    // EBP = offset = 0
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));       // EAX = sys_mmap2
+        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx)); // EBX = 0 (addr = NULL)
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rdi)); // ECX = length = size
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3)); // EDX = PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22)); // ESI = MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32)); // EDI = fd = -1
+        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp)); // EBP = offset = 0
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192)); // EAX = sys_mmap2
         code.extend(encode_syscall());
         // Restore EBP (frame pointer)
         code.extend(encode_pop(Gpr::Rbp));
-        code.extend(encode_pop(Gpr::Rbx));                      // restore EBX (callee-saved, outermost)
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX (callee-saved, outermost)
         code.extend(encode_ret());
         stubs.push(("__vuma_alloc".to_string(), code));
     }
@@ -2133,13 +2239,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                     // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rsi));                     // push size
-        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));    // EBX = addr
-        code.extend(encode_pop(Gpr::Rcx));                      // ECX = size
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 91));        // EAX = sys_munmap
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rsi)); // push size
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = size
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 91)); // EAX = sys_munmap
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                      // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("__vuma_free".to_string(), code));
     }
@@ -2152,17 +2258,17 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));     // save EBX (callee-saved, outermost)
-        // Save oldact (EDX) before clobbering
-        code.extend(encode_push(Gpr::Rdx));     // push oldact
-        code.extend(encode_push(Gpr::Rsi));     // push act
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+                                            // Save oldact (EDX) before clobbering
+        code.extend(encode_push(Gpr::Rdx)); // push oldact
+        code.extend(encode_push(Gpr::Rsi)); // push act
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = signum
-        code.extend(encode_pop(Gpr::Rcx));      // ECX = act
-        code.extend(encode_pop(Gpr::Rdx));      // EDX = oldact
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = act
+        code.extend(encode_pop(Gpr::Rdx)); // EDX = oldact
         code.extend(encode_mov_reg_imm32(Gpr::Rsi, 8)); // ESI = sigsetsize = 8
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 174)); // sys_rt_sigaction
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));      // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("sigaction".to_string(), code));
     }
@@ -2173,11 +2279,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 27));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("alarm".to_string(), code));
     }
@@ -2188,11 +2294,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 42));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("pipe".to_string(), code));
     }
@@ -2203,13 +2309,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_pop(Gpr::Rcx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 63));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("dup2".to_string(), code));
     }
@@ -2218,10 +2324,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // EBX is callee-saved on i386 SysV ABI; save/restore for uniformity.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 20));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("getpid".to_string(), code));
     }
@@ -2230,10 +2336,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // EBX is callee-saved on i386 SysV ABI; save/restore for uniformity.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("fork".to_string(), code));
     }
@@ -2244,7 +2350,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rdx));
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
@@ -2252,7 +2358,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 11));
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));        // restore EBX (only reached on execve failure)
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX (only reached on execve failure)
         code.extend(encode_ret());
         stubs.push(("execve".to_string(), code));
     }
@@ -2264,17 +2370,17 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));     // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rcx));     // push rusage
-        code.extend(encode_push(Gpr::Rdx));     // push options
-        code.extend(encode_push(Gpr::Rsi));     // push wstatus
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rcx)); // push rusage
+        code.extend(encode_push(Gpr::Rdx)); // push options
+        code.extend(encode_push(Gpr::Rsi)); // push wstatus
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = pid
-        code.extend(encode_pop(Gpr::Rcx));      // ECX = wstatus
-        code.extend(encode_pop(Gpr::Rdx));      // EDX = options
-        code.extend(encode_pop(Gpr::Rsi));      // ESI = rusage
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = wstatus
+        code.extend(encode_pop(Gpr::Rdx)); // EDX = options
+        code.extend(encode_pop(Gpr::Rsi)); // ESI = rusage
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 114)); // sys_wait4
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));      // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("wait4".to_string(), code));
     }
@@ -2287,14 +2393,14 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rsi));                  // push wstatus
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rsi)); // push wstatus
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = pid
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = wstatus
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = wstatus
         code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // ESI = 0 (rusage = NULL)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 114));    // EAX = sys_wait4
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 114)); // EAX = sys_wait4
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("waitpid".to_string(), code));
     }
@@ -2325,35 +2431,35 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // all subsequent local variable access reads garbage → SIGSEGV.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        // Save EBP (frame pointer) — will be restored after the syscall.
-        code.extend(encode_push(Gpr::Rbp));                  // push EBP
-        // Save addr in EBX (target register) before we lose it.
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+                                            // Save EBP (frame pointer) — will be restored after the syscall.
+        code.extend(encode_push(Gpr::Rbp)); // push EBP
+                                            // Save addr in EBX (target register) before we lose it.
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
-        // Push ECX (flags) so we can later pop it into ESI.
-        code.extend(encode_push(Gpr::Rcx));                  // push flags
-        // Push ESI (length) so we can later pop it into ECX.
-        code.extend(encode_push(Gpr::Rsi));                  // push length
-        // Stack now: [ESP]=length, [ESP+4]=flags, [ESP+8]=saved_EBP,
-        //            [ESP+12]=saved_EBX, [ESP+16]=retaddr,
-        //            [ESP+20]=fd, [ESP+24]=offset
-        // Compute EBP = offset_pages = offset_bytes >> 12
+                                                             // Push ECX (flags) so we can later pop it into ESI.
+        code.extend(encode_push(Gpr::Rcx)); // push flags
+                                            // Push ESI (length) so we can later pop it into ECX.
+        code.extend(encode_push(Gpr::Rsi)); // push length
+                                            // Stack now: [ESP]=length, [ESP+4]=flags, [ESP+8]=saved_EBP,
+                                            //            [ESP+12]=saved_EBX, [ESP+16]=retaddr,
+                                            //            [ESP+20]=fd, [ESP+24]=offset
+                                            // Compute EBP = offset_pages = offset_bytes >> 12
         code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 24)); // EAX = offset_bytes
-        // shr EAX, 12
-        code.extend_from_slice(&[0xC1, 0xE8, 0x0C]);         // shr eax, 12
+                                                                 // shr EAX, 12
+        code.extend_from_slice(&[0xC1, 0xE8, 0x0C]); // shr eax, 12
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = offset_pages
-        // Set EDI = fd (was at [ESP+20] after our four pushes)
+                                                             // Set EDI = fd (was at [ESP+20] after our four pushes)
         code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = fd
         code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = fd
-        // Restore length → ECX and flags → ESI from the stack.
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
-        code.extend(encode_pop(Gpr::Rsi));                   // ESI = flags
-        // Syscall number for mmap2 on i386.
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));    // EAX = sys_mmap2
-        code.extend(encode_syscall());                       // int 0x80
-        // Restore EBP (frame pointer) before returning.
-        code.extend(encode_pop(Gpr::Rbp));                   // pop EBP
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX (callee-saved, outermost)
+                                                             // Restore length → ECX and flags → ESI from the stack.
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = length
+        code.extend(encode_pop(Gpr::Rsi)); // ESI = flags
+                                           // Syscall number for mmap2 on i386.
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192)); // EAX = sys_mmap2
+        code.extend(encode_syscall()); // int 0x80
+                                       // Restore EBP (frame pointer) before returning.
+        code.extend(encode_pop(Gpr::Rbp)); // pop EBP
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX (callee-saved, outermost)
         code.extend(encode_ret());
         stubs.push(("mmap".to_string(), code));
     }
@@ -2364,13 +2470,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rsi));                  // push length
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rsi)); // push length
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 91));     // EAX = sys_munmap
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = length
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 91)); // EAX = sys_munmap
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("munmap".to_string(), code));
     }
@@ -2382,13 +2488,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rsi));                  // push type
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rsi)); // push type
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = domain
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = type
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 359));    // EAX = sys_socket (i386)
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = type
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 359)); // EAX = sys_socket (i386)
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("socket".to_string(), code));
     }
@@ -2399,11 +2505,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = flags
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 329));    // EAX = sys_epoll_create1 (i386)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 329)); // EAX = sys_epoll_create1 (i386)
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("epoll_create1".to_string(), code));
     }
@@ -2419,32 +2525,32 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // save/restore it, otherwise the caller's stack frame is corrupted.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        // Save EBP (frame pointer) — will be restored after the syscall.
-        code.extend(encode_push(Gpr::Rbp));                  // push EBP
-        // Save uaddr in EBX (target register) before losing it.
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+                                            // Save EBP (frame pointer) — will be restored after the syscall.
+        code.extend(encode_push(Gpr::Rbp)); // push EBP
+                                            // Save uaddr in EBX (target register) before losing it.
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = uaddr
-        // Push ECX (timeout) and ESI (futex_op) so we can pop them into
-        // the correct registers later.
-        code.extend(encode_push(Gpr::Rcx));                  // push timeout
-        code.extend(encode_push(Gpr::Rsi));                  // push futex_op
-        // Stack: [ESP]=futex_op, [ESP+4]=timeout, [ESP+8]=saved_EBP,
-        //        [ESP+12]=saved_EBX, [ESP+16]=retaddr,
-        //        [ESP+20]=uaddr2, [ESP+24]=val3
-        // Set EBP = val3 (was at [ESP+24] after four pushes)
+                                                             // Push ECX (timeout) and ESI (futex_op) so we can pop them into
+                                                             // the correct registers later.
+        code.extend(encode_push(Gpr::Rcx)); // push timeout
+        code.extend(encode_push(Gpr::Rsi)); // push futex_op
+                                            // Stack: [ESP]=futex_op, [ESP+4]=timeout, [ESP+8]=saved_EBP,
+                                            //        [ESP+12]=saved_EBX, [ESP+16]=retaddr,
+                                            //        [ESP+20]=uaddr2, [ESP+24]=val3
+                                            // Set EBP = val3 (was at [ESP+24] after four pushes)
         code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 24)); // EAX = val3
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = val3
-        // Set EDI = uaddr2 (was at [ESP+20] after four pushes)
+                                                             // Set EDI = uaddr2 (was at [ESP+20] after four pushes)
         code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = uaddr2
         code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = uaddr2
-        // Restore futex_op → ECX and timeout → ESI from the stack.
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = futex_op
-        code.extend(encode_pop(Gpr::Rsi));                   // ESI = timeout
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 240));    // EAX = sys_futex (i386)
+                                                             // Restore futex_op → ECX and timeout → ESI from the stack.
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = futex_op
+        code.extend(encode_pop(Gpr::Rsi)); // ESI = timeout
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 240)); // EAX = sys_futex (i386)
         code.extend(encode_syscall());
         // Restore EBP (frame pointer) before returning.
-        code.extend(encode_pop(Gpr::Rbp));                   // pop EBP
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX (callee-saved, outermost)
+        code.extend(encode_pop(Gpr::Rbp)); // pop EBP
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX (callee-saved, outermost)
         code.extend(encode_ret());
         stubs.push(("futex".to_string(), code));
     }
@@ -2456,15 +2562,15 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rcx));                  // push event
-        code.extend(encode_push(Gpr::Rsi));                  // push op
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rcx)); // push event
+        code.extend(encode_push(Gpr::Rsi)); // push op
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = op
-        code.extend(encode_pop(Gpr::Rsi));                   // ESI = event
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 255));    // EAX = sys_epoll_ctl (i386)
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = op
+        code.extend(encode_pop(Gpr::Rsi)); // ESI = event
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 255)); // EAX = sys_epoll_ctl (i386)
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("epoll_ctl".to_string(), code));
     }
@@ -2476,15 +2582,15 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
-        code.extend(encode_push(Gpr::Rcx));                  // push timeout
-        code.extend(encode_push(Gpr::Rsi));                  // push events
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rcx)); // push timeout
+        code.extend(encode_push(Gpr::Rsi)); // push events
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
-        code.extend(encode_pop(Gpr::Rcx));                   // ECX = events
-        code.extend(encode_pop(Gpr::Rsi));                   // ESI = timeout
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 256));    // EAX = sys_epoll_wait (i386)
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = events
+        code.extend(encode_pop(Gpr::Rsi)); // ESI = timeout
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 256)); // EAX = sys_epoll_wait (i386)
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("epoll_wait".to_string(), code));
     }
@@ -2497,12 +2603,12 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     {
         let mut code = Vec::new();
         // Save callee-saved EBX and EDI (both used by syscall ABI).
-        code.extend(encode_push(Gpr::Rbx));    // save EBX (outermost)
-        code.extend(encode_push(Gpr::Rdi));    // save EDI (for tls arg later)
-        // Push the VUMA args we need to reshuffle:
-        code.extend(encode_push(Gpr::Rcx));    // push ctid
-        code.extend(encode_push(Gpr::Rsi));    // push stack
-        // EBX = flags (from EDI)
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (outermost)
+        code.extend(encode_push(Gpr::Rdi)); // save EDI (for tls arg later)
+                                            // Push the VUMA args we need to reshuffle:
+        code.extend(encode_push(Gpr::Rcx)); // push ctid
+        code.extend(encode_push(Gpr::Rsi)); // push stack
+                                            // EBX = flags (from EDI)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         // ECX = stack (from stack)
         code.extend(encode_pop(Gpr::Rcx));
@@ -2524,10 +2630,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // remaining pushes (EBX, EDI), it's at [ESP+12].
         // Simplified: just load 0 (tls) — rarely used from VUMA.
         code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi)); // EDI = 0 (tls = NULL)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 120));    // sys_clone
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 120)); // sys_clone
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rdi));     // restore EDI
-        code.extend(encode_pop(Gpr::Rbx));     // restore EBX
+        code.extend(encode_pop(Gpr::Rdi)); // restore EDI
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("clone".to_string(), code));
     }
@@ -2541,7 +2647,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         let mut code = Vec::new();
         code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 19)); // EAX = sys_lseek
-        // args: EBX=fd, ECX=offset (low), EDX=whence
+                                                         // args: EBX=fd, ECX=offset (low), EDX=whence
         code.extend(encode_syscall()); // int 0x80
         code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
@@ -2740,22 +2846,29 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // ── Additional missing syscalls (i386 numbers) ──
     // Simple stubs: shuffle args (EDI→EBX, ESI→ECX, EDX stays) + syscall + ret
     for (name, num) in [
-        ("brk", 45), ("clock_gettime", 265), ("gettimeofday", 78),
-        ("rt_sigprocmask", 175), ("rt_sigreturn", 173),
+        ("brk", 45),
+        ("clock_gettime", 265),
+        ("gettimeofday", 78),
+        ("rt_sigprocmask", 175),
+        ("rt_sigreturn", 173),
         ("setsockopt", 372),
-                ("getsockopt", 365), ("bind", 361), ("listen", 363),
-        ("accept", 364), ("lstat", 107),
-        ("recvfrom", 368), ("sendto", 367),
+        ("getsockopt", 365),
+        ("bind", 361),
+        ("listen", 363),
+        ("accept", 364),
+        ("lstat", 107),
+        ("recvfrom", 368),
+        ("sendto", 367),
     ] {
         let mut code = Vec::new();
         // i386 syscall: args in EBX, ECX, EDX, ESI, EDI, EBP
         // Caller passes args in EDI, ESI, EDX, ECX (regparm(4) convention)
-        // Shuffle: EBX=EDI, ECX=ESI, EDX stays, ESI=EDX(original)... 
+        // Shuffle: EBX=EDI, ECX=ESI, EDX stays, ESI=EDX(original)...
         // Actually for simple 1-3 arg syscalls, just move EDI→EBX, ESI→ECX
         code.extend(encode_push(Gpr::Rbx));
-        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg0
-        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsi));  // ECX = arg1
-        // EDX already = arg2
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg0
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsi)); // ECX = arg1
+                                                             // EDX already = arg2
         code.extend(encode_mov_reg_imm32(Gpr::Rax, num as i32)); // EAX = syscall #
         code.extend(encode_syscall());
         code.extend(encode_pop(Gpr::Rbx));
@@ -2787,19 +2900,19 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     //   C3              ret
     {
         let code: Vec<u8> = vec![
-            0x8A, 0x07,                         // mov al, [edi]
-            0x8A, 0x0E,                         // mov cl, [esi]
-            0x38, 0xC8,                         // cmp al, cl
-            0x75, 0x08,                         // jne .done (+8)
-            0x84, 0xC0,                         // test al, al
-            0x74, 0x04,                         // jz .done (+4)
-            0x47,                               // inc edi
-            0x46,                               // inc esi
-            0xEB, 0xF0,                         // jmp .loop (-16)
-            0x0F, 0xB6, 0xC0,                   // movzx eax, al
-            0x0F, 0xB6, 0xC9,                   // movzx ecx, cl
-            0x29, 0xC8,                         // sub eax, ecx
-            0xC3,                               // ret
+            0x8A, 0x07, // mov al, [edi]
+            0x8A, 0x0E, // mov cl, [esi]
+            0x38, 0xC8, // cmp al, cl
+            0x75, 0x08, // jne .done (+8)
+            0x84, 0xC0, // test al, al
+            0x74, 0x04, // jz .done (+4)
+            0x47, // inc edi
+            0x46, // inc esi
+            0xEB, 0xF0, // jmp .loop (-16)
+            0x0F, 0xB6, 0xC0, // movzx eax, al
+            0x0F, 0xB6, 0xC9, // movzx ecx, cl
+            0x29, 0xC8, // sub eax, ecx
+            0xC3, // ret
         ];
         stubs.push(("strcmp".to_string(), code));
     }
@@ -2815,7 +2928,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp));
         // sub esp, 16 (space for 8 hex digits + padding)
         code.extend_from_slice(&[0x83, 0xEC, 0x10]); // sub esp, 16
-        // mov eax, edi — load argument from EDI into EAX
+                                                     // mov eax, edi — load argument from EDI into EAX
         code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rdi));
         // mov ecx, esp (buffer pointer)
         code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsp));
@@ -2828,26 +2941,26 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rax));
         // and ebx, 0x0F (isolate lowest nibble)
         code.extend_from_slice(&[0x83, 0xE3, 0x0F]); // and ebx, 0x0F
-        // cmp ebx, 10
+                                                     // cmp ebx, 10
         code.extend_from_slice(&[0x83, 0xFB, 0x0A]); // cmp ebx, 10
-        // jb .digit (skip letter branch: 6+2+2 = 10 bytes)
+                                                     // jb .digit (skip letter branch: 6+2+2 = 10 bytes)
         code.extend_from_slice(&[0x72, 0x0A]); // jb +10
-        // add ebx, 'A' - 10
+                                               // add ebx, 'A' - 10
         code.extend(encode_mov_reg_imm32(Gpr::Rsi, 55)); // 'A' - 10 = 55
         code.extend(encode_add_reg_reg(Gpr::Rbx, Gpr::Rsi));
         // jmp .store (skip digit branch: 3 bytes)
         code.extend_from_slice(&[0xEB, 0x03]); // jmp +3
-        // .digit: add ebx, '0'
+                                               // .digit: add ebx, '0'
         code.extend_from_slice(&[0x83, 0xC3, 0x30]); // add ebx, 0x30
-        // .store: mov [ecx], bl
+                                                     // .store: mov [ecx], bl
         code.extend_from_slice(&[0x88, 0x19]); // mov [ecx], bl
-        // shr eax, 4
+                                               // shr eax, 4
         code.extend_from_slice(&[0xC1, 0xE8, 0x04]); // shr eax, 4
-        // inc ecx
+                                                     // inc ecx
         code.extend_from_slice(&[0x41]); // inc ecx
-        // dec edx
+                                         // dec edx
         code.extend_from_slice(&[0x4A]); // dec edx
-        // jnz .loop (back to loop_offset)
+                                         // jnz .loop (back to loop_offset)
         let loop_end = code.len();
         let back_offset = loop_offset as i32 - loop_end as i32 - 2;
         code.extend_from_slice(&[0x75, back_offset as u8]); // jnz
@@ -2881,24 +2994,24 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp));
         // sub esp, 32 (space for digits)
         code.extend_from_slice(&[0x83, 0xEC, 0x20]); // sub esp, 32
-        // mov eax, edi — load argument from EDI into EAX
+                                                     // mov eax, edi — load argument from EDI into EAX
         code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rdi));
         // lea ecx, [esp+31] (point to end of buffer, write backwards)
         code.extend(encode_lea_reg_mem(Gpr::Rcx, Gpr::Rsp, 31));
         // mov byte [ecx], 10 (newline)
         code.extend_from_slice(&[0xC6, 0x01, 0x0A]); // mov byte [ecx], 10
-        // dec ecx
+                                                     // dec ecx
         code.extend_from_slice(&[0x49]); // dec ecx
 
         // Check if EAX is 0
         // test eax, eax
         code.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
-        // jnz .loop (skip zero-handling: 3+1+2 = 6 bytes)
+                                               // jnz .loop (skip zero-handling: 3+1+2 = 6 bytes)
         code.extend_from_slice(&[0x75, 0x06]); // jnz +6
-        // Handle zero: mov byte [ecx], '0'; dec ecx; jmp .done
+                                               // Handle zero: mov byte [ecx], '0'; dec ecx; jmp .done
         code.extend_from_slice(&[0xC6, 0x01, 0x30]); // mov byte [ecx], '0'
         code.extend_from_slice(&[0x49]); // dec ecx
-        // jmp .done (skip loop body: 2+6+2+3+2+1+2+2 = 20 bytes)
+                                         // jmp .done (skip loop body: 2+6+2+3+2+1+2+2 = 20 bytes)
         code.extend_from_slice(&[0xEB, 0x14]); // jmp +20
 
         // .loop:
@@ -2911,13 +3024,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_div_reg(Gpr::Rbx));
         // add dl, '0'
         code.extend_from_slice(&[0x80, 0xC2, 0x30]); // add dl, 0x30
-        // mov [ecx], dl
+                                                     // mov [ecx], dl
         code.extend_from_slice(&[0x88, 0x11]); // mov [ecx], dl
-        // dec ecx
+                                               // dec ecx
         code.extend_from_slice(&[0x49]); // dec ecx
-        // test eax, eax
+                                         // test eax, eax
         code.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
-        // jnz .loop
+                                               // jnz .loop
         let loop_end = code.len();
         let back_offset = loop_offset as i32 - loop_end as i32 - 2;
         code.extend_from_slice(&[0x75, back_offset as u8]); // jnz
@@ -2953,15 +3066,15 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // EBX is callee-saved on i386 SysV but is syscall arg1 — save/restore it.
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));                       // save EBX (callee-saved)
-        code.extend_from_slice(&[0x6A, 0x0A]);                    // push 0x0A (newline, sign-extended to 4 bytes)
-        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 1));           // ebx = 1 (stdout fd)
-        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsp));      // ecx = &newline (buf)
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 1));           // edx = 1 (count)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 4));           // eax = 4 (sys_write)
-        code.extend(encode_syscall());                            // int 0x80
-        code.extend(encode_pop(Gpr::Rax));                        // pop newline (restore stack)
-        code.extend(encode_pop(Gpr::Rbx));                        // restore EBX
+        code.extend(encode_push(Gpr::Rbx)); // save EBX (callee-saved)
+        code.extend_from_slice(&[0x6A, 0x0A]); // push 0x0A (newline, sign-extended to 4 bytes)
+        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 1)); // ebx = 1 (stdout fd)
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsp)); // ecx = &newline (buf)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 1)); // edx = 1 (count)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 4)); // eax = 4 (sys_write)
+        code.extend(encode_syscall()); // int 0x80
+        code.extend(encode_pop(Gpr::Rax)); // pop newline (restore stack)
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("print_newline".to_string(), code));
     }
@@ -2984,35 +3097,35 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
                 code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg1
             }
             2 => {
-                code.extend(encode_push(Gpr::Rsi));                   // push arg2
-                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1
-                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
+                code.extend(encode_push(Gpr::Rsi)); // push arg2
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg1
+                code.extend(encode_pop(Gpr::Rcx)); // ECX = arg2
             }
             3 => {
                 // EBX=arg1, ECX=arg2, EDX=arg3 (already in EDX)
-                code.extend(encode_push(Gpr::Rsi));                   // push arg2
-                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1
-                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
+                code.extend(encode_push(Gpr::Rsi)); // push arg2
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg1
+                code.extend(encode_pop(Gpr::Rcx)); // ECX = arg2
             }
             4 => {
                 // EBX=arg1, ECX=arg2, EDX=arg3(ok), ESI=arg4
-                code.extend(encode_push(Gpr::Rcx));                   // push arg4
-                code.extend(encode_push(Gpr::Rsi));                   // push arg2
-                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1
-                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
-                code.extend(encode_pop(Gpr::Rsi));                    // ESI = arg4
+                code.extend(encode_push(Gpr::Rcx)); // push arg4
+                code.extend(encode_push(Gpr::Rsi)); // push arg2
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg1
+                code.extend(encode_pop(Gpr::Rcx)); // ECX = arg2
+                code.extend(encode_pop(Gpr::Rsi)); // ESI = arg4
             }
             5 => {
                 // EBX=arg1, ECX=arg2, EDX=arg3, ESI=arg4, EDI=arg5(stack).
                 // arg1 lives in EDI but EDI is also the syscall arg5 target, so
                 // move arg1→EBX first, then load arg5 from the stack into EDI.
-                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));  // EBX = arg1 (EDI free)
-                code.extend(encode_push(Gpr::Rcx));                   // push arg4
-                code.extend(encode_push(Gpr::Rsi));                   // push arg2
-                // [ESP]=arg2,[ESP+4]=arg4,[ESP+8]=saved_EBX,[ESP+12]=retaddr,[ESP+16]=arg5
+                code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = arg1 (EDI free)
+                code.extend(encode_push(Gpr::Rcx)); // push arg4
+                code.extend(encode_push(Gpr::Rsi)); // push arg2
+                                                    // [ESP]=arg2,[ESP+4]=arg4,[ESP+8]=saved_EBX,[ESP+12]=retaddr,[ESP+16]=arg5
                 code.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 16)); // EDI = arg5
-                code.extend(encode_pop(Gpr::Rcx));                    // ECX = arg2
-                code.extend(encode_pop(Gpr::Rsi));                    // ESI = arg4
+                code.extend(encode_pop(Gpr::Rcx)); // ECX = arg2
+                code.extend(encode_pop(Gpr::Rsi)); // ESI = arg4
             }
             _ => {} // 6-arg syscalls not needed for wave 7
         }
@@ -3024,57 +3137,112 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     };
     for (name, num, nargs) in [
         // Family 1: dir/link ops
-        ("mkdir", 39, 2), ("rmdir", 40, 1), ("rename", 38, 2),
-        ("link", 9, 2), ("symlink", 83, 2), ("readlink", 85, 3),
+        ("mkdir", 39, 2),
+        ("rmdir", 40, 1),
+        ("rename", 38, 2),
+        ("link", 9, 2),
+        ("symlink", 83, 2),
+        ("readlink", 85, 3),
         // Family 2: mode/owner (chown/fchown → 32-bit chown32/fchown32)
-        ("chmod", 15, 2), ("chown", 212, 3), ("umask", 60, 1),
-        ("fchmod", 94, 2), ("fchown", 207, 3),
+        ("chmod", 15, 2),
+        ("chown", 212, 3),
+        ("umask", 60, 1),
+        ("fchmod", 94, 2),
+        ("fchown", 207, 3),
         // Family 3: *at variants
-        ("openat", 295, 4), ("unlinkat", 301, 3), ("renameat", 302, 4),
-        ("linkat", 303, 5), ("symlinkat", 304, 3), ("readlinkat", 305, 4),
-        ("fchmodat", 306, 4), ("faccessat", 307, 3), ("fchownat", 298, 5),
+        ("openat", 295, 4),
+        ("unlinkat", 301, 3),
+        ("renameat", 302, 4),
+        ("linkat", 303, 5),
+        ("symlinkat", 304, 3),
+        ("readlinkat", 305, 4),
+        ("fchmodat", 306, 4),
+        ("faccessat", 307, 3),
+        ("fchownat", 298, 5),
         // Family 4: sync/truncate
-        ("ftruncate", 93, 2), ("fsync", 118, 1), ("fdatasync", 148, 1),
-        ("sync", 36, 0), ("syncfs", 344, 1),
+        ("ftruncate", 93, 2),
+        ("fsync", 118, 1),
+        ("fdatasync", 148, 1),
+        ("sync", 36, 0),
+        ("syncfs", 344, 1),
         // Family 5: positioned & vector I/O
-        ("pread", 180, 4), ("pwrite", 181, 4), ("readv", 145, 3), ("writev", 146, 3),
-        ("preadv", 333, 4), ("pwritev", 334, 4),
+        ("pread", 180, 4),
+        ("pwrite", 181, 4),
+        ("readv", 145, 3),
+        ("writev", 146, 3),
+        ("preadv", 333, 4),
+        ("pwritev", 334, 4),
         // Family 7: cwd/root (getcwd/chdir already registered above)
-        ("fchdir", 133, 1), ("chroot", 61, 1),
+        ("fchdir", 133, 1),
+        ("chroot", 61, 1),
         // ── Wave 9: POSIX system & advanced syscalls (i386 syscall_32.tbl) ──
         // eventfd→eventfd2(328), signalfd→signalfd4(327) = modern variants.
         // mremap is 5-arg (old_addr, old_size, new_size, flags, new_addr).
-        ("mlock", 150, 2), ("munlock", 151, 2), ("mlockall", 152, 1), ("munlockall", 153, 0),
-        ("mincore", 218, 3), ("madvise", 219, 3), ("msync", 144, 3), ("mremap", 163, 5),
-        ("getrlimit", 76, 2), ("setrlimit", 75, 2), ("prlimit64", 340, 4),
-        ("getrusage", 77, 2), ("times", 43, 1),
+        ("mlock", 150, 2),
+        ("munlock", 151, 2),
+        ("mlockall", 152, 1),
+        ("munlockall", 153, 0),
+        ("mincore", 218, 3),
+        ("madvise", 219, 3),
+        ("msync", 144, 3),
+        ("mremap", 163, 5),
+        ("getrlimit", 76, 2),
+        ("setrlimit", 75, 2),
+        ("prlimit64", 340, 4),
+        ("getrusage", 77, 2),
+        ("times", 43, 1),
         ("getrandom", 355, 3),
-        ("eventfd", 328, 2), ("timerfd_create", 322, 2), ("timerfd_settime", 325, 4),
-        ("timerfd_gettime", 326, 2), ("signalfd", 327, 4),
-        ("inotify_init1", 332, 1), ("inotify_add_watch", 292, 3), ("inotify_rm_watch", 293, 2),
+        ("eventfd", 328, 2),
+        ("timerfd_create", 322, 2),
+        ("timerfd_settime", 325, 4),
+        ("timerfd_gettime", 326, 2),
+        ("signalfd", 327, 4),
+        ("inotify_init1", 332, 1),
+        ("inotify_add_watch", 292, 3),
+        ("inotify_rm_watch", 293, 2),
         ("ptrace", 26, 4),
         // ── Wave 8: POSIX process & identity syscalls (i386 syscall_32.tbl) ──
         // Identity uses the modern *32 variants (199-214) per Wave 7 precedent.
         // 5-arg syscalls (waitid/execveat/prctl) use nargs=5 → syscall_stub
         // moves arg1 EDI→EBX then loads arg5 from [ESP+16] into EDI.
         // Family 1: identity
-        ("getuid", 199, 0), ("geteuid", 201, 0), ("getgid", 200, 0), ("getegid", 202, 0),
-        ("setuid", 213, 1), ("setgid", 214, 1), ("setresuid", 208, 3), ("setresgid", 210, 3),
+        ("getuid", 199, 0),
+        ("geteuid", 201, 0),
+        ("getgid", 200, 0),
+        ("getegid", 202, 0),
+        ("setuid", 213, 1),
+        ("setgid", 214, 1),
+        ("setresuid", 208, 3),
+        ("setresgid", 210, 3),
         // Family 2: process group (getpid already present)
-        ("getppid", 64, 0), ("getsid", 147, 1), ("setsid", 66, 0),
-        ("setpgid", 57, 2), ("getpgid", 132, 1), ("getpgrp", 65, 0),
+        ("getppid", 64, 0),
+        ("getsid", 147, 1),
+        ("setsid", 66, 0),
+        ("setpgid", 57, 2),
+        ("getpgid", 132, 1),
+        ("getpgrp", 65, 0),
         // Family 3: clone/wait (clone/wait4 already present)
-        ("vfork", 190, 0), ("clone3", 435, 2), ("waitid", 284, 5),
+        ("vfork", 190, 0),
+        ("clone3", 435, 2),
+        ("waitid", 284, 5),
         // Family 4: exec/exit (execve/exit_group already present)
         ("execveat", 358, 5),
         // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-        ("tgkill", 270, 3), ("tkill", 238, 2), ("rt_sigaction", 174, 4),
+        ("tgkill", 270, 3),
+        ("tkill", 238, 2),
+        ("rt_sigaction", 174, 4),
         // Family 6: directory read (readdir=89 is sys_old_readdir, deprecated)
-        ("getdents64", 220, 3), ("getdents", 141, 3), ("readdir", 89, 3),
+        ("getdents64", 220, 3),
+        ("getdents", 141, 3),
+        ("readdir", 89, 3),
         // Family 7: system (arch_prctl NOT on i386)
-        ("prctl", 172, 5), ("uname", 122, 1), ("sysinfo", 116, 1),
-        ("eventfd2", 328, 2), ("newfstatat", 300, 4), ("signalfd4", 327, 4),
-] {
+        ("prctl", 172, 5),
+        ("uname", 122, 1),
+        ("sysinfo", 116, 1),
+        ("eventfd2", 328, 2),
+        ("newfstatat", 300, 4),
+        ("signalfd4", 327, 4),
+    ] {
         stubs.push((name.to_string(), syscall_stub(num, nargs)));
     }
 
@@ -3091,13 +3259,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_push(Gpr::Rdi));
         code.extend(encode_push(Gpr::Rbp));
         // Set up mmap2 args: EBX=0(addr), ECX=4096(len), EDX=3(prot), ESI=0x22(flags), EDI=-1(fd), EBP=0(pgoff)
-        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx));        // EBX = 0 (NULL)
-        code.extend(encode_mov_reg_imm32(Gpr::Rcx, 4096));          // ECX = 4096
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));             // EDX = PROT_READ|PROT_WRITE
-        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22));          // ESI = MAP_PRIVATE|MAP_ANONYMOUS
-        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32));         // EDI = -1 (fd)
-        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp));        // EBP = 0 (pgoffset)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));           // EAX = sys_mmap2
+        code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx)); // EBX = 0 (NULL)
+        code.extend(encode_mov_reg_imm32(Gpr::Rcx, 4096)); // ECX = 4096
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3)); // EDX = PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 0x22)); // ESI = MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, -1i32)); // EDI = -1 (fd)
+        code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp)); // EBP = 0 (pgoffset)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192)); // EAX = sys_mmap2
         code.extend(encode_syscall());
         // Restore callee-saved registers
         code.extend(encode_pop(Gpr::Rbp));
@@ -3127,11 +3295,36 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Real exit(1) — arena bounds check overflow trap.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 1));   // exit code = 1 (EBX = arg1 on i386)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));   // sys_exit
+        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 1)); // exit code = 1 (EBX = arg1 on i386)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_exit
         code.extend(encode_syscall());
-        code.extend(encode_int3());                          // safety guard
+        code.extend(encode_int3()); // safety guard
         stubs.push(("__arena_overflow".to_string(), code));
+    }
+
+    // __oob_trap() → void  [syscall 1 = sys_exit, code=134]
+    // Real exit(134) — out-of-bounds trap. Uses exit code 134 (SIGABRT)
+    // to distinguish OOB from arena overflow (exit 1) in CI logs.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 134)); // exit code = 134 (EBX = arg1 on i386)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_exit
+        code.extend(encode_syscall());
+        code.extend(encode_int3()); // safety guard
+        stubs.push(("__oob_trap".to_string(), code));
+    }
+
+    // __uaf_trap() → void  [syscall 1 = sys_exit, code=135]
+    // Real exit(135) — use-after-free trap. Uses exit code 135 to
+    // distinguish UAF from OOB (134) and arena overflow (1) in CI logs.
+    // Dormant until the liveness check IR invokes it (IMPL-UAF-1).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rbx, 135)); // exit code = 135 (EBX = arg1 on i386)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // sys_exit
+        code.extend(encode_syscall());
+        code.extend(encode_int3()); // safety guard
+        stubs.push(("__uaf_trap".to_string(), code));
     }
 
     stubs
@@ -3211,7 +3404,6 @@ impl Backend for X86_32Backend {
         &self.target_info
     }
 
-
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let mut allocated = stack_slot_isel::allocate_registers(func)?;
 
@@ -3220,14 +3412,22 @@ impl Backend for X86_32Backend {
         if self.use_real_regalloc {
             let max_real_regs = 6u32; // EAX, ECX, EDX, EBX, ESI, EDI
             let mut all_vreg_ids: Vec<u32> = Vec::new();
-            for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+            for &id in func.vregs.keys() {
+                all_vreg_ids.push(id);
+            }
             for param in &func.params {
-                if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+                if let Some(id) = param.as_register() {
+                    all_vreg_ids.push(id);
+                }
             }
             for block in &func.blocks {
                 for instr in &block.instructions {
-                    for id in instr.defined_regs() { all_vreg_ids.push(id); }
-                    for id in instr.used_regs() { all_vreg_ids.push(id); }
+                    for id in instr.defined_regs() {
+                        all_vreg_ids.push(id);
+                    }
+                    for id in instr.used_regs() {
+                        all_vreg_ids.push(id);
+                    }
                 }
             }
             all_vreg_ids.sort();
@@ -3235,10 +3435,8 @@ impl Backend for X86_32Backend {
 
             for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
                 if (i as u32) < max_real_regs {
-                    let preg = crate::backend::PhysicalReg::new(
-                        crate::backend::RegClass::Gpr,
-                        i as u32,
-                    );
+                    let preg =
+                        crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
                     for block in &mut allocated.blocks {
                         for instr in &mut block.instructions {
                             if !instr.writes.contains(&preg) {
@@ -3310,9 +3508,8 @@ impl Backend for X86_32Backend {
         // These are small functions that use the `syscall` instruction
         // directly, avoiding the need for libc linkage.
         let runtime_stubs = build_runtime_syscall_stubs();
-        let runtime_stubs_total_size: usize = runtime_stubs.iter()
-            .map(|(_, code)| code.len())
-            .sum();
+        let runtime_stubs_total_size: usize =
+            runtime_stubs.iter().map(|(_, code)| code.len()).sum();
 
         // Compute offsets: _start stub → runtime stubs → user functions
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
@@ -3338,7 +3535,9 @@ impl Backend for X86_32Backend {
         // User functions follow the runtime stubs
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -3376,7 +3575,8 @@ impl Backend for X86_32Backend {
         // Patch the call main rel32 offset in _start stub.
         // The E8 byte sits at CALL_SITE_OFFSET; the rel32 field starts at
         // CALL_SITE_OFFSET + 1.  rel32 = target - (call_site + 5).
-        let main_key = func_offsets.keys()
+        let main_key = func_offsets
+            .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
@@ -3428,8 +3628,8 @@ impl Backend for X86_32Backend {
         // segment.  We mirror the calculation from build_minimal_x86_32_elf
         // here, using ELF32 sizes (52-byte header, 32-byte phdrs) and 64K
         // virtual address alignment for QEMU 10.x host page size compatibility.
-        const ELF_HEADER_SIZE: u64 = 52;  // ELF32 header
-        const PHDR_SIZE: u64 = 32;        // ELF32 Phdr
+        const ELF_HEADER_SIZE: u64 = 52; // ELF32 header
+        const PHDR_SIZE: u64 = 32; // ELF32 Phdr
         const FILE_PAGE_SIZE: u64 = 0x1000;
         const VADDR_ALIGN: u64 = 0x10000;
         const BASE_ADDR: u64 = 0x400000;
@@ -3469,15 +3669,14 @@ impl Backend for X86_32Backend {
                     // S = symbol value (target address)
                     // A = addend (current value at the relocation site)
                     // P = place (address of the relocation site)
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let current_val = i32::from_le_bytes([
                             all_code[abs_offset],
@@ -3509,7 +3708,7 @@ impl Backend for X86_32Backend {
                             all_code[abs_offset..abs_offset + 4]
                                 .copy_from_slice(&resolved.to_le_bytes());
                         } else {
-                            vuma_log!(debug, 
+                            vuma_log!(debug,
                                 "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — no __ffi_fallback_stub, deferring to linker",
                                 reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                             );
@@ -3535,14 +3734,16 @@ impl Backend for X86_32Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&(func_addr as u32).to_le_bytes());
                     } else {
-                        vuma_log!(debug, 
+                        vuma_log!(debug,
                             "unresolved R_X86_64_64 relocation: symbol '{}' in '{}' at 0x{:X} — deferring to linker",
                             reloc.symbol, func.name, reloc.offset
                         );
                     }
                 }
             }
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -3748,7 +3949,7 @@ mod tests {
         let code = encode_cmp_reg_imm32(Gpr::Rax, 100);
         assert_eq!(code[0], 0x83); // CMP r/m32, imm8
         assert_eq!(code[1], 0xF8); // mod=3, reg=7(/7), rm=EAX(0)
-        assert_eq!(code[2], 100);  // imm8 = 100
+        assert_eq!(code[2], 100); // imm8 = 100
         assert_eq!(code.len(), 3);
     }
 
@@ -4068,7 +4269,8 @@ mod tests {
         // e_machine = EM_386 (3, not 62!)
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 3);
         // ELF32 header is 52 bytes; e_phnum is at offset 44 (not 56!)
-        assert_eq!(u16::from_le_bytes([elf[44], elf[45]]), 1);
+        // e_phnum = 2: one PT_LOAD (text) + one PT_GNU_STACK (non-exec stack marker).
+        assert_eq!(u16::from_le_bytes([elf[44], elf[45]]), 2);
         // entry = vaddr_align(0x400000 + page_align(52 + 32)) = 0x410000
         let entry = u32::from_le_bytes([elf[24], elf[25], elf[26], elf[27]]);
         assert_eq!(entry, 0x410000);
@@ -4085,8 +4287,9 @@ mod tests {
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
         // e_machine = EM_386 (3)
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 3);
-        // With BSS, e_phnum = 2 (at offset 44 for ELF32)
-        assert_eq!(u16::from_le_bytes([elf[44], elf[45]]), 2);
+        // With BSS, e_phnum = 3 (at offset 44 for ELF32):
+        // one PT_LOAD (text) + one PT_LOAD (BSS) + one PT_GNU_STACK.
+        assert_eq!(u16::from_le_bytes([elf[44], elf[45]]), 3);
         // Entry point (u32 at offset 24)
         let entry = u32::from_le_bytes([elf[24], elf[25], elf[26], elf[27]]);
         // With 2 phdrs, text_offset = page_align(52 + 2*32) = page_align(116) = 0x1000
@@ -4096,16 +4299,20 @@ mod tests {
         // Second program header (BSS) starts at offset 52 + 32 = 84
         // ELF32 Phdr layout: p_type(4) p_offset(4) p_vaddr(4) p_paddr(4) p_filesz(4) p_memsz(4) p_flags(4) p_align(4)
         let ph2 = 52 + 32; // = 84
-        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
+        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2 + 1], elf[ph2 + 2], elf[ph2 + 3]]);
         assert_eq!(p_type, 1); // PT_LOAD
-        // p_flags is at offset 24 within the phdr
-        let p_flags = u32::from_le_bytes([elf[ph2+24], elf[ph2+25], elf[ph2+26], elf[ph2+27]]);
+                               // p_flags is at offset 24 within the phdr
+        let p_flags =
+            u32::from_le_bytes([elf[ph2 + 24], elf[ph2 + 25], elf[ph2 + 26], elf[ph2 + 27]]);
         assert_eq!(p_flags, 6); // PF_R | PF_W
-        let p_filesz = u32::from_le_bytes([elf[ph2+16], elf[ph2+17], elf[ph2+18], elf[ph2+19]]);
+        let p_filesz =
+            u32::from_le_bytes([elf[ph2 + 16], elf[ph2 + 17], elf[ph2 + 18], elf[ph2 + 19]]);
         assert_eq!(p_filesz, 0); // BSS has no file content
-        let p_memsz = u32::from_le_bytes([elf[ph2+20], elf[ph2+21], elf[ph2+22], elf[ph2+23]]);
+        let p_memsz =
+            u32::from_le_bytes([elf[ph2 + 20], elf[ph2 + 21], elf[ph2 + 22], elf[ph2 + 23]]);
         assert_eq!(p_memsz, 16);
-        let bss_vaddr = u32::from_le_bytes([elf[ph2+8], elf[ph2+9], elf[ph2+10], elf[ph2+11]]);
+        let bss_vaddr =
+            u32::from_le_bytes([elf[ph2 + 8], elf[ph2 + 9], elf[ph2 + 10], elf[ph2 + 11]]);
         // BSS vaddr should be 64K-aligned and after the text segment
         assert_eq!(bss_vaddr % 0x10000, 0, "BSS vaddr should be 64K-aligned");
         assert!(bss_vaddr > 0x410000, "BSS should be after text segment");
@@ -4370,10 +4577,7 @@ mod tests {
         // SDiv uses CDQ (0x99 on x86_32, no REX prefix) + IDIV (0xF7 /7).
         // (On x86_64 this would be CQO = REX.W + 0x99 = 48 99; on x86_32
         // it's just the single-byte CDQ = 0x99.)
-        assert!(
-            code.iter().any(|&b| b == 0x99),
-            "CDQ not found for SDiv"
-        );
+        assert!(code.iter().any(|&b| b == 0x99), "CDQ not found for SDiv");
         assert!(
             code.iter().any(|&b| b == 0xF7),
             "IDIV opcode not found for SDiv"
@@ -4417,9 +4621,7 @@ mod tests {
         // when the immediate fits in a signed byte (5 does), or the long
         // `81 /7 id` form (6 bytes) otherwise.  Accept either form.
         let has_cmp_imm = code.windows(2).any(|w| {
-            (w[0] == 0x81 || w[0] == 0x83)
-                && (w[1] & 0xC0) == 0xC0
-                && (w[1] & 0x38) == 0x38
+            (w[0] == 0x81 || w[0] == 0x83) && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x38
         });
         assert!(has_cmp_imm, "CMP r/m32, imm not found");
         // Should also have SETcc (0F 9x) and MOVZX (0F B6)
@@ -4555,8 +4757,8 @@ mod tests {
 
     #[test]
     fn test_real_regalloc_metadata() {
-        use crate::ir::{VirtualRegister, IRFunction, IRInstr, IRValue};
         use crate::backend::Backend;
+        use crate::ir::{IRFunction, IRInstr, IRValue, VirtualRegister};
 
         let mut func = IRFunction::new("test_real_regalloc".to_string());
         func.vregs.insert(0, VirtualRegister::anonymous(0));
@@ -4575,9 +4777,15 @@ mod tests {
         let result_ss = backend.allocate_registers(&func);
         assert!(result_ss.is_ok(), "stack-slot allocation should succeed");
         let ss_func = result_ss.unwrap();
-        let ss_has_regs = ss_func.blocks.iter()
-            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
-        assert!(!ss_has_regs, "stack-slot mode should not record physical registers");
+        let ss_has_regs = ss_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| !i.reads.is_empty() || !i.writes.is_empty())
+        });
+        assert!(
+            !ss_has_regs,
+            "stack-slot mode should not record physical registers"
+        );
 
         // Real regalloc mode: reads/writes should be populated.
         let mut backend = X86_32Backend::new();
@@ -4585,9 +4793,15 @@ mod tests {
         let result_real = backend.allocate_registers(&func);
         assert!(result_real.is_ok(), "real regalloc should succeed");
         let real_func = result_real.unwrap();
-        let has_real_regs = real_func.blocks.iter()
-            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
-        assert!(has_real_regs, "real regalloc should record physical register assignments");
+        let has_real_regs = real_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| !i.reads.is_empty() || !i.writes.is_empty())
+        });
+        assert!(
+            has_real_regs,
+            "real regalloc should record physical register assignments"
+        );
     }
 }
 pub mod disasm;

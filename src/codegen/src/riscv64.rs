@@ -1383,9 +1383,14 @@ impl Instruction {
                 OP_FP,
             ),
             // FSQRT.S: funct7=0b0101100, rs2=0b00000, funct3=rm
-            Instruction::FsqrtS { rd, rs1 } => {
-                encode_r_type(0b0101100, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
+            Instruction::FsqrtS { rd, rs1 } => encode_r_type(
+                0b0101100,
+                0b00000,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FMIN.S / FMAX.S: funct7=0b0010100, funct3=0b000/0b001, rs2=source
             Instruction::FminS { rd, rs1, rs2 } => encode_r_type(
                 0b0010100,
@@ -1430,26 +1435,34 @@ impl Instruction {
                 OP_FP,
             ),
             // FCLASS.S: funct7=0b1110000, rs2=0b00000, funct3=0b001
-            Instruction::FclassS { rd, rs1 } => {
-                encode_r_type(0b1110000, 0b00000, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
-            }
+            Instruction::FclassS { rd, rs1 } => encode_r_type(
+                0b1110000,
+                0b00000,
+                rs1.encoding(),
+                0b001,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FMV.S = FSGNJ.S rd, fs1, fs1
-            Instruction::FmvS { rd, rs1 } => {
-                encode_r_type(
-                    0b0010000,
-                    rs1.encoding(),
-                    rs1.encoding(),
-                    0b000,
-                    rd.encoding(),
-                    OP_FP,
-                )
-            }
+            Instruction::FmvS { rd, rs1 } => encode_r_type(
+                0b0010000,
+                rs1.encoding(),
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
 
             // ── F/D Extension: Extra Double-Precision Arithmetic ────
             // FSQRT.D: funct7=0b0101101, rs2=0b00000, funct3=rm
-            Instruction::FsqrtD { rd, rs1 } => {
-                encode_r_type(0b0101101, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
+            Instruction::FsqrtD { rd, rs1 } => encode_r_type(
+                0b0101101,
+                0b00000,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
             Instruction::FminD { rd, rs1, rs2 } => encode_r_type(
                 0b0010101,
                 rs2.encoding(),
@@ -1491,9 +1504,14 @@ impl Instruction {
                 OP_FP,
             ),
             // FCLASS.D: funct7=0b1110001, rs2=0b00000, funct3=0b001
-            Instruction::FclassD { rd, rs1 } => {
-                encode_r_type(0b1110001, 0b00000, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
-            }
+            Instruction::FclassD { rd, rs1 } => encode_r_type(
+                0b1110001,
+                0b00000,
+                rs1.encoding(),
+                0b001,
+                rd.encoding(),
+                OP_FP,
+            ),
 
             // ── F/D Extension: FP Comparison ────────────────────────
             // FP compares: funct7=0b1010000 (S) / 0b1010001 (D),
@@ -1550,83 +1568,201 @@ impl Instruction {
 
             // ── F/D Extension: FP ↔ Integer Conversion ────────────────
             // FCVT.S.W: funct7=1101000, rs2=00000, funct3=rm (0b111=dynamic)
-            Instruction::FcvtSW { rd, rs1 } => {
-                encode_r_type(0b1101000, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtSWU { rd, rs1 } => {
-                encode_r_type(0b1101000, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtSL { rd, rs1 } => {
-                encode_r_type(0b1101000, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtSLU { rd, rs1 } => {
-                encode_r_type(0b1101000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
+            Instruction::FcvtSW { rd, rs1 } => encode_r_type(
+                0b1101000,
+                0b00000,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtSWU { rd, rs1 } => encode_r_type(
+                0b1101000,
+                0b00001,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtSL { rd, rs1 } => encode_r_type(
+                0b1101000,
+                0b00010,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtSLU { rd, rs1 } => encode_r_type(
+                0b1101000,
+                0b00011,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FCVT.D.W: funct7=1101001, rs2=00000 (signed int32 → double)
             // NOTE: per the RISC-V spec, FCVT.D.* (int → double) uses
             // funct7=0b1101001, NOT 0b1100001 (which is FCVT.*.D, double → int).
-            Instruction::FcvtDW { rd, rs1 } => {
-                encode_r_type(0b1101001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtDWU { rd, rs1 } => {
-                encode_r_type(0b1101001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtDL { rd, rs1 } => {
-                encode_r_type(0b1101001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtDLU { rd, rs1 } => {
-                encode_r_type(0b1101001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
+            Instruction::FcvtDW { rd, rs1 } => encode_r_type(
+                0b1101001,
+                0b00000,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtDWU { rd, rs1 } => encode_r_type(
+                0b1101001,
+                0b00001,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtDL { rd, rs1 } => encode_r_type(
+                0b1101001,
+                0b00010,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtDLU { rd, rs1 } => encode_r_type(
+                0b1101001,
+                0b00011,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FCVT.W.S: funct7=1100000, rs2=00000
-            Instruction::FcvtWS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtWUS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
+            Instruction::FcvtWS { rd, rs1 } => encode_r_type(
+                0b1100000,
+                0b00000,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtWUS { rd, rs1 } => encode_r_type(
+                0b1100000,
+                0b00001,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
             Instruction::FcvtLS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00010, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
+                encode_r_type(
+                    0b1100000,
+                    0b00010,
+                    rs1.encoding(),
+                    0b001,
+                    rd.encoding(),
+                    OP_FP,
+                ) // G7: RTZ
             }
             Instruction::FcvtLUS { rd, rs1 } => {
-                encode_r_type(0b1100000, 0b00011, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
+                encode_r_type(
+                    0b1100000,
+                    0b00011,
+                    rs1.encoding(),
+                    0b001,
+                    rd.encoding(),
+                    OP_FP,
+                ) // G7: RTZ
             }
             // FCVT.W.D: funct7=1100001, rs2=00000
-            Instruction::FcvtWD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
-            Instruction::FcvtWUD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
-            }
+            Instruction::FcvtWD { rd, rs1 } => encode_r_type(
+                0b1100001,
+                0b00000,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
+            Instruction::FcvtWUD { rd, rs1 } => encode_r_type(
+                0b1100001,
+                0b00001,
+                rs1.encoding(),
+                0b111,
+                rd.encoding(),
+                OP_FP,
+            ),
             Instruction::FcvtLD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
+                encode_r_type(
+                    0b1100001,
+                    0b00010,
+                    rs1.encoding(),
+                    0b001,
+                    rd.encoding(),
+                    OP_FP,
+                ) // G7: RTZ
             }
             Instruction::FcvtLUD { rd, rs1 } => {
-                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b001, rd.encoding(), OP_FP)  // G7: RTZ
+                encode_r_type(
+                    0b1100001,
+                    0b00011,
+                    rs1.encoding(),
+                    0b001,
+                    rd.encoding(),
+                    OP_FP,
+                ) // G7: RTZ
             }
             // FCVT.D.S: funct7=0100001, rs2=00000
-            Instruction::FcvtDS { rd, rs1 } => {
-                encode_r_type(0b0100001, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
-            }
+            Instruction::FcvtDS { rd, rs1 } => encode_r_type(
+                0b0100001,
+                0b00000,
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FCVT.S.D: funct7=0100000, rs2=00001
-            Instruction::FcvtSD { rd, rs1 } => {
-                encode_r_type(0b0100000, 0b00001, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
-            }
+            Instruction::FcvtSD { rd, rs1 } => encode_r_type(
+                0b0100000,
+                0b00001,
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FMV.X.W: funct7=1110000, rs2=00000, funct3=000
-            Instruction::FmvXW { rd, rs1 } => {
-                encode_r_type(0b1110000, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
-            }
+            Instruction::FmvXW { rd, rs1 } => encode_r_type(
+                0b1110000,
+                0b00000,
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FMV.W.X: funct7=1111000, rs2=00000, funct3=000
-            Instruction::FmvWX { rd, rs1 } => {
-                encode_r_type(0b1111000, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
-            }
+            Instruction::FmvWX { rd, rs1 } => encode_r_type(
+                0b1111000,
+                0b00000,
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FMV.X.D: funct7=1110001, rs2=00000, funct3=000
-            Instruction::FmvXD { rd, rs1 } => {
-                encode_r_type(0b1110001, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
-            }
+            Instruction::FmvXD { rd, rs1 } => encode_r_type(
+                0b1110001,
+                0b00000,
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
             // FMV.D.X: funct7=1111001, rs2=00000, funct3=000
-            Instruction::FmvDX { rd, rs1 } => {
-                encode_r_type(0b1111001, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
-            }
+            Instruction::FmvDX { rd, rs1 } => encode_r_type(
+                0b1111001,
+                0b00000,
+                rs1.encoding(),
+                0b000,
+                rd.encoding(),
+                OP_FP,
+            ),
 
             // ── Zicsr Extension ──────────────────────────────────────
             Instruction::Csrrw { rd, csr, rs1 } => {
@@ -1685,22 +1821,50 @@ impl Instruction {
                 // Encoding: R-type with funct3=0b010 (64-bit), funct7=0b0001010
                 // (aq=0, rl=0, funct5=0b00010), rs2=0, opcode=0b0101111 (AMO).
                 // encode_r_type signature: (funct7, rs2, rs1, funct3, rd, opcode).
-                encode_r_type(0b0001010, 0, rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+                encode_r_type(
+                    0b0001010,
+                    0,
+                    rs1.encoding(),
+                    0b010,
+                    rd.encoding(),
+                    0b0101111,
+                )
             }
             Instruction::ScD { rd, rs1, rs2 } => {
                 // SC.D rd, rs1, rs2
                 // Encoding: R-type with funct3=0b010 (64-bit), funct7=0b0001100
                 // (aq=0, rl=0, funct5=0b00011), opcode=0b0101111 (AMO).
                 // encode_r_type signature: (funct7, rs2, rs1, funct3, rd, opcode).
-                encode_r_type(0b0001100, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+                encode_r_type(
+                    0b0001100,
+                    rs2.encoding(),
+                    rs1.encoding(),
+                    0b010,
+                    rd.encoding(),
+                    0b0101111,
+                )
             }
             Instruction::LrW { rd, rs1 } => {
                 // LR.W rd, (rs1): funct5=0b00010, funct3=0b010 (32-bit)
-                encode_r_type(0b0001010, 0, rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+                encode_r_type(
+                    0b0001010,
+                    0,
+                    rs1.encoding(),
+                    0b010,
+                    rd.encoding(),
+                    0b0101111,
+                )
             }
             Instruction::ScW { rd, rs1, rs2 } => {
                 // SC.W rd, rs1, rs2: funct5=0b00011, funct3=0b010 (32-bit)
-                encode_r_type(0b0001100, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+                encode_r_type(
+                    0b0001100,
+                    rs2.encoding(),
+                    rs1.encoding(),
+                    0b010,
+                    rd.encoding(),
+                    0b0101111,
+                )
             }
 
             // ── RV64A Extension: AMO ─────────────────────────────────
@@ -1708,60 +1872,150 @@ impl Instruction {
             // funct5 (bits 31:27) selects the operation; bits 26:25 are aq/rl (0 here).
             // encode_r_type signature: (funct7, rs2, rs1, funct3, rd, opcode) where
             // funct7 = funct5 << 2 (aq=0, rl=0).
-            Instruction::AmoaddW { rd, rs1, rs2 } => {
-                encode_r_type(0b0000010, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoaddD { rd, rs1, rs2 } => {
-                encode_r_type(0b0000010, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoswapW { rd, rs1, rs2 } => {
-                encode_r_type(0b0000110, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoswapD { rd, rs1, rs2 } => {
-                encode_r_type(0b0000110, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoxorW { rd, rs1, rs2 } => {
-                encode_r_type(0b0010010, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoxorD { rd, rs1, rs2 } => {
-                encode_r_type(0b0010010, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoandW { rd, rs1, rs2 } => {
-                encode_r_type(0b0110010, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoandD { rd, rs1, rs2 } => {
-                encode_r_type(0b0110010, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoorW { rd, rs1, rs2 } => {
-                encode_r_type(0b0100010, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmoorD { rd, rs1, rs2 } => {
-                encode_r_type(0b0100010, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmomaxW { rd, rs1, rs2 } => {
-                encode_r_type(0b1000010, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmomaxD { rd, rs1, rs2 } => {
-                encode_r_type(0b1000010, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmominW { rd, rs1, rs2 } => {
-                encode_r_type(0b1000011, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmominD { rd, rs1, rs2 } => {
-                encode_r_type(0b1000011, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmomaxWu { rd, rs1, rs2 } => {
-                encode_r_type(0b1110010, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmomaxDu { rd, rs1, rs2 } => {
-                encode_r_type(0b1110010, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmominWu { rd, rs1, rs2 } => {
-                encode_r_type(0b1110011, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
-            }
-            Instruction::AmominDu { rd, rs1, rs2 } => {
-                encode_r_type(0b1110011, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
-            }
+            Instruction::AmoaddW { rd, rs1, rs2 } => encode_r_type(
+                0b0000010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoaddD { rd, rs1, rs2 } => encode_r_type(
+                0b0000010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoswapW { rd, rs1, rs2 } => encode_r_type(
+                0b0000110,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoswapD { rd, rs1, rs2 } => encode_r_type(
+                0b0000110,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoxorW { rd, rs1, rs2 } => encode_r_type(
+                0b0010010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoxorD { rd, rs1, rs2 } => encode_r_type(
+                0b0010010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoandW { rd, rs1, rs2 } => encode_r_type(
+                0b0110010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoandD { rd, rs1, rs2 } => encode_r_type(
+                0b0110010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoorW { rd, rs1, rs2 } => encode_r_type(
+                0b0100010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmoorD { rd, rs1, rs2 } => encode_r_type(
+                0b0100010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmomaxW { rd, rs1, rs2 } => encode_r_type(
+                0b1000010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmomaxD { rd, rs1, rs2 } => encode_r_type(
+                0b1000010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmominW { rd, rs1, rs2 } => encode_r_type(
+                0b1000011,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmominD { rd, rs1, rs2 } => encode_r_type(
+                0b1000011,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmomaxWu { rd, rs1, rs2 } => encode_r_type(
+                0b1110010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmomaxDu { rd, rs1, rs2 } => encode_r_type(
+                0b1110010,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmominWu { rd, rs1, rs2 } => encode_r_type(
+                0b1110011,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b010,
+                rd.encoding(),
+                0b0101111,
+            ),
+            Instruction::AmominDu { rd, rs1, rs2 } => encode_r_type(
+                0b1110011,
+                rs2.encoding(),
+                rs1.encoding(),
+                0b011,
+                rd.encoding(),
+                0b0101111,
+            ),
         }
     }
 
@@ -1952,7 +2206,10 @@ impl Instruction {
                     | ((word >> 20) & 1) << 11
                     | ((word >> 21) & 0x3FF) << 1;
                 let offset = ((imm20 << 11) as i32) >> 11;
-                Some(Instruction::Jal { rd: Gpr::Ra, offset })
+                Some(Instruction::Jal {
+                    rd: Gpr::Ra,
+                    offset,
+                })
             }
 
             // ── JALR ───────────────────────────────────────────────
@@ -2445,96 +2702,150 @@ impl Instruction {
                     (0b1101000, 0b00000, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtSW { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtSW {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     (0b1101000, 0b00001, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtSWU { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtSWU {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     (0b1101000, 0b00010, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtSL { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtSL {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     (0b1101000, 0b00011, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtSLU { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtSLU {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     // FCVT.D.W / WU / L / LU (int -> double): funct7=0b1101001
                     (0b1101001, 0b00000, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtDW { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtDW {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     (0b1101001, 0b00001, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtDWU { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtDWU {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     (0b1101001, 0b00010, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtDL { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtDL {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     (0b1101001, 0b00011, 0b111) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_g = Gpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtDLU { rd: rd_f, rs1: rs1_g })
+                        Some(Instruction::FcvtDLU {
+                            rd: rd_f,
+                            rs1: rs1_g,
+                        })
                     }
                     // FCVT.W.S / WU.S / L.S / LU.S (single -> int): funct7=0b1100000
                     (0b1100000, 0b00000, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtWS { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtWS {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b1100000, 0b00001, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtWUS { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtWUS {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b1100000, 0b00010, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtLS { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtLS {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b1100000, 0b00011, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtLUS { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtLUS {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     // FCVT.W.D / WU.D / L.D / LU.D (double -> int): funct7=0b1100001
                     (0b1100001, 0b00000, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtWD { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtWD {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b1100001, 0b00001, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtWUD { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtWUD {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b1100001, 0b00010, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtLD { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtLD {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b1100001, 0b00011, 0b111) => {
                         let rd_g = Gpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtLUD { rd: rd_g, rs1: rs1_f })
+                        Some(Instruction::FcvtLUD {
+                            rd: rd_g,
+                            rs1: rs1_f,
+                        })
                     }
                     // FCVT.D.S (single -> double) / FCVT.S.D (double -> single)
                     (0b0100001, 0b00000, 0b000) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtDS { rd: rd_f, rs1: rs1_f })
+                        Some(Instruction::FcvtDS {
+                            rd: rd_f,
+                            rs1: rs1_f,
+                        })
                     }
                     (0b0100000, 0b00001, 0b000) => {
                         let rd_f = Fpr::from_encoding(rd)?;
                         let rs1_f = Fpr::from_encoding(rs1)?;
-                        Some(Instruction::FcvtSD { rd: rd_f, rs1: rs1_f })
+                        Some(Instruction::FcvtSD {
+                            rd: rd_f,
+                            rs1: rs1_f,
+                        })
                     }
                     _ => {
                         // Fall through to the FP arithmetic decode below.
@@ -2584,7 +2895,10 @@ impl Instruction {
                 match (funct5, funct3) {
                     (0b00010, 0b010) => {
                         // LR.D rd, (rs1)  — rs2 must be 0
-                        Some(Instruction::LrD { rd: Gpr::Ra, rs1: rs1_reg })
+                        Some(Instruction::LrD {
+                            rd: Gpr::Ra,
+                            rs1: rs1_reg,
+                        })
                     }
                     (0b00011, 0b010) => {
                         // SC.D rd, rs2, (rs1)
@@ -2759,24 +3073,56 @@ impl std::fmt::Display for Instruction {
             Instruction::ScD { rd, rs1, rs2 } => write!(f, "sc.d {}, {}, ({})", rd, rs2, rs1),
             Instruction::LrW { rd, rs1 } => write!(f, "lr.w {}, ({})", rd, rs1),
             Instruction::ScW { rd, rs1, rs2 } => write!(f, "sc.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoaddW { rd, rs1, rs2 } => write!(f, "amoadd.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoaddD { rd, rs1, rs2 } => write!(f, "amoadd.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoswapW { rd, rs1, rs2 } => write!(f, "amoswap.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoswapD { rd, rs1, rs2 } => write!(f, "amoswap.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoxorW { rd, rs1, rs2 } => write!(f, "amoxor.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoxorD { rd, rs1, rs2 } => write!(f, "amoxor.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoandW { rd, rs1, rs2 } => write!(f, "amoand.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmoandD { rd, rs1, rs2 } => write!(f, "amoand.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoaddW { rd, rs1, rs2 } => {
+                write!(f, "amoadd.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoaddD { rd, rs1, rs2 } => {
+                write!(f, "amoadd.d {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoswapW { rd, rs1, rs2 } => {
+                write!(f, "amoswap.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoswapD { rd, rs1, rs2 } => {
+                write!(f, "amoswap.d {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoxorW { rd, rs1, rs2 } => {
+                write!(f, "amoxor.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoxorD { rd, rs1, rs2 } => {
+                write!(f, "amoxor.d {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoandW { rd, rs1, rs2 } => {
+                write!(f, "amoand.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmoandD { rd, rs1, rs2 } => {
+                write!(f, "amoand.d {}, {}, ({})", rd, rs2, rs1)
+            }
             Instruction::AmoorW { rd, rs1, rs2 } => write!(f, "amoor.w {}, {}, ({})", rd, rs2, rs1),
             Instruction::AmoorD { rd, rs1, rs2 } => write!(f, "amoor.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmomaxW { rd, rs1, rs2 } => write!(f, "amomax.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmomaxD { rd, rs1, rs2 } => write!(f, "amomax.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmominW { rd, rs1, rs2 } => write!(f, "amomin.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmominD { rd, rs1, rs2 } => write!(f, "amomin.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmomaxWu { rd, rs1, rs2 } => write!(f, "amomaxu.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmomaxDu { rd, rs1, rs2 } => write!(f, "amomaxu.d {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmominWu { rd, rs1, rs2 } => write!(f, "amominu.w {}, {}, ({})", rd, rs2, rs1),
-            Instruction::AmominDu { rd, rs1, rs2 } => write!(f, "amominu.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmomaxW { rd, rs1, rs2 } => {
+                write!(f, "amomax.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmomaxD { rd, rs1, rs2 } => {
+                write!(f, "amomax.d {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmominW { rd, rs1, rs2 } => {
+                write!(f, "amomin.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmominD { rd, rs1, rs2 } => {
+                write!(f, "amomin.d {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmomaxWu { rd, rs1, rs2 } => {
+                write!(f, "amomaxu.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmomaxDu { rd, rs1, rs2 } => {
+                write!(f, "amomaxu.d {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmominWu { rd, rs1, rs2 } => {
+                write!(f, "amominu.w {}, {}, ({})", rd, rs2, rs1)
+            }
+            Instruction::AmominDu { rd, rs1, rs2 } => {
+                write!(f, "amominu.d {}, {}, ({})", rd, rs2, rs1)
+            }
         }
     }
 }
@@ -2829,12 +3175,12 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
     elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff
-    // e_flags: 0 = soft-float ABI (EF_RISCV_FLOAT_ABI_SOFT).
-    // Our codegen passes FP values in GPRs via FMV.D.X/FMV.X.D (soft-float
-    // calling convention), NOT in FP registers. Setting the ABI to DOUBLE
-    // (0xA0) causes QEMU user-mode to reject FP compare instructions
-    // (FEQ.D/FLT.D/FLE.D) as illegal. Use soft-float ABI to match the
-    // actual codegen.
+                                                // e_flags: 0 = soft-float ABI (EF_RISCV_FLOAT_ABI_SOFT).
+                                                // Our codegen passes FP values in GPRs via FMV.D.X/FMV.X.D (soft-float
+                                                // calling convention), NOT in FP registers. Setting the ABI to DOUBLE
+                                                // (0xA0) causes QEMU user-mode to reject FP compare instructions
+                                                // (FEQ.D/FLT.D/FLE.D) as illegal. Use soft-float ABI to match the
+                                                // actual codegen.
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags (soft-float ABI)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
@@ -2898,43 +3244,127 @@ fn build_riscv64_runtime() -> (Vec<u8>, usize, usize, usize) {
     let hex_offset = 0usize;
 
     // Prologue
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -32 }.encode());
-    code.extend(Instruction::Sd { rs2: Gpr::Ra, rs1: Gpr::Sp, imm: 24 }.encode());
-    code.extend(Instruction::Sd { rs2: Gpr::S0, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::Sp,
+            rs1: Gpr::Sp,
+            imm: -32,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sd {
+            rs2: Gpr::Ra,
+            rs1: Gpr::Sp,
+            imm: 24,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sd {
+            rs2: Gpr::S0,
+            rs1: Gpr::Sp,
+            imm: 16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::S0,
+            rs1: Gpr::Sp,
+            imm: 0,
+        }
+        .encode(),
+    );
 
     // t0 = loop counter (0..8), t1 = shift amount (28, 24, ..., 0)
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 28 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::Zero,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::Zero,
+            imm: 28,
+        }
+        .encode(),
+    );
 
     // hex_loop:
     let hex_loop_start = code.len();
 
     // Extract nibble: t2 = (a0 >> t1) & 0xF
-    code.extend(Instruction::Srl { rd: Gpr::T2, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
-    code.extend(Instruction::Andi { rd: Gpr::T2, rs1: Gpr::T2, imm: 15 }.encode());
+    code.extend(
+        Instruction::Srl {
+            rd: Gpr::T2,
+            rs1: Gpr::A0,
+            rs2: Gpr::T1,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Andi {
+            rd: Gpr::T2,
+            rs1: Gpr::T2,
+            imm: 15,
+        }
+        .encode(),
+    );
 
     // Convert nibble to hex char:
     // t3 = t2 + 48 ('0')  (default)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 48 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T2,
+            imm: 48,
+        }
+        .encode(),
+    );
     // if t2 > 9: t3 = t2 + 87 ('a' - 10)
-    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T2, imm: -10 }.encode()); // t4 = t2 - 10 (temp)
-    // Use SLTIU to check: if t2 >= 10, t4 = 1, else t4 = 0
-    // Actually: SLTIU t4, t2, 10 → if t2 < 10 then t4=1 else t4=0
-    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T2, imm: 10 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T4,
+            rs1: Gpr::T2,
+            imm: -10,
+        }
+        .encode(),
+    ); // t4 = t2 - 10 (temp)
+       // Use SLTIU to check: if t2 >= 10, t4 = 1, else t4 = 0
+       // Actually: SLTIU t4, t2, 10 → if t2 < 10 then t4=1 else t4=0
+    code.extend(
+        Instruction::Sltiu {
+            rd: Gpr::T4,
+            rs1: Gpr::T2,
+            imm: 10,
+        }
+        .encode(),
+    );
     // If t4 == 0 (t2 >= 10), use alpha: t3 = t2 + 87
     // BNE t4, zero, store_digit (t2 < 10, use default t3 = t2 + 48)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 87 }.encode()); // t3 = t2 + 87 (alpha)
-    // Now we have two possibilities: if t2 < 10, use t2+48, else use t2+87
-    // Simple approach: use CSEL-like pattern
-    // t3 = t2 + 48 always, then if t2 >= 10, add 39 more (87-48=39)
-    // Actually let me redo this properly:
-    // t3 = t2 + 48
-    // if t2 >= 10: t3 += 39
-    // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10, 0 if t2 >= 10
-    // We need to add 39 only when t2 >= 10 (t4 == 0)
-    // XORI t4, t4, 1 → invert: t4 = 1 if t2 >= 10
-    // But this is getting complicated. Let me just use a branch.
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T2,
+            imm: 87,
+        }
+        .encode(),
+    ); // t3 = t2 + 87 (alpha)
+       // Now we have two possibilities: if t2 < 10, use t2+48, else use t2+87
+       // Simple approach: use CSEL-like pattern
+       // t3 = t2 + 48 always, then if t2 >= 10, add 39 more (87-48=39)
+       // Actually let me redo this properly:
+       // t3 = t2 + 48
+       // if t2 >= 10: t3 += 39
+       // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10, 0 if t2 >= 10
+       // We need to add 39 only when t2 >= 10 (t4 == 0)
+       // XORI t4, t4, 1 → invert: t4 = 1 if t2 >= 10
+       // But this is getting complicated. Let me just use a branch.
 
     // Let me restart the nibble conversion with a simpler approach.
     // Remove the last 2 instructions we just added.
@@ -2942,52 +3372,189 @@ fn build_riscv64_runtime() -> (Vec<u8>, usize, usize, usize) {
     code.truncate(code.len() - 8);
 
     // t3 = t2 + 48  (default for 0-9)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 48 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T2,
+            imm: 48,
+        }
+        .encode(),
+    );
     // SLTIU t4, t2, 10 → t4 = 1 if t2 < 10
-    code.extend(Instruction::Sltiu { rd: Gpr::T4, rs1: Gpr::T2, imm: 10 }.encode());
+    code.extend(
+        Instruction::Sltiu {
+            rd: Gpr::T4,
+            rs1: Gpr::T2,
+            imm: 10,
+        }
+        .encode(),
+    );
     // BNE t4, zero, +2 (skip alpha adjustment if t2 < 10)
     // We'll compute the branch offset after we know where we are
     let bne_offset_pos = code.len();
-    code.extend(Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
-    // Alpha: t3 = t2 + 87
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T2, imm: 87 }.encode());
+    code.extend(
+        Instruction::Bne {
+            rs1: Gpr::T4,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    ); // placeholder
+       // Alpha: t3 = t2 + 87
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T2,
+            imm: 87,
+        }
+        .encode(),
+    );
     // Patch the BNE to skip this instruction
     let bne_patch_pos = code.len();
     let bne_offset = (bne_patch_pos - bne_offset_pos) as i32;
-    let bne_patched = Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: bne_offset };
+    let bne_patched = Instruction::Bne {
+        rs1: Gpr::T4,
+        rs2: Gpr::Zero,
+        offset: bne_offset,
+    };
     code[bne_offset_pos..bne_offset_pos + 4].copy_from_slice(&bne_patched.encode());
 
     // Store char at sp + t0
-    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
-    code.extend(Instruction::Sb { rs1: Gpr::T5, rs2: Gpr::T3, imm: 0 }.encode());
+    code.extend(
+        Instruction::Add {
+            rd: Gpr::T5,
+            rs1: Gpr::Sp,
+            rs2: Gpr::T0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::T5,
+            rs2: Gpr::T3,
+            imm: 0,
+        }
+        .encode(),
+    );
 
     // Increment: SUB t1, t1, 4; ADD t0, t0, 1; BLT t0, 8, hex_loop
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -4 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::T1,
+            imm: -4,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::T0,
+            imm: 1,
+        }
+        .encode(),
+    );
     // Compute branch back to hex_loop_start
     let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Blt { rs1: Gpr::T0, rs2: Gpr::T4, offset: loop_back_offset }.encode());
+    code.extend(
+        Instruction::Blt {
+            rs1: Gpr::T0,
+            rs2: Gpr::T4,
+            offset: loop_back_offset,
+        }
+        .encode(),
+    );
     // Wait, t4 was used above. Let me use a different register for the limit.
     // Actually BLT t0, 8 → we need imm=8 in a register. Use ADDI t4, zero, 8.
     // Remove the last BLT and redo.
     // Remove the last BLT instruction (4 bytes)
     code.truncate(code.len() - 4);
-    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Zero, imm: 8 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T4,
+            rs1: Gpr::Zero,
+            imm: 8,
+        }
+        .encode(),
+    );
     let loop_back_offset = (hex_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Blt { rs1: Gpr::T0, rs2: Gpr::T4, offset: loop_back_offset }.encode());
+    code.extend(
+        Instruction::Blt {
+            rs1: Gpr::T0,
+            rs2: Gpr::T4,
+            offset: loop_back_offset,
+        }
+        .encode(),
+    );
 
     // ── sys_write(1, sp, 8) ──
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd=1
-    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf=sp
-    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 8 }.encode()); // len=8
-    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A0,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // fd=1
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A1,
+            rs1: Gpr::Sp,
+            imm: 0,
+        }
+        .encode(),
+    ); // buf=sp
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A2,
+            rs1: Gpr::Zero,
+            imm: 8,
+        }
+        .encode(),
+    ); // len=8
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A7,
+            rs1: Gpr::Zero,
+            imm: 64,
+        }
+        .encode(),
+    ); // sys_write
     code.extend(Instruction::Ecall.encode());
 
     // Epilogue
-    code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: 24 }.encode());
-    code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 32 }.encode());
-    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+    code.extend(
+        Instruction::Ld {
+            rd: Gpr::Ra,
+            rs1: Gpr::Sp,
+            imm: 24,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Ld {
+            rd: Gpr::S0,
+            rs1: Gpr::Sp,
+            imm: 16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::Sp,
+            rs1: Gpr::Sp,
+            imm: 32,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Jalr {
+            rd: Gpr::Zero,
+            rs1: Gpr::Ra,
+            imm: 0,
+        }
+        .encode(),
+    );
 
     // ── __vuma_print_int ──
     // Input: a0 = 64-bit signed integer to print as decimal
@@ -2995,146 +3562,575 @@ fn build_riscv64_runtime() -> (Vec<u8>, usize, usize, usize) {
     let int_offset = code.len();
 
     // Prologue
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -64 }.encode());
-    code.extend(Instruction::Sd { rs2: Gpr::Ra, rs1: Gpr::Sp, imm: 56 }.encode());
-    code.extend(Instruction::Sd { rs2: Gpr::S0, rs1: Gpr::Sp, imm: 48 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: 0 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::Sp,
+            rs1: Gpr::Sp,
+            imm: -64,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sd {
+            rs2: Gpr::Ra,
+            rs1: Gpr::Sp,
+            imm: 56,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sd {
+            rs2: Gpr::S0,
+            rs1: Gpr::Sp,
+            imm: 48,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::S0,
+            rs1: Gpr::Sp,
+            imm: 0,
+        }
+        .encode(),
+    );
 
     // Handle negative: if a0 < 0, print '-' and negate
-    code.extend(Instruction::Bge { rs1: Gpr::A0, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    code.extend(
+        Instruction::Bge {
+            rs1: Gpr::A0,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    ); // placeholder
     let bge_pos = code.len() - 4;
 
     // Print '-'
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 45 }.encode()); // '-'
-    code.extend(Instruction::Sb { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
-    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf
-    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 1 }.encode()); // len
-    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::Zero,
+            imm: 45,
+        }
+        .encode(),
+    ); // '-'
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::Sp,
+            rs2: Gpr::T0,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A0,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // fd
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A1,
+            rs1: Gpr::Sp,
+            imm: 0,
+        }
+        .encode(),
+    ); // buf
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A2,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // len
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A7,
+            rs1: Gpr::Zero,
+            imm: 64,
+        }
+        .encode(),
+    ); // sys_write
     code.extend(Instruction::Ecall.encode());
 
     // Negate a0
-    code.extend(Instruction::Sub { rd: Gpr::A0, rs1: Gpr::Zero, rs2: Gpr::A0 }.encode());
+    code.extend(
+        Instruction::Sub {
+            rd: Gpr::A0,
+            rs1: Gpr::Zero,
+            rs2: Gpr::A0,
+        }
+        .encode(),
+    );
 
     // Patch BGE to skip to here
     let bge_target = code.len() as i32;
     let bge_offset = bge_target - (bge_pos as i32);
-    let bge_patched = Instruction::Bge { rs1: Gpr::A0, rs2: Gpr::Zero, offset: bge_offset };
+    let bge_patched = Instruction::Bge {
+        rs1: Gpr::A0,
+        rs2: Gpr::Zero,
+        offset: bge_offset,
+    };
     code[bge_pos..bge_pos + 4].copy_from_slice(&bge_patched.encode());
 
     // Convert digits: t0 = digit count, t1 = 10
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode()); // count=0
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 10 }.encode()); // divisor=10
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::Zero,
+            imm: 0,
+        }
+        .encode(),
+    ); // count=0
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::Zero,
+            imm: 10,
+        }
+        .encode(),
+    ); // divisor=10
 
     let div_loop_start = code.len();
 
     // CBZ-like: if a0 == 0, jump to done
-    code.extend(Instruction::Beq { rs1: Gpr::A0, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::A0,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    ); // placeholder
     let beq_pos = code.len() - 4;
 
     // UDIV: t2 = a0 / 10
-    code.extend(Instruction::Divu { rd: Gpr::T2, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
+    code.extend(
+        Instruction::Divu {
+            rd: Gpr::T2,
+            rs1: Gpr::A0,
+            rs2: Gpr::T1,
+        }
+        .encode(),
+    );
     // REM: t3 = a0 % 10
-    code.extend(Instruction::Remu { rd: Gpr::T3, rs1: Gpr::A0, rs2: Gpr::T1 }.encode());
+    code.extend(
+        Instruction::Remu {
+            rd: Gpr::T3,
+            rs1: Gpr::A0,
+            rs2: Gpr::T1,
+        }
+        .encode(),
+    );
     // Add '0'
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: 48 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T3,
+            imm: 48,
+        }
+        .encode(),
+    );
     // Store at sp + 16 + t0 (use s0+16 area as buffer)
-    code.extend(Instruction::Addi { rd: Gpr::T5, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T0 }.encode());
-    code.extend(Instruction::Sb { rs1: Gpr::T5, rs2: Gpr::T3, imm: 0 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T5,
+            rs1: Gpr::Sp,
+            imm: 16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Add {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::T5,
+            rs2: Gpr::T3,
+            imm: 0,
+        }
+        .encode(),
+    );
     // Increment count
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::T0,
+            imm: 1,
+        }
+        .encode(),
+    );
     // a0 = quotient
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::T2, imm: 0 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A0,
+            rs1: Gpr::T2,
+            imm: 0,
+        }
+        .encode(),
+    );
     // Loop back
     let div_back = (div_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: div_back }.encode());
+    code.extend(
+        Instruction::Jal {
+            rd: Gpr::Zero,
+            offset: div_back,
+        }
+        .encode(),
+    );
 
     // done_digits: Patch BEQ
     let beq_target = code.len() as i32;
     let beq_offset = beq_target - (beq_pos as i32);
-    let beq_patched = Instruction::Beq { rs1: Gpr::A0, rs2: Gpr::Zero, offset: beq_offset };
+    let beq_patched = Instruction::Beq {
+        rs1: Gpr::A0,
+        rs2: Gpr::Zero,
+        offset: beq_offset,
+    };
     code[beq_pos..beq_pos + 4].copy_from_slice(&beq_patched.encode());
 
     // If count == 0, print "0"
-    code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    code.extend(
+        Instruction::Bne {
+            rs1: Gpr::T0,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    ); // placeholder
     let bne_notzero_pos = code.len() - 4;
 
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 48 }.encode()); // '0'
-    code.extend(Instruction::Sb { rs1: Gpr::Sp, rs2: Gpr::T3, imm: 16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 1 }.encode()); // count=1
-    // B write_digits
-    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode()); // placeholder
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::Zero,
+            imm: 48,
+        }
+        .encode(),
+    ); // '0'
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::Sp,
+            rs2: Gpr::T3,
+            imm: 16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // count=1
+       // B write_digits
+    code.extend(
+        Instruction::Jal {
+            rd: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    ); // placeholder
     let j_write_pos = code.len() - 4;
 
     // Patch BNE to skip to reverse section
     let rev_start = code.len() as i32;
     let bne_offset = rev_start - (bne_notzero_pos as i32);
-    let bne_patched = Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: bne_offset };
+    let bne_patched = Instruction::Bne {
+        rs1: Gpr::T0,
+        rs2: Gpr::Zero,
+        offset: bne_offset,
+    };
     code[bne_notzero_pos..bne_notzero_pos + 4].copy_from_slice(&bne_patched.encode());
 
     // Reverse digits in buffer [sp+16, sp+16+t0)
     // t2 = left = 0, t3 = right = t0 - 1
-    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::Zero, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T0, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T2,
+            rs1: Gpr::Zero,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T0,
+            imm: -1,
+        }
+        .encode(),
+    );
 
     let rev_loop = code.len();
     // BGE t2, t3, rev_done
-    code.extend(Instruction::Bge { rs1: Gpr::T2, rs2: Gpr::T3, offset: 0 }.encode()); // placeholder
+    code.extend(
+        Instruction::Bge {
+            rs1: Gpr::T2,
+            rs2: Gpr::T3,
+            offset: 0,
+        }
+        .encode(),
+    ); // placeholder
     let bge_rev_pos = code.len() - 4;
 
     // Load bytes and swap
-    code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Add { rd: Gpr::T5, rs1: Gpr::T4, rs2: Gpr::T2 }.encode());
-    code.extend(Instruction::Add { rd: Gpr::T6, rs1: Gpr::T4, rs2: Gpr::T3 }.encode());
-    code.extend(Instruction::Lbu { rd: Gpr::T4, rs1: Gpr::T5, imm: 0 }.encode()); // reuse t4
-    code.extend(Instruction::Lbu { rd: Gpr::A7, rs1: Gpr::T6, imm: 0 }.encode()); // use a7 as temp
-    code.extend(Instruction::Sb { rs1: Gpr::T5, rs2: Gpr::A7, imm: 0 }.encode());
-    code.extend(Instruction::Sb { rs1: Gpr::T6, rs2: Gpr::T4, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T2, rs1: Gpr::T2, imm: 1 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T4,
+            rs1: Gpr::Sp,
+            imm: 16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Add {
+            rd: Gpr::T5,
+            rs1: Gpr::T4,
+            rs2: Gpr::T2,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Add {
+            rd: Gpr::T6,
+            rs1: Gpr::T4,
+            rs2: Gpr::T3,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Lbu {
+            rd: Gpr::T4,
+            rs1: Gpr::T5,
+            imm: 0,
+        }
+        .encode(),
+    ); // reuse t4
+    code.extend(
+        Instruction::Lbu {
+            rd: Gpr::A7,
+            rs1: Gpr::T6,
+            imm: 0,
+        }
+        .encode(),
+    ); // use a7 as temp
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::T5,
+            rs2: Gpr::A7,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::T6,
+            rs2: Gpr::T4,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T2,
+            rs1: Gpr::T2,
+            imm: 1,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T3,
+            imm: -1,
+        }
+        .encode(),
+    );
     // Loop back
     let rev_back = (rev_loop as i32) - (code.len() as i32);
-    code.extend(Instruction::Jal { rd: Gpr::Zero, offset: rev_back }.encode());
+    code.extend(
+        Instruction::Jal {
+            rd: Gpr::Zero,
+            offset: rev_back,
+        }
+        .encode(),
+    );
 
     // rev_done: Patch BGE
     let rev_done = code.len() as i32;
     let bge_rev_offset = rev_done - (bge_rev_pos as i32);
-    let bge_rev_patched = Instruction::Bge { rs1: Gpr::T2, rs2: Gpr::T3, offset: bge_rev_offset };
+    let bge_rev_patched = Instruction::Bge {
+        rs1: Gpr::T2,
+        rs2: Gpr::T3,
+        offset: bge_rev_offset,
+    };
     code[bge_rev_pos..bge_rev_pos + 4].copy_from_slice(&bge_rev_patched.encode());
 
     // Patch J write_digits
     let write_digits = code.len() as i32;
     let j_write_offset = write_digits - (j_write_pos as i32);
-    let j_write_patched = Instruction::Jal { rd: Gpr::Zero, offset: j_write_offset };
+    let j_write_patched = Instruction::Jal {
+        rd: Gpr::Zero,
+        offset: j_write_offset,
+    };
     code[j_write_pos..j_write_pos + 4].copy_from_slice(&j_write_patched.encode());
 
     // write_digits: sys_write(1, sp+16, t0)
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
-    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 16 }.encode()); // buf
-    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::T0, imm: 0 }.encode()); // len
-    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A0,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // fd
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A1,
+            rs1: Gpr::Sp,
+            imm: 16,
+        }
+        .encode(),
+    ); // buf
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A2,
+            rs1: Gpr::T0,
+            imm: 0,
+        }
+        .encode(),
+    ); // len
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A7,
+            rs1: Gpr::Zero,
+            imm: 64,
+        }
+        .encode(),
+    ); // sys_write
     code.extend(Instruction::Ecall.encode());
 
     // Epilogue
-    code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: 56 }.encode());
-    code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: 48 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 64 }.encode());
-    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+    code.extend(
+        Instruction::Ld {
+            rd: Gpr::Ra,
+            rs1: Gpr::Sp,
+            imm: 56,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Ld {
+            rd: Gpr::S0,
+            rs1: Gpr::Sp,
+            imm: 48,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::Sp,
+            rs1: Gpr::Sp,
+            imm: 64,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Jalr {
+            rd: Gpr::Zero,
+            rs1: Gpr::Ra,
+            imm: 0,
+        }
+        .encode(),
+    );
 
     // ── __vuma_print_newline ──
     // Simple: write '\n' to stdout
     let newline_offset = code.len();
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 10 }.encode()); // '\n'
-    code.extend(Instruction::Sb { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 0 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode()); // fd
-    code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // buf
-    code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 1 }.encode()); // len
-    code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode()); // sys_write
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::Sp,
+            rs1: Gpr::Sp,
+            imm: -16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::Zero,
+            imm: 10,
+        }
+        .encode(),
+    ); // '\n'
+    code.extend(
+        Instruction::Sb {
+            rs1: Gpr::Sp,
+            rs2: Gpr::T0,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A0,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // fd
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A1,
+            rs1: Gpr::Sp,
+            imm: 0,
+        }
+        .encode(),
+    ); // buf
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A2,
+            rs1: Gpr::Zero,
+            imm: 1,
+        }
+        .encode(),
+    ); // len
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::A7,
+            rs1: Gpr::Zero,
+            imm: 64,
+        }
+        .encode(),
+    ); // sys_write
     code.extend(Instruction::Ecall.encode());
-    code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());
-    code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::Sp,
+            rs1: Gpr::Sp,
+            imm: 16,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Jalr {
+            rd: Gpr::Zero,
+            rs1: Gpr::Ra,
+            imm: 0,
+        }
+        .encode(),
+    );
 
     (code, hex_offset, int_offset, newline_offset)
 }
@@ -4467,7 +5463,14 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
 
     // Case 1: fits in 12-bit signed
     if (-2048..=2047).contains(&val) {
-        code.extend(Instruction::Addi { rd: dst, rs1: Gpr::Zero, imm: val as i32 }.encode());
+        code.extend(
+            Instruction::Addi {
+                rd: dst,
+                rs1: Gpr::Zero,
+                imm: val as i32,
+            }
+            .encode(),
+        );
         return code;
     }
 
@@ -4479,7 +5482,14 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         let lo = (val as i32).wrapping_sub(hi as i32);
         code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
         if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: dst,
+                    rs1: dst,
+                    imm: lo,
+                }
+                .encode(),
+            );
         }
         // If the value is non-negative but hi has bit 31 set, LUI sign-extends
         // bit 31 and produces a negative 64-bit result.  Zero-extend with
@@ -4487,8 +5497,22 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         // This happens for positive i32 values near 0x8000_0000 (e.g. 0x7FFF_FF00)
         // where the +0x800 rounding pushes hi into the negative-i32 range.
         if val >= 0 && hi >= 0x8000_0000 {
-            code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
-            code.extend(Instruction::Srli { rd: dst, rs1: dst, shamt: 32 }.encode());
+            code.extend(
+                Instruction::Slli {
+                    rd: dst,
+                    rs1: dst,
+                    shamt: 32,
+                }
+                .encode(),
+            );
+            code.extend(
+                Instruction::Srli {
+                    rd: dst,
+                    rs1: dst,
+                    shamt: 32,
+                }
+                .encode(),
+            );
         }
         return code;
     }
@@ -4503,41 +5527,124 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         let lo = (lower_32 as i32).wrapping_sub(hi as i32);
         code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
         if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: dst,
+                    rs1: dst,
+                    imm: lo,
+                }
+                .encode(),
+            );
         }
         // Zero-extend: SLLI 32 then SRLI 32
-        code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
-        code.extend(Instruction::Srli { rd: dst, rs1: dst, shamt: 32 }.encode());
+        code.extend(
+            Instruction::Slli {
+                rd: dst,
+                rs1: dst,
+                shamt: 32,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Srli {
+                rd: dst,
+                rs1: dst,
+                shamt: 32,
+            }
+            .encode(),
+        );
     } else if lower_32 == 0 {
         // Load upper_32 and shift left by 32
         let hi = ((upper_32.wrapping_add(0x800)) >> 12) << 12;
         let lo = (upper_32 as i32).wrapping_sub(hi as i32);
         code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
         if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: dst,
+                    rs1: dst,
+                    imm: lo,
+                }
+                .encode(),
+            );
         }
-        code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
+        code.extend(
+            Instruction::Slli {
+                rd: dst,
+                rs1: dst,
+                shamt: 32,
+            }
+            .encode(),
+        );
     } else {
         // Load upper_32, SLLI 32, load lower_32 (zero-extended) into T3, OR
         let hi = ((upper_32.wrapping_add(0x800)) >> 12) << 12;
         let lo = (upper_32 as i32).wrapping_sub(hi as i32);
         code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
         if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: dst,
+                    rs1: dst,
+                    imm: lo,
+                }
+                .encode(),
+            );
         }
-        code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
+        code.extend(
+            Instruction::Slli {
+                rd: dst,
+                rs1: dst,
+                shamt: 32,
+            }
+            .encode(),
+        );
 
         // Load lower_32 into T3 with zero-extension
         let hi = ((lower_32.wrapping_add(0x800)) >> 12) << 12;
         let lo = (lower_32 as i32).wrapping_sub(hi as i32);
-        code.extend(Instruction::Lui { rd: Gpr::T3, imm: hi }.encode());
+        code.extend(
+            Instruction::Lui {
+                rd: Gpr::T3,
+                imm: hi,
+            }
+            .encode(),
+        );
         if lo != 0 {
-            code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: lo }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::T3,
+                    rs1: Gpr::T3,
+                    imm: lo,
+                }
+                .encode(),
+            );
         }
-        code.extend(Instruction::Slli { rd: Gpr::T3, rs1: Gpr::T3, shamt: 32 }.encode());
-        code.extend(Instruction::Srli { rd: Gpr::T3, rs1: Gpr::T3, shamt: 32 }.encode());
+        code.extend(
+            Instruction::Slli {
+                rd: Gpr::T3,
+                rs1: Gpr::T3,
+                shamt: 32,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Srli {
+                rd: Gpr::T3,
+                rs1: Gpr::T3,
+                shamt: 32,
+            }
+            .encode(),
+        );
 
-        code.extend(Instruction::Or { rd: dst, rs1: dst, rs2: Gpr::T3 }.encode());
+        code.extend(
+            Instruction::Or {
+                rd: dst,
+                rs1: dst,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
     }
 
     code
@@ -4551,16 +5658,34 @@ fn ss_load_from_slot(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
         // Offset fits in 12-bit signed: LD dst, neg_off(S0)
-        Instruction::Ld { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }
-            .encode()
-            .to_vec()
+        Instruction::Ld {
+            rd: dst_reg,
+            rs1: Gpr::S0,
+            imm: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         // Large offset: compute address into T3, then LD from T3
         let mut code = Vec::new();
         // Materialize offset into T3, then SUB T3, S0, T3
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend(Instruction::Ld { rd: dst_reg, rs1: Gpr::T3, imm: 0 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T3,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Ld {
+                rd: dst_reg,
+                rs1: Gpr::T3,
+                imm: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -4574,16 +5699,34 @@ fn ss_store_to_slot(src_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
         // Offset fits in 12-bit signed: SD src, neg_off(S0)
-        Instruction::Sd { rs1: Gpr::S0, rs2: src_reg, imm: neg_off }
-            .encode()
-            .to_vec()
+        Instruction::Sd {
+            rs1: Gpr::S0,
+            rs2: src_reg,
+            imm: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         // Large offset: compute address into T3, then SD from T3
         let mut code = Vec::new();
         // Materialize offset into T3, then SUB T3, S0, T3
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend(Instruction::Sd { rs1: Gpr::T3, rs2: src_reg, imm: 0 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T3,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Sd {
+                rs1: Gpr::T3,
+                rs2: src_reg,
+                imm: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -4592,14 +5735,32 @@ fn ss_store_to_slot(src_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
 fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
-        Instruction::Fsd { rs1: Gpr::S0, rs2: src_fpr, imm: neg_off }
-            .encode()
-            .to_vec()
+        Instruction::Fsd {
+            rs1: Gpr::S0,
+            rs2: src_fpr,
+            imm: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend(Instruction::Fsd { rs1: Gpr::T3, rs2: src_fpr, imm: 0 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T3,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Fsd {
+                rs1: Gpr::T3,
+                rs2: src_fpr,
+                imm: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -4608,14 +5769,32 @@ fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
 fn ss_store_fpr_s_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
-        Instruction::Fsw { rs1: Gpr::S0, rs2: src_fpr, imm: neg_off }
-            .encode()
-            .to_vec()
+        Instruction::Fsw {
+            rs1: Gpr::S0,
+            rs2: src_fpr,
+            imm: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend(Instruction::Fsw { rs1: Gpr::T3, rs2: src_fpr, imm: 0 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T3,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Fsw {
+                rs1: Gpr::T3,
+                rs2: src_fpr,
+                imm: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -4624,14 +5803,32 @@ fn ss_store_fpr_s_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
 fn ss_load_word_from_slot(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
-        Instruction::Lw { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }
-            .encode()
-            .to_vec()
+        Instruction::Lw {
+            rd: dst_reg,
+            rs1: Gpr::S0,
+            imm: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend(Instruction::Lw { rd: dst_reg, rs1: Gpr::T3, imm: 0 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T3,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Lw {
+                rd: dst_reg,
+                rs1: Gpr::T3,
+                imm: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -4652,9 +5849,13 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
         IRValue::Address(a) => ss_load_imm(scratch, *a as i64),
         IRValue::Label(_) => {
             // Placeholder: load 0
-            Instruction::Addi { rd: scratch, rs1: Gpr::Zero, imm: 0 }
-                .encode()
-                .to_vec()
+            Instruction::Addi {
+                rd: scratch,
+                rs1: Gpr::Zero,
+                imm: 0,
+            }
+            .encode()
+            .to_vec()
         }
     }
 }
@@ -4667,12 +5868,32 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
 fn ss_emit_slot_addr(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
-        Instruction::Addi { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }.encode().to_vec()
+        Instruction::Addi {
+            rd: dst_reg,
+            rs1: Gpr::S0,
+            imm: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend(Instruction::Addi { rd: dst_reg, rs1: Gpr::T3, imm: 0 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T3,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
+        code.extend(
+            Instruction::Addi {
+                rd: dst_reg,
+                rs1: Gpr::T3,
+                imm: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -4711,83 +5932,218 @@ fn emit_riscv64_crc32_frame_loop() -> Vec<u8> {
     // T4 = 0xEDB88320 (polynomial)
     code.extend(ss_load_imm(Gpr::T4, 0xEDB8_8320));
     // T0 = SP (byte pointer)
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Sp, imm: 0 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::Sp,
+            imm: 0,
+        }
+        .encode(),
+    );
     // T1 = 52 (outer byte counter)
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 52 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::Zero,
+            imm: 52,
+        }
+        .encode(),
+    );
 
     // outer_loop_start:
     let outer_loop_start = code.len();
     // BEQ T1, zero, outer_done (placeholder, patched below)
-    code.extend(Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T1,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let outer_beq_pos = code.len() - 4;
     // T2 = byte at [T0] (zero-extended)
-    code.extend(Instruction::Lbu { rd: Gpr::T2, rs1: Gpr::T0, imm: 0 }.encode());
+    code.extend(
+        Instruction::Lbu {
+            rd: Gpr::T2,
+            rs1: Gpr::T0,
+            imm: 0,
+        }
+        .encode(),
+    );
     // T5 ^= T2
-    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T2 }.encode());
+    code.extend(
+        Instruction::Xor {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T2,
+        }
+        .encode(),
+    );
     // T3 = 8 (inner bit counter)
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 8 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::Zero,
+            imm: 8,
+        }
+        .encode(),
+    );
 
     // inner_loop_start:
     let inner_loop_start = code.len();
     // BEQ T3, zero, inner_done (placeholder, patched below)
-    code.extend(Instruction::Beq { rs1: Gpr::T3, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T3,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let inner_beq_pos = code.len() - 4;
     // T6 = T5 & 1
-    code.extend(Instruction::Andi { rd: Gpr::T6, rs1: Gpr::T5, imm: 1 }.encode());
+    code.extend(
+        Instruction::Andi {
+            rd: Gpr::T6,
+            rs1: Gpr::T5,
+            imm: 1,
+        }
+        .encode(),
+    );
     // T5 >>= 1
-    code.extend(Instruction::Srli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 1 }.encode());
+    code.extend(
+        Instruction::Srli {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            shamt: 1,
+        }
+        .encode(),
+    );
     // BEQ T6, zero, skip_xor (placeholder, patched below)
-    code.extend(Instruction::Beq { rs1: Gpr::T6, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T6,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let skip_xor_beq_pos = code.len() - 4;
     // T5 ^= T4 (apply polynomial)
-    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T4 }.encode());
+    code.extend(
+        Instruction::Xor {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T4,
+        }
+        .encode(),
+    );
     // skip_xor_target:
     let skip_xor_target = code.len() as i32;
     let skip_xor_offset = skip_xor_target - (skip_xor_beq_pos as i32);
     let skip_xor_patched = Instruction::Beq {
-        rs1: Gpr::T6, rs2: Gpr::Zero, offset: skip_xor_offset,
+        rs1: Gpr::T6,
+        rs2: Gpr::Zero,
+        offset: skip_xor_offset,
     };
     code[skip_xor_beq_pos..skip_xor_beq_pos + 4].copy_from_slice(&skip_xor_patched.encode());
     // T3 -= 1
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T3,
+            imm: -1,
+        }
+        .encode(),
+    );
     // unconditional branch back to inner_loop_start
     let inner_back_offset = (inner_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Beq {
-        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: inner_back_offset,
-    }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::Zero,
+            rs2: Gpr::Zero,
+            offset: inner_back_offset,
+        }
+        .encode(),
+    );
 
     // inner_done: patch the inner BEQ to jump here.
     let inner_done_target = code.len() as i32;
     let inner_beq_offset = inner_done_target - (inner_beq_pos as i32);
     let inner_beq_patched = Instruction::Beq {
-        rs1: Gpr::T3, rs2: Gpr::Zero, offset: inner_beq_offset,
+        rs1: Gpr::T3,
+        rs2: Gpr::Zero,
+        offset: inner_beq_offset,
     };
     code[inner_beq_pos..inner_beq_pos + 4].copy_from_slice(&inner_beq_patched.encode());
 
     // T0 += 1 (advance byte pointer)
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::T0,
+            imm: 1,
+        }
+        .encode(),
+    );
     // T1 -= 1 (decrement outer counter)
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::T1,
+            imm: -1,
+        }
+        .encode(),
+    );
     // unconditional branch back to outer_loop_start
     let outer_back_offset = (outer_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Beq {
-        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: outer_back_offset,
-    }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::Zero,
+            rs2: Gpr::Zero,
+            offset: outer_back_offset,
+        }
+        .encode(),
+    );
 
     // outer_done: patch the outer BEQ to jump here.
     let outer_done_target = code.len() as i32;
     let outer_beq_offset = outer_done_target - (outer_beq_pos as i32);
     let outer_beq_patched = Instruction::Beq {
-        rs1: Gpr::T1, rs2: Gpr::Zero, offset: outer_beq_offset,
+        rs1: Gpr::T1,
+        rs2: Gpr::Zero,
+        offset: outer_beq_offset,
     };
     code[outer_beq_pos..outer_beq_pos + 4].copy_from_slice(&outer_beq_patched.encode());
 
     // Final: T5 = !T5 (XOR with all-1s = NOT)
-    code.extend(Instruction::Xori { rd: Gpr::T5, rs1: Gpr::T5, imm: -1 }.encode());
+    code.extend(
+        Instruction::Xori {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            imm: -1,
+        }
+        .encode(),
+    );
     // Zero-extend: clear upper 32 bits for clean 64-bit comparison with
     // a 32-bit loaded CRC value.
-    code.extend(Instruction::Slli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 32 }.encode());
-    code.extend(Instruction::Srli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 32 }.encode());
+    code.extend(
+        Instruction::Slli {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            shamt: 32,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Srli {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            shamt: 32,
+        }
+        .encode(),
+    );
 
     code
 }
@@ -4822,6 +6178,7 @@ fn emit_riscv64_crc32_frame_loop() -> Vec<u8> {
 ///   T4 — FNV prime 0x100000001b3
 ///   T5 — running hash (init = offset_basis ^ salt; final result)
 ///   T6 — unused (reserved for future use)
+#[allow(dead_code)]
 fn emit_riscv64_fnv1a_64_loop(offset_from_s0: i32, byte_count: u32, salt: u8) -> Vec<u8> {
     let mut code = Vec::new();
     // T5 = FNV-1a offset basis = 0xcbf29ce484222325
@@ -4829,17 +6186,45 @@ fn emit_riscv64_fnv1a_64_loop(offset_from_s0: i32, byte_count: u32, salt: u8) ->
     // T4 = FNV-1a prime = 0x100000001b3
     code.extend(ss_load_imm(Gpr::T4, 0x0000_0001_0000_01b3u64 as i64));
     // T5 ^= salt (initial salt step before the per-byte loop)
-    code.extend(Instruction::Xori { rd: Gpr::T5, rs1: Gpr::T5, imm: salt as i32 }.encode());
+    code.extend(
+        Instruction::Xori {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            imm: salt as i32,
+        }
+        .encode(),
+    );
     // T5 *= prime (wrapping mul; RISC-V MUL gives low 64 bits = wrapping_mul)
-    code.extend(Instruction::Mul { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T4 }.encode());
+    code.extend(
+        Instruction::Mul {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T4,
+        }
+        .encode(),
+    );
 
     // T0 = &sig_input[0] = S0 - offset_from_s0
     let neg_off = -offset_from_s0;
     if neg_off >= -2048 {
-        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::S0, imm: neg_off }.encode());
+        code.extend(
+            Instruction::Addi {
+                rd: Gpr::T0,
+                rs1: Gpr::S0,
+                imm: neg_off,
+            }
+            .encode(),
+        );
     } else {
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(
+            Instruction::Sub {
+                rd: Gpr::T0,
+                rs1: Gpr::S0,
+                rs2: Gpr::T3,
+            }
+            .encode(),
+        );
     }
     // T1 = byte_count (loop counter)
     code.extend(ss_load_imm(Gpr::T1, byte_count as i64));
@@ -4847,29 +6232,78 @@ fn emit_riscv64_fnv1a_64_loop(offset_from_s0: i32, byte_count: u32, salt: u8) ->
     // loop_start:
     let loop_start = code.len();
     // BEQ T1, zero, done (placeholder, patched below)
-    code.extend(Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T1,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let beq_pos = code.len() - 4;
     // T2 = byte at [T0] (zero-extended)
-    code.extend(Instruction::Lbu { rd: Gpr::T2, rs1: Gpr::T0, imm: 0 }.encode());
+    code.extend(
+        Instruction::Lbu {
+            rd: Gpr::T2,
+            rs1: Gpr::T0,
+            imm: 0,
+        }
+        .encode(),
+    );
     // T5 ^= T2
-    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T2 }.encode());
+    code.extend(
+        Instruction::Xor {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T2,
+        }
+        .encode(),
+    );
     // T5 *= T4 (wrapping mul)
-    code.extend(Instruction::Mul { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T4 }.encode());
+    code.extend(
+        Instruction::Mul {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T4,
+        }
+        .encode(),
+    );
     // T0 += 1
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::T0,
+            imm: 1,
+        }
+        .encode(),
+    );
     // T1 -= 1
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::T1,
+            imm: -1,
+        }
+        .encode(),
+    );
     // Unconditional branch back to loop_start
     let back_offset = (loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Beq {
-        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: back_offset,
-    }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::Zero,
+            rs2: Gpr::Zero,
+            offset: back_offset,
+        }
+        .encode(),
+    );
 
     // done: patch the BEQ to jump here.
     let done_target = code.len() as i32;
     let beq_offset = done_target - (beq_pos as i32);
     let beq_patched = Instruction::Beq {
-        rs1: Gpr::T1, rs2: Gpr::Zero, offset: beq_offset,
+        rs1: Gpr::T1,
+        rs2: Gpr::Zero,
+        offset: beq_offset,
     };
     code[beq_pos..beq_pos + 4].copy_from_slice(&beq_patched.encode());
 
@@ -4908,57 +6342,178 @@ fn emit_riscv64_crc32_range(byte_count: u32) -> Vec<u8> {
 
     // outer_loop_start:
     let outer_loop_start = code.len();
-    code.extend(Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T1,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let outer_beq_pos = code.len() - 4;
-    code.extend(Instruction::Lbu { rd: Gpr::T2, rs1: Gpr::T0, imm: 0 }.encode());
-    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T2 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::Zero, imm: 8 }.encode());
+    code.extend(
+        Instruction::Lbu {
+            rd: Gpr::T2,
+            rs1: Gpr::T0,
+            imm: 0,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Xor {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T2,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::Zero,
+            imm: 8,
+        }
+        .encode(),
+    );
 
     let inner_loop_start = code.len();
-    code.extend(Instruction::Beq { rs1: Gpr::T3, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T3,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let inner_beq_pos = code.len() - 4;
-    code.extend(Instruction::Andi { rd: Gpr::T6, rs1: Gpr::T5, imm: 1 }.encode());
-    code.extend(Instruction::Srli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 1 }.encode());
-    code.extend(Instruction::Beq { rs1: Gpr::T6, rs2: Gpr::Zero, offset: 0 }.encode());
+    code.extend(
+        Instruction::Andi {
+            rd: Gpr::T6,
+            rs1: Gpr::T5,
+            imm: 1,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Srli {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            shamt: 1,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::T6,
+            rs2: Gpr::Zero,
+            offset: 0,
+        }
+        .encode(),
+    );
     let skip_xor_beq_pos = code.len() - 4;
-    code.extend(Instruction::Xor { rd: Gpr::T5, rs1: Gpr::T5, rs2: Gpr::T4 }.encode());
+    code.extend(
+        Instruction::Xor {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            rs2: Gpr::T4,
+        }
+        .encode(),
+    );
     let skip_xor_target = code.len() as i32;
     let skip_xor_offset = skip_xor_target - (skip_xor_beq_pos as i32);
     let skip_xor_patched = Instruction::Beq {
-        rs1: Gpr::T6, rs2: Gpr::Zero, offset: skip_xor_offset,
+        rs1: Gpr::T6,
+        rs2: Gpr::Zero,
+        offset: skip_xor_offset,
     };
     code[skip_xor_beq_pos..skip_xor_beq_pos + 4].copy_from_slice(&skip_xor_patched.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T3,
+            rs1: Gpr::T3,
+            imm: -1,
+        }
+        .encode(),
+    );
     let inner_back_offset = (inner_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Beq {
-        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: inner_back_offset,
-    }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::Zero,
+            rs2: Gpr::Zero,
+            offset: inner_back_offset,
+        }
+        .encode(),
+    );
 
     let inner_done_target = code.len() as i32;
     let inner_beq_offset = inner_done_target - (inner_beq_pos as i32);
     let inner_beq_patched = Instruction::Beq {
-        rs1: Gpr::T3, rs2: Gpr::Zero, offset: inner_beq_offset,
+        rs1: Gpr::T3,
+        rs2: Gpr::Zero,
+        offset: inner_beq_offset,
     };
     code[inner_beq_pos..inner_beq_pos + 4].copy_from_slice(&inner_beq_patched.encode());
 
-    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
-    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -1 }.encode());
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T0,
+            rs1: Gpr::T0,
+            imm: 1,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Addi {
+            rd: Gpr::T1,
+            rs1: Gpr::T1,
+            imm: -1,
+        }
+        .encode(),
+    );
     let outer_back_offset = (outer_loop_start as i32) - (code.len() as i32);
-    code.extend(Instruction::Beq {
-        rs1: Gpr::Zero, rs2: Gpr::Zero, offset: outer_back_offset,
-    }.encode());
+    code.extend(
+        Instruction::Beq {
+            rs1: Gpr::Zero,
+            rs2: Gpr::Zero,
+            offset: outer_back_offset,
+        }
+        .encode(),
+    );
 
     let outer_done_target = code.len() as i32;
     let outer_beq_offset = outer_done_target - (outer_beq_pos as i32);
     let outer_beq_patched = Instruction::Beq {
-        rs1: Gpr::T1, rs2: Gpr::Zero, offset: outer_beq_offset,
+        rs1: Gpr::T1,
+        rs2: Gpr::Zero,
+        offset: outer_beq_offset,
     };
     code[outer_beq_pos..outer_beq_pos + 4].copy_from_slice(&outer_beq_patched.encode());
 
     // Final: T5 = !T5; zero-extend to 64 bits.
-    code.extend(Instruction::Xori { rd: Gpr::T5, rs1: Gpr::T5, imm: -1 }.encode());
-    code.extend(Instruction::Slli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 32 }.encode());
-    code.extend(Instruction::Srli { rd: Gpr::T5, rs1: Gpr::T5, shamt: 32 }.encode());
+    code.extend(
+        Instruction::Xori {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            imm: -1,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Slli {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            shamt: 32,
+        }
+        .encode(),
+    );
+    code.extend(
+        Instruction::Srli {
+            rd: Gpr::T5,
+            rs1: Gpr::T5,
+            shamt: 32,
+        }
+        .encode(),
+    );
 
     code
 }
@@ -4968,14 +6523,11 @@ fn emit_riscv64_crc32_range(byte_count: u32) -> Vec<u8> {
 /// matching the library `StarkProof::commitment()` (ipc.rs:4017):
 /// init = 0xcbf29ce484222325, prime = 0x100000001b3, per byte
 /// `hash ^= byte; hash = hash.wrapping_mul(prime)`.
+///
+/// Delegates to [`vuma_scg::hash::fnv1a_64`] (single source of truth,
+/// Gap 6 fix).
 fn compute_fnv1a_64(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    let prime: u64 = 0x100000001b3;
-    for &b in data {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(prime);
-    }
-    hash
+    vuma_scg::hash::fnv1a_64(data)
 }
 
 impl Backend for RiscV64Backend {
@@ -4988,8 +6540,7 @@ impl Backend for RiscV64Backend {
 
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
-        let mut all_vreg_ids: std::collections::HashSet<u32> =
-            std::collections::HashSet::new();
+        let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for &id in func.vregs.keys() {
             all_vreg_ids.insert(id);
         }
@@ -5138,7 +6689,10 @@ impl Backend for RiscV64Backend {
         let mut cap_grant_sig_input: Option<Vec<u8>> = None;
         'grant_scan: for block in &func.blocks {
             for instr in &block.instructions {
-                if let IRInstr::Call { func: fname, args, .. } = instr {
+                if let IRInstr::Call {
+                    func: fname, args, ..
+                } = instr
+                {
                     if fname == "capability_grant" && args.len() == 2 {
                         let resource_id = match &args[0] {
                             IRValue::Immediate(v) => *v as u64,
@@ -5153,11 +6707,17 @@ impl Backend for RiscV64Backend {
                             read: (perms_raw & 1) != 0,
                             write: (perms_raw & 2) != 0,
                             execute: (perms_raw & 4) != 0,
-                            ..Default::default()
                         };
                         let token = crate::ipc::capability::grant_capability(
-                            resource_id as u128, 1, 1, resource, perms,
-                            0, 0, 3600, b"vuma_dev_signing_key",
+                            resource_id as u128,
+                            1,
+                            1,
+                            resource,
+                            perms,
+                            0,
+                            0,
+                            3600,
+                            b"vuma_dev_signing_key",
                         );
                         // Reconstruct signature_input inline (mirrors
                         // x86_64 stack_slot_isel.rs: ipc::capability::signature_input
@@ -5197,12 +6757,25 @@ impl Backend for RiscV64Backend {
                 opcode: "addi".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
                 writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
-                encoded: Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -fs }.encode().to_vec(),
+                encoded: Instruction::Addi {
+                    rd: Gpr::Sp,
+                    rs1: Gpr::Sp,
+                    imm: -fs,
+                }
+                .encode()
+                .to_vec(),
             });
         } else {
             let mut prologue = Vec::new();
             prologue.extend(ss_load_imm(Gpr::T0, fs as i64));
-            prologue.extend(Instruction::Sub { rd: Gpr::Sp, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+            prologue.extend(
+                Instruction::Sub {
+                    rd: Gpr::Sp,
+                    rs1: Gpr::Sp,
+                    rs2: Gpr::T0,
+                }
+                .encode(),
+            );
             instructions.push(AllocatedInstruction {
                 opcode: "sub".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
@@ -5215,18 +6788,44 @@ impl Backend for RiscV64Backend {
         if fs - 8 >= -2048 && fs - 8 <= 2047 {
             instructions.push(AllocatedInstruction {
                 opcode: "sd".to_string(),
-                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()),
+                ],
                 writes: vec![],
-                encoded: Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Ra, imm: fs - 8 }.encode().to_vec(),
+                encoded: Instruction::Sd {
+                    rs1: Gpr::Sp,
+                    rs2: Gpr::Ra,
+                    imm: fs - 8,
+                }
+                .encode()
+                .to_vec(),
             });
         } else {
             let mut code = Vec::new();
             code.extend(ss_load_imm(Gpr::T0, (fs - 8) as i64));
-            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
-            code.extend(Instruction::Sd { rs1: Gpr::T0, rs2: Gpr::Ra, imm: 0 }.encode());
+            code.extend(
+                Instruction::Add {
+                    rd: Gpr::T0,
+                    rs1: Gpr::Sp,
+                    rs2: Gpr::T0,
+                }
+                .encode(),
+            );
+            code.extend(
+                Instruction::Sd {
+                    rs1: Gpr::T0,
+                    rs2: Gpr::Ra,
+                    imm: 0,
+                }
+                .encode(),
+            );
             instructions.push(AllocatedInstruction {
                 opcode: "sd".to_string(),
-                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()),
+                ],
                 writes: vec![],
                 encoded: code,
             });
@@ -5235,18 +6834,44 @@ impl Backend for RiscV64Backend {
         if fs - 16 >= -2048 && fs - 16 <= 2047 {
             instructions.push(AllocatedInstruction {
                 opcode: "sd".to_string(),
-                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()),
+                ],
                 writes: vec![],
-                encoded: Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::S0, imm: fs - 16 }.encode().to_vec(),
+                encoded: Instruction::Sd {
+                    rs1: Gpr::Sp,
+                    rs2: Gpr::S0,
+                    imm: fs - 16,
+                }
+                .encode()
+                .to_vec(),
             });
         } else {
             let mut code = Vec::new();
             code.extend(ss_load_imm(Gpr::T0, (fs - 16) as i64));
-            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
-            code.extend(Instruction::Sd { rs1: Gpr::T0, rs2: Gpr::S0, imm: 0 }.encode());
+            code.extend(
+                Instruction::Add {
+                    rd: Gpr::T0,
+                    rs1: Gpr::Sp,
+                    rs2: Gpr::T0,
+                }
+                .encode(),
+            );
+            code.extend(
+                Instruction::Sd {
+                    rs1: Gpr::T0,
+                    rs2: Gpr::S0,
+                    imm: 0,
+                }
+                .encode(),
+            );
             instructions.push(AllocatedInstruction {
                 opcode: "sd".to_string(),
-                reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding()),
+                ],
                 writes: vec![],
                 encoded: code,
             });
@@ -5258,12 +6883,25 @@ impl Backend for RiscV64Backend {
                 opcode: "addi".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
                 writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding())],
-                encoded: Instruction::Addi { rd: Gpr::S0, rs1: Gpr::Sp, imm: fs }.encode().to_vec(),
+                encoded: Instruction::Addi {
+                    rd: Gpr::S0,
+                    rs1: Gpr::Sp,
+                    imm: fs,
+                }
+                .encode()
+                .to_vec(),
             });
         } else {
             let mut code = Vec::new();
             code.extend(ss_load_imm(Gpr::T0, fs as i64));
-            code.extend(Instruction::Add { rd: Gpr::S0, rs1: Gpr::Sp, rs2: Gpr::T0 }.encode());
+            code.extend(
+                Instruction::Add {
+                    rd: Gpr::S0,
+                    rs1: Gpr::Sp,
+                    rs2: Gpr::T0,
+                }
+                .encode(),
+            );
             instructions.push(AllocatedInstruction {
                 opcode: "add".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
@@ -5273,7 +6911,16 @@ impl Backend for RiscV64Backend {
         }
 
         // Store function parameters from A0-A7 to their stack slots
-        let arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+        let arg_regs = [
+            Gpr::A0,
+            Gpr::A1,
+            Gpr::A2,
+            Gpr::A3,
+            Gpr::A4,
+            Gpr::A5,
+            Gpr::A6,
+            Gpr::A7,
+        ];
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
                 if i < 8 {
@@ -5298,7 +6945,14 @@ impl Backend for RiscV64Backend {
         {
             let mut prologue_extra: Vec<u8> = Vec::new();
             // T0 = 0 (zero source for the counter slots).
-            prologue_extra.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+            prologue_extra.extend(
+                Instruction::Addi {
+                    rd: Gpr::T0,
+                    rs1: Gpr::Zero,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // Zero seq_counter, proto_state, cb_state, IRQ/hotswap/stark counts.
             prologue_extra.extend(ss_store_to_slot(Gpr::T0, seq_counter_off));
             prologue_extra.extend(ss_store_to_slot(Gpr::T0, proto_state_off));
@@ -5309,12 +6963,20 @@ impl Backend for RiscV64Backend {
 
             // Wave C: populate cap sig + sig_input + sig_input_len from
             // compile-time grant data (only if the function has a grant).
-            if let (Some(sig), Some(sig_input)) = (cap_grant_sig.as_ref(), cap_grant_sig_input.as_ref()) {
+            if let (Some(sig), Some(sig_input)) =
+                (cap_grant_sig.as_ref(), cap_grant_sig_input.as_ref())
+            {
                 // Store the 32-byte signature into cap_sig_off (4 × 8-byte stores).
                 for i in 0..4 {
                     let chunk = u64::from_le_bytes([
-                        sig[i * 8], sig[i * 8 + 1], sig[i * 8 + 2], sig[i * 8 + 3],
-                        sig[i * 8 + 4], sig[i * 8 + 5], sig[i * 8 + 6], sig[i * 8 + 7],
+                        sig[i * 8],
+                        sig[i * 8 + 1],
+                        sig[i * 8 + 2],
+                        sig[i * 8 + 3],
+                        sig[i * 8 + 4],
+                        sig[i * 8 + 5],
+                        sig[i * 8 + 6],
+                        sig[i * 8 + 7],
                     ]);
                     prologue_extra.extend(ss_load_imm(Gpr::T1, chunk as i64));
                     // Need to store T1 at [S0 - (cap_sig_off + i*8)]; build address in T2.
@@ -5330,7 +6992,8 @@ impl Backend for RiscV64Backend {
                     chunk_bytes[..end - start].copy_from_slice(&sig_input[start..end]);
                     let chunk = u64::from_le_bytes(chunk_bytes);
                     prologue_extra.extend(ss_load_imm(Gpr::T1, chunk as i64));
-                    prologue_extra.extend(ss_store_to_slot(Gpr::T1, cap_siginput_off + (i as i32) * 8));
+                    prologue_extra
+                        .extend(ss_store_to_slot(Gpr::T1, cap_siginput_off + (i as i32) * 8));
                 }
                 // Store sig_input length into cap_siginput_len_off.
                 prologue_extra.extend(ss_load_imm(Gpr::T1, sig_input.len() as i64));
@@ -5356,7 +7019,8 @@ impl Backend for RiscV64Backend {
 
         // ── Phase 3: Emit body with branch fixup tracking ──
 
-        let mut current_byte_offset: u64 = instructions.iter().map(|i| i.encoded.len() as u64).sum();
+        let mut current_byte_offset: u64 =
+            instructions.iter().map(|i| i.encoded.len() as u64).sum();
         let mut label_offsets: HashMap<String, u64> = HashMap::new();
 
         // Branch fixup: records a branch instruction that needs its offset patched
@@ -6793,7 +8457,6 @@ impl Backend for RiscV64Backend {
                                     read: (perms_raw & 1) != 0,
                                     write: (perms_raw & 2) != 0,
                                     execute: (perms_raw & 4) != 0,
-                                    ..Default::default()
                                 };
                                 let token = crate::ipc::capability::grant_capability(
                                     resource_id as u128, 1, 1, resource, perms,
@@ -7005,7 +8668,7 @@ impl Backend for RiscV64Backend {
                                 // xor_loop:
                                 let xor_loop_start = code.len();
                                 code.extend(Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: 0 }.encode());
-                                let xor_beq_pos = code.len() - 4;
+                                let _xor_beq_pos = code.len() - 4;
                                 // Load plaintext/ciphertext byte
                                 code.extend(Instruction::Lbu { rd: Gpr::T6, rs1: Gpr::T0, imm: 0 }.encode());
                                 // Compute key stream: KEY[T4] ^ NONCE[T5]
@@ -7821,146 +9484,22 @@ impl Backend for RiscV64Backend {
                                 code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                                 true
                             }
-                            ("checkpoint_save", 1, _) => {
-                                let value = &args[0];
-                                // Stack: [0..32] path, [32..128] record (96 bytes)
-                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -128 }.encode());
-                                // Build path "/tmp/vuma_checkpoint.bin\0" at [SP+0..25]
-                                code.extend(ss_load_imm(Gpr::T0, 0x6D75_762F_706D_742Fu64 as i64)); // "/tmp/vum"
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 0 }.encode());
-                                code.extend(ss_load_imm(Gpr::T0, 0x706B_6365_6863_5F61u64 as i64)); // "a_checkp"
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 8 }.encode());
-                                code.extend(ss_load_imm(Gpr::T0, 0x6E69_622E_746E_696Fu64 as i64)); // "oint.bin"
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 16 }.encode());
-                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 24 }.encode()); // null
-                                let rec = 32;
-                                // [rec+0..8] = magic 0x434B50544F494E54
-                                code.extend(ss_load_imm(Gpr::T0, 0x434B_5054_4F49_4E54u64 as i64));
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: rec }.encode());
-                                // [rec+8..32] = 0 (pid, timestamp, channel_id)
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 8 }.encode());
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 16 }.encode());
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 24 }.encode());
-                                // [rec+32..40] = sequence = value
-                                code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T0));
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: rec + 32 }.encode());
-                                // [rec+40..48] = protocol_state = 0
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 40 }.encode());
-                                // [rec+48..52] = CRC32 over [rec+24..rec+48] (24 bytes)
-                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Sp, imm: rec + 24 }.encode());
-                                code.extend(emit_riscv64_crc32_range(24));
-                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::T5, imm: rec + 48 }.encode());
-                                // [rec+52..96] = 0 (reserved)
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 56 }.encode());
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 64 }.encode());
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 72 }.encode());
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 80 }.encode());
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: rec + 88 }.encode());
-                                // openat(AT_FDCWD=-100, path, O_WRONLY|O_CREAT|O_TRUNC=0x241, 0644)
-                                code.extend(ss_load_imm(Gpr::A0, -100)); // AT_FDCWD
-                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode()); // path
-                                code.extend(ss_load_imm(Gpr::A2, 0x241)); // O_WRONLY|O_CREAT|O_TRUNC
-                                code.extend(ss_load_imm(Gpr::A3, 0o644));
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 56 }.encode()); // sys_openat
-                                code.extend(Instruction::Ecall.encode());
-                                // Save fd at [SP+24]
-                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::A0, imm: 24 }.encode());
-                                // write(fd, &record, 96)
-                                code.extend(Instruction::Lwu { rd: Gpr::A0, rs1: Gpr::Sp, imm: 24 }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: rec }.encode());
-                                code.extend(ss_load_imm(Gpr::A2, 96));
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 64 }.encode());
-                                code.extend(Instruction::Ecall.encode());
-                                // close(fd)
-                                code.extend(Instruction::Lwu { rd: Gpr::A0, rs1: Gpr::Sp, imm: 24 }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 57 }.encode());
-                                code.extend(Instruction::Ecall.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 128 }.encode());
-                                true
-                            }
-                            ("checkpoint_restore", 0, true) => {
-                                let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
-                                let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -128 }.encode());
-                                // Build path
-                                code.extend(ss_load_imm(Gpr::T0, 0x6D75_762F_706D_742Fu64 as i64));
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 0 }.encode());
-                                code.extend(ss_load_imm(Gpr::T0, 0x706B_6365_6863_5F61u64 as i64));
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 8 }.encode());
-                                code.extend(ss_load_imm(Gpr::T0, 0x6E69_622E_746E_696Fu64 as i64));
-                                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::T0, imm: 16 }.encode());
-                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 24 }.encode());
-                                let rec = 32;
-                                // openat(AT_FDCWD, path, O_RDONLY=0, 0)
-                                code.extend(ss_load_imm(Gpr::A0, -100));
-                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode()); // O_RDONLY
-                                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 56 }.encode());
-                                code.extend(Instruction::Ecall.encode());
-                                // If fd < 0, fail
-                                code.extend(Instruction::Blt { rs1: Gpr::A0, rs2: Gpr::Zero, offset: 0 }.encode());
-                                let blt_fail_pos = code.len() - 4;
-                                // Save fd
-                                code.extend(Instruction::Sw { rs1: Gpr::Sp, rs2: Gpr::A0, imm: 24 }.encode());
-                                // read(fd, &record, 96)
-                                code.extend(Instruction::Lwu { rd: Gpr::A0, rs1: Gpr::Sp, imm: 24 }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: rec }.encode());
-                                code.extend(ss_load_imm(Gpr::A2, 96));
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 63 }.encode());
-                                code.extend(Instruction::Ecall.encode());
-                                // If read < 96, fail
-                                code.extend(ss_load_imm(Gpr::T0, 96));
-                                code.extend(Instruction::Blt { rs1: Gpr::A0, rs2: Gpr::T0, offset: 0 }.encode());
-                                let blt_short_pos = code.len() - 4;
-                                // close(fd)
-                                code.extend(Instruction::Lwu { rd: Gpr::A0, rs1: Gpr::Sp, imm: 24 }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 57 }.encode());
-                                code.extend(Instruction::Ecall.encode());
-                                // Verify magic
-                                code.extend(Instruction::Ld { rd: Gpr::T0, rs1: Gpr::Sp, imm: rec }.encode());
-                                code.extend(ss_load_imm(Gpr::T1, 0x434B_5054_4F49_4E54u64 as i64));
-                                code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::T1, offset: 0 }.encode());
-                                let bne_magic_pos = code.len() - 4;
-                                // Verify CRC32
-                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Sp, imm: rec + 24 }.encode());
-                                code.extend(emit_riscv64_crc32_range(24));
-                                code.extend(Instruction::Lwu { rd: Gpr::T0, rs1: Gpr::Sp, imm: rec + 48 }.encode());
-                                code.extend(Instruction::Bne { rs1: Gpr::T5, rs2: Gpr::T0, offset: 0 }.encode());
-                                let bne_hash_pos = code.len() - 4;
-                                // Success: load sequence from [rec+32]
-                                code.extend(Instruction::Ld { rd: Gpr::T0, rs1: Gpr::Sp, imm: rec + 32 }.encode());
-                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
-                                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
-                                let jmp_ok_pos = code.len() - 4;
-                                // fail: store -1
-                                let fail_target = code.len() as i32;
-                                for (pos, rs1, rs2) in [
-                                    (blt_fail_pos, Gpr::A0, Gpr::Zero),
-                                    (blt_short_pos, Gpr::A0, Gpr::T0),
-                                    (bne_magic_pos, Gpr::T0, Gpr::T1),
-                                    (bne_hash_pos, Gpr::T5, Gpr::T0),
-                                ] {
-                                    let off = fail_target - (pos as i32);
-                                    // Re-emit the branch with the correct offset
-                                    // We need to know the branch type. Let me handle each individually.
-                                    let _ = (rs1, rs2);
-                                    // Actually, we already emitted the branches with offset 0.
-                                    // Let me just patch the offset field.
-                                    let off_bytes = off.to_le_bytes();
-                                    code[pos + 1] = off_bytes[0];
-                                    code[pos + 2] = off_bytes[1];
-                                }
-                                code.extend(ss_load_imm(Gpr::T0, -1));
-                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
-                                // cleanup
-                                let cleanup_target = code.len() as i32;
-                                let cleanup_off = cleanup_target - (jmp_ok_pos as i32);
-                                code[jmp_ok_pos..jmp_ok_pos + 4].copy_from_slice(
-                                    &Instruction::Jal { rd: Gpr::Zero, offset: cleanup_off }.encode());
-                                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 128 }.encode());
-                                true
-                            }
+                            // Task 8-b: The ("checkpoint_save", 1, _) and
+                            // ("checkpoint_restore", 0, true) arms that were
+                            // previously here have been DELETED. They were dead
+                            // code: `pipeline.rs:lower_ipc_builtins` runs
+                            // unconditionally BEFORE `allocate_registers` and
+                            // rewrites every `Call { func: "checkpoint_save" }`
+                            // into real IR via `expand_checkpoint_save` →
+                            // `build_checkpoint_path` (which emits a PID-suffixed
+                            // `/tmp/vuma_checkpoint_<PID>.bin` path). The deleted
+                            // arms used a stale hardcoded `/tmp/vuma_checkpoint.bin`
+                            // path (no PID suffix) and a divergent 96-byte record
+                            // format that could never round-trip with the generic
+                            // path. If a `checkpoint_save` Call ever reaches this
+                            // match again, the `_ => false` fallback will treat it
+                            // as a normal extern call and fail at link time — a
+                            // clearer error than silently using the wrong path.
                             ("formal_verify", 0, true) => {
                                 let dst_id = dst.as_ref().unwrap().as_register().unwrap_or(0);
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -8430,45 +9969,86 @@ impl Backend for RiscV64Backend {
                         IRInstr::Mul { .. } => "mul",
                         IRInstr::Div { .. } => "div",
                         IRInstr::BinOp { op, .. } => match op {
-                            BinOpKind::Add => "add", BinOpKind::Sub => "sub", BinOpKind::Mul => "mul",
-                            BinOpKind::SDiv => "div", BinOpKind::UDiv => "divu",
-                            BinOpKind::SRem => "rem", BinOpKind::URem => "remu",
-                            BinOpKind::And => "and", BinOpKind::Or => "or", BinOpKind::Xor => "xor",
-                            BinOpKind::Shl => "sll", BinOpKind::ShrL => "srl", BinOpKind::ShrA => "sra",
-                            BinOpKind::Ror => "ror", BinOpKind::Rol => "rol",
-                            BinOpKind::SLt => "slt", BinOpKind::SLe => "sle", BinOpKind::SGt => "sgt", BinOpKind::SGe => "sge",
-                            BinOpKind::ULt => "sltu", BinOpKind::ULe => "sleu", BinOpKind::UGt => "sgtu", BinOpKind::UGe => "sgeu",
-                            BinOpKind::Eq => "seq", BinOpKind::Ne => "sne",
+                            BinOpKind::Add => "add",
+                            BinOpKind::Sub => "sub",
+                            BinOpKind::Mul => "mul",
+                            BinOpKind::SDiv => "div",
+                            BinOpKind::UDiv => "divu",
+                            BinOpKind::SRem => "rem",
+                            BinOpKind::URem => "remu",
+                            BinOpKind::And => "and",
+                            BinOpKind::Or => "or",
+                            BinOpKind::Xor => "xor",
+                            BinOpKind::Shl => "sll",
+                            BinOpKind::ShrL => "srl",
+                            BinOpKind::ShrA => "sra",
+                            BinOpKind::Ror => "ror",
+                            BinOpKind::Rol => "rol",
+                            BinOpKind::SLt => "slt",
+                            BinOpKind::SLe => "sle",
+                            BinOpKind::SGt => "sgt",
+                            BinOpKind::SGe => "sge",
+                            BinOpKind::ULt => "sltu",
+                            BinOpKind::ULe => "sleu",
+                            BinOpKind::UGt => "sgtu",
+                            BinOpKind::UGe => "sgeu",
+                            BinOpKind::Eq => "seq",
+                            BinOpKind::Ne => "sne",
                         },
                         IRInstr::UnaryOp { op, .. } => match op {
-                            UnaryOpKind::Neg => "neg", UnaryOpKind::Not => "not",
-                            UnaryOpKind::Clz => "clz", UnaryOpKind::Ctz => "ctz", UnaryOpKind::Popcnt => "popcnt",
+                            UnaryOpKind::Neg => "neg",
+                            UnaryOpKind::Not => "not",
+                            UnaryOpKind::Clz => "clz",
+                            UnaryOpKind::Ctz => "ctz",
+                            UnaryOpKind::Popcnt => "popcnt",
                         },
                         IRInstr::Cmp { .. } => "cmp",
-                        IRInstr::Load { .. } => "ld", IRInstr::Store { .. } => "sd",
-                        IRInstr::Alloc { .. } => "alloc", IRInstr::Free { .. } => "free",
-                        IRInstr::Cast { kind, from_ty, to_ty, .. } => match kind {
-                            CastKind::IntToFloat | CastKind::UIntToFloat => match (from_ty, to_ty) {
-                                (Some(IRType::I64), Some(IRType::F64)) | (Some(IRType::U64), Some(IRType::F64)) => "fcvt.d.l",
-                                (Some(IRType::I32), Some(IRType::F64)) | (Some(IRType::U32), Some(IRType::F64)) => "fcvt.d.w",
-                                (Some(IRType::I64), Some(IRType::F32)) | (Some(IRType::U64), Some(IRType::F32)) => "fcvt.s.l",
-                                (Some(IRType::I32), Some(IRType::F32)) | (Some(IRType::U32), Some(IRType::F32)) => "fcvt.s.w",
-                                _ => "fcvt",
-                            },
-                            CastKind::FloatToInt | CastKind::FloatToUInt => match (from_ty, to_ty) {
-                                (Some(IRType::F64), Some(IRType::I64)) | (Some(IRType::F64), Some(IRType::U64)) => "fcvt.l.d",
-                                (Some(IRType::F32), Some(IRType::I64)) | (Some(IRType::F32), Some(IRType::U64)) => "fcvt.l.s",
-                                (Some(IRType::F64), Some(IRType::I32)) | (Some(IRType::F64), Some(IRType::U32)) => "fcvt.w.d",
-                                (Some(IRType::F32), Some(IRType::I32)) | (Some(IRType::F32), Some(IRType::U32)) => "fcvt.w.s",
-                                _ => "fcvt",
-                            },
+                        IRInstr::Load { .. } => "ld",
+                        IRInstr::Store { .. } => "sd",
+                        IRInstr::Alloc { .. } => "alloc",
+                        IRInstr::Free { .. } => "free",
+                        IRInstr::Cast {
+                            kind,
+                            from_ty,
+                            to_ty,
+                            ..
+                        } => match kind {
+                            CastKind::IntToFloat | CastKind::UIntToFloat => {
+                                match (from_ty, to_ty) {
+                                    (Some(IRType::I64), Some(IRType::F64))
+                                    | (Some(IRType::U64), Some(IRType::F64)) => "fcvt.d.l",
+                                    (Some(IRType::I32), Some(IRType::F64))
+                                    | (Some(IRType::U32), Some(IRType::F64)) => "fcvt.d.w",
+                                    (Some(IRType::I64), Some(IRType::F32))
+                                    | (Some(IRType::U64), Some(IRType::F32)) => "fcvt.s.l",
+                                    (Some(IRType::I32), Some(IRType::F32))
+                                    | (Some(IRType::U32), Some(IRType::F32)) => "fcvt.s.w",
+                                    _ => "fcvt",
+                                }
+                            }
+                            CastKind::FloatToInt | CastKind::FloatToUInt => {
+                                match (from_ty, to_ty) {
+                                    (Some(IRType::F64), Some(IRType::I64))
+                                    | (Some(IRType::F64), Some(IRType::U64)) => "fcvt.l.d",
+                                    (Some(IRType::F32), Some(IRType::I64))
+                                    | (Some(IRType::F32), Some(IRType::U64)) => "fcvt.l.s",
+                                    (Some(IRType::F64), Some(IRType::I32))
+                                    | (Some(IRType::F64), Some(IRType::U32)) => "fcvt.w.d",
+                                    (Some(IRType::F32), Some(IRType::I32))
+                                    | (Some(IRType::F32), Some(IRType::U32)) => "fcvt.w.s",
+                                    _ => "fcvt",
+                                }
+                            }
                             CastKind::FloatToFloat => "fcvt.d.s",
                             _ => "cast",
                         },
                         IRInstr::Select { .. } => "select",
-                        IRInstr::Offset { .. } => "addi", IRInstr::GetAddress { .. } => "getaddr",
-                        IRInstr::Ret { .. } => "ret", IRInstr::Branch { .. } => "j",
-                        IRInstr::CondBranch { .. } => "bnez", IRInstr::Call { .. } => "call",
+                        IRInstr::Offset { .. } => "addi",
+                        IRInstr::GetAddress { .. } => "getaddr",
+                        IRInstr::Ret { .. } => "ret",
+                        IRInstr::Branch { .. } => "j",
+                        IRInstr::CondBranch { .. } => "bnez",
+                        IRInstr::Call { .. } => "call",
                         IRInstr::Syscall { .. } => "ecall",
                         IRInstr::Phi { .. } => "nop",
                         IRInstr::AtomicLoad { .. } => "atomic_load",
@@ -8479,7 +10059,9 @@ impl Backend for RiscV64Backend {
                         IRInstr::VectorOp { .. } => "vectorop",
                         IRInstr::ChannelOpen { .. } => "channel_open",
                         IRInstr::ChannelSend { .. } => "channel_send",
-                        IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvResult { .. } => "channel_recv",
+                        IRInstr::ChannelRecvTimeout { .. }
+                        | IRInstr::ChannelRecv { .. }
+                        | IRInstr::ChannelRecvResult { .. } => "channel_recv",
                         IRInstr::ChannelClose { .. } => "channel_close",
                         // Wave 93-94: zk-STARK proof generation.
                         IRInstr::StarkProof { .. } => "stark_prove",
@@ -8535,12 +10117,21 @@ impl Backend for RiscV64Backend {
                 let rel_offset = target_offset as i32 - fixup.abs_byte_offset as i32;
                 let instr = &mut instructions[fixup.instr_idx];
                 if fixup.is_jal {
-                    let encoded = Instruction::Jal { rd: fixup.jal_rd, offset: rel_offset }.encode();
+                    let encoded = Instruction::Jal {
+                        rd: fixup.jal_rd,
+                        offset: rel_offset,
+                    }
+                    .encode();
                     instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                         .copy_from_slice(&encoded);
                 } else {
                     if rel_offset >= -4096 && rel_offset <= 4094 {
-                        let encoded = Instruction::Bne { rs1: fixup.bne_rs1, rs2: fixup.bne_rs2, offset: rel_offset }.encode();
+                        let encoded = Instruction::Bne {
+                            rs1: fixup.bne_rs1,
+                            rs2: fixup.bne_rs2,
+                            offset: rel_offset,
+                        }
+                        .encode();
                         instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                             .copy_from_slice(&encoded);
                     } else {
@@ -8556,11 +10147,18 @@ impl Backend for RiscV64Backend {
         // After emitting, patch the corresponding BNE to branch to the trampoline.
         let mut trampoline_code: Vec<u8> = Vec::new();
         let mut trampoline_offsets: Vec<i32> = Vec::new(); // offset of each trampoline from function start
-        for (_, target_label) in &trampolines {
-            let tramp_off = instructions.iter().map(|i| i.encoded.len()).sum::<usize>() + trampoline_code.len();
+        for (_, _target_label) in &trampolines {
+            let tramp_off =
+                instructions.iter().map(|i| i.encoded.len()).sum::<usize>() + trampoline_code.len();
             trampoline_offsets.push(tramp_off as i32);
             // Emit JAL ra, 0 (placeholder — patched below with target offset)
-            trampoline_code.extend_from_slice(&Instruction::Jal { rd: Gpr::Ra, offset: 0 }.encode());
+            trampoline_code.extend_from_slice(
+                &Instruction::Jal {
+                    rd: Gpr::Ra,
+                    offset: 0,
+                }
+                .encode(),
+            );
         }
 
         // Patch the BNEs to branch to their trampolines
@@ -8570,7 +10168,12 @@ impl Backend for RiscV64Backend {
             let bne_to_tramp = tramp_abs as i32 - fixup.abs_byte_offset as i32;
             // BNE to trampoline (should be in range since trampoline is at end)
             let instr = &mut instructions[fixup.instr_idx];
-            let bne = Instruction::Bne { rs1: fixup.bne_rs1, rs2: fixup.bne_rs2, offset: bne_to_tramp }.encode();
+            let bne = Instruction::Bne {
+                rs1: fixup.bne_rs1,
+                rs2: fixup.bne_rs2,
+                offset: bne_to_tramp,
+            }
+            .encode();
             instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                 .copy_from_slice(&bne);
         }
@@ -8580,7 +10183,11 @@ impl Backend for RiscV64Backend {
             if let Some(&target_offset) = label_offsets.get(target_label) {
                 let tramp_abs = trampoline_offsets[idx] as i64;
                 let jal_rel = target_offset as i32 - tramp_abs as i32;
-                let jal = Instruction::Jal { rd: Gpr::Ra, offset: jal_rel }.encode();
+                let jal = Instruction::Jal {
+                    rd: Gpr::Ra,
+                    offset: jal_rel,
+                }
+                .encode();
                 let off = idx * 4;
                 trampoline_code[off..off + 4].copy_from_slice(&jal);
             }
@@ -8642,12 +10249,12 @@ impl Backend for RiscV64Backend {
         // ECALL             — 4 bytes
 
         let start_stub_size: usize = 20; // 5 × 4-byte instructions
-        // `ffi_stub` (li a0,0; ret) is appended right after _start in
-        // `all_code` (see below), so the first user function actually
-        // starts at offset `start_stub_size + ffi_stub_size` in
-        // `all_code`. We must account for this when computing function
-        // offsets, otherwise the _start JAL jumps into the ffi_stub
-        // (li a0,0; ret) and every program returns exit code 0.
+                                         // `ffi_stub` (li a0,0; ret) is appended right after _start in
+                                         // `all_code` (see below), so the first user function actually
+                                         // starts at offset `start_stub_size + ffi_stub_size` in
+                                         // `all_code`. We must account for this when computing function
+                                         // offsets, otherwise the _start JAL jumps into the ffi_stub
+                                         // (li a0,0; ret) and every program returns exit code 0.
         let ffi_stub_size: usize = 8; // li a0,0 (4) + ret (4)
         let header_size: usize = start_stub_size + ffi_stub_size;
 
@@ -8666,35 +10273,112 @@ impl Backend for RiscV64Backend {
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
             // MV a1, a0       (size -> length)
-            code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::A0, imm: 0 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A1,
+                    rs1: Gpr::A0,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // MV a0, zero     (addr = NULL)
-            code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A0,
+                    rs1: Gpr::Zero,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // ADDI a2, zero, 3       (PROT_READ | PROT_WRITE = 3)
-            code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 3 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A2,
+                    rs1: Gpr::Zero,
+                    imm: 3,
+                }
+                .encode(),
+            );
             // ADDI a3, zero, 0x22    (MAP_PRIVATE | MAP_ANONYMOUS = 0x22 = 34)
-            code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x22 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A3,
+                    rs1: Gpr::Zero,
+                    imm: 0x22,
+                }
+                .encode(),
+            );
             // ADDI a4, zero, -1      (fd = -1)
-            code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: -1 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A4,
+                    rs1: Gpr::Zero,
+                    imm: -1,
+                }
+                .encode(),
+            );
             // MV a5, zero     (offset = 0)
-            code.extend(Instruction::Addi { rd: Gpr::A5, rs1: Gpr::Zero, imm: 0 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A5,
+                    rs1: Gpr::Zero,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // ADDI a7, zero, 222     (sys_mmap)
-            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 222 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A7,
+                    rs1: Gpr::Zero,
+                    imm: 222,
+                }
+                .encode(),
+            );
             // ECALL
             code.extend(Instruction::Ecall.encode());
             // RET (JALR zero, ra, 0)
-            code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+            code.extend(
+                Instruction::Jalr {
+                    rd: Gpr::Zero,
+                    rs1: Gpr::Ra,
+                    imm: 0,
+                }
+                .encode(),
+            );
             code
         };
         let vuma_free_stub: Vec<u8> = {
             let mut code = Vec::new();
             // MV a1, zero     (size = 0)
-            code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A1,
+                    rs1: Gpr::Zero,
+                    imm: 0,
+                }
+                .encode(),
+            );
             // ADDI a7, zero, 215     (sys_munmap)
-            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 215 }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A7,
+                    rs1: Gpr::Zero,
+                    imm: 215,
+                }
+                .encode(),
+            );
             // ECALL
             code.extend(Instruction::Ecall.encode());
             // RET
-            code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+            code.extend(
+                Instruction::Jalr {
+                    rd: Gpr::Zero,
+                    rs1: Gpr::Ra,
+                    imm: 0,
+                }
+                .encode(),
+            );
             code
         };
 
@@ -8726,14 +10410,33 @@ impl Backend for RiscV64Backend {
         // Helper: encode a simple "ADDI a7, zero, num ; ECALL ; RET" stub.
         let simple_stub = |num: i32| -> Vec<u8> {
             let mut code = Vec::new();
-            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: num }.encode());
+            code.extend(
+                Instruction::Addi {
+                    rd: Gpr::A7,
+                    rs1: Gpr::Zero,
+                    imm: num,
+                }
+                .encode(),
+            );
             code.extend(Instruction::Ecall.encode());
-            code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+            code.extend(
+                Instruction::Jalr {
+                    rd: Gpr::Zero,
+                    rs1: Gpr::Ra,
+                    imm: 0,
+                }
+                .encode(),
+            );
             code
         };
         // Helper: encode MV rd, rs (i.e. ADDI rd, rs, 0)
         let mv = |rd: Gpr, rs: Gpr| -> [u8; 4] {
-            Instruction::Addi { rd, rs1: rs, imm: 0 }.encode()
+            Instruction::Addi {
+                rd,
+                rs1: rs,
+                imm: 0,
+            }
+            .encode()
         };
 
         let syscall_stubs: Vec<(String, Vec<u8>)> = {
@@ -8742,19 +10445,40 @@ impl Backend for RiscV64Backend {
             // Simple stubs (args already in correct registers a0-a5):
             // Numbers verified against asm-generic/unistd.h.
             for (name, num) in [
-                ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
-                ("munmap", 215), ("exit", 93), ("getpid", 172),
-                ("socket", 198), ("epoll_create1", 20), ("futex", 98),
-                ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                ("write", 64),
+                ("read", 63),
+                ("close", 57),
+                ("mmap", 222),
+                ("munmap", 215),
+                ("exit", 93),
+                ("getpid", 172),
+                ("socket", 198),
+                ("epoll_create1", 20),
+                ("futex", 98),
+                ("execve", 221),
+                ("wait4", 260),
+                ("epoll_ctl", 21),
+                ("epoll_wait", 22),
                 ("clone", 220),
                 // ── Additional POSIX syscall stubs (RISC-V generic ABI) ──
-                ("lseek", 62), ("fstat", 80),
-                ("kill", 129), ("getcwd", 17), ("chdir", 49),
-                ("ioctl", 29), ("fcntl", 25), ("connect", 203),
-                ("nanosleep", 101), ("mprotect", 226),
-                ("dup", 23), ("exit_group", 94),
-                ("recv", 207), ("send", 206), ("shutdown", 210),
-                ("bind", 200), ("listen", 201), ("accept", 202),
+                ("lseek", 62),
+                ("fstat", 80),
+                ("kill", 129),
+                ("getcwd", 17),
+                ("chdir", 49),
+                ("ioctl", 29),
+                ("fcntl", 25),
+                ("connect", 203),
+                ("nanosleep", 101),
+                ("mprotect", 226),
+                ("dup", 23),
+                ("exit_group", 94),
+                ("recv", 207),
+                ("send", 206),
+                ("shutdown", 210),
+                ("bind", 200),
+                ("listen", 201),
+                ("accept", 202),
                 ("setsockopt", 208),
                 ("getsockopt", 209),
                 ("waitpid", 260),
@@ -8763,61 +10487,106 @@ impl Backend for RiscV64Backend {
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
                 ("dup3", 24),
-                ("recvfrom", 207), ("sendto", 206),
+                ("recvfrom", 207),
+                ("sendto", 206),
                 // NOTE: stat/lstat/poll/alarm do not exist on the generic ABI.
                 // They are provided as newfstatat/ppoll/setitimer shims below.
                 // ── Wave 7: POSIX file-metadata & I/O syscalls (asm-generic) ──
                 // RV64 has 8 reg args (a0-a7); all take ≤5 args → simple_stub.
                 // Plain mkdir/rmdir/rename/link/symlink/readlink/chmod/chown do
                 // NOT exist on the generic ABI — provided as *at wrappers below.
-                ("umask", 166), ("fchmod", 52), ("fchown", 55),
-                ("openat", 56), ("unlinkat", 35), ("renameat", 38),
-                ("linkat", 37), ("symlinkat", 36), ("readlinkat", 78),
-                ("faccessat", 48), ("fchmodat", 53), ("fchownat", 54),
-                ("ftruncate", 46), ("fsync", 82), ("fdatasync", 83),
-                ("sync", 81), ("syncfs", 306),
-                ("pread", 67), ("pwrite", 68), ("readv", 65), ("writev", 66),
-                ("preadv", 69), ("pwritev", 70),
-                ("fchdir", 50), ("chroot", 51),
+                ("umask", 166),
+                ("fchmod", 52),
+                ("fchown", 55),
+                ("openat", 56),
+                ("unlinkat", 35),
+                ("renameat", 38),
+                ("linkat", 37),
+                ("symlinkat", 36),
+                ("readlinkat", 78),
+                ("faccessat", 48),
+                ("fchmodat", 53),
+                ("fchownat", 54),
+                ("ftruncate", 46),
+                ("fsync", 82),
+                ("fdatasync", 83),
+                ("sync", 81),
+                ("syncfs", 306),
+                ("pread", 67),
+                ("pwrite", 68),
+                ("readv", 65),
+                ("writev", 66),
+                ("preadv", 69),
+                ("pwritev", 70),
+                ("fchdir", 50),
+                ("chroot", 51),
                 // ── Wave 9: POSIX system & advanced syscalls (asm-generic) ──
                 // RV64 has 8 reg args; all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(19), signalfd→signalfd4(74) = modern variants.
-                ("mlock", 228), ("munlock", 229), ("mlockall", 230), ("munlockall", 231),
-                ("mincore", 232), ("madvise", 233), ("msync", 227), ("mremap", 216),
-                ("getrlimit", 163), ("setrlimit", 164), ("prlimit64", 261),
-                ("getrusage", 165), ("times", 153),
+                ("mlock", 228),
+                ("munlock", 229),
+                ("mlockall", 230),
+                ("munlockall", 231),
+                ("mincore", 232),
+                ("madvise", 233),
+                ("msync", 227),
+                ("mremap", 216),
+                ("getrlimit", 163),
+                ("setrlimit", 164),
+                ("prlimit64", 261),
+                ("getrusage", 165),
+                ("times", 153),
                 ("getrandom", 278),
-                ("eventfd", 19), ("timerfd_create", 85), ("timerfd_settime", 86),
-                ("timerfd_gettime", 87), ("signalfd", 74),
-                ("inotify_init1", 26), ("inotify_add_watch", 27), ("inotify_rm_watch", 28),
+                ("eventfd", 19),
+                ("timerfd_create", 85),
+                ("timerfd_settime", 86),
+                ("timerfd_gettime", 87),
+                ("signalfd", 74),
+                ("inotify_init1", 26),
+                ("inotify_add_watch", 27),
+                ("inotify_rm_watch", 28),
                 ("ptrace", 117),
                 // ── Wave 8: POSIX process & identity syscalls (asm-generic/unistd.h) ──
                 // All present directly in asm-generic (no *at wrapping). All take
                 // ≤5 args; RV64 has 8 reg args (a0-a7) → simple_stub for all.
                 // Family 1: identity
-                ("getuid", 174), ("geteuid", 175), ("getgid", 176), ("getegid", 177),
-                ("setuid", 146), ("setgid", 144), ("setresuid", 147), ("setresgid", 149),
+                ("getuid", 174),
+                ("geteuid", 175),
+                ("getgid", 176),
+                ("getegid", 177),
+                ("setuid", 146),
+                ("setgid", 144),
+                ("setresuid", 147),
+                ("setresgid", 149),
                 // Family 2: process group (getpid already present; getpgrp ABSENT in
                 // asm-generic → callers use getpgid(0))
-                ("getppid", 173), ("getsid", 156), ("setsid", 157),
-                ("setpgid", 154), ("getpgid", 155),
+                ("getppid", 173),
+                ("getsid", 156),
+                ("setsid", 157),
+                ("setpgid", 154),
+                ("getpgid", 155),
                 ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present; vfork ABSENT →
                 // callers use clone(CLONE_VFORK))
-                ("clone3", 435), ("waitid", 95),
+                ("clone3", 435),
+                ("waitid", 95),
                 // Family 4: exec/exit (execve/exit_group already present)
                 ("execveat", 281),
                 // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-                ("tgkill", 131), ("tkill", 130), ("rt_sigaction", 134),
+                ("tgkill", 131),
+                ("tkill", 130),
+                ("rt_sigaction", 134),
                 // Family 6: directory read (getdents/readdir ABSENT in asm-generic →
                 // use getdents64)
                 ("getdents64", 61),
                 // Family 7: system (arch_prctl is x86_64-only)
-                ("prctl", 167), ("uname", 160), ("sysinfo", 179),
-                            ("eventfd2", 19),
+                ("prctl", 167),
+                ("uname", 160),
+                ("sysinfo", 179),
+                ("eventfd2", 19),
                 ("newfstatat", 79),
                 ("signalfd4", 74),
-] {
+            ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
@@ -8827,13 +10596,34 @@ impl Backend for RiscV64Backend {
             // Shuffle high→low to avoid clobbering.
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A3, Gpr::A2));           // a3 <- mode
-                code.extend(mv(Gpr::A2, Gpr::A1));           // a2 <- flags
-                code.extend(mv(Gpr::A1, Gpr::A0));           // a1 <- pathname
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 56 }.encode());  // sys_openat
+                code.extend(mv(Gpr::A3, Gpr::A2)); // a3 <- mode
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 <- flags
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 <- pathname
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 56,
+                    }
+                    .encode(),
+                ); // sys_openat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("open".to_string(), code));
             }
 
@@ -8842,12 +10632,40 @@ impl Backend for RiscV64Backend {
             // Need:        a0=-100,   a1=pathname, a2=0
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());   // a2 = 0 (flags)
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 <- pathname
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 35 }.encode());  // sys_unlinkat
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a2 = 0 (flags)
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 <- pathname
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 35,
+                    }
+                    .encode(),
+                ); // sys_unlinkat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("unlink".to_string(), code));
             }
 
@@ -8856,10 +10674,31 @@ impl Backend for RiscV64Backend {
             // Need:        a0=signum, a1=act, a2=oldact, a3=8
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 8 }.encode());   // a3 = sigsetsize
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 134 }.encode()); // sys_rt_sigaction
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 8,
+                    }
+                    .encode(),
+                ); // a3 = sigsetsize
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 134,
+                    }
+                    .encode(),
+                ); // sys_rt_sigaction
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("sigaction".to_string(), code));
             }
 
@@ -8868,10 +10707,31 @@ impl Backend for RiscV64Backend {
             // Need:        a0=pipefd, a1=0
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());   // a1 = 0 (flags)
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 59 }.encode());  // sys_pipe2
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A1,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a1 = 0 (flags)
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 59,
+                    }
+                    .encode(),
+                ); // sys_pipe2
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("pipe".to_string(), code));
             }
 
@@ -8880,10 +10740,31 @@ impl Backend for RiscV64Backend {
             // Need:        a0=oldfd, a1=newfd, a2=0
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());   // a2 = 0 (flags)
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 24 }.encode());  // sys_dup3
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a2 = 0 (flags)
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 24,
+                    }
+                    .encode(),
+                ); // sys_dup3
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("dup2".to_string(), code));
             }
 
@@ -8892,21 +10773,77 @@ impl Backend for RiscV64Backend {
             // Need:        a0=17, a1=0, a2=0, a3=0, a4=0
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 17 }.encode());  // a0 = SIGCHLD
-                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());   // a1 = 0
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());   // a2 = 0
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());   // a3 = 0
-                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());   // a4 = 0
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 220 }.encode()); // sys_clone
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: 17,
+                    }
+                    .encode(),
+                ); // a0 = SIGCHLD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A1,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a1 = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a2 = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a3 = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A4,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a4 = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 220,
+                    }
+                    .encode(),
+                ); // sys_clone
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("fork".to_string(), code));
             }
 
             // rt_sigreturn (139) — special: no args, never returns.
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 139 }.encode());
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 139,
+                    }
+                    .encode(),
+                );
                 code.extend(Instruction::Ecall.encode());
                 // Defensive: if the kernel ever does return, trap.
                 code.extend(Instruction::Ebreak.encode());
@@ -8919,26 +10856,82 @@ impl Backend for RiscV64Backend {
             // Need:        a0=-100, a1=path, a2=statbuf, a3=0
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A2, Gpr::A1));                                              // a2 <- statbuf
-                code.extend(mv(Gpr::A1, Gpr::A0));                                              // a1 <- path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());   // a3 = 0 (flags)
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 79 }.encode());  // newfstatat
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 <- statbuf
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 <- path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a3 = 0 (flags)
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 79,
+                    }
+                    .encode(),
+                ); // newfstatat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("stat".to_string(), code));
             }
 
             // lstat(path, statbuf) → newfstatat(AT_FDCWD, path, statbuf, AT_SYMLINK_NOFOLLOW=0x100)
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A2, Gpr::A1));                                              // a2 <- statbuf
-                code.extend(mv(Gpr::A1, Gpr::A0));                                              // a1 <- path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x100 }.encode()); // a3 = AT_SYMLINK_NOFOLLOW
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 79 }.encode());  // newfstatat
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 <- statbuf
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 <- path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 0x100,
+                    }
+                    .encode(),
+                ); // a3 = AT_SYMLINK_NOFOLLOW
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 79,
+                    }
+                    .encode(),
+                ); // newfstatat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("lstat".to_string(), code));
             }
 
@@ -8949,15 +10942,71 @@ impl Backend for RiscV64Backend {
             // Build a 16-byte timespec {tv_sec=timeout, tv_nsec=0} on the stack.
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -16 }.encode()); // sp -= 16
-                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::A2, imm: 0 }.encode());    // ts.tv_sec = timeout
-                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 8 }.encode());  // ts.tv_nsec = 0
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Sp, imm: 0 }.encode());    // a2 = &ts
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());  // a3 = NULL
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 73 }.encode()); // ppoll
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::Sp,
+                        rs1: Gpr::Sp,
+                        imm: -16,
+                    }
+                    .encode(),
+                ); // sp -= 16
+                code.extend(
+                    Instruction::Sd {
+                        rs1: Gpr::Sp,
+                        rs2: Gpr::A2,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // ts.tv_sec = timeout
+                code.extend(
+                    Instruction::Sd {
+                        rs1: Gpr::Sp,
+                        rs2: Gpr::Zero,
+                        imm: 8,
+                    }
+                    .encode(),
+                ); // ts.tv_nsec = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Sp,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a2 = &ts
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a3 = NULL
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 73,
+                    }
+                    .encode(),
+                ); // ppoll
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 16 }.encode());  // sp += 16
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::Sp,
+                        rs1: Gpr::Sp,
+                        imm: 16,
+                    }
+                    .encode(),
+                ); // sp += 16
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("poll".to_string(), code));
             }
 
@@ -8970,20 +11019,97 @@ impl Backend for RiscV64Backend {
             // Need: a0=0 (ITIMER_REAL), a1=&itimerval, a2=NULL
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: -32 }.encode()); // sp -= 32
-                // it_interval.tv_sec = 0, it_interval.tv_usec = 0
-                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 0 }.encode());
-                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 8 }.encode());
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::Sp,
+                        rs1: Gpr::Sp,
+                        imm: -32,
+                    }
+                    .encode(),
+                ); // sp -= 32
+                   // it_interval.tv_sec = 0, it_interval.tv_usec = 0
+                code.extend(
+                    Instruction::Sd {
+                        rs1: Gpr::Sp,
+                        rs2: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
+                code.extend(
+                    Instruction::Sd {
+                        rs1: Gpr::Sp,
+                        rs2: Gpr::Zero,
+                        imm: 8,
+                    }
+                    .encode(),
+                );
                 // it_value.tv_sec = a0 (seconds), it_value.tv_usec = 0
-                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::A0, imm: 16 }.encode());
-                code.extend(Instruction::Sd { rs1: Gpr::Sp, rs2: Gpr::Zero, imm: 24 }.encode());
-                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Sp, imm: 0 }.encode());    // a1 = &itimerval
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());  // a0 = ITIMER_REAL
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());  // a2 = NULL
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 103 }.encode());// setitimer
+                code.extend(
+                    Instruction::Sd {
+                        rs1: Gpr::Sp,
+                        rs2: Gpr::A0,
+                        imm: 16,
+                    }
+                    .encode(),
+                );
+                code.extend(
+                    Instruction::Sd {
+                        rs1: Gpr::Sp,
+                        rs2: Gpr::Zero,
+                        imm: 24,
+                    }
+                    .encode(),
+                );
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A1,
+                        rs1: Gpr::Sp,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a1 = &itimerval
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a0 = ITIMER_REAL
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a2 = NULL
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 103,
+                    }
+                    .encode(),
+                ); // setitimer
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Addi { rd: Gpr::Sp, rs1: Gpr::Sp, imm: 32 }.encode());  // sp += 32
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::Sp,
+                        rs1: Gpr::Sp,
+                        imm: 32,
+                    }
+                    .encode(),
+                ); // sp += 32
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("alarm".to_string(), code));
             }
 
@@ -8992,16 +11118,78 @@ impl Backend for RiscV64Backend {
             {
                 let mut code = Vec::new();
                 // loop:
-                code.extend(Instruction::Lbu { rd: Gpr::A2, rs1: Gpr::A0, imm: 0 }.encode()); // LBU a2, 0(a0)
-                code.extend(Instruction::Lbu { rd: Gpr::A3, rs1: Gpr::A1, imm: 0 }.encode()); // LBU a3, 0(a1)
-                code.extend(Instruction::Bne { rs1: Gpr::A2, rs2: Gpr::A3, offset: 20 }.encode()); // BNE a2, a3, done
-                code.extend(Instruction::Beq { rs1: Gpr::A2, rs2: Gpr::Zero, offset: 16 }.encode()); // BEQ a2, zero, done
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::A0, imm: 1 }.encode()); // ADDI a0, a0, 1
-                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::A1, imm: 1 }.encode()); // ADDI a1, a1, 1
-                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: -24 }.encode()); // J loop
-                // done:
-                code.extend(Instruction::Sub { rd: Gpr::A0, rs1: Gpr::A2, rs2: Gpr::A3 }.encode()); // SUB a0, a2, a3
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode()); // RET
+                code.extend(
+                    Instruction::Lbu {
+                        rd: Gpr::A2,
+                        rs1: Gpr::A0,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // LBU a2, 0(a0)
+                code.extend(
+                    Instruction::Lbu {
+                        rd: Gpr::A3,
+                        rs1: Gpr::A1,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // LBU a3, 0(a1)
+                code.extend(
+                    Instruction::Bne {
+                        rs1: Gpr::A2,
+                        rs2: Gpr::A3,
+                        offset: 20,
+                    }
+                    .encode(),
+                ); // BNE a2, a3, done
+                code.extend(
+                    Instruction::Beq {
+                        rs1: Gpr::A2,
+                        rs2: Gpr::Zero,
+                        offset: 16,
+                    }
+                    .encode(),
+                ); // BEQ a2, zero, done
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::A0,
+                        imm: 1,
+                    }
+                    .encode(),
+                ); // ADDI a0, a0, 1
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A1,
+                        rs1: Gpr::A1,
+                        imm: 1,
+                    }
+                    .encode(),
+                ); // ADDI a1, a1, 1
+                code.extend(
+                    Instruction::Jal {
+                        rd: Gpr::Zero,
+                        offset: -24,
+                    }
+                    .encode(),
+                ); // J loop
+                   // done:
+                code.extend(
+                    Instruction::Sub {
+                        rd: Gpr::A0,
+                        rs1: Gpr::A2,
+                        rs2: Gpr::A3,
+                    }
+                    .encode(),
+                ); // SUB a0, a2, a3
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // RET
                 stubs.push(("strcmp".to_string(), code));
             }
 
@@ -9014,96 +11202,306 @@ impl Backend for RiscV64Backend {
             // mkdir(path, mode) → mkdirat(AT_FDCWD, path, mode)  [mkdirat=34]
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = mode
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 34 }.encode());     // mkdirat
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 = mode
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 34,
+                    }
+                    .encode(),
+                ); // mkdirat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("mkdir".to_string(), code));
             }
             // rmdir(path) → unlinkat(AT_FDCWD, path, AT_REMOVEDIR=0x200)  [unlinkat=35]
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0x200 }.encode());  // a2 = AT_REMOVEDIR
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 35 }.encode());     // unlinkat
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: 0x200,
+                    }
+                    .encode(),
+                ); // a2 = AT_REMOVEDIR
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 35,
+                    }
+                    .encode(),
+                ); // unlinkat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("rmdir".to_string(), code));
             }
             // rename(old, new) → renameat(AT_FDCWD, old, AT_FDCWD, new)  [renameat=38]
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A3, Gpr::A1));                                                    // a3 = new
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: -100 }.encode());   // a2 = AT_FDCWD
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = old
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 38 }.encode());     // renameat
+                code.extend(mv(Gpr::A3, Gpr::A1)); // a3 = new
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a2 = AT_FDCWD
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = old
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 38,
+                    }
+                    .encode(),
+                ); // renameat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("rename".to_string(), code));
             }
             // link(old, new) → linkat(AT_FDCWD, old, AT_FDCWD, new, 0)  [linkat=37]
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());      // a4 = 0 (flags)
-                code.extend(mv(Gpr::A3, Gpr::A1));                                                    // a3 = new
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: -100 }.encode());   // a2 = AT_FDCWD
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = old
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 37 }.encode());     // linkat
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A4,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a4 = 0 (flags)
+                code.extend(mv(Gpr::A3, Gpr::A1)); // a3 = new
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a2 = AT_FDCWD
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = old
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 37,
+                    }
+                    .encode(),
+                ); // linkat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("link".to_string(), code));
             }
             // symlink(target, linkpath) → symlinkat(target, AT_FDCWD, linkpath)  [symlinkat=36]
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = linkpath
-                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: -100 }.encode());   // a1 = AT_FDCWD
-                // a0 = target (unchanged)
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 36 }.encode());     // symlinkat
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 = linkpath
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A1,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a1 = AT_FDCWD
+                   // a0 = target (unchanged)
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 36,
+                    }
+                    .encode(),
+                ); // symlinkat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("symlink".to_string(), code));
             }
             // readlink(path, buf, siz) → readlinkat(AT_FDCWD, path, buf, siz)  [readlinkat=78]
             {
                 let mut code = Vec::new();
-                code.extend(mv(Gpr::A3, Gpr::A2));                                                    // a3 = siz
-                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = buf
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 78 }.encode());     // readlinkat
+                code.extend(mv(Gpr::A3, Gpr::A2)); // a3 = siz
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 = buf
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 78,
+                    }
+                    .encode(),
+                ); // readlinkat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("readlink".to_string(), code));
             }
             // chmod(path, mode) → fchmodat(AT_FDCWD, path, mode, 0)  [fchmodat=53]
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());      // a3 = 0 (flags)
-                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = mode
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 53 }.encode());     // fchmodat
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a3 = 0 (flags)
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 = mode
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 53,
+                    }
+                    .encode(),
+                ); // fchmodat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("chmod".to_string(), code));
             }
             // chown(path, owner, group) → fchownat(AT_FDCWD, path, owner, group, 0)  [fchownat=54]
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());      // a4 = 0 (flags)
-                code.extend(mv(Gpr::A3, Gpr::A2));                                                    // a3 = group
-                code.extend(mv(Gpr::A2, Gpr::A1));                                                    // a2 = owner
-                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 = path
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode());   // a0 = AT_FDCWD
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 54 }.encode());     // fchownat
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A4,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a4 = 0 (flags)
+                code.extend(mv(Gpr::A3, Gpr::A2)); // a3 = group
+                code.extend(mv(Gpr::A2, Gpr::A1)); // a2 = owner
+                code.extend(mv(Gpr::A1, Gpr::A0)); // a1 = path
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: -100,
+                    }
+                    .encode(),
+                ); // a0 = AT_FDCWD
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 54,
+                    }
+                    .encode(),
+                ); // fchownat
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("chown".to_string(), code));
             }
 
@@ -9112,33 +11510,181 @@ impl Backend for RiscV64Backend {
             // Args: a0=0(NULL), a1=4096, a2=3(PROT), a3=0x22(MAP), a4=-1(fd), a5=0(off), a7=222.
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());    // a0 = 0
-                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 4096 }.encode());  // a1 = 4096
-                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 3 }.encode());     // a2 = PROT
-                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x22 }.encode());  // a3 = MAP
-                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: -1 }.encode());    // a4 = -1
-                code.extend(Instruction::Addi { rd: Gpr::A5, rs1: Gpr::Zero, imm: 0 }.encode());     // a5 = 0
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 222 }.encode());   // a7 = sys_mmap
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a0 = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A1,
+                        rs1: Gpr::Zero,
+                        imm: 4096,
+                    }
+                    .encode(),
+                ); // a1 = 4096
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A2,
+                        rs1: Gpr::Zero,
+                        imm: 3,
+                    }
+                    .encode(),
+                ); // a2 = PROT
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A3,
+                        rs1: Gpr::Zero,
+                        imm: 0x22,
+                    }
+                    .encode(),
+                ); // a3 = MAP
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A4,
+                        rs1: Gpr::Zero,
+                        imm: -1,
+                    }
+                    .encode(),
+                ); // a4 = -1
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A5,
+                        rs1: Gpr::Zero,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // a5 = 0
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 222,
+                    }
+                    .encode(),
+                ); // a7 = sys_mmap
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());    // ret
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // ret
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
             }
 
             // ffi_scratch_pop_frame: no-op (ret).
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
             }
 
             // __arena_overflow: real exit(1) syscall
             {
                 let mut code = Vec::new();
-                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 1 }.encode());
-                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 93 }.encode());
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: 1,
+                    }
+                    .encode(),
+                );
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 93,
+                    }
+                    .encode(),
+                );
                 code.extend(Instruction::Ecall.encode());
-                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("__arena_overflow".to_string(), code));
+            }
+
+            // __oob_trap: real exit(134) syscall (SIGABRT code).
+            {
+                let mut code = Vec::new();
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: 134,
+                    }
+                    .encode(),
+                );
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 93,
+                    }
+                    .encode(),
+                );
+                code.extend(Instruction::Ecall.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
+                stubs.push(("__oob_trap".to_string(), code));
+            }
+
+            // __uaf_trap: real exit(135) syscall. Dormant until the
+            // liveness check IR invokes it (IMPL-UAF-1). Distinct from
+            // OOB (134) and arena overflow (1).
+            {
+                let mut code = Vec::new();
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A0,
+                        rs1: Gpr::Zero,
+                        imm: 135,
+                    }
+                    .encode(),
+                );
+                code.extend(
+                    Instruction::Addi {
+                        rd: Gpr::A7,
+                        rs1: Gpr::Zero,
+                        imm: 93,
+                    }
+                    .encode(),
+                );
+                code.extend(Instruction::Ecall.encode());
+                code.extend(
+                    Instruction::Jalr {
+                        rd: Gpr::Zero,
+                        rs1: Gpr::Ra,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
+                stubs.push(("__uaf_trap".to_string(), code));
             }
 
             stubs
@@ -9150,7 +11696,9 @@ impl Backend for RiscV64Backend {
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -9163,9 +11711,18 @@ impl Backend for RiscV64Backend {
         // int, then newline.  Each registered symbol points at its own
         // entry-point offset within the blob.
         let runtime_offsets_start = current_offset;
-        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start + rt_hex_off);
-        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start + rt_int_off);
-        func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start + rt_newline_off);
+        func_offsets.insert(
+            "__vuma_print_hex".to_string(),
+            runtime_offsets_start + rt_hex_off,
+        );
+        func_offsets.insert(
+            "__vuma_print_int".to_string(),
+            runtime_offsets_start + rt_int_off,
+        );
+        func_offsets.insert(
+            "__vuma_print_newline".to_string(),
+            runtime_offsets_start + rt_newline_off,
+        );
         // Bare-name aliases: print_int / print_hex / print_newline point at
         // the same runtime entry points as their __vuma_* counterparts so
         // user code using the POSIX-friendly bare names resolves to the real
@@ -9175,7 +11732,10 @@ impl Backend for RiscV64Backend {
         // the VUMA calling convention does not keep live across extern calls.
         func_offsets.insert("print_hex".to_string(), runtime_offsets_start + rt_hex_off);
         func_offsets.insert("print_int".to_string(), runtime_offsets_start + rt_int_off);
-        func_offsets.insert("print_newline".to_string(), runtime_offsets_start + rt_newline_off);
+        func_offsets.insert(
+            "print_newline".to_string(),
+            runtime_offsets_start + rt_newline_off,
+        );
         current_offset += runtime_code.len();
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
@@ -9237,7 +11797,8 @@ impl Backend for RiscV64Backend {
         start_stub.extend_from_slice(&Instruction::Ecall.encode());
 
         // ── Patch _start JAL to main ──
-        let main_key = func_offsets.keys()
+        let main_key = func_offsets
+            .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
@@ -9296,15 +11857,14 @@ impl Backend for RiscV64Backend {
                 }
 
                 if reloc.reloc_type == "R_RISCV_JAL" {
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let jal_addr = abs_offset as i32;
                         let target_addr = target_offset as i32;
@@ -9323,8 +11883,7 @@ impl Backend for RiscV64Backend {
                             rd: Gpr::Ra,
                             offset,
                         };
-                        all_code[abs_offset..abs_offset + 4]
-                            .copy_from_slice(&patched.encode());
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.encode());
                     } else {
                         // External symbol — point to the "return 0" stub
                         // (li a0, 0; ret) which sits at offset
@@ -9338,8 +11897,7 @@ impl Backend for RiscV64Backend {
                             rd: Gpr::Ra,
                             offset,
                         };
-                        all_code[abs_offset..abs_offset + 4]
-                            .copy_from_slice(&patched.encode());
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.encode());
                     }
                 } else if reloc.reloc_type == "R_RISCV_PCREL_HI20" {
                     // GetAddress relocation: patch the AUIPC + ADDI pair
@@ -9350,17 +11908,21 @@ impl Backend for RiscV64Backend {
                     //
                     // where (hi20 << 12) + sign_ext(lo12) == target - auipc_addr.
                     if abs_offset + 8 > all_code.len() {
-                        vuma_log!(warn, 
+                        vuma_log!(
+                            warn,
                             "R_RISCV_PCREL_HI20 at offset {} overflows code (len {})",
-                            abs_offset, all_code.len()
+                            abs_offset,
+                            all_code.len()
                         );
                         continue;
                     }
-                    let target_offset = func_offsets.get(&reloc.symbol)
+                    let target_offset = func_offsets
+                        .get(&reloc.symbol)
                         .copied()
                         .or_else(|| {
                             let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
+                            func_offsets
+                                .keys()
                                 .find(|k| k.starts_with(&prefix))
                                 .and_then(|k| func_offsets.get(k))
                                 .copied()
@@ -9382,7 +11944,7 @@ impl Backend for RiscV64Backend {
                     } as i64;
                     let hi20 = ((delta - lo12) >> 12) as i32;
                     let lo12_imm = lo12 as i32; // sign-extended 12-bit
-                    // Patch the AUIPC: keep rd, opcode; replace imm20.
+                                                // Patch the AUIPC: keep rd, opcode; replace imm20.
                     let auipc_word = u32::from_le_bytes([
                         all_code[abs_offset],
                         all_code[abs_offset + 1],
@@ -9394,8 +11956,7 @@ impl Backend for RiscV64Backend {
                         rd: Gpr::from_encoding(auipc_rd).unwrap_or(Gpr::T0),
                         imm: (hi20 << 12) as u32,
                     };
-                    all_code[abs_offset..abs_offset + 4]
-                        .copy_from_slice(&patched_auipc.encode());
+                    all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched_auipc.encode());
                     // Patch the ADDI: keep rd, rs1, funct3, opcode; replace imm12.
                     let addi_word = u32::from_le_bytes([
                         all_code[abs_offset + 4],
@@ -9414,7 +11975,9 @@ impl Backend for RiscV64Backend {
                         .copy_from_slice(&patched_addi.encode());
                 }
             }
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();

@@ -84,10 +84,16 @@ impl std::fmt::Display for InferenceError {
             }
             InferenceError::InvalidSCG { reason } => write!(f, "invalid SCG: {reason}"),
             InferenceError::CycleDetected { node_id } => {
-                write!(f, "cycle detected during BD propagation at node {node_id:?}")
+                write!(
+                    f,
+                    "cycle detected during BD propagation at node {node_id:?}"
+                )
             }
             InferenceError::NoConvergence { iterations } => {
-                write!(f, "inference did not converge after {iterations} iterations")
+                write!(
+                    f,
+                    "inference did not converge after {iterations} iterations"
+                )
             }
             InferenceError::BdErrors { count, summary } => {
                 write!(f, "{count} BD inference error(s): {summary}")
@@ -260,7 +266,8 @@ impl InferenceEngine {
         let constraints = self.derive_constraints(scg, &bd_map);
 
         if self.verbose {
-            vuma_log!(info, 
+            vuma_log!(
+                info,
                 "InferenceEngine::infer: {} BDs, {} constraints, {} iterations, {} errors",
                 bd_map.len(),
                 constraints.len(),
@@ -341,7 +348,8 @@ impl InferenceEngine {
         let engine = BdEngineInner::new().with_max_iterations(self.max_iterations);
 
         if self.verbose {
-            vuma_log!(info, 
+            vuma_log!(
+                info,
                 "Running BD inference on SCG with {} nodes",
                 scg.node_count()
             );
@@ -350,7 +358,8 @@ impl InferenceEngine {
         let result = engine.infer(scg);
 
         if self.verbose {
-            vuma_log!(info, 
+            vuma_log!(
+                info,
                 "BD inference complete: {} BDs inferred, {} errors, {} warnings, {} iterations",
                 result.bd_map.len(),
                 result.errors.len(),

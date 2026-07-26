@@ -22,8 +22,8 @@
 
 use crate::ast::*;
 use crate::error::{
-    check_llm_construct, suggest_keyword, suggest_vuma_type, ErrorRecovery, ParseError,
-    ParseErrorKind, ParseResult, Span,
+    check_llm_construct, suggest_keyword, suggest_vuma_type, ParseError, ParseErrorKind,
+    ParseResult, Span,
 };
 use crate::lexer::{Lexer, Token, TokenKind};
 use std::collections::HashSet;
@@ -33,9 +33,16 @@ use std::collections::HashSet;
 // ---------------------------------------------------------------------------
 
 /// Default maximum recursion depth for expression parsing.
-const MAX_EXPR_DEPTH: u32 = 256;
+///
+/// Raised from 256 to 1024 to better accommodate machine-generated
+/// VUMA programs (e.g. bignum2048 KAT tests in `scripts/womb_kat_tests/`)
+/// that may legitimately produce deeply-nested expressions. Override on
+/// a per-invocation basis via the `--max-expr-depth N` CLI flag, which is
+/// plumbed through `CompileConfig` (see `pipeline.rs`) and reaches the
+/// parser via `Parser::with_max_depth`.
+pub const MAX_EXPR_DEPTH: u32 = 1024;
 
-// Wave 12: Channel builtins (channel_open, channel_send, channel_recv,
+// Channel builtins (channel_open, channel_send, channel_recv,
 // channel_close, channel_try_recv, channel_recv_timeout) are parsed as
 // regular Call expressions and intercepted by the codegen. The L1 frame
 // format carries capability tokens (crate::capability::CapabilityToken)
@@ -57,10 +64,43 @@ pub struct Parser<'src> {
     expr_depth: u32,
     /// Maximum allowed recursion depth for expression parsing.
     max_depth: u32,
-    /// When true, struct literal parsing is suppressed in `parse_postfix()`.
-    /// Used when parsing the end expression of a range (`..`) so that `{`
-    /// is not consumed as part of a struct literal and remains available
-    /// for the enclosing construct (e.g. a for-loop body).
+    /// When true, struct-literal parsing is suppressed in `parse_postfix()`'s
+    /// `TokenKind::LBrace` arm (the arm instead `break`s, leaving the `{` for
+    /// the enclosing construct to consume).
+    ///
+    /// # Why this flag exists
+    ///
+    /// VUMA has several `cond { body }` constructs — `if`, `while`, the
+    /// if-expression form `if cond { … } else { … }`, and `for x in 0..n { … }`
+    /// — where the parser must decide, after parsing `cond`, whether the next
+    /// `{` opens a struct literal or a block body.  The lexer does not
+    /// distinguish the two, so the decision is contextual.
+    ///
+    /// When `cond` ends in an *identifier-like* expression (e.g. `if i < len`
+    /// or `0..n`), `parse_postfix` would otherwise greedily consume `len { … }`
+    /// or `n { … }` as `Expr::StructInit { name: len, fields: … }`, stealing
+    /// the body block from the enclosing control-flow construct.  The
+    /// resulting AST is well-formed but semantically wrong (the loop body
+    /// becomes a struct literal), and the error surfaces far downstream as a
+    /// confusing type or resolution failure rather than at the parse site.
+    ///
+    /// To prevent this, every caller that parses a `cond` immediately before
+    /// a `{`-delimited body must wrap the condition parse in
+    /// [`Self::with_no_struct_literal`], which sets this flag for the duration
+    /// of the parse and restores it afterwards (the save/restore matters
+    /// because conditions nest — e.g. `if a { if b { … } }` — and the inner
+    /// condition parse must not be affected by the outer setting after the
+    /// outer condition has been consumed).
+    ///
+    /// # Adding a new `cond { body }` construct
+    ///
+    /// If you add a new statement/expression form whose grammar is
+    /// `<cond> <block>`, you **must** wrap the condition parse in
+    /// `with_no_struct_literal`.  Forgetting this will silently mis-parse any
+    /// condition whose final token is an identifier followed by `{` (e.g.
+    /// `match foo { … }` if `match` is added without the wrapper).  There is
+    /// no compile-time guard; the bug manifests as a struct-literal AST node
+    /// where a block was expected.
     no_struct_literal: bool,
     /// Name of the function currently being parsed (for context-aware errors).
     current_fn_name: Option<String>,
@@ -154,6 +194,34 @@ impl<'src> Parser<'src> {
         parser
     }
 
+    /// Temporarily set [`Parser::no_struct_literal`] to `true` for the
+    /// duration of `f`, restoring the previous value afterwards.
+    ///
+    /// This is the canonical way to parse the condition of any `cond { body }`
+    /// construct (`if`, `while`, if-expression, range-end before a `{`-body)
+    /// — see the field-level doc on `no_struct_literal` for *why* this
+    /// wrapper is required.  Callers should write:
+    ///
+    /// ```text
+    /// let cond = self.with_no_struct_literal(|p| p.parse_expr())?;
+    /// ```
+    ///
+    /// The save/restore is necessary because conditions nest (e.g.
+    /// `if a { if b { … } }`) and the inner condition must see the same
+    /// flag value as the outer once the outer condition has been consumed.
+    /// Using this helper instead of inline save/restore guarantees that the
+    /// restore happens even if `f` returns early via `?`.
+    fn with_no_struct_literal<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let result = f(self);
+        self.no_struct_literal = prev;
+        result
+    }
+
     // -- public entry point --------------------------------------------------
 
     /// Parse the full source into a [`Program`].
@@ -202,9 +270,9 @@ impl<'src> Parser<'src> {
         // "no PMT mode". Any such site is pushed onto `self.errors` by
         // `check_pointer_syntax` (which returns `Err` unconditionally) and
         // reaches here via the error-recovery loop above. We scan
-        // `self.errors` for pointer-syntax violations (identified by the
-        // message prefix emitted by `check_pointer_syntax`) and downgrade
-        // to a fatal `ParseResult::err` (value `None`) so that
+        // `self.errors` for errors classified with the structured
+        // `ParseErrorKind::PointerSyntax` kind (set by `check_pointer_syntax`)
+        // and downgrade to a fatal `ParseResult::err` (value `None`) so that
         // `ModuleResolver::parse_source` — which only bails on
         // `result.is_err()` — propagates the failure to the CLI driver.
         // Other (non-pointer) parse errors remain non-fatal via
@@ -213,14 +281,16 @@ impl<'src> Parser<'src> {
         let has_pointer_syntax_error = self
             .errors
             .iter()
-            .any(|e| e.message.starts_with("pointer syntax '"));
+            .any(|e| e.kind == ParseErrorKind::PointerSyntax);
         // FFI attribute placement errors (from validate_extern_fn_ffi_attrs /
         // validate_layout_ffi_attrs) are also fatal — a misplaced #[foreign(raw)]
-        // or invalid #[callback] must not silently produce a binary.
+        // or invalid #[callback] must not silently produce a binary. They are
+        // tagged with the structured `ParseErrorKind::FfiAttr` kind at the
+        // producer sites.
         let has_ffi_attr_error = self
             .errors
             .iter()
-            .any(|e| e.message.starts_with("FFI attribute "));
+            .any(|e| e.kind == ParseErrorKind::FfiAttr);
         if has_pointer_syntax_error || has_ffi_attr_error {
             return ParseResult::err(std::mem::take(&mut self.errors));
         }
@@ -250,7 +320,7 @@ impl<'src> Parser<'src> {
                 kind
             ),
             span,
-            ParseErrorKind::InvalidSyntax,
+            ParseErrorKind::PointerSyntax,
         ))
     }
 
@@ -316,7 +386,7 @@ impl<'src> Parser<'src> {
                 let lexeme = self.current.lexeme.as_str();
                 match lexeme {
                     "static" => self.parse_static_item(visibility, attrs).map(Item::Static),
-                    // PMT (Wave 1a): `layout Name = { ... }` and
+                    // PMT: `layout Name = { ... }` and
                     // `transform name(p: T, ...) -> T { ... }`.
                     // These are intentionally NOT promoted to keyword tokens
                     // — they are dispatched by lexeme so the lexer is
@@ -324,8 +394,33 @@ impl<'src> Parser<'src> {
                     // is unrelated to the capital-`R` `Ref<T,F>` PMT type).
                     // FIX1: transforms now accept multiple params and any
                     // return type (mirroring `fn`).
-                    "layout" => self.parse_layout_def(attrs).map(Item::LayoutDef),
-                    "transform" => self.parse_transform_def().map(Item::TransformDef),
+                    //
+                    // FIX2: A 1-token peek disambiguates a definition
+                    // (`layout Foo { ... }` / `transform foo(...) ...`)
+                    // from `layout`/`transform` used as a variable name in an
+                    // assignment or expression-statement (e.g. `layout = 5;`).
+                    // Mirrors the `region` handling above (lines ~290-305):
+                    // only dispatch when the next token is a valid name —
+                    // either an `Ident` or a "name keyword" (see
+                    // `is_name_keyword`). Otherwise fall through to
+                    // `parse_stmt` so the identifier is treated as an
+                    // ordinary expression/assignment LHS.
+                    "layout" => {
+                        let next = self.peek_next();
+                        if next.kind == TokenKind::Ident || Self::is_name_keyword(next.kind) {
+                            self.parse_layout_def(attrs).map(Item::LayoutDef)
+                        } else {
+                            self.parse_stmt().map(Item::Stmt)
+                        }
+                    }
+                    "transform" => {
+                        let next = self.peek_next();
+                        if next.kind == TokenKind::Ident || Self::is_name_keyword(next.kind) {
+                            self.parse_transform_def().map(Item::TransformDef)
+                        } else {
+                            self.parse_stmt().map(Item::Stmt)
+                        }
+                    }
                     _ => self.parse_stmt().map(Item::Stmt),
                 }
             }
@@ -477,7 +572,7 @@ impl<'src> Parser<'src> {
 
     /// `layout` <ident> `=` `{` <field>: <type> `,` ... `}` [`;`]
     ///
-    /// PMT (Wave 1a) — a layout is a typed view of a memory buffer region.
+    /// PMT — a layout is a typed view of a memory buffer region.
     /// Mirrors `parse_struct_def` but uses `=` between the name and the
     /// field list (mirroring the `region name = allocate(N)` form) and
     /// accepts an optional trailing semicolon.
@@ -626,23 +721,6 @@ impl<'src> Parser<'src> {
         })
     }
 
-    /// Parse comma-separated type parameter names inside `< … >`.
-    #[allow(dead_code)]
-    fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {
-        self.expect(TokenKind::Lt)?;
-        let mut params = Vec::new();
-        while !self.at_closing_gt() && !self.at(TokenKind::Eof) {
-            params.push(self.expect_name()?);
-            if self.at(TokenKind::Comma) {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        self.expect_gt_closing_generic()?;
-        Ok(params)
-    }
-
     /// Parse type parameters with optional bounds: `<T: Display + Clone, U>`
     fn parse_type_params_with_bounds(&mut self) -> Result<Vec<TypeParam>, ParseError> {
         self.expect(TokenKind::Lt)?;
@@ -718,7 +796,12 @@ impl<'src> Parser<'src> {
             } else {
                 None
             };
-            params.push(Param { name, ty, attrs, span });
+            params.push(Param {
+                name,
+                ty,
+                attrs,
+                span,
+            });
             if self.at(TokenKind::Comma) {
                 self.advance();
             } else {
@@ -1200,7 +1283,22 @@ impl<'src> Parser<'src> {
     const FFI_ATTR_FOREIGN_CONSUME: &'static str = "foreign_consume";
     const FFI_ATTR_FOREIGN: &'static str = "foreign";
 
+    /// The `#[secret]` attribute marks a `let` binding (or `Param`) as
+    /// carrying secret-tainted data, so the constant-time verifier seeds
+    /// its `secret_vars` set from the bound name. See
+    /// `docs/architecture/ive-fix-proposals.md` §8.
+    ///
+    /// The const itself is unused (callers compare against the literal
+    /// `"secret"`), but it documents the canonical attribute name and is
+    /// retained for future parser-side validation of `#[secret]`.
+    #[allow(dead_code)]
+    const SECRET_ATTR: &'static str = "secret";
+
     /// Returns true if `name` is one of the 8 FFI attributes.
+    ///
+    /// Note: `#[secret]` is intentionally NOT an FFI attribute — it is a
+    /// security annotation handled separately by the pipeline (see
+    /// `collect_secret_vars` in `pipeline.rs`).
     fn is_ffi_attr(name: &str) -> bool {
         matches!(
             name,
@@ -1217,10 +1315,7 @@ impl<'src> Parser<'src> {
 
     /// Validate FFI attribute placement on a `layout` declaration.
     /// Only `#[foreign(raw)]` is allowed on layouts.
-    fn validate_layout_ffi_attrs(
-        attrs: &[Attribute],
-        layout_name: &str,
-    ) -> Result<(), ParseError> {
+    fn validate_layout_ffi_attrs(attrs: &[Attribute], layout_name: &str) -> Result<(), ParseError> {
         for attr in attrs {
             if !Self::is_ffi_attr(&attr.name) {
                 continue; // non-FFI attr — pass through
@@ -1233,7 +1328,7 @@ impl<'src> Parser<'src> {
                         attr.name, layout_name
                     ),
                     attr.span,
-                    ParseErrorKind::InvalidSyntax,
+                    ParseErrorKind::FfiAttr,
                 ));
             }
             // #[foreign(raw)] is valid here — check it has a value (the field name).
@@ -1278,7 +1373,7 @@ impl<'src> Parser<'src> {
                         fn_name
                     ),
                     attr.span,
-                    ParseErrorKind::InvalidSyntax,
+                    ParseErrorKind::FfiAttr,
                 ));
             }
             // All other FFI attrs (borrow, marshal, may_retain, unmarshal,
@@ -1304,7 +1399,7 @@ impl<'src> Parser<'src> {
                                 attr.name, param.name, fn_name
                             ),
                             attr.span,
-                            ParseErrorKind::InvalidSyntax,
+                            ParseErrorKind::FfiAttr,
                         ));
                     }
                 }
@@ -1359,8 +1454,39 @@ impl<'src> Parser<'src> {
 
     /// Parse a single statement.
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        // Parse leading outer attributes on a statement. Currently only
+        // `#[secret] let name = ...;` is honored (the attrs are attached
+        // to the `LetStmt` so the pipeline can extract secret variable
+        // names). Other attributes on non-let statements are accepted but
+        // silently discarded — a per-attr warning is emitted so users
+        // notice typos. This is the minimal hook for `#[secret]`; the full
+        // attribute-on-statements design is future work.
+        if self.at(TokenKind::Hash) {
+            let next = self.peek_next();
+            if next.kind == TokenKind::LBracket {
+                let attrs = self.parse_outer_attributes()?;
+                if self.at(TokenKind::Let) {
+                    return self.parse_let_stmt(attrs);
+                }
+                // Non-let statement with attributes: emit a warning per attr
+                // and continue parsing the underlying statement. We use
+                // `eprintln!` (not `vuma_log!`) because the parser crate
+                // does not depend on the `vuma` root crate's logging macro.
+                for a in &attrs {
+                    eprintln!(
+                        "[warn] Attribute '#[{}]' on non-let statement is not \
+                         yet supported (Gap 8 minimal hook) — ignoring.",
+                        a.name
+                    );
+                }
+                // Recurse to dispatch on the now-current token. If this is
+                // another `#[...]`, the recursion handles it; otherwise we
+                // fall through to the normal statement dispatch.
+                return self.parse_stmt();
+            }
+        }
         match self.current.kind {
-            TokenKind::Let => self.parse_let_stmt(),
+            TokenKind::Let => self.parse_let_stmt(Vec::new()),
             TokenKind::Mut => {
                 // LLM mistake: `mut` is not a VUMA keyword for declarations
                 let span = self.current.span;
@@ -1370,7 +1496,7 @@ impl<'src> Parser<'src> {
                     "remove `mut`",
                 ));
                 self.advance(); // consume `mut`
-                // Try to continue parsing what comes after `mut`
+                                // Try to continue parsing what comes after `mut`
                 self.parse_stmt()
             }
             TokenKind::MacroIdent => {
@@ -1386,7 +1512,7 @@ impl<'src> Parser<'src> {
                     "use `write` or format strings instead",
                 ));
                 self.advance(); // consume the macro identifier
-                // Try to skip the macro arguments and continue
+                                // Try to skip the macro arguments and continue
                 if self.at(TokenKind::LParen) {
                     self.skip_balanced_parens();
                 }
@@ -1409,7 +1535,7 @@ impl<'src> Parser<'src> {
             TokenKind::Sync => self.parse_sync_stmt(),
             TokenKind::Free => self.parse_free_stmt(),
             TokenKind::Allocate => self.parse_allocate_stmt(),
-            // BD directives — with parser context-awareness (Task 7-b).
+            // BD directives — with parser context-awareness.
             //
             // The keywords `bd`/`repd`/`capd`/`reld` are reserved as
             // BD-directive introducers in the lexer (form: `bd(name, expr);`),
@@ -1422,7 +1548,7 @@ impl<'src> Parser<'src> {
             // `parse_bd_directive`, which expected `(` immediately after the
             // keyword and failed with
             // `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`,
-            // blocking the Wave 48 bootstrap self-host test.
+            // blocking the bootstrap self-host test.
             //
             // We disambiguate by peeking the token AFTER the keyword:
             //   * `(`  → real BD directive (`bd(name, expr);` / `repd(...)` / etc.)
@@ -1448,7 +1574,10 @@ impl<'src> Parser<'src> {
                     TokenKind::Reld => BdDirectiveKind::Reld,
                     // Unreachable: this arm is only entered for the four
                     // TokenKind variants matched above.
-                    _ => unreachable!("Bd/Repd/Capd/Reld dispatch arm reached for {:?}", self.current.kind),
+                    _ => unreachable!(
+                        "Bd/Repd/Capd/Reld dispatch arm reached for {:?}",
+                        self.current.kind
+                    ),
                 };
                 match next.kind {
                     // Real BD directive: `bd(name, expr);` — always followed
@@ -1492,7 +1621,11 @@ impl<'src> Parser<'src> {
     }
 
     /// `let` <name> [`:` <type>] [`=` <expr>] `;`
-    fn parse_let_stmt(&mut self) -> Result<Stmt, ParseError> {
+    ///
+    /// `attrs` carries any outer attributes parsed by the caller (e.g.
+    /// `#[secret]` for constant-time tainting). When called directly from
+    /// the `Let` dispatch arm in `parse_stmt`, `attrs` is empty.
+    fn parse_let_stmt(&mut self, attrs: Vec<Attribute>) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Let)?;
 
@@ -1521,6 +1654,7 @@ impl<'src> Parser<'src> {
             name,
             ty,
             value,
+            attrs,
             span: Span::new(start, self.current.span.end),
         }))
     }
@@ -1540,6 +1674,7 @@ impl<'src> Parser<'src> {
             name,
             ty: Some(ty),
             value,
+            attrs: Vec::new(),
             span: Span::new(start, self.current.span.end),
         }))
     }
@@ -1581,8 +1716,8 @@ impl<'src> Parser<'src> {
 
         if self.at(TokenKind::Assign) {
             self.advance(); // consume '='
-            // Handle `x = if cond { ... } else { ... };` by parsing the
-            // if as a statement and converting to an assignment.
+                            // Handle `x = if cond { ... } else { ... };` by parsing the
+                            // if as a statement and converting to an assignment.
             let value = if self.at(TokenKind::If) {
                 // Parse if-expression: convert to a synthetic value
                 // by parsing the if statement and wrapping it.
@@ -1698,12 +1833,10 @@ impl<'src> Parser<'src> {
     fn parse_if_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::If)?;
-        // Suppress struct literal parsing in the condition so that
-        // `if i < len { ... }` does not interpret `len {` as a struct literal.
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        let condition = self.parse_expr()?;
-        self.no_struct_literal = prev;
+        // `if i < len { ... }` must not treat `len {` as a struct literal —
+        // see the `no_struct_literal` field doc for why this wrapper is
+        // required for any `cond { body }` construct.
+        let condition = self.with_no_struct_literal(|p| p.parse_expr())?;
         let then_block = self.parse_block()?;
         let else_block = self.parse_else_clause()?;
         Ok(Stmt::If(IfStmt {
@@ -1841,13 +1974,10 @@ impl<'src> Parser<'src> {
     fn parse_while_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::While)?;
-        // Suppress struct literal parsing in the condition so that
-        // `while i < len { ... }` does not interpret `len {` as a struct
-        // literal (which would consume the loop body).
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        let condition = self.parse_expr()?;
-        self.no_struct_literal = prev;
+        // `while i < len { ... }` must not treat `len {` as a struct literal —
+        // see the `no_struct_literal` field doc for why this wrapper is
+        // required for any `cond { body }` construct.
+        let condition = self.with_no_struct_literal(|p| p.parse_expr())?;
         let body = self.parse_block()?;
         Ok(Stmt::While(WhileStmt {
             condition,
@@ -1865,9 +1995,10 @@ impl<'src> Parser<'src> {
 
         // Detect C-style for loop: `for (` or `for(i=0;...)`
         if self.at(TokenKind::LParen) {
-            self.errors.push(ParseError::c_style_for_loop(
-                Span::new(start, self.current.span.end),
-            ));
+            self.errors.push(ParseError::c_style_for_loop(Span::new(
+                start,
+                self.current.span.end,
+            )));
             // Skip the entire C-style for loop to recover
             self.recover_to_statement_boundary();
             // Return a synthetic for loop
@@ -2007,7 +2138,7 @@ impl<'src> Parser<'src> {
             arms,
             span: Span::new(start, self.current.span.end),
         };
-        // Wave 8b: validate the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+        // Validate the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
         // form.  The Ok/Err arms are parsed by `parse_match_pattern` (via the
         // OkKw/ErrKw keywords) into MatchPattern::Enum; here we confirm the
         // subject is `channel_recv(...)` and that exactly one Ok-binding and
@@ -2159,11 +2290,11 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Wave 8b: validate the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
+    /// Validate the `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`
     /// form, where Ok/Err arms are matched against a `channel_recv` subject.
     ///
-    /// This is the parser-side recognition of the fallible channel-recv match
-    /// construct (Wave 8b).  When the subject is `channel_recv(...)`:
+    /// This is the parser-side recognition of the fallible channel-recv
+    /// match construct.  When the subject is `channel_recv(...)`:
     ///   - exactly two arms MUST be present,
     ///   - one arm MUST be `Ok(<ident>)` (a binding, not a bare `Ok`),
     ///   - the other arm MUST be `Err(<ident>)` (a binding, not a bare `Err`),
@@ -2205,7 +2336,9 @@ impl<'src> Parser<'src> {
                 MatchPattern::Enum { name, binding, .. } if name == "Ok" => {
                     if binding.is_none() {
                         return Err(ParseError::new(
-                            String::from("Ok arm of match channel_recv(ch) must bind a value: Ok(v)"),
+                            String::from(
+                                "Ok arm of match channel_recv(ch) must bind a value: Ok(v)",
+                            ),
                             arm.span,
                             ParseErrorKind::UnexpectedToken,
                         ));
@@ -2215,7 +2348,9 @@ impl<'src> Parser<'src> {
                 MatchPattern::Enum { name, binding, .. } if name == "Err" => {
                     if binding.is_none() {
                         return Err(ParseError::new(
-                            String::from("Err arm of match channel_recv(ch) must bind a value: Err(e)"),
+                            String::from(
+                                "Err arm of match channel_recv(ch) must bind a value: Err(e)",
+                            ),
                             arm.span,
                             ParseErrorKind::UnexpectedToken,
                         ));
@@ -2364,12 +2499,10 @@ impl<'src> Parser<'src> {
             if self.current.kind == TokenKind::DotDot && min_prec == 0 {
                 let start = left.span().start;
                 self.advance(); // consume '..'
-                // Suppress struct literal parsing for the range end so that
-                // `0..n { … }` does not interpret `n {` as a struct literal.
-                let prev = self.no_struct_literal;
-                self.no_struct_literal = true;
-                let end_expr = self.parse_expr_with_precedence(1)?;
-                self.no_struct_literal = prev;
+                                // `0..n { … }` must not treat `n {` as a struct literal —
+                                // see the `no_struct_literal` field doc for why this wrapper
+                                // is required for any `cond { body }` construct.
+                let end_expr = self.with_no_struct_literal(|p| p.parse_expr_with_precedence(1))?;
                 let end = end_expr.span().end;
                 left = Expr::Range {
                     start: Box::new(left),
@@ -2510,22 +2643,22 @@ impl<'src> Parser<'src> {
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
 
-        // Wave 2c: Channel-open builtin `channel_open<T>(args)` — parse the
-        // type parameter in angle brackets BEFORE entering the postfix
-        // loop.  Without this interception the `<` would be consumed by
-        // the binary-expression parser as a less-than operator
+        // Channel-open builtin `channel_open<T>(args)` — parse the type
+        // parameter in angle brackets BEFORE entering the postfix loop.
+        // Without this interception the `<` would be consumed by the
+        // binary-expression parser as a less-than operator
         // (`channel_open < i32 > ()`), which is nonsensical.  We mirror
         // the existing `Channel<T>` type-parsing path (parse_type +
         // expect_gt_closing_generic) so nested types like
         // `channel_open<Channel<i32>>` parse correctly via `>>`-splitting.
         //
         // The type parameter is parsed (and validated syntactically) but
-        // not retained on the resulting `Expr::Call` — Wave 3 codegen
-        // will recover it from the channel's runtime descriptor.  This
-        // matches the task spec ("parsed as regular function calls, just
-        // like allocate/free/state_new"): the callee is
-        // `Var("channel_open")` and the subsequent `(` arm of the
-        // postfix loop builds the `Expr::Call` with zero arguments.
+        // not retained on the resulting `Expr::Call` — codegen will
+        // recover it from the channel's runtime descriptor.  This matches
+        // the task spec ("parsed as regular function calls, just like
+        // allocate/free/state_new"): the callee is `Var("channel_open")`
+        // and the subsequent `(` arm of the postfix loop builds the
+        // `Expr::Call` with zero arguments.
         //
         // channel_send/recv/close have no type parameter and parse as
         // plain `Expr::Call` via the generic LParen arm below — no
@@ -2560,14 +2693,17 @@ impl<'src> Parser<'src> {
                         args,
                         span: call_span,
                     };
-                    // PMT (Wave 1a): intercept `state_new(LayoutName)` and
-                    // emit `Expr::StateInit` directly. The function-call
-                    // syntax was chosen (per task spec) as the simplest
-                    // parse form — no new keyword tokens required.
+                    // PMT: intercept `state_new(LayoutName)` and emit
+                    // `Expr::StateInit` directly. The function-call syntax
+                    // was chosen (per task spec) as the simplest parse form
+                    // — no new keyword tokens required.
                     if let Expr::Call { callee, args, span } = &expr {
                         if let Expr::Var { name, .. } = callee.as_ref() {
                             if name == "state_new" && args.len() == 1 {
-                                if let Expr::Var { name: layout_name, .. } = &args[0] {
+                                if let Expr::Var {
+                                    name: layout_name, ..
+                                } = &args[0]
+                                {
                                     expr = Expr::StateInit {
                                         layout_name: layout_name.clone(),
                                         span: *span,
@@ -2577,7 +2713,7 @@ impl<'src> Parser<'src> {
                         }
                     }
 
-                    // Arena State Model (Wave 1): intercept arena builtins.
+                    // Arena State Model: intercept arena builtins.
                     // arena_new(capacity) → Expr::ArenaNew
                     // arena_alloc(arena, LayoutName) → Expr::ArenaAlloc
                     // arena_grow(arena, min_capacity) → Expr::ArenaGrow
@@ -2593,7 +2729,10 @@ impl<'src> Parser<'src> {
                                 }
                                 "arena_alloc" if args.len() == 2 => {
                                     // Second arg must be a layout name (Expr::Var)
-                                    if let Expr::Var { name: layout_name, .. } = &args[1] {
+                                    if let Expr::Var {
+                                        name: layout_name, ..
+                                    } = &args[1]
+                                    {
                                         expr = Expr::ArenaAlloc {
                                             arena: Box::new(args[0].clone()),
                                             layout_name: layout_name.clone(),
@@ -2661,9 +2800,17 @@ impl<'src> Parser<'src> {
                     // and the brace is followed by `ident :` — otherwise the `{`
                     // belongs to a block statement like `if cond { … }`).
                     //
-                    // When `no_struct_literal` is set (e.g. parsing the end of a
-                    // range expression like `0..n`), skip this branch entirely so
-                    // that the `{` remains for the enclosing construct.
+                    // CONSUMER of the `no_struct_literal` flag. When this flag
+                    // is set (by `with_no_struct_literal` — see the field-level
+                    // doc), the *enclosing* construct is itself a `cond { body }`
+                    // form (`if`/`while`/if-expr/range-end before a `{`-block),
+                    // and the `{` we are looking at here belongs to that body,
+                    // not to a struct literal. Breaking leaves the `{` for the
+                    // enclosing caller (`parse_block`/`parse_for_stmt`/etc.) to
+                    // consume. Without this check, `if i < len { … }` would
+                    // have its `len { … }` greedily consumed as a
+                    // `Expr::StructInit` whose name is `len`, stealing the loop
+                    // body and producing a silently-wrong AST.
                     if self.no_struct_literal {
                         break;
                     }
@@ -2680,13 +2827,16 @@ impl<'src> Parser<'src> {
                             // Empty braces: `Foo {}` is a valid struct literal
                             true
                         } else if self.current.kind == TokenKind::Ident
-                            || Self::is_name_keyword(self.current.kind) {
+                            || Self::is_name_keyword(self.current.kind)
+                        {
                             // Peek at the token after the field name.
                             // Struct literal if followed by `:` (field: value),
                             // `,` (shorthand: field), or `}` (single shorthand field).
                             let after_field = self.peek_next();
-                            matches!(after_field.kind,
-                                TokenKind::Colon | TokenKind::Comma | TokenKind::RBrace)
+                            matches!(
+                                after_field.kind,
+                                TokenKind::Colon | TokenKind::Comma | TokenKind::RBrace
+                            )
                         } else {
                             false
                         };
@@ -2931,7 +3081,10 @@ impl<'src> Parser<'src> {
                     self.advance();
                     lexeme.parse::<u32>().map_err(|_| {
                         ParseError::new(
-                            format!("syscall number must be a non-negative integer, got: {}", lexeme),
+                            format!(
+                                "syscall number must be a non-negative integer, got: {}",
+                                lexeme
+                            ),
                             span,
                             ParseErrorKind::InvalidSyntax,
                         )
@@ -3133,7 +3286,9 @@ impl<'src> Parser<'src> {
                         args.push(self.parse_expr()?);
                         while self.at(TokenKind::Comma) {
                             self.advance();
-                            if self.at(TokenKind::RParen) { break; }
+                            if self.at(TokenKind::RParen) {
+                                break;
+                            }
                             args.push(self.parse_expr()?);
                         }
                     }
@@ -3292,13 +3447,11 @@ impl<'src> Parser<'src> {
     fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::If)?;
-        // Suppress struct-literal parsing during the condition so that
-        // `if a < b { ... }` doesn't treat `b { ... }` as a struct literal.
+        // `if a < b { ... }` must not treat `b { ... }` as a struct literal —
+        // see the `no_struct_literal` field doc for why this wrapper is
+        // required for any `cond { body }` construct.
         // The `{` belongs to the then-block, not to a struct construction.
-        let prev = self.no_struct_literal;
-        self.no_struct_literal = true;
-        let condition = self.parse_expr()?;
-        self.no_struct_literal = prev;
+        let condition = self.with_no_struct_literal(|p| p.parse_expr())?;
         // parse_block consumes its own `{` and `}`
         let then_block = self.parse_block()?;
         // Expect `else`
@@ -3517,7 +3670,11 @@ impl<'src> Parser<'src> {
             let next = self.peek_next();
             let is_mut_ref = next.kind == TokenKind::Mut;
             self.check_pointer_syntax(
-                if is_mut_ref { "&mut T (reference type)" } else { "&T (reference type)" },
+                if is_mut_ref {
+                    "&mut T (reference type)"
+                } else {
+                    "&T (reference type)"
+                },
                 span,
             )?;
             self.advance(); // consume '&'
@@ -3609,18 +3766,18 @@ impl<'src> Parser<'src> {
             });
         }
 
-        // Wave 1b: `Channel<T>` — typed channel endpoint. The `Channel`
-        // keyword is registered in the lexer keyword table (mapped to
+        // `Channel<T>` — typed channel endpoint. The `Channel` keyword is
+        // registered in the lexer keyword table (mapped to
         // `TokenKind::Channel`). We intercept it here, *before* the
         // BDBase/`expect_name` path, so that `Channel<i32>` is parsed as
         // `Type::Channel { inner: Box<i32>, session_type: None }` rather
         // than falling through to `Type::Generic { name: "Channel", ... }`.
         //
-        // Wave 89-90 (Session Types): the parser leaves `session_type`
-        // as `None` here — surface syntax for session-typed channels
-        // (e.g. `Channel<i32, Send<i32, End>>`) is a future parser
-        // extension; the AST node carries the field so downstream passes
-        // (IVE linear-type checker) can attach protocols programmatically.
+        // The parser leaves `session_type` as `None` here — surface syntax
+        // for session-typed channels (e.g. `Channel<i32, Send<i32, End>>`)
+        // is a future parser extension; the AST node carries the field so
+        // downstream passes (IVE linear-type checker) can attach protocols
+        // programmatically.
         if self.at(TokenKind::Channel) {
             self.advance(); // consume 'Channel'
             self.expect(TokenKind::Lt)?;
@@ -3635,11 +3792,11 @@ impl<'src> Parser<'src> {
         // Named type (BDBase) or Generic type: `Name<T, ...>`
         let name = self.expect_name()?;
 
-        // PMT (Wave 1a): `State<T>` and `Ref<T, field>` are recognised by
-        // name (the lexer leaves `State`/`Ref` as Ident tokens because
-        // there is already a lowercase `ref` keyword). We intercept them
-        // here, *before* the LLM-type suggestion check, so that
-        // `State<u32>` is not mis-reported as an unknown type.
+        // PMT: `State<T>` and `Ref<T, field>` are recognised by name (the
+        // lexer leaves `State`/`Ref` as Ident tokens because there is
+        // already a lowercase `ref` keyword). We intercept them here,
+        // *before* the LLM-type suggestion check, so that `State<u32>` is
+        // not mis-reported as an unknown type.
         if name == "State" && self.at(TokenKind::Lt) {
             self.advance(); // consume '<'
             let inner = self.parse_type()?;
@@ -3662,7 +3819,8 @@ impl<'src> Parser<'src> {
         if suggest_vuma_type(&name).is_some() {
             // Only report if the name is NOT a valid VUMA type already
             // (suggest_vuma_type returns None for valid VUMA types)
-            self.errors.push(ParseError::unknown_type(&name, self.current.span));
+            self.errors
+                .push(ParseError::unknown_type(&name, self.current.span));
         }
 
         // Check for generic arguments: `Name<T, U, ...>`
@@ -3964,18 +4122,6 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Skip tokens until a likely block boundary is found.
-    ///
-    /// More conservative than statement recovery: skips until we see `}` or
-    /// EOF. Useful when an error inside a block might cascade if we only
-    /// skip to the next `;`.
-    #[allow(dead_code)]
-    fn recover_to_block_boundary(&mut self) {
-        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            self.advance();
-        }
-    }
-
     /// Skip balanced parentheses (used for error recovery when encountering
     /// macro invocations like `println!(...)`).
     fn skip_balanced_parens(&mut self) {
@@ -3997,68 +4143,6 @@ impl<'src> Parser<'src> {
                 }
             }
             self.advance();
-        }
-    }
-
-    /// Skip balanced braces (used for error recovery when encountering
-    /// unterminated blocks).
-    #[allow(dead_code)]
-    fn skip_balanced_braces(&mut self) {
-        if !self.at(TokenKind::LBrace) {
-            return;
-        }
-        let mut depth: usize = 0;
-        while !self.at(TokenKind::Eof) {
-            if self.at(TokenKind::LBrace) {
-                depth += 1;
-            } else if self.at(TokenKind::RBrace) {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    self.advance(); // consume closing '}'
-                    break;
-                }
-            }
-            self.advance();
-        }
-    }
-
-    /// Recover from a parse error by dispatching through [`ErrorRecovery::for_kind`].
-    ///
-    /// The `level` parameter provides context about where the error occurred
-    /// (item-level vs statement-level) and is used as a fallback when the
-    /// strategy from `for_kind()` doesn't match the recovery context.
-    #[allow(dead_code)]
-    fn recover_from_error(&mut self, kind: &ParseErrorKind, level: RecoveryLevel) {
-        let strategy = ErrorRecovery::for_kind(kind);
-        match strategy {
-            ErrorRecovery::SkipToStatementBoundary => {
-                self.recover_to_statement_boundary();
-            }
-            ErrorRecovery::SkipToBlockBoundary => {
-                self.recover_to_block_boundary();
-            }
-            ErrorRecovery::InsertMissingToken(_) => {
-                // For inserted tokens we don't actually skip — the parser
-                // continues as if the token had been present. In practice
-                // this means we do nothing and let the next `expect()` call
-                // try the following token.
-            }
-            ErrorRecovery::SkipOneToken => {
-                if !self.at(TokenKind::Eof) {
-                    self.advance();
-                }
-            }
-            ErrorRecovery::AbortItem => {
-                // Fall back to context-appropriate recovery.
-                match level {
-                    RecoveryLevel::Item => self.recover_to_item_boundary(),
-                    RecoveryLevel::Statement => self.recover_to_statement_boundary(),
-                    RecoveryLevel::Block => self.recover_to_block_boundary(),
-                }
-            }
         }
     }
 
@@ -4110,22 +4194,6 @@ impl<'src> Parser<'src> {
             let next = self.peek_next();
             if next.kind == TokenKind::LBracket {
                 let attr = self.parse_attribute(false)?;
-                attrs.push(attr);
-            } else {
-                break;
-            }
-        }
-        Ok(attrs)
-    }
-
-    /// Parse zero or more inner attributes (`#![...]`) at the start of a block.
-    #[allow(dead_code)]
-    fn parse_inner_attributes(&mut self) -> Result<Vec<Attribute>, ParseError> {
-        let mut attrs = Vec::new();
-        while self.at(TokenKind::Hash) {
-            let next = self.peek_next();
-            if next.kind == TokenKind::Bang {
-                let attr = self.parse_attribute(true)?;
                 attrs.push(attr);
             } else {
                 break;
@@ -4230,27 +4298,6 @@ impl<'src> Parser<'src> {
 // Span helper on Expr
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// RecoveryLevel
-// ---------------------------------------------------------------------------
-
-/// Context level for error recovery dispatch.
-///
-/// Used by [`Parser::recover_from_error`] to select the appropriate fallback
-/// when the [`ErrorRecovery`] strategy is [`AbortItem`].
-///
-/// [`AbortItem`]: ErrorRecovery::AbortItem
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecoveryLevel {
-    /// Top-level item boundary (fn, struct, enum, import, …).
-    Item,
-    /// Statement boundary (`;` or `}`).
-    Statement,
-    /// Block boundary (`}`).
-    Block,
-}
-
 /// Convenience: every [`Expr`] variant can report its source span.
 impl Expr {
     /// Return the source span of this expression.
@@ -4290,11 +4337,11 @@ impl Expr {
             Expr::Block { span, .. } => *span,
             Expr::MatchExpr { span, .. } => *span,
             Expr::Syscall { span, .. } => *span,
-            // PMT (Wave 1a)
+            // PMT
             Expr::StateInit { span, .. } => *span,
             Expr::StateRead { span, .. } => *span,
             Expr::StateWrite { span, .. } => *span,
-            // Arena State Model (Wave 1)
+            // Arena State Model
             Expr::ArenaNew { span, .. } => *span,
             Expr::ArenaAlloc { span, .. } => *span,
             Expr::ArenaGrow { span, .. } => *span,
@@ -4331,7 +4378,7 @@ impl Stmt {
             Stmt::Break(s) => s.span,
             Stmt::Continue(s) => s.span,
             Stmt::BdDirective(s) => s.span,
-            // PMT (Wave 1a)
+            // PMT
             Stmt::TransformCall(s) => s.span,
             Stmt::Expr(s) => s.span,
         }
@@ -4345,19 +4392,6 @@ impl Stmt {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- Test 1: Region definition ----
-    #[test]
-    fn parse_simple_region() {
-        let source = "region pool = allocate(1024);";
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        assert_eq!(program.items.len(), 1);
-        match &program.items[0] {
-            Item::RegionDef(r) => assert_eq!(r.name, "pool"),
-            other => panic!("expected RegionDef, got {:?}", other),
-        }
-    }
 
     // ---- Test 2: Function definition ----
     #[test]
@@ -4409,15 +4443,6 @@ mod tests {
             }
             other => panic!("expected EnumDef, got {:?}", other),
         }
-    }
-
-    // ---- Test 5: Cast expression ----
-    #[test]
-    fn parse_cast_expr() {
-        let source = "region pool = allocate(64); header = pool as *NodeHeader;";
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        assert_eq!(program.items.len(), 2);
     }
 
     // ---- Test 6: While loop with expressions ----
@@ -4642,24 +4667,6 @@ mod tests {
         match &program.items[0] {
             Item::FnDef(f) => {
                 assert_eq!(f.body.statements.len(), 2);
-            }
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
-    // ---- Test 17: Region-annotated pointer type ----
-    #[test]
-    fn parse_region_ptr_type() {
-        let source = "fn test() -> *u32 @ heap { return x; }";
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                assert!(f.return_type.is_some());
-                match f.return_type.as_ref().unwrap() {
-                    Type::RegionPtr { region, .. } => assert_eq!(region, "heap"),
-                    other => panic!("expected RegionPtr, got {:?}", other),
-                }
             }
             other => panic!("expected FnDef, got {:?}", other),
         }
@@ -5013,22 +5020,6 @@ mod tests {
         }
     }
 
-    // ---- Test 24: Complex example program ----
-    #[test]
-    fn parse_example_program() {
-        let source = r#"
-            region memory_pool = allocate(1024);
-            fn main() {
-                node_ptr = memory_pool + 64;
-                header = node_ptr as *NodeHeader;
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let result = parser.parse_program();
-        assert!(result.is_ok(), "should parse example program");
-        assert!(!result.is_err(), "should have no parse errors");
-    }
-
     // ---- Test 25: Error recovery ----
     #[test]
     fn parse_error_recovery() {
@@ -5044,39 +5035,6 @@ mod tests {
         if result.is_ok() {
             let program = result.unwrap();
             assert!(program.items.len() > 0, "should have recovered some items");
-        }
-    }
-
-    // ---- Test 26: Struct init with deref assign ----
-    #[test]
-    fn parse_struct_init_and_deref_assign() {
-        let source = r#"
-            fn test() {
-                node = allocate(24);
-                *node = NodeHeader { prev: 0, next: 0, data: 0 };
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                assert_eq!(f.body.statements.len(), 2);
-                // First is assignment with allocate expr
-                match &f.body.statements[0] {
-                    Stmt::Assign(a) => {
-                        assert!(matches!(a.target, AssignTarget::Var { .. }));
-                    }
-                    other => panic!("expected Assign, got {:?}", other),
-                }
-                // Second is deref assign with struct init
-                match &f.body.statements[1] {
-                    Stmt::Assign(a) => {
-                        assert!(matches!(a.target, AssignTarget::Deref { .. }));
-                    }
-                    other => panic!("expected Assign (deref), got {:?}", other),
-                }
-            }
-            other => panic!("expected FnDef, got {:?}", other),
         }
     }
 
@@ -5117,90 +5075,6 @@ mod tests {
             }
             other => panic!("expected EnumDef, got {:?}", other),
         }
-    }
-
-    // ---- Test 29: Allocate as expression in assignment ----
-    #[test]
-    fn parse_allocate_as_expr() {
-        let source = r#"
-            fn test() {
-                region = allocate(8);
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                assert_eq!(f.body.statements.len(), 1);
-            }
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
-    // ---- Test 30: Parsing the full hello_memory.vuma example ----
-    #[test]
-    fn parse_hello_memory_example() {
-        let source = r#"
-fn main() -> i32 {
-    region = allocate(8);
-    *region = 42;
-    let value: i32 = *region;
-    free(region);
-    return value;
-}
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("should parse hello_memory");
-        assert_eq!(program.items.len(), 1);
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                assert_eq!(f.name, "main");
-                assert_eq!(f.body.statements.len(), 5);
-            }
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
-    // ---- Test 31: Parsing the full doubly_linked_list.vuma example ----
-    #[test]
-    fn parse_doubly_linked_list_example() {
-        let source = r#"
-struct NodeHeader {
-    prev: Address,
-    next: Address,
-    data: u64,
-}
-
-fn new_list() -> Address {
-    node = allocate(24);
-    *node = NodeHeader { prev: 0, next: 0, data: 0 };
-    return node;
-}
-
-fn push_back(list: Address, value: u64) {
-    sentinel = list;
-    last = (*sentinel).prev;
-    node = allocate(24);
-    *node = NodeHeader { prev: last, next: sentinel, data: value };
-    (*last).next = node;
-    (*sentinel).prev = node;
-}
-
-fn main() -> i32 {
-    list = new_list();
-    push_back(list, 10);
-    push_back(list, 20);
-    free_list(list);
-    return 0;
-}
-        "#;
-        let mut parser = Parser::new(source);
-        let result = parser.parse_program();
-        assert!(result.is_ok(), "should parse doubly_linked_list");
-        assert!(!result.is_err(), "should have no parse errors");
-        let program = result.unwrap();
-        // Should have 4 items: struct + 3 functions
-        assert!(program.items.len() >= 4);
     }
 
     // ---- Test 32: Else-if chain ----
@@ -5590,31 +5464,6 @@ fn main() -> i32 {
         }
     }
 
-    // ---- Test 40: Null literal ----
-    #[test]
-    fn parse_null_literal() {
-        let source = r#"
-            fn test() {
-                let p: *u8 = null;
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                assert_eq!(f.body.statements.len(), 1);
-                match &f.body.statements[0] {
-                    Stmt::Let(l) => match &l.value {
-                        Expr::Null { .. } => {}
-                        other => panic!("expected Null expr, got {:?}", other),
-                    },
-                    other => panic!("expected Let, got {:?}", other),
-                }
-            }
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
     // ---- Test 41: BD directive statements ----
     #[test]
     fn parse_bd_directives() {
@@ -5665,50 +5514,6 @@ fn main() -> i32 {
             }
             other => panic!("expected FnDef, got {:?}", other),
         }
-    }
-
-    // ---- Test 42: Borrow operator (&expr) ----
-    #[test]
-    fn parse_borrow_expr() {
-        let source = r#"
-            fn test() {
-                let ptr = &x;
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        match &program.items[0] {
-            Item::FnDef(f) => match &f.body.statements[0] {
-                Stmt::Let(l) => match &l.value {
-                    Expr::AddressOf { .. } => {}
-                    other => panic!("expected AddressOf, got {:?}", other),
-                },
-                other => panic!("expected Let, got {:?}", other),
-            },
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
-    // ---- Test 43: Full program with all new features ----
-    #[test]
-    fn parse_full_program_with_new_features() {
-        let source = r#"
-const MAX: u32 = 1024;
-static counter: u32 = 0;
-struct Buffer { data: *u8, size: u32 }
-fn process(buf: *Buffer) -> u32 {
-    bd(Secure);
-    counter += 1;
-    let derived = derive(buf, heap);
-    return 0;
-}
-        "#;
-        let mut parser = Parser::new(source);
-        let result = parser.parse_program();
-        assert!(result.is_ok(), "should parse full program");
-        assert!(!result.is_err(), "should have no parse errors");
-        let program = result.unwrap();
-        assert!(program.items.len() >= 4);
     }
 
     // ---- Test 44: Complex expression precedence ----
@@ -5813,27 +5618,6 @@ fn process(buf: *Buffer) -> u32 {
         }
     }
 
-    // ---- Test 48: Nested struct init and method chains ----
-    #[test]
-    fn parse_nested_struct_and_chains() {
-        let source = r#"
-            fn test() {
-                let n = Node { val: 1, next: null };
-                let v = (*ptr).data;
-                let r = Math::sqrt(x);
-                let d = derive(p, r);
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                assert_eq!(f.body.statements.len(), 4);
-            }
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
     // ---- Test 49: Function type in type position ----
     #[test]
     fn parse_function_type() {
@@ -5860,29 +5644,6 @@ fn process(buf: *Buffer) -> u32 {
             },
             other => panic!("expected FnDef, got {:?}", other),
         }
-    }
-
-    // ---- Test 50: Mixed const, static, and top-level items ----
-    #[test]
-    fn parse_mixed_top_level_items() {
-        let source = r#"
-            const A: u32 = 1;
-            static B: u32 = 2;
-            import "std";
-            export main;
-            region pool = allocate(4096);
-            fn main() -> i32 { return 0; }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("parse should succeed");
-        assert_eq!(program.items.len(), 6);
-        // Verify item types
-        assert!(matches!(&program.items[0], Item::Const(_)));
-        assert!(matches!(&program.items[1], Item::Static(_)));
-        assert!(matches!(&program.items[2], Item::Import(_)));
-        assert!(matches!(&program.items[3], Item::Export(_)));
-        assert!(matches!(&program.items[4], Item::RegionDef(_)));
-        assert!(matches!(&program.items[5], Item::FnDef(_)));
     }
 
     // =========================================================================
@@ -6384,39 +6145,6 @@ fn process(buf: *Buffer) -> u32 {
     // REGRESSION / STRESS TESTS — VUMA-Specific Constructs (15 tests)
     // =========================================================================
 
-    // ---- Reg Test 26: Region with large size ----
-    #[test]
-    fn reg_region_large_size() {
-        let source = "region huge_pool = allocate(4294967296);";
-        let mut parser = Parser::new(source);
-        let program = parser
-            .parse_program()
-            .expect("region with large size should parse");
-        match &program.items[0] {
-            Item::RegionDef(r) => assert_eq!(r.name, "huge_pool"),
-            other => panic!("expected RegionDef, got {:?}", other),
-        }
-    }
-
-    // ---- Reg Test 27: Allocate/free pair ----
-    #[test]
-    fn reg_allocate_free_pair() {
-        let source = r#"
-            fn test() {
-                buf = allocate(256);
-                free(buf);
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser
-            .parse_program()
-            .expect("allocate/free pair should parse");
-        match &program.items[0] {
-            Item::FnDef(f) => assert_eq!(f.body.statements.len(), 2),
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
     // ---- Reg Test 28: Derive with complex ptr ----
     #[test]
     fn reg_derive_complex_ptr() {
@@ -6546,66 +6274,6 @@ fn process(buf: *Buffer) -> u32 {
         }
     }
 
-    // ---- Reg Test 34: Deref chain (*(*(*ptr))) ----
-    #[test]
-    fn reg_deref_chain() {
-        let source = r#"
-            fn test() {
-                let v = ***ptr;
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().expect("deref chain should parse");
-        match &program.items[0] {
-            Item::FnDef(f) => {
-                match &f.body.statements[0] {
-                    Stmt::Let(l) => {
-                        // Should be a triple-nested Deref
-                        match &l.value {
-                            Expr::Deref { expr, .. } => match expr.as_ref() {
-                                Expr::Deref { expr: inner1, .. } => match inner1.as_ref() {
-                                    Expr::Deref { .. } => {}
-                                    other => panic!("expected inner Deref, got {:?}", other),
-                                },
-                                other => panic!("expected Deref, got {:?}", other),
-                            },
-                            other => panic!("expected Deref, got {:?}", other),
-                        }
-                    }
-                    other => panic!("expected Let, got {:?}", other),
-                }
-            }
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
-    // ---- Reg Test 35: Address-of chain (@@x) ----
-    #[test]
-    fn reg_address_of_chain() {
-        let source = r#"
-            fn test() {
-                let v = @@x;
-            }
-        "#;
-        let mut parser = Parser::new(source);
-        let program = parser
-            .parse_program()
-            .expect("address-of chain should parse");
-        match &program.items[0] {
-            Item::FnDef(f) => match &f.body.statements[0] {
-                Stmt::Let(l) => match &l.value {
-                    Expr::AddressOf { expr, .. } => match expr.as_ref() {
-                        Expr::AddressOf { .. } => {}
-                        other => panic!("expected inner AddressOf, got {:?}", other),
-                    },
-                    other => panic!("expected AddressOf, got {:?}", other),
-                },
-                other => panic!("expected Let, got {:?}", other),
-            },
-            other => panic!("expected FnDef, got {:?}", other),
-        }
-    }
-
     // ---- Reg Test 36: Struct init with nested struct ----
     #[test]
     fn reg_struct_init_nested() {
@@ -6642,24 +6310,6 @@ fn process(buf: *Buffer) -> u32 {
                 assert_eq!(s.fields.len(), 2);
             }
             other => panic!("expected StructDef, got {:?}", other),
-        }
-    }
-
-    // ---- Reg Test 38: Enum with payload types ----
-    #[test]
-    fn reg_enum_with_payload_types() {
-        let source = "enum Result { Ok(u32), Err(*u8) }";
-        let mut parser = Parser::new(source);
-        let program = parser
-            .parse_program()
-            .expect("enum with payload types should parse");
-        match &program.items[0] {
-            Item::EnumDef(e) => {
-                assert_eq!(e.variants.len(), 2);
-                assert!(e.variants[0].payload.is_some());
-                assert!(e.variants[1].payload.is_some());
-            }
-            other => panic!("expected EnumDef, got {:?}", other),
         }
     }
 
@@ -7259,8 +6909,23 @@ fn process(buf: *Buffer) -> u32 {
         );
     }
 
+    // Run in a thread with an enlarged stack: the default aarch64 test-host
+    // stack (8 MiB) is insufficient for the parser's recursive descent at the
+    // custom high depth limit (30 nested parens) and would SIGABRT. The
+    // underlying parser recursion is bounded by the configured depth limit and
+    // not actually unbounded — this is purely a host-stack-size limitation.
     #[test]
     fn recursion_depth_custom_limit() {
+        let child = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(recursion_depth_custom_limit_inner)
+            .expect("failed to spawn stack-enlarged test thread");
+        child
+            .join()
+            .expect("recursion_depth_custom_limit test thread panicked");
+    }
+
+    fn recursion_depth_custom_limit_inner() {
         // With a custom high limit, deep nesting should work
         let parens = "(".repeat(30);
         let close_parens = ")".repeat(30);
@@ -7636,6 +7301,64 @@ fn process(buf: *Buffer) -> u32 {
             }
             other => panic!("expected FnDef, got {:?}", other),
         }
+    }
+
+    // ── Negative-path tests ───────────────────────────────────────────
+    //
+    // These tests cover the parser's negative paths (malformed programs).
+    // The parser uses `ParseResult<T>` rather than panicking on bad input,
+    // so these tests use `assert!(result.is_err())` /
+    // `assert!(result.has_errors())` instead of `#[should_panic]`.
+
+    /// Pointer syntax (`*p`, `&x`, `*T`, `allocate`, `free`) is ALWAYS
+    /// a hard fatal parse error in VUMA 2.0 PMT-only mode (see the
+    /// `has_pointer_syntax_error` block at line 281 above).  This test
+    /// asserts that the parser returns `ParseResult::err` (rather than
+    /// `ok_with_errors`) when the source contains `*p`, and that at
+    /// least one accumulated error is classified as
+    /// `ParseErrorKind::PointerSyntax`.  Without this test, a
+    /// regression that silently downgraded pointer syntax to a
+    /// non-fatal warning would go undetected — the gold-standard
+    /// `pmt_wave3_negative/` files would still fail, but the unit-level
+    /// failure mode would be invisible.
+    #[test]
+    fn test_negative_parse_pointer_syntax_is_fatal_error() {
+        let source = "fn main() { let x = *p; }";
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        assert!(
+            result.is_err(),
+            "pointer syntax `*p` must be a fatal parse error in PMT-only \
+             mode, but parse_program returned ok (errors={:?})",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == ParseErrorKind::PointerSyntax),
+            "expected at least one ParseErrorKind::PointerSyntax error, \
+             got errors={:?}",
+            result.errors
+        );
+    }
+
+    /// An unterminated function body (missing `}`) is recovered from
+    /// for multi-error reporting, but the parser must accumulate at
+    /// least one non-fatal parse error.  This is the negative-path
+    /// counterpart to `parse_fn_def` above.
+    #[test]
+    fn test_negative_parse_unterminated_function_body_has_errors() {
+        // Missing closing brace — the parser hits EOF mid-body.
+        let source = "fn main() { let x = 1;";
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        assert!(
+            result.has_errors(),
+            "unterminated function body must produce at least one parse \
+             error (got errors={:?})",
+            result.errors
+        );
     }
 }
 

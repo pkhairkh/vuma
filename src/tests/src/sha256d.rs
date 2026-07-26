@@ -35,24 +35,21 @@ use crate::framework::{build_scg_from_source, compile_to_arm64, verify_program_d
 /// First 32 bits of the fractional parts of the square roots of the
 /// first 8 primes: 2, 3, 5, 7, 11, 13, 17, 19.
 const H_INIT: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// SHA-256 round constants (FIPS 180-4 Section 4.2.2).
 /// First 32 bits of the fractional parts of the cube roots of the
 /// first 64 primes: 2, 3, 5, 7, 11, 13, ..., 311.
 const K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 /// SHA-256 logical functions (FIPS 180-4 Section 4.1.2).
@@ -469,7 +466,10 @@ fn test_sha256d_different_inputs() {
     // Different inputs must produce different outputs (collision resistance).
     let d1 = sha256d(b"input A");
     let d2 = sha256d(b"input B");
-    assert_ne!(d1, d2, "Different inputs must produce different SHA256d outputs");
+    assert_ne!(
+        d1, d2,
+        "Different inputs must produce different SHA256d outputs"
+    );
 }
 
 #[test]
@@ -527,14 +527,14 @@ fn test_sha256d_vuma_pipeline() {
     let result = verify_program_detailed(source);
 
     // Parse and AST-to-SCG must succeed.
-    let parse_ok = result
-        .stages
-        .iter()
-        .any(|(stage, outcome)| *stage == crate::framework::PipelineStage::Parse && *outcome == crate::framework::StageOutcome::Passed);
-    let ast_ok = result
-        .stages
-        .iter()
-        .any(|(stage, outcome)| *stage == crate::framework::PipelineStage::AstToScg && *outcome == crate::framework::StageOutcome::Passed);
+    let parse_ok = result.stages.iter().any(|(stage, outcome)| {
+        *stage == crate::framework::PipelineStage::Parse
+            && *outcome == crate::framework::StageOutcome::Passed
+    });
+    let ast_ok = result.stages.iter().any(|(stage, outcome)| {
+        *stage == crate::framework::PipelineStage::AstToScg
+            && *outcome == crate::framework::StageOutcome::Passed
+    });
 
     assert!(parse_ok, "SHA256d must parse successfully");
     assert!(ast_ok, "SHA256d AST-to-SCG conversion must succeed");
@@ -564,20 +564,32 @@ fn test_sha256d_vuma_compiles_to_arm64() {
                 "ARM64 ELF output must be at least 64 bytes, got {}",
                 elf_bytes.len()
             );
-            assert_eq!(&elf_bytes[0..4], &[0x7f, 0x45, 0x4c, 0x46], "Must be valid ELF");
+            assert_eq!(
+                &elf_bytes[0..4],
+                &[0x7f, 0x45, 0x4c, 0x46],
+                "Must be valid ELF"
+            );
         }
         Err(errors) => {
             // Codegen failure is acceptable for complex programs at this stage.
             // Verify it's a codegen error (not a parse error), confirming the
             // program was syntactically valid.
-            let has_codegen_error = errors.iter().any(|e| {
-                matches!(e, crate::framework::CompileError::Codegen(_))
-            });
-            let has_parse_error = errors.iter().any(|e| {
-                matches!(e, crate::framework::CompileError::Parse(_))
-            });
-            assert!(!has_parse_error, "SHA256d must parse without errors: {:?}", errors);
-            assert!(has_codegen_error, "Failure must be a codegen issue, not parse: {:?}", errors);
+            let has_codegen_error = errors
+                .iter()
+                .any(|e| matches!(e, crate::framework::CompileError::Codegen(_)));
+            let has_parse_error = errors
+                .iter()
+                .any(|e| matches!(e, crate::framework::CompileError::Parse(_)));
+            assert!(
+                !has_parse_error,
+                "SHA256d must parse without errors: {:?}",
+                errors
+            );
+            assert!(
+                has_codegen_error,
+                "Failure must be a codegen issue, not parse: {:?}",
+                errors
+            );
         }
     }
 }
@@ -593,7 +605,7 @@ fn test_sha256_transform_single_block() {
     let mut state = H_INIT;
     let mut block = [0u8; 64];
     block[0] = 0x80; // padding bit
-    // Remaining bytes are zero (message length is 0, so last 8 bytes are already 0).
+                     // Remaining bytes are zero (message length is 0, so last 8 bytes are already 0).
 
     sha256_transform(&mut state, &block);
 
@@ -632,7 +644,7 @@ fn test_sha256_message_schedule() {
     block[1] = 0x62; // 'b'
     block[2] = 0x63; // 'c'
     block[3] = 0x80; // padding
-    // ... zeros ...
+                     // ... zeros ...
     block[63] = 0x18; // 24 bits = 3 bytes * 8
 
     // Manually compute W[0..3] (the first 4 words of the message).
@@ -666,12 +678,7 @@ fn test_sha256_message_schedule() {
 
     // All W values must be valid u32 (implicitly true, but let's verify range).
     for i in 0..64 {
-        assert!(
-            w[i] <= u32::MAX,
-            "W[{}] must be valid u32: {}",
-            i,
-            w[i]
-        );
+        assert!(w[i] <= u32::MAX, "W[{}] must be valid u32: {}", i, w[i]);
     }
 }
 
@@ -766,7 +773,10 @@ fn test_sha256_nist_two_block_message() {
     let digest = sha256(msg.as_bytes());
     // At minimum verify determinism and 32-byte length.
     let d2 = sha256(msg.as_bytes());
-    assert_eq!(digest, d2, "SHA-256 must be deterministic for 112-char message");
+    assert_eq!(
+        digest, d2,
+        "SHA-256 must be deterministic for 112-char message"
+    );
     assert_eq!(digest.len(), 32, "SHA-256 must produce 32 bytes");
 }
 
@@ -796,7 +806,11 @@ fn test_sha256d_known_vector_empty() {
     let inner = sha256(b"");
     let outer = sha256(&inner);
     assert_eq!(result, outer, "SHA256d('') must equal manual double-hash");
-    assert_eq!(digest_to_hex(&result).len(), 64, "SHA256d must produce 64 hex chars");
+    assert_eq!(
+        digest_to_hex(&result).len(),
+        64,
+        "SHA256d must produce 64 hex chars"
+    );
 }
 
 #[test]
@@ -807,7 +821,10 @@ fn test_sha256d_known_vector_abc() {
     let result = sha256d(b"abc");
     let inner = sha256(b"abc");
     let outer = sha256(&inner);
-    assert_eq!(result, outer, "SHA256d('abc') must equal manual double-hash");
+    assert_eq!(
+        result, outer,
+        "SHA256d('abc') must equal manual double-hash"
+    );
 
     // Verify inner matches NIST.
     assert_eq!(
@@ -843,7 +860,10 @@ fn test_sha256d_preimage_resistance() {
     // All outputs must be distinct.
     for i in 0..outputs.len() {
         for j in (i + 1)..outputs.len() {
-            assert_ne!(outputs[i], outputs[j], "SHA256d of different inputs must differ");
+            assert_ne!(
+                outputs[i], outputs[j],
+                "SHA256d of different inputs must differ"
+            );
         }
     }
 }
@@ -863,12 +883,18 @@ fn test_sha256d_avalanche_multiple_pairs() {
     for (a, b) in &pairs {
         let da = sha256d(a);
         let db = sha256d(b);
-        let diff_bits: u32 = da.iter().zip(db.iter()).map(|(x, y)| (x ^ y).count_ones()).sum();
+        let diff_bits: u32 = da
+            .iter()
+            .zip(db.iter())
+            .map(|(x, y)| (x ^ y).count_ones())
+            .sum();
         // Expect roughly 128 out of 256 bits different (±30% tolerance).
         assert!(
             diff_bits > 89 && diff_bits < 167,
             "Avalanche: pair {:?} vs {:?} got {} diff bits (expected ~128)",
-            a, b, diff_bits
+            a,
+            b,
+            diff_bits
         );
     }
 }
@@ -879,7 +905,12 @@ fn test_sha256d_length_consistency() {
     for len in [0, 1, 31, 32, 55, 56, 63, 64, 65, 127, 128, 255, 256, 1000] {
         let msg: Vec<u8> = vec![0xAB; len];
         let result = sha256d(&msg);
-        assert_eq!(result.len(), 32, "SHA256d of {}-byte message must be 32 bytes", len);
+        assert_eq!(
+            result.len(),
+            32,
+            "SHA256d of {}-byte message must be 32 bytes",
+            len
+        );
     }
 }
 
@@ -897,22 +928,16 @@ fn test_sha256_k_constants_all_64_values() {
     // 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251,
     // 257, 263, 269, 271, 277, 281, 283, 293, 307, 311.
     let expected: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
     for i in 0..64 {
         assert_eq!(K[i], expected[i], "K[{}] must match FIPS 180-4", i);
@@ -925,8 +950,8 @@ fn test_sha256_h_init_all_8_values() {
     // These are the first 32 bits of the fractional parts of the square roots
     // of the first 8 primes: 2, 3, 5, 7, 11, 13, 17, 19.
     let expected: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     for i in 0..8 {
         assert_eq!(H_INIT[i], expected[i], "H[{}] must match FIPS 180-4", i);
@@ -969,13 +994,17 @@ fn test_sha256d_vuma_compilation_attempt() {
         Ok(elf_bytes) => {
             // If compilation succeeds, verify it's a valid ELF.
             assert!(elf_bytes.len() >= 64, "ELF must be at least 64 bytes");
-            assert_eq!(&elf_bytes[0..4], &[0x7f, 0x45, 0x4c, 0x46], "Must be valid ELF");
+            assert_eq!(
+                &elf_bytes[0..4],
+                &[0x7f, 0x45, 0x4c, 0x46],
+                "Must be valid ELF"
+            );
         }
         Err(errors) => {
             // Parse errors are unacceptable — the program is syntactically valid.
-            let has_parse_error = errors.iter().any(|e| {
-                matches!(e, crate::framework::CompileError::Parse(_))
-            });
+            let has_parse_error = errors
+                .iter()
+                .any(|e| matches!(e, crate::framework::CompileError::Parse(_)));
             assert!(
                 !has_parse_error,
                 "SHA256d must parse without errors after bridge improvements: {:?}",

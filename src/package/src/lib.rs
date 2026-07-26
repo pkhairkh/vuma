@@ -21,16 +21,18 @@
 
 #[macro_use]
 mod vuma_log_w44 {
-    /// VUMA-native logging macro (Wave 44). Replaces the `log` crate in core
-    /// crates. No-op in release builds (format args still type-checked via
-    /// `format_args!`); `eprintln!` in debug. Not `#[macro_export]` to avoid
-    /// cross-crate name collisions — each core crate carries its own copy.
+    /// Logging macro for VUMA compiler diagnostics.
+    ///
+    /// In debug builds: always emits to stderr.
+    /// In release builds: emits to stderr if `VUMA_LOG` env var is set.
+    /// This ensures advisory verification warnings are visible in production.
+    #[macro_export]
     macro_rules! vuma_log {
         ($level:ident, $($arg:tt)*) => {{
-            #[cfg(debug_assertions)]
-            eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
-            #[cfg(not(debug_assertions))]
-            { let _ = format_args!($($arg)*); }
+            let emit = cfg!(debug_assertions) || std::env::var("VUMA_LOG").is_ok();
+            if emit {
+                eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
+            }
         }};
     }
 }
@@ -39,9 +41,9 @@ pub mod registry;
 pub mod resolver;
 mod toml_lite;
 
-pub use manifest::{PackageManifest, PackageTarget, Dependency, TargetKind, parse_manifest};
+pub use manifest::{parse_manifest, Dependency, PackageManifest, PackageTarget, TargetKind};
 pub use registry::PackageRegistry;
-pub use resolver::{DependencyResolver, ResolveResult, resolve_dependencies};
+pub use resolver::{resolve_dependencies, DependencyResolver, ResolveResult};
 
 // Wave 41: `thiserror` removed in favor of hand-written `Display` +
 // `std::error::Error` impls (matches the pattern established in
@@ -87,7 +89,11 @@ impl std::fmt::Display for PackageError {
             PackageError::DependencyNotFound(name, version) => {
                 write!(f, "dependency not found: {name}@{version}")
             }
-            PackageError::VersionConflict { name, required, found } => {
+            PackageError::VersionConflict {
+                name,
+                required,
+                found,
+            } => {
                 write!(
                     f,
                     "version conflict for {name}: required {required}, found {found}"
@@ -145,7 +151,9 @@ pub fn init_package(dir: &std::path::Path, name: &str) -> PackageResult<()> {
         }],
     };
 
-    let toml_str = manifest.to_toml().map_err(|e| PackageError::ManifestParse(e.to_string()))?;
+    let toml_str = manifest
+        .to_toml()
+        .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
     std::fs::write(&pkg_path, toml_str)?;
 
     // Create src directory
@@ -190,7 +198,9 @@ pub fn add_dependency(dir: &std::path::Path, dep_name: &str, version: &str) -> P
         registry: None,
     });
 
-    let toml_str = manifest.to_toml().map_err(|e| PackageError::ManifestParse(e.to_string()))?;
+    let toml_str = manifest
+        .to_toml()
+        .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
     std::fs::write(&pkg_path, toml_str)?;
 
     Ok(())
@@ -211,7 +221,12 @@ pub fn build_package(dir: &std::path::Path) -> PackageResult<()> {
     let manifest = PackageManifest::from_toml(&content)
         .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
 
-    vuma_log!(info, "Building package {} v{}", manifest.name, manifest.version);
+    vuma_log!(
+        info,
+        "Building package {} v{}",
+        manifest.name,
+        manifest.version
+    );
 
     // Resolve dependencies
     let registry = PackageRegistry::default();

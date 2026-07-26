@@ -880,7 +880,8 @@ mod tests {
     use super::*;
     use crate::edge::EdgeKind;
     use crate::node::{
-        ComputationKind, ComputationNode, ControlKind, ControlNode, NodePayload, NodeType, PhantomNode, ProgramPoint,
+        ComputationKind, ComputationNode, ControlKind, ControlNode, NodePayload, NodeType,
+        PhantomNode, ProgramPoint,
     };
 
     /// Helper to create a default program point for tests.

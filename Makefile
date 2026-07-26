@@ -26,8 +26,11 @@ FEATURES      ?=
 # ============================================================================
 .PHONY: all build check test bench doc fmt clippy \
 	x86-64-run riscv64-run \
-	clean install verify-examples \
-	setup toolchain
+	clean install verify-examples verify-manifest regen-manifest \
+	setup toolchain \
+	proof proof-check proof-test proof-clean \
+	proof-extract proof-parity verify-all \
+	qemu-smoke
 
 # ============================================================================
 # Default: build + test
@@ -79,20 +82,20 @@ test-ipc:
 	@cd /home/z/vuma-review && \
 	pass=0; fail=0; fail_list=""; \
 	for vuma in tests/gold_standard/ipc/*.vuma; do \
-		name=$$(basename "$$vuma" .vuma); \
-		expected=$$(grep -m1 'Expected exit code' "$$vuma" | sed 's/.*Expected exit code[: ]*//' | grep -oE '^[0-9]+' | head -1); \
-		bin=/tmp/vuma_ipc_$${name}.bin; \
-		./target/debug/compile_dump "$$vuma" "$$bin" x86_64 > /dev/null 2>&1; \
-		if [ $$? -ne 0 ]; then \
-			echo "  FAIL  $$name (compile error)"; fail=$$((fail+1)); fail_list="$$fail_list $$name"; \
-		else \
-			"$$bin" < /dev/null > /dev/null 2>&1; rc=$$?; \
-			if [ "$$rc" = "$$expected" ]; then \
-				echo "  PASS  $$name (exit=$$rc)"; pass=$$((pass+1)); \
-			else \
-				echo "  FAIL  $$name (exit=$$rc, expected $$expected)"; fail=$$((fail+1)); fail_list="$$fail_list $$name"; \
-			fi; \
-		fi; \
+	        name=$$(basename "$$vuma" .vuma); \
+	        expected=$$(grep -m1 'Expected exit code' "$$vuma" | sed 's/.*Expected exit code[: ]*//' | grep -oE '^[0-9]+' | head -1); \
+	        bin=/tmp/vuma_ipc_$${name}.bin; \
+	        ./target/debug/compile_dump "$$vuma" "$$bin" x86_64 > /dev/null 2>&1; \
+	        if [ $$? -ne 0 ]; then \
+	                echo "  FAIL  $$name (compile error)"; fail=$$((fail+1)); fail_list="$$fail_list $$name"; \
+	        else \
+	                "$$bin" < /dev/null > /dev/null 2>&1; rc=$$?; \
+	                if [ "$$rc" = "$$expected" ]; then \
+	                        echo "  PASS  $$name (exit=$$rc)"; pass=$$((pass+1)); \
+	                else \
+	                        echo "  FAIL  $$name (exit=$$rc, expected $$expected)"; fail=$$((fail+1)); fail_list="$$fail_list $$name"; \
+	                fi; \
+	        fi; \
 	done; \
 	echo "=== Summary: $$pass passed, $$fail failed ==="; \
 	if [ $$fail -gt 0 ]; then echo "Failed:$$fail_list"; exit 1; fi
@@ -207,6 +210,42 @@ verify-examples:
 	@echo "Verifying example programs..."
 	@for f in examples/*.vuma; do echo "  $$f"; done
 
+# ============================================================================
+# Gold-standard manifest reconciliation
+# ============================================================================
+# tests/gold_standard/manifest.json is the canonical source of truth for the
+# gold-standard test suite. The two targets below enforce and repair the
+# invariant: manifest.total_programs == sum(per-category program_count) ==
+# number of .vuma files on disk under tests/gold_standard/.
+#
+# See docs/architecture/caveats.md S6 row 1 for the history of the test-count
+# disagreement that motivated this check (Task 9-b).
+
+## verify-manifest: Fail if manifest.json disagrees with the filesystem.
+##                  Run by CI (.github/workflows/ci.yml -> manifest job).
+verify-manifest:
+	@python3 scripts/verify_manifest.py
+
+## regen-manifest: Rebuild manifest.json from disk (writes in place).
+##                 Use this after adding/removing .vuma files to bring the
+##                 manifest back in sync. Run `make verify-manifest` after.
+regen-manifest:
+	@python3 scripts/regen_manifest.py --write
+	@python3 scripts/verify_manifest.py
+
+## qemu-smoke: Build vuma and run the Waves 13-14 QEMU smoke-test matrix.
+##             Compiles 4 gold-standard .vuma programs per backend and runs
+##             each under the appropriate emulator (qemu-<isa>-static for
+##             the 12 native ISAs, wasmtime for wasm32). Checks process
+##             exit codes against the `// Expected exit code:` header in
+##             each test file. Exits 0 on full pass, 1 on any failure.
+##             Override the backend set with:
+##               make qemu-smoke VUMA_SMOKE_ISAS="x86_64 aarch64 wasm32"
+##             Skip the cargo build with VUMA_SMOKE_NO_BUILD=1.
+##             Run by CI (.github/workflows/ci.yml -> qemu-smoke job).
+qemu-smoke:
+	@bash scripts/qemu_smoke_test.sh
+
 ## help: Show this help message
 help:
 	@echo "VUMA Build System"
@@ -216,20 +255,55 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@grep -E '^## ' $(MAKEFILE_LIST) | sort | \
-		awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
-		sed 's/^## //'
+	        awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
+	        sed 's/^## //'
 
 # FFI Wave 6 tests — real extern calls (aarch64 has ffi_stub, runs cleanly;
 # x86_64 compiles but needs libc linking to run).
 ffi-test: $(COMPILE_DUMP)
 	@echo "=== FFI Wave 6 tests (aarch64) ==="
 	@for t in tests/gold_standard/ffi_wave1/*.vuma tests/gold_standard/ffi_wave2/*.vuma; do \
-		./target/debug/compile_dump "$$t" /tmp/ffi_test.bin aarch64 --verify 2>/dev/null && \
-		qemu-aarch64 /tmp/ffi_test.bin; \
-		echo "  $$? : $$(basename $$t)"; \
+	        ./target/debug/compile_dump "$$t" /tmp/ffi_test.bin aarch64 --verify 2>/dev/null && \
+	        qemu-aarch64 /tmp/ffi_test.bin; \
+	        echo "  $$? : $$(basename $$t)"; \
 	done
 	@echo "=== FFI Wave 6 tests (x86_64 compile-only) ==="
 	@for t in tests/gold_standard/ffi_wave1/*.vuma; do \
-		./target/debug/compile_dump "$$t" /tmp/ffi_test.bin x86_64 --verify 2>/dev/null && \
-		echo "  OK : $$(basename $$t)"; \
+	        ./target/debug/compile_dump "$$t" /tmp/ffi_test.bin x86_64 --verify 2>/dev/null && \
+	        echo "  OK : $$(basename $$t)"; \
 	done
+
+# ============================================================================
+# Lean 4 formal verification proofs (proof/PMT_Soundness.lean)
+# ============================================================================
+# Requires `lean` (via elan) and `lake` on PATH.
+# Install: curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+
+## proof: Build Lean 4 proofs in proof/ via Lake
+proof:
+	cd proof && lake build
+
+## proof-check: Verify the proof is sorry-free (fails the build if `sorry` is detected)
+proof-check:
+	./scripts/check-lean.sh
+
+## proof-test: Run the Lean 4 proof test harness (Wave 7 PMT.Test.* modules)
+proof-test:
+	cd proof && lake exe test
+
+## proof-clean: Remove Lake build artifacts
+proof-clean:
+	rm -rf proof/.lake proof/build
+
+## proof-extract: Extract Lean proofs to C (via lake build's C backend)
+proof-extract:
+	cd proof && lake build PMT.Extraction
+	@echo "C output: proof/.lake/build/ir/PMT_Extraction.c"
+
+## proof-parity: Run parity tests between Lean-verified and Rust checkers
+proof-parity:
+	@echo "TODO Wave 29: run parity tests on 1,536 gold-standard fixtures"
+
+## verify-all: Run ALL verification checks (Lean + CI + docs)
+verify-all:
+	./scripts/verify-all.sh

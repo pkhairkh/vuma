@@ -174,12 +174,7 @@ impl DiagnosticSourceLocation {
     }
 
     /// Create a location spanning a range within a single line.
-    pub fn range(
-        file: impl Into<String>,
-        line: u32,
-        start_col: u32,
-        end_col: u32,
-    ) -> Self {
+    pub fn range(file: impl Into<String>, line: u32, start_col: u32, end_col: u32) -> Self {
         Self {
             file: file.into(),
             start_line: line,
@@ -228,8 +223,14 @@ impl DiagnosticSourceLocation {
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
             ("file".to_string(), json_str(&self.file)),
-            ("start_line".to_string(), JsonValue::U64(self.start_line as u64)),
-            ("start_col".to_string(), JsonValue::U64(self.start_col as u64)),
+            (
+                "start_line".to_string(),
+                JsonValue::U64(self.start_line as u64),
+            ),
+            (
+                "start_col".to_string(),
+                JsonValue::U64(self.start_col as u64),
+            ),
             ("end_line".to_string(), JsonValue::U64(self.end_line as u64)),
             ("end_col".to_string(), JsonValue::U64(self.end_col as u64)),
         ])
@@ -242,7 +243,13 @@ impl DiagnosticSourceLocation {
         let start_col = v.get("start_col").and_then(|x| x.as_u64())? as u32;
         let end_line = v.get("end_line").and_then(|x| x.as_u64())? as u32;
         let end_col = v.get("end_col").and_then(|x| x.as_u64())? as u32;
-        Some(Self { file, start_line, start_col, end_line, end_col })
+        Some(Self {
+            file,
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+        })
     }
 }
 
@@ -295,7 +302,8 @@ impl RelatedInfo {
 
     /// Parse a [`JsonValue`] into a [`RelatedInfo`].
     pub fn from_json_value(v: &JsonValue) -> Option<Self> {
-        let location = v.get("location")
+        let location = v
+            .get("location")
             .and_then(DiagnosticSourceLocation::from_json_value)?;
         let message = v.get("message").and_then(|x| x.as_str())?.to_string();
         Some(Self { location, message })
@@ -323,8 +331,7 @@ pub struct Suggestion {
 }
 
 /// How likely a suggestion is to be the right fix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SuggestionApplicability {
     /// The suggestion is definitely what the user intended (machine-applicable).
     MachineApplicable,
@@ -336,7 +343,6 @@ pub enum SuggestionApplicability {
     #[default]
     Unspecified,
 }
-
 
 impl SuggestionApplicability {
     /// Returns the JSON snake_case string representation.
@@ -414,7 +420,10 @@ impl Suggestion {
     pub fn to_json_value(&self) -> JsonValue {
         let mut entries = vec![
             ("message".to_string(), json_str(&self.message)),
-            ("applicability".to_string(), json_str(self.applicability.as_json_str())),
+            (
+                "applicability".to_string(),
+                json_str(self.applicability.as_json_str()),
+            ),
         ];
         if let Some(r) = &self.edit_range {
             entries.push(("edit_range".to_string(), r.to_json_value()));
@@ -428,16 +437,24 @@ impl Suggestion {
     /// Parse a [`JsonValue`] into a [`Suggestion`].
     pub fn from_json_value(v: &JsonValue) -> Option<Self> {
         let message = v.get("message").and_then(|x| x.as_str())?.to_string();
-        let edit_range = v.get("edit_range")
+        let edit_range = v
+            .get("edit_range")
             .and_then(DiagnosticSourceLocation::from_json_value);
-        let replacement = v.get("replacement")
+        let replacement = v
+            .get("replacement")
             .and_then(|x| x.as_str())
             .map(|s| s.to_string());
-        let applicability = v.get("applicability")
+        let applicability = v
+            .get("applicability")
             .and_then(|x| x.as_str())
             .and_then(SuggestionApplicability::from_json_str)
             .unwrap_or_default();
-        Some(Self { message, edit_range, replacement, applicability })
+        Some(Self {
+            message,
+            edit_range,
+            replacement,
+            applicability,
+        })
     }
 }
 
@@ -497,6 +514,11 @@ pub fn code_for_parse_error_kind(kind: &ParseErrorKind) -> &'static str {
         ParseErrorKind::LlmMistake => "E021",
         ParseErrorKind::CStyleForLoop => "E022",
         ParseErrorKind::UnknownType => "E023",
+        // VUMA 2.0 PMT-only fatal parse errors (added alongside the
+        // `PointerSyntax` / `FfiAttr` variants — see `parser/src/error.rs`).
+        // E038/E039 are the next free codes after the codegen range (E031-E037).
+        ParseErrorKind::PointerSyntax => "E038",
+        ParseErrorKind::FfiAttr => "E039",
     }
 }
 
@@ -535,11 +557,11 @@ pub fn code_description(code: &str) -> &'static str {
         "E013" => "Invalid compound assignment operator",
         "E014" => "Missing semicolon",
         "E015" => "Invalid address literal",
-        "E016" => "Invalid instruction (legacy)",
-        "E017" => "Register allocation failed (legacy)",
-        "E018" => "Encoding error (legacy)",
-        "E019" => "IR translation error (legacy)",
-        "E020" => "ELF emission error (legacy)",
+        "E016" => "Invalid instruction",
+        "E017" => "Register allocation failed",
+        "E018" => "Encoding error",
+        "E019" => "IR translation error",
+        "E020" => "ELF emission error",
         "E021" => "LLM code mismatch (Rust/C syntax in VUMA)",
         "E022" => "C-style for loop (use range-based for instead)",
         "E023" => "Unknown type (use VUMA sized integer types)",
@@ -583,7 +605,6 @@ pub fn code_description(code: &str) -> &'static str {
         "W005" => "Redundant cast",
         "W006" => "Shadowed variable",
         "W007" => "Unnecessary mut keyword",
-        "W008" => "Deprecated feature",
         "W009" => "Unused import",
         "W010" => "Reachable panic",
 
@@ -683,9 +704,11 @@ pub struct VumaDiagnostic {
     /// Causal chain: list of diagnostics that caused this one.
     /// The first element is the immediate cause, the last is the root cause.
     pub chain: Vec<Box<VumaDiagnostic>>,
-    /// Backward-compatible plain-text suggestions (stored alongside
-    /// structured suggestions for JSON serialization compatibility).
-    pub legacy_suggestions: Vec<String>,
+    /// Plain-text suggestions (stored alongside structured suggestions
+    /// for JSON serialization compatibility). Renamed from `legacy_suggestions`
+    /// for clarity — this field is the live plain-text suggestion channel,
+    /// not a legacy one.
+    pub text_suggestions: Vec<String>,
 }
 
 impl VumaDiagnostic {
@@ -706,7 +729,7 @@ impl VumaDiagnostic {
             related: Vec::new(),
             suggestions: Vec::new(),
             chain: Vec::new(),
-            legacy_suggestions: Vec::new(),
+            text_suggestions: Vec::new(),
         }
     }
 
@@ -718,7 +741,7 @@ impl VumaDiagnostic {
 
     /// Add a quick-fix suggestion (plain text, backward-compatible).
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
-        self.legacy_suggestions.push(suggestion.into());
+        self.text_suggestions.push(suggestion.into());
         self
     }
 
@@ -811,24 +834,31 @@ impl VumaDiagnostic {
     pub fn to_json_value(&self) -> JsonValue {
         let mut entries = vec![
             ("code".to_string(), json_str(&self.code)),
-            ("severity".to_string(), json_str(self.severity.as_json_str())),
+            (
+                "severity".to_string(),
+                json_str(self.severity.as_json_str()),
+            ),
             ("message".to_string(), json_str(&self.message)),
             ("source".to_string(), json_str(&self.source)),
             ("location".to_string(), self.location.to_json_value()),
-            ("related".to_string(), JsonValue::Array(
-                self.related.iter().map(|r| r.to_json_value()).collect(),
-            )),
-            ("suggestions".to_string(), JsonValue::Array(
-                self.suggestions.iter().map(|s| s.to_json_value()).collect(),
-            )),
-            ("chain".to_string(), JsonValue::Array(
-                self.chain.iter().map(|c| c.to_json_value()).collect(),
-            )),
+            (
+                "related".to_string(),
+                JsonValue::Array(self.related.iter().map(|r| r.to_json_value()).collect()),
+            ),
+            (
+                "suggestions".to_string(),
+                JsonValue::Array(self.suggestions.iter().map(|s| s.to_json_value()).collect()),
+            ),
+            (
+                "chain".to_string(),
+                JsonValue::Array(self.chain.iter().map(|c| c.to_json_value()).collect()),
+            ),
         ];
-        if !self.legacy_suggestions.is_empty() {
-            entries.push(("suggestions_legacy".to_string(), JsonValue::Array(
-                self.legacy_suggestions.iter().map(json_str).collect(),
-            )));
+        if !self.text_suggestions.is_empty() {
+            entries.push((
+                "suggestions_legacy".to_string(),
+                JsonValue::Array(self.text_suggestions.iter().map(json_str).collect()),
+            ));
         }
         JsonValue::Object(entries)
     }
@@ -850,18 +880,26 @@ impl VumaDiagnostic {
         let severity = DiagnosticSeverity::from_json_str(severity_str)?;
         let message = get_str("message")?;
         let source = get_str("source")?;
-        let location = v.get("location")
+        let location = v
+            .get("location")
             .and_then(DiagnosticSourceLocation::from_json_value)
             .unwrap_or_else(DiagnosticSourceLocation::unknown);
-        let related = v.get("related")
+        let related = v
+            .get("related")
             .and_then(|x| x.as_array())
-            .map(|arr| arr.iter().filter_map(RelatedInfo::from_json_value).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(RelatedInfo::from_json_value)
+                    .collect()
+            })
             .unwrap_or_default();
-        let suggestions = v.get("suggestions")
+        let suggestions = v
+            .get("suggestions")
             .and_then(|x| x.as_array())
             .map(|arr| arr.iter().filter_map(Suggestion::from_json_value).collect())
             .unwrap_or_default();
-        let chain = v.get("chain")
+        let chain = v
+            .get("chain")
             .and_then(|x| x.as_array())
             .map(|arr| {
                 arr.iter()
@@ -870,7 +908,8 @@ impl VumaDiagnostic {
                     .collect()
             })
             .unwrap_or_default();
-        let legacy_suggestions = v.get("suggestions_legacy")
+        let text_suggestions = v
+            .get("suggestions_legacy")
             .or_else(|| v.get("legacy_suggestions"))
             .and_then(|x| x.as_array())
             .map(|arr| {
@@ -889,7 +928,7 @@ impl VumaDiagnostic {
             related,
             suggestions,
             chain,
-            legacy_suggestions,
+            text_suggestions,
         })
     }
 
@@ -902,7 +941,10 @@ impl VumaDiagnostic {
             self.severity, self.code, self.message, self.source, self.location
         );
         for related in &self.related {
-            out.push_str(&format!("\n  note: {} at {}", related.message, related.location));
+            out.push_str(&format!(
+                "\n  note: {} at {}",
+                related.message, related.location
+            ));
         }
         for suggestion in &self.suggestions {
             out.push_str(&format!("\n  help: {}", suggestion.message));
@@ -910,7 +952,7 @@ impl VumaDiagnostic {
                 out.push_str(&format!(" → `{}`", repl));
             }
         }
-        for suggestion in &self.legacy_suggestions {
+        for suggestion in &self.text_suggestions {
             out.push_str(&format!("\n  help: {}", suggestion));
         }
         for cause in &self.chain {
@@ -967,10 +1009,7 @@ impl VumaDiagnostic {
 
         // Structured suggestions
         for suggestion in &self.suggestions {
-            out.push_str(&format!(
-                "  \x1b[32mhelp\x1b[0m: {}",
-                suggestion.message
-            ));
+            out.push_str(&format!("  \x1b[32mhelp\x1b[0m: {}", suggestion.message));
             if let Some(ref repl) = suggestion.replacement {
                 out.push_str(&format!(" → \x1b[32m`{}`\x1b[0m", repl));
             }
@@ -981,7 +1020,7 @@ impl VumaDiagnostic {
         }
 
         // Legacy suggestions
-        for suggestion in &self.legacy_suggestions {
+        for suggestion in &self.text_suggestions {
             out.push_str(&format!("  \x1b[32mhelp\x1b[0m: {}\n", suggestion));
         }
 
@@ -1001,7 +1040,10 @@ impl VumaDiagnostic {
             if !cause.location.is_unknown() {
                 out.push_str(&format!(
                     "{}  \x1b[2m--> {}:{}:{}\x1b[0m\n",
-                    indent, cause.location.file, cause.location.start_line, cause.location.start_col
+                    indent,
+                    cause.location.file,
+                    cause.location.start_line,
+                    cause.location.start_col
                 ));
             }
         }
@@ -1041,17 +1083,29 @@ impl VumaDiagnostic {
         };
 
         let mut diagnostic = JsonValue::Object(vec![
-            ("range".to_string(), JsonValue::Object(vec![
-                ("start".to_string(), JsonValue::Object(vec![
-                    ("line".to_string(), JsonValue::U64(start_line as u64)),
-                    ("character".to_string(), JsonValue::U64(start_col as u64)),
-                ])),
-                ("end".to_string(), JsonValue::Object(vec![
-                    ("line".to_string(), JsonValue::U64(end_line as u64)),
-                    ("character".to_string(), JsonValue::U64(end_col as u64)),
-                ])),
-            ])),
-            ("severity".to_string(), JsonValue::U64(self.severity.to_lsp_severity() as u64)),
+            (
+                "range".to_string(),
+                JsonValue::Object(vec![
+                    (
+                        "start".to_string(),
+                        JsonValue::Object(vec![
+                            ("line".to_string(), JsonValue::U64(start_line as u64)),
+                            ("character".to_string(), JsonValue::U64(start_col as u64)),
+                        ]),
+                    ),
+                    (
+                        "end".to_string(),
+                        JsonValue::Object(vec![
+                            ("line".to_string(), JsonValue::U64(end_line as u64)),
+                            ("character".to_string(), JsonValue::U64(end_col as u64)),
+                        ]),
+                    ),
+                ]),
+            ),
+            (
+                "severity".to_string(),
+                JsonValue::U64(self.severity.to_lsp_severity() as u64),
+            ),
             ("code".to_string(), json_str(&self.code)),
             ("source".to_string(), json_str(&self.source)),
             ("message".to_string(), json_str(&self.message)),
@@ -1059,47 +1113,94 @@ impl VumaDiagnostic {
 
         // Add related information if present
         if !self.related.is_empty() {
-            let related: Vec<JsonValue> = self.related.iter().map(|r| {
-                let r_start_line = if r.location.start_line > 0 { r.location.start_line - 1 } else { 0 };
-                let r_start_col = if r.location.start_col > 0 { r.location.start_col - 1 } else { 0 };
-                let r_end_line = if r.location.end_line > 0 { r.location.end_line - 1 } else { 0 };
-                let r_end_col = if r.location.end_col > 0 { r.location.end_col - 1 } else { 0 };
-                JsonValue::Object(vec![
-                    ("location".to_string(), JsonValue::Object(vec![
-                        ("uri".to_string(), json_str(format!("file://{}", r.location.file))),
-                        ("range".to_string(), JsonValue::Object(vec![
-                            ("start".to_string(), JsonValue::Object(vec![
-                                ("line".to_string(), JsonValue::U64(r_start_line as u64)),
-                                ("character".to_string(), JsonValue::U64(r_start_col as u64)),
-                            ])),
-                            ("end".to_string(), JsonValue::Object(vec![
-                                ("line".to_string(), JsonValue::U64(r_end_line as u64)),
-                                ("character".to_string(), JsonValue::U64(r_end_col as u64)),
-                            ])),
-                        ])),
-                    ])),
-                    ("message".to_string(), json_str(&r.message)),
-                ])
-            }).collect();
+            let related: Vec<JsonValue> = self
+                .related
+                .iter()
+                .map(|r| {
+                    let r_start_line = if r.location.start_line > 0 {
+                        r.location.start_line - 1
+                    } else {
+                        0
+                    };
+                    let r_start_col = if r.location.start_col > 0 {
+                        r.location.start_col - 1
+                    } else {
+                        0
+                    };
+                    let r_end_line = if r.location.end_line > 0 {
+                        r.location.end_line - 1
+                    } else {
+                        0
+                    };
+                    let r_end_col = if r.location.end_col > 0 {
+                        r.location.end_col - 1
+                    } else {
+                        0
+                    };
+                    JsonValue::Object(vec![
+                        (
+                            "location".to_string(),
+                            JsonValue::Object(vec![
+                                (
+                                    "uri".to_string(),
+                                    json_str(format!("file://{}", r.location.file)),
+                                ),
+                                (
+                                    "range".to_string(),
+                                    JsonValue::Object(vec![
+                                        (
+                                            "start".to_string(),
+                                            JsonValue::Object(vec![
+                                                (
+                                                    "line".to_string(),
+                                                    JsonValue::U64(r_start_line as u64),
+                                                ),
+                                                (
+                                                    "character".to_string(),
+                                                    JsonValue::U64(r_start_col as u64),
+                                                ),
+                                            ]),
+                                        ),
+                                        (
+                                            "end".to_string(),
+                                            JsonValue::Object(vec![
+                                                (
+                                                    "line".to_string(),
+                                                    JsonValue::U64(r_end_line as u64),
+                                                ),
+                                                (
+                                                    "character".to_string(),
+                                                    JsonValue::U64(r_end_col as u64),
+                                                ),
+                                            ]),
+                                        ),
+                                    ]),
+                                ),
+                            ]),
+                        ),
+                        ("message".to_string(), json_str(&r.message)),
+                    ])
+                })
+                .collect();
             diagnostic.insert("relatedInformation", JsonValue::Array(related));
         }
 
         // Add LSP CodeDescription with href if it's a known code
         let desc = code_description(&self.code);
         if desc != "Unknown diagnostic code" {
-            diagnostic.insert("codeDescription", JsonValue::Object(vec![
-                ("href".to_string(), json_str(format!(
-                    "https://vuma.dev/docs/diagnostics/{}",
-                    self.code
-                ))),
-            ]));
+            diagnostic.insert(
+                "codeDescription",
+                JsonValue::Object(vec![(
+                    "href".to_string(),
+                    json_str(format!("https://vuma.dev/docs/diagnostics/{}", self.code)),
+                )]),
+            );
         }
 
         // Add tags for warnings (Unnecessary = 1, Deprecated = 2)
         let mut tags: Vec<JsonValue> = Vec::new();
         match self.code.as_str() {
             "W001" | "W004" | "W009" => tags.push(JsonValue::U64(1)), // Unnecessary
-            "W008" => tags.push(JsonValue::U64(2)),                     // Deprecated
             _ => {}
         }
         if !tags.is_empty() {
@@ -1126,7 +1227,7 @@ impl fmt::Display for VumaDiagnostic {
                 write!(f, " → `{}`", repl)?;
             }
         }
-        for suggestion in &self.legacy_suggestions {
+        for suggestion in &self.text_suggestions {
             write!(f, "\n  help: {}", suggestion)?;
         }
         for cause in &self.chain {
@@ -1245,17 +1346,20 @@ impl DiagnosticSummary {
     /// Build the [`JsonValue`] representation of this summary.
     pub fn to_json_value(&self) -> JsonValue {
         // Sort HashMap entries by key for deterministic output.
-        let mut by_code: Vec<(String, JsonValue)> = self.by_code
+        let mut by_code: Vec<(String, JsonValue)> = self
+            .by_code
             .iter()
             .map(|(k, v)| (k.clone(), JsonValue::U64(*v as u64)))
             .collect();
         by_code.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut by_source: Vec<(String, JsonValue)> = self.by_source
+        let mut by_source: Vec<(String, JsonValue)> = self
+            .by_source
             .iter()
             .map(|(k, v)| (k.clone(), JsonValue::U64(*v as u64)))
             .collect();
         by_source.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut by_subcategory: Vec<(String, JsonValue)> = self.by_subcategory
+        let mut by_subcategory: Vec<(String, JsonValue)> = self
+            .by_subcategory
             .iter()
             .map(|(k, v)| (k.clone(), JsonValue::U64(*v as u64)))
             .collect();
@@ -1268,7 +1372,10 @@ impl DiagnosticSummary {
             ("hints".to_string(), JsonValue::U64(self.hints as u64)),
             ("by_code".to_string(), JsonValue::Object(by_code)),
             ("by_source".to_string(), JsonValue::Object(by_source)),
-            ("by_subcategory".to_string(), JsonValue::Object(by_subcategory)),
+            (
+                "by_subcategory".to_string(),
+                JsonValue::Object(by_subcategory),
+            ),
         ])
     }
 
@@ -1346,11 +1453,7 @@ impl fmt::Display for DiagnosticSummary {
 ///
 /// `source` is the full source text (used to compute line/column from byte
 /// offsets). `file` is the optional file path.
-pub fn from_parse_error(
-    err: &ParseError,
-    source: &str,
-    file: Option<&str>,
-) -> VumaDiagnostic {
+pub fn from_parse_error(err: &ParseError, source: &str, file: Option<&str>) -> VumaDiagnostic {
     let code = code_for_parse_error_kind(&err.kind).to_string();
     let loc = offset_to_location(source, err.span.start, file);
 
@@ -1395,7 +1498,10 @@ pub fn from_parse_errors(
     source: &str,
     file: Option<&str>,
 ) -> Vec<VumaDiagnostic> {
-    errors.iter().map(|e| from_parse_error(e, source, file)).collect()
+    errors
+        .iter()
+        .map(|e| from_parse_error(e, source, file))
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1516,15 +1622,6 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
                 DiagnosticSourceLocation::unknown(),
             )]
         }
-        VumaError::CorInit { message } => {
-            vec![VumaDiagnostic::new(
-                "E024",
-                DiagnosticSeverity::Error,
-                message,
-                "cor-init",
-                DiagnosticSourceLocation::unknown(),
-            )]
-        }
         VumaError::Multi { errors } => errors.iter().flat_map(from_vuma_error).collect(),
         VumaError::ModuleResolution { errors } => errors
             .iter()
@@ -1538,19 +1635,6 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
                 )]
             })
             .collect(),
-        VumaError::BackendFallback { failed_backend, fallback_backend, error } => {
-            let mut msg = format!("backend '{}' failed: {}", failed_backend, error);
-            if let Some(fb) = fallback_backend {
-                msg.push_str(&format!(", attempting fallback to '{}'", fb));
-            }
-            vec![VumaDiagnostic::new(
-                "E031",
-                DiagnosticSeverity::Warning,
-                &msg,
-                "backend-fallback",
-                DiagnosticSourceLocation::unknown(),
-            )]
-        }
         VumaError::PanicCaught { stage, message } => {
             vec![VumaDiagnostic::new(
                 "E050",
@@ -1662,7 +1746,9 @@ pub fn from_codegen_error(err: &CodegenError) -> VumaDiagnostic {
 /// Maps each violation to its E041–E050 code and creates a structured
 /// diagnostic with source location and quick-fix suggestions where
 /// applicable.
-pub fn from_memory_safety_violation(violation: &vuma_codegen::MemorySafetyViolation) -> VumaDiagnostic {
+pub fn from_memory_safety_violation(
+    violation: &vuma_codegen::MemorySafetyViolation,
+) -> VumaDiagnostic {
     use vuma_codegen::MemorySafetyViolation;
 
     let code = violation.code().to_string();
@@ -1767,14 +1853,17 @@ pub fn syntax_error(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E001", DiagnosticSeverity::Error, message, "parser", location)
+    VumaDiagnostic::new(
+        "E001",
+        DiagnosticSeverity::Error,
+        message,
+        "parser",
+        location,
+    )
 }
 
 /// Create an E002 (undefined variable) diagnostic.
-pub fn undefined_variable(
-    name: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn undefined_variable(name: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "E002",
         DiagnosticSeverity::Error,
@@ -1789,14 +1878,17 @@ pub fn type_mismatch(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E003", DiagnosticSeverity::Error, message, "parser", location)
+    VumaDiagnostic::new(
+        "E003",
+        DiagnosticSeverity::Error,
+        message,
+        "parser",
+        location,
+    )
 }
 
 /// Create an E004 (duplicate definition) diagnostic.
-pub fn duplicate_definition(
-    name: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn duplicate_definition(name: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "E004",
         DiagnosticSeverity::Error,
@@ -1826,7 +1918,13 @@ pub fn invalid_type(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E006", DiagnosticSeverity::Error, message, "parser", location)
+    VumaDiagnostic::new(
+        "E006",
+        DiagnosticSeverity::Error,
+        message,
+        "parser",
+        location,
+    )
 }
 
 /// Create an E007 (missing return) diagnostic.
@@ -1856,7 +1954,13 @@ pub fn name_resolution_error(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E024", DiagnosticSeverity::Error, message, "name-resolution", location)
+    VumaDiagnostic::new(
+        "E024",
+        DiagnosticSeverity::Error,
+        message,
+        "name-resolution",
+        location,
+    )
 }
 
 /// Create an E025 (circular dependency) diagnostic.
@@ -1864,7 +1968,13 @@ pub fn circular_dependency(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E025", DiagnosticSeverity::Error, message, "parser", location)
+    VumaDiagnostic::new(
+        "E025",
+        DiagnosticSeverity::Error,
+        message,
+        "parser",
+        location,
+    )
 }
 
 /// Create an E026 (invalid assignment target) diagnostic.
@@ -1872,7 +1982,13 @@ pub fn invalid_assignment_target(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E026", DiagnosticSeverity::Error, message, "parser", location)
+    VumaDiagnostic::new(
+        "E026",
+        DiagnosticSeverity::Error,
+        message,
+        "parser",
+        location,
+    )
 }
 
 /// Create an E027 (break/continue outside loop) diagnostic.
@@ -1887,11 +2003,7 @@ pub fn break_outside_loop(location: DiagnosticSourceLocation) -> VumaDiagnostic 
 }
 
 /// Create an E028 (invalid cast) diagnostic.
-pub fn invalid_cast(
-    from: &str,
-    to: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn invalid_cast(from: &str, to: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "E028",
         DiagnosticSeverity::Error,
@@ -1902,10 +2014,7 @@ pub fn invalid_cast(
 }
 
 /// Create an E029 (missing function body) diagnostic.
-pub fn missing_function_body(
-    name: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn missing_function_body(name: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "E029",
         DiagnosticSeverity::Error,
@@ -1920,7 +2029,13 @@ pub fn invalid_visibility(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E030", DiagnosticSeverity::Error, message, "parser", location)
+    VumaDiagnostic::new(
+        "E030",
+        DiagnosticSeverity::Error,
+        message,
+        "parser",
+        location,
+    )
 }
 
 /// Create an E031 (invalid instruction) diagnostic.
@@ -1928,7 +2043,13 @@ pub fn invalid_instruction(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E031", DiagnosticSeverity::Error, message, "codegen", location)
+    VumaDiagnostic::new(
+        "E031",
+        DiagnosticSeverity::Error,
+        message,
+        "codegen",
+        location,
+    )
 }
 
 /// Create an E032 (register allocation failed) diagnostic.
@@ -1942,7 +2063,8 @@ pub fn register_alloc_failed(
         message,
         "register-alloc",
         location,
-    ).with_structured_suggestion(Suggestion::text(
+    )
+    .with_structured_suggestion(Suggestion::text(
         "reduce register pressure by splitting live ranges",
     ))
 }
@@ -1952,7 +2074,13 @@ pub fn encoding_error(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E033", DiagnosticSeverity::Error, message, "codegen", location)
+    VumaDiagnostic::new(
+        "E033",
+        DiagnosticSeverity::Error,
+        message,
+        "codegen",
+        location,
+    )
 }
 
 /// Create an E037 (relocation error) diagnostic.
@@ -1960,7 +2088,13 @@ pub fn relocation_error(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E037", DiagnosticSeverity::Error, message, "linker", location)
+    VumaDiagnostic::new(
+        "E037",
+        DiagnosticSeverity::Error,
+        message,
+        "linker",
+        location,
+    )
 }
 
 /// Create an E038 (stack layout error) diagnostic.
@@ -1968,7 +2102,13 @@ pub fn stack_layout_error(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E038", DiagnosticSeverity::Error, message, "codegen", location)
+    VumaDiagnostic::new(
+        "E038",
+        DiagnosticSeverity::Error,
+        message,
+        "codegen",
+        location,
+    )
 }
 
 /// Create an E039 (linker error) diagnostic.
@@ -1976,7 +2116,13 @@ pub fn linker_error(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E039", DiagnosticSeverity::Error, message, "linker", location)
+    VumaDiagnostic::new(
+        "E039",
+        DiagnosticSeverity::Error,
+        message,
+        "linker",
+        location,
+    )
 }
 
 /// Create an E040 (target unsupported feature) diagnostic.
@@ -2006,7 +2152,13 @@ pub fn proof_failure(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new("E042", DiagnosticSeverity::Error, message, "proof", location)
+    VumaDiagnostic::new(
+        "E042",
+        DiagnosticSeverity::Error,
+        message,
+        "proof",
+        location,
+    )
 }
 
 /// Create an E043 (liveness invariant violated) diagnostic.
@@ -2070,15 +2222,10 @@ pub fn verification_timeout(
     message: impl Into<String>,
     location: DiagnosticSourceLocation,
 ) -> VumaDiagnostic {
-    VumaDiagnostic::new(
-        "E050",
-        DiagnosticSeverity::Error,
-        message,
-        "ive",
-        location,
-    ).with_structured_suggestion(Suggestion::with_placeholders(
-        "consider simplifying the code or increasing the verification timeout",
-    ))
+    VumaDiagnostic::new("E050", DiagnosticSeverity::Error, message, "ive", location)
+        .with_structured_suggestion(Suggestion::with_placeholders(
+            "consider simplifying the code or increasing the verification timeout",
+        ))
 }
 
 /// Create a W001 (unused variable) diagnostic.
@@ -2110,7 +2257,8 @@ pub fn implicit_conversion(
         format!("implicit conversion from `{}` to `{}`", from, to),
         "parser",
         location,
-    ).with_suggestion(format!("add explicit `as {}' cast", to))
+    )
+    .with_suggestion(format!("add explicit `as {}' cast", to))
 }
 
 /// Create a W003 (large constant performance hint) diagnostic.
@@ -2118,7 +2266,10 @@ pub fn large_constant(value: &str, location: DiagnosticSourceLocation) -> VumaDi
     VumaDiagnostic::new(
         "W003",
         DiagnosticSeverity::Hint,
-        format!("large constant `{}` may require multiple instructions", value),
+        format!(
+            "large constant `{}` may require multiple instructions",
+            value
+        ),
         "codegen",
         location,
     )
@@ -2136,11 +2287,7 @@ pub fn dead_code(message: impl Into<String>, location: DiagnosticSourceLocation)
 }
 
 /// Create a W005 (redundant cast) diagnostic.
-pub fn redundant_cast(
-    from: &str,
-    to: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn redundant_cast(from: &str, to: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     let edit_loc = location.clone();
     VumaDiagnostic::new(
         "W005",
@@ -2148,7 +2295,8 @@ pub fn redundant_cast(
         format!("redundant cast from `{}` to `{}`", from, to),
         "parser",
         location,
-    ).with_structured_suggestion(Suggestion::edit(
+    )
+    .with_structured_suggestion(Suggestion::edit(
         "remove the redundant cast",
         edit_loc,
         "", // remove the cast expression
@@ -2167,14 +2315,15 @@ pub fn shadowed_variable(
         format!("variable `{}` shadows a previous declaration", name),
         "parser",
         location,
-    ).with_related(RelatedInfo::new(original_location, "previous declaration here"))
+    )
+    .with_related(RelatedInfo::new(
+        original_location,
+        "previous declaration here",
+    ))
 }
 
 /// Create a W007 (unnecessary mut keyword) diagnostic.
-pub fn unnecessary_mut(
-    name: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn unnecessary_mut(name: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     let edit_loc = location.clone();
     VumaDiagnostic::new(
         "W007",
@@ -2182,30 +2331,12 @@ pub fn unnecessary_mut(
         format!("variable `{}` is declared mut but never modified", name),
         "parser",
         location,
-    ).with_structured_suggestion(Suggestion::machine_applicable(
+    )
+    .with_structured_suggestion(Suggestion::machine_applicable(
         "remove 'mut' keyword — variables are mutable by default",
         edit_loc,
         "", // remove 'mut'
     ))
-}
-
-/// Create a W008 (deprecated feature) diagnostic.
-pub fn deprecated_feature(
-    feature: &str,
-    replacement: Option<&str>,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
-    let mut diag = VumaDiagnostic::new(
-        "W008",
-        DiagnosticSeverity::Warning,
-        format!("use of deprecated feature '{}'", feature),
-        "parser",
-        location,
-    );
-    if let Some(repl) = replacement {
-        diag = diag.with_suggestion(format!("use '{}' instead", repl));
-    }
-    diag
 }
 
 /// Create a W009 (unused import) diagnostic.
@@ -2217,7 +2348,8 @@ pub fn unused_import(name: &str, location: DiagnosticSourceLocation) -> VumaDiag
         format!("unused import `{}`", name),
         "parser",
         location,
-    ).with_structured_suggestion(Suggestion::machine_applicable(
+    )
+    .with_structured_suggestion(Suggestion::machine_applicable(
         format!("remove unused import `{}`", name),
         edit_loc,
         "",
@@ -2261,10 +2393,7 @@ pub fn stage_completed(stage: &str) -> VumaDiagnostic {
 }
 
 /// Create an I003 (optimization applied) diagnostic.
-pub fn optimization_applied(
-    pass: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn optimization_applied(pass: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "I003",
         DiagnosticSeverity::Info,
@@ -2275,10 +2404,7 @@ pub fn optimization_applied(
 }
 
 /// Create an I004 (verification passed) diagnostic.
-pub fn verification_passed(
-    invariant: &str,
-    location: DiagnosticSourceLocation,
-) -> VumaDiagnostic {
+pub fn verification_passed(invariant: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "I004",
         DiagnosticSeverity::Info,
@@ -2289,14 +2415,14 @@ pub fn verification_passed(
 }
 
 /// Create an I005 (build artifact produced) diagnostic.
-pub fn artifact_provided(
-    artifact: &str,
-    size_bytes: usize,
-) -> VumaDiagnostic {
+pub fn artifact_provided(artifact: &str, size_bytes: usize) -> VumaDiagnostic {
     VumaDiagnostic::new(
         "I005",
         DiagnosticSeverity::Info,
-        format!("build artifact '{}' produced ({} bytes)", artifact, size_bytes),
+        format!(
+            "build artifact '{}' produced ({} bytes)",
+            artifact, size_bytes
+        ),
         "pipeline",
         DiagnosticSourceLocation::unknown(),
     )
@@ -2459,7 +2585,13 @@ mod tests {
     #[test]
     fn diagnostic_construction() {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
-        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc);
+        let diag = VumaDiagnostic::new(
+            "E002",
+            DiagnosticSeverity::Error,
+            "undefined variable `x`",
+            "parser",
+            loc,
+        );
         assert_eq!(diag.code, "E002");
         assert_eq!(diag.severity, DiagnosticSeverity::Error);
         assert_eq!(diag.message, "undefined variable `x`");
@@ -2467,28 +2599,40 @@ mod tests {
         assert!(diag.related.is_empty());
         assert!(diag.suggestions.is_empty());
         assert!(diag.chain.is_empty());
-        assert!(diag.legacy_suggestions.is_empty());
+        assert!(diag.text_suggestions.is_empty());
     }
 
     #[test]
     fn diagnostic_with_suggestion() {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
-        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc)
-            .with_suggestion("did you mean 'y'?");
-        assert_eq!(diag.legacy_suggestions.len(), 1);
-        assert_eq!(diag.legacy_suggestions[0], "did you mean 'y'?");
+        let diag = VumaDiagnostic::new(
+            "E002",
+            DiagnosticSeverity::Error,
+            "undefined variable `x`",
+            "parser",
+            loc,
+        )
+        .with_suggestion("did you mean 'y'?");
+        assert_eq!(diag.text_suggestions.len(), 1);
+        assert_eq!(diag.text_suggestions[0], "did you mean 'y'?");
     }
 
     #[test]
     fn diagnostic_with_structured_suggestion() {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
         let edit_loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
-        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "type mismatch", "parser", loc)
-            .with_structured_suggestion(Suggestion::edit(
-                "Replace 'int' with 'i32'",
-                edit_loc,
-                "i32",
-            ));
+        let diag = VumaDiagnostic::new(
+            "E003",
+            DiagnosticSeverity::Error,
+            "type mismatch",
+            "parser",
+            loc,
+        )
+        .with_structured_suggestion(Suggestion::edit(
+            "Replace 'int' with 'i32'",
+            edit_loc,
+            "i32",
+        ));
         assert_eq!(diag.suggestions.len(), 1);
         assert_eq!(diag.suggestions[0].message, "Replace 'int' with 'i32'");
         assert_eq!(diag.suggestions[0].replacement, Some("i32".to_string()));
@@ -2498,8 +2642,14 @@ mod tests {
     fn diagnostic_with_related() {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
         let related_loc = DiagnosticSourceLocation::point("main.vu", 2, 1);
-        let diag = VumaDiagnostic::new("E004", DiagnosticSeverity::Error, "duplicate definition", "parser", loc)
-            .with_related(RelatedInfo::new(related_loc, "previous definition here"));
+        let diag = VumaDiagnostic::new(
+            "E004",
+            DiagnosticSeverity::Error,
+            "duplicate definition",
+            "parser",
+            loc,
+        )
+        .with_related(RelatedInfo::new(related_loc, "previous definition here"));
         assert_eq!(diag.related.len(), 1);
         assert_eq!(diag.related[0].message, "previous definition here");
     }
@@ -2507,8 +2657,14 @@ mod tests {
     #[test]
     fn diagnostic_display() {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
-        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc)
-            .with_suggestion("did you mean 'y'?");
+        let diag = VumaDiagnostic::new(
+            "E002",
+            DiagnosticSeverity::Error,
+            "undefined variable `x`",
+            "parser",
+            loc,
+        )
+        .with_suggestion("did you mean 'y'?");
         let display = diag.to_string();
         assert!(display.contains("error[E002]"));
         assert!(display.contains("undefined variable `x`"));
@@ -2518,8 +2674,14 @@ mod tests {
     #[test]
     fn diagnostic_json_output() {
         let loc = DiagnosticSourceLocation::range("main.vu", 10, 4, 7);
-        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `foo`", "parser", loc)
-            .with_suggestion("did you mean `for`?");
+        let diag = VumaDiagnostic::new(
+            "E002",
+            DiagnosticSeverity::Error,
+            "undefined variable `foo`",
+            "parser",
+            loc,
+        )
+        .with_suggestion("did you mean `for`?");
 
         let json = diag.to_json();
         assert!(json.contains("\"code\":\"E002\""));
@@ -2538,7 +2700,7 @@ mod tests {
         assert_eq!(back.severity, DiagnosticSeverity::Error);
         assert_eq!(back.message, "undefined variable `foo`");
         assert_eq!(back.source, "parser");
-        assert_eq!(back.legacy_suggestions.len(), 1);
+        assert_eq!(back.text_suggestions.len(), 1);
     }
 
     #[test]
@@ -2546,8 +2708,20 @@ mod tests {
         let loc1 = DiagnosticSourceLocation::point("a.vu", 1, 1);
         let loc2 = DiagnosticSourceLocation::point("b.vu", 2, 3);
         let diags = vec![
-            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "syntax error", "parser", loc1),
-            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "unused variable", "parser", loc2),
+            VumaDiagnostic::new(
+                "E001",
+                DiagnosticSeverity::Error,
+                "syntax error",
+                "parser",
+                loc1,
+            ),
+            VumaDiagnostic::new(
+                "W001",
+                DiagnosticSeverity::Warning,
+                "unused variable",
+                "parser",
+                loc2,
+            ),
         ];
         let json = diagnostics_to_json(&diags);
         assert!(json.starts_with('['));
@@ -2573,7 +2747,8 @@ mod tests {
             "Type mismatch",
             "parser",
             DiagnosticSourceLocation::unknown(),
-        ).chain(root);
+        )
+        .chain(root);
 
         assert!(diag.has_chain());
         assert_eq!(diag.chain.len(), 1);
@@ -2596,14 +2771,16 @@ mod tests {
             "Unknown type 'int' — did you mean 'i32'?",
             "parser",
             DiagnosticSourceLocation::unknown(),
-        ).chain(root_cause);
+        )
+        .chain(root_cause);
         let top = VumaDiagnostic::new(
             "E003",
             DiagnosticSeverity::Error,
             "Type mismatch",
             "parser",
             DiagnosticSourceLocation::unknown(),
-        ).chain(intermediate);
+        )
+        .chain(intermediate);
 
         assert!(top.has_chain());
         assert_eq!(top.immediate_cause().unwrap().code, "E023");
@@ -2646,7 +2823,8 @@ mod tests {
             "Type mismatch",
             "parser",
             DiagnosticSourceLocation::unknown(),
-        ).chain(cause);
+        )
+        .chain(cause);
 
         let display = diag.to_string();
         assert!(display.contains("caused by: error[E023]: Unknown type 'int'"));
@@ -2667,7 +2845,8 @@ mod tests {
             "Type mismatch",
             "parser",
             DiagnosticSourceLocation::unknown(),
-        ).chain(cause);
+        )
+        .chain(cause);
 
         let json = diag.to_json();
         assert!(json.contains("\"chain\""));
@@ -2684,19 +2863,25 @@ mod tests {
     #[test]
     fn to_plain_text() {
         let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 15);
-        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "Type mismatch", "parser", loc)
-            .with_structured_suggestion(Suggestion::edit(
-                "Replace 'int' with 'i32'",
-                DiagnosticSourceLocation::range("main.vu", 5, 10, 13),
-                "i32",
-            ))
-            .chain(VumaDiagnostic::new(
-                "E023",
-                DiagnosticSeverity::Error,
-                "Unknown type 'int'",
-                "parser",
-                DiagnosticSourceLocation::unknown(),
-            ));
+        let diag = VumaDiagnostic::new(
+            "E003",
+            DiagnosticSeverity::Error,
+            "Type mismatch",
+            "parser",
+            loc,
+        )
+        .with_structured_suggestion(Suggestion::edit(
+            "Replace 'int' with 'i32'",
+            DiagnosticSourceLocation::range("main.vu", 5, 10, 13),
+            "i32",
+        ))
+        .chain(VumaDiagnostic::new(
+            "E023",
+            DiagnosticSeverity::Error,
+            "Unknown type 'int'",
+            "parser",
+            DiagnosticSourceLocation::unknown(),
+        ));
 
         let plain = diag.to_plain_text();
         assert!(plain.contains("error[E003]: Type mismatch"));
@@ -2709,12 +2894,18 @@ mod tests {
     #[test]
     fn to_rich_text_contains_ansi() {
         let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 15);
-        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "Type mismatch", "parser", loc)
-            .with_structured_suggestion(Suggestion::edit(
-                "Replace 'int' with 'i32'",
-                DiagnosticSourceLocation::range("main.vu", 5, 10, 13),
-                "i32",
-            ));
+        let diag = VumaDiagnostic::new(
+            "E003",
+            DiagnosticSeverity::Error,
+            "Type mismatch",
+            "parser",
+            loc,
+        )
+        .with_structured_suggestion(Suggestion::edit(
+            "Replace 'int' with 'i32'",
+            DiagnosticSourceLocation::range("main.vu", 5, 10, 13),
+            "i32",
+        ));
 
         let rich = diag.to_rich_text();
         assert!(rich.contains("\x1b[")); // contains ANSI escape codes
@@ -2746,7 +2937,8 @@ mod tests {
             "Type mismatch",
             "parser",
             DiagnosticSourceLocation::unknown(),
-        ).chain(VumaDiagnostic::new(
+        )
+        .chain(VumaDiagnostic::new(
             "E023",
             DiagnosticSeverity::Error,
             "Unknown type 'int'",
@@ -2763,8 +2955,14 @@ mod tests {
     fn to_lsp_format() {
         let loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 15);
         let related_loc = DiagnosticSourceLocation::point("main.vu", 2, 1);
-        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "Type mismatch", "parser", loc)
-            .with_related(RelatedInfo::new(related_loc, "previous definition here"));
+        let diag = VumaDiagnostic::new(
+            "E003",
+            DiagnosticSeverity::Error,
+            "Type mismatch",
+            "parser",
+            loc,
+        )
+        .with_related(RelatedInfo::new(related_loc, "previous definition here"));
 
         let lsp = diag.to_lsp();
         assert_eq!(lsp.get("severity").unwrap().as_u64(), Some(1)); // Error
@@ -2774,17 +2972,37 @@ mod tests {
 
         // LSP uses 0-based positions
         let range = lsp.get("range").unwrap();
-        assert_eq!(range.get("start").unwrap().get("line").unwrap().as_u64(), Some(4)); // 5 - 1
-        assert_eq!(range.get("start").unwrap().get("character").unwrap().as_u64(), Some(9)); // 10 - 1
-        assert_eq!(range.get("end").unwrap().get("line").unwrap().as_u64(), Some(4));
-        assert_eq!(range.get("end").unwrap().get("character").unwrap().as_u64(), Some(14)); // 15 - 1
+        assert_eq!(
+            range.get("start").unwrap().get("line").unwrap().as_u64(),
+            Some(4)
+        ); // 5 - 1
+        assert_eq!(
+            range
+                .get("start")
+                .unwrap()
+                .get("character")
+                .unwrap()
+                .as_u64(),
+            Some(9)
+        ); // 10 - 1
+        assert_eq!(
+            range.get("end").unwrap().get("line").unwrap().as_u64(),
+            Some(4)
+        );
+        assert_eq!(
+            range.get("end").unwrap().get("character").unwrap().as_u64(),
+            Some(14)
+        ); // 15 - 1
 
         // Related information
         let related = lsp.get("relatedInformation").unwrap();
         assert!(related.is_array());
         let related_arr = related.as_array().unwrap();
         assert_eq!(related_arr.len(), 1);
-        assert_eq!(related_arr[0].get("message").unwrap().as_str(), Some("previous definition here"));
+        assert_eq!(
+            related_arr[0].get("message").unwrap().as_str(),
+            Some("previous definition here")
+        );
     }
 
     #[test]
@@ -2799,17 +3017,11 @@ mod tests {
     }
 
     #[test]
-    fn to_lsp_deprecated_tag() {
-        let diag = deprecated_feature("old_fn", Some("new_fn"), DiagnosticSourceLocation::point("main.vu", 5, 10));
-        let lsp = diag.to_lsp();
-        assert_eq!(lsp.get("severity").unwrap().as_u64(), Some(2)); // Warning
-        let tags = lsp.get("tags").unwrap().as_array().unwrap();
-        assert!(tags.contains(&JsonValue::U64(2))); // Deprecated
-    }
-
-    #[test]
     fn to_lsp_code_description() {
-        let diag = syntax_error("bad syntax", DiagnosticSourceLocation::point("main.vu", 5, 10));
+        let diag = syntax_error(
+            "bad syntax",
+            DiagnosticSourceLocation::point("main.vu", 5, 10),
+        );
         let lsp = diag.to_lsp();
         let href = lsp.get("codeDescription").unwrap().get("href").unwrap();
         assert!(href.as_str().is_some());
@@ -2833,10 +3045,34 @@ mod tests {
     fn summary_from_diagnostics() {
         let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
         let diags = vec![
-            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "err1", "parser", loc.clone()),
-            VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "err2", "parser", loc.clone()),
-            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "warn1", "parser", loc.clone()),
-            VumaDiagnostic::new("I001", DiagnosticSeverity::Info, "info1", "pipeline", loc.clone()),
+            VumaDiagnostic::new(
+                "E001",
+                DiagnosticSeverity::Error,
+                "err1",
+                "parser",
+                loc.clone(),
+            ),
+            VumaDiagnostic::new(
+                "E003",
+                DiagnosticSeverity::Error,
+                "err2",
+                "parser",
+                loc.clone(),
+            ),
+            VumaDiagnostic::new(
+                "W001",
+                DiagnosticSeverity::Warning,
+                "warn1",
+                "parser",
+                loc.clone(),
+            ),
+            VumaDiagnostic::new(
+                "I001",
+                DiagnosticSeverity::Info,
+                "info1",
+                "pipeline",
+                loc.clone(),
+            ),
             VumaDiagnostic::new("W003", DiagnosticSeverity::Hint, "hint1", "codegen", loc),
         ];
         let summary = DiagnosticSummary::from_diagnostics(&diags);
@@ -2860,10 +3096,28 @@ mod tests {
     fn summary_by_subcategory() {
         let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
         let diags = vec![
-            VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "err", "parser", loc.clone()),
-            VumaDiagnostic::new("E032", DiagnosticSeverity::Error, "err", "codegen", loc.clone()),
+            VumaDiagnostic::new(
+                "E003",
+                DiagnosticSeverity::Error,
+                "err",
+                "parser",
+                loc.clone(),
+            ),
+            VumaDiagnostic::new(
+                "E032",
+                DiagnosticSeverity::Error,
+                "err",
+                "codegen",
+                loc.clone(),
+            ),
             VumaDiagnostic::new("E042", DiagnosticSeverity::Error, "err", "ive", loc.clone()),
-            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "warn", "parser", loc.clone()),
+            VumaDiagnostic::new(
+                "W001",
+                DiagnosticSeverity::Warning,
+                "warn",
+                "parser",
+                loc.clone(),
+            ),
             VumaDiagnostic::new("I001", DiagnosticSeverity::Info, "info", "pipeline", loc),
         ];
         let summary = DiagnosticSummary::from_diagnostics(&diags);
@@ -2878,7 +3132,13 @@ mod tests {
     fn summary_display() {
         let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
         let diags = vec![
-            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "err1", "parser", loc.clone()),
+            VumaDiagnostic::new(
+                "E001",
+                DiagnosticSeverity::Error,
+                "err1",
+                "parser",
+                loc.clone(),
+            ),
             VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "err2", "parser", loc),
         ];
         let summary = DiagnosticSummary::from_diagnostics(&diags);
@@ -2892,9 +3152,13 @@ mod tests {
     #[test]
     fn summary_json() {
         let loc = DiagnosticSourceLocation::point("main.vu", 1, 1);
-        let diags = vec![
-            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "err", "parser", loc),
-        ];
+        let diags = vec![VumaDiagnostic::new(
+            "E001",
+            DiagnosticSeverity::Error,
+            "err",
+            "parser",
+            loc,
+        )];
         let summary = DiagnosticSummary::from_diagnostics(&diags);
         let json = summary.to_json();
         assert!(json.contains("\"total\":1"));
@@ -2910,14 +3174,38 @@ mod tests {
 
     #[test]
     fn codes_for_parse_error_kinds() {
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::InvalidSyntax), "E001");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedVariable), "E002");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedReference), "E002");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::TypeMismatch), "E003");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::DuplicateDefinition), "E004");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UnexpectedToken), "E009");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::ExpectedToken), "E010");
-        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::MissingSemicolon), "E014");
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::InvalidSyntax),
+            "E001"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::UndefinedVariable),
+            "E002"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::UndefinedReference),
+            "E002"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::TypeMismatch),
+            "E003"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::DuplicateDefinition),
+            "E004"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::UnexpectedToken),
+            "E009"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::ExpectedToken),
+            "E010"
+        );
+        assert_eq!(
+            code_for_parse_error_kind(&ParseErrorKind::MissingSemicolon),
+            "E014"
+        );
     }
 
     #[test]
@@ -2935,7 +3223,10 @@ mod tests {
         assert_eq!(code_description("E010"), "Expected token");
         assert_eq!(code_description("E011"), "Region error");
         assert_eq!(code_description("E012"), "BD annotation error");
-        assert_eq!(code_description("E013"), "Invalid compound assignment operator");
+        assert_eq!(
+            code_description("E013"),
+            "Invalid compound assignment operator"
+        );
         assert_eq!(code_description("E014"), "Missing semicolon");
         assert_eq!(code_description("E015"), "Invalid address literal");
         assert_eq!(code_description("E024"), "Name resolution error");
@@ -2970,7 +3261,10 @@ mod tests {
         assert_eq!(code_description("E043"), "Liveness invariant violated");
         assert_eq!(code_description("E044"), "Origin invariant violated");
         assert_eq!(code_description("E045"), "Exclusivity invariant violated");
-        assert_eq!(code_description("E046"), "Interpretation invariant violated");
+        assert_eq!(
+            code_description("E046"),
+            "Interpretation invariant violated"
+        );
         assert_eq!(code_description("E047"), "Cleanup invariant violated");
         assert_eq!(code_description("E048"), "BD inference error");
         assert_eq!(code_description("E049"), "Constraint unsatisfiable");
@@ -2982,12 +3276,14 @@ mod tests {
         // W001–W010
         assert_eq!(code_description("W001"), "Unused variable");
         assert_eq!(code_description("W002"), "Implicit type conversion");
-        assert_eq!(code_description("W003"), "Large constant (performance hint)");
+        assert_eq!(
+            code_description("W003"),
+            "Large constant (performance hint)"
+        );
         assert_eq!(code_description("W004"), "Dead code");
         assert_eq!(code_description("W005"), "Redundant cast");
         assert_eq!(code_description("W006"), "Shadowed variable");
         assert_eq!(code_description("W007"), "Unnecessary mut keyword");
-        assert_eq!(code_description("W008"), "Deprecated feature");
         assert_eq!(code_description("W009"), "Unused import");
         assert_eq!(code_description("W010"), "Reachable panic");
     }
@@ -3033,11 +3329,16 @@ mod tests {
             .chain((1..=5).map(|n| format!("I{:03}", n)))
             .collect();
 
-        let described = all_codes.iter()
+        let described = all_codes
+            .iter()
             .filter(|code| code_description(code) != "Unknown diagnostic code")
             .count();
 
-        assert!(described >= 50, "Expected at least 50 diagnostic codes, got {}", described);
+        assert!(
+            described >= 50,
+            "Expected at least 50 diagnostic codes, got {}",
+            described
+        );
     }
 
     // -- Convenience constructors --------------------------------------------
@@ -3182,16 +3483,17 @@ mod tests {
         assert_eq!(d.code, "W005");
         assert!(!d.suggestions.is_empty());
 
-        let d = shadowed_variable("x", loc.clone(), DiagnosticSourceLocation::point("test.vu", 1, 1));
+        let d = shadowed_variable(
+            "x",
+            loc.clone(),
+            DiagnosticSourceLocation::point("test.vu", 1, 1),
+        );
         assert_eq!(d.code, "W006");
         assert!(!d.related.is_empty());
 
         let d = unnecessary_mut("x", loc.clone());
         assert_eq!(d.code, "W007");
         assert!(!d.suggestions.is_empty());
-
-        let d = deprecated_feature("old_fn", Some("new_fn"), loc.clone());
-        assert_eq!(d.code, "W008");
 
         let d = unused_import("std::foo", loc.clone());
         assert_eq!(d.code, "W009");
@@ -3210,7 +3512,10 @@ mod tests {
         let d = stage_completed("parser");
         assert_eq!(d.code, "I002");
 
-        let d = optimization_applied("constant_fold", DiagnosticSourceLocation::point("test.vu", 1, 1));
+        let d = optimization_applied(
+            "constant_fold",
+            DiagnosticSourceLocation::point("test.vu", 1, 1),
+        );
         assert_eq!(d.code, "I003");
 
         let d = verification_passed("liveness", DiagnosticSourceLocation::point("test.vu", 1, 1));
@@ -3236,7 +3541,7 @@ mod tests {
         assert_eq!(diag.source, "parser");
         assert!(diag.message.contains("x"));
         assert!(!diag.location.is_unknown());
-        assert!(!diag.legacy_suggestions.is_empty());
+        assert!(!diag.text_suggestions.is_empty());
     }
 
     // -- Integration: VumaError → Vec<VumaDiagnostic> ------------------------
@@ -3307,7 +3612,10 @@ mod tests {
         };
         let diag = from_codegen_error(&err);
         assert_eq!(diag.code, "E002");
-        assert!(diag.suggestions.iter().any(|s| s.message.contains("declare")));
+        assert!(diag
+            .suggestions
+            .iter()
+            .any(|s| s.message.contains("declare")));
     }
 
     // -- has_machine_applicable_fixes test ------------------------------------
@@ -3317,12 +3625,24 @@ mod tests {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
         let edit_loc = DiagnosticSourceLocation::range("main.vu", 5, 10, 13);
 
-        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "type mismatch", "parser", loc.clone())
-            .with_structured_suggestion(Suggestion::edit("fix it", edit_loc, "i32"));
+        let diag = VumaDiagnostic::new(
+            "E003",
+            DiagnosticSeverity::Error,
+            "type mismatch",
+            "parser",
+            loc.clone(),
+        )
+        .with_structured_suggestion(Suggestion::edit("fix it", edit_loc, "i32"));
         assert!(diag.has_machine_applicable_fixes());
 
-        let diag2 = VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "syntax error", "parser", loc)
-            .with_structured_suggestion(Suggestion::text("try something else"));
+        let diag2 = VumaDiagnostic::new(
+            "E001",
+            DiagnosticSeverity::Error,
+            "syntax error",
+            "parser",
+            loc,
+        )
+        .with_structured_suggestion(Suggestion::text("try something else"));
         assert!(!diag2.has_machine_applicable_fixes());
     }
 
@@ -3337,7 +3657,8 @@ mod tests {
             "Unknown type 'int' — did you mean 'i32'?",
             "parser",
             loc.clone(),
-        ).with_structured_suggestion(Suggestion::machine_applicable(
+        )
+        .with_structured_suggestion(Suggestion::machine_applicable(
             "Replace 'int' with 'i32'",
             loc,
             "i32",
@@ -3349,7 +3670,8 @@ mod tests {
             "Type mismatch: expected i32, found int",
             "parser",
             DiagnosticSourceLocation::range("main.vu", 5, 20, 25),
-        ).chain(cause);
+        )
+        .chain(cause);
 
         assert!(diag.has_chain());
         let immediate = diag.immediate_cause().unwrap();
@@ -3360,9 +3682,15 @@ mod tests {
     #[test]
     fn all_suggestions_method() {
         let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
-        let diag = VumaDiagnostic::new("E003", DiagnosticSeverity::Error, "type error", "parser", loc)
-            .with_structured_suggestion(Suggestion::text("fix A"))
-            .with_structured_suggestion(Suggestion::text("fix B"));
+        let diag = VumaDiagnostic::new(
+            "E003",
+            DiagnosticSeverity::Error,
+            "type error",
+            "parser",
+            loc,
+        )
+        .with_structured_suggestion(Suggestion::text("fix A"))
+        .with_structured_suggestion(Suggestion::text("fix B"));
         assert_eq!(diag.all_suggestions().len(), 2);
     }
 }

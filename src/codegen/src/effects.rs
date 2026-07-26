@@ -20,8 +20,8 @@
 //! itself impure.  Truly-extern calls (to functions not in the
 //! program) still get the conservative `ExternCall` marker.
 
-use std::collections::{HashMap, HashSet};
 use crate::ir::{IRFunction, IRInstr, IRTerminator};
+use std::collections::{HashMap, HashSet};
 
 /// Effects that a function may have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,10 +147,7 @@ pub fn infer_effects(func: &IRFunction) -> EffectSet {
 /// Intra-function effect inference that does NOT mark calls to known
 /// local functions as `ExternCall` — those effects are resolved by
 /// [`analyze_program_effects`]'s interprocedural fixpoint.
-fn infer_effects_with_local_set(
-    func: &IRFunction,
-    local_funcs: &HashSet<&str>,
-) -> EffectSet {
+fn infer_effects_with_local_set(func: &IRFunction, local_funcs: &HashSet<&str>) -> EffectSet {
     let mut effects = EffectSet::new();
 
     for block in &func.blocks {
@@ -193,9 +190,15 @@ fn infer_effects_with_local_set(
         if let IRTerminator::TailCall { func: fname, .. } = &block.terminator {
             if !matches!(
                 fname.as_str(),
-                "write" | "read" | "open" | "close" | "exit"
-                    | "__vuma_alloc" | "allocate"
-                    | "__vuma_free" | "free"
+                "write"
+                    | "read"
+                    | "open"
+                    | "close"
+                    | "exit"
+                    | "__vuma_alloc"
+                    | "allocate"
+                    | "__vuma_free"
+                    | "free"
             ) && !local_funcs.contains(fname.as_str())
             {
                 effects.add(Effect::ExternCall);
@@ -247,7 +250,10 @@ pub fn analyze_program_effects(funcs: &[IRFunction]) -> HashMap<String, EffectSe
     let mut map: HashMap<String, EffectSet> = HashMap::new();
     let mut callee_map: HashMap<String, Vec<&str>> = HashMap::new();
     for func in funcs {
-        map.insert(func.name.clone(), infer_effects_with_local_set(func, &local_funcs));
+        map.insert(
+            func.name.clone(),
+            infer_effects_with_local_set(func, &local_funcs),
+        );
         callee_map.insert(func.name.clone(), local_callees(func, &local_funcs));
     }
 
@@ -256,10 +262,8 @@ pub fn analyze_program_effects(funcs: &[IRFunction]) -> HashMap<String, EffectSe
     while changed {
         changed = false;
         // Snapshot the callee effect sets so we can mutate callers in-place.
-        let snapshot: HashMap<String, EffectSet> = map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let snapshot: HashMap<String, EffectSet> =
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for func in funcs {
             let callees = &callee_map[&func.name];
             if callees.is_empty() {
@@ -354,10 +358,7 @@ mod tests {
         let g = fn_with(
             "g",
             vec![
-                IRInstr::Alloc {
-                    dst: r(1),
-                    size: 8,
-                },
+                IRInstr::Alloc { dst: r(1), size: 8 },
                 IRInstr::Store {
                     value: IRValue::Immediate(42),
                     addr: r(1),
@@ -427,10 +428,7 @@ mod tests {
         let h = fn_with(
             "h",
             vec![
-                IRInstr::Alloc {
-                    dst: r(1),
-                    size: 8,
-                },
+                IRInstr::Alloc { dst: r(1), size: 8 },
                 IRInstr::Store {
                     value: IRValue::Immediate(7),
                     addr: r(1),

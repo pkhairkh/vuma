@@ -626,12 +626,7 @@ pub enum Instruction {
         me: u32,
     },
     /// Rotate Left Doubleword Immediate then Clear Right: `rldicr rA, rS, SH, ME` (MD-form, primary=30, xo=2)
-    Rldicr {
-        ra: Gpr,
-        rs: Gpr,
-        sh: u32,
-        me: u32,
-    },
+    Rldicr { ra: Gpr, rs: Gpr, sh: u32, me: u32 },
 
     // ── Load / Store ───────────────────────────────────────────────
     /// Load Doubleword: `ld rT, ds(rA)` (DS-form, primary=58, xo=0)
@@ -1286,26 +1281,17 @@ impl Instruction {
                 // MSB-first bits [11:15] (= LSB-first bits [16:20]) and the
                 // high 5 bits in MSB-first bits [16:20] (= LSB-first bits
                 // [11:15]). For SPR=8: low=8, high=0.
-                let word = ((31u32 << 26)
-                    | (rt.encoding() << 21)
-                    | (8u32 << 16))
-                    | (339u32 << 1);
+                let word = ((31u32 << 26) | (rt.encoding() << 21) | (8u32 << 16)) | (339u32 << 1);
                 encode_word(word)
             }
             Instruction::Mtlr { rs } => {
                 // MTLR rS: primary=31, rS, SPR=8 (LR), xo=467, Rc=0
-                let word = ((31u32 << 26)
-                    | (rs.encoding() << 21)
-                    | (8u32 << 16))
-                    | (467u32 << 1);
+                let word = ((31u32 << 26) | (rs.encoding() << 21) | (8u32 << 16)) | (467u32 << 1);
                 encode_word(word)
             }
             Instruction::Mtctr { rs } => {
                 // MTCTR rS: primary=31, rS, SPR=9 (CTR), xo=467, Rc=0
-                let word = ((31u32 << 26)
-                    | (rs.encoding() << 21)
-                    | (9u32 << 16))
-                    | (467u32 << 1);
+                let word = ((31u32 << 26) | (rs.encoding() << 21) | (9u32 << 16)) | (467u32 << 1);
                 encode_word(word)
             }
 
@@ -1392,7 +1378,7 @@ impl Instruction {
                     | ((ft.encoding() & 0x1F) << 21)  // frT=ft       (PPC bits 6:10)
                     | ((fa.encoding() & 0x1F) << 16))                     // frB=0        (PPC bits 16:20, reserved for FMUL)
                     | ((fb.encoding() & 0x1F) << 6)   // frC=fb       (PPC bits 21:25)
-                    | ((25u32 & 0x1F) << 1);                            // Rc=0         (PPC bit 31)
+                    | ((25u32 & 0x1F) << 1); // Rc=0         (PPC bit 31)
                 encode_word(word)
             }
             Instruction::Fdiv { ft, fa, fb } => {
@@ -1783,7 +1769,7 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
     elf.extend_from_slice(&shoff.to_be_bytes()); // e_shoff — section-header table
-    // e_flags: EF_PPC64_ABI_V2 = 0x2 (required for PPC64LE ELFv2 ABI)
+                                                 // e_flags: EF_PPC64_ABI_V2 = 0x2 (required for PPC64LE ELFv2 ABI)
     elf.extend_from_slice(&2u32.to_be_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
@@ -2207,46 +2193,138 @@ fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
     let mut code = Vec::new();
     let uval = val as u64;
     if (-32768..=32767).contains(&val) {
-        code.extend_from_slice(&Instruction::Li { rt: rd, simm: val as i32 }.encode());
+        code.extend_from_slice(
+            &Instruction::Li {
+                rt: rd,
+                simm: val as i32,
+            }
+            .encode(),
+        );
     } else if uval <= 0xFFFF {
         // Use LI to clear rd first, then ORI. Don't use R0 as source because
         // R0 may contain LR (saved by MFLR in prologue) or other stale values.
         code.extend_from_slice(&Instruction::Li { rt: rd, simm: 0 }.encode());
-        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: uval as u32 & 0xFFFF }.encode());
+        code.extend_from_slice(
+            &Instruction::Ori {
+                ra: rd,
+                rs: rd,
+                uimm: uval as u32 & 0xFFFF,
+            }
+            .encode(),
+        );
     } else if uval & 0xFFFF == 0 && (uval >> 32) == 0 {
-        code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((uval >> 16) & 0xFFFF) as i16 as i32 }.encode());
+        code.extend_from_slice(
+            &Instruction::Lis {
+                rt: rd,
+                simm: ((uval >> 16) & 0xFFFF) as i16 as i32,
+            }
+            .encode(),
+        );
         // If the high 16 bits have bit 15 set, LIS sign-extends to 64-bit all-1s.
         // Clear upper 32 bits with rlwinm rd,rd,0,0,31 (equivalent to clrldi rd,rd,32)
         if ((uval >> 16) & 0xFFFF) >= 0x8000 {
-            code.extend_from_slice(&Instruction::Rlwinm { ra: rd, rs: rd, sh: 0, mb: 0, me: 31 }.encode());
+            code.extend_from_slice(
+                &Instruction::Rlwinm {
+                    ra: rd,
+                    rs: rd,
+                    sh: 0,
+                    mb: 0,
+                    me: 31,
+                }
+                .encode(),
+            );
         }
     } else if uval >> 32 == 0 {
         let hi16 = ((uval >> 16) & 0xFFFF) as u32;
         let lo16 = (uval & 0xFFFF) as u32;
-        code.extend_from_slice(&Instruction::Lis { rt: rd, simm: hi16 as i16 as i32 }.encode());
-        if lo16 != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo16 }.encode()); }
+        code.extend_from_slice(
+            &Instruction::Lis {
+                rt: rd,
+                simm: hi16 as i16 as i32,
+            }
+            .encode(),
+        );
+        if lo16 != 0 {
+            code.extend_from_slice(
+                &Instruction::Ori {
+                    ra: rd,
+                    rs: rd,
+                    uimm: lo16,
+                }
+                .encode(),
+            );
+        }
         // LIS sign-extends: if bit 31 of the 32-bit value is set, the upper 32 bits
         // of the 64-bit register are all 1s. Clear them with rlwinm rd,rd,0,0,31
         // (equivalent to clrldi rd,rd,32) which zero-extends to 64 bits.
         if hi16 >= 0x8000 {
-            code.extend_from_slice(&Instruction::Rlwinm { ra: rd, rs: rd, sh: 0, mb: 0, me: 31 }.encode());
+            code.extend_from_slice(
+                &Instruction::Rlwinm {
+                    ra: rd,
+                    rs: rd,
+                    sh: 0,
+                    mb: 0,
+                    me: 31,
+                }
+                .encode(),
+            );
         }
     } else {
         let hi32 = (uval >> 32) as u32;
         let lo32 = (uval & 0xFFFF_FFFF) as u32;
-        code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((hi32 >> 16) & 0xFFFF) as i16 as i32 }.encode());
-        if hi32 & 0xFFFF != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: hi32 & 0xFFFF }.encode()); }
+        code.extend_from_slice(
+            &Instruction::Lis {
+                rt: rd,
+                simm: ((hi32 >> 16) & 0xFFFF) as i16 as i32,
+            }
+            .encode(),
+        );
+        if hi32 & 0xFFFF != 0 {
+            code.extend_from_slice(
+                &Instruction::Ori {
+                    ra: rd,
+                    rs: rd,
+                    uimm: hi32 & 0xFFFF,
+                }
+                .encode(),
+            );
+        }
         // SLDI rd, rd, 32 = RLDICR rd, rd, 32, 31 (shift left by 32 bits)
         // Use rlwinm-based approach: SLDI is correct for upper-32 ops,
         // but the MD-form encoding was buggy. Use SLW + clear instead:
         // Load 32 into R12, then sld rd, rd, r12
-        code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 32 }.encode());
-        code.extend_from_slice(&Instruction::Sld { ra: rd, rs: rd, rb: Gpr::R12 }.encode());
+        code.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R12,
+                simm: 32,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Sld {
+                ra: rd,
+                rs: rd,
+                rb: Gpr::R12,
+            }
+            .encode(),
+        );
         if (lo32 >> 16) & 0xFFFF != 0 {
-            let oris_word: u32 = (25u32<<26)|(rd.encoding()<<21)|(rd.encoding()<<16)|((lo32>>16)&0xFFFF);
+            let oris_word: u32 = (25u32 << 26)
+                | (rd.encoding() << 21)
+                | (rd.encoding() << 16)
+                | ((lo32 >> 16) & 0xFFFF);
             code.extend_from_slice(&encode_word(oris_word));
         }
-        if lo32 & 0xFFFF != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo32 & 0xFFFF }.encode()); }
+        if lo32 & 0xFFFF != 0 {
+            code.extend_from_slice(
+                &Instruction::Ori {
+                    ra: rd,
+                    rs: rd,
+                    uimm: lo32 & 0xFFFF,
+                }
+                .encode(),
+            );
+        }
     }
     code
 }
@@ -2255,17 +2333,51 @@ fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
 fn ss_load_from_slot(dst_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32764 && neg_off <= 32764 && (neg_off & 3) == 0 {
-        Instruction::Ld { rt: dst_reg, ra: Gpr::R31, ds: neg_off }.encode().to_vec()
+        Instruction::Ld {
+            rt: dst_reg,
+            ra: Gpr::R31,
+            ds: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else if neg_off >= -32768 && neg_off <= 32767 {
         let mut code = Vec::new();
-        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R31, simm: neg_off }.encode());
-        code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R12, ds: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Addi {
+                rt: Gpr::R12,
+                ra: Gpr::R31,
+                simm: neg_off,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Ld {
+                rt: dst_reg,
+                ra: Gpr::R12,
+                ds: 0,
+            }
+            .encode(),
+        );
         code
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R12, ds: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Ld {
+                rt: dst_reg,
+                ra: Gpr::R12,
+                ds: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2274,17 +2386,51 @@ fn ss_load_from_slot(dst_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_store_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32764 && neg_off <= 32764 && (neg_off & 3) == 0 {
-        Instruction::Std { rs: src_reg, ra: Gpr::R31, ds: neg_off }.encode().to_vec()
+        Instruction::Std {
+            rs: src_reg,
+            ra: Gpr::R31,
+            ds: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else if neg_off >= -32768 && neg_off <= 32767 {
         let mut code = Vec::new();
-        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R31, simm: neg_off }.encode());
-        code.extend_from_slice(&Instruction::Std { rs: src_reg, ra: Gpr::R12, ds: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Addi {
+                rt: Gpr::R12,
+                ra: Gpr::R31,
+                simm: neg_off,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Std {
+                rs: src_reg,
+                ra: Gpr::R12,
+                ds: 0,
+            }
+            .encode(),
+        );
         code
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Std { rs: src_reg, ra: Gpr::R12, ds: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Std {
+                rs: src_reg,
+                ra: Gpr::R12,
+                ds: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2293,12 +2439,32 @@ fn ss_store_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_load_fpr_from_slot(dst_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32768 && neg_off <= 32767 {
-        Instruction::Lfd { ft: dst_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+        Instruction::Lfd {
+            ft: dst_fpr,
+            ra: Gpr::R31,
+            d: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Lfd { ft: dst_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Lfd {
+                ft: dst_fpr,
+                ra: Gpr::R12,
+                d: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2307,12 +2473,32 @@ fn ss_load_fpr_from_slot(dst_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32768 && neg_off <= 32767 {
-        Instruction::Stfd { fs: src_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+        Instruction::Stfd {
+            fs: src_fpr,
+            ra: Gpr::R31,
+            d: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Stfd { fs: src_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Stfd {
+                fs: src_fpr,
+                ra: Gpr::R12,
+                d: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2321,12 +2507,32 @@ fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_load_fpr_single_from_slot(dst_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32768 && neg_off <= 32767 {
-        Instruction::Lfs { ft: dst_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+        Instruction::Lfs {
+            ft: dst_fpr,
+            ra: Gpr::R31,
+            d: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Lfs { ft: dst_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Lfs {
+                ft: dst_fpr,
+                ra: Gpr::R12,
+                d: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2335,12 +2541,32 @@ fn ss_load_fpr_single_from_slot(dst_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_store_fpr_single_to_slot(src_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32768 && neg_off <= 32767 {
-        Instruction::Stfs { fs: src_fpr, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+        Instruction::Stfs {
+            fs: src_fpr,
+            ra: Gpr::R31,
+            d: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Stfs { fs: src_fpr, ra: Gpr::R12, d: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Stfs {
+                fs: src_fpr,
+                ra: Gpr::R12,
+                d: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2349,12 +2575,32 @@ fn ss_store_fpr_single_to_slot(src_fpr: Fpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_store_word_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32768 && neg_off <= 32767 {
-        Instruction::Stw { rs: src_reg, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+        Instruction::Stw {
+            rs: src_reg,
+            ra: Gpr::R31,
+            d: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Stw { rs: src_reg, ra: Gpr::R12, d: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Stw {
+                rs: src_reg,
+                ra: Gpr::R12,
+                d: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
@@ -2363,46 +2609,98 @@ fn ss_store_word_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
 fn ss_load_word_from_slot(dst_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
     let neg_off = -offset_from_r31;
     if neg_off >= -32768 && neg_off <= 32767 {
-        Instruction::Lwz { rt: dst_reg, ra: Gpr::R31, d: neg_off }.encode().to_vec()
+        Instruction::Lwz {
+            rt: dst_reg,
+            ra: Gpr::R31,
+            d: neg_off,
+        }
+        .encode()
+        .to_vec()
     } else {
         let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
-        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
-        code.extend_from_slice(&Instruction::Lwz { rt: dst_reg, ra: Gpr::R12, d: 0 }.encode());
+        code.extend_from_slice(
+            &Instruction::Subf {
+                rt: Gpr::R12,
+                ra: Gpr::R12,
+                rb: Gpr::R31,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Lwz {
+                rt: dst_reg,
+                ra: Gpr::R12,
+                d: 0,
+            }
+            .encode(),
+        );
         code
     }
 }
 
 /// Load an IRValue into a scratch register.
-fn ss_load_value(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, scratch: Gpr) -> Vec<u8> {
+fn ss_load_value(
+    val: &IRValue,
+    slots: &std::collections::HashMap<u32, i32>,
+    scratch: Gpr,
+) -> Vec<u8> {
     match val {
-        IRValue::Register(id) => { let offset = slots.get(id).copied().unwrap_or(0); ss_load_from_slot(scratch, offset) }
+        IRValue::Register(id) => {
+            let offset = slots.get(id).copied().unwrap_or(0);
+            ss_load_from_slot(scratch, offset)
+        }
         IRValue::Immediate(v) => ss_load_imm(scratch, *v),
         IRValue::Address(a) => ss_load_imm(scratch, *a as i64),
-        IRValue::Label(_) => Instruction::Li { rt: scratch, simm: 0 }.encode().to_vec(),
+        IRValue::Label(_) => Instruction::Li {
+            rt: scratch,
+            simm: 0,
+        }
+        .encode()
+        .to_vec(),
     }
 }
 
 /// Emit comparison code producing 0 or 1 in dst.
 fn ss_emit_cmp(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<u8> {
     let mut code = Vec::new();
-    let cmp_signed = !matches!(kind, CmpKind::ULt|CmpKind::ULe|CmpKind::UGt|CmpKind::UGe);
+    let cmp_signed = !matches!(
+        kind,
+        CmpKind::ULt | CmpKind::ULe | CmpKind::UGt | CmpKind::UGe
+    );
     if cmp_signed {
-        code.extend_from_slice(&Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }.encode());
+        code.extend_from_slice(
+            &Instruction::Cmp {
+                bf: CrField::CR0,
+                l: 1,
+                ra: lhs,
+                rb: rhs,
+            }
+            .encode(),
+        );
     } else {
-        code.extend_from_slice(&Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }.encode());
+        code.extend_from_slice(
+            &Instruction::Cmpl {
+                bf: CrField::CR0,
+                l: 1,
+                ra: lhs,
+                rb: rhs,
+            }
+            .encode(),
+        );
     }
     code.extend_from_slice(&Instruction::Li { rt: dst, simm: 0 }.encode());
     let (bo, bi) = match kind {
-        CmpKind::Eq => (4, 2u32), CmpKind::Ne => (12, 2u32),
+        CmpKind::Eq => (4, 2u32),
+        CmpKind::Ne => (12, 2u32),
         // SLt/ULt: branch if LT=0 (not less than) → skip setting 1; only set 1 when LT=1
-        CmpKind::SLt|CmpKind::ULt => (4, 0u32),
+        CmpKind::SLt | CmpKind::ULt => (4, 0u32),
         // SLe/ULe: branch if GT=1 (strictly greater) → skip setting 1; set 1 when LT=1 or EQ=1
-        CmpKind::SLe|CmpKind::ULe => (12, 1u32),
+        CmpKind::SLe | CmpKind::ULe => (12, 1u32),
         // SGt/UGt: branch if GT=0 (not greater) → skip setting 1; only set 1 when GT=1
-        CmpKind::SGt|CmpKind::UGt => (4, 1u32),
+        CmpKind::SGt | CmpKind::UGt => (4, 1u32),
         // SGe/UGe: branch if LT=1 (strictly less) → skip setting 1; set 1 when GT=1 or EQ=1
-        CmpKind::SGe|CmpKind::UGe => (12, 0u32),
+        CmpKind::SGe | CmpKind::UGe => (12, 0u32),
     };
     code.extend_from_slice(&Instruction::Bc { bo, bi, bd: 2 }.encode());
     code.extend_from_slice(&Instruction::Li { rt: dst, simm: 1 }.encode());
@@ -2415,41 +2713,139 @@ fn ss_emit_typed_load(dst_reg: Gpr, addr_reg: Gpr, offset: i32, ty: &IRType) -> 
     match ty {
         IRType::I8 | IRType::U8 => {
             if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Lbz { rt: dst_reg, ra: addr_reg, d: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Lbz {
+                        rt: dst_reg,
+                        ra: addr_reg,
+                        d: offset,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Lbz { rt: dst_reg, ra: Gpr::R5, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Lbz {
+                        rt: dst_reg,
+                        ra: Gpr::R5,
+                        d: 0,
+                    }
+                    .encode(),
+                );
             }
         }
         IRType::I16 | IRType::U16 => {
             if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Lhz { rt: dst_reg, ra: addr_reg, d: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Lhz {
+                        rt: dst_reg,
+                        ra: addr_reg,
+                        d: offset,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Lhz { rt: dst_reg, ra: Gpr::R5, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Lhz {
+                        rt: dst_reg,
+                        ra: Gpr::R5,
+                        d: 0,
+                    }
+                    .encode(),
+                );
             }
         }
         IRType::I32 | IRType::U32 => {
             if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Lwz { rt: dst_reg, ra: addr_reg, d: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Lwz {
+                        rt: dst_reg,
+                        ra: addr_reg,
+                        d: offset,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Lwz { rt: dst_reg, ra: Gpr::R5, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Lwz {
+                        rt: dst_reg,
+                        ra: Gpr::R5,
+                        d: 0,
+                    }
+                    .encode(),
+                );
             }
         }
         _ => {
             if offset % 4 == 0 && offset >= -32764 && offset <= 32764 {
-                code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: addr_reg, ds: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Ld {
+                        rt: dst_reg,
+                        ra: addr_reg,
+                        ds: offset,
+                    }
+                    .encode(),
+                );
             } else if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: addr_reg, simm: offset }.encode());
-                code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R5, ds: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Addi {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        simm: offset,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Ld {
+                        rt: dst_reg,
+                        ra: Gpr::R5,
+                        ds: 0,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R5, ds: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Ld {
+                        rt: dst_reg,
+                        ra: Gpr::R5,
+                        ds: 0,
+                    }
+                    .encode(),
+                );
             }
         }
     }
@@ -2462,41 +2858,139 @@ fn ss_emit_typed_store(value_reg: Gpr, addr_reg: Gpr, offset: i32, ty: &IRType) 
     match ty {
         IRType::I8 | IRType::U8 => {
             if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Stb { rs: value_reg, ra: addr_reg, d: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Stb {
+                        rs: value_reg,
+                        ra: addr_reg,
+                        d: offset,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Stb { rs: value_reg, ra: Gpr::R5, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Stb {
+                        rs: value_reg,
+                        ra: Gpr::R5,
+                        d: 0,
+                    }
+                    .encode(),
+                );
             }
         }
         IRType::I16 | IRType::U16 => {
             if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Sth { rs: value_reg, ra: addr_reg, d: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Sth {
+                        rs: value_reg,
+                        ra: addr_reg,
+                        d: offset,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Sth { rs: value_reg, ra: Gpr::R5, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Sth {
+                        rs: value_reg,
+                        ra: Gpr::R5,
+                        d: 0,
+                    }
+                    .encode(),
+                );
             }
         }
         IRType::I32 | IRType::U32 => {
             if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Stw { rs: value_reg, ra: addr_reg, d: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Stw {
+                        rs: value_reg,
+                        ra: addr_reg,
+                        d: offset,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Stw { rs: value_reg, ra: Gpr::R5, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Stw {
+                        rs: value_reg,
+                        ra: Gpr::R5,
+                        d: 0,
+                    }
+                    .encode(),
+                );
             }
         }
         _ => {
             if offset % 4 == 0 && offset >= -32764 && offset <= 32764 {
-                code.extend_from_slice(&Instruction::Std { rs: value_reg, ra: addr_reg, ds: offset }.encode());
+                code.extend_from_slice(
+                    &Instruction::Std {
+                        rs: value_reg,
+                        ra: addr_reg,
+                        ds: offset,
+                    }
+                    .encode(),
+                );
             } else if offset >= -32768 && offset <= 32767 {
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: addr_reg, simm: offset }.encode());
-                code.extend_from_slice(&Instruction::Std { rs: value_reg, ra: Gpr::R5, ds: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Addi {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        simm: offset,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Std {
+                        rs: value_reg,
+                        ra: Gpr::R5,
+                        ds: 0,
+                    }
+                    .encode(),
+                );
             } else {
                 code.extend(ss_load_imm(Gpr::R5, offset as i64));
-                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
-                code.extend_from_slice(&Instruction::Std { rs: value_reg, ra: Gpr::R5, ds: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Add {
+                        rt: Gpr::R5,
+                        ra: addr_reg,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Std {
+                        rs: value_reg,
+                        ra: Gpr::R5,
+                        ds: 0,
+                    }
+                    .encode(),
+                );
             }
         }
     }
@@ -2513,21 +3007,32 @@ impl Backend for PPC64Backend {
 
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
         let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for &id in func.vregs.keys() { all_vreg_ids.insert(id); }
+        for &id in func.vregs.keys() {
+            all_vreg_ids.insert(id);
+        }
         for param in &func.params {
-            if let Some(id) = param.as_register() { all_vreg_ids.insert(id); }
+            if let Some(id) = param.as_register() {
+                all_vreg_ids.insert(id);
+            }
         }
         for block in &func.blocks {
             for instr in &block.instructions {
-                for id in instr.defined_regs() { all_vreg_ids.insert(id); }
-                for id in instr.used_regs() { all_vreg_ids.insert(id); }
+                for id in instr.defined_regs() {
+                    all_vreg_ids.insert(id);
+                }
+                for id in instr.used_regs() {
+                    all_vreg_ids.insert(id);
+                }
             }
         }
         for val in &func.results {
-            if let Some(id) = val.as_register() { all_vreg_ids.insert(id); }
+            if let Some(id) = val.as_register() {
+                all_vreg_ids.insert(id);
+            }
         }
 
-        let mut stack_alloc_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut stack_alloc_vregs: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         let mut alloc_sizes: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
         for block in &func.blocks {
             for instr in &block.instructions {
@@ -2558,7 +3063,8 @@ impl Backend for PPC64Backend {
         // ppc64-specific failures in tests with 3+ vregs in the caller
         // (bsearch, fn_sum_squares, quicksort, matrix, mem_nested_alloc).
 
-        let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+        let mut alloc_offsets: std::collections::HashMap<u32, i32> =
+            std::collections::HashMap::new();
         // Start at 32 to avoid overlapping with the reserved save-area slots:
         //   [R31 - 0]  = back chain (old R1) — at SP+0, set by STDU
         //   [R31 - 8]  = unused
@@ -2577,7 +3083,8 @@ impl Backend for PPC64Backend {
             alloc_offsets.insert(id, current_offset);
         }
 
-        let mut vreg_stack_slots: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+        let mut vreg_stack_slots: std::collections::HashMap<u32, i32> =
+            std::collections::HashMap::new();
         let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
         all_vreg_ids_sorted.sort();
         for &id in &all_vreg_ids_sorted {
@@ -2597,12 +3104,20 @@ impl Backend for PPC64Backend {
             opcode: "stdu".into(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, 1)],
             writes: vec![PhysicalReg::new(RegClass::Gpr, 1)],
-            encoded: Instruction::Stdu { rs: Gpr::R1, ra: Gpr::R1, ds: -fs }.encode().to_vec(),
+            encoded: Instruction::Stdu {
+                rs: Gpr::R1,
+                ra: Gpr::R1,
+                ds: -fs,
+            }
+            .encode()
+            .to_vec(),
         });
         // MFLR R0
         let mflr_word: u32 = (31u32 << 26) | (8u32 << 16) | (339 << 1);
         instructions.push(AllocatedInstruction {
-            opcode: "mflr".into(), reads: vec![], writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
+            opcode: "mflr".into(),
+            reads: vec![],
+            writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
             encoded: encode_word(mflr_word).to_vec(),
         });
         // STD R0, fs-24(R1) - save LR in the CALLEE's own frame at SP + fs - 24
@@ -2617,27 +3132,60 @@ impl Backend for PPC64Backend {
         // and never overlaps any vreg slot, alloc region, or back chain.
         instructions.push(AllocatedInstruction {
             opcode: "std".into(),
-            reads: vec![PhysicalReg::new(RegClass::Gpr, 0), PhysicalReg::new(RegClass::Gpr, 1)],
+            reads: vec![
+                PhysicalReg::new(RegClass::Gpr, 0),
+                PhysicalReg::new(RegClass::Gpr, 1),
+            ],
             writes: vec![],
-            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs - 24 }.encode().to_vec(),
+            encoded: Instruction::Std {
+                rs: Gpr::R0,
+                ra: Gpr::R1,
+                ds: fs - 24,
+            }
+            .encode()
+            .to_vec(),
         });
         // STD R31, fs-16(R1) - save R31
         instructions.push(AllocatedInstruction {
             opcode: "std".into(),
-            reads: vec![PhysicalReg::new(RegClass::Gpr, 31), PhysicalReg::new(RegClass::Gpr, 1)],
+            reads: vec![
+                PhysicalReg::new(RegClass::Gpr, 31),
+                PhysicalReg::new(RegClass::Gpr, 1),
+            ],
             writes: vec![],
-            encoded: Instruction::Std { rs: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode().to_vec(),
+            encoded: Instruction::Std {
+                rs: Gpr::R31,
+                ra: Gpr::R1,
+                ds: fs - 16,
+            }
+            .encode()
+            .to_vec(),
         });
         // ADDI R31, R1, frame_size
         instructions.push(AllocatedInstruction {
             opcode: "addi".into(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, 1)],
             writes: vec![PhysicalReg::new(RegClass::Gpr, 31)],
-            encoded: Instruction::Addi { rt: Gpr::R31, ra: Gpr::R1, simm: fs }.encode().to_vec(),
+            encoded: Instruction::Addi {
+                rt: Gpr::R31,
+                ra: Gpr::R1,
+                simm: fs,
+            }
+            .encode()
+            .to_vec(),
         });
 
         // Store function params from R3-R10 to stack slots
-        let arg_regs = [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8, Gpr::R9, Gpr::R10];
+        let arg_regs = [
+            Gpr::R3,
+            Gpr::R4,
+            Gpr::R5,
+            Gpr::R6,
+            Gpr::R7,
+            Gpr::R8,
+            Gpr::R9,
+            Gpr::R10,
+        ];
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
                 if i < 8 {
@@ -2646,17 +3194,28 @@ impl Backend for PPC64Backend {
                     instructions.push(AllocatedInstruction {
                         opcode: "std".into(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
-                        writes: vec![], encoded: store_code,
+                        writes: vec![],
+                        encoded: store_code,
                     });
                 }
             }
         }
 
         // ── Phase 3: Emit body ──
-        let mut current_byte_offset: u64 = instructions.iter().map(|i| i.encoded.len() as u64).sum();
-        let mut label_offsets: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut current_byte_offset: u64 =
+            instructions.iter().map(|i| i.encoded.len() as u64).sum();
+        let mut label_offsets: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
 
-        struct BranchFixup { instr_idx: usize, offset_in_encoded: usize, abs_byte_offset: u64, target_label: String, is_unconditional: bool, bc_bo: u32, bc_bi: u32 }
+        struct BranchFixup {
+            instr_idx: usize,
+            offset_in_encoded: usize,
+            abs_byte_offset: u64,
+            target_label: String,
+            is_unconditional: bool,
+            bc_bo: u32,
+            bc_bi: u32,
+        }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
 
         // Build predecessor-aware phi resolution map.
@@ -2705,7 +3264,8 @@ impl Backend for PPC64Backend {
         let mut store_count = 0usize;
         let mut cmp_count = 0usize;
         let mut has_u8_load = false;
-        let mut add_defined_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut add_defined_vregs: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         for block in &func.blocks {
             for instr in &block.instructions {
                 match instr {
@@ -2755,7 +3315,14 @@ impl Backend for PPC64Backend {
             && cmp_count == 0
             && matches!(
                 ret_ty,
-                Some(IRType::I16 | IRType::U16 | IRType::I32 | IRType::U32 | IRType::I64 | IRType::U64)
+                Some(
+                    IRType::I16
+                        | IRType::U16
+                        | IRType::I32
+                        | IRType::U32
+                        | IRType::I64
+                        | IRType::U64
+                )
             ) {
             ret_ty
         } else {
@@ -3479,7 +4046,7 @@ impl Backend for PPC64Backend {
                                 // blt means "branch if less than" (CR0_LT set = R6 < 0 = saturated)
                                 // So: blt skip → if saturated, skip the "R3 = R6" move
                                 // If NOT saturated (R6 >= 0), fall through to R3 = R6
-                                let blt_word: u32 = (16u32 << 26) | (0u32 << 23) | (12u32 << 21) | (8u32); // blt cr0, +8 (skip 2 instructions)
+                                let blt_word: u32 = (16u32 << 26) | (12u32 << 21) | (8u32); // blt cr0, +8 (skip 2 instructions)
                                 code.extend_from_slice(&blt_word.to_be_bytes());
                                 code.extend_from_slice(&[0x7c, 0x63, 0x33, 0x78]); // mr r3, r6 (or r3, r6, r6)
                                 // skip:
@@ -3796,7 +4363,7 @@ impl Backend for PPC64Backend {
                         // symbol's absolute 64-bit address. See the
                         // corresponding reg-alloc path for full details.
                         let lis_byte_offset = current_byte_offset + code.len() as u64;
-                        vuma_log!(warn, 
+                        vuma_log!(warn,
                             "GetAddress for '{}' — emitting 5-instruction placeholder (reloc at func byte {})",
                             name, lis_byte_offset
                         );
@@ -4099,7 +4666,7 @@ impl Backend for PPC64Backend {
                     // ppc64 (AltiVec/VSX) has no SIMD encoder in the Wave 29
                     // suite; emit nothing.
                     IRInstr::VectorOp { .. } => Vec::new(),
-                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // ── Channel operations ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
@@ -4164,11 +4731,16 @@ impl Backend for PPC64Backend {
                 if fixup.is_unconditional {
                     let imm24 = (offset_words as u32) & 0x00FF_FFFF;
                     let b_word: u32 = (18u32 << 26) | (imm24 << 2);
-                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&b_word.to_be_bytes());
+                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
+                        .copy_from_slice(&b_word.to_be_bytes());
                 } else {
                     let bd = (offset_words as i32) & 0x3FFF;
-                    let bc_word: u32 = (16u32 << 26) | ((fixup.bc_bo & 0x1F) << 21) | ((fixup.bc_bi & 0x1F) << 16) | (((bd as u32) & 0x3FFF) << 2);
-                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&bc_word.to_be_bytes());
+                    let bc_word: u32 = (16u32 << 26)
+                        | ((fixup.bc_bo & 0x1F) << 21)
+                        | ((fixup.bc_bi & 0x1F) << 16)
+                        | (((bd as u32) & 0x3FFF) << 2);
+                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
+                        .copy_from_slice(&bc_word.to_be_bytes());
                 }
             }
         }
@@ -4179,8 +4751,16 @@ impl Backend for PPC64Backend {
 
         let mut allocated = AllocatedFunction {
             name: func_name,
-            blocks: vec![AllocatedBlock { label: "entry".into(), instructions, code_offset: 0 }],
-            frame_size, callee_saved, spill_slots, code_size, relocations,
+            blocks: vec![AllocatedBlock {
+                label: "entry".into(),
+                instructions,
+                code_offset: 0,
+            }],
+            frame_size,
+            callee_saved,
+            spill_slots,
+            code_size,
+            relocations,
             wasm_func_type: None,
             wasm_locals: None,
         };
@@ -4193,14 +4773,22 @@ impl Backend for PPC64Backend {
         if self.use_real_regalloc {
             let max_real_regs = 8u32;
             let mut all_vreg_ids: Vec<u32> = Vec::new();
-            for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+            for &id in func.vregs.keys() {
+                all_vreg_ids.push(id);
+            }
             for param in &func.params {
-                if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+                if let Some(id) = param.as_register() {
+                    all_vreg_ids.push(id);
+                }
             }
             for block in &func.blocks {
                 for instr in &block.instructions {
-                    for id in instr.defined_regs() { all_vreg_ids.push(id); }
-                    for id in instr.used_regs() { all_vreg_ids.push(id); }
+                    for id in instr.defined_regs() {
+                        all_vreg_ids.push(id);
+                    }
+                    for id in instr.used_regs() {
+                        all_vreg_ids.push(id);
+                    }
                 }
             }
             all_vreg_ids.sort();
@@ -4208,10 +4796,8 @@ impl Backend for PPC64Backend {
 
             for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
                 if (i as u32) < max_real_regs {
-                    let preg = crate::backend::PhysicalReg::new(
-                        crate::backend::RegClass::Gpr,
-                        i as u32,
-                    );
+                    let preg =
+                        crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
                     for block in &mut allocated.blocks {
                         for instr in &mut block.instructions {
                             if !instr.writes.contains(&preg) {
@@ -4268,12 +4854,15 @@ impl Backend for PPC64Backend {
 
         // ── Compute function offsets ──
         // _start stub comes first, then user functions.
-        let mut func_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut func_offsets: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut current_offset: usize = start_stub_size; // after _start
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -4315,91 +4904,318 @@ impl Backend for PPC64Backend {
         let print_int_stub: Vec<u8> = {
             let mut code: Vec<u8> = Vec::new();
             // [0] stdu R1, R1, -32 — allocate 32-byte stack frame (16-byte aligned)
-            code.extend_from_slice(&Instruction::Stdu {
-                rs: Gpr::R1, ra: Gpr::R1, ds: -32,
-            }.encode());
+            code.extend_from_slice(
+                &Instruction::Stdu {
+                    rs: Gpr::R1,
+                    ra: Gpr::R1,
+                    ds: -32,
+                }
+                .encode(),
+            );
             // [1] mr R9, R3 — save input value in R9
-            code.extend_from_slice(&Instruction::Mr { ra: Gpr::R9, rs: Gpr::R3 }.encode());
+            code.extend_from_slice(
+                &Instruction::Mr {
+                    ra: Gpr::R9,
+                    rs: Gpr::R3,
+                }
+                .encode(),
+            );
             // [2] addi R10, R1, 16 — R10 = end of digit buffer (SP+16)
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R10, ra: Gpr::R1, simm: 16 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R10,
+                    ra: Gpr::R1,
+                    simm: 16,
+                }
+                .encode(),
+            );
             // [3] cmpdi cr0, R9, 0 — compare R9 with 0
-            code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: Gpr::R9, simm: 0 }.encode());
+            code.extend_from_slice(
+                &Instruction::Cmpi {
+                    bf: CrField::CR0,
+                    l: 1,
+                    ra: Gpr::R9,
+                    simm: 0,
+                }
+                .encode(),
+            );
             // [4] bne cr0, +5 — if R9 != 0, jump to [9] (neg_check)
-            code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 5 }.encode());
+            code.extend_from_slice(
+                &Instruction::Bc {
+                    bo: 4,
+                    bi: 2,
+                    bd: 5,
+                }
+                .encode(),
+            );
             // [5] li R12, 0x30 ('0')
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 0x30 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R12,
+                    simm: 0x30,
+                }
+                .encode(),
+            );
             // [6] addi R10, R10, -1
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R10, ra: Gpr::R10, simm: -1 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R10,
+                    ra: Gpr::R10,
+                    simm: -1,
+                }
+                .encode(),
+            );
             // [7] stb R12, 0(R10)
-            code.extend_from_slice(&Instruction::Stb { rs: Gpr::R12, ra: Gpr::R10, d: 0 }.encode());
+            code.extend_from_slice(
+                &Instruction::Stb {
+                    rs: Gpr::R12,
+                    ra: Gpr::R10,
+                    d: 0,
+                }
+                .encode(),
+            );
             // [8] b +21 — jump to [29] (write)
             code.extend_from_slice(&Instruction::B { li: 21 }.encode());
             // [9] cmpdi cr0, R9, 0
-            code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: Gpr::R9, simm: 0 }.encode());
+            code.extend_from_slice(
+                &Instruction::Cmpi {
+                    bf: CrField::CR0,
+                    l: 1,
+                    ra: Gpr::R9,
+                    simm: 0,
+                }
+                .encode(),
+            );
             // [10] bge cr0, +9 — if R9 >= 0, jump to [19] (loop_setup). BO=4, BI=0
             //      = branch if CR0_LT==0 (i.e., R9 >= 0).
-            code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 0, bd: 9 }.encode());
+            code.extend_from_slice(
+                &Instruction::Bc {
+                    bo: 4,
+                    bi: 0,
+                    bd: 9,
+                }
+                .encode(),
+            );
             // [11] li R12, 0x2D ('-')
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 0x2D }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R12,
+                    simm: 0x2D,
+                }
+                .encode(),
+            );
             // [12] stb R12, 8(R1) — store '-' at SP+8 (1-byte scratch)
-            code.extend_from_slice(&Instruction::Stb { rs: Gpr::R12, ra: Gpr::R1, d: 8 }.encode());
+            code.extend_from_slice(
+                &Instruction::Stb {
+                    rs: Gpr::R12,
+                    ra: Gpr::R1,
+                    d: 8,
+                }
+                .encode(),
+            );
             // [13] li R3, 1 — fd=1 (stdout)
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 1 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R3,
+                    simm: 1,
+                }
+                .encode(),
+            );
             // [14] addi R4, R1, 8 — buf = SP+8
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R4, ra: Gpr::R1, simm: 8 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R4,
+                    ra: Gpr::R1,
+                    simm: 8,
+                }
+                .encode(),
+            );
             // [15] li R5, 1 — len=1
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R5, simm: 1 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R5,
+                    simm: 1,
+                }
+                .encode(),
+            );
             // [16] li R0, 4 — sys_write
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 4 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R0,
+                    simm: 4,
+                }
+                .encode(),
+            );
             // [17] sc
             code.extend_from_slice(&Instruction::Sc.encode());
             // [18] neg R9, R9
-            code.extend_from_slice(&Instruction::Neg { rt: Gpr::R9, ra: Gpr::R9 }.encode());
+            code.extend_from_slice(
+                &Instruction::Neg {
+                    rt: Gpr::R9,
+                    ra: Gpr::R9,
+                }
+                .encode(),
+            );
             // [19] li R11, 10 — divisor (loop_setup)
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R11, simm: 10 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R11,
+                    simm: 10,
+                }
+                .encode(),
+            );
             // [20] divdu R12, R9, R11 — R12 = R9 / 10 (unsigned)
-            code.extend_from_slice(&Instruction::Divdu { rt: Gpr::R12, ra: Gpr::R9, rb: Gpr::R11 }.encode());
+            code.extend_from_slice(
+                &Instruction::Divdu {
+                    rt: Gpr::R12,
+                    ra: Gpr::R9,
+                    rb: Gpr::R11,
+                }
+                .encode(),
+            );
             // [21] mulld R5, R12, R11 — R5 = R12 * 10
-            code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R12, rb: Gpr::R11 }.encode());
+            code.extend_from_slice(
+                &Instruction::Mulld {
+                    rt: Gpr::R5,
+                    ra: Gpr::R12,
+                    rb: Gpr::R11,
+                }
+                .encode(),
+            );
             // [22] subf R5, R5, R9 — R5 = R9 - R5 = R9 % 10
-            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R9 }.encode());
+            code.extend_from_slice(
+                &Instruction::Subf {
+                    rt: Gpr::R5,
+                    ra: Gpr::R5,
+                    rb: Gpr::R9,
+                }
+                .encode(),
+            );
             // [23] addi R5, R5, 0x30 — R5 += '0'
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 0x30 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R5,
+                    ra: Gpr::R5,
+                    simm: 0x30,
+                }
+                .encode(),
+            );
             // [24] addi R10, R10, -1
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R10, ra: Gpr::R10, simm: -1 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R10,
+                    ra: Gpr::R10,
+                    simm: -1,
+                }
+                .encode(),
+            );
             // [25] stb R5, 0(R10)
-            code.extend_from_slice(&Instruction::Stb { rs: Gpr::R5, ra: Gpr::R10, d: 0 }.encode());
+            code.extend_from_slice(
+                &Instruction::Stb {
+                    rs: Gpr::R5,
+                    ra: Gpr::R10,
+                    d: 0,
+                }
+                .encode(),
+            );
             // [26] mr R9, R12
-            code.extend_from_slice(&Instruction::Mr { ra: Gpr::R9, rs: Gpr::R12 }.encode());
+            code.extend_from_slice(
+                &Instruction::Mr {
+                    ra: Gpr::R9,
+                    rs: Gpr::R12,
+                }
+                .encode(),
+            );
             // [27] cmpdi cr0, R9, 0
-            code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: Gpr::R9, simm: 0 }.encode());
+            code.extend_from_slice(
+                &Instruction::Cmpi {
+                    bf: CrField::CR0,
+                    l: 1,
+                    ra: Gpr::R9,
+                    simm: 0,
+                }
+                .encode(),
+            );
             // [28] bne cr0, -8 — if R9 != 0, loop back to [20]
-            code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: -8 }.encode());
+            code.extend_from_slice(
+                &Instruction::Bc {
+                    bo: 4,
+                    bi: 2,
+                    bd: -8,
+                }
+                .encode(),
+            );
             // [29] mr R4, R10 — R4 = start of digits (write)
-            code.extend_from_slice(&Instruction::Mr { ra: Gpr::R4, rs: Gpr::R10 }.encode());
+            code.extend_from_slice(
+                &Instruction::Mr {
+                    ra: Gpr::R4,
+                    rs: Gpr::R10,
+                }
+                .encode(),
+            );
             // [30] addi R5, R1, 16 — R5 = end of buffer
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R1, simm: 16 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R5,
+                    ra: Gpr::R1,
+                    simm: 16,
+                }
+                .encode(),
+            );
             // [31] subf R5, R4, R5 — R5 = end - start = length
-            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R5, ra: Gpr::R4, rb: Gpr::R5 }.encode());
+            code.extend_from_slice(
+                &Instruction::Subf {
+                    rt: Gpr::R5,
+                    ra: Gpr::R4,
+                    rb: Gpr::R5,
+                }
+                .encode(),
+            );
             // [32] li R3, 1 — fd=1
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 1 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R3,
+                    simm: 1,
+                }
+                .encode(),
+            );
             // [33] li R0, 4 — sys_write
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 4 }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R0,
+                    simm: 4,
+                }
+                .encode(),
+            );
             // [34] sc
             code.extend_from_slice(&Instruction::Sc.encode());
             // [35] addi R1, R1, 32 — deallocate stack frame
-            code.extend_from_slice(&Instruction::Addi { rt: Gpr::R1, ra: Gpr::R1, simm: 32 }.encode());
+            code.extend_from_slice(
+                &Instruction::Addi {
+                    rt: Gpr::R1,
+                    ra: Gpr::R1,
+                    simm: 32,
+                }
+                .encode(),
+            );
             // [36] blr — return
-            code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+            code.extend_from_slice(
+                &Instruction::Bclr {
+                    bo: 20,
+                    bi: 0,
+                    bh: 0,
+                }
+                .encode(),
+            );
             code
         };
         // print_int stub size: 37 instructions × 4 bytes = 148 bytes.
         let print_int_size: usize = print_int_stub.len();
         let print_int_offset = vuma_free_offset + 12; // after vuma_free stub (3 instrs × 4 = 12 B)
         let print_hex_offset = print_int_offset + print_int_size; // print_hex stub: 1 BLR (4 bytes)
-        // Register under BOTH names: the user-facing "print_int" (which is
-        // what the IR Call instruction uses as func name) and the internal
-        // "__vuma_print_int" (for consistency with other backends).
+                                                                  // Register under BOTH names: the user-facing "print_int" (which is
+                                                                  // what the IR Call instruction uses as func name) and the internal
+                                                                  // "__vuma_print_int" (for consistency with other backends).
         func_offsets.insert("print_int".to_string(), print_int_offset);
         func_offsets.insert("print_hex".to_string(), print_hex_offset);
         func_offsets.insert("print_newline".to_string(), print_hex_offset);
@@ -4434,9 +5250,22 @@ impl Backend for PPC64Backend {
         // Helper: encode a simple "LI R0, num ; SC ; BLR" stub.
         let simple_stub = |num: i32| -> Vec<u8> {
             let mut code = Vec::new();
-            code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: num }.encode());
+            code.extend_from_slice(
+                &Instruction::Li {
+                    rt: Gpr::R0,
+                    simm: num,
+                }
+                .encode(),
+            );
             code.extend_from_slice(&Instruction::Sc.encode());
-            code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+            code.extend_from_slice(
+                &Instruction::Bclr {
+                    bo: 20,
+                    bi: 0,
+                    bh: 0,
+                }
+                .encode(),
+            ); // BLR
             code
         };
 
@@ -4473,7 +5302,10 @@ impl Backend for PPC64Backend {
             // sys_connect at runtime. (The real __NR_shutdown on ppc64 is
             // 373; if shutdown calls fail under QEMU, switch this to 373.)
             for (name, num) in [
-                ("write", 4), ("read", 3), ("open", 5), ("close", 6),
+                ("write", 4),
+                ("read", 3),
+                ("open", 5),
+                ("close", 6),
                 // [wave 6 — mmap ABI normalization, verified] ppc64's legacy
                 // sys_mmap (90) is the DIRECT 6-arg form: (addr, len, prot,
                 // flags, fd, offset) all passed in R3-R8, with `offset` in
@@ -4486,87 +5318,167 @@ impl Backend for PPC64Backend {
                 // __vuma_alloc" requirement is satisfied. The VUMA ppc64 CC
                 // passes 8 args in R3-R10 (see Gpr::arg_register), so all 6
                 // mmap args fit in registers — no stack-arg plumbing needed.
-                ("mmap", 90), ("munmap", 91), ("exit", 1), ("alarm", 27),
-                ("getpid", 20), ("socket", 326), ("epoll_create1", 315),
-                ("futex", 221), ("wait4", 114),
-                ("epoll_ctl", 237), ("epoll_wait", 238),
-                ("dup2", 63), ("fork", 2), ("unlink", 10),
+                ("mmap", 90),
+                ("munmap", 91),
+                ("exit", 1),
+                ("alarm", 27),
+                ("getpid", 20),
+                ("socket", 326),
+                ("epoll_create1", 315),
+                ("futex", 221),
+                ("wait4", 114),
+                ("epoll_ctl", 237),
+                ("epoll_wait", 238),
+                ("dup2", 63),
+                ("fork", 2),
+                ("unlink", 10),
                 ("clone", 120),
                 // ── P6: missing syscall stubs ──
-                ("lseek", 8), ("stat", 106), ("fstat", 108), ("kill", 37),
-                ("getcwd", 182), ("chdir", 12), ("ioctl", 54), ("fcntl", 55),
-                ("connect", 362), ("poll", 168), ("nanosleep", 162),
-                ("mprotect", 125), ("dup", 41), ("exit_group", 234),
+                ("lseek", 8),
+                ("stat", 106),
+                ("fstat", 108),
+                ("kill", 37),
+                ("getcwd", 182),
+                ("chdir", 12),
+                ("ioctl", 54),
+                ("fcntl", 55),
+                ("connect", 362),
+                ("poll", 168),
+                ("nanosleep", 162),
+                ("mprotect", 125),
+                ("dup", 41),
+                ("exit_group", 234),
                 // recv/send alias recvfrom/sendto. The previous values
                 // (recv=317, send=316) were wrong: 316 is __NR_dup3 on ppc64
                 // (collided with the dup3 stub below) and 317 is __NR_socket.
                 // recv = recvfrom(fd,buf,len,flags,NULL,NULL); send likewise.
-                ("recv", 372), ("send", 371),
+                ("recv", 372),
+                ("send", 371),
                 ("shutdown", 373),
-                ("bind", 361), ("listen", 363), ("accept", 364),
+                ("bind", 361),
+                ("listen", 363),
+                ("accept", 364),
                 ("setsockopt", 366),
                 ("getsockopt", 340),
-                ("brk", 45), ("clock_gettime", 246), ("gettimeofday", 78),
-                ("rt_sigprocmask", 126), ("rt_sigreturn", 173),
-                ("dup3", 316), ("lstat", 107),
-                ("recvfrom", 372), ("sendto", 371),
+                ("brk", 45),
+                ("clock_gettime", 246),
+                ("gettimeofday", 78),
+                ("rt_sigprocmask", 126),
+                ("rt_sigreturn", 173),
+                ("dup3", 316),
+                ("lstat", 107),
+                ("recvfrom", 372),
+                ("sendto", 371),
                 // pipe and execve are simple passthrough stubs.  VUMA test
                 // programs now read/write kernel-produced data (pipefd's,
                 // argv pointer arrays) in the guest's NATIVE byte order, so
                 // no byte-swapping is needed in the stub — the kernel and the
                 // program agree on byte order.
-                ("pipe", 42), ("execve", 11),
+                ("pipe", 42),
+                ("execve", 11),
                 // ── Wave 7: POSIX file-metadata & I/O syscalls (ppc unistd.h) ──
                 // ppc64 has 8 reg args (R3-R10); all take ≤5 args → simple_stub.
                 // ppc's chown=181 is already the 32-bit-uid variant (ppc never
                 // had a separate chown32); fchown=95 likewise. pread64=179.
-                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
-                ("link", 9), ("symlink", 83), ("readlink", 85),
-                ("chmod", 15), ("chown", 181), ("umask", 60),
-                ("fchmod", 94), ("fchown", 95),
-                ("openat", 286), ("unlinkat", 292), ("renameat", 293),
-                ("linkat", 294), ("symlinkat", 295), ("readlinkat", 296),
-                ("fchmodat", 297), ("faccessat", 298), ("fchownat", 289),
-                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
-                ("sync", 36), ("syncfs", 348),
-                ("pread", 179), ("pwrite", 180), ("readv", 145), ("writev", 146),
-                ("preadv", 320), ("pwritev", 321),
-                ("fchdir", 133), ("chroot", 61),
+                ("mkdir", 39),
+                ("rmdir", 40),
+                ("rename", 38),
+                ("link", 9),
+                ("symlink", 83),
+                ("readlink", 85),
+                ("chmod", 15),
+                ("chown", 181),
+                ("umask", 60),
+                ("fchmod", 94),
+                ("fchown", 95),
+                ("openat", 286),
+                ("unlinkat", 292),
+                ("renameat", 293),
+                ("linkat", 294),
+                ("symlinkat", 295),
+                ("readlinkat", 296),
+                ("fchmodat", 297),
+                ("faccessat", 298),
+                ("fchownat", 289),
+                ("ftruncate", 93),
+                ("fsync", 118),
+                ("fdatasync", 148),
+                ("sync", 36),
+                ("syncfs", 348),
+                ("pread", 179),
+                ("pwrite", 180),
+                ("readv", 145),
+                ("writev", 146),
+                ("preadv", 320),
+                ("pwritev", 321),
+                ("fchdir", 133),
+                ("chroot", 61),
                 // ── Wave 9: POSIX system & advanced syscalls (ppc unistd.h) ──
                 // ppc64 has 8 reg args (R3-R10); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(314), signalfd→signalfd4(313) = modern variants.
-                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
-                ("mincore", 206), ("madvise", 205), ("msync", 144), ("mremap", 163),
-                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 325),
-                ("getrusage", 77), ("times", 43),
+                ("mlock", 150),
+                ("munlock", 151),
+                ("mlockall", 152),
+                ("munlockall", 153),
+                ("mincore", 206),
+                ("madvise", 205),
+                ("msync", 144),
+                ("mremap", 163),
+                ("getrlimit", 76),
+                ("setrlimit", 75),
+                ("prlimit64", 325),
+                ("getrusage", 77),
+                ("times", 43),
                 ("getrandom", 359),
-                ("eventfd", 314), ("timerfd_create", 306), ("timerfd_settime", 311),
-                ("timerfd_gettime", 312), ("signalfd", 313),
-                ("inotify_init1", 318), ("inotify_add_watch", 276), ("inotify_rm_watch", 277),
+                ("eventfd", 314),
+                ("timerfd_create", 306),
+                ("timerfd_settime", 311),
+                ("timerfd_gettime", 312),
+                ("signalfd", 313),
+                ("inotify_init1", 318),
+                ("inotify_add_watch", 276),
+                ("inotify_rm_watch", 277),
                 ("ptrace", 26),
                 // ── Wave 8: POSIX process & identity syscalls (powerpc syscall.tbl) ──
                 // ppc64 has no uid16 split (getuid=24 is already 32-bit). All take
                 // ≤5 args; ppc64 has 6 reg args (r3-r8) → simple_stub for all.
                 // Family 1: identity
-                ("getuid", 24), ("geteuid", 49), ("getgid", 47), ("getegid", 50),
-                ("setuid", 23), ("setgid", 46), ("setresuid", 164), ("setresgid", 169),
+                ("getuid", 24),
+                ("geteuid", 49),
+                ("getgid", 47),
+                ("getegid", 50),
+                ("setuid", 23),
+                ("setgid", 46),
+                ("setresuid", 164),
+                ("setresgid", 169),
                 // Family 2: process group (getpid already present)
-                ("getppid", 64), ("getsid", 147), ("setsid", 66),
-                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
+                ("getppid", 64),
+                ("getsid", 147),
+                ("setsid", 66),
+                ("setpgid", 57),
+                ("getpgid", 132),
+                ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present)
-                ("vfork", 189), ("clone3", 435), ("waitid", 272),
+                ("vfork", 189),
+                ("clone3", 435),
+                ("waitid", 272),
                 // Family 4: exec/exit (execve/exit_group already present)
                 ("execveat", 362),
                 // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-                ("tgkill", 250), ("tkill", 208), ("rt_sigaction", 173),
+                ("tgkill", 250),
+                ("tkill", 208),
+                ("rt_sigaction", 173),
                 // Family 6: directory read (readdir ABSENT → use getdents64)
-                ("getdents64", 202), ("getdents", 141),
+                ("getdents64", 202),
+                ("getdents", 141),
                 // Family 7: system (arch_prctl is x86_64-only)
-                ("prctl", 171), ("uname", 122), ("sysinfo", 116),
-                            ("eventfd2", 314),
+                ("prctl", 171),
+                ("uname", 122),
+                ("sysinfo", 116),
+                ("eventfd2", 314),
                 ("newfstatat", 291),
                 ("signalfd4", 313),
-] {
+            ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
@@ -4576,13 +5488,32 @@ impl Backend for PPC64Backend {
             {
                 let mut code = Vec::new();
                 // LI R6, 0 — rusage = NULL
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R6,
+                        simm: 0,
+                    }
+                    .encode(),
+                );
                 // LI R0, 114 — sys_wait4
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 114 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R0,
+                        simm: 114,
+                    }
+                    .encode(),
+                );
                 // SC
                 code.extend_from_slice(&Instruction::Sc.encode());
                 // BLR
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Bclr {
+                        bo: 20,
+                        bi: 0,
+                        bh: 0,
+                    }
+                    .encode(),
+                );
                 stubs.push(("waitpid".to_string(), code));
             }
 
@@ -4601,34 +5532,92 @@ impl Backend for PPC64Backend {
                 // strcmp_loop:
                 let loop_offset = code.len();
                 // LBZ R5, 0(R3) — load byte from s1
-                code.extend_from_slice(&Instruction::Lbz { rt: Gpr::R5, ra: Gpr::R3, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Lbz {
+                        rt: Gpr::R5,
+                        ra: Gpr::R3,
+                        d: 0,
+                    }
+                    .encode(),
+                );
                 // LBZ R6, 0(R4) — load byte from s2
-                code.extend_from_slice(&Instruction::Lbz { rt: Gpr::R6, ra: Gpr::R4, d: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Lbz {
+                        rt: Gpr::R6,
+                        ra: Gpr::R4,
+                        d: 0,
+                    }
+                    .encode(),
+                );
                 // CMPW CR0, R5, R6 — compare bytes (unsigned)
-                code.extend_from_slice(&Instruction::Cmpl { bf: CrField::CR0, l: 0, ra: Gpr::R5, rb: Gpr::R6 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Cmpl {
+                        bf: CrField::CR0,
+                        l: 0,
+                        ra: Gpr::R5,
+                        rb: Gpr::R6,
+                    }
+                    .encode(),
+                );
                 // BNE done (CR0.EQ clear → BO=4, BI=2)
                 let bne_pos = code.len();
                 code.extend_from_slice(&[0u8; 4]); // placeholder
-                // CMPLWI R5, 0 — check if s1 byte is NUL
-                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 0, ra: Gpr::R5, uimm: 0 }.encode());
+                                                   // CMPLWI R5, 0 — check if s1 byte is NUL
+                code.extend_from_slice(
+                    &Instruction::Cmpli {
+                        bf: CrField::CR0,
+                        l: 0,
+                        ra: Gpr::R5,
+                        uimm: 0,
+                    }
+                    .encode(),
+                );
                 // BEQ done (CR0.EQ set → BO=12, BI=2)
                 let beq_pos = code.len();
                 code.extend_from_slice(&[0u8; 4]); // placeholder
-                // ADDI R3, R3, 1 — advance s1
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R3, ra: Gpr::R3, simm: 1 }.encode());
+                                                   // ADDI R3, R3, 1 — advance s1
+                code.extend_from_slice(
+                    &Instruction::Addi {
+                        rt: Gpr::R3,
+                        ra: Gpr::R3,
+                        simm: 1,
+                    }
+                    .encode(),
+                );
                 // ADDI R4, R4, 1 — advance s2
-                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R4, ra: Gpr::R4, simm: 1 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Addi {
+                        rt: Gpr::R4,
+                        ra: Gpr::R4,
+                        simm: 1,
+                    }
+                    .encode(),
+                );
                 // B loop
                 let b_loop_pos = code.len();
                 code.extend_from_slice(&[0u8; 4]); // placeholder
                 let done_offset = code.len();
 
                 // done: R3 = R5 - R6 (return difference)
-                code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R6, rb: Gpr::R5 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Subf {
+                        rt: Gpr::R3,
+                        ra: Gpr::R6,
+                        rb: Gpr::R5,
+                    }
+                    .encode(),
+                );
                 // Note: SUBF R3, R6, R5 computes R6 - R5... we want R5 - R6.
                 // SUBF RT, RA, RB = RT = RB - RA. So SUBF R3, R6, R5 = R5 - R6. ✓
                 // BLR
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Bclr {
+                        bo: 20,
+                        bi: 0,
+                        bh: 0,
+                    }
+                    .encode(),
+                );
 
                 // ── Patch branches ──
                 // BNE: BO=4 (branch if CR0.EQ NOT set), BI=2
@@ -4661,11 +5650,30 @@ impl Backend for PPC64Backend {
             {
                 let mut code = Vec::new();
                 // LI R6, 8     (sigsetsize)
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 8 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R6,
+                        simm: 8,
+                    }
+                    .encode(),
+                );
                 // LI R0, 173   (sys_rt_sigaction)
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 173 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R0,
+                        simm: 173,
+                    }
+                    .encode(),
+                );
                 code.extend_from_slice(&Instruction::Sc.encode());
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                code.extend_from_slice(
+                    &Instruction::Bclr {
+                        bo: 20,
+                        bi: 0,
+                        bh: 0,
+                    }
+                    .encode(),
+                ); // BLR
                 stubs.push(("sigaction".to_string(), code));
             }
 
@@ -4676,15 +5684,64 @@ impl Backend for PPC64Backend {
             {
                 let mut code = Vec::new();
                 // Set up mmap args: R3=0(NULL), R4=4096, R5=3(PROT), R6=0x22(MAP), R7=-1(fd), R8=0(off)
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R4, simm: 4096 }.encode());
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R5, simm: 3 }.encode());
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 0x22 }.encode());
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R7, simm: -1 }.encode());
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R8, simm: 0 }.encode());
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 90 }.encode()); // sys_mmap
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R3,
+                        simm: 0,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R4,
+                        simm: 4096,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R5,
+                        simm: 3,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R6,
+                        simm: 0x22,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R7,
+                        simm: -1,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R8,
+                        simm: 0,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R0,
+                        simm: 90,
+                    }
+                    .encode(),
+                ); // sys_mmap
                 code.extend_from_slice(&Instruction::Sc.encode());
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                code.extend_from_slice(
+                    &Instruction::Bclr {
+                        bo: 20,
+                        bi: 0,
+                        bh: 0,
+                    }
+                    .encode(),
+                ); // BLR
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
             }
 
@@ -4692,14 +5749,98 @@ impl Backend for PPC64Backend {
             // when marshal_cstr is fully integrated.
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                code.extend_from_slice(
+                    &Instruction::Bclr {
+                        bo: 20,
+                        bi: 0,
+                        bh: 0,
+                    }
+                    .encode(),
+                ); // BLR
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
                 stubs.push(("__arena_overflow".to_string(), {
                     let mut code = Vec::new();
-                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 1 }.encode());
-                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 1 }.encode());
+                    code.extend_from_slice(
+                        &Instruction::Li {
+                            rt: Gpr::R3,
+                            simm: 1,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::Li {
+                            rt: Gpr::R0,
+                            simm: 1,
+                        }
+                        .encode(),
+                    );
                     code.extend_from_slice(&Instruction::Sc.encode());
-                    code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                    code.extend_from_slice(
+                        &Instruction::Bclr {
+                            bo: 20,
+                            bi: 0,
+                            bh: 0,
+                        }
+                        .encode(),
+                    );
+                    code
+                }));
+                // __oob_trap: real exit(134) syscall (SIGABRT code).
+                stubs.push(("__oob_trap".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(
+                        &Instruction::Li {
+                            rt: Gpr::R3,
+                            simm: 134,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::Li {
+                            rt: Gpr::R0,
+                            simm: 1,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(&Instruction::Sc.encode());
+                    code.extend_from_slice(
+                        &Instruction::Bclr {
+                            bo: 20,
+                            bi: 0,
+                            bh: 0,
+                        }
+                        .encode(),
+                    );
+                    code
+                }));
+                // __uaf_trap: real exit(135) syscall. Dormant until the
+                // liveness check IR invokes it (IMPL-UAF-1). Distinct from
+                // OOB (134) and arena overflow (1).
+                stubs.push(("__uaf_trap".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(
+                        &Instruction::Li {
+                            rt: Gpr::R3,
+                            simm: 135,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::Li {
+                            rt: Gpr::R0,
+                            simm: 1,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(&Instruction::Sc.encode());
+                    code.extend_from_slice(
+                        &Instruction::Bclr {
+                            bo: 20,
+                            bi: 0,
+                            bh: 0,
+                        }
+                        .encode(),
+                    );
                     code
                 }));
             }
@@ -4708,8 +5849,21 @@ impl Backend for PPC64Backend {
             // truly unknown externs (e.g. C library functions not linked).
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
-                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                code.extend_from_slice(
+                    &Instruction::Li {
+                        rt: Gpr::R3,
+                        simm: 0,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::Bclr {
+                        bo: 20,
+                        bi: 0,
+                        bh: 0,
+                    }
+                    .encode(),
+                ); // BLR
                 stubs.push(("__ffi_fallback_stub".to_string(), code));
             }
 
@@ -4734,21 +5888,37 @@ impl Backend for PPC64Backend {
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
         // LD R3, 0(R1) — load argc from stack pointer (64-bit)
-        start_stub.extend_from_slice(&Instruction::Ld {
-            rt: Gpr::R3, ra: Gpr::R1, ds: 0,
-        }.encode());
+        start_stub.extend_from_slice(
+            &Instruction::Ld {
+                rt: Gpr::R3,
+                ra: Gpr::R1,
+                ds: 0,
+            }
+            .encode(),
+        );
 
         // ADDI R4, R1, 8 — argv = R1 + 8 (64-bit pointers on PPC64)
-        start_stub.extend_from_slice(&Instruction::Addi {
-            rt: Gpr::R4, ra: Gpr::R1, simm: 8,
-        }.encode());
+        start_stub.extend_from_slice(
+            &Instruction::Addi {
+                rt: Gpr::R4,
+                ra: Gpr::R1,
+                simm: 8,
+            }
+            .encode(),
+        );
 
         // BL <main> — placeholder, will be patched
         // BL encoding: I-form, primary=18, LI=0, AA=0, LK=1
         start_stub.extend_from_slice(&Instruction::Bl { li: 0 }.encode());
 
         // LI R0, 1 = ADDI R0, 0, 1 (sys_exit = 1)
-        start_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 1 }.encode());
+        start_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R0,
+                simm: 1,
+            }
+            .encode(),
+        );
 
         // SC (syscall)
         start_stub.extend_from_slice(&Instruction::Sc.encode());
@@ -4759,7 +5929,8 @@ impl Backend for PPC64Backend {
         }
 
         // ── Patch _start BL to main ──
-        let main_key = func_offsets.keys()
+        let main_key = func_offsets
+            .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
@@ -4777,34 +5948,96 @@ impl Backend for PPC64Backend {
         //   PPC64 ABI: syscall # in R0, args R3-R8, return in R3
         //   __NR_mmap = 90
         let mut vuma_alloc_stub: Vec<u8> = Vec::new();
-        vuma_alloc_stub.extend_from_slice(&Instruction::Mr { ra: Gpr::R4, rs: Gpr::R3 }.encode());        // R4 = R3 (size -> length)
-        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());            // R3 = 0 (addr = NULL)
-        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R5, simm: 3 }.encode());            // R5 = 3 (prot)
-        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 0x22 }.encode());         // R6 = 0x22 (flags)
-        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R7, simm: -1 }.encode());           // R7 = -1 (fd)
-        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R8, simm: 0 }.encode());            // R8 = 0 (offset)
-        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 90 }.encode());           // R0 = 90 (sys_mmap)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Mr {
+                ra: Gpr::R4,
+                rs: Gpr::R3,
+            }
+            .encode(),
+        ); // R4 = R3 (size -> length)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R3,
+                simm: 0,
+            }
+            .encode(),
+        ); // R3 = 0 (addr = NULL)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R5,
+                simm: 3,
+            }
+            .encode(),
+        ); // R5 = 3 (prot)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R6,
+                simm: 0x22,
+            }
+            .encode(),
+        ); // R6 = 0x22 (flags)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R7,
+                simm: -1,
+            }
+            .encode(),
+        ); // R7 = -1 (fd)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R8,
+                simm: 0,
+            }
+            .encode(),
+        ); // R8 = 0 (offset)
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R0,
+                simm: 90,
+            }
+            .encode(),
+        ); // R0 = 90 (sys_mmap)
         vuma_alloc_stub.extend_from_slice(&Instruction::Sc.encode());
-        vuma_alloc_stub.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());         // BLR
-        // __vuma_free(addr in R3, size in R4) -> munmap(addr, size)
-        //   __NR_munmap = 91
-        //   P7: Previously this stub hardcoded `Li R4, 4096`, ignoring the
-        //   caller's size argument. The runtime calls `__vuma_free(ptr, 0)`
-        //   (see pipeline.rs:7550), so the hardcoded 4096 caused munmap to
-        //   unmap a full 4 KiB page even when the caller passed size=0. This
-        //   is wrong for non-page-aligned or sub-page allocations.
-        //
-        //   Fix: accept the size from R4 (caller responsibility). The
-        //   runtime now passes the actual allocation size in R4. For
-        //   backwards compatibility, callers that pass size=0 will get
-        //   munmap(addr, 0), which Linux rejects with -EINVAL (a silent
-        //   no-op since the return value is ignored).
+        vuma_alloc_stub.extend_from_slice(
+            &Instruction::Bclr {
+                bo: 20,
+                bi: 0,
+                bh: 0,
+            }
+            .encode(),
+        ); // BLR
+           // __vuma_free(addr in R3, size in R4) -> munmap(addr, size)
+           //   __NR_munmap = 91
+           //   P7: Previously this stub hardcoded `Li R4, 4096`, ignoring the
+           //   caller's size argument. The runtime calls `__vuma_free(ptr, 0)`
+           //   (see pipeline.rs:7550), so the hardcoded 4096 caused munmap to
+           //   unmap a full 4 KiB page even when the caller passed size=0. This
+           //   is wrong for non-page-aligned or sub-page allocations.
+           //
+           //   Fix: accept the size from R4 (caller responsibility). The
+           //   runtime now passes the actual allocation size in R4. For
+           //   backwards compatibility, callers that pass size=0 will get
+           //   munmap(addr, 0), which Linux rejects with -EINVAL (a silent
+           //   no-op since the return value is ignored).
         let mut vuma_free_stub: Vec<u8> = Vec::new();
         // R3 already holds addr (from caller); R4 already holds size (from caller).
         // No need to set R4 — caller responsibility.
-        vuma_free_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 91 }.encode());             // R0 = 91 (sys_munmap)
+        vuma_free_stub.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R0,
+                simm: 91,
+            }
+            .encode(),
+        ); // R0 = 91 (sys_munmap)
         vuma_free_stub.extend_from_slice(&Instruction::Sc.encode());
-        vuma_free_stub.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());           // BLR
+        vuma_free_stub.extend_from_slice(
+            &Instruction::Bclr {
+                bo: 20,
+                bi: 0,
+                bh: 0,
+            }
+            .encode(),
+        ); // BLR
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
@@ -4822,8 +6055,15 @@ impl Backend for PPC64Backend {
         // __vuma_print_hex / __vuma_print_newline (BLR stubs — the test suite
         // only checks exit codes for hex/newline paths).
         all_code.extend_from_slice(&print_int_stub);
-        all_code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR (print_hex/newline)
-        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        all_code.extend_from_slice(
+            &Instruction::Bclr {
+                bo: 20,
+                bi: 0,
+                bh: 0,
+            }
+            .encode(),
+        ); // BLR (print_hex/newline)
+           // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
         for (_, code) in &syscall_stubs {
             all_code.extend_from_slice(code);
         }
@@ -4843,24 +6083,25 @@ impl Backend for PPC64Backend {
                     // R_PPC64_REL24: patch BL instruction's LI field (24 bits).
                     // BL target = CIA + LI*4, where CIA = address of BL instruction.
                     // So: LI = (target_addr - bl_addr) / 4
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let bl_addr = abs_offset as i64;
                         let target_addr = target_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±32MB (24-bit signed)
                         if offset_words < -(1 << 23) || offset_words >= (1 << 23) {
-                            vuma_log!(warn, 
+                            vuma_log!(
+                                warn,
                                 "warning: BL relocation to '{}' out of range: {} words",
-                                reloc.symbol, offset_words
+                                reloc.symbol,
+                                offset_words
                             );
                             continue;
                         }
@@ -4901,7 +6142,7 @@ impl Backend for PPC64Backend {
                             all_code[abs_offset..abs_offset + 4]
                                 .copy_from_slice(&patched.to_be_bytes());
                         } else {
-                            vuma_log!(debug, 
+                            vuma_log!(debug,
                                 "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — no __ffi_fallback_stub, deferring to linker",
                                 reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                             );
@@ -4932,21 +6173,20 @@ impl Backend for PPC64Backend {
                     const NUM_PHDRS: u64 = 3;
                     const TEXT_OFFSET: u64 = ELF_HEADER_SIZE + NUM_PHDRS * PHDR_SIZE;
 
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let abs_addr: u64 = BASE_ADDR + TEXT_OFFSET + target_offset as u64;
                         let w0 = ((abs_addr >> 48) & 0xFFFF) as u32; // lis
                         let w1 = ((abs_addr >> 32) & 0xFFFF) as u32; // ori (high half)
                         let w4 = ((abs_addr >> 16) & 0xFFFF) as u32; // oris (low half high)
-                        let w5 = (abs_addr & 0xFFFF) as u32;          // ori (low half low)
+                        let w5 = (abs_addr & 0xFFFF) as u32; // ori (low half low)
 
                         // Helper: patch the 16-bit immediate (bits 16-31) of a
                         // 4-byte big-endian instruction word at `off`.
@@ -4972,14 +6212,14 @@ impl Backend for PPC64Backend {
                         // `clippy::identity_op` for `1 * 4`; the byte offsets
                         // are spelled out directly here, with the slot index
                         // preserved as a trailing comment for readability.
-                        patch_imm16(abs_offset,       w0);  // [0] lis
-                        patch_imm16(abs_offset + 4,   w1);  // [1] ori
-                        // skip [2] li r0, 32 and [3] sldi (no immediate to patch)
-                        patch_imm16(abs_offset + 16,  w4);  // [4] oris
-                        patch_imm16(abs_offset + 20,  w5);  // [5] ori
+                        patch_imm16(abs_offset, w0); // [0] lis
+                        patch_imm16(abs_offset + 4, w1); // [1] ori
+                                                         // skip [2] li r0, 32 and [3] sldi (no immediate to patch)
+                        patch_imm16(abs_offset + 16, w4); // [4] oris
+                        patch_imm16(abs_offset + 20, w5); // [5] ori
                     } else {
                         // External symbol — leave the placeholder 0 in place.
-                        vuma_log!(warn, 
+                        vuma_log!(warn,
                             "unresolved R_PPC64_ADDR64 relocation: symbol '{}' in '{}' at 0x{:X} — leaving placeholder 0",
                             reloc.symbol, func.name, reloc.offset
                         );
@@ -4987,7 +6227,9 @@ impl Backend for PPC64Backend {
                     }
                 }
             }
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -5043,8 +6285,21 @@ impl Backend for PPC64Backend {
         // sldi r12, r12, 32 (= rldicr r12, r12, 32, 31)
         // MD-form: primary=30, rS, rA, SH[0:4], ME[0:4], SH[5], ME[5], xo=2, Rc=0
         // sldi r12, r12, 32 — use R11 as temp for shift amount
-        code.extend_from_slice(&Instruction::Li { rt: Gpr::R11, simm: 32 }.encode());
-        code.extend_from_slice(&Instruction::Sld { ra: Gpr::R12, rs: Gpr::R12, rb: Gpr::R11 }.encode());
+        code.extend_from_slice(
+            &Instruction::Li {
+                rt: Gpr::R11,
+                simm: 32,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Sld {
+                ra: Gpr::R12,
+                rs: Gpr::R12,
+                rb: Gpr::R11,
+            }
+            .encode(),
+        );
         // oris r12, r12, hi16(lo32) -- oris = primary=25
         let oris_word: u32 = (25u32 << 26)
             | (Gpr::R12.encoding() << 21)
@@ -5350,7 +6605,9 @@ mod tests {
     #[test]
     fn test_cmp_encoding() {
         // CMP CR0, 1, r3, r4: primary=31, bf=0, l=1, rA=3, rB=4, xo=0
-        // Known encoding: cmp cr0, 1, r3, r4 = 0x7C432000 (with l=1 at bit 22)
+        // Known encoding: cmp cr0, 1, r3, r4 = 0x7C232000 (with l=1 at bit 21)
+        // Power ISA v3.0C places the L field at MSB-first bit 10 = LSB-first
+        // bit 21; bit 22 is the reserved field and must be 0.
         let encoded = Instruction::Cmp {
             bf: CrField::CR0,
             l: 1,
@@ -5361,9 +6618,13 @@ mod tests {
         let word = u32::from_be_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31);
         assert_eq!((word >> 23) & 0x7, 0); // bf = CR0
-        assert_eq!((word >> 22) & 0x1, 1); // l = 1 (64-bit) at bit 22
-        // Also verify against known-good encoding: 0x7C432000
-        assert_eq!(word, 0x7C432000, "cmp cr0,1,r3,r4 should encode as 0x7C432000");
+        assert_eq!((word >> 22) & 0x1, 0, "reserved bit 22 must be 0");
+        assert_eq!((word >> 21) & 0x1, 1, "l = 1 (64-bit) at bit 21");
+        // Also verify against known-good encoding: 0x7C232000
+        assert_eq!(
+            word, 0x7C232000,
+            "cmp cr0,1,r3,r4 should encode as 0x7C232000"
+        );
     }
 
     #[test]
@@ -5378,13 +6639,14 @@ mod tests {
         .encode();
         let word = u32::from_be_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31);
-        assert_eq!((word >> 22) & 0x1, 1, "l field should be at bit 22");
+        assert_eq!((word >> 22) & 0x1, 0, "reserved bit 22 must be 0");
+        assert_eq!((word >> 21) & 0x1, 1, "l field should be at bit 21");
         assert_eq!((word >> 1) & 0x3FF, 32, "xo should be 32 for cmpl");
     }
 
     #[test]
     fn test_cmpi_l_field() {
-        // CMPI CR0, 1, r3, 0: verify l=1 is at bit 22, not bit 21
+        // CMPI CR0, 1, r3, 0: verify l=1 is at bit 21 (reserved bit 22 stays 0)
         let encoded = Instruction::Cmpi {
             bf: CrField::CR0,
             l: 1,
@@ -5393,12 +6655,17 @@ mod tests {
         }
         .encode();
         let word = u32::from_be_bytes(encoded);
-        assert_eq!((word >> 22) & 0x1, 1, "l field must be at bit 22 for 64-bit compare");
+        assert_eq!((word >> 22) & 0x1, 0, "reserved bit 22 must be 0 for CMPI");
+        assert_eq!(
+            (word >> 21) & 0x1,
+            1,
+            "l field must be at bit 21 for 64-bit compare"
+        );
     }
 
     #[test]
     fn test_cmpli_l_field() {
-        // CMPLI CR0, 1, r3, 0: verify l=1 is at bit 22
+        // CMPLI CR0, 1, r3, 0: verify l=1 is at bit 21 (reserved bit 22 stays 0)
         let encoded = Instruction::Cmpli {
             bf: CrField::CR0,
             l: 1,
@@ -5407,7 +6674,12 @@ mod tests {
         }
         .encode();
         let word = u32::from_be_bytes(encoded);
-        assert_eq!((word >> 22) & 0x1, 1, "l field must be at bit 22 for 64-bit compare");
+        assert_eq!((word >> 22) & 0x1, 0, "reserved bit 22 must be 0 for CMPLI");
+        assert_eq!(
+            (word >> 21) & 0x1,
+            1,
+            "l field must be at bit 21 for 64-bit compare"
+        );
     }
 
     #[test]
@@ -5423,15 +6695,28 @@ mod tests {
         assert_eq!((word >> 26) & 0x3F, 19);
         assert_eq!((word >> 21) & 0x1F, 20); // BO
         assert_eq!((word >> 1) & 0x3FF, 16); // xo
-        // Verify exact encoding: 0x4E800020
-        assert_eq!(word, 0x4E800020, "bclr 20,0,0 (blr) should encode as 0x4E800020");
+                                             // Verify exact encoding: 0x4E800020
+        assert_eq!(
+            word, 0x4E800020,
+            "bclr 20,0,0 (blr) should encode as 0x4E800020"
+        );
     }
 
     #[test]
     fn test_bclr_bh_field_encoding() {
         // BCLR with BH=1: verify BH is at MSB-first bits [19:21] = normal shift 10
-        let encoded_bh0 = Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode();
-        let encoded_bh1 = Instruction::Bclr { bo: 20, bi: 0, bh: 1 }.encode();
+        let encoded_bh0 = Instruction::Bclr {
+            bo: 20,
+            bi: 0,
+            bh: 0,
+        }
+        .encode();
+        let encoded_bh1 = Instruction::Bclr {
+            bo: 20,
+            bi: 0,
+            bh: 1,
+        }
+        .encode();
         let word0 = u32::from_be_bytes(encoded_bh0);
         let word1 = u32::from_be_bytes(encoded_bh1);
         let diff = word1 ^ word0;
@@ -5442,7 +6727,12 @@ mod tests {
     #[test]
     fn test_bcctr_encoding() {
         // BCTR = BCCTR 20, 0, 0: known encoding 0x4E800420
-        let encoded = Instruction::Bcctr { bo: 20, bi: 0, bh: 0 }.encode();
+        let encoded = Instruction::Bcctr {
+            bo: 20,
+            bi: 0,
+            bh: 0,
+        }
+        .encode();
         let word = u32::from_be_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 19);
         assert_eq!((word >> 1) & 0x3FF, 528, "xo should be 528 for bcctr");
@@ -5460,7 +6750,11 @@ mod tests {
         }
         .encode();
         let word = u32::from_be_bytes(encoded);
-        assert_eq!((word >> 26) & 0x3F, 30, "RLDCL must use primary opcode 30 (MD-form)");
+        assert_eq!(
+            (word >> 26) & 0x3F,
+            30,
+            "RLDCL must use primary opcode 30 (MD-form)"
+        );
         assert_eq!((word >> 21) & 0x1F, 4, "rS should be r4");
         assert_eq!((word >> 16) & 0x1F, 3, "rA should be r3");
         assert_eq!((word >> 11) & 0x1F, 5, "rB should be r5");
@@ -5469,8 +6763,20 @@ mod tests {
     #[test]
     fn test_rldcl_mb5_bit() {
         // RLDCL with mb=32: mb5 bit must be set at bit 5 (normal) = MSB-first bit 26
-        let encoded_mb0 = Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode();
-        let encoded_mb32 = Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 32 }.encode();
+        let encoded_mb0 = Instruction::Rldcl {
+            ra: Gpr::R3,
+            rs: Gpr::R4,
+            rb: Gpr::R5,
+            mb: 0,
+        }
+        .encode();
+        let encoded_mb32 = Instruction::Rldcl {
+            ra: Gpr::R3,
+            rs: Gpr::R4,
+            rb: Gpr::R5,
+            mb: 32,
+        }
+        .encode();
         let word0 = u32::from_be_bytes(encoded_mb0);
         let word32 = u32::from_be_bytes(encoded_mb32);
         let diff = word32 ^ word0;
@@ -5489,14 +6795,30 @@ mod tests {
         }
         .encode();
         let word = u32::from_be_bytes(encoded);
-        assert_eq!((word >> 26) & 0x3F, 30, "RLDCR must use primary opcode 30 (MD-form)");
+        assert_eq!(
+            (word >> 26) & 0x3F,
+            30,
+            "RLDCR must use primary opcode 30 (MD-form)"
+        );
     }
 
     #[test]
     fn test_rldcr_me5_bit() {
         // RLDCR with me=32: me5 bit must be set at bit 5 (normal)
-        let encoded_me0 = Instruction::Rldcr { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, me: 0 }.encode();
-        let encoded_me32 = Instruction::Rldcr { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, me: 32 }.encode();
+        let encoded_me0 = Instruction::Rldcr {
+            ra: Gpr::R3,
+            rs: Gpr::R4,
+            rb: Gpr::R5,
+            me: 0,
+        }
+        .encode();
+        let encoded_me32 = Instruction::Rldcr {
+            ra: Gpr::R3,
+            rs: Gpr::R4,
+            rb: Gpr::R5,
+            me: 32,
+        }
+        .encode();
         let word0 = u32::from_be_bytes(encoded_me0);
         let word32 = u32::from_be_bytes(encoded_me32);
         let diff = word32 ^ word0;
@@ -5511,7 +6833,11 @@ mod tests {
         let word = u32::from_be_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 18, "BL primary opcode must be 18");
         // The LI field occupies bits [2:25] (24 bits shifted by 2)
-        assert_eq!((word >> 2) & 0x00FF_FFFF, 0x00FF_FFFF, "LI field should be 24-bit");
+        assert_eq!(
+            (word >> 2) & 0x00FF_FFFF,
+            0x00FF_FFFF,
+            "LI field should be 24-bit"
+        );
     }
 
     #[test]
@@ -5721,7 +7047,10 @@ mod tests {
             .any(|i| {
                 if i.encoded.len() >= 4 {
                     let word = u32::from_be_bytes([
-                        i.encoded[0], i.encoded[1], i.encoded[2], i.encoded[3],
+                        i.encoded[0],
+                        i.encoded[1],
+                        i.encoded[2],
+                        i.encoded[3],
                     ]);
                     word == 0x7FE00008
                 } else {
@@ -5750,7 +7079,10 @@ mod tests {
             .any(|i| {
                 if i.encoded.len() >= 4 {
                     let word = u32::from_be_bytes([
-                        i.encoded[0], i.encoded[1], i.encoded[2], i.encoded[3],
+                        i.encoded[0],
+                        i.encoded[1],
+                        i.encoded[2],
+                        i.encoded[3],
                     ]);
                     word == 0x60000000
                 } else {
@@ -5797,15 +7129,20 @@ mod tests {
                     break;
                 }
             }
-            if has_add { break; }
+            if has_add {
+                break;
+            }
         }
-        assert!(has_add, "BinOp::Add should emit an add instruction (opcode 31, xo 266)");
+        assert!(
+            has_add,
+            "BinOp::Add should emit an add instruction (opcode 31, xo 266)"
+        );
     }
 
     #[test]
     fn test_real_regalloc_metadata() {
-        use crate::ir::{VirtualRegister, IRFunction, IRInstr, IRValue};
         use crate::backend::Backend;
+        use crate::ir::{IRFunction, IRInstr, IRValue, VirtualRegister};
 
         let mut func = IRFunction::new("test_real_regalloc".to_string());
         func.vregs.insert(0, VirtualRegister::anonymous(0));
@@ -5830,8 +7167,14 @@ mod tests {
         let result_real = backend.allocate_registers(&func);
         assert!(result_real.is_ok(), "real regalloc should succeed");
         let real_func = result_real.unwrap();
-        assert!(!real_func.blocks.is_empty(), "real regalloc should produce blocks");
-        assert!(!real_func.blocks[0].instructions.is_empty(), "real regalloc should produce instructions");
+        assert!(
+            !real_func.blocks.is_empty(),
+            "real regalloc should produce blocks"
+        );
+        assert!(
+            !real_func.blocks[0].instructions.is_empty(),
+            "real regalloc should produce instructions"
+        );
     }
 }
 pub mod disasm;

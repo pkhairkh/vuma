@@ -23,10 +23,10 @@
 //! The benchmark suite can be invoked via `vuma --bench` or used
 //! programmatically from the `vuma-tests` crate.
 
-pub mod sha256d;
-pub mod compilation_speed;
 pub mod backend_comparison;
 pub mod codegen_quality;
+pub mod compilation_speed;
+pub mod sha256d;
 
 use std::fmt;
 use std::time::Duration;
@@ -131,7 +131,10 @@ impl BenchmarkSuiteReport {
 
     /// Find a result by name prefix.
     pub fn find(&self, prefix: &str) -> Vec<&BenchmarkResult> {
-        self.results.iter().filter(|r| r.name.starts_with(prefix)).collect()
+        self.results
+            .iter()
+            .filter(|r| r.name.starts_with(prefix))
+            .collect()
     }
 }
 
@@ -227,7 +230,12 @@ mod tests {
 
     #[test]
     fn test_measure_utility() {
-        let (mean, median) = measure(|| { let _ = 1 + 1; }, 10);
+        let (mean, median) = measure(
+            || {
+                let _ = 1 + 1;
+            },
+            10,
+        );
         assert!(mean > 0);
         assert!(median > 0);
     }

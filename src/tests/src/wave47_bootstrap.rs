@@ -43,7 +43,7 @@ use std::path::Path;
 use vuma_codegen::backend::{AllocatedProgram, Backend};
 use vuma_codegen::ir::{IRFunction, IRInstr, IRTerminator, IRType, IRValue};
 use vuma_codegen::x86_64::{
-    RUNTIME_ARGV_STORAGE_PLACEHOLDER, RUNTIME_ARGV_STORAGE_SIZE, X86_64Backend,
+    X86_64Backend, RUNTIME_ARGV_STORAGE_PLACEHOLDER, RUNTIME_ARGV_STORAGE_SIZE,
 };
 
 // ===========================================================================
@@ -79,8 +79,10 @@ fn build_main_calling_argc() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(0));
-    func.vregs
-        .insert(0, vuma_codegen::ir::VirtualRegister::new(0, Some("argc".to_string())));
+    func.vregs.insert(
+        0,
+        vuma_codegen::ir::VirtualRegister::new(0, Some("argc".to_string())),
+    );
 
     let block = func.current_block();
     block.push(IRInstr::Call {
@@ -99,8 +101,10 @@ fn build_main_calling_argv() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(0));
-    func.vregs
-        .insert(0, vuma_codegen::ir::VirtualRegister::new(0, Some("argv".to_string())));
+    func.vregs.insert(
+        0,
+        vuma_codegen::ir::VirtualRegister::new(0, Some("argv".to_string())),
+    );
 
     let block = func.current_block();
     block.push(IRInstr::Call {
@@ -124,8 +128,8 @@ fn compile_to_elf_x86_64(func: IRFunction) -> Vec<u8> {
         functions: vec![allocated],
         total_code_size: 0,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
     backend
         .encode_program(&program)
@@ -240,11 +244,13 @@ fn test_wave47_bootstrap_source_uses_argv() {
     // the fallback function (byte 119 = 'w', byte 111 = 'o', etc.).
     // VUMA 2.0: uses __vuma_store_u8 instead of *(buf + N) = value.
     assert!(
-        source.contains("__vuma_store_u8(buf + 0, 119)") || source.contains("__vuma_store_u8(buf, 119)"),
+        source.contains("__vuma_store_u8(buf + 0, 119)")
+            || source.contains("__vuma_store_u8(buf, 119)"),
         "write_fallback_path must still contain the hardcoded 'w' byte (119)"
     );
     assert!(
-        source.contains("__vuma_store_u8(buf + 20, 0)") || source.contains("__vuma_store_u8(buf, 0)"),
+        source.contains("__vuma_store_u8(buf + 20, 0)")
+            || source.contains("__vuma_store_u8(buf, 0)"),
         "write_fallback_path must still NUL-terminate the fallback path"
     );
 

@@ -78,9 +78,7 @@ fn extract_function_body(source: &str, name: &str) -> String {
     let rest = &source[start..];
     let mut end = source.len();
     // Walk past the function header line, then look for `\nfn ` at column 0.
-    let after_header = rest
-        .find('{')
-        .unwrap_or(rest.len());
+    let after_header = rest.find('{').unwrap_or(rest.len());
     let search_from = start + after_header + 1;
     if let Some(rel) = source[search_from..].find("\nfn ") {
         end = search_from + rel;

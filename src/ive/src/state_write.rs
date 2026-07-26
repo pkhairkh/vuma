@@ -143,7 +143,8 @@ pub fn verify_state_writes(
                     field_name: w.field_name.clone(),
                     valid: false,
                     error: Some(format!(
-                        "field '{}' not found in layout '{}'", w.field_name, layout_name
+                        "field '{}' not found in layout '{}'",
+                        w.field_name, layout_name
                     )),
                 });
             }
@@ -165,24 +166,28 @@ mod tests {
         LayoutInfo {
             name: name.to_string(),
             total_size: fields.iter().map(|(_, sz, _, _)| *sz).sum(),
-            fields: fields.iter().map(|(fn_, sz, _off, ty)| {
-                let f = FieldInfo {
-                    name: fn_.to_string(),
-                    offset,
-                    size: *sz,
-                    type_name: ty.to_string(),
-                };
-                offset += sz;
-                f
-            }).collect(),
+            fields: fields
+                .iter()
+                .map(|(fn_, sz, _off, ty)| {
+                    let f = FieldInfo {
+                        name: fn_.to_string(),
+                        offset,
+                        size: *sz,
+                        type_name: ty.to_string(),
+                    };
+                    offset += sz;
+                    f
+                })
+                .collect(),
         }
     }
 
     #[test]
     fn test_valid_write() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", &[("x", 4, 0, "u32"), ("y", 4, 0, "u32")])),
-        ]);
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32"), ("y", 4, 0, "u32")]),
+        )]);
         let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
         let writes = vec![StateWriteOp {
             var_name: "p".to_string(),
@@ -197,9 +202,10 @@ mod tests {
 
     #[test]
     fn test_linearity_violation() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", &[("x", 4, 0, "u32")])),
-        ]);
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32")]),
+        )]);
         let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
         let writes = vec![StateWriteOp {
             var_name: "p".to_string(),
@@ -215,9 +221,10 @@ mod tests {
 
     #[test]
     fn test_write_after_consume_in_set() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", &[("x", 4, 0, "u32")])),
-        ]);
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32")]),
+        )]);
         let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
         let writes = vec![StateWriteOp {
             var_name: "p".to_string(),
@@ -233,9 +240,10 @@ mod tests {
 
     #[test]
     fn test_type_mismatch() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", &[("x", 4, 0, "u32")])),
-        ]);
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32")]),
+        )]);
         let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
         let writes = vec![StateWriteOp {
             var_name: "p".to_string(),
@@ -247,5 +255,58 @@ mod tests {
         let results = verify_state_writes(&var_layouts, &layouts, &writes, &consumed);
         assert!(!all_valid(&results));
         assert!(results[0].error.as_ref().unwrap().contains("type mismatch"));
+    }
+
+    // ── [Task 9-d / Caveats §6 row 3] Negative-path test ───────────────
+    //
+    // Covers the PMT linearity-violation negative path documented in
+    // `tests/gold_standard/pmt_wave3_negative/write_after_consume.vuma`:
+    // a state is consumed by a transform, then written to.  The
+    // verifier returns `Vec<StateWriteVerification>` with `valid=false`
+    // and a specific error message rather than panicking, so per the
+    // task brief this test uses `assert!(!all_valid(...))` plus an
+    // error-message substring check.
+
+    /// [PMT violation: linearity] Writing to a state after it has been
+    /// consumed by a transform must yield an invalid result whose
+    /// error message contains BOTH the literal "linearity violation"
+    /// AND the name of the consumed variable.  This is the
+    /// negative-path counterpart to `test_valid_write` above.
+    #[test]
+    fn test_negative_linearity_violation_error_message_is_specific() {
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32")]),
+        )]);
+        let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
+        // The `consumed` set marks `p` as consumed by a prior transform
+        // (mirrors `StateTransformNode` marking its input vreg as
+        // consumed in `verification.rs::verify_pmt`).
+        let consumed = HashSet::from(["p".to_string()]);
+        let writes = vec![StateWriteOp {
+            var_name: "p".to_string(),
+            field_name: "x".to_string(),
+            value_type: "u32".to_string(),
+            after_consume: false,
+        }];
+        let results = verify_state_writes(&var_layouts, &layouts, &writes, &consumed);
+        assert!(
+            !all_valid(&results),
+            "write to a consumed state must yield an invalid verification result"
+        );
+        let err = results[0]
+            .error
+            .as_ref()
+            .expect("error message must be set on invalid result");
+        assert!(
+            err.contains("linearity violation"),
+            "error message must mention 'linearity violation'; got: {}",
+            err
+        );
+        assert!(
+            err.contains("'p'"),
+            "error message must name the consumed variable ('p'); got: {}",
+            err
+        );
     }
 }

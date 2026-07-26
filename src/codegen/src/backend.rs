@@ -4,9 +4,9 @@
 //! multiple instruction set architectures. Each ISA implements these traits
 //! to provide target-specific information and code generation.
 //!
-//! # Wave 8a — Single-Buffer PMT State Lowering
+//! # Single-Buffer PMT State Lowering
 //!
-//! As of Wave 8a, PMT state-typed allocations (`let p = state_new(Layout)`)
+//! PMT state-typed allocations (`let p = state_new(Layout)`)
 //! no longer lower to per-state `IRInstr::Alloc`s. Instead, the IRBuilder
 //! emits ONE `IRInstr::Alloc` for a program-wide buffer (`___pmt_buffer`)
 //! at the start of `main`, and each state-typed allocation becomes an
@@ -19,7 +19,7 @@
 //! `IRInstr::Alloc` and `IRInstr::Offset` are both already supported by
 //! every backend (the former via stack-slot reservation, the latter via
 //! `LEA`/`ADD`/`ADDI` etc.). No `_start` stub modification or runtime
-//! helper is needed (Approach A from the Wave 8a task description).
+//! helper is needed.
 //!
 //! The buffer is sized to the SUM of all state-typed allocation sizes
 //! (each aligned to 16 bytes), computed by the IRBuilder's pre-pass
@@ -30,30 +30,30 @@
 //! allocations from regular `allocate(N)` calls (which still use the
 //! per-call `Alloc` path).
 
+use crate::aarch64_be::AArch64BeBackend;
+use crate::alpha::AlphaBackend;
 use crate::arm32::Arm32Backend;
+use crate::armeb::ArmEbBackend;
+use crate::hppa::HppaBackend;
 use crate::ir::{
-    size_of_with_ptr_width, alignment_of_with_ptr_width, BinOpKind, IRFunction, IRInstr, IRProgram,
+    alignment_of_with_ptr_width, size_of_with_ptr_width, BinOpKind, IRFunction, IRInstr, IRProgram,
     IRType,
 };
 use crate::loongarch64::LoongArch64Backend;
+use crate::m68k::M68kBackend;
 use crate::mips64::Mips64Backend;
+use crate::mips64be::Mips64BeBackend;
 use crate::ppc64::PPC64Backend;
 use crate::ppc64le::PPC64LEBackend;
 use crate::riscv64::RiscV64Backend;
 use crate::s390x::S390XBackend;
 use crate::sparc64::Sparc64Backend;
-use crate::mips64be::Mips64BeBackend;
-use crate::armeb::ArmEbBackend;
-use crate::aarch64_be::AArch64BeBackend;
-use crate::m68k::M68kBackend;
-use crate::alpha::AlphaBackend;
-use crate::hppa::HppaBackend;
 use crate::x86_64::X86_64Backend;
 use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
-// IR float-op verification (F2a)
+// IR float-op verification
 // ---------------------------------------------------------------------------
 //
 // VUMA's `BinOpKind` is deliberately type-tag-polymorphic: the same
@@ -70,19 +70,20 @@ use std::fmt;
 // `verify_program_float_ops` walk an `IRFunction` / `IRProgram` and collect
 // every violation.
 //
-// WIRING: The `Backend` trait's `allocate_registers(&self, func: &IRFunction)`
-// is the per-function, pre-lowering entry point every backend implements.
-// Each backend SHOULD call `verify_function_float_ops(func)` (or the
-// `verify_float_op` helper directly in its own walk) at the top of its
-// `allocate_registers` impl and map any `Err` into
-// `BackendError::InvalidInstruction`.  `AArch64Backend::allocate_registers`
-// (in this file) is wired as the reference call site; other backends
-// (`alpha.rs`, `hppa.rs`, `s390x.rs`, `sparc64.rs`, `arm64.rs`,
-// `x86_64/`, `riscv64.rs`, `arm32/`, `mips64/`, `ppc64/`, `ppc64le.rs`,
-// `loongarch64/`, `wasm32/`, `riscv32.rs`, `x86_32/`, `mips64be.rs`,
-// `armeb.rs`, `aarch64_be.rs`, `m68k.rs`) need the same one-liner added —
-// that wiring is a follow-up task (out of scope for F2a because F2a is
-// restricted to editing `backend.rs` only).
+// WIRING: Pre-lowering float-op verification
+// is now wired CENTRALLY in the compilation drivers, NOT per-backend.
+// The 5 central driver call sites — `compile_to_binary_direct`
+// (`src/main.rs`), `compile_modules` and `compile_to_wasm`
+// (`src/pipeline.rs`), `run_backend_codegen` (`src/api.rs`), and the
+// `compile_dump` dev binary (`src/bin/compile_dump.rs`) — each call
+// `verify_program_float_ops(&ir_program)` ONCE immediately after IR
+// construction and before any backend's `allocate_registers` runs.
+// Every backend (including the 4 thin wrappers `aarch64_be`, `armeb`,
+// `mips64be`, `ppc64le`) benefits without per-backend wiring.  The
+// former AArch64-only call site in `AArch64Backend::allocate_registers`
+// has been removed (the central call subsumes it).  The per-backend
+// `allocate_registers` one-liner pattern documented below remains
+// available for any future backend that wants defense-in-depth.
 
 /// Verify that a binary operation is valid for the given result type.
 ///
@@ -143,10 +144,13 @@ pub fn verify_float_op(op: BinOpKind, ty: Option<&IRType>) -> Result<(), String>
 /// (each message includes the function name and block label so the
 /// user can locate the offending op).
 ///
-/// This is the per-function pre-lowering validation pass.  Backends
-/// should call it at the top of `allocate_registers` and map the
-/// error vector to `BackendError::InvalidInstruction` (joining the
-/// messages with `"; "`).
+/// This is the per-function pre-lowering validation pass.  The
+/// central compilation drivers call
+/// `verify_program_float_ops` (which delegates to this function) once
+/// per program, before any `allocate_registers` runs — so individual
+/// backends do NOT need to call this themselves.  The function is
+/// retained as `pub` for callers (e.g. tests, dev tools) that hold a
+/// single `IRFunction` rather than a full `IRProgram`.
 pub fn verify_function_float_ops(func: &IRFunction) -> Result<(), Vec<String>> {
     let mut errs: Vec<String> = Vec::new();
     for block in &func.blocks {
@@ -172,11 +176,14 @@ pub fn verify_function_float_ops(func: &IRFunction) -> Result<(), Vec<String>> {
 /// Returns `Ok(())` if the program is clean, or `Err(Vec<String>)` with
 /// one message per violating instruction (across all functions).
 ///
-/// This is the program-level pre-lowering validation pass.  It is the
-/// ideal single call site for a future central compilation driver: call
-/// `verify_program_float_ops(&program)?` once after IR construction and
-/// before any backend's `allocate_registers` runs, and every backend
-/// benefits without per-backend wiring.
+/// This is the program-level pre-lowering validation pass.  It is
+/// wired into the 5 central compilation drivers
+/// (`compile_to_binary_direct`, `compile_modules`, `compile_to_wasm`,
+/// `run_backend_codegen`, and the `compile_dump` dev binary) — each
+/// calls `verify_program_float_ops(&ir_program)?` once immediately
+/// after IR construction and before any backend's `allocate_registers`
+/// runs, so every backend (including the 4 thin wrappers) benefits
+/// without per-backend wiring.
 pub fn verify_program_float_ops(program: &IRProgram) -> Result<(), Vec<String>> {
     let mut errs: Vec<String> = Vec::new();
     for func in &program.functions {
@@ -465,10 +472,10 @@ pub struct AllocatedProgram {
     pub total_code_size: usize,
     /// Total data section size in bytes.
     pub total_data_size: usize,
-    /// Wave 1: Read-only data (string literals) to be placed in .rodata.
+    /// Read-only data (string literals) to be placed in .rodata.
     /// Concatenated bytes of all ReadOnly data sections.
     pub rodata_data: Vec<u8>,
-    /// Wave 5: All known function names (from the AST). Used to distinguish
+    /// All known function names (from the AST). Used to distinguish
     /// function symbols (which should be in .text) from data symbols (which
     /// go in .bss). Without this, functions removed by the O2 optimizer but
     /// still referenced via GetAddress would be incorrectly classified as
@@ -696,12 +703,12 @@ pub trait TargetInfo: Send + Sync + 'static {
     /// Binary format produced by this backend.
     fn output_format(&self) -> OutputFormat;
 
-    // === Scheduling (Wave 10) ===
+    // === Scheduling ===
 
     /// Returns the instruction latency table for this target.
     ///
-    /// Used by the instruction scheduler (Wave 5) and the e-graph cost
-    /// function (Wave 10) to make per-ISA optimization decisions.
+    /// Used by the instruction scheduler and the e-graph cost
+    /// function to make per-ISA optimization decisions.
     ///
     /// Default implementation returns `LatencyTable::default_ooo()` (a
     /// conservative modern OoO profile). Each backend should override
@@ -863,17 +870,25 @@ impl BackendKind {
         //   branches). Suitable only for `test_exit`-style smoke tests.
         match self {
             // Tier 1 — fully featured and tested.
-            BackendKind::AArch64 | BackendKind::AArch64Be |
-            BackendKind::X86_64 | BackendKind::X86_32 |
-            BackendKind::RiscV64 | BackendKind::RiscV32 |
-            BackendKind::LoongArch64 | BackendKind::Arm32 | BackendKind::ArmEb |
-            BackendKind::Mips64 | BackendKind::Mips64Be |
-            BackendKind::PowerPC64 | BackendKind::PowerPC64LE |
-            BackendKind::Wasm32 => BackendTier::Complete,
+            BackendKind::AArch64
+            | BackendKind::AArch64Be
+            | BackendKind::X86_64
+            | BackendKind::X86_32
+            | BackendKind::RiscV64
+            | BackendKind::RiscV32
+            | BackendKind::LoongArch64
+            | BackendKind::Arm32
+            | BackendKind::ArmEb
+            | BackendKind::Mips64
+            | BackendKind::Mips64Be
+            | BackendKind::PowerPC64
+            | BackendKind::PowerPC64LE
+            | BackendKind::Wasm32 => BackendTier::Complete,
             // Tier 2 — functional integer codegen, known gaps (signed div,
             // FP, atomics, callee-saved). See docs/AUDIT.md.
-            BackendKind::Sparc64 | BackendKind::S390X |
-            BackendKind::M68k | BackendKind::Alpha => BackendTier::Experimental,
+            BackendKind::Sparc64 | BackendKind::S390X | BackendKind::M68k | BackendKind::Alpha => {
+                BackendTier::Experimental
+            }
             // Tier 3 — Mul/Div/Cmp/conditional-branches emit stub code.
             BackendKind::Hppa => BackendTier::Scaffolded,
         }
@@ -1419,29 +1434,75 @@ impl TargetInfo for X86_64TargetInfo {
 pub struct X86_32TargetInfo;
 
 impl TargetInfo for X86_32TargetInfo {
-    fn isa_name(&self) -> &'static str { "x86_32" }
-    fn target_triple(&self) -> &'static str { "i386-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 3 } // EM_386
-    fn default_base_address(&self) -> u64 { 0x08048000 }
-    fn pointer_width(&self) -> usize { 4 }
-    fn size_of(&self, ty: &IRType) -> usize { size_of_with_ptr_width(ty, 4) }
-    fn alignment_of(&self, ty: &IRType) -> usize { alignment_of_with_ptr_width(ty, 4) }
-    fn endianness(&self) -> Endianness { Endianness::Little }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 8 }
-    fn num_simd_fp_regs(&self) -> usize { 8 }
-    fn has_hardwired_zero(&self) -> bool { false }
-    fn has_link_register(&self) -> bool { false }
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "cdecl" }
-    fn num_int_arg_regs(&self) -> usize { 0 }
-    fn num_fp_arg_regs(&self) -> usize { 0 }
-    fn stack_alignment(&self) -> usize { 16 }
-    fn instruction_alignment(&self) -> usize { 1 }
-    fn instruction_width_range(&self) -> (usize, usize) { (1, 15) }
-    fn output_format(&self) -> OutputFormat { OutputFormat::Elf32 }
+    fn isa_name(&self) -> &'static str {
+        "x86_32"
+    }
+    fn target_triple(&self) -> &'static str {
+        "i386-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        3
+    } // EM_386
+    fn default_base_address(&self) -> u64 {
+        0x08048000
+    }
+    fn pointer_width(&self) -> usize {
+        4
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        size_of_with_ptr_width(ty, 4)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        alignment_of_with_ptr_width(ty, 4)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        8
+    }
+    fn num_simd_fp_regs(&self) -> usize {
+        8
+    }
+    fn has_hardwired_zero(&self) -> bool {
+        false
+    }
+    fn has_link_register(&self) -> bool {
+        false
+    }
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "cdecl"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        0
+    }
+    fn num_fp_arg_regs(&self) -> usize {
+        0
+    }
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        1
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (1, 15)
+    }
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf32
+    }
 
     fn latency_table(&self) -> crate::target_desc::LatencyTable {
         crate::target_desc::LatencyTable::x86_32()
@@ -2028,8 +2089,7 @@ fn arm64_instruction_regs(
             reads.push(gpr(rn));
             writes.push(gpr(rt));
         }
-        Instruction::STXR { rs, rt, rn }
-        | Instruction::STLXR { rs, rt, rn } => {
+        Instruction::STXR { rs, rt, rn } | Instruction::STLXR { rs, rt, rn } => {
             reads.push(gpr(rn));
             reads.push(gpr(rt));
             writes.push(gpr(rs));
@@ -2139,7 +2199,7 @@ impl AArch64Backend {
         }
     }
 
-    /// Wave 22: Emit a function using real register allocation.
+    /// Emit a function using real register allocation.
     ///
     /// Consumes a `RegAllocResult` (from `TargetAgnosticRegAlloc`) and
     /// produces an `AllocatedFunction` where each instruction's
@@ -2156,31 +2216,31 @@ impl AArch64Backend {
     ) -> Result<AllocatedFunction, BackendError> {
         // Step 1: Run the existing stack-slot emitter to produce correct
         // encoded instruction words.  Pass `None` for the AllocationResult
-        // to use the stack-slot path (Wave 21 changed emit_function to
+        // to use the stack-slot path (emit_function was changed to
         // accept Option<&AllocationResult>; we annotate post-hoc with the
         // backend-agnostic RegAllocResult instead).
         let mut emitter = crate::emit::Emitter::new();
-        let code_words = emitter
-            .emit_function(func, None)
-            .map_err(|e| BackendError::RegisterAllocFailed {
-                isa: "aarch64",
-                reason: e.to_string(),
-            })?;
+        let code_words =
+            emitter
+                .emit_function(func, None)
+                .map_err(|e| BackendError::RegisterAllocFailed {
+                    isa: "aarch64",
+                    reason: e.to_string(),
+                })?;
 
         // Convert each 32-bit word into an AllocatedInstruction.
         let instructions: Vec<AllocatedInstruction> = code_words
             .iter()
             .enumerate()
             .map(|(i, &word)| {
-                let (opcode, reads, writes) =
-                    match crate::arm64::Instruction::decode(word) {
-                        Some(inst) => {
-                            let opcode = format!("{}", inst);
-                            let (reads, writes) = arm64_instruction_regs(&inst);
-                            (opcode, reads, writes)
-                        }
-                        None => (format!("arm64_{}", i), Vec::new(), Vec::new()),
-                    };
+                let (opcode, reads, writes) = match crate::arm64::Instruction::decode(word) {
+                    Some(inst) => {
+                        let opcode = format!("{}", inst);
+                        let (reads, writes) = arm64_instruction_regs(&inst);
+                        (opcode, reads, writes)
+                    }
+                    None => (format!("arm64_{}", i), Vec::new(), Vec::new()),
+                };
                 AllocatedInstruction {
                     opcode,
                     reads,
@@ -2216,7 +2276,7 @@ impl AArch64Backend {
         Ok(allocated)
     }
 
-    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    /// Convenience method — run regalloc + emit in one step.
     pub fn emit_function_with_regalloc(
         &self,
         func: &IRFunction,
@@ -2442,11 +2502,11 @@ fn append_aarch64_elf_sections(
     symtab.extend_from_slice(&[0u8; 24]); // NULL symbol
     for &name_off in &sym_name_offsets {
         symtab.extend_from_slice(&name_off.to_le_bytes()); // st_name
-        symtab.push((STB_GLOBAL << 4) | STT_FUNC);          // st_info
-        symtab.push(0);                                       // st_other
-        symtab.extend_from_slice(&SHN_UNDEF.to_le_bytes());  // st_shndx
-        symtab.extend_from_slice(&0u64.to_le_bytes());       // st_value
-        symtab.extend_from_slice(&0u64.to_le_bytes());       // st_size
+        symtab.push((STB_GLOBAL << 4) | STT_FUNC); // st_info
+        symtab.push(0); // st_other
+        symtab.extend_from_slice(&SHN_UNDEF.to_le_bytes()); // st_shndx
+        symtab.extend_from_slice(&0u64.to_le_bytes()); // st_value
+        symtab.extend_from_slice(&0u64.to_le_bytes()); // st_size
     }
 
     // ── Append section data to the file ──
@@ -2589,45 +2649,151 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     // All instructions via `Instruction::encode()` for correct encodings.
     // Stack: 32 bytes (16 for FP/LR, 16 for buffer).
     {
-        use crate::arm64::{Instruction, Register, Operand, Condition};
+        use crate::arm64::{Condition, Instruction, Operand, Register};
         macro_rules! e {
-            ($i:expr) => { code.extend_from_slice(&$i.encode().unwrap().to_le_bytes()) };
+            ($i:expr) => {
+                code.extend_from_slice(&$i.encode().unwrap().to_le_bytes())
+            };
         }
         // ── Prologue ──
-        e!(Instruction::SUB { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });               // 0: SUB SP, SP, #32
-        e!(Instruction::STP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 1: STP X29, X30, [SP]
-        e!(Instruction::ADD { rd: Register::X29, rn: Register::SP, rm: Operand::Imm12(0) });               // 2: ADD X29, SP, #0
-        // ── Setup ──
-        e!(Instruction::ADD { rd: Register::X9, rn: Register::SP, rm: Operand::Imm12(16) });               // 3: ADD X9, SP, #16  (buffer)
-        e!(Instruction::MOVZ { rd: Register::X10, imm16: 0, shift: 0 });                                    // 4: MOVZ X10, #0  (counter)
-        e!(Instruction::MOVZ { rd: Register::X3, imm16: 28, shift: 0 });                                    // 5: MOVZ X3, #28  (shift amount)
-        e!(Instruction::MOVZ { rd: Register::X8, imm16: 15, shift: 0 });                                    // 6: MOVZ X8, #15  (mask 0xF)
-        // ── Loop (instruction 7 = loop_start) ──
-        e!(Instruction::LSR { rd: Register::X2, rn: Register::X0, rm: Operand::Reg { reg: Register::X3, shift: None } }); // 7: LSR X2, X0, X3
-        e!(Instruction::AND { rd: Register::X2, rn: Register::X2, rm: Register::X8 });                     // 8: AND X2, X2, X8  (nibble)
-        e!(Instruction::CMP { rn: Register::X2, rm: Operand::Imm12(9) });                                   // 9: CMP X2, #9
-        e!(Instruction::ADD { rd: Register::X1, rn: Register::X2, rm: Operand::Imm12(48) });               // 10: ADD X1, X2, #48  ('0'+digit, default)
-        e!(Instruction::BCond { cond: Condition::GT, offset: 8 });                                          // 11: B.GT hex_alpha (+8 → instr 13)
-        e!(Instruction::B { offset: 8 });                                                                   // 12: B store_char (+8 → instr 14)
-        // hex_alpha:
-        e!(Instruction::ADD { rd: Register::X1, rn: Register::X2, rm: Operand::Imm12(87) });               // 13: ADD X1, X2, #87  ('a'-10+digit)
-        // store_char: (reuse X8 as scratch addr — mask no longer needed)
-        e!(Instruction::ADD { rd: Register::X8, rn: Register::X9, rm: Operand::Reg { reg: Register::X10, shift: None } }); // 14: ADD X8, X9, X10  (addr)
-        e!(Instruction::STRB { rt: Register::X1, rn: Register::X8, offset: 0 });                            // 15: STRB W1, [X8]
-        e!(Instruction::SUB { rd: Register::X3, rn: Register::X3, rm: Operand::Imm12(4) });                // 16: SUB X3, X3, #4  (shift -= 4)
-        e!(Instruction::ADD { rd: Register::X10, rn: Register::X10, rm: Operand::Imm12(1) });              // 17: ADD X10, X10, #1  (counter++)
-        e!(Instruction::CMP { rn: Register::X10, rm: Operand::Imm12(8) });                                   // 18: CMP X10, #8
-        e!(Instruction::BCond { cond: Condition::LT, offset: -48 });                                         // 19: B.LT loop_start (-48 → instr 7)
-        // ── sys_write(1, SP+16, 8) ──
-        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // 20: MOVZ X0, #1  (fd)
-        e!(Instruction::ADD { rd: Register::X1, rn: Register::SP, rm: Operand::Imm12(16) });               // 21: ADD X1, SP, #16  (buf)
-        e!(Instruction::MOVZ { rd: Register::X2, imm16: 8, shift: 0 });                                     // 22: MOVZ X2, #8  (len)
-        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // 23: MOVZ X8, #64  (sys_write)
-        e!(Instruction::SVC { imm16: 0 });                                                                  // 24: SVC #0
-        // ── Epilogue ──
-        e!(Instruction::LDP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 25: LDP X29, X30, [SP]
-        e!(Instruction::ADD { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });              // 26: ADD SP, SP, #32
-        e!(Instruction::RET { rn: None });                                                                  // 27: RET
+        e!(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(32)
+        }); // 0: SUB SP, SP, #32
+        e!(Instruction::STP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0
+        }); // 1: STP X29, X30, [SP]
+        e!(Instruction::ADD {
+            rd: Register::X29,
+            rn: Register::SP,
+            rm: Operand::Imm12(0)
+        }); // 2: ADD X29, SP, #0
+            // ── Setup ──
+        e!(Instruction::ADD {
+            rd: Register::X9,
+            rn: Register::SP,
+            rm: Operand::Imm12(16)
+        }); // 3: ADD X9, SP, #16  (buffer)
+        e!(Instruction::MOVZ {
+            rd: Register::X10,
+            imm16: 0,
+            shift: 0
+        }); // 4: MOVZ X10, #0  (counter)
+        e!(Instruction::MOVZ {
+            rd: Register::X3,
+            imm16: 28,
+            shift: 0
+        }); // 5: MOVZ X3, #28  (shift amount)
+        e!(Instruction::MOVZ {
+            rd: Register::X8,
+            imm16: 15,
+            shift: 0
+        }); // 6: MOVZ X8, #15  (mask 0xF)
+            // ── Loop (instruction 7 = loop_start) ──
+        e!(Instruction::LSR {
+            rd: Register::X2,
+            rn: Register::X0,
+            rm: Operand::Reg {
+                reg: Register::X3,
+                shift: None
+            }
+        }); // 7: LSR X2, X0, X3
+        e!(Instruction::AND {
+            rd: Register::X2,
+            rn: Register::X2,
+            rm: Register::X8
+        }); // 8: AND X2, X2, X8  (nibble)
+        e!(Instruction::CMP {
+            rn: Register::X2,
+            rm: Operand::Imm12(9)
+        }); // 9: CMP X2, #9
+        e!(Instruction::ADD {
+            rd: Register::X1,
+            rn: Register::X2,
+            rm: Operand::Imm12(48)
+        }); // 10: ADD X1, X2, #48  ('0'+digit, default)
+        e!(Instruction::BCond {
+            cond: Condition::GT,
+            offset: 8
+        }); // 11: B.GT hex_alpha (+8 → instr 13)
+        e!(Instruction::B { offset: 8 }); // 12: B store_char (+8 → instr 14)
+                                          // hex_alpha:
+        e!(Instruction::ADD {
+            rd: Register::X1,
+            rn: Register::X2,
+            rm: Operand::Imm12(87)
+        }); // 13: ADD X1, X2, #87  ('a'-10+digit)
+            // store_char: (reuse X8 as scratch addr — mask no longer needed)
+        e!(Instruction::ADD {
+            rd: Register::X8,
+            rn: Register::X9,
+            rm: Operand::Reg {
+                reg: Register::X10,
+                shift: None
+            }
+        }); // 14: ADD X8, X9, X10  (addr)
+        e!(Instruction::STRB {
+            rt: Register::X1,
+            rn: Register::X8,
+            offset: 0
+        }); // 15: STRB W1, [X8]
+        e!(Instruction::SUB {
+            rd: Register::X3,
+            rn: Register::X3,
+            rm: Operand::Imm12(4)
+        }); // 16: SUB X3, X3, #4  (shift -= 4)
+        e!(Instruction::ADD {
+            rd: Register::X10,
+            rn: Register::X10,
+            rm: Operand::Imm12(1)
+        }); // 17: ADD X10, X10, #1  (counter++)
+        e!(Instruction::CMP {
+            rn: Register::X10,
+            rm: Operand::Imm12(8)
+        }); // 18: CMP X10, #8
+        e!(Instruction::BCond {
+            cond: Condition::LT,
+            offset: -48
+        }); // 19: B.LT loop_start (-48 → instr 7)
+            // ── sys_write(1, SP+16, 8) ──
+        e!(Instruction::MOVZ {
+            rd: Register::X0,
+            imm16: 1,
+            shift: 0
+        }); // 20: MOVZ X0, #1  (fd)
+        e!(Instruction::ADD {
+            rd: Register::X1,
+            rn: Register::SP,
+            rm: Operand::Imm12(16)
+        }); // 21: ADD X1, SP, #16  (buf)
+        e!(Instruction::MOVZ {
+            rd: Register::X2,
+            imm16: 8,
+            shift: 0
+        }); // 22: MOVZ X2, #8  (len)
+        e!(Instruction::MOVZ {
+            rd: Register::X8,
+            imm16: 64,
+            shift: 0
+        }); // 23: MOVZ X8, #64  (sys_write)
+        e!(Instruction::SVC { imm16: 0 }); // 24: SVC #0
+                                           // ── Epilogue ──
+        e!(Instruction::LDP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0
+        }); // 25: LDP X29, X30, [SP]
+        e!(Instruction::ADD {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(32)
+        }); // 26: ADD SP, SP, #32
+        e!(Instruction::RET { rn: None }); // 27: RET
     }
 
     // ── __vuma_print_int ──
@@ -2647,59 +2813,200 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     // overwrote past the stack frame → SIGSEGV — the test_print crash on
     // aarch64). This rewrite fixes all branch offsets by construction.
     {
-        use crate::arm64::{Instruction, Register, Operand, Condition};
+        use crate::arm64::{Condition, Instruction, Operand, Register};
         macro_rules! e {
-            ($i:expr) => { code.extend_from_slice(&$i.encode().unwrap().to_le_bytes()) };
+            ($i:expr) => {
+                code.extend_from_slice(&$i.encode().unwrap().to_le_bytes())
+            };
         }
         // ── Prologue ──
-        e!(Instruction::SUB { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(48) });               // 0: SUB SP, SP, #48
-        e!(Instruction::STP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 1: STP X29, X30, [SP]
-        e!(Instruction::ADD { rd: Register::X29, rn: Register::SP, rm: Operand::Imm12(0) });               // 2: ADD X29, SP, #0
-        // ── Handle negative ──
-        e!(Instruction::CMP { rn: Register::X0, rm: Operand::Imm12(0) });                                   // 3: CMP X0, #0
-        e!(Instruction::BCond { cond: Condition::GE, offset: 40 });                                         // 4: B.GE positive (+40 → instr 14)
-        // Save X0 in X9 before the write syscall clobbers it with fd=1
-        e!(Instruction::MOV { rd: Register::X9, rm: Register::X0 });                                        // 5: MOV X9, X0  (save value)
-        // Write '-' to stdout
-        e!(Instruction::MOVZ { rd: Register::X1, imm16: 45, shift: 0 });                                    // 6: MOVZ X1, #45  ('-')
-        e!(Instruction::STRB { rt: Register::X1, rn: Register::SP, offset: 16 });                           // 7: STRB W1, [SP, #16]
-        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // 8: MOVZ X0, #1  (fd=stdout)
-        e!(Instruction::ADD { rd: Register::X1, rn: Register::SP, rm: Operand::Imm12(16) });               // 9: ADD X1, SP, #16  (buf)
-        e!(Instruction::MOVZ { rd: Register::X2, imm16: 1, shift: 0 });                                     // 10: MOVZ X2, #1  (len)
-        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // 11: MOVZ X8, #64 (sys_write)
-        e!(Instruction::SVC { imm16: 0 });                                                                  // 12: SVC #0
-        e!(Instruction::SUB { rd: Register::X0, rn: Register::XZR, rm: Operand::Reg { reg: Register::X9, shift: None } }); // 13: NEG X0 (SUB X0, XZR, X9)
-        // ── positive: convert digits ──
-        e!(Instruction::MOVZ { rd: Register::X9, imm16: 0, shift: 0 });                                     // 14: MOVZ X9, #0  (count = 0)
-        e!(Instruction::ADD { rd: Register::X10, rn: Register::SP, rm: Operand::Imm12(47) });              // 15: ADD X10, SP, #47  (&buf[31], end of buffer)
-        // ── div_loop ──
-        e!(Instruction::CBZ { rt: Register::X0, offset: 40 });                                              // 16: CBZ X0, write_digits (+40 → instr 26)
-        e!(Instruction::MOVZ { rd: Register::X1, imm16: 10, shift: 0 });                                    // 17: MOVZ X1, #10  (divisor)
-        e!(Instruction::UDIV { rd: Register::X2, rn: Register::X0, rm: Register::X1 });                    // 18: UDIV X2, X0, X1  (quotient)
-        e!(Instruction::MSUB { rd: Register::X3, rn: Register::X2, rm: Register::X1, ra: Register::X0 });  // 19: MSUB X3, X2, X1, X0  (remainder)
-        e!(Instruction::ADD { rd: Register::X3, rn: Register::X3, rm: Operand::Imm12(48) });              // 20: ADD X3, X3, #48  ('0' + remainder)
-        e!(Instruction::STRB { rt: Register::X3, rn: Register::X10, offset: 0 });                           // 21: STRB W3, [X10]  (store digit backward)
-        e!(Instruction::SUB { rd: Register::X10, rn: Register::X10, rm: Operand::Imm12(1) });              // 22: SUB X10, X10, #1  (ptr--)
-        e!(Instruction::ADD { rd: Register::X9, rn: Register::X9, rm: Operand::Imm12(1) });               // 23: ADD X9, X9, #1  (count++)
-        e!(Instruction::MOV { rd: Register::X0, rm: Register::X2 });                                        // 24: MOV X0, X2  (X0 = quotient)
-        e!(Instruction::B { offset: -36 });                                                                 // 25: B div_loop (-36 → instr 16)
-        // ── write_digits ──
-        e!(Instruction::CBNZ { rt: Register::X9, offset: 20 });                                             // 26: CBNZ X9, do_write (+20 → instr 31)
-        // count == 0 (input was 0): store '0' as the sole digit
-        e!(Instruction::MOVZ { rd: Register::X1, imm16: 48, shift: 0 });                                    // 27: MOVZ X1, #48  ('0')
-        e!(Instruction::STRB { rt: Register::X1, rn: Register::X10, offset: 0 });                           // 28: STRB W1, [X10]
-        e!(Instruction::SUB { rd: Register::X10, rn: Register::X10, rm: Operand::Imm12(1) });              // 29: SUB X10, X10, #1
-        e!(Instruction::MOVZ { rd: Register::X9, imm16: 1, shift: 0 });                                     // 30: MOVZ X9, #1  (count = 1)
-        // ── do_write: sys_write(1, X10+1, X9) ──
-        e!(Instruction::ADD { rd: Register::X1, rn: Register::X10, rm: Operand::Imm12(1) });              // 31: ADD X1, X10, #1  (buf = X10+1)
-        e!(Instruction::MOV { rd: Register::X2, rm: Register::X9 });                                        // 32: MOV X2, X9  (len = count)
-        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // 33: MOVZ X0, #1  (fd=stdout)
-        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // 34: MOVZ X8, #64 (sys_write)
-        e!(Instruction::SVC { imm16: 0 });                                                                  // 35: SVC #0
-        // ── Epilogue ──
-        e!(Instruction::LDP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // 36: LDP X29, X30, [SP]
-        e!(Instruction::ADD { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(48) });              // 37: ADD SP, SP, #48
-        e!(Instruction::RET { rn: None });                                                                  // 38: RET
+        e!(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(48)
+        }); // 0: SUB SP, SP, #48
+        e!(Instruction::STP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0
+        }); // 1: STP X29, X30, [SP]
+        e!(Instruction::ADD {
+            rd: Register::X29,
+            rn: Register::SP,
+            rm: Operand::Imm12(0)
+        }); // 2: ADD X29, SP, #0
+            // ── Handle negative ──
+        e!(Instruction::CMP {
+            rn: Register::X0,
+            rm: Operand::Imm12(0)
+        }); // 3: CMP X0, #0
+        e!(Instruction::BCond {
+            cond: Condition::GE,
+            offset: 40
+        }); // 4: B.GE positive (+40 → instr 14)
+            // Save X0 in X9 before the write syscall clobbers it with fd=1
+        e!(Instruction::MOV {
+            rd: Register::X9,
+            rm: Register::X0
+        }); // 5: MOV X9, X0  (save value)
+            // Write '-' to stdout
+        e!(Instruction::MOVZ {
+            rd: Register::X1,
+            imm16: 45,
+            shift: 0
+        }); // 6: MOVZ X1, #45  ('-')
+        e!(Instruction::STRB {
+            rt: Register::X1,
+            rn: Register::SP,
+            offset: 16
+        }); // 7: STRB W1, [SP, #16]
+        e!(Instruction::MOVZ {
+            rd: Register::X0,
+            imm16: 1,
+            shift: 0
+        }); // 8: MOVZ X0, #1  (fd=stdout)
+        e!(Instruction::ADD {
+            rd: Register::X1,
+            rn: Register::SP,
+            rm: Operand::Imm12(16)
+        }); // 9: ADD X1, SP, #16  (buf)
+        e!(Instruction::MOVZ {
+            rd: Register::X2,
+            imm16: 1,
+            shift: 0
+        }); // 10: MOVZ X2, #1  (len)
+        e!(Instruction::MOVZ {
+            rd: Register::X8,
+            imm16: 64,
+            shift: 0
+        }); // 11: MOVZ X8, #64 (sys_write)
+        e!(Instruction::SVC { imm16: 0 }); // 12: SVC #0
+        e!(Instruction::SUB {
+            rd: Register::X0,
+            rn: Register::XZR,
+            rm: Operand::Reg {
+                reg: Register::X9,
+                shift: None
+            }
+        }); // 13: NEG X0 (SUB X0, XZR, X9)
+            // ── positive: convert digits ──
+        e!(Instruction::MOVZ {
+            rd: Register::X9,
+            imm16: 0,
+            shift: 0
+        }); // 14: MOVZ X9, #0  (count = 0)
+        e!(Instruction::ADD {
+            rd: Register::X10,
+            rn: Register::SP,
+            rm: Operand::Imm12(47)
+        }); // 15: ADD X10, SP, #47  (&buf[31], end of buffer)
+            // ── div_loop ──
+        e!(Instruction::CBZ {
+            rt: Register::X0,
+            offset: 40
+        }); // 16: CBZ X0, write_digits (+40 → instr 26)
+        e!(Instruction::MOVZ {
+            rd: Register::X1,
+            imm16: 10,
+            shift: 0
+        }); // 17: MOVZ X1, #10  (divisor)
+        e!(Instruction::UDIV {
+            rd: Register::X2,
+            rn: Register::X0,
+            rm: Register::X1
+        }); // 18: UDIV X2, X0, X1  (quotient)
+        e!(Instruction::MSUB {
+            rd: Register::X3,
+            rn: Register::X2,
+            rm: Register::X1,
+            ra: Register::X0
+        }); // 19: MSUB X3, X2, X1, X0  (remainder)
+        e!(Instruction::ADD {
+            rd: Register::X3,
+            rn: Register::X3,
+            rm: Operand::Imm12(48)
+        }); // 20: ADD X3, X3, #48  ('0' + remainder)
+        e!(Instruction::STRB {
+            rt: Register::X3,
+            rn: Register::X10,
+            offset: 0
+        }); // 21: STRB W3, [X10]  (store digit backward)
+        e!(Instruction::SUB {
+            rd: Register::X10,
+            rn: Register::X10,
+            rm: Operand::Imm12(1)
+        }); // 22: SUB X10, X10, #1  (ptr--)
+        e!(Instruction::ADD {
+            rd: Register::X9,
+            rn: Register::X9,
+            rm: Operand::Imm12(1)
+        }); // 23: ADD X9, X9, #1  (count++)
+        e!(Instruction::MOV {
+            rd: Register::X0,
+            rm: Register::X2
+        }); // 24: MOV X0, X2  (X0 = quotient)
+        e!(Instruction::B { offset: -36 }); // 25: B div_loop (-36 → instr 16)
+                                            // ── write_digits ──
+        e!(Instruction::CBNZ {
+            rt: Register::X9,
+            offset: 20
+        }); // 26: CBNZ X9, do_write (+20 → instr 31)
+            // count == 0 (input was 0): store '0' as the sole digit
+        e!(Instruction::MOVZ {
+            rd: Register::X1,
+            imm16: 48,
+            shift: 0
+        }); // 27: MOVZ X1, #48  ('0')
+        e!(Instruction::STRB {
+            rt: Register::X1,
+            rn: Register::X10,
+            offset: 0
+        }); // 28: STRB W1, [X10]
+        e!(Instruction::SUB {
+            rd: Register::X10,
+            rn: Register::X10,
+            rm: Operand::Imm12(1)
+        }); // 29: SUB X10, X10, #1
+        e!(Instruction::MOVZ {
+            rd: Register::X9,
+            imm16: 1,
+            shift: 0
+        }); // 30: MOVZ X9, #1  (count = 1)
+            // ── do_write: sys_write(1, X10+1, X9) ──
+        e!(Instruction::ADD {
+            rd: Register::X1,
+            rn: Register::X10,
+            rm: Operand::Imm12(1)
+        }); // 31: ADD X1, X10, #1  (buf = X10+1)
+        e!(Instruction::MOV {
+            rd: Register::X2,
+            rm: Register::X9
+        }); // 32: MOV X2, X9  (len = count)
+        e!(Instruction::MOVZ {
+            rd: Register::X0,
+            imm16: 1,
+            shift: 0
+        }); // 33: MOVZ X0, #1  (fd=stdout)
+        e!(Instruction::MOVZ {
+            rd: Register::X8,
+            imm16: 64,
+            shift: 0
+        }); // 34: MOVZ X8, #64 (sys_write)
+        e!(Instruction::SVC { imm16: 0 }); // 35: SVC #0
+                                           // ── Epilogue ──
+        e!(Instruction::LDP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0
+        }); // 36: LDP X29, X30, [SP]
+        e!(Instruction::ADD {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(48)
+        }); // 37: ADD SP, SP, #48
+        e!(Instruction::RET { rn: None }); // 38: RET
     }
 
     // ── __vuma_print_newline ──
@@ -2710,23 +3017,71 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     // STRB encoding 0x390021E1 = STRB W1,[X15,#8] instead of [SP,#16]).
     let newline_offset = code.len();
     {
-        use crate::arm64::{Instruction, Register, Operand, Condition};
+        use crate::arm64::{Instruction, Operand, Register};
         macro_rules! e {
-            ($i:expr) => { code.extend_from_slice(&$i.encode().unwrap().to_le_bytes()) };
+            ($i:expr) => {
+                code.extend_from_slice(&$i.encode().unwrap().to_le_bytes())
+            };
         }
-        e!(Instruction::SUB { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });               // SUB SP, SP, #32
-        e!(Instruction::STP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // STP X29, X30, [SP]
-        e!(Instruction::ADD { rd: Register::X29, rn: Register::SP, rm: Operand::Imm12(0) });               // ADD X29, SP, #0
-        e!(Instruction::MOVZ { rd: Register::X1, imm16: 10, shift: 0 });                                    // MOVZ W1, #10  ('\n')
-        e!(Instruction::STRB { rt: Register::X1, rn: Register::SP, offset: 16 });                           // STRB W1, [SP, #16]
-        e!(Instruction::MOVZ { rd: Register::X0, imm16: 1, shift: 0 });                                     // MOVZ X0, #1  (fd)
-        e!(Instruction::ADD { rd: Register::X1, rn: Register::SP, rm: Operand::Imm12(16) });               // ADD X1, SP, #16  (buf)
-        e!(Instruction::MOVZ { rd: Register::X2, imm16: 1, shift: 0 });                                     // MOVZ X2, #1  (len)
-        e!(Instruction::MOVZ { rd: Register::X8, imm16: 64, shift: 0 });                                    // MOVZ X8, #64 (sys_write)
-        e!(Instruction::SVC { imm16: 0 });                                                                  // SVC #0
-        e!(Instruction::LDP { rt1: Register::X29, rt2: Register::X30, rn: Register::SP, offset: 0 });       // LDP X29, X30, [SP]
-        e!(Instruction::ADD { rd: Register::SP, rn: Register::SP, rm: Operand::Imm12(32) });              // ADD SP, SP, #32
-        e!(Instruction::RET { rn: None });                                                                  // RET
+        e!(Instruction::SUB {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(32)
+        }); // SUB SP, SP, #32
+        e!(Instruction::STP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0
+        }); // STP X29, X30, [SP]
+        e!(Instruction::ADD {
+            rd: Register::X29,
+            rn: Register::SP,
+            rm: Operand::Imm12(0)
+        }); // ADD X29, SP, #0
+        e!(Instruction::MOVZ {
+            rd: Register::X1,
+            imm16: 10,
+            shift: 0
+        }); // MOVZ W1, #10  ('\n')
+        e!(Instruction::STRB {
+            rt: Register::X1,
+            rn: Register::SP,
+            offset: 16
+        }); // STRB W1, [SP, #16]
+        e!(Instruction::MOVZ {
+            rd: Register::X0,
+            imm16: 1,
+            shift: 0
+        }); // MOVZ X0, #1  (fd)
+        e!(Instruction::ADD {
+            rd: Register::X1,
+            rn: Register::SP,
+            rm: Operand::Imm12(16)
+        }); // ADD X1, SP, #16  (buf)
+        e!(Instruction::MOVZ {
+            rd: Register::X2,
+            imm16: 1,
+            shift: 0
+        }); // MOVZ X2, #1  (len)
+        e!(Instruction::MOVZ {
+            rd: Register::X8,
+            imm16: 64,
+            shift: 0
+        }); // MOVZ X8, #64 (sys_write)
+        e!(Instruction::SVC { imm16: 0 }); // SVC #0
+        e!(Instruction::LDP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: 0
+        }); // LDP X29, X30, [SP]
+        e!(Instruction::ADD {
+            rd: Register::SP,
+            rn: Register::SP,
+            rm: Operand::Imm12(32)
+        }); // ADD SP, SP, #32
+        e!(Instruction::RET { rn: None }); // RET
     }
 
     (code, hex_offset, int_offset, newline_offset)
@@ -2738,27 +3093,28 @@ impl Backend for AArch64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        // F2a: Pre-lowering float-op verification.  Reject bitwise/shift/
-        // remainder ops on F32/F64 operands before any backend lowers them,
-        // so the emitter never sees an integer encoding for a float op.
-        // AArch64 is wired as the reference call site; other backends
-        // (alpha.rs, hppa.rs, s390x.rs, sparc64.rs, ...) should add the
-        // same one-liner at the top of their `allocate_registers` impls —
-        // see the doc on `verify_function_float_ops` above.
-        verify_function_float_ops(func).map_err(|errs| BackendError::InvalidInstruction {
-            isa: "aarch64",
-            details: errs.join("; "),
-        })?;
+        // Pre-lowering float-op verification is now wired
+        // CENTRALLY in the compilation drivers (`compile_to_binary_direct`
+        // in `main.rs`, `compile_modules` and `compile_to_wasm` in
+        // `pipeline.rs`, `run_backend_codegen` in `api.rs`, and the
+        // `compile_dump` dev binary) — they each call
+        // `verify_program_float_ops(&ir_program)` ONCE immediately after
+        // IR construction and before any backend's `allocate_registers`
+        // runs, so all 19 backends benefit without per-backend wiring.
+        // The AArch64-specific call that used to live here has been
+        // removed (the central call subsumes it).  See the doc on
+        // `verify_program_float_ops` above.
 
         // Use the existing Emitter to emit the function, which internally
         // performs register allocation and instruction encoding.
         let mut emitter = crate::emit::Emitter::new();
-        let code = emitter
-            .emit_function(func, None)
-            .map_err(|e| BackendError::RegisterAllocFailed {
-                isa: "aarch64",
-                reason: e.to_string(),
-            })?;
+        let code =
+            emitter
+                .emit_function(func, None)
+                .map_err(|e| BackendError::RegisterAllocFailed {
+                    isa: "aarch64",
+                    reason: e.to_string(),
+                })?;
 
         let func_name = func.name.clone();
         let frame_size = aarch64_compute_frame_size(func);
@@ -2778,15 +3134,14 @@ impl Backend for AArch64Backend {
             .iter()
             .enumerate()
             .map(|(i, &word)| {
-                let (opcode, reads, writes) =
-                    match crate::arm64::Instruction::decode(word) {
-                        Some(inst) => {
-                            let opcode = format!("{}", inst);
-                            let (reads, writes) = arm64_instruction_regs(&inst);
-                            (opcode, reads, writes)
-                        }
-                        None => (format!("arm64_{}", i), Vec::new(), Vec::new()),
-                    };
+                let (opcode, reads, writes) = match crate::arm64::Instruction::decode(word) {
+                    Some(inst) => {
+                        let opcode = format!("{}", inst);
+                        let (reads, writes) = arm64_instruction_regs(&inst);
+                        (opcode, reads, writes)
+                    }
+                    None => (format!("arm64_{}", i), Vec::new(), Vec::new()),
+                };
                 AllocatedInstruction {
                     opcode,
                     reads,
@@ -2868,21 +3223,21 @@ impl Backend for AArch64Backend {
         // __vuma_free(addr in X0) -> munmap(addr, 0)
         //   AArch64 Linux: munmap = syscall 215, args X0/X1, syscall # in X8, SVC #0
         let vuma_alloc_stub: Vec<u8> = vec![
-            0xE1, 0x03, 0x00, 0xAA,  // MOV X1, X0       (size -> length)
-            0xE0, 0x03, 0x1F, 0xAA,  // MOV X0, XZR      (addr = NULL)
-            0x62, 0x00, 0x80, 0xD2,  // MOV X2, #3       (PROT_READ|PROT_WRITE)
-            0x43, 0x04, 0x80, 0xD2,  // MOV X3, #0x22    (MAP_PRIVATE|MAP_ANONYMOUS)
-            0x04, 0x00, 0x80, 0x92,  // MOVN X4, #0      (fd = -1)
-            0xE5, 0x03, 0x1F, 0xAA,  // MOV X5, XZR      (offset = 0)
-            0xC8, 0x1B, 0x80, 0xD2,  // MOV X8, #222     (sys_mmap)
-            0x01, 0x00, 0x00, 0xD4,  // SVC #0
-            0xC0, 0x03, 0x5F, 0xD6,  // RET
+            0xE1, 0x03, 0x00, 0xAA, // MOV X1, X0       (size -> length)
+            0xE0, 0x03, 0x1F, 0xAA, // MOV X0, XZR      (addr = NULL)
+            0x62, 0x00, 0x80, 0xD2, // MOV X2, #3       (PROT_READ|PROT_WRITE)
+            0x43, 0x04, 0x80, 0xD2, // MOV X3, #0x22    (MAP_PRIVATE|MAP_ANONYMOUS)
+            0x04, 0x00, 0x80, 0x92, // MOVN X4, #0      (fd = -1)
+            0xE5, 0x03, 0x1F, 0xAA, // MOV X5, XZR      (offset = 0)
+            0xC8, 0x1B, 0x80, 0xD2, // MOV X8, #222     (sys_mmap)
+            0x01, 0x00, 0x00, 0xD4, // SVC #0
+            0xC0, 0x03, 0x5F, 0xD6, // RET
         ];
         let vuma_free_stub: Vec<u8> = vec![
-            0xE1, 0x03, 0x1F, 0xAA,  // MOV X1, XZR      (size = 0)
-            0xE8, 0x1A, 0x80, 0xD2,  // MOV X8, #215     (sys_munmap)
-            0x01, 0x00, 0x00, 0xD4,  // SVC #0
-            0xC0, 0x03, 0x5F, 0xD6,  // RET
+            0xE1, 0x03, 0x1F, 0xAA, // MOV X1, XZR      (size = 0)
+            0xE8, 0x1A, 0x80, 0xD2, // MOV X8, #215     (sys_munmap)
+            0x01, 0x00, 0x00, 0xD4, // SVC #0
+            0xC0, 0x03, 0x5F, 0xD6, // RET
         ];
 
         // ── Compute function offsets ──
@@ -2892,7 +3247,9 @@ impl Backend for AArch64Backend {
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -2902,8 +3259,14 @@ impl Backend for AArch64Backend {
         // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline.
         // Each entry point lives at its own offset within the runtime blob.
         let runtime_offsets_start = current_offset;
-        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start + rt_hex_off);
-        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start + rt_int_off);
+        func_offsets.insert(
+            "__vuma_print_hex".to_string(),
+            runtime_offsets_start + rt_hex_off,
+        );
+        func_offsets.insert(
+            "__vuma_print_int".to_string(),
+            runtime_offsets_start + rt_int_off,
+        );
         func_offsets.insert(
             "__vuma_print_newline".to_string(),
             runtime_offsets_start + rt_newline_off,
@@ -2938,9 +3301,8 @@ impl Backend for AArch64Backend {
         // extra MOV instructions are added before the syscall.
 
         // Helper: encode MOVZ X8, #imm16
-        let movz_x8 = |imm: u32| -> [u8; 4] {
-            (0xD2800008u32 | ((imm & 0xFFFF) << 5)).to_le_bytes()
-        };
+        let movz_x8 =
+            |imm: u32| -> [u8; 4] { (0xD2800008u32 | ((imm & 0xFFFF) << 5)).to_le_bytes() };
         // Helper: encode MOV Xn, Xm (register move)
         let mov_reg = |rd: u32, rs: u32| -> [u8; 4] {
             (0xAA0003E0u32 | ((rs & 0x1F) << 16) | (rd & 0x1F)).to_le_bytes()
@@ -2966,20 +3328,41 @@ impl Backend for AArch64Backend {
             // linkat). We implement alarm as a special stub below using
             // kill(getpid(), SIGALRM).
             for (name, num) in [
-                ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
-                ("munmap", 215), ("exit", 93), ("getpid", 172),
-                ("socket", 198), ("epoll_create1", 20), ("futex", 98),
-                ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                ("write", 64),
+                ("read", 63),
+                ("close", 57),
+                ("mmap", 222),
+                ("munmap", 215),
+                ("exit", 93),
+                ("getpid", 172),
+                ("socket", 198),
+                ("epoll_create1", 20),
+                ("futex", 98),
+                ("execve", 221),
+                ("wait4", 260),
+                ("epoll_ctl", 21),
+                ("epoll_wait", 22),
                 ("clone", 220),
                 // ── Additional POSIX syscall stubs (AArch64 generic ABI) ──
                 // Numbers verified against asm-generic/unistd.h.
-                ("lseek", 62), ("fstat", 80),
-                ("kill", 129), ("getcwd", 17), ("chdir", 49),
-                ("ioctl", 29), ("fcntl", 25), ("connect", 203),
-                ("nanosleep", 101), ("mprotect", 226),
-                ("dup", 23), ("exit_group", 94),
-                ("recv", 207), ("send", 206), ("shutdown", 210),
-                ("bind", 200), ("listen", 201), ("accept", 202),
+                ("lseek", 62),
+                ("fstat", 80),
+                ("kill", 129),
+                ("getcwd", 17),
+                ("chdir", 49),
+                ("ioctl", 29),
+                ("fcntl", 25),
+                ("connect", 203),
+                ("nanosleep", 101),
+                ("mprotect", 226),
+                ("dup", 23),
+                ("exit_group", 94),
+                ("recv", 207),
+                ("send", 206),
+                ("shutdown", 210),
+                ("bind", 200),
+                ("listen", 201),
+                ("accept", 202),
                 ("setsockopt", 208),
                 ("getsockopt", 209),
                 ("waitpid", 260),
@@ -2988,63 +3371,108 @@ impl Backend for AArch64Backend {
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
                 ("dup3", 24),
-                ("recvfrom", 207), ("sendto", 206),
+                ("recvfrom", 207),
+                ("sendto", 206),
                 // NOTE: stat/lstat/poll do not exist on the AArch64 generic
                 // ABI. They are provided as newfstatat/ppoll shims below.
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (asm-generic) ──
+                // ── POSIX file-metadata & I/O syscalls (asm-generic) ──
                 // AArch64 has 8 register args (X0-X7); all these take ≤5 args,
                 // so the simple "mov x8,#num; svc; ret" stub suffices. Numbers
                 // from asm-generic/unistd.h. The plain mkdir/rmdir/rename/link/
                 // symlink/readlink/chmod/chown names do NOT exist on the generic
                 // ABI and are provided as *at wrappers below.
-                ("umask", 166), ("fchmod", 52), ("fchown", 55),
-                ("openat", 56), ("unlinkat", 35), ("renameat", 38),
-                ("linkat", 37), ("symlinkat", 36), ("readlinkat", 78),
-                ("faccessat", 48), ("fchmodat", 53), ("fchownat", 54),
-                ("ftruncate", 46), ("fsync", 82), ("fdatasync", 83),
-                ("sync", 81), ("syncfs", 306),
-                ("pread", 67), ("pwrite", 68), ("readv", 65), ("writev", 66),
-                ("preadv", 69), ("pwritev", 70),
-                ("fchdir", 50), ("chroot", 51),
-                // ── Wave 9: POSIX system & advanced syscalls (asm-generic) ──
+                ("umask", 166),
+                ("fchmod", 52),
+                ("fchown", 55),
+                ("openat", 56),
+                ("unlinkat", 35),
+                ("renameat", 38),
+                ("linkat", 37),
+                ("symlinkat", 36),
+                ("readlinkat", 78),
+                ("faccessat", 48),
+                ("fchmodat", 53),
+                ("fchownat", 54),
+                ("ftruncate", 46),
+                ("fsync", 82),
+                ("fdatasync", 83),
+                ("sync", 81),
+                ("syncfs", 306),
+                ("pread", 67),
+                ("pwrite", 68),
+                ("readv", 65),
+                ("writev", 66),
+                ("preadv", 69),
+                ("pwritev", 70),
+                ("fchdir", 50),
+                ("chroot", 51),
+                // ── POSIX system & advanced syscalls (asm-generic) ──
                 // AArch64 has 8 reg args; all take ≤5 args → simple stub.
                 // eventfd→eventfd2(19), signalfd→signalfd4(74) = modern variants.
-                ("mlock", 228), ("munlock", 229), ("mlockall", 230), ("munlockall", 231),
-                ("mincore", 232), ("madvise", 233), ("msync", 227), ("mremap", 216),
-                ("getrlimit", 163), ("setrlimit", 164), ("prlimit64", 261),
-                ("getrusage", 165), ("times", 153),
+                ("mlock", 228),
+                ("munlock", 229),
+                ("mlockall", 230),
+                ("munlockall", 231),
+                ("mincore", 232),
+                ("madvise", 233),
+                ("msync", 227),
+                ("mremap", 216),
+                ("getrlimit", 163),
+                ("setrlimit", 164),
+                ("prlimit64", 261),
+                ("getrusage", 165),
+                ("times", 153),
                 ("getrandom", 278),
-                ("eventfd", 19), ("timerfd_create", 85), ("timerfd_settime", 86),
-                ("timerfd_gettime", 87), ("signalfd", 74),
-                ("inotify_init1", 26), ("inotify_add_watch", 27), ("inotify_rm_watch", 28),
+                ("eventfd", 19),
+                ("timerfd_create", 85),
+                ("timerfd_settime", 86),
+                ("timerfd_gettime", 87),
+                ("signalfd", 74),
+                ("inotify_init1", 26),
+                ("inotify_add_watch", 27),
+                ("inotify_rm_watch", 28),
                 ("ptrace", 117),
-                // ── Wave 8: POSIX process & identity syscalls (asm-generic/unistd.h) ──
+                // ── POSIX process & identity syscalls (asm-generic/unistd.h) ──
                 // All present directly in asm-generic (no *at wrapping). All take
                 // ≤5 args; aarch64 has 8 reg args (X0-X7) → inline stub for all.
                 // Family 1: identity
-                ("getuid", 174), ("geteuid", 175), ("getgid", 176), ("getegid", 177),
-                ("setuid", 146), ("setgid", 144), ("setresuid", 147), ("setresgid", 149),
+                ("getuid", 174),
+                ("geteuid", 175),
+                ("getgid", 176),
+                ("getegid", 177),
+                ("setuid", 146),
+                ("setgid", 144),
+                ("setresuid", 147),
+                ("setresgid", 149),
                 // Family 2: process group (getpid already present; getpgrp ABSENT in
                 // asm-generic → callers use getpgid(0))
-                ("getppid", 173), ("getsid", 156), ("setsid", 157),
-                ("setpgid", 154), ("getpgid", 155),
+                ("getppid", 173),
+                ("getsid", 156),
+                ("setsid", 157),
+                ("setpgid", 154),
+                ("getpgid", 155),
                 ("getpgrp", 65),
                 // Family 3: clone/wait (clone/wait4 already present; vfork ABSENT →
                 // callers use clone(CLONE_VFORK))
-                ("clone3", 435), ("waitid", 95),
+                ("clone3", 435),
+                ("waitid", 95),
                 // Family 4: exec/exit (execve/exit_group already present)
                 ("execveat", 281),
                 // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-                ("tgkill", 131), ("tkill", 130), ("rt_sigaction", 134),
+                ("tgkill", 131),
+                ("tkill", 130),
+                ("rt_sigaction", 134),
                 // Family 6: directory read (getdents/readdir ABSENT in asm-generic →
                 // use getdents64)
                 ("getdents64", 61),
                 // Family 7: system (arch_prctl is x86_64-only)
-                ("prctl", 167), ("uname", 160), ("sysinfo", 179),
-                            ("eventfd2", 19),
+                ("prctl", 167),
+                ("uname", 160),
+                ("sysinfo", 179),
+                ("eventfd2", 19),
                 ("newfstatat", 79),
                 ("signalfd4", 74),
-] {
+            ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&movz_x8(num));
                 code.extend_from_slice(&svc);
@@ -3182,11 +3610,11 @@ impl Backend for AArch64Backend {
             // replacement. flags=0 means "follow symlinks".
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&mov_reg(2, 1));     // X2 = X1 (statbuf)
-                code.extend_from_slice(&mov_reg(1, 0));     // X1 = X0 (pathname)
-                code.extend_from_slice(&movn_reg(0, 99));   // X0 = AT_FDCWD = -100
-                code.extend_from_slice(&movz_reg(3, 0));    // X3 = 0 (flags)
-                code.extend_from_slice(&movz_x8(79));       // newfstatat
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = X1 (statbuf)
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = X0 (pathname)
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD = -100
+                code.extend_from_slice(&movz_reg(3, 0)); // X3 = 0 (flags)
+                code.extend_from_slice(&movz_x8(79)); // newfstatat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("stat".to_string(), code));
@@ -3196,14 +3624,14 @@ impl Backend for AArch64Backend {
             //   AT_SYMLINK_NOFOLLOW=0x100). lstat() does not exist on AArch64.
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&mov_reg(2, 1));     // X2 = X1 (statbuf)
-                code.extend_from_slice(&mov_reg(1, 0));     // X1 = X0 (pathname)
-                code.extend_from_slice(&movn_reg(0, 99));   // X0 = AT_FDCWD
-                // AT_SYMLINK_NOFOLLOW = 0x100. MOVZ X3, #0x100
-                // MOVZ Xd, #imm16, LSL #shift: 0xD2800000 | (imm << 5) | rd
-                // For imm=0x100 with shift=0: 0xD2800000 | (0x100 << 5) | 3
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = X1 (statbuf)
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = X0 (pathname)
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                                                          // AT_SYMLINK_NOFOLLOW = 0x100. MOVZ X3, #0x100
+                                                          // MOVZ Xd, #imm16, LSL #shift: 0xD2800000 | (imm << 5) | rd
+                                                          // For imm=0x100 with shift=0: 0xD2800000 | (0x100 << 5) | 3
                 code.extend_from_slice(&0xD2820063u32.to_le_bytes());
-                code.extend_from_slice(&movz_x8(79));       // newfstatat
+                code.extend_from_slice(&movz_x8(79)); // newfstatat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("lstat".to_string(), code));
@@ -3261,7 +3689,7 @@ impl Backend for AArch64Backend {
                 stubs.push(("strcmp".to_string(), code));
             }
 
-            // ── Wave 7 wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
+            // ── Wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
             // AArch64 (asm-generic) removed the legacy mkdir/rmdir/rename/link/
             // symlink/readlink/chmod/chown syscalls; they exist only as the *at
             // variants. We expose the plain names by inserting AT_FDCWD=-100
@@ -3270,10 +3698,10 @@ impl Backend for AArch64Backend {
             // mkdir(path, mode) → mkdirat(AT_FDCWD, path, mode)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&mov_reg(2, 1));    // X2 = mode
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(34));      // mkdirat
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = mode
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(34)); // mkdirat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("mkdir".to_string(), code));
@@ -3281,10 +3709,10 @@ impl Backend for AArch64Backend {
             // rmdir(path) → unlinkat(AT_FDCWD, path, AT_REMOVEDIR=0x200)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&movz_reg(2, 0x200));// X2 = AT_REMOVEDIR
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(35));      // unlinkat
+                code.extend_from_slice(&movz_reg(2, 0x200)); // X2 = AT_REMOVEDIR
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(35)); // unlinkat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("rmdir".to_string(), code));
@@ -3292,11 +3720,11 @@ impl Backend for AArch64Backend {
             // rename(old, new) → renameat(AT_FDCWD, old, AT_FDCWD, new)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&mov_reg(3, 1));    // X3 = new
-                code.extend_from_slice(&movn_reg(2, 99));  // X2 = AT_FDCWD
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = old
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(38));      // renameat
+                code.extend_from_slice(&mov_reg(3, 1)); // X3 = new
+                code.extend_from_slice(&movn_reg(2, 99)); // X2 = AT_FDCWD
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = old
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(38)); // renameat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("rename".to_string(), code));
@@ -3304,12 +3732,12 @@ impl Backend for AArch64Backend {
             // link(old, new) → linkat(AT_FDCWD, old, AT_FDCWD, new, 0)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&movz_reg(4, 0));   // X4 = 0 (flags)
-                code.extend_from_slice(&mov_reg(3, 1));    // X3 = new
-                code.extend_from_slice(&movn_reg(2, 99));  // X2 = AT_FDCWD
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = old
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(37));      // linkat
+                code.extend_from_slice(&movz_reg(4, 0)); // X4 = 0 (flags)
+                code.extend_from_slice(&mov_reg(3, 1)); // X3 = new
+                code.extend_from_slice(&movn_reg(2, 99)); // X2 = AT_FDCWD
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = old
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(37)); // linkat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("link".to_string(), code));
@@ -3317,10 +3745,10 @@ impl Backend for AArch64Backend {
             // symlink(target, linkpath) → symlinkat(target, AT_FDCWD, linkpath)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&mov_reg(2, 1));    // X2 = linkpath
-                code.extend_from_slice(&movn_reg(1, 99));  // X1 = AT_FDCWD
-                // X0 = target (unchanged)
-                code.extend_from_slice(&movz_x8(36));      // symlinkat
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = linkpath
+                code.extend_from_slice(&movn_reg(1, 99)); // X1 = AT_FDCWD
+                                                          // X0 = target (unchanged)
+                code.extend_from_slice(&movz_x8(36)); // symlinkat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("symlink".to_string(), code));
@@ -3328,11 +3756,11 @@ impl Backend for AArch64Backend {
             // readlink(path, buf, siz) → readlinkat(AT_FDCWD, path, buf, siz)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&mov_reg(3, 2));    // X3 = siz
-                code.extend_from_slice(&mov_reg(2, 1));    // X2 = buf
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(78));      // readlinkat
+                code.extend_from_slice(&mov_reg(3, 2)); // X3 = siz
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = buf
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(78)); // readlinkat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("readlink".to_string(), code));
@@ -3340,11 +3768,11 @@ impl Backend for AArch64Backend {
             // chmod(path, mode) → fchmodat(AT_FDCWD, path, mode, 0)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&movz_reg(3, 0));   // X3 = 0 (flags)
-                code.extend_from_slice(&mov_reg(2, 1));    // X2 = mode
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(53));      // fchmodat
+                code.extend_from_slice(&movz_reg(3, 0)); // X3 = 0 (flags)
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = mode
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(53)); // fchmodat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("chmod".to_string(), code));
@@ -3352,30 +3780,30 @@ impl Backend for AArch64Backend {
             // chown(path, owner, group) → fchownat(AT_FDCWD, path, owner, group, 0)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&movz_reg(4, 0));   // X4 = 0 (flags)
-                code.extend_from_slice(&mov_reg(3, 2));    // X3 = group
-                code.extend_from_slice(&mov_reg(2, 1));    // X2 = owner
-                code.extend_from_slice(&mov_reg(1, 0));    // X1 = path
-                code.extend_from_slice(&movn_reg(0, 99));  // X0 = AT_FDCWD
-                code.extend_from_slice(&movz_x8(54));      // fchownat
+                code.extend_from_slice(&movz_reg(4, 0)); // X4 = 0 (flags)
+                code.extend_from_slice(&mov_reg(3, 2)); // X3 = group
+                code.extend_from_slice(&mov_reg(2, 1)); // X2 = owner
+                code.extend_from_slice(&mov_reg(1, 0)); // X1 = path
+                code.extend_from_slice(&movn_reg(0, 99)); // X0 = AT_FDCWD
+                code.extend_from_slice(&movz_x8(54)); // fchownat
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("chown".to_string(), code));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs ──────────────────
             // ffi_scratch_push_frame: REAL mmap syscall (aarch64 sys_mmap=222).
             // Allocates 4096 bytes for the scratchpad frame.
             {
                 let mut code = Vec::new();
                 // Set up mmap args: X0=0(NULL), X1=4096, X2=3(PROT), X3=0x22(MAP), X4=-1(fd), X5=0(off)
-                code.extend_from_slice(&movz_reg(0, 0));       // X0 = 0 (NULL)
-                code.extend_from_slice(&movz_reg(1, 4096));    // X1 = 4096
-                code.extend_from_slice(&movz_reg(2, 3));       // X2 = PROT_READ|PROT_WRITE
-                code.extend_from_slice(&movz_reg(3, 0x22));    // X3 = MAP_PRIVATE|MAP_ANONYMOUS
-                code.extend_from_slice(&movn_reg(4, 0));       // X4 = -1 (fd)
-                code.extend_from_slice(&movz_reg(5, 0));       // X5 = 0 (offset)
-                code.extend_from_slice(&movz_x8(222));         // sys_mmap
+                code.extend_from_slice(&movz_reg(0, 0)); // X0 = 0 (NULL)
+                code.extend_from_slice(&movz_reg(1, 4096)); // X1 = 4096
+                code.extend_from_slice(&movz_reg(2, 3)); // X2 = PROT_READ|PROT_WRITE
+                code.extend_from_slice(&movz_reg(3, 0x22)); // X3 = MAP_PRIVATE|MAP_ANONYMOUS
+                code.extend_from_slice(&movn_reg(4, 0)); // X4 = -1 (fd)
+                code.extend_from_slice(&movz_reg(5, 0)); // X5 = 0 (offset)
+                code.extend_from_slice(&movz_x8(222)); // sys_mmap
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
@@ -3392,11 +3820,33 @@ impl Backend for AArch64Backend {
             // __arena_overflow: real exit(1) syscall (aarch64 sys_exit=93)
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&movz_reg(0, 1));       // X0 = 1 (exit code)
-                code.extend_from_slice(&movz_x8(93));           // sys_exit
+                code.extend_from_slice(&movz_reg(0, 1)); // X0 = 1 (exit code)
+                code.extend_from_slice(&movz_x8(93)); // sys_exit
                 code.extend_from_slice(&svc);
-                code.extend_from_slice(&ret);                   // safety (shouldn't reach)
+                code.extend_from_slice(&ret); // safety (shouldn't reach)
                 stubs.push(("__arena_overflow".to_string(), code));
+            }
+
+            // __oob_trap: real exit(134) syscall (SIGABRT code).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(0, 134)); // X0 = 134 (exit code)
+                code.extend_from_slice(&movz_x8(93)); // sys_exit
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret); // safety (shouldn't reach)
+                stubs.push(("__oob_trap".to_string(), code));
+            }
+
+            // __uaf_trap: real exit(135) syscall. Dormant until the
+            // liveness check IR invokes it (IMPL-UAF-1). Distinct from
+            // OOB (134) and arena overflow (1).
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(0, 135)); // X0 = 135 (exit code)
+                code.extend_from_slice(&movz_x8(93)); // sys_exit
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret); // safety (shouldn't reach)
+                stubs.push(("__uaf_trap".to_string(), code));
             }
 
             stubs
@@ -3441,7 +3891,8 @@ impl Backend for AArch64Backend {
         start_stub.extend_from_slice(&0xD4000001u32.to_le_bytes());
 
         // ── Patch _start BL to main ──
-        let main_key = func_offsets.keys()
+        let main_key = func_offsets
+            .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
@@ -3504,17 +3955,15 @@ impl Backend for AArch64Backend {
                 }
 
                 if reloc.reloc_type == "R_VUMA_GETADDR" {
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            for k in func_offsets.keys() {
-                                if k.starts_with(&prefix) {
-                                    return Some(func_offsets[k]);
-                                }
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        for k in func_offsets.keys() {
+                            if k.starts_with(&prefix) {
+                                return Some(func_offsets[k]);
                             }
-                            None
-                        });
+                        }
+                        None
+                    });
                     if let Some(target_offset) = target_offset {
                         // The code blob (`all_code`) is placed at file offset
                         // `text_offset` (= 0xe8 = ELF header + 3 phdrs) in the
@@ -3524,7 +3973,7 @@ impl Backend for AArch64Backend {
                         //   0x400000 + 0xe8 + target_offset = 0x4000e8 + target_offset
                         // The previous code used `0x400000 + target_offset`
                         // which pointed into the ELF header, causing CallIndirect
-                        // (Wave 49 driver_isolation) to jump to address 0 and
+                        // (driver_isolation) to jump to address 0 and
                         // SIGILL. This fix adds the text_offset (0xe8).
                         const TEXT_OFFSET: u64 = 64 + 3 * 56; // = 0xe8
                         let abs_addr = 0x400000u64 + TEXT_OFFSET + target_offset as u64;
@@ -3533,61 +3982,74 @@ impl Backend for AArch64Backend {
                             // MOVZ X9, #imm16 (bits 0-15)
                             let imm0 = (abs_addr & 0xFFFF) as u32;
                             let existing0 = u32::from_le_bytes([
-                                all_code[abs_offset], all_code[abs_offset + 1],
-                                all_code[abs_offset + 2], all_code[abs_offset + 3],
+                                all_code[abs_offset],
+                                all_code[abs_offset + 1],
+                                all_code[abs_offset + 2],
+                                all_code[abs_offset + 3],
                             ]);
                             let patched0 = (existing0 & !0x001FFFE0) | (imm0 << 5);
-                            all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched0.to_le_bytes());
+                            all_code[abs_offset..abs_offset + 4]
+                                .copy_from_slice(&patched0.to_le_bytes());
 
                             // MOVK X9, #imm16, lsl #16 (bits 16-31)
                             let imm1 = ((abs_addr >> 16) & 0xFFFF) as u32;
                             let existing1 = u32::from_le_bytes([
-                                all_code[abs_offset + 4], all_code[abs_offset + 5],
-                                all_code[abs_offset + 6], all_code[abs_offset + 7],
+                                all_code[abs_offset + 4],
+                                all_code[abs_offset + 5],
+                                all_code[abs_offset + 6],
+                                all_code[abs_offset + 7],
                             ]);
                             let patched1 = (existing1 & !0x001FFFE0) | (imm1 << 5);
-                            all_code[abs_offset + 4..abs_offset + 8].copy_from_slice(&patched1.to_le_bytes());
+                            all_code[abs_offset + 4..abs_offset + 8]
+                                .copy_from_slice(&patched1.to_le_bytes());
 
                             // MOVK X9, #imm16, lsl #32 (bits 32-47)
                             let imm2 = ((abs_addr >> 32) & 0xFFFF) as u32;
                             let existing2 = u32::from_le_bytes([
-                                all_code[abs_offset + 8], all_code[abs_offset + 9],
-                                all_code[abs_offset + 10], all_code[abs_offset + 11],
+                                all_code[abs_offset + 8],
+                                all_code[abs_offset + 9],
+                                all_code[abs_offset + 10],
+                                all_code[abs_offset + 11],
                             ]);
                             let patched2 = (existing2 & !0x001FFFE0) | (imm2 << 5);
-                            all_code[abs_offset + 8..abs_offset + 12].copy_from_slice(&patched2.to_le_bytes());
+                            all_code[abs_offset + 8..abs_offset + 12]
+                                .copy_from_slice(&patched2.to_le_bytes());
 
                             // MOVK X9, #imm16, lsl #48 (bits 48-63)
                             let imm3 = ((abs_addr >> 48) & 0xFFFF) as u32;
                             let existing3 = u32::from_le_bytes([
-                                all_code[abs_offset + 12], all_code[abs_offset + 13],
-                                all_code[abs_offset + 14], all_code[abs_offset + 15],
+                                all_code[abs_offset + 12],
+                                all_code[abs_offset + 13],
+                                all_code[abs_offset + 14],
+                                all_code[abs_offset + 15],
                             ]);
                             let patched3 = (existing3 & !0x001FFFE0) | (imm3 << 5);
-                            all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&patched3.to_le_bytes());
+                            all_code[abs_offset + 12..abs_offset + 16]
+                                .copy_from_slice(&patched3.to_le_bytes());
                         }
                     }
                 } else if reloc.reloc_type == R_AARCH64_CALL26 {
                     // BL target = PC + imm26*4, where PC = address of BL instruction.
                     // So: imm26 = (target_addr - bl_addr) / 4
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let bl_addr = abs_offset as i64;
                         let target_addr = target_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±128MB (26-bit signed)
                         if offset_words < -(1 << 25) || offset_words >= (1 << 25) {
-                            vuma_log!(warn, 
+                            vuma_log!(
+                                warn,
                                 "warning: BL relocation to '{}' out of range: {} words",
-                                reloc.symbol, offset_words
+                                reloc.symbol,
+                                offset_words
                             );
                             continue;
                         }
@@ -3625,7 +4087,9 @@ impl Backend for AArch64Backend {
                     }
                 }
             }
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -3636,7 +4100,11 @@ impl Backend for AArch64Backend {
         // Pass the external symbols so `build_aarch64_elf_2seg` can emit a
         // `.symtab` / `.strtab` / `.shstrtab` / `.text` section-header
         // appendix with SHN_UNDEF entries for each external callee.
-        Ok(build_aarch64_elf_2seg(&all_code, 0x400000, &external_symbols))
+        Ok(build_aarch64_elf_2seg(
+            &all_code,
+            0x400000,
+            &external_symbols,
+        ))
     }
 
     fn return_stub(&self) -> Vec<u8> {
@@ -3932,7 +4400,8 @@ mod tests {
         assert_eq!(info.elf_machine_type(), 8);
         assert!(info.has_branch_delay_slots()); // THE defining feature
         assert!(info.has_hardwired_zero());
-        assert_eq!(info.endianness(), Endianness::Big);
+        // mips64 emits little-endian (qemu-mips64el); mips64be wrapper handles BE.
+        assert_eq!(info.endianness(), Endianness::Little);
         assert_eq!(info.calling_convention_name(), "n64");
         validate_target_info(&info);
     }
@@ -4056,45 +4525,45 @@ mod tests {
     }
 
     // ===================================================================
-    // Wave 13 — IRInstr::Syscall cross-backend conformance test
+    // IRInstr::Syscall cross-backend conformance test
     // ===================================================================
     //
     // Asserts that every backend emits a **non-empty** encoded instruction
-    // sequence for `IRInstr::Syscall { nr: 1, .. }`.  Wave 11 implemented
-    // Syscall on the 6 tier-1 backends.  Wave 12 is in progress for the
-    // 8 tier-2/3 backends (which currently `unimplemented!("… (Wave 12)")`).
+    // sequence for `IRInstr::Syscall { nr: 1, .. }`.  Syscall is implemented
+    // on the 6 tier-1 backends.  Implementation is in progress for the
+    // 8 tier-2/3 backends (which currently `unimplemented!("…")`).
     // The 4 big-endian / LE wrapper backends automatically inherit from
     // their parents.
     //
     // This test iterates over all 19 BackendKind variants and categorizes
     // each result:
     //   - **PASS**: backend emits non-empty encoded bytes for the syscall.
-    //   - **PENDING**: backend panics with "Wave 12" (not yet implemented).
+    //   - **PENDING**: backend panics with a not-yet-implemented message.
     //   - **FAIL**: backend panics with an unexpected message, returns an
     //     error, or emits empty output.
     //
     // The test asserts zero FAILs.  PENDING backends are reported but do
     // not fail the test (they will automatically be promoted to PASS once
-    // Wave 12 lands and removes the `unimplemented!()` arms).
+    // the `unimplemented!()` arms are removed).
 
     use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
     use std::collections::HashSet;
 
-    /// All 19 backend kinds for the Wave 13 syscall conformance sweep.
+    /// All 19 backend kinds for the syscall conformance sweep.
     const ALL_19_BACKENDS: &[BackendKind] = &[
-        // Tier-1 (Wave 11 — Syscall implemented)
+        // Tier-1 (Syscall implemented)
         BackendKind::X86_64,
         BackendKind::AArch64,
         BackendKind::RiscV64,
         BackendKind::RiscV32,
         BackendKind::Arm32,
         BackendKind::X86_32,
-        // Big-endian / LE wrappers (Wave 13 — inherit from parent)
+        // Big-endian / LE wrappers (inherit from parent)
         BackendKind::AArch64Be,   // → aarch64  (has Syscall)
         BackendKind::ArmEb,       // → arm32    (has Syscall)
-        BackendKind::Mips64Be,    // → mips64   (pending Wave 12)
-        BackendKind::PowerPC64LE, // → ppc64    (pending Wave 12)
-        // Tier-2/3 (Wave 12 — pending)
+        BackendKind::Mips64Be,    // → mips64   (pending implementation)
+        BackendKind::PowerPC64LE, // → ppc64    (pending implementation)
+        // Tier-2/3 (pending)
         BackendKind::LoongArch64,
         BackendKind::Mips64,
         BackendKind::PowerPC64,
@@ -4103,7 +4572,7 @@ mod tests {
         BackendKind::Alpha,
         BackendKind::M68k,
         BackendKind::Hppa,
-        // wasm32 (Wave 11 — emits i32.const -ENOSYS)
+        // wasm32 (emits i32.const -ENOSYS)
         BackendKind::Wasm32,
     ];
 
@@ -4137,7 +4606,7 @@ mod tests {
     enum SyscallConformance {
         /// Backend emitted non-empty encoded bytes — conformance met.
         Pass(usize), // byte count
-        /// Backend panicked with a "Wave 12" message — not yet implemented.
+        /// Backend panicked with a not-yet-implemented message.
         Pending(String),
         /// Backend failed unexpectedly (wrong panic, error, or empty output).
         Fail(String),
@@ -4182,11 +4651,11 @@ mod tests {
         }
     }
 
-    /// Wave 13 — Cross-backend `IRInstr::Syscall` conformance test.
+    /// Cross-backend `IRInstr::Syscall` conformance test.
     ///
     /// Iterates over all 19 backends and asserts that each one EITHER
     /// emits non-empty encoded output for `Syscall { nr: 1, .. }` OR
-    /// panics with a "Wave 12" message (indicating the tier-2/3
+    /// panics with a not-yet-implemented message (indicating the tier-2/3
     /// implementation is still pending).  Any other outcome (unexpected
     /// panic, error, or empty output) fails the test.
     #[test]
@@ -4230,7 +4699,7 @@ mod tests {
         eprintln!();
 
         // 1. Zero FAILs — every backend must either emit non-empty output
-        //    or panic with "Wave 12" (pending).
+        //    or panic with the not-yet-implemented message (pending).
         assert_eq!(
             fail_count, 0,
             "{} backend(s) failed Syscall conformance unexpectedly: {:?}",
@@ -4274,18 +4743,21 @@ mod tests {
             match check_syscall_conformance(*kind) {
                 SyscallConformance::Pass(_) | SyscallConformance::Pending(_) => { /* ok */ }
                 SyscallConformance::Fail(msg) => {
-                    panic!("wrapper backend {:?} must pass or be pending but failed: {}", kind, msg);
+                    panic!(
+                        "wrapper backend {:?} must pass or be pending but failed: {}",
+                        kind, msg
+                    );
                 }
             }
         }
     }
 
     // ===================================================================
-    // Wave 22 — emit_function_regalloc cross-backend test
+    // emit_function_regalloc cross-backend test
     // ===================================================================
     //
     // Verifies that each tier-1 backend's `emit_function_regalloc`
-    // method (Wave 22) runs without crashing and produces a non-empty
+    // method runs without crashing and produces a non-empty
     // `AllocatedFunction` with correct `reads`/`writes` metadata.
 
     /// Build a minimal IR function with a few vregs for regalloc testing.
@@ -4299,15 +4771,13 @@ mod tests {
             vregs: std::collections::HashMap::new(),
             blocks: vec![IRBlock {
                 label: "entry".to_string(),
-                instructions: vec![
-                    IRInstr::BinOp {
-                        op: crate::ir::BinOpKind::Add,
-                        dst: IRValue::Register(2),
-                        lhs: IRValue::Register(0),
-                        rhs: IRValue::Register(1),
-                        ty: None,
-                    },
-                ],
+                instructions: vec![IRInstr::BinOp {
+                    op: crate::ir::BinOpKind::Add,
+                    dst: IRValue::Register(2),
+                    lhs: IRValue::Register(0),
+                    rhs: IRValue::Register(1),
+                    ty: None,
+                }],
                 terminator: IRTerminator::Return(vec![IRValue::Register(2)]),
                 predecessors: HashSet::new(),
                 successors: HashSet::new(),
@@ -4317,77 +4787,127 @@ mod tests {
         }
     }
 
-    /// Wave 22: x86_64 `emit_function_regalloc` produces non-empty output.
+    /// x86_64 `emit_function_regalloc` produces non-empty output.
     #[test]
     fn test_wave22_x86_64_emit_function_regalloc() {
         let backend = crate::x86_64::X86_64Backend::new();
         let func = build_regalloc_test_func();
         let result = backend.emit_function_with_regalloc(&func);
-        assert!(result.is_ok(), "x86_64 emit_function_regalloc failed: {:?}", result.err());
-        let allocated = result.unwrap();
-        assert!(!allocated.blocks.is_empty(), "should have at least one block");
         assert!(
-            allocated.blocks[0].instructions.iter().any(|i| !i.encoded.is_empty()),
+            result.is_ok(),
+            "x86_64 emit_function_regalloc failed: {:?}",
+            result.err()
+        );
+        let allocated = result.unwrap();
+        assert!(
+            !allocated.blocks.is_empty(),
+            "should have at least one block"
+        );
+        assert!(
+            allocated.blocks[0]
+                .instructions
+                .iter()
+                .any(|i| !i.encoded.is_empty()),
             "should have at least one instruction with encoded bytes"
         );
     }
 
-    /// Wave 22: aarch64 `emit_function_regalloc` produces non-empty output.
+    /// aarch64 `emit_function_regalloc` produces non-empty output.
     #[test]
     fn test_wave22_aarch64_emit_function_regalloc() {
         let backend = AArch64Backend::new();
         let func = build_regalloc_test_func();
         let result = backend.emit_function_with_regalloc(&func);
-        assert!(result.is_ok(), "aarch64 emit_function_regalloc failed: {:?}", result.err());
-        let allocated = result.unwrap();
-        assert!(!allocated.blocks.is_empty(), "should have at least one block");
         assert!(
-            allocated.blocks[0].instructions.iter().any(|i| !i.encoded.is_empty()),
+            result.is_ok(),
+            "aarch64 emit_function_regalloc failed: {:?}",
+            result.err()
+        );
+        let allocated = result.unwrap();
+        assert!(
+            !allocated.blocks.is_empty(),
+            "should have at least one block"
+        );
+        assert!(
+            allocated.blocks[0]
+                .instructions
+                .iter()
+                .any(|i| !i.encoded.is_empty()),
             "should have at least one instruction with encoded bytes"
         );
     }
 
-    /// Wave 22: riscv64 `emit_function_regalloc` produces non-empty output.
+    /// riscv64 `emit_function_regalloc` produces non-empty output.
     #[test]
     fn test_wave22_riscv64_emit_function_regalloc() {
         let backend = crate::riscv64::RiscV64Backend::new();
         let func = build_regalloc_test_func();
         let result = backend.emit_function_with_regalloc(&func);
-        assert!(result.is_ok(), "riscv64 emit_function_regalloc failed: {:?}", result.err());
-        let allocated = result.unwrap();
-        assert!(!allocated.blocks.is_empty(), "should have at least one block");
         assert!(
-            allocated.blocks[0].instructions.iter().any(|i| !i.encoded.is_empty()),
+            result.is_ok(),
+            "riscv64 emit_function_regalloc failed: {:?}",
+            result.err()
+        );
+        let allocated = result.unwrap();
+        assert!(
+            !allocated.blocks.is_empty(),
+            "should have at least one block"
+        );
+        assert!(
+            allocated.blocks[0]
+                .instructions
+                .iter()
+                .any(|i| !i.encoded.is_empty()),
             "should have at least one instruction with encoded bytes"
         );
     }
 
-    /// Wave 22: arm32 `emit_function_regalloc` produces non-empty output.
+    /// arm32 `emit_function_regalloc` produces non-empty output.
     #[test]
     fn test_wave22_arm32_emit_function_regalloc() {
         let backend = crate::arm32::Arm32Backend::new();
         let func = build_regalloc_test_func();
         let result = backend.emit_function_with_regalloc(&func);
-        assert!(result.is_ok(), "arm32 emit_function_regalloc failed: {:?}", result.err());
-        let allocated = result.unwrap();
-        assert!(!allocated.blocks.is_empty(), "should have at least one block");
         assert!(
-            allocated.blocks[0].instructions.iter().any(|i| !i.encoded.is_empty()),
+            result.is_ok(),
+            "arm32 emit_function_regalloc failed: {:?}",
+            result.err()
+        );
+        let allocated = result.unwrap();
+        assert!(
+            !allocated.blocks.is_empty(),
+            "should have at least one block"
+        );
+        assert!(
+            allocated.blocks[0]
+                .instructions
+                .iter()
+                .any(|i| !i.encoded.is_empty()),
             "should have at least one instruction with encoded bytes"
         );
     }
 
-    /// Wave 22: loongarch64 `emit_function_regalloc` produces non-empty output.
+    /// loongarch64 `emit_function_regalloc` produces non-empty output.
     #[test]
     fn test_wave22_loongarch64_emit_function_regalloc() {
         let backend = crate::loongarch64::LoongArch64Backend::new();
         let func = build_regalloc_test_func();
         let result = backend.emit_function_with_regalloc(&func);
-        assert!(result.is_ok(), "loongarch64 emit_function_regalloc failed: {:?}", result.err());
-        let allocated = result.unwrap();
-        assert!(!allocated.blocks.is_empty(), "should have at least one block");
         assert!(
-            allocated.blocks[0].instructions.iter().any(|i| !i.encoded.is_empty()),
+            result.is_ok(),
+            "loongarch64 emit_function_regalloc failed: {:?}",
+            result.err()
+        );
+        let allocated = result.unwrap();
+        assert!(
+            !allocated.blocks.is_empty(),
+            "should have at least one block"
+        );
+        assert!(
+            allocated.blocks[0]
+                .instructions
+                .iter()
+                .any(|i| !i.encoded.is_empty()),
             "should have at least one instruction with encoded bytes"
         );
     }

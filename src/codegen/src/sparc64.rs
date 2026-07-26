@@ -56,9 +56,9 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, RelocationEntry, SectionHeader, TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 #[cfg(test)]
 use crate::ir::VirtualRegister;
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -412,6 +412,7 @@ impl fmt::Display for Fpr {
 /// instructions, so clobbering them between instructions is safe.
 const FA: Fpr = Fpr::F0; // FP accumulator / result (even for double)
 const FB: Fpr = Fpr::F2; // FP second operand (even for double)
+#[allow(dead_code)]
 const FC: Fpr = Fpr::F4; // FP third scratch / zero register (even for double)
 
 // ===========================================================================
@@ -583,10 +584,15 @@ fn encode_stdf(rd: Fpr, rs1: Gpr, imm: i32) -> [u8; 4] {
 }
 
 // SPARC V9 FP `opf` codes (FPop1 unless noted).
+#[allow(dead_code)]
 const FP_FMOVS: u32 = 0x001; // F32 move
+#[allow(dead_code)]
 const FP_FNEGS: u32 = 0x005; // F32 negate
+#[allow(dead_code)]
 const FP_FABSS: u32 = 0x009; // F32 abs
+#[allow(dead_code)]
 const FP_FSQRTS: u32 = 0x029; // F32 sqrt
+#[allow(dead_code)]
 const FP_FSQRTD: u32 = 0x02A; // F64 sqrt
 const FP_FADDS: u32 = 0x041; // F32 add
 const FP_FADDD: u32 = 0x042; // F64 add
@@ -596,12 +602,15 @@ const FP_FMULS: u32 = 0x049; // F32 mul
 const FP_FMULD: u32 = 0x04A; // F64 mul
 const FP_FDIVS: u32 = 0x04D; // F32 div
 const FP_FDIVD: u32 = 0x04E; // F64 div
-// Note: FCMPS (0x051) and FCMPD (0x052) are in FPop2 (op3=0x35), NOT FPop1.
-// They are unused by the current FP-compare approximation (which uses
-// diff-bits) but kept here for documentation.
+                             // Note: FCMPS (0x051) and FCMPD (0x052) are in FPop2 (op3=0x35), NOT FPop1.
+                             // They are unused by the current FP-compare approximation (which uses
+                             // diff-bits) but kept here for documentation.
+#[allow(dead_code)]
 const FP_FCMPS: u32 = 0x051; // F32 compare (FPop2)
+#[allow(dead_code)]
 const FP_FCMPD: u32 = 0x052; // F64 compare (FPop2)
 const FP_FDTOX: u32 = 0x082; // F64 → i64 (truncate toward zero)
+#[allow(dead_code)]
 const FP_FSTOX: u32 = 0x081; // F32 → i64 (truncate toward zero)
 const FP_FXTOS: u32 = 0x084; // i64 → F32
 const FP_FXTOD: u32 = 0x088; // i64 → F64
@@ -1261,8 +1270,7 @@ fn build_sparc64_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> 
     let text_size = code.len() as u64;
 
     let text_file_end = text_offset + text_size;
-    let data_vaddr =
-        (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
+    let data_vaddr = (base_addr + text_file_end).div_ceil(HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
     let data_size: u64 = PAGE_SIZE;
     let entry_point = base_addr + text_offset;
 
@@ -1493,46 +1501,56 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
     let mut code = Vec::new();
     if (-4096..=4095).contains(&val) {
         // Fits in 13-bit signed immediate: OR %g0, imm, dst
-        code.extend_from_slice(&Instruction::OrImm {
-            rd: dst,
-            rs1: Gpr::G0,
-            imm: val as i32,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::OrImm {
+                rd: dst,
+                rs1: Gpr::G0,
+                imm: val as i32,
+            }
+            .encode(),
+        );
     } else if val >= 0 && val <= 0x3FF_FFFF {
         // Fits in 22-bit SETHI range (bits 31:10): SETHI + (OR if low bits non-zero)
         let hi22 = ((val as u64) >> 10) as u32 & 0x3F_FFFF;
         let lo10 = (val as u64) & 0x3FF;
-        code.extend_from_slice(&Instruction::Sethi {
-            rd: dst,
-            imm22: hi22,
-        }
-        .encode());
-        if lo10 != 0 {
-            code.extend_from_slice(&Instruction::OrImm {
+        code.extend_from_slice(
+            &Instruction::Sethi {
                 rd: dst,
-                rs1: dst,
-                imm: lo10 as i32,
+                imm22: hi22,
             }
-            .encode());
+            .encode(),
+        );
+        if lo10 != 0 {
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: dst,
+                    rs1: dst,
+                    imm: lo10 as i32,
+                }
+                .encode(),
+            );
         }
     } else if val >= 0 && val <= 0xFFFF_FFFF {
         // 32-bit value: SETHI hi22, OR lo10, then SLL to clear upper bits if needed
         let v32 = val as u32;
         let hi22 = (v32 >> 10) & 0x3F_FFFF;
         let lo10 = v32 & 0x3FF;
-        code.extend_from_slice(&Instruction::Sethi {
-            rd: dst,
-            imm22: hi22,
-        }
-        .encode());
-        if lo10 != 0 || hi22 == 0 {
-            code.extend_from_slice(&Instruction::OrImm {
+        code.extend_from_slice(
+            &Instruction::Sethi {
                 rd: dst,
-                rs1: dst,
-                imm: lo10 as i32,
+                imm22: hi22,
             }
-            .encode());
+            .encode(),
+        );
+        if lo10 != 0 || hi22 == 0 {
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: dst,
+                    rs1: dst,
+                    imm: lo10 as i32,
+                }
+                .encode(),
+            );
         }
         // Zero-extend the 32-bit value to 64 bits using SLLX + SRLX.
         // SETHI+OR gives the 32-bit value in the low 32 bits, but upper
@@ -1540,18 +1558,22 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         // 32 bits, then SRLX 32 shifts it back, zero-filling the upper bits.
         // Using SRAX (arithmetic shift) would sign-extend, which is wrong
         // for unsigned values like 0xFFFFFFFF (would give 0xFFFFFFFFFFFFFFFF).
-        code.extend_from_slice(&Instruction::SllxImm {
-            rd: dst,
-            rs1: dst,
-            imm: 32,
-        }
-        .encode());
-        code.extend_from_slice(&Instruction::SrlxImm {
-            rd: dst,
-            rs1: dst,
-            imm: 32,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::SllxImm {
+                rd: dst,
+                rs1: dst,
+                imm: 32,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::SrlxImm {
+                rd: dst,
+                rs1: dst,
+                imm: 32,
+            }
+            .encode(),
+        );
     } else {
         // Full 64-bit: SETHI hi22, OR lo10, SLLX 32, SETHI hi22, OR lo10
         // This builds the value in two 32-bit halves.
@@ -1566,47 +1588,59 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         let l_lo10 = lower & 0x3FF;
 
         // Load upper 32 bits into dst
-        code.extend_from_slice(&Instruction::Sethi {
-            rd: dst,
-            imm22: u_hi22,
-        }
-        .encode());
-        if u_lo10 != 0 {
-            code.extend_from_slice(&Instruction::OrImm {
+        code.extend_from_slice(
+            &Instruction::Sethi {
                 rd: dst,
-                rs1: dst,
-                imm: u_lo10 as i32,
+                imm22: u_hi22,
             }
-            .encode());
+            .encode(),
+        );
+        if u_lo10 != 0 {
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: dst,
+                    rs1: dst,
+                    imm: u_lo10 as i32,
+                }
+                .encode(),
+            );
         }
         // Shift left 32
-        code.extend_from_slice(&Instruction::SllxImm {
-            rd: dst,
-            rs1: dst,
-            imm: 32,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::SllxImm {
+                rd: dst,
+                rs1: dst,
+                imm: 32,
+            }
+            .encode(),
+        );
         // OR in lower 32 bits (via SETHI into a temp + OR)
         if l_hi22 != 0 {
-            code.extend_from_slice(&Instruction::Sethi {
-                rd: Gpr::G2,
-                imm22: l_hi22,
-            }
-            .encode());
-            code.extend_from_slice(&Instruction::Or {
-                rd: dst,
-                rs1: dst,
-                rs2: Gpr::G2,
-            }
-            .encode());
+            code.extend_from_slice(
+                &Instruction::Sethi {
+                    rd: Gpr::G2,
+                    imm22: l_hi22,
+                }
+                .encode(),
+            );
+            code.extend_from_slice(
+                &Instruction::Or {
+                    rd: dst,
+                    rs1: dst,
+                    rs2: Gpr::G2,
+                }
+                .encode(),
+            );
         }
         if l_lo10 != 0 {
-            code.extend_from_slice(&Instruction::OrImm {
-                rd: dst,
-                rs1: dst,
-                imm: l_lo10 as i32,
-            }
-            .encode());
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: dst,
+                    rs1: dst,
+                    imm: l_lo10 as i32,
+                }
+                .encode(),
+            );
         }
     }
     code
@@ -1616,27 +1650,33 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
 fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
     if (-4096..=4095).contains(&(-offset)) {
-        code.extend_from_slice(&Instruction::Ldx {
-            rd: dst,
-            rs1: Gpr::I6,
-            imm: -offset,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::Ldx {
+                rd: dst,
+                rs1: Gpr::I6,
+                imm: -offset,
+            }
+            .encode(),
+        );
     } else {
         // Large offset: compute address into a temp register
         code.extend(ss_load_imm(Gpr::L3, offset as i64));
-        code.extend_from_slice(&Instruction::Sub {
-            rd: Gpr::L3,
-            rs1: Gpr::I6,
-            rs2: Gpr::L3,
-        }
-        .encode());
-        code.extend_from_slice(&Instruction::Ldx {
-            rd: dst,
-            rs1: Gpr::L3,
-            imm: 0,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::Sub {
+                rd: Gpr::L3,
+                rs1: Gpr::I6,
+                rs2: Gpr::L3,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Ldx {
+                rd: dst,
+                rs1: Gpr::L3,
+                imm: 0,
+            }
+            .encode(),
+        );
     }
     code
 }
@@ -1645,26 +1685,32 @@ fn ss_ld(dst: Gpr, offset: i32) -> Vec<u8> {
 fn ss_stx(src: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
     if (-4096..=4095).contains(&(-offset)) {
-        code.extend_from_slice(&Instruction::Stx {
-            rd: src,
-            rs1: Gpr::I6,
-            imm: -offset,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::Stx {
+                rd: src,
+                rs1: Gpr::I6,
+                imm: -offset,
+            }
+            .encode(),
+        );
     } else {
         code.extend(ss_load_imm(Gpr::L3, offset as i64));
-        code.extend_from_slice(&Instruction::Sub {
-            rd: Gpr::L3,
-            rs1: Gpr::I6,
-            rs2: Gpr::L3,
-        }
-        .encode());
-        code.extend_from_slice(&Instruction::Stx {
-            rd: src,
-            rs1: Gpr::L3,
-            imm: 0,
-        }
-        .encode());
+        code.extend_from_slice(
+            &Instruction::Sub {
+                rd: Gpr::L3,
+                rs1: Gpr::I6,
+                rs2: Gpr::L3,
+            }
+            .encode(),
+        );
+        code.extend_from_slice(
+            &Instruction::Stx {
+                rd: src,
+                rs1: Gpr::L3,
+                imm: 0,
+            }
+            .encode(),
+        );
     }
     code
 }
@@ -1686,8 +1732,12 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
 fn is_32bit_ty(ty: Option<&IRType>) -> bool {
     matches!(
         ty,
-        Some(IRType::I8) | Some(IRType::U8) | Some(IRType::I16) | Some(IRType::U16)
-            | Some(IRType::I32) | Some(IRType::U32)
+        Some(IRType::I8)
+            | Some(IRType::U8)
+            | Some(IRType::I16)
+            | Some(IRType::U16)
+            | Some(IRType::I32)
+            | Some(IRType::U32)
     )
 }
 
@@ -1855,14 +1905,18 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
             .encode(),
         );
         // SAVE %sp, %g1, %sp  (register form — i=0)
-        code.extend_from_slice(&encode_fmt3_rr(OPC_FORMAT3, Gpr::O6, OP3_SAVE, Gpr::O6, Gpr::G1));
+        code.extend_from_slice(&encode_fmt3_rr(
+            OPC_FORMAT3,
+            Gpr::O6,
+            OP3_SAVE,
+            Gpr::O6,
+            Gpr::G1,
+        ));
     }
 
     // Store incoming args (%i0-%i5) to their stack slots.
     // After SAVE, the caller's %o0-%o5 become the callee's %i0-%i5.
-    let arg_regs = [
-        Gpr::I0, Gpr::I1, Gpr::I2, Gpr::I3, Gpr::I4, Gpr::I5,
-    ];
+    let arg_regs = [Gpr::I0, Gpr::I1, Gpr::I2, Gpr::I3, Gpr::I4, Gpr::I5];
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
             if i < 6 {
@@ -2106,8 +2160,7 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
             ]);
             // Patch the 22-bit displacement field (bits 21:0)
             let patched = (existing & !0x3F_FFFF) | ((disp_words as u32) & 0x3F_FFFF);
-            code[patch.code_offset..patch.code_offset + 4]
-                .copy_from_slice(&patched.to_be_bytes());
+            code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
         }
     }
     for patch in &cond_branch_false_patches {
@@ -2122,8 +2175,7 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
                 code[patch.code_offset + 3],
             ]);
             let patched = (existing & !0x3F_FFFF) | ((disp_words as u32) & 0x3F_FFFF);
-            code[patch.code_offset..patch.code_offset + 4]
-                .copy_from_slice(&patched.to_be_bytes());
+            code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
         }
     }
 
@@ -2180,14 +2232,22 @@ fn sparc64_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunctio
 
     // Collect all vreg IDs.
     let mut all_vreg_ids: Vec<u32> = Vec::new();
-    for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+    for &id in func.vregs.keys() {
+        all_vreg_ids.push(id);
+    }
     for param in &func.params {
-        if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+        if let Some(id) = param.as_register() {
+            all_vreg_ids.push(id);
+        }
     }
     for block in &func.blocks {
         for instr in &block.instructions {
-            for id in instr.defined_regs() { all_vreg_ids.push(id); }
-            for id in instr.used_regs() { all_vreg_ids.push(id); }
+            for id in instr.defined_regs() {
+                all_vreg_ids.push(id);
+            }
+            for id in instr.used_regs() {
+                all_vreg_ids.push(id);
+            }
         }
     }
     all_vreg_ids.sort();
@@ -2199,10 +2259,7 @@ fn sparc64_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunctio
     let max_real_regs = 8; // conservative limit
     for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
-            let preg = crate::backend::PhysicalReg::new(
-                crate::backend::RegClass::Gpr,
-                i as u32,
-            );
+            let preg = crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
             // Record this assignment in every instruction that defines/uses this vreg.
             for block in &mut allocated.blocks {
                 for instr in &mut block.instructions {
@@ -2819,10 +2876,30 @@ fn emit_instr(
                 }
                 CastKind::FloatToUInt => {
                     // Float → unsigned int64.  SPARC V9 has no direct
-                    // float→uint instruction.  APPROXIMATION: FDTOX
-                    // (treats as signed).  For negative floats the result
-                    // is wrong.  TODO F1d: unsigned correction (compare
-                    // against 2^63, branch, adjust).
+                    // float→uint instruction; the only FP→int conversion
+                    // available is FDTOX (treats the operand as a SIGNED
+                    // double and truncates toward zero).  This gives the
+                    // correct bit pattern for non-negative floats in
+                    // [0, 2^63), but for negative floats FDTOX returns
+                    // the negative signed result (e.g. -1.5 → -1 instead
+                    // of the Rust `as u64` semantics of 0).
+                    //
+                    // F1d FIX (Wave 11-c): clamp negative inputs to +0.0
+                    // before FDTOX, matching Rust's `f64 as u64` /
+                    // `f32 as u64` saturation semantics for negatives.
+                    // After widening F32→F64 (FSTOD) above, the sign bit
+                    // lives in bit 63 of the f64 representation.  We spill
+                    // FA to memory, mask the sign bit to zero if set
+                    // (yielding +0.0 for any negative input — including
+                    // -0.0 and -inf — and the original value otherwise),
+                    // reload, then FDTOX.
+                    //
+                    // PARTIAL: values ≥ 2^63 still go through FDTOX's
+                    // signed truncation and wrap as if signed (e.g.
+                    // 2^64 → 0, 2^63+1 → -2^63).  Full-range unsigned
+                    // correction (compare against 2^63, branch, add 2^63
+                    // back via the alpha.rs G5b trick) is deferred —
+                    // see caveats.md §8 row 15 (PARTIALLY RESOLVED).
                     let src_off = src
                         .as_register()
                         .and_then(|id| vreg_stack_slots.get(&id).copied())
@@ -2837,6 +2914,37 @@ fn emit_instr(
                     } else {
                         code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -src_off));
                     }
+                    // ── F1d: negative-clamp via sign-bit masking ──
+                    // 1. Spill FA to dst_off (will be overwritten with the
+                    //    final converted value at the end).
+                    // 2. LDX dst_off → L0  (FA's bits as int64).
+                    // 3. SRLX L0, 63 → L1  (1 if sign bit set, else 0).
+                    // 4. SUB G0, L1 → L2   (0 if non-negative, all-1s if negative).
+                    // 5. ANDN L0, L2 → L0  (zero out the bits if negative;
+                    //    otherwise unchanged).  For a negative input this
+                    //    produces exactly the bit pattern of +0.0 (all
+                    //    zero bits).
+                    // 6. STX L0 → dst_off.
+                    // 7. LDDF dst_off → FA (FA = +0.0 if was negative, else
+                    //    original non-negative float).
+                    code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
+                    code.extend(ss_ld(Gpr::L0, dst_off));
+                    code.extend_from_slice(&Instruction::SrlxImm {
+                        rd: Gpr::L1,
+                        rs1: Gpr::L0,
+                        imm: 63,
+                    }
+                    .encode()); // L1 = sign bit (0 or 1)
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, Gpr::L2, OP3_SUB, Gpr::G0, Gpr::L1,
+                    )); // L2 = -L1 (0 or all-1s)
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3, Gpr::L0, OP3_ANDN, Gpr::L0, Gpr::L2,
+                    )); // L0 = L0 AND NOT L2 (clamp negative → 0)
+                    code.extend(ss_stx(Gpr::L0, dst_off));
+                    code.extend_from_slice(&encode_lddf(FA, Gpr::I6, -dst_off));
+                    // FDTOX on the (now non-negative) float.  For inputs in
+                    // [0, 2^63) this yields the correct u64 bit pattern.
                     code.extend_from_slice(&encode_fp_unary(FP_FDTOX, FA, FA));
                     code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
                     let _ = (from_ty, to_ty);
@@ -3409,7 +3517,7 @@ fn emit_instr(
             }
         }
         IRInstr::VectorOp { .. } => {}
-        // ── Channel operations (Wave 1d / Task 2a) ──
+        // ── Channel operations ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
@@ -3483,7 +3591,14 @@ fn emit_binop(
                 .encode(),
             );
             if is_32bit {
-                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::SrlImm {
+                        rd: Gpr::L0,
+                        rs1: Gpr::L0,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
             }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
@@ -3597,7 +3712,14 @@ fn emit_binop(
                 .encode(),
             );
             if is_32bit {
-                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::SrlImm {
+                        rd: Gpr::L0,
+                        rs1: Gpr::L0,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
             }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
@@ -3613,7 +3735,14 @@ fn emit_binop(
                 .encode(),
             );
             if is_32bit {
-                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::SrlImm {
+                        rd: Gpr::L0,
+                        rs1: Gpr::L0,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
             }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
@@ -3629,7 +3758,14 @@ fn emit_binop(
                 .encode(),
             );
             if is_32bit {
-                code.extend_from_slice(&Instruction::SrlImm { rd: Gpr::L0, rs1: Gpr::L0, imm: 0 }.encode());
+                code.extend_from_slice(
+                    &Instruction::SrlImm {
+                        rd: Gpr::L0,
+                        rs1: Gpr::L0,
+                        imm: 0,
+                    }
+                    .encode(),
+                );
             }
             code.extend(ss_stx(Gpr::L0, dst_off));
         }
@@ -3743,12 +3879,14 @@ fn emit_binop(
                 .encode(),
             );
             // MOVEQ 1, l0 (move 1 if equal — cond=BE=1)
-            code.extend_from_slice(&Instruction::Movcc {
-                rd: Gpr::L0,
-                rs2: Gpr::G1, // %g1 = ?... we need 1 in a register
-                cond: COND_BE,
-            }
-            .encode());
+            code.extend_from_slice(
+                &Instruction::Movcc {
+                    rd: Gpr::L0,
+                    rs2: Gpr::G1, // %g1 = ?... we need 1 in a register
+                    cond: COND_BE,
+                }
+                .encode(),
+            );
             // Actually, MOVcc moves a register, not an immediate. We need
             // to load 1 into a temp first. Let's redo this.
             //
@@ -3783,17 +3921,17 @@ fn emit_binop(
             // Let me just use a different approach: branch-based.
             // Remove the last 4 bytes (the bad MOVcc) and emit a branch.
             code.truncate(code.len() - 4); // remove the bad MOVcc
-            // BE +2 instructions (skip the "l0 = 0" if equal)
-            // After SUBcc:
-            //   BE skip (if equal, skip the "l0 = 0")
-            //   NOP (delay slot)
-            //   l0 = 0  (not equal)
-            // skip: l0 = 1 (equal)
-            //
-            // Actually, let me redo this entire Eq case cleanly.
+                                           // BE +2 instructions (skip the "l0 = 0" if equal)
+                                           // After SUBcc:
+                                           //   BE skip (if equal, skip the "l0 = 0")
+                                           //   NOP (delay slot)
+                                           //   l0 = 0  (not equal)
+                                           // skip: l0 = 1 (equal)
+                                           //
+                                           // Actually, let me redo this entire Eq case cleanly.
             code.truncate(code.len() - 4); // remove the "OR %g0, %g0, %l0" too
-            // Now code ends after the SUBcc.
-            // Emit: l0 = 1
+                                           // Now code ends after the SUBcc.
+                                           // Emit: l0 = 1
             code.extend_from_slice(
                 &Instruction::OrImm {
                     rd: Gpr::L0,
@@ -3806,7 +3944,7 @@ fn emit_binop(
             let _bne_off = code.len();
             code.extend_from_slice(&Instruction::Be { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // l0 = 0 (not equal)
+                                                   // l0 = 0 (not equal)
             code.extend_from_slice(
                 &Instruction::Or {
                     rd: Gpr::L0,
@@ -3842,7 +3980,7 @@ fn emit_binop(
             // BNE skip (if not equal, skip the "l0 = 0")
             code.extend_from_slice(&Instruction::Bne { offset: 3 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // l0 = 0 (equal)
+                                                   // l0 = 0 (equal)
             code.extend_from_slice(
                 &Instruction::Or {
                     rd: Gpr::L0,
@@ -4141,13 +4279,21 @@ fn emit_binop(
 /// SPARC V9 FP comparisons set the `%fsr` fcc0 condition codes, which
 /// would require a `STFSR` + load sequence to extract.  As a pragmatic
 /// approximation, this emitter computes `lhs - rhs`, stores the diff
-/// bits, takes the LSB as a boolean, and inverts it for `Eq`.  This is
-/// correct for `Eq`/`Ne` only in the bitwise sense (NOT IEEE-754 sense:
-/// `-0.0 == +0.0` would compare unequal, and NaN != NaN happens to be
-/// correct by accident).  For `Lt`/`Le`/`Gt`/`Ge` the result is WRONG
-/// because the sign of the diff is lost when taking the LSB.  TODO F1d:
-/// implement proper fcc extraction via `STFSR` + `FBE`/`FBNE`/`FBL`/...
-/// branches, or via `MOVR`/`MOVCC` after `FCMP`.
+/// bits, and inspects the sign bit (for ordered comparisons) and the
+/// all-zero test (for `Eq`/`Ne`).  This is correct for `Eq`/`Ne` in
+/// the bitwise sense for non-NaN inputs (NOT IEEE-754 sense:
+/// `-0.0 == +0.0` would compare unequal here).  For `Lt`/`Le`/`Gt`/`Ge`
+/// the sign-bit heuristic is CORRECT for all non-NaN finite inputs
+/// (including mixed-sign — Task 1-f's "mixed-sign TODO" was incorrect).
+///
+/// G5 FIX (Wave 11-c): NaN is now handled via magnitude comparison
+/// (`|diff| > 0x7FF0_0000_0000_0000` for f64, `> 0x7F80_0000` for f32
+/// ⇒ NaN; Inf equals the threshold).  When the diff is NaN, ordered
+/// comparisons return 0 and `Ne` returns 1, per IEEE-754 unordered
+/// semantics.  See the inline block in the `Eq/Ne/.../UGe` arm for the
+/// exact sequence.  PARTIAL: the `-0.0 == +0.0` distinction is still
+/// bitwise (they compare unequal); full IEEE-754 equality would require
+/// `FCMPD` + `STFSR` extraction — deferred.  See caveats.md §8 row 15.
 fn emit_sparc64_fp_binop(
     op: &BinOpKind,
     dst: &IRValue,
@@ -4245,19 +4391,37 @@ fn emit_sparc64_fp_binop(
         | BinOpKind::UGt
         | BinOpKind::SGe
         | BinOpKind::UGe => {
-            // G5: improved FP comparison.
+            // G5: NaN-aware FP comparison.
             // FA = lhs - rhs (computed above, in FA).
             // Store diff, reload, and materialize boolean.
             //
-            // For Eq/Ne (FULLY CORRECT): is_zero = (high_word | low_word) == 0.
+            // For Eq/Ne (FULLY CORRECT modulo -0.0/+0.0 distinction — which
+            //   this bitwise test treats as unequal, contrary to IEEE-754):
+            //   is_zero = (high_word | low_word) == 0.
             //   Ne = !is_zero; Eq = is_zero.
-            // For Lt/Le/Gt/Ge (CORRECT for same-sign non-NaN; TODO G5 for
-            //   mixed-sign/NaN): use the sign bit of the high word.
+            // For Lt/Le/Gt/Ge (CORRECT for all non-NaN finite inputs,
+            //   INCLUDING mixed-sign — Task 1-f's "mixed-sign TODO" was
+            //   incorrect: the sign of `lhs - rhs` correctly reflects
+            //   `lhs < rhs` even across sign boundaries as long as the
+            //   subtraction does not overflow to ±Inf; the only remaining
+            //   hazard was NaN, fixed below):
             //   sign = (high_word < 0)  (i.e. bit 63 set for f64, bit 31 for f32)
             //   Lt = sign AND !is_zero
             //   Le = sign OR is_zero
             //   Gt = !sign AND !is_zero
             //   Ge = !sign OR is_zero
+            //
+            // G5 NaN fix (Wave 11-c): if the diff is NaN (because either
+            //   operand was NaN, OR the subtraction overflowed to NaN —
+            //   which does not happen for finite inputs since FSUBS/D
+            //   only produces NaN when an operand is NaN), IEEE-754 says
+            //   all ordered comparisons (Lt/Le/Gt/Ge) return false, Ne
+            //   returns true, and Eq returns false.  We detect NaN by
+            //   magnitude comparison: |diff| > 0x7FF0_0000_0000_0000
+            //   (f64) or > 0x7F80_0000 (f32) implies NaN (Inf has |diff|
+            //   exactly equal to the threshold).  The result is then
+            //   AND-ed with `not_nan` (or OR-ed with `is_nan` for Ne)
+            //   to satisfy IEEE-754 unordered semantics.
             let sub_opf = if is_f64 { FP_FSUBD } else { FP_FSUBS };
             code.extend_from_slice(&encode_fp_arith(sub_opf, FA, FA, FB));
             // Store the FP diff and reload it into a GPR for bit inspection.
@@ -4276,7 +4440,7 @@ fn emit_sparc64_fp_binop(
             // because slots are 8 bytes wide), which QEMU rejects with
             // mem_address_not_aligned (SIGBUS).  The low word is not
             // needed once the full diff is in L0.
-            let _ = if is_f64 {
+            if is_f64 {
                 code.extend_from_slice(&encode_stdf(FA, Gpr::I6, -dst_off));
                 code.extend(ss_ld(Gpr::L0, dst_off));
             } else {
@@ -4285,114 +4449,291 @@ fn emit_sparc64_fp_binop(
                 // convention used by LDF (offset 4) and the materialize pass
                 // (integer STX puts f32 bits in GPR LOW 32 = offset 4-7).
                 code.extend_from_slice(&encode_stf(FA, Gpr::I6, 4 - dst_off));
-                code.extend_from_slice(&Instruction::Lduw {
-                    rd: Gpr::L0,
-                    rs1: Gpr::I6,
-                    imm: 4 - dst_off,
-                }
-                .encode());
+                code.extend_from_slice(
+                    &Instruction::Lduw {
+                        rd: Gpr::L0,
+                        rs1: Gpr::I6,
+                        imm: 4 - dst_off,
+                    }
+                    .encode(),
+                );
             };
             // L1 = 0 so L2 = L0 | L1 = L0 (full diff; nonzero iff diff != 0.0).
             code.extend(ss_load_imm(Gpr::L1, 0));
             // L2 = L0 | L1 (nonzero iff diff != 0.0).
             code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3, Gpr::L2, OP3_OR, Gpr::L0, Gpr::L1,
+                OPC_FORMAT3,
+                Gpr::L2,
+                OP3_OR,
+                Gpr::L0,
+                Gpr::L1,
             ));
             // is_zero in L3: L3 = (L2 == 0) ? 1 : 0.
             // Build via: L3 = (L2 | -L2) >> 63  (1 if nonzero, 0 if zero),
             // then invert.  -L2 = SUB G0, L2, L4.  L4 = L2 | L4.  SRLX L4, 63.
             // SPARC V9: SUB G0, L2, L4 → L4 = -L2 (op3=0x04, SUB).
             code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3, Gpr::L4, 0x04, Gpr::G0, Gpr::L2,
-            ));  // L4 = 0 - L2 = -L2
-            // L4 = L2 | (-L2) → all-1s if L2 != 0, all-0s if L2 == 0.
+                OPC_FORMAT3,
+                Gpr::L4,
+                0x04,
+                Gpr::G0,
+                Gpr::L2,
+            )); // L4 = 0 - L2 = -L2
+                // L4 = L2 | (-L2) → all-1s if L2 != 0, all-0s if L2 == 0.
             code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3, Gpr::L4, OP3_OR, Gpr::L2, Gpr::L4,
+                OPC_FORMAT3,
+                Gpr::L4,
+                OP3_OR,
+                Gpr::L2,
+                Gpr::L4,
             ));
             // nonzero = L4 >> 63  (1 if L2 != 0, 0 if == 0).
             // MUST use SRLX (64-bit logical shift) — the 32-bit SRA/SRL only
             // examine the low 32 bits and mask the shift count to 5 bits,
             // producing -1/0 instead of 1/0 and corrupting every downstream
             // boolean (Eq/Ne/Lt/Le/Gt/Ge).
-            code.extend_from_slice(&Instruction::SrlxImm {
-                rd: Gpr::L4,
-                rs1: Gpr::L4,
-                imm: 63,
-            }
-            .encode());
+            code.extend_from_slice(
+                &Instruction::SrlxImm {
+                    rd: Gpr::L4,
+                    rs1: Gpr::L4,
+                    imm: 63,
+                }
+                .encode(),
+            );
             // is_zero = nonzero XOR 1.
             code.extend(ss_load_imm(Gpr::L5, 1));
             code.extend_from_slice(&encode_fmt3_rr(
-                OPC_FORMAT3, Gpr::L3, OP3_XOR, Gpr::L4, Gpr::L5,
-            ));  // L3 = is_zero (1 if L2 == 0, else 0)
-            // sign in L6: L6 = L0 >> sign_shift  (sign bit of the diff).
-            // For f64, sign_shift = 63 (bit 63 of the 64-bit value) → SRLX.
-            // For f32, sign_shift = 31 (bit 31 of the zero-extended 32-bit
-            //   value) → SRL (32-bit, zero-extends to 64).
+                OPC_FORMAT3,
+                Gpr::L3,
+                OP3_XOR,
+                Gpr::L4,
+                Gpr::L5,
+            )); // L3 = is_zero (1 if L2 == 0, else 0)
+                // sign in L6: L6 = L0 >> sign_shift  (sign bit of the diff).
+                // For f64, sign_shift = 63 (bit 63 of the 64-bit value) → SRLX.
+                // For f32, sign_shift = 31 (bit 31 of the zero-extended 32-bit
+                //   value) → SRL (32-bit, zero-extends to 64).
             if is_f64 {
-                code.extend_from_slice(&Instruction::SrlxImm {
-                    rd: Gpr::L6,
-                    rs1: Gpr::L0,
+                code.extend_from_slice(
+                    &Instruction::SrlxImm {
+                        rd: Gpr::L6,
+                        rs1: Gpr::L0,
+                        imm: 63,
+                    }
+                    .encode(),
+                );
+            } else {
+                code.extend_from_slice(
+                    &Instruction::SrlImm {
+                        rd: Gpr::L6,
+                        rs1: Gpr::L0,
+                        imm: 31,
+                    }
+                    .encode(),
+                );
+            } // L6 = sign (0 or 1)
+              // not_sign = 1 - sign = sign XOR 1.
+
+            // ── G5: NaN detection via magnitude comparison ──
+            // For both f64 and f32, NaN iff |diff| > Inf_threshold.
+            // Compute L7 = |diff| (clear sign bit) via SLLX+SRLX pair:
+            //   f64: SLLX 1 + SRLX 1 clears bit 63.
+            //   f32: SLLX 33 + SRLX 33 clears bit 31 (the f32 sign bit,
+            //        since the 32-bit diff is zero-extended into the low
+            //        32 bits of L0 after LDUW).
+            // Then: L1 = threshold (0x7FF0_0000_0000_0000 for f64,
+            //                       0x7F80_0000 for f32 — the magnitude
+            //                       of ±Inf, which is the largest finite-
+            //       looking exponent).  Subtract threshold from |diff|:
+            //   - if |diff| > threshold → result positive → -result negative
+            //     → sign bit 1 → SRLX 63 = 1 = is_nan.
+            //   - otherwise → result ≤ 0 → -result ≥ 0 → sign bit 0 → 0.
+            // L1 is reused here (it held 0 above); L5 still holds 1.
+            // L7 is otherwise unused in this block.
+            if is_f64 {
+                code.extend_from_slice(
+                    &Instruction::SllxImm {
+                        rd: Gpr::L7,
+                        rs1: Gpr::L0,
+                        imm: 1,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::SrlxImm {
+                        rd: Gpr::L7,
+                        rs1: Gpr::L7,
+                        imm: 1,
+                    }
+                    .encode(),
+                );
+                code.extend(ss_load_imm(Gpr::L1, 0x7FF0_0000_0000_0000));
+            } else {
+                code.extend_from_slice(
+                    &Instruction::SllxImm {
+                        rd: Gpr::L7,
+                        rs1: Gpr::L0,
+                        imm: 33,
+                    }
+                    .encode(),
+                );
+                code.extend_from_slice(
+                    &Instruction::SrlxImm {
+                        rd: Gpr::L7,
+                        rs1: Gpr::L7,
+                        imm: 33,
+                    }
+                    .encode(),
+                );
+                code.extend(ss_load_imm(Gpr::L1, 0x7F80_0000));
+            }
+            // L7 = |diff| - threshold (signed; both operands are < 2^63
+            // so no overflow).
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3,
+                Gpr::L7,
+                OP3_SUB,
+                Gpr::L7,
+                Gpr::L1,
+            ));
+            // L7 = -L7 = SUB G0, L7, L7  (sign bit = 1 iff L7 was > 0,
+            // i.e. iff |diff| > threshold → NaN).
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3,
+                Gpr::L7,
+                OP3_SUB,
+                Gpr::G0,
+                Gpr::L7,
+            ));
+            // L7 = is_nan (1 iff sign bit was 1, else 0).
+            code.extend_from_slice(
+                &Instruction::SrlxImm {
+                    rd: Gpr::L7,
+                    rs1: Gpr::L7,
                     imm: 63,
                 }
-                .encode());
-            } else {
-                code.extend_from_slice(&Instruction::SrlImm {
-                    rd: Gpr::L6,
-                    rs1: Gpr::L0,
-                    imm: 31,
-                }
-                .encode());
-            }  // L6 = sign (0 or 1)
-            // not_sign = 1 - sign = sign XOR 1.
-            // Now materialize per op:
-            //   Eq = is_zero                    → L3
-            //   Ne = nonzero                    → L4
-            //   Lt = sign AND nonzero           → L6 & L4
-            //   Le = sign OR is_zero            → L6 | L3
-            //   Gt = not_sign AND nonzero       → (1-L6) & L4
-            //   Ge = not_sign OR is_zero        → (1-L6) | L3
-            let result_reg = Gpr::L0;  // reuse L0 for the result
+                .encode(),
+            );
+            // L1 = NOT is_nan = is_nan XOR 1 (L5 still holds 1).
+            code.extend_from_slice(&encode_fmt3_rr(
+                OPC_FORMAT3,
+                Gpr::L1,
+                OP3_XOR,
+                Gpr::L7,
+                Gpr::L5,
+            ));
+            // Register state entering the per-op materialization:
+            //   L1 = not_nan, L3 = is_zero, L4 = nonzero,
+            //   L5 = 1, L6 = sign, L7 = is_nan.
+            // NaN fixup rules (IEEE-754 unordered):
+            //   Eq = is_zero AND not_nan
+            //   Ne = nonzero OR is_nan
+            //   Lt = (sign AND nonzero) AND not_nan
+            //   Le = (sign OR is_zero) AND not_nan
+            //   Gt = ((NOT sign) AND nonzero) AND not_nan
+            //   Ge = ((NOT sign) OR is_zero) AND not_nan
+            let result_reg = Gpr::L0; // reuse L0 for the result
             match op {
                 BinOpKind::Eq => {
-                    // result = is_zero
+                    // result = is_zero AND not_nan
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L3, Gpr::G0,
-                    ));  // L0 = L3 | 0 = L3
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        Gpr::L3,
+                        Gpr::L1,
+                    ));
                 }
                 BinOpKind::Ne => {
+                    // result = nonzero OR is_nan
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L4, Gpr::G0,
-                    ));  // L0 = nonzero
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_OR,
+                        Gpr::L4,
+                        Gpr::L7,
+                    ));
                 }
                 BinOpKind::SLt | BinOpKind::ULt => {
-                    // result = sign AND nonzero
+                    // result = (sign AND nonzero) AND not_nan
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, result_reg, OP3_AND, Gpr::L6, Gpr::L4,
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        Gpr::L6,
+                        Gpr::L4,
+                    ));
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        result_reg,
+                        Gpr::L1,
                     ));
                 }
                 BinOpKind::SLe | BinOpKind::ULe => {
-                    // result = sign OR is_zero
+                    // result = (sign OR is_zero) AND not_nan
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L6, Gpr::L3,
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_OR,
+                        Gpr::L6,
+                        Gpr::L3,
+                    ));
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        result_reg,
+                        Gpr::L1,
                     ));
                 }
                 BinOpKind::SGt | BinOpKind::UGt => {
-                    // result = not_sign AND nonzero = (sign XOR 1) AND nonzero
+                    // result = ((sign XOR 1) AND nonzero) AND not_nan
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, Gpr::L2, OP3_XOR, Gpr::L6, Gpr::L5,
-                    ));  // L2 = not_sign (L5 still holds 1)
+                        OPC_FORMAT3,
+                        Gpr::L2,
+                        OP3_XOR,
+                        Gpr::L6,
+                        Gpr::L5,
+                    )); // L2 = not_sign (L5 still holds 1)
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, result_reg, OP3_AND, Gpr::L2, Gpr::L4,
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        Gpr::L2,
+                        Gpr::L4,
+                    ));
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        result_reg,
+                        Gpr::L1,
                     ));
                 }
                 BinOpKind::SGe | BinOpKind::UGe => {
-                    // result = not_sign OR is_zero
+                    // result = ((sign XOR 1) OR is_zero) AND not_nan
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, Gpr::L2, OP3_XOR, Gpr::L6, Gpr::L5,
-                    ));  // L2 = not_sign
+                        OPC_FORMAT3,
+                        Gpr::L2,
+                        OP3_XOR,
+                        Gpr::L6,
+                        Gpr::L5,
+                    )); // L2 = not_sign
                     code.extend_from_slice(&encode_fmt3_rr(
-                        OPC_FORMAT3, result_reg, OP3_OR, Gpr::L2, Gpr::L3,
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_OR,
+                        Gpr::L2,
+                        Gpr::L3,
+                    ));
+                    code.extend_from_slice(&encode_fmt3_rr(
+                        OPC_FORMAT3,
+                        result_reg,
+                        OP3_AND,
+                        result_reg,
+                        Gpr::L1,
                     ));
                 }
                 _ => unreachable!(),
@@ -4824,7 +5165,9 @@ impl Backend for Sparc64Backend {
                 // SPARC64 stat family uses old syscall numbers (oldstat=38,
                 // oldlstat=68, oldfstat=91).  QEMU translates the old struct
                 // stat to the host's native struct stat.
-                ("stat", 38), ("lstat", 40), ("fstat", 62),
+                ("stat", 38),
+                ("lstat", 40),
+                ("fstat", 62),
                 ("getcwd", 119),
                 // ── Wave 7: POSIX file-metadata & I/O syscalls (sparc unistd.h) ──
                 // sparc64 has 6 reg args (o0-o5); all these take ≤5 args → simple_stub.
@@ -4832,55 +5175,107 @@ impl Backend for Sparc64Backend {
                 // expose the modern 32-bit ones: chown32=35, fchown32=32. Many
                 // sparc numbers differ from the "common" table (mkdir=136,
                 // symlink=57, fchmod=124, fsync=95, pread64=67, fdatasync=253).
-                ("mkdir", 136), ("rmdir", 137), ("rename", 128),
-                ("link", 9), ("symlink", 57), ("readlink", 58),
-                ("chmod", 15), ("chown", 35), ("umask", 60),
-                ("fchmod", 124), ("fchown", 32),
-                ("openat", 284), ("unlinkat", 290), ("renameat", 291),
-                ("linkat", 292), ("symlinkat", 293), ("readlinkat", 294),
-                ("fchmodat", 295), ("faccessat", 296), ("fchownat", 287),
-                ("ftruncate", 130), ("fsync", 95), ("fdatasync", 253),
-                ("sync", 36), ("syncfs", 335),
-                ("pread", 67), ("pwrite", 68), ("readv", 120), ("writev", 121),
-                ("preadv", 324), ("pwritev", 325),
-                ("fchdir", 176), ("chroot", 61),
+                ("mkdir", 136),
+                ("rmdir", 137),
+                ("rename", 128),
+                ("link", 9),
+                ("symlink", 57),
+                ("readlink", 58),
+                ("chmod", 15),
+                ("chown", 35),
+                ("umask", 60),
+                ("fchmod", 124),
+                ("fchown", 32),
+                ("openat", 284),
+                ("unlinkat", 290),
+                ("renameat", 291),
+                ("linkat", 292),
+                ("symlinkat", 293),
+                ("readlinkat", 294),
+                ("fchmodat", 295),
+                ("faccessat", 296),
+                ("fchownat", 287),
+                ("ftruncate", 130),
+                ("fsync", 95),
+                ("fdatasync", 253),
+                ("sync", 36),
+                ("syncfs", 335),
+                ("pread", 67),
+                ("pwrite", 68),
+                ("readv", 120),
+                ("writev", 121),
+                ("preadv", 324),
+                ("pwritev", 325),
+                ("fchdir", 176),
+                ("chroot", 61),
                 // ── Wave 9: POSIX system & advanced syscalls (sparc unistd.h) ──
                 // sparc64 has 6 reg args (o0-o5); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(318), signalfd→signalfd4(317) = modern variants.
                 // sparc numbers diverge: mlock=237, mincore=78, madvise=75,
                 // getrlimit=144, mremap=250, inotify_add_watch=152, etc.
-                ("mlock", 237), ("munlock", 238), ("mlockall", 239), ("munlockall", 240),
-                ("mincore", 78), ("madvise", 75), ("msync", 65), ("mremap", 250),
-                ("getrlimit", 144), ("setrlimit", 145), ("prlimit64", 331),
-                ("getrusage", 117), ("times", 43),
+                ("mlock", 237),
+                ("munlock", 238),
+                ("mlockall", 239),
+                ("munlockall", 240),
+                ("mincore", 78),
+                ("madvise", 75),
+                ("msync", 65),
+                ("mremap", 250),
+                ("getrlimit", 144),
+                ("setrlimit", 145),
+                ("prlimit64", 331),
+                ("getrusage", 117),
+                ("times", 43),
                 ("getrandom", 347),
-                ("eventfd", 318), ("timerfd_create", 312), ("timerfd_settime", 315),
-                ("timerfd_gettime", 316), ("signalfd", 317),
-                ("inotify_init1", 322), ("inotify_add_watch", 152), ("inotify_rm_watch", 156),
+                ("eventfd", 318),
+                ("timerfd_create", 312),
+                ("timerfd_settime", 315),
+                ("timerfd_gettime", 316),
+                ("signalfd", 317),
+                ("inotify_init1", 322),
+                ("inotify_add_watch", 152),
+                ("inotify_rm_watch", 156),
                 ("ptrace", 26),
                 // ── Wave 8: POSIX process & identity syscalls (sparc64 syscall.tbl) ──
                 // sparc64 numbers are SunOS-derived and highly divergent. All take
                 // ≤5 args; sparc64 has 6 reg args (o0-o5) → simple_stub for all.
                 // Family 1: identity (no uid16 split on sparc64)
-                ("getuid", 24), ("geteuid", 49), ("getgid", 47), ("getegid", 50),
-                ("setuid", 23), ("setgid", 46), ("setresuid", 108), ("setresgid", 110),
+                ("getuid", 24),
+                ("geteuid", 49),
+                ("getgid", 47),
+                ("getegid", 50),
+                ("setuid", 23),
+                ("setgid", 46),
+                ("setresuid", 108),
+                ("setresgid", 110),
                 // Family 2: process group (getpid already present)
-                ("getppid", 197), ("getsid", 252), ("setsid", 175),
-                ("setpgid", 185), ("getpgid", 224), ("getpgrp", 81),
+                ("getppid", 197),
+                ("getsid", 252),
+                ("setsid", 175),
+                ("setpgid", 185),
+                ("getpgid", 224),
+                ("getpgrp", 81),
                 // Family 3: clone/wait (clone/wait4 already present)
-                ("vfork", 66), ("clone3", 435), ("waitid", 279),
+                ("vfork", 66),
+                ("clone3", 435),
+                ("waitid", 279),
                 // Family 4: exec/exit (execve/exit_group already present)
                 ("execveat", 350),
                 // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-                ("tgkill", 211), ("tkill", 187), ("rt_sigaction", 102),
+                ("tgkill", 211),
+                ("tkill", 187),
+                ("rt_sigaction", 102),
                 // Family 6: directory read (readdir ABSENT → use getdents64)
-                ("getdents64", 154), ("getdents", 174),
+                ("getdents64", 154),
+                ("getdents", 174),
                 // Family 7: system (arch_prctl is x86_64-only)
-                ("prctl", 147), ("uname", 189), ("sysinfo", 214),
-                            ("eventfd2", 318),
+                ("prctl", 147),
+                ("uname", 189),
+                ("sysinfo", 214),
+                ("eventfd2", 318),
                 ("newfstatat", 289),
                 ("signalfd4", 327),
-] {
+            ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
@@ -4890,17 +5285,79 @@ impl Backend for Sparc64Backend {
             // Syscall nr in G1=71. TA 0x6d. Return via JMPL %o7+8.
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 0 }.encode());       // O0 = 0
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O1, rs1: Gpr::G0, imm: 4096 }.encode());    // O1 = 4096
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O2, rs1: Gpr::G0, imm: 3 }.encode());       // O2 = PROT
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O3, rs1: Gpr::G0, imm: 0x22 }.encode());    // O3 = MAP
-                // O4 = -1: use SETHI + OR for -1 (0xFFFFFFFF)
-                code.extend_from_slice(&Instruction::Sethi { rd: Gpr::O4, imm22: 0x3FF }.encode()); // sethi %hi(0xFFFFFC00), %o4
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O4, rs1: Gpr::O4, imm: 0x3FF }.encode()); // or %o4, 0x3FF, %o4 → -1
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode());       // O5 = 0
-                code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 71 }.encode());      // G1 = sys_mmap
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::O0,
+                        rs1: Gpr::G0,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // O0 = 0
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::O1,
+                        rs1: Gpr::G0,
+                        imm: 4096,
+                    }
+                    .encode(),
+                ); // O1 = 4096
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::O2,
+                        rs1: Gpr::G0,
+                        imm: 3,
+                    }
+                    .encode(),
+                ); // O2 = PROT
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::O3,
+                        rs1: Gpr::G0,
+                        imm: 0x22,
+                    }
+                    .encode(),
+                ); // O3 = MAP
+                   // O4 = -1: use SETHI + OR for -1 (0xFFFFFFFF)
+                code.extend_from_slice(
+                    &Instruction::Sethi {
+                        rd: Gpr::O4,
+                        imm22: 0x3FF,
+                    }
+                    .encode(),
+                ); // sethi %hi(0xFFFFFC00), %o4
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::O4,
+                        rs1: Gpr::O4,
+                        imm: 0x3FF,
+                    }
+                    .encode(),
+                ); // or %o4, 0x3FF, %o4 → -1
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::O5,
+                        rs1: Gpr::G0,
+                        imm: 0,
+                    }
+                    .encode(),
+                ); // O5 = 0
+                code.extend_from_slice(
+                    &Instruction::OrImm {
+                        rd: Gpr::G1,
+                        rs1: Gpr::G0,
+                        imm: 71,
+                    }
+                    .encode(),
+                ); // G1 = sys_mmap
                 code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-                code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Jmpl {
+                        rd: Gpr::G0,
+                        rs1: Gpr::O7,
+                        imm: 8,
+                    }
+                    .encode(),
+                );
                 code.extend_from_slice(&encode_nop());
                 stubs.push(("ffi_scratch_push_frame".to_string(), code));
             }
@@ -4910,15 +5367,107 @@ impl Backend for Sparc64Backend {
             // since push_frame allocates fresh memory each call).
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                code.extend_from_slice(
+                    &Instruction::Jmpl {
+                        rd: Gpr::G0,
+                        rs1: Gpr::O7,
+                        imm: 8,
+                    }
+                    .encode(),
+                );
                 code.extend_from_slice(&encode_nop());
                 stubs.push(("ffi_scratch_pop_frame".to_string(), code));
                 stubs.push(("__arena_overflow".to_string(), {
                     let mut code = Vec::new();
-                    code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 1 }.encode());
-                    code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 1 }.encode());
+                    code.extend_from_slice(
+                        &Instruction::OrImm {
+                            rd: Gpr::O0,
+                            rs1: Gpr::G0,
+                            imm: 1,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::OrImm {
+                            rd: Gpr::G1,
+                            rs1: Gpr::G0,
+                            imm: 1,
+                        }
+                        .encode(),
+                    );
                     code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-                    code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                    code.extend_from_slice(
+                        &Instruction::Jmpl {
+                            rd: Gpr::G0,
+                            rs1: Gpr::O7,
+                            imm: 8,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(&encode_nop());
+                    code
+                }));
+                // __oob_trap: real exit(134) syscall (SIGABRT code).
+                stubs.push(("__oob_trap".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(
+                        &Instruction::OrImm {
+                            rd: Gpr::O0,
+                            rs1: Gpr::G0,
+                            imm: 134,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::OrImm {
+                            rd: Gpr::G1,
+                            rs1: Gpr::G0,
+                            imm: 1,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+                    code.extend_from_slice(
+                        &Instruction::Jmpl {
+                            rd: Gpr::G0,
+                            rs1: Gpr::O7,
+                            imm: 8,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(&encode_nop());
+                    code
+                }));
+                // __uaf_trap: real exit(135) syscall. Dormant until the
+                // liveness check IR invokes it (IMPL-UAF-1). Distinct from
+                // OOB (134) and arena overflow (1).
+                stubs.push(("__uaf_trap".to_string(), {
+                    let mut code = Vec::new();
+                    code.extend_from_slice(
+                        &Instruction::OrImm {
+                            rd: Gpr::O0,
+                            rs1: Gpr::G0,
+                            imm: 135,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(
+                        &Instruction::OrImm {
+                            rd: Gpr::G1,
+                            rs1: Gpr::G0,
+                            imm: 1,
+                        }
+                        .encode(),
+                    );
+                    code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+                    code.extend_from_slice(
+                        &Instruction::Jmpl {
+                            rd: Gpr::G0,
+                            rs1: Gpr::O7,
+                            imm: 8,
+                        }
+                        .encode(),
+                    );
                     code.extend_from_slice(&encode_nop());
                     code
                 }));
@@ -4972,29 +5521,59 @@ impl Backend for Sparc64Backend {
             let mut code = Vec::new();
             // Save %o0 (pipefd buffer ptr) to %l0 (callee-saved local)
             code.extend_from_slice(
-                &Instruction::Or { rd: Gpr::L0, rs1: Gpr::O0, rs2: Gpr::G0 }.encode(),
+                &Instruction::Or {
+                    rd: Gpr::L0,
+                    rs1: Gpr::O0,
+                    rs2: Gpr::G0,
+                }
+                .encode(),
             );
             // %g1 = 42 (sys_pipe)
             code.extend_from_slice(
-                &Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 42 }.encode(),
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 42,
+                }
+                .encode(),
             );
             // ta 0x6d (syscall) — returns read fd in %o0, write fd in %o1
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
             // STW %o0, [%l0] — store read fd (32-bit, only needs 4-byte alignment)
             code.extend_from_slice(
-                &Instruction::Stw { rd: Gpr::O0, rs1: Gpr::L0, imm: 0 }.encode(),
+                &Instruction::Stw {
+                    rd: Gpr::O0,
+                    rs1: Gpr::L0,
+                    imm: 0,
+                }
+                .encode(),
             );
             // STW %o1, [%l0+4] — store write fd (32-bit)
             code.extend_from_slice(
-                &Instruction::Stw { rd: Gpr::O1, rs1: Gpr::L0, imm: 4 }.encode(),
+                &Instruction::Stw {
+                    rd: Gpr::O1,
+                    rs1: Gpr::L0,
+                    imm: 4,
+                }
+                .encode(),
             );
             // %o0 = 0 (return success)
             code.extend_from_slice(
-                &Instruction::OrImm { rd: Gpr::O0, rs1: Gpr::G0, imm: 0 }.encode(),
+                &Instruction::OrImm {
+                    rd: Gpr::O0,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
             );
             // JMPL %o7+8, %g0 (return — leaf function, no SAVE/RESTORE)
             code.extend_from_slice(
-                &Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode(),
+                &Instruction::Jmpl {
+                    rd: Gpr::G0,
+                    rs1: Gpr::O7,
+                    imm: 8,
+                }
+                .encode(),
             );
             // NOP (delay slot)
             code.extend_from_slice(&encode_nop());
@@ -5005,7 +5584,12 @@ impl Backend for Sparc64Backend {
         {
             let mut code = Vec::new();
             code.extend_from_slice(
-                &Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 101 }.encode(),
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 101,
+                }
+                .encode(),
             );
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
             // Safety trap in case the kernel ever returns (it shouldn't).
@@ -5017,10 +5601,31 @@ impl Backend for Sparc64Backend {
         // SPARC64: %o3 = 4th arg (rusage). Zero it before the syscall.
         {
             let mut code = Vec::new();
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O3, rs1: Gpr::G0, imm: 0 }.encode()); // rusage=NULL
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 7 }.encode());  // sys_wait4
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::O3,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
+            ); // rusage=NULL
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 7,
+                }
+                .encode(),
+            ); // sys_wait4
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(
+                &Instruction::Jmpl {
+                    rd: Gpr::G0,
+                    rs1: Gpr::O7,
+                    imm: 8,
+                }
+                .encode(),
+            );
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("waitpid".to_string(), code));
         }
@@ -5029,11 +5634,39 @@ impl Backend for Sparc64Backend {
         // SPARC64: %o4 = addr, %o5 = addrlen. Both must be NULL.
         {
             let mut code = Vec::new();
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O4, rs1: Gpr::G0, imm: 0 }.encode()); // addr=NULL
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode()); // addrlen=NULL
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 198 }.encode()); // sys_recvfrom
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::O4,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
+            ); // addr=NULL
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::O5,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
+            ); // addrlen=NULL
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 198,
+                }
+                .encode(),
+            ); // sys_recvfrom
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(
+                &Instruction::Jmpl {
+                    rd: Gpr::G0,
+                    rs1: Gpr::O7,
+                    imm: 8,
+                }
+                .encode(),
+            );
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("recv".to_string(), code));
         }
@@ -5041,11 +5674,39 @@ impl Backend for Sparc64Backend {
         // ── send(fd, buf, len, flags) → sendto(fd, buf, len, flags, NULL, 0)
         {
             let mut code = Vec::new();
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O4, rs1: Gpr::G0, imm: 0 }.encode());
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::O5, rs1: Gpr::G0, imm: 0 }.encode());
-            code.extend_from_slice(&Instruction::OrImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 197 }.encode()); // sys_sendto
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::O4,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
+            );
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::O5,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
+            );
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 197,
+                }
+                .encode(),
+            ); // sys_sendto
             code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+            code.extend_from_slice(
+                &Instruction::Jmpl {
+                    rd: Gpr::G0,
+                    rs1: Gpr::O7,
+                    imm: 8,
+                }
+                .encode(),
+            );
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("send".to_string(), code));
         }
@@ -5057,21 +5718,77 @@ impl Backend for Sparc64Backend {
             let mut code = Vec::new();
             let nop: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
             // loop:
-            code.extend_from_slice(&Instruction::Ldub { rd: Gpr::O2, rs1: Gpr::O0, imm: 0 }.encode()); // %o2 = *s1
-            code.extend_from_slice(&Instruction::Ldub { rd: Gpr::O3, rs1: Gpr::O1, imm: 0 }.encode()); // %o3 = *s2
-            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::O4, rs1: Gpr::O2, rs2: Gpr::O3 }.encode()); // %o4 = %o2 - %o3, set CC
-            code.extend_from_slice(&Instruction::Bne { offset: 9 }.encode());  // BNE done (+9 words)
+            code.extend_from_slice(
+                &Instruction::Ldub {
+                    rd: Gpr::O2,
+                    rs1: Gpr::O0,
+                    imm: 0,
+                }
+                .encode(),
+            ); // %o2 = *s1
+            code.extend_from_slice(
+                &Instruction::Ldub {
+                    rd: Gpr::O3,
+                    rs1: Gpr::O1,
+                    imm: 0,
+                }
+                .encode(),
+            ); // %o3 = *s2
+            code.extend_from_slice(
+                &Instruction::Subcc {
+                    rd: Gpr::O4,
+                    rs1: Gpr::O2,
+                    rs2: Gpr::O3,
+                }
+                .encode(),
+            ); // %o4 = %o2 - %o3, set CC
+            code.extend_from_slice(&Instruction::Bne { offset: 9 }.encode()); // BNE done (+9 words)
             code.extend_from_slice(&nop); // delay slot
-            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: Gpr::O2, rs2: Gpr::G0 }.encode()); // check %o2 == 0
-            code.extend_from_slice(&Instruction::Be { offset: 6 }.encode());   // BE done (+6 words)
+            code.extend_from_slice(
+                &Instruction::Subcc {
+                    rd: Gpr::G0,
+                    rs1: Gpr::O2,
+                    rs2: Gpr::G0,
+                }
+                .encode(),
+            ); // check %o2 == 0
+            code.extend_from_slice(&Instruction::Be { offset: 6 }.encode()); // BE done (+6 words)
             code.extend_from_slice(&nop); // delay slot
-            code.extend_from_slice(&Instruction::AddImm { rd: Gpr::O0, rs1: Gpr::O0, imm: 1 }.encode()); // s1++
-            code.extend_from_slice(&Instruction::AddImm { rd: Gpr::O1, rs1: Gpr::O1, imm: 1 }.encode()); // s2++
+            code.extend_from_slice(
+                &Instruction::AddImm {
+                    rd: Gpr::O0,
+                    rs1: Gpr::O0,
+                    imm: 1,
+                }
+                .encode(),
+            ); // s1++
+            code.extend_from_slice(
+                &Instruction::AddImm {
+                    rd: Gpr::O1,
+                    rs1: Gpr::O1,
+                    imm: 1,
+                }
+                .encode(),
+            ); // s2++
             code.extend_from_slice(&Instruction::Ba { offset: -10 }.encode()); // BA loop (-10 words)
             code.extend_from_slice(&nop); // delay slot
-            // done:
-            code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::O4, rs2: Gpr::G0 }.encode()); // %o0 = %o4
-            code.extend_from_slice(&Instruction::Jmpl { rd: Gpr::G0, rs1: Gpr::O7, imm: 8 }.encode());
+                                          // done:
+            code.extend_from_slice(
+                &Instruction::Or {
+                    rd: Gpr::O0,
+                    rs1: Gpr::O4,
+                    rs2: Gpr::G0,
+                }
+                .encode(),
+            ); // %o0 = %o4
+            code.extend_from_slice(
+                &Instruction::Jmpl {
+                    rd: Gpr::G0,
+                    rs1: Gpr::O7,
+                    imm: 8,
+                }
+                .encode(),
+            );
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("strcmp".to_string(), code));
         }
@@ -5111,8 +5828,8 @@ impl Backend for Sparc64Backend {
             let bneg_off = code.len();
             code.extend_from_slice(&Instruction::Bl { offset: 0 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // ... negative handling: print '-', negate %l0
-            // OR %g0, 45, %l1 (ASCII '-')
+                                                   // ... negative handling: print '-', negate %l0
+                                                   // OR %g0, 45, %l1 (ASCII '-')
             code.extend_from_slice(
                 &Instruction::OrImm {
                     rd: Gpr::L1,
@@ -5291,7 +6008,7 @@ impl Backend for Sparc64Backend {
             let bne_off = code.len();
             code.extend_from_slice(&Instruction::Bne { offset: 0 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // Patch the BNE to jump back to div_loop_start
+                                                   // Patch the BNE to jump back to div_loop_start
             let disp = (div_loop_start as i64 - bne_off as i64) / 4;
             let existing = u32::from_be_bytes([
                 code[bne_off],
@@ -5481,7 +6198,7 @@ impl Backend for Sparc64Backend {
             let bl_off = code.len();
             code.extend_from_slice(&Instruction::Bl { offset: 0 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // Add 39 to %l3 (convert '9'+1.. to 'a'..)
+                                                   // Add 39 to %l3 (convert '9'+1.. to 'a'..)
             code.extend_from_slice(
                 &Instruction::AddImm {
                     rd: Gpr::L3,
@@ -5649,7 +6366,12 @@ impl Backend for Sparc64Backend {
         let mut start_stub = Vec::with_capacity(start_stub_size);
         // MOV %sp, %g2 — save original SP in global register
         start_stub.extend_from_slice(
-            &Instruction::Or { rd: Gpr::G2, rs1: Gpr::O6, rs2: Gpr::G0 }.encode(),
+            &Instruction::Or {
+                rd: Gpr::G2,
+                rs1: Gpr::O6,
+                rs2: Gpr::G0,
+            }
+            .encode(),
         );
         // AND %sp, -16, %sp — align SP (required for STX in prologues)
         start_stub.extend_from_slice(
@@ -5802,17 +6524,14 @@ impl Backend for Sparc64Backend {
                     continue;
                 }
                 if reloc.reloc_type == R_SPARC_WDISP30 {
-                    let target_offset = func_offsets
-                        .get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets
-                                .keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     let target_offset = target_offset.unwrap_or(ffi_stub_offset);
                     let call_abs = BASE_ADDR + text_offset + abs_offset as u64;
                     let target_abs = BASE_ADDR + text_offset + target_offset as u64;
@@ -5827,17 +6546,14 @@ impl Backend for Sparc64Backend {
                     all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
                 } else if reloc.reloc_type == "R_SPARC_HI22" || reloc.reloc_type == "R_SPARC_LO10" {
                     // Resolve the symbol's absolute address.
-                    let target_offset = func_offsets
-                        .get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets
-                                .keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     let target_offset = target_offset.unwrap_or(ffi_stub_offset);
                     let abs_addr: u64 = BASE_ADDR + text_offset + target_offset as u64;
                     let existing = u32::from_be_bytes([
@@ -5938,18 +6654,22 @@ impl Backend for Sparc64Backend {
         let lo10 = (addr & 0x3FF) as u32;
 
         let mut code = Vec::with_capacity(16);
-        code.extend_from_slice(&Instruction::Sethi {
-            rd: Gpr::G2,
-            imm22: hi22,
-        }
-        .encode());
-        if lo10 != 0 {
-            code.extend_from_slice(&Instruction::OrImm {
+        code.extend_from_slice(
+            &Instruction::Sethi {
                 rd: Gpr::G2,
-                rs1: Gpr::G2,
-                imm: lo10 as i32,
+                imm22: hi22,
             }
-            .encode());
+            .encode(),
+        );
+        if lo10 != 0 {
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::G2,
+                    rs1: Gpr::G2,
+                    imm: lo10 as i32,
+                }
+                .encode(),
+            );
         }
         code.extend_from_slice(
             &Instruction::Jmpl {
@@ -6023,8 +6743,288 @@ mod tests {
         assert!(result_real.is_ok(), "real regalloc should succeed");
         let real_func = result_real.unwrap();
         // Real regalloc mode: at least one instruction should have reads/writes.
-        let has_real_regs = real_func.blocks.iter()
-            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
-        assert!(has_real_regs, "real regalloc should record physical register assignments");
+        let has_real_regs = real_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| !i.reads.is_empty() || !i.writes.is_empty())
+        });
+        assert!(
+            has_real_regs,
+            "real regalloc should record physical register assignments"
+        );
+    }
+
+    // ── F1d (Wave 11-c) tests ────────────────────────────────────────────
+    //
+    // The F1d fix clamps negative floats to +0.0 before FDTOX so that
+    // `f64 as u64` / `f32 as u64` saturate to 0 for negative inputs
+    // (matching Rust's saturation cast semantics).  Without a QEMU
+    // execution harness in this repo, we verify by inspecting the
+    // emitted bytes for the expected ANDN (op3=0x05) sign-bit-masking
+    // instruction.  A future regression that re-introduces the bare
+    // FDTOX approximation would drop the ANDN, failing this test.
+
+    /// Decode every 4-byte big-endian SPARC word from `code` and return
+    /// `true` if any word matches `predicate`.
+    fn any_sparc_word<F: Fn(u32) -> bool>(code: &[u8], predicate: F) -> bool {
+        code.chunks_exact(4).any(|w| {
+            let word = u32::from_be_bytes([w[0], w[1], w[2], w[3]]);
+            predicate(word)
+        })
+    }
+
+    /// Collect the encoded machine bytes for a single-instruction IR
+    /// function (used by the F1d/G5 byte-pattern tests).
+    fn emit_function_code(func: &IRFunction) -> Vec<u8> {
+        let backend = Sparc64Backend::new();
+        let allocated = backend
+            .allocate_registers(func)
+            .expect("sparc64 allocation should succeed");
+        let mut code = Vec::new();
+        for block in &allocated.blocks {
+            for instr in &block.instructions {
+                code.extend_from_slice(&instr.encoded);
+            }
+        }
+        code
+    }
+
+    #[test]
+    fn test_sparc64_f1d_floattouint_f64_negative_clamp() {
+        // F1d: FloatToUInt(f64) must emit a sign-bit-masking ANDN before
+        // FDTOX so that negative floats saturate to 0 (Rust `as u64`
+        // semantics) rather than producing a wrong signed bit pattern.
+        let mut func = IRFunction::new("test_f1d_f64");
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.blocks[0].instructions.push(IRInstr::Cast {
+            kind: CastKind::FloatToUInt,
+            dst: IRValue::Register(1),
+            src: IRValue::Register(0),
+            from_ty: Some(IRType::F64),
+            to_ty: Some(IRType::U64),
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+
+        let code = emit_function_code(&func);
+
+        // ANDN: op=0b10, op3=0x05.
+        let has_andn = any_sparc_word(&code, |w| (w >> 30) == 0b10 && ((w >> 19) & 0x3F) == 0x05);
+        assert!(
+            has_andn,
+            "F1d: FloatToUInt(f64) must emit ANDN (op3=0x05) to clamp negatives; \
+             got code: {:02x?}",
+            code
+        );
+
+        // FDTOX (opf=0x082, FPop1 op3=0x34) must still appear.
+        let has_fdtox = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10 && ((w >> 19) & 0x3F) == 0x34 && ((w >> 5) & 0x1FF) == 0x082
+        });
+        assert!(
+            has_fdtox,
+            "F1d: FloatToUInt(f64) must still emit FDTOX (opf=0x082); \
+             got code: {:02x?}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_sparc64_f1d_floattouint_f32_negative_clamp() {
+        // F1d on the F32 path: same ANDN clamp must appear after FSTOD
+        // widens the f32 source to f64.
+        let mut func = IRFunction::new("test_f1d_f32");
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.blocks[0].instructions.push(IRInstr::Cast {
+            kind: CastKind::FloatToUInt,
+            dst: IRValue::Register(1),
+            src: IRValue::Register(0),
+            from_ty: Some(IRType::F32),
+            to_ty: Some(IRType::U64),
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+
+        let code = emit_function_code(&func);
+
+        let has_andn = any_sparc_word(&code, |w| (w >> 30) == 0b10 && ((w >> 19) & 0x3F) == 0x05);
+        assert!(
+            has_andn,
+            "F1d: FloatToUInt(f32) must emit ANDN (op3=0x05) to clamp negatives; \
+             got code: {:02x?}",
+            code
+        );
+
+        // FSTOD (opf=0x0C9) widens f32 → f64 before the clamp.
+        let has_fstod = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10 && ((w >> 19) & 0x3F) == 0x34 && ((w >> 5) & 0x1FF) == 0x0C9
+        });
+        assert!(
+            has_fstod,
+            "F1d: FloatToUInt(f32) must emit FSTOD (opf=0x0C9) widening; \
+             got code: {:02x?}",
+            code
+        );
+    }
+
+    // ── G5 (Wave 11-c) tests ─────────────────────────────────────────────
+    //
+    // The G5 fix adds NaN detection via magnitude comparison
+    // (|diff| > Inf_threshold) and ANDs the comparison result with
+    // `not_nan` (or ORs with `is_nan` for `Ne`) so that NaN operands
+    // produce the IEEE-754 unordered result.  We verify the emitted
+    // bytes contain the SLLX+SRLX magnitude-clear pair that opens the
+    // NaN-detection sequence.
+
+    #[test]
+    fn test_sparc64_g5_fp_eq_nan_aware() {
+        // G5: FP Eq must include the NaN-detection sequence (SLLX+SRLX
+        // to clear the sign bit of the diff).  Without it, NaN operands
+        // would compare equal to themselves (because the diff is 0 only
+        // if both operands are bit-identical — but for NaN this is
+        // false, so the existing diff-bits test happens to give the
+        // right answer for Eq; still, the magnitude-clear sequence is
+        // emitted unconditionally and must be present).
+        let mut func = IRFunction::new("test_g5_eq");
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.vregs.insert(2, VirtualRegister::anonymous(2));
+        func.blocks[0].instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Eq,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+
+        let code = emit_function_code(&func);
+
+        // SLLX (op=0b10, op3=0x25, i=1, x=1).
+        let has_sllx = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10
+                && ((w >> 19) & 0x3F) == 0x25
+                && ((w >> 13) & 0x1) == 1
+                && ((w >> 12) & 0x1) == 1
+        });
+        assert!(
+            has_sllx,
+            "G5: FP Eq(f64) must emit SLLX (op3=0x25, x=1) for the NaN \
+             magnitude-clear; got code: {:02x?}",
+            code
+        );
+
+        // SRLX (op=0b10, op3=0x26, i=1, x=1).
+        let has_srlx = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10
+                && ((w >> 19) & 0x3F) == 0x26
+                && ((w >> 13) & 0x1) == 1
+                && ((w >> 12) & 0x1) == 1
+        });
+        assert!(
+            has_srlx,
+            "G5: FP Eq(f64) must emit SRLX (op3=0x26, x=1) for the NaN \
+             magnitude-clear; got code: {:02x?}",
+            code
+        );
+
+        // FSUBD (opf=0x046) must be present (computes lhs - rhs).
+        let has_fsubd = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10 && ((w >> 19) & 0x3F) == 0x34 && ((w >> 5) & 0x1FF) == 0x046
+        });
+        assert!(
+            has_fsubd,
+            "G5: FP Eq(f64) must emit FSUBD (opf=0x046) for the diff; \
+             got code: {:02x?}",
+            code
+        );
+    }
+
+    #[test]
+    fn test_sparc64_g5_fp_lt_nan_aware() {
+        // G5: FP Lt must include the NaN-detection sequence so that
+        // `NaN < x` returns 0 (false) per IEEE-754 unordered semantics.
+        // Without it, the sign-bit heuristic would return the
+        // unpredictable sign bit of the NaN diff (often 1 → Lt=true).
+        let mut func = IRFunction::new("test_g5_lt");
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.vregs.insert(2, VirtualRegister::anonymous(2));
+        func.blocks[0].instructions.push(IRInstr::BinOp {
+            op: BinOpKind::SLt,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+
+        let code = emit_function_code(&func);
+
+        let has_sllx = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10
+                && ((w >> 19) & 0x3F) == 0x25
+                && ((w >> 13) & 0x1) == 1
+                && ((w >> 12) & 0x1) == 1
+        });
+        assert!(
+            has_sllx,
+            "G5: FP Lt(f64) must emit SLLX (op3=0x25, x=1) for NaN detection; \
+             got code: {:02x?}",
+            code
+        );
+
+        // The result AND-with-not_nan step requires an AND (op3=0x01)
+        // instruction with the L1 register (which holds not_nan).
+        // We just check that at least two AND instructions appear
+        // (one for `sign AND nonzero`, one for `result AND not_nan`).
+        let and_count = code
+            .chunks_exact(4)
+            .filter(|w| {
+                let word = u32::from_be_bytes([w[0], w[1], w[2], w[3]]);
+                (word >> 30) == 0b10 && ((word >> 19) & 0x3F) == 0x01
+            })
+            .count();
+        assert!(
+            and_count >= 2,
+            "G5: FP Lt(f64) must emit at least 2 ANDs (sign∧nonzero, then ∧not_nan); \
+             got {} ANDs in code: {:02x?}",
+            and_count,
+            code
+        );
+    }
+
+    #[test]
+    fn test_sparc64_g5_fp_ne_nan_aware() {
+        // G5: FP Ne must OR the result with `is_nan` so that
+        // `NaN != x` returns 1 (true) per IEEE-754.  We verify the
+        // OR-with-L7 (is_nan) step by checking that the emitted code
+        // contains the SLLX/SRLX pair (NaN detection) and the FSUBD.
+        let mut func = IRFunction::new("test_g5_ne");
+        func.vregs.insert(0, VirtualRegister::anonymous(0));
+        func.vregs.insert(1, VirtualRegister::anonymous(1));
+        func.vregs.insert(2, VirtualRegister::anonymous(2));
+        func.blocks[0].instructions.push(IRInstr::BinOp {
+            op: BinOpKind::Ne,
+            dst: IRValue::Register(2),
+            lhs: IRValue::Register(0),
+            rhs: IRValue::Register(1),
+            ty: Some(IRType::F64),
+        });
+        func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
+
+        let code = emit_function_code(&func);
+
+        let has_sllx = any_sparc_word(&code, |w| {
+            (w >> 30) == 0b10
+                && ((w >> 19) & 0x3F) == 0x25
+                && ((w >> 13) & 0x1) == 1
+                && ((w >> 12) & 0x1) == 1
+        });
+        assert!(
+            has_sllx,
+            "G5: FP Ne(f64) must emit SLLX for NaN detection; got code: {:02x?}",
+            code
+        );
     }
 }

@@ -104,16 +104,37 @@ impl TelemetryReport {
         JsonValue::Object(vec![
             ("version".to_string(), json_str(&self.version)),
             ("total_time_ms".to_string(), json_u64(self.total_time_ms)),
-            ("stage_timings".to_string(), JsonValue::Object(stage_entries)),
-            ("peak_memory_bytes".to_string(), json_u64(self.peak_memory_bytes)),
+            (
+                "stage_timings".to_string(),
+                JsonValue::Object(stage_entries),
+            ),
+            (
+                "peak_memory_bytes".to_string(),
+                json_u64(self.peak_memory_bytes),
+            ),
             ("error_count".to_string(), json_usize(self.error_count)),
             ("warning_count".to_string(), json_usize(self.warning_count)),
-            ("scg_node_count".to_string(), json_usize(self.scg_node_count)),
-            ("ir_function_count".to_string(), json_usize(self.ir_function_count)),
-            ("ir_instruction_count".to_string(), json_usize(self.ir_instruction_count)),
-            ("binary_size_bytes".to_string(), json_usize(self.binary_size_bytes)),
+            (
+                "scg_node_count".to_string(),
+                json_usize(self.scg_node_count),
+            ),
+            (
+                "ir_function_count".to_string(),
+                json_usize(self.ir_function_count),
+            ),
+            (
+                "ir_instruction_count".to_string(),
+                json_usize(self.ir_instruction_count),
+            ),
+            (
+                "binary_size_bytes".to_string(),
+                json_usize(self.binary_size_bytes),
+            ),
             ("opt_level".to_string(), json_str(&self.opt_level)),
-            ("verification_level".to_string(), json_str(&self.verification_level)),
+            (
+                "verification_level".to_string(),
+                json_str(&self.verification_level),
+            ),
             ("debug_info".to_string(), json_bool(self.debug_info)),
             ("target".to_string(), json_str(&self.target)),
             ("timestamp".to_string(), json_str(&self.timestamp)),
@@ -141,7 +162,10 @@ impl StageMetrics {
             ("time_ms".to_string(), json_u64(self.time_ms)),
             ("error_count".to_string(), json_usize(self.error_count)),
             ("warning_count".to_string(), json_usize(self.warning_count)),
-            ("memory_delta_bytes".to_string(), JsonValue::from(self.memory_delta_bytes)),
+            (
+                "memory_delta_bytes".to_string(),
+                JsonValue::from(self.memory_delta_bytes),
+            ),
         ])
     }
 }
