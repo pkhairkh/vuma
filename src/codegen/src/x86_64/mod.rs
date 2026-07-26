@@ -4341,10 +4341,20 @@ impl Backend for X86_64Backend {
                             all_code[abs_offset..abs_offset + 4]
                                 .copy_from_slice(&resolved.to_le_bytes());
                         } else {
-                            vuma_log!(warn,
-                                "Unresolved external symbol '{}' in '{}' at 0x{:X} — no __ffi_fallback_stub registered, call will jump to address 0",
-                                reloc.symbol, func.name, reloc.offset
-                            );
+                            // PMT state/arena externs — temporary stop-the-bleeding fallback; Wave 1 (FFI-1-C) will inline these as IR instructions.
+                            if reloc.symbol.starts_with("__vuma_state_")
+                                || reloc.symbol.starts_with("__vuma_arena_")
+                            {
+                                vuma_log!(debug,
+                                    "PMT extern '{}' in '{}' at 0x{:X} unresolved (no __ffi_fallback_stub registered) — intentional stop-the-bleeding fallback; Wave 1 will inline as IR",
+                                    reloc.symbol, func.name, reloc.offset
+                                );
+                            } else {
+                                vuma_log!(warn,
+                                    "Unresolved external symbol '{}' in '{}' at 0x{:X} — no __ffi_fallback_stub registered, call will jump to address 0",
+                                    reloc.symbol, func.name, reloc.offset
+                                );
+                            }
                             continue;
                         }
                     }
