@@ -163,11 +163,22 @@ verify:
  `Arena::create` / `Arena::grow` via `raw_create: Nat → Except TrapCode
  RawArena`, closing the simulation-soundness gap in the arena-fidelity
  audit — `proof/PMT/MmapArena.lean`.
-- **PipelineSim**: the **first mechanical connection** between the Lean
- formal model and the Rust implementation. Following CompCert's translation
- validation approach, it models the specification of `pipeline::compile`,
- proves Lean's `exec` satisfies that spec, and conditionally concludes
- end-to-end safety of the compiled binary — `proof/PMT/PipelineSim.lean`.
+- **PipelineSim**: scaffolding for the Lean↔Rust pipeline-conformance
+  theorem. Following CompCert's translation validation approach, it models
+  the specification that `pipeline::compile` *will eventually* be required
+  to meet (`PipelineSpec`), and proves Lean's own `exec` already meets that
+  spec (`exec_satisfies_pipeline_spec`). The two headline theorems
+  `pmt_soundness_restate` and `pmt_soundness_no_oob_restate` (renamed in
+  PMT-0-C from `pipeline_compile_sound` / `pipeline_compile_no_oob`) are
+  **direct restatements** of `pmt_soundness` /
+  `no_oob_trap_for_well_typed_strong` — sorry-free, but with **no Rust-side
+  hypothesis**, because the pre-PMT-0-C `hconforms : PipelineSpec prog s`
+  hypothesis was unused in the proof bodies (the
+  `PipelineSpec.compiled_matches_exec` field is `exec prog s = exec prog s`,
+  a `rfl` tautology). The "real" pipeline-conformance theorem — one that
+  discharges a non-vacuous `PipelineSpec prog s` tying Lean `exec` to the
+  actual Rust `pipeline::compile` output — is deferred to Wave 1 PMT-1-G
+  (extraction + Rust-parity testing) — `proof/PMT/PipelineSim.lean`.
 - **Rust integration (runtime checkers)**: the verified checkers are
  hand-translated to Rust at `src/codegen/src/runtime/pmt_check.rs`, gated
  behind the `pmt-runtime-check` Cargo feature — **now WIRED into
@@ -233,7 +244,7 @@ analysis). Module inventory:
 | `proof/PMT/SimRel.lean` | Simulation relation Lean ↔ Rust |
 | `proof/PMT/BitVecArena.lean` | `BitVec 64`-based arena model — expresses `usize` arithmetic overflow |
 | `proof/PMT/MmapArena.lean` | `raw_create` models `alloc::alloc`-returns-null (OOM) failure path |
-| `proof/PMT/PipelineSim.lean` | First Lean↔Rust simulation: spec of `pipeline::compile` + soundness |
+| `proof/PMT/PipelineSim.lean` | `PipelineSpec` scaffolding + `pmt_soundness_restate` / `pmt_soundness_no_oob_restate` (PMT-0-C: degenerate `hconforms` removed; real conformance deferred to PMT-1-G) |
 | `proof/PMT/ArenaProperties.lean` | Composition lemmas over `RawArena` (e.g. `raw_alloc_alive_succeeds`) |
 | `proof/PMT/AdditionalTheorems.lean` | Extra soundness/correctness theorems |
 | `proof/PMT/{Helper,IR,Misc}Lemmas.lean` | Supporting lemma libraries used across modules |
