@@ -55,7 +55,7 @@ const IR_ALLOC: u32 = 15;
 const IR_MOV: u32 = 16;
 const IR_BRANCH: u32 = 17;
 const IR_COND_BRANCH: u32 = 18;
-// Wave P1-c-8: raw syscall intrinsic. dst = result vreg, lhs = syscall nr
+// raw syscall intrinsic. dst = result vreg, lhs = syscall nr
 // (VUMA/asm-generic — codegen translates to per-ISA native), rhs = arg_count,
 // imm (lower 32) = arg0_vreg. Same single-arg limitation as IR_CALL.
 const IR_SYSCALL: u32 = 20;
@@ -68,13 +68,13 @@ const IR_SIZE: u32 = 32;
 //   12-15: next_label (u32)
 //   16-23: symtab ptr (BTreeMap or simple array)
 //   24-27: symtab_count
-//   28-31: alloc_hash      (FNV-1a of "allocate"       — Wave P6.3)
-//   32-35: free_hash       (FNV-1a of "free"            — Wave P6.3)
-//   36-39: vuma_alloc_hash (FNV-1a of "__vuma_alloc"   — Wave P6.3)
-//   40-43: vuma_free_hash  (FNV-1a of "__vuma_free"    — Wave P6.3)
+//   28-31: alloc_hash (FNV-1a of "allocate" — )
+//   32-35: free_hash (FNV-1a of "free" — )
+//   36-39: vuma_alloc_hash (FNV-1a of "__vuma_alloc" — )
+//   40-43: vuma_free_hash (FNV-1a of "__vuma_free" — )
 //   44-47: _pad
 //
-// Wave P6.3: the 4 callee-name hashes are set by the driver (full_lexer.vuma
+// the 4 callee-name hashes are set by the driver (full_lexer.vuma
 // via irb_set_alloc_hashes) before irb_lower_fn runs, so the NK_CALL handler
 // can intercept allocate/free calls and lower them to IR_ALLOC / IR_SYSCALL
 // instead of the generic IR_CALL (which the codegen skips for non-print_int
@@ -90,7 +90,7 @@ fn irb_new(ir_buf: Address) -> Address {
     symtab = __vuma_alloc(4096);  // 512 symbols max
     store_u64(b, 16, symtab);
     store_u32(b, 24, 0);  // symtab count
-    // Wave P6.3: hash slots default to 0 (no interception) until the driver
+    // hash slots default to 0 (no interception) until the driver
     // calls irb_set_alloc_hashes. __vuma_alloc returns zeroed mmap memory,
     // so this is belt-and-suspenders.
     store_u32(b, 28, 0);  // alloc_hash
@@ -100,7 +100,7 @@ fn irb_new(ir_buf: Address) -> Address {
     return b;
 }
 
-// Wave P6.3: stash the 4 callee-name hashes computed by the driver
+// stash the 4 callee-name hashes computed by the driver
 // (full_lexer.vuma::main via name_hash) into the builder state. Must be
 // called after irb_new and before irb_lower_fn / irb_lower_expr.
 fn irb_set_alloc_hashes(b: Address, alloc_h: u32, free_h: u32, valloc_h: u32, vfree_h: u32) {
@@ -209,7 +209,7 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
         else { if c1 == 50 { op = IR_CMP; } }  // <=
         else { if c1 == 51 { op = IR_CMP; } }  // >=
         else { op = IR_ADD; }  // default
-        // Wave P6.2: comparisons (==/!=/</>/>=/<=) carry the original token
+        // comparisons (==/!=/</>/>=/<=) carry the original token
         // type (c1) in the IR instruction's `imm` field so the bootstrap
         // codegen can emit the matching setCC opcode. Non-comparison ops
         // (arithmetic / bitwise / shifts) leave imm=0.
@@ -229,7 +229,7 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
     
     // NK_ASSIGN (7): evaluate rhs, store to lhs.
     // c1 = lhs node idx, c2 = rhs node idx.
-    // Wave P6.1: if the lhs is a NK_DEREF (`*(addr) = val`), emit IR_STORE
+    // if the lhs is a NK_DEREF (`*(addr) = val`), emit IR_STORE
     // so the bootstrap codegen can emit a byte store to memory. For simple
     // assignments (`x = val`), the rhs vreg is the result (no IR emitted —
     // the binding is handled by NK_LET's symtab insert).
@@ -251,11 +251,11 @@ fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
     }
     
     // NK_CALL (5): c1=callee_name_hash, c3=arg_count, val (lower 32)=arg0_node_idx
-    // Wave 48: lower arg0 (the only arg we support in the bootstrap) and
+    // lower arg0 (the only arg we support in the bootstrap) and
     // stash its vreg in the IR_CALL's `imm` field (lower 32 bits). The
     // codegen reads this when emitting the print_int syscall sequence.
     //
-    // Wave P6.3: intercept allocate / __vuma_alloc / free / __vuma_free
+    // intercept allocate / __vuma_alloc / free / __vuma_free
     // before the generic IR_CALL emission. The codegen skips IR_CALL for
     // any callee whose hash != print_int_hash, so without this intercept,
     // heap-allocating programs would silently no-op. We lower:
@@ -416,7 +416,7 @@ fn irb_lower_stmt(b: Address, ast: u64, node_idx: u32) {
     }
     
     // NK_LET (11): c1=init expr node, val (lower 32)=var name hash.
-    // Wave 48: lower the init expression and insert (var_hash → vreg) into
+    // lower the init expression and insert (var_hash → vreg) into
     // the symbol table so subsequent NK_IDENT lookups resolve to the same vreg.
     if kind == 11 {
         init_vreg: u32 = irb_lower_expr(b, ast, c1);
@@ -459,12 +459,12 @@ fn irb_lower_stmt(b: Address, ast: u64, node_idx: u32) {
 }
 
 // Lower a block.
-// NK_BLOCK layout (Wave 48):
+// NK_BLOCK layout:
 //   c1  = stmt_start (unused, kept for debugging)
 //   c2  = stmt_count
 //   val = side buffer ptr (heap array of u32 stmt node indices)
 //
-// Wave 48 fix: the old code iterated `stmt_start + i` assuming stmts were
+//  fix: the old code iterated `stmt_start + i` assuming stmts were
 // at consecutive arena indices. This was wrong (child expr nodes are
 // interleaved), so it visited child nodes as statements and missed real
 // stmts. The parser now records each stmt's actual node index in a side
@@ -515,11 +515,11 @@ fn irb_lower_fn(b: Address, ast: u64, node_idx: u32) {
 fn irb_free(b: Address) {
     symtab: u64 = load_u64(b, 16);
     __vuma_free(symtab, 4096);
-    __vuma_free(b, 48);  // Wave P6.3: builder state grew 32 → 48 bytes
+    __vuma_free(b, 48);  // builder state grew 32 → 48 bytes
 }
 
 // ============================================================================
-// Wave 48 — pipeline entry points (SCG / IR build / BD / IVE)
+//  — pipeline entry points (SCG / IR build / BD / IVE)
 // ============================================================================
 // The bootstrap pipeline (full_lexer.vuma::main) calls these in order:
 //   1. scg_construct(ast)        — REAL: walks the AST arena and builds a
@@ -540,7 +540,7 @@ fn irb_free(b: Address) {
 //                                  rather than consuming the SCG from step 1;
 //                                  the SCG is built for diagnostic purposes
 //                                  and to make the pipeline shape match the
-//                                  production compiler. See Wave 48 task
+//                                  production compiler. See task
 //                                  [BOOT] Implement IR construction from SCG
 //                                  for the documented caveat.)
 //   3. bd_infer(ir_buf)          — REAL: forward RepD propagation pass.
@@ -560,12 +560,12 @@ fn irb_free(b: Address) {
 //                                  counts dead defs (dst vreg never used).
 //                                  Returns 1 if liveness passes, 0 otherwise.
 //
-// The Wave 48 contract: a coherent, documented pipeline where every stage's
+// The contract: a coherent, documented pipeline where every stage's
 // signature is final and every stage does REAL work (not return-a-constant
 // stubs). Subsequent waves can deepen each pass without touching the driver.
 
 // ── SCG (Scheduled Computation Graph) construction ──
-// Wave 48: minimal but REAL SCG builder. Walks the AST arena and emits a
+// minimal but REAL SCG builder. Walks the AST arena and emits a
 // linear-chain SCG: one FunctionEntry node per NK_FN_DEF, then one node per
 // statement in the function body (classified by AST kind), connected by
 // ControlFlow edges in program order.
@@ -652,7 +652,7 @@ fn scg_node_kind_for(ast_kind: u32) -> u32 {
 }
 
 // Walk an NK_BLOCK's statement list (side-buffer of u32 AST indices, per
-// the Wave 48 fix in irb_lower_block) and append one SCG node + ControlFlow
+// the fix in irb_lower_block) and append one SCG node + ControlFlow
 // edge per statement, in program order. Returns the index of the last node
 // appended (or `entry_node` if the block was empty).
 fn scg_walk_block(scg: Address, ast: u64, block_idx: u32, entry_node: u32) -> u32 {
@@ -676,7 +676,7 @@ fn scg_walk_block(scg: Address, ast: u64, block_idx: u32, entry_node: u32) -> u3
     return prev;
 }
 
-// scg_construct(ast): REAL Wave 48 implementation. Builds a minimal
+// scg_construct(ast): REAL implementation. Builds a minimal
 // linear-chain SCG from the AST arena. For each NK_FN_DEF at top level, a
 // FunctionEntry node is created and the function body (NK_BLOCK) is walked
 // to produce one node per statement, classified by AST kind, connected by
@@ -685,7 +685,7 @@ fn scg_walk_block(scg: Address, ast: u64, block_idx: u32, entry_node: u32) -> u3
 //
 // The SCG buffer is heap-allocated and intentionally NOT freed — the
 // bootstrap exits after pipeline completion and the OS reclaims the heap.
-// A future wave can store the SCG handle in the AST arena header and have
+// A future effort can store the SCG handle in the AST arena header and have
 // irb_build_main consume + free it.
 fn scg_construct(ast: Address) -> u32 {
     scg: Address = scg_new();
@@ -712,7 +712,7 @@ fn scg_construct(ast: Address) -> u32 {
 // and passes the FNV-1a hash of "main" (computed by name_hash in
 // full_parser.vuma, or by an equivalent helper in the driver).
 //
-// Wave P6.3: the driver also passes the FNV-1a hashes of "allocate",
+// the driver also passes the FNV-1a hashes of "allocate",
 // "free", "__vuma_alloc", and "__vuma_free" so the NK_CALL handler can
 // intercept those callees and lower them to IR_ALLOC / IR_SYSCALL(215)
 // instead of the generic IR_CALL (which the codegen skips for non-print_int
@@ -743,7 +743,7 @@ fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address, alloc_h: u32, f
 }
 
 // ── BD (Bounded-Domain) inference — Phase 1 ──
-// Wave 48: minimal but REAL forward-propagation pass. Walks the IR buffer
+// minimal but REAL forward-propagation pass. Walks the IR buffer
 // forward, allocates a per-vreg RepD tag array, and assigns each dst vreg a
 // RepD based on the opcode and (where relevant) the operands' already-inferred
 // RepDs. Literal MOVs seed I64; ALU ops propagate the operand RepD (with
@@ -776,7 +776,7 @@ fn bd_classify(op: u32, lhs_repd: u32, rhs_repd: u32) -> u32 {
     return REPD_UNKNOWN;
 }
 
-// bd_infer(ir_buf): REAL Wave 48 implementation. Forward RepD propagation.
+// bd_infer(ir_buf): REAL implementation. Forward RepD propagation.
 fn bd_infer(ir_buf: Address) -> u32 {
     count: u32 = load_u32(ir_buf, 0);
     repd: Address = __vuma_alloc(BD_VREG_CAP);
@@ -812,7 +812,7 @@ fn bd_infer(ir_buf: Address) -> u32 {
 }
 
 // ── IVE (Integer Verification Engine) — liveness + cleanup ──
-// Wave 48: minimal but REAL IVE pass. Performs two checks:
+// minimal but REAL IVE pass. Performs two checks:
 //
 //   (a) Liveness — every vreg used by some instruction must be defined by
 //       a prior def-instruction (MOV/ALU/CMP/LOAD/CALL/ALLOC). A vreg that
@@ -879,7 +879,7 @@ fn ive_op_is_def(op: u32) -> u32 {
     return 0;
 }
 
-// ive_verify(ir_buf): REAL Wave 48 implementation. Liveness + cleanup pass.
+// ive_verify(ir_buf): REAL implementation. Liveness + cleanup pass.
 fn ive_verify(ir_buf: Address) -> u32 {
     count: u32 = load_u32(ir_buf, 0);
     // defined: bitmap of vregs defined by some instruction (forward pass).

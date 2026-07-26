@@ -394,7 +394,7 @@ enum Commands {
         /// binary can be executed natively. Currently `compile_modules`
         /// always uses the host backend regardless of this flag (the
         /// flag is accepted for forward-compatibility and to mirror
-        /// `vuma build`/`vuma run`'s CLI shape); a future wave will
+        /// `vuma build`/`vuma run`'s CLI shape); a future effort will
         /// thread it through to the pipeline.
         isa: Option<IsaArg>,
 

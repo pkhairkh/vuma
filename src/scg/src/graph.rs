@@ -1286,7 +1286,7 @@ mod tests {
         assert!(scg.get_region(RegionId::new(1)).is_some());
     }
 
-    /// Wave 39 regression: the SCG storage now wraps the hand-written
+    /// regression: the SCG storage now wraps the hand-written
     /// `crate::digraph::DiGraph` instead of `petgraph::DiGraph`. This test
     /// exercises the 17 storage-method surface end-to-end through the SCG API
     /// to confirm the swap is transparent: add/remove node, add/remove edge,

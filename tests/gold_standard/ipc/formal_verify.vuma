@@ -1,4 +1,4 @@
-// formal_verify — Wave 96/J: L1→L3 invariant collapse proof witness
+// formal_verify — L1→L3 invariant collapse proof witness
 //
 // The l1l3_collapse() function in src/ive/src/verification.rs scans the SCG
 // for runtime-checked invariants (L1: channel framing, CRC, capability,

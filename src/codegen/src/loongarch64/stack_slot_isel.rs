@@ -2376,16 +2376,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
                     code
                 }
-                // ── VectorOp (Wave 29) ──
-                // LoongArch64 has no SIMD encoder in the Wave 29 suite; emit nothing.
+                // ── VectorOp ──
+                // LoongArch64 has no SIMD encoder in the suite; emit nothing.
                 IRInstr::VectorOp { .. } => Vec::new(),
-                // ── Channel operations (Wave 1d / Task 2a) ──
+                // ── Channel operations (ask 2a) ──
                 // Backend lowering not yet implemented; emit no bytes.
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-                // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                // StarkProof — stub (Call-form builtin is the active path).
                 | IRInstr::StarkProof { .. } => Vec::new(),
-                // ── CallIndirect (Wave 49: driver_call) ──
+                // ── CallIndirect (driver_call) ──
                 // Lower an indirect call: load args into $a0-$a5, load the
                 // function pointer into a scratch register, then `jirl $ra,
                 // scratch, 0` (jump indirect, save return addr in $ra). The

@@ -13,24 +13,21 @@ plus `WF_Layout` per step. `WellTypedStrong` adds:
      without trapping on step 2 (input `c` was never produced).
   2. **Field access safety**: every `Field` registered in a step's
      `Layout` satisfies `FieldBounds` (the static bound). In a future
-     wave (W11+), when `Step` gains an `op : PmtOp` field, this will be
+     refinement, when `Step` gains an `op : PmtOp` field, this will be
      refined to match the `PmtOp.field_access f` case of
-     `PmtInstr.well_typed` (W8-B) — proving that the accessed field `f`
+     `PmtInstr.well_typed` — proving that the accessed field `f`
      is in `s.layout.fields`.
   3. **(Implicit via `WellTyped`)**: `WF_Layout s.layout` for each step,
      plus `in_var`/`out_var` name-uniqueness across the program.
 
-This closes **gap 1.2** from `docs/verification-reports/W3-remaining-gaps.md`
-("WellTyped only enforces name-uniqueness"). The companion non-trapping
+This closes **gap 1.2** ("WellTyped only enforces name-uniqueness"). The companion non-trapping
 corollary `no_oob_trap_for_well_typed_strong` lives in this module
 (`WellTypedStrong.lean`); the top-level `pmt_soundness` in
-`PMT.Soundness` accepts `WellTypedStrong` as its hypothesis (Wave 4
-strengthening). All theorems in this file close without `sorry`.
+`PMT.Soundness` accepts `WellTypedStrong` as its (strengthened)
+hypothesis. All theorems in this file close without `sorry`.
 
 **References.**
-  * `docs/verification-reports/W3-remaining-gaps.md` §1.2 — gap statement and fix sketch.
-  * `docs/verification-reports/W9-strengthened-types.md` — Wave 9 status.
-  * `PMT.PmtInstr` (W8-B) — `PmtInstr.well_typed`, the per-instruction
+  * `PMT.PmtInstr` — `PmtInstr.well_typed`, the per-instruction
     check that IVE's `verify_state_reads` / `verify_state_writes` /
     `verify_transform` perform; `WellTypedStrong` is the program-level
     analog for the `Step` model.
@@ -65,24 +62,24 @@ def DataflowOk (prog : Program) (initial_var : String) : Prop :=
     s.in_var = initial_var
     ∨ ∃ prior : Step, prior ∈ prog ∧ prior.out_var = s.in_var
 
-/-! ## §2. Field access safety predicate (W11-A strengthened) -/
+/-! ## §2. Field access safety predicate (strengthened) -/
 
 /-- §2.1: `FieldAccessOk prog` — for every `Step` in `prog` whose `op`
 is `PmtOp.field_access f`, the accessed field `f` is registered in
 `s.layout.fields`.
 
 This is the program-level analog of `PmtInstr.well_typed`'s
-`field_access` branch (W8-B): it ensures that every runtime
+`field_access` branch: it ensures that every runtime
 `PmtOp.field_access f` op references a field whose byte range is
 statically known to fit inside the layout — via `WF_Layout`'s first
 conjunct, which gives `f.offset + f.size ≤ layout.total_size` for
 every `f ∈ layout.fields`.
 
-**W11-A strengthening.** Prior to W11, `FieldAccessOk` checked that
+**Strengthening.** Previously, `FieldAccessOk` checked that
 every field `f ∈ s.layout.fields` satisfies `FieldBounds s.layout f`.
 That check was implied by `WF_Layout`'s first conjunct and did *not*
 constrain `PmtOp.field_access f` ops whose `f` was not in
-`s.layout.fields`. The W11-A strengthening closes that gap by requiring
+`s.layout.fields`. The strengthening closes that gap by requiring
 `f ∈ s.layout.fields` for every `PmtOp.field_access f` op. Combined
 with `WF_Layout`, this makes `TrapCode.oob` (exit 134) unreachable for
 `WellTypedStrong` programs — see `no_oob_trap_for_well_typed_strong`
@@ -100,7 +97,7 @@ predicate.
 
 Combines the basic `WellTyped` (name uniqueness + `WF_Layout`) with
 `DataflowOk` (dataflow) and `FieldAccessOk` (field safety). This is the
-predicate that closes gap 1.2 of `W3-remaining-gaps.md`. -/
+predicate that closes gap 1.2. -/
 def WellTypedStrong (prog : Program) (initial_var : String) : Prop :=
   WellTyped prog  -- basic uniqueness + WF_Layout (from PMT.Soundness)
   ∧ DataflowOk prog initial_var
@@ -126,12 +123,12 @@ theorem well_typed_strong_implies_field_access
     (h : WellTypedStrong prog initial_var) :
     FieldAccessOk prog := h.2.2
 
-/-! ## §5. Bridge to `PmtInstr.well_typed` (W8-B)
+/-! ## §5. Bridge to `PmtInstr.well_typed`
 
 This bridge demonstrates that the strengthened `Step`-level predicate
-subsumes the per-instruction `PmtInstr.well_typed` check (W8-B) for the
+subsumes the per-instruction `PmtInstr.well_typed` check for the
 `transform` case — the only `PmtOp`-bearing case in the current `Step`
-model. When `Step` gains an `op` field (W11+), this bridge generalizes
+model. When `Step` gains an `op` field, this bridge generalizes
 to all `PmtOp` variants. -/
 
 /-- §5.1: Embed a `Step` as the corresponding `PmtInstr.transform`. -/
@@ -143,7 +140,7 @@ def Step.to_pmt_instr (s : Step) : PmtInstr :=
 
 This is the per-step lift of `WF_Layout` into `PmtInstr.well_typed`,
 connecting the strengthened `WellTypedStrong` predicate to the
-per-instruction check from W8-B. -/
+per-instruction check. -/
 theorem step_wf_implies_pmt_instr_well_typed
     (s : Step) (env : String → Layout)
     (henv : env s.in_var = s.layout)
@@ -182,7 +179,7 @@ theorem pmt_soundness_strong
   have hwf_basic := well_typed_strong_implies_well_typed prog initial_var hwf
   exact pmt_soundness prog hwf_basic s hstep hcap
 
-/-! ## §7. Corollary: no `.oob` trap (W11-A proved) -/
+/-! ## §7. Corollary: no `.oob` trap (proved) -/
 
 /-- Helper: `WellTyped (i :: rest)` projects to `WellTyped rest`.
 Used by `no_oob_trap_aux` to invoke the induction hypothesis on the
@@ -291,7 +288,7 @@ private theorem no_oob_trap_aux
         --   (1) `s.live i.in_var ≠ .dead` (else `.uaf`)
         --   (2) `i.op = .field_access f` for some `f`
         --   (3) `f.offset + f.size > i.layout.total_size`
-        -- But `FieldAccessOk` (W11-A strengthened) gives
+        -- But `FieldAccessOk` (strengthened) gives
         -- `f ∈ i.layout.fields`, and `WF_Layout`'s first conjunct gives
         -- `f.offset + f.size ≤ i.layout.total_size`. Contradiction.
         exfalso
@@ -471,9 +468,9 @@ private theorem no_oob_trap_aux
 (exit code 134).
 
 This is the Lean proof that the runtime `__oob_trap` injection (in
-`codegen::memory_safety::inject_bounds_check_ir`, per W2-C) is
+`codegen::memory_safety::inject_bounds_check_ir`) is
 **redundant defense-in-depth** for `WellTypedStrong` programs: the
-`FieldAccessOk` conjunct (W11-A strengthened) guarantees that every
+`FieldAccessOk` conjunct (strengthened) guarantees that every
 runtime `PmtOp.field_access f` op references a field `f` registered in
 `s.layout.fields`; combined with `WF_Layout`'s first conjunct
 (`f.offset + f.size ≤ layout.total_size` for every registered `f`),

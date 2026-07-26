@@ -1694,8 +1694,8 @@ fn vuma_error_to_diagnostics_mapping() {
             },
             "E035",
         ),
-        // Task 9-a (Wave 9): `VumaError::CorInit { message }` was REMOVED in
-        // Wave 1 (commit 0a514ad2 "pmt: implement Stage 1+5 fixes + delete
+        // Task 9-a: `VumaError::CorInit { message }` was REMOVED in
+        //  (commit 0a514ad2 "pmt: implement Stage 1+5 fixes + delete
         // all legacy code paths") when the entire COR (Concurrent Object
         // Representation) pipeline stage was deleted. There is no direct
         // replacement variant — COR was a discrete pipeline stage, not a

@@ -1,4 +1,4 @@
-// capability_grant_verify — Wave 12b + Wave C: capability grant + real
+// capability_grant_verify — capability grant + real
 // FNV-1a×4 signature verification.
 //
 // Exercises the capability_grant builtin (compile-time CapabilityToken
@@ -6,7 +6,7 @@
 // builtin (sends a 96-byte frame: 56 header+payload+CRC + 8 cap_id +
 // 32-byte FNV-1a×4 signature).
 //
-// Wave C: the receiver's ChannelRecv codegen, upon seeing cap_count > 0,
+// the receiver's ChannelRecv codegen, upon seeing cap_count > 0,
 // reads the 40-byte capability section (cap_id + 32-byte signature), checks
 // cap_id != 0 (structural check), and then RECOMPUTES the FNV-1a×4
 // signature over the same signature_input byte vector the grant used

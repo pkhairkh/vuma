@@ -10,10 +10,10 @@
 //! that the wrapper's `allocate_registers` + `encode_function` path works
 //! end-to-end on a trivial program (a single empty block with
 //! `IRTerminator::Return(vec![])`). This deliberately avoids
-//! `IRInstr::Syscall` so that the Wave-12 `unimplemented!()` panic in the
+//! `IRInstr::Syscall` so that the `unimplemented!()` panic in the
 //! `mips64` and `ppc64` parents does not affect this test. See the
 //! per-wrapper `test_syscall_inherited_from_*` tests in each backend
-//! file for the Wave-12-pending case.
+//! file for the -pending case.
 //!
 //! Wired into `vuma-codegen`'s test build via
 //! `#[cfg(test)] mod wrapper_smoke;` in `lib.rs`.
@@ -31,7 +31,7 @@ use std::collections::HashSet;
 
 /// Build the trivial "smoke" function: a single empty `entry` block with
 /// terminator `Return(vec![])` (no return values, no instructions, no
-/// syscalls). This avoids `IRInstr::Syscall` entirely so the Wave-12
+/// syscalls). This avoids `IRInstr::Syscall` entirely so the
 /// panic in `mips64` / `ppc64` parents does not fire.
 fn build_smoke_function() -> IRFunction {
     IRFunction {
@@ -75,12 +75,12 @@ fn run_smoke<B: Backend>(backend: &B, name: &str) -> usize {
 /// can compile a trivial empty function (no Syscall) and produce non-empty
 /// encoded output (at least one 4-byte instruction word — the function
 /// epilogue / return sequence). This deliberately avoids
-/// `IRInstr::Syscall` so the Wave-12 `unimplemented!()` panic in
+/// `IRInstr::Syscall` so the `unimplemented!()` panic in
 /// `mips64` / `ppc64` parents does not fire here.
 ///
 /// The per-wrapper `test_syscall_inherited_from_*` tests in each
 /// backend file (e.g. `armeb.rs::tests::test_syscall_inherited_from_arm32`)
-/// exercise the Wave-12-pending Syscall path with `catch_unwind`.
+/// exercise the -pending Syscall path with `catch_unwind`.
 #[test]
 fn test_smoke_compile_simple_program_all_4_wrappers() {
     let names_and_lengths: Vec<(&str, usize)> = vec![

@@ -14,7 +14,7 @@ guarantees BEq-uniqueness, not list-count uniqueness. The counterexample
 is `l = [x, x]`, where the filter length is 2, not 1. To avoid leaving
 a `sorry`, that theorem has been omitted; a correct version would
 require an additional `List.Nodup l` (or `l.count x = 1`) hypothesis
-and is left for a future wave.
+and is left for future work.
 -/
 
 namespace PMT

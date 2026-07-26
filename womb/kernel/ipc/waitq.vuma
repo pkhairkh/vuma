@@ -51,7 +51,7 @@
 // waitq_wake_one — using u64 for head/tail/next avoids a u32↔u64 cast on
 // every field touch.
 //
-// The `next` field was added in Wave 18S4 to fix the documented multi-
+// The `next` field was added in 4 to fix the documented multi-
 // waiter bug in waitq_wake_one (see "Simplified linked-list management"
 // below). It tracks head's IMMEDIATE successor — the one waiter that
 // waitq_wake_one needs to advance head to when popping the head of a
@@ -64,7 +64,7 @@
 // layout with u32 head/tail/count. This file's WaitQueue (u64 head/tail +
 // u32 count) is a DIFFERENT layout — the K7e contract is the authoritative
 // source for the IPC wait queue (K4e's was a stub declared only for the
-// DoD requirement, never instantiated). A future reconciliation wave will
+// DoD requirement, never instantiated). A future reconciliation effort will
 // either re-declare K4e's WaitQueue byte-identically to this K7e layout,
 // or K4f's syscall handler will switch to using this K7e WaitQueue
 // directly. Until then, the two layouts coexist (VUMA has no `import`, so

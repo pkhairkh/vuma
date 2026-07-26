@@ -3,7 +3,7 @@
 // Provides: write_str, write_int, write_hex, write_u64, read_line, file ops
 // Uses the vuma-native syscall() intrinsic for write & read syscalls (asm-generic nrs 64/63).
 //
-// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers
+// PMT migration: the local `allocate(N)` scratch buffers
 // (sized 1, 12, 16, 20, 24, 68 bytes) used by the various write_* /
 // read_* / eprint_* helpers are replaced by typed `State<BufN>` states
 // with `data: [u8; N]` array fields. Access via `*(buf + i)` becomes

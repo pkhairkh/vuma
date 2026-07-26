@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/bootinfo.vuma
-// VWK Canonical Superset BootInfo (Wave R1a).
+// VWK Canonical Superset BootInfo.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file defines the **canonical superset** BootInfo layout — the single
@@ -12,7 +12,7 @@
 // Per the R1 Golden Rule in TASKS.md:
 //   "Do not write arch-conditional logic inside kernel transforms."
 // The BootInfo layout is the boot-side equivalent of the TrapFrame layout
-// (Wave R2): a single superset shape that arch stubs fill in, then the
+// : a single superset shape that arch stubs fill in, then the
 // arch-independent core consumes.
 //
 // ── Field semantics ─────────────────────────────────────────────────────────
@@ -34,7 +34,7 @@
 //                    The bootloader is expected to set up a linear framebuffer
 //                    at this address; kmain maps it into the kernel's address
 //                    space and hands the address + dimensions to the early
-//                    console (Wave R1c/R1d).
+//                    console.
 //   fb_width         framebuffer width in pixels (u32 — even 8K = 7680 fits).
 //   fb_height        framebuffer height in pixels.
 //   boot_type        0 = x86_multiboot, 1 = dtb (aarch64/riscv64-sbi-dtb),

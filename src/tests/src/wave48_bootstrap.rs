@@ -1,11 +1,11 @@
-//! # Wave 48 — Bootstrap SCG / BD / IVE implementation tests
+//! # — Bootstrap SCG / BD / IVE implementation tests
 //!
-//! Implements the test coverage required by TASKS.md Wave 48:
+//! Implements the test coverage required by TASKS.md
 //!
 //! 1. **Source-level smoke test** (`test_wave48_bootstrap_no_stubs`) —
 //!    reads `womb/lang/ir_builder.vuma` and asserts that the three formerly-
 //!    stubbed functions (`scg_construct`, `bd_infer`, `ive_verify`) no
-//!    longer contain `STUB` comments or `Wave 48 STUB` markers.
+//! longer contain `STUB` comments or ` STUB` markers.
 //!
 //! 2. **Real-logic test** (`test_wave48_bootstrap_has_real_logic`) —
 //!    asserts each function contains real control flow (loops, conditionals,
@@ -26,7 +26,7 @@
 //! `wave47_bootstrap.rs` for the same limitation). These tests are
 //! source-level structural checks: they verify the stubs were replaced
 //! with real implementations that contain meaningful logic, but they do
-//! not execute the bootstrap compiler itself. A future wave that adds a
+//! not execute the bootstrap compiler itself. A future effort that adds a
 //! runtime path to compile + link the `.vuma` files into a `vumac`
 //! binary will be able to add a real end-to-end test.
 
@@ -91,9 +91,9 @@ fn extract_function_body(source: &str, name: &str) -> String {
 // ===========================================================================
 
 /// Verify that `scg_construct`, `bd_infer`, and `ive_verify` no longer
-/// contain `STUB` markers. The original Wave 48 audit found each function
+/// contain `STUB` markers. The original audit found each function
 /// was a `return 0;` / `return 1;` stub with a `// STUB` or
-/// `// Wave 48 STUB` comment. After remediation, none of these markers
+/// `// STUB` comment. After remediation, none of these markers
 /// should remain.
 #[test]
 fn test_wave48_bootstrap_no_stubs() {
@@ -353,7 +353,7 @@ fn test_wave48_bootstrap_constants_defined() {
 
 /// Verify the pipeline-stage header comment block (above scg_construct)
 /// describes the functions as REAL, not STUBs. The original header said
-/// `Wave 48 — pipeline entry points + SCG/BD/IVE stubs` and described each
+/// ` — pipeline entry points + SCG/BD/IVE stubs` and described each
 /// function as a stub. After remediation, the header should describe them
 /// as real passes.
 #[test]

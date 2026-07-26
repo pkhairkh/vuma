@@ -1,7 +1,7 @@
 // inbounds_loop — Loop over array within bounds
 // Expected exit code: 10
 //
-// Bounds Wave 1 positive test: loop `i` over [0,4), writing `i+1`
+// Bounds positive test: loop `i` over [0,4), writing `i+1`
 // into `buf.data[i]` each iteration (1,2,3,4), then sum the four
 // cells into `acc.sum` (via a state-field accumulator to dodge the
 // known "while-body local assignments don't propagate" codegen bug).

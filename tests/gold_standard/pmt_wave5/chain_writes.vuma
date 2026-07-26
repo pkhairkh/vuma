@@ -1,4 +1,4 @@
-// chain_writes — PMT Wave 5: chained writes, only the last matters
+// chain_writes — chained writes, only the last matters
 // Expected exit code: 3
 //
 // Writes 1, 2, 3 to p.x in sequence, then reads p.x. Only the last
@@ -10,7 +10,7 @@
 // Under the *current* optimizer, all three Stores are emitted — but
 // the program's observable behaviour is unchanged (exit 3), so this
 // test passes either way. The file serves as a forward-looking test
-// case for the wave that wires state ops into
+// case for the effort that wires state ops into
 // `equality_saturation_with_cost` and combines it with DSE.
 //
 // VUMA Key Concepts:

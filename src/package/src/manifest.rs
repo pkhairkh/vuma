@@ -46,7 +46,7 @@ pub struct PackageManifest {
 impl PackageManifest {
     /// Parse a manifest from a TOML string.
     ///
-    /// Wave 43 serde-migration: this previously used `#[derive(Deserialize)]`
+    /// serde-migration: this previously used `#[derive(Deserialize)]`
     /// helper structs (`RawManifest`/`RawPackage`) and a third-party TOML
     /// deserializer. It now uses the in-tree `toml_lite` parser and
     /// navigates the value tree by hand. The on-disk TOML format is
@@ -102,7 +102,7 @@ impl PackageManifest {
 
     /// Serialize the manifest to a TOML string.
     ///
-    /// Wave 43 serde-migration: this previously used `#[derive(Serialize)]`
+    /// serde-migration: this previously used `#[derive(Serialize)]`
     /// helper structs (`RawManifest`/`RawPackage`/`RawTarget`) and a
     /// third-party TOML serializer. It now builds a `toml_lite::Value::Table`
     /// by hand and serializes that with the in-tree `toml_lite` serializer.

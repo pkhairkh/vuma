@@ -166,20 +166,20 @@ pub unsafe extern "C" fn vuma_write_u64(ctx: *mut VumaContext, offset: u64, val:
 }
 
 /// Allocate a fresh state in ___pmt_buffer.
-/// (Stub: returns 0 for now — full state_new integration is Wave 8.)
+/// (Stub: returns 0 for now — full state_new integration is .)
 #[no_mangle]
 pub extern "C" fn vuma_state_new(
     _ctx: *mut VumaContext,
     _layout_name: *const std::os::raw::c_char,
 ) -> u64 {
-    // TODO Wave 8: allocate at a fresh offset in ___pmt_buffer.
+    // TODO allocate at a fresh offset in ___pmt_buffer.
     // For now, return 0 (the callback can use offset 0 as a scratch area,
     // since the callback_live_set prevents aliasing with caller state).
     0
 }
 
 /// Push an i32 return value.
-/// (Stub: stores in a thread-local — full integration is Wave 8.)
+/// (Stub: stores in a thread-local — full integration is .)
 #[no_mangle]
 pub extern "C" fn vuma_push_i32(_ctx: *mut VumaContext, val: i32) {
     CALLBACK_RETURN_I32.with(|r| r.set(Some(val)));

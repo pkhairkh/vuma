@@ -13,7 +13,7 @@
 //     }
 // In hosted mode, those four names resolve to `__ffi_fallback_stub`
 // (xor eax, eax; ret — returns 0, no-op for void functions) at link time.
-// In bare-metal mode (Wave K11), the same four names link against REAL
+// In bare-metal mode, the same four names link against REAL
 // asm stubs registered by the x86_64 backend:
 //     pte_read / pte_write — direct 8-byte load/store at the PTE's
 //         physical address (x86_64 page tables live in regular memory,

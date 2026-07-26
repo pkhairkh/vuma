@@ -56,7 +56,7 @@ impl RegistryIndex {
 
     /// Serialize the index to a TOML string.
     ///
-    /// Wave 43 serde-migration: previously used `#[derive(Serialize)]` +
+    /// serde-migration: previously used `#[derive(Serialize)]` +
     /// a third-party TOML serializer. Now builds a `toml_lite::Value::Table`
     /// by hand and serializes that with the in-tree `toml_lite` serializer.
     /// The on-disk TOML format is unchanged: a top-level `[packages]` table
@@ -79,7 +79,7 @@ impl RegistryIndex {
 
     /// Deserialize the index from a TOML string.
     ///
-    /// Wave 43 serde-migration: previously used `#[derive(Deserialize)]` +
+    /// serde-migration: previously used `#[derive(Deserialize)]` +
     /// a third-party TOML deserializer. Now uses the in-tree `toml_lite`
     /// parser and navigates the value tree by hand.
     pub fn from_toml(toml_str: &str) -> Result<Self, PackageError> {

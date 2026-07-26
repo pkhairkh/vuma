@@ -75,8 +75,8 @@ if [ "$SORRY_COUNT" -gt 0 ]; then
     # STRICT mode (PROOF_CHECK_STRICT=1): fail on any sorry.
     # Default (non-strict): print sorries as warnings but exit 0.
     # The 4 documented sorries in RawArena.lean and SimRel.lean are intentional
-    # TODOs for Waves 13-17 (simulation relation proofs). Strict mode will be
-    # enabled in CI once those waves land.
+    # TODOs for the simulation relation proofs. Strict mode will be
+    # enabled in CI once those proofs land.
     if [ "${PROOF_CHECK_STRICT:-0}" = "1" ]; then
         echo "[check-lean] FAIL: $SORRY_COUNT sorry detected (strict mode)"
         printf '%s\n' "$SORRY_LINES" | sed 's/^/  /'

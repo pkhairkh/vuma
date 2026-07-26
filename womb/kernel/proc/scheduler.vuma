@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/proc/scheduler.vuma
 // VWK Process/Thread Subsystem — CFS-like scheduler on the superset TrapFrame.
-// Wave R4a+b (PMT-pure) + W36 (priority-weighted vruntime, sys_sched_yield,
+//  (PMT-pure) + W36 (priority-weighted vruntime, sys_sched_yield,
 // sys_nice, sched_dump).
 // ═══════════════════════════════════════════════════════════════════════════
 //

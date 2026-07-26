@@ -22,7 +22,7 @@ pub fn verify_state_reads(
 ) -> Vec<StateReadVerification>
 ```
 
-Per W1-C §1 (`docs/verification-reports/W1-C-ive-audit.md`), each item of
+Per the IVE audit, each item of
 the output is `StateReadVerification { valid: bool, error: Option<String> }`,
 and the per-read check has five conjuncts:
   1. var is state-typed,
@@ -36,21 +36,21 @@ The Lean model below simplifies (1)+(2)+(5) by collapsing
 `env : String → Layout` (the caller-side well-formedness hypothesis
 `hwf_env` ensures `WF_Layout (env var)` for every var). The type-matching
 check (5) is omitted from this Lean model — it is a pure syntactic check
-on `String`s that does not bear on memory safety; it will be added in
-Wave 18 if the simulation relation requires it. The two soundness-critical
+on `String`s that does not bear on memory safety; it may be added later
+if the simulation relation requires it. The two soundness-critical
 conjuncts (3) + (4) are retained and match `WF_Layout`'s first conjunct
 in `PMT.Basic`.
 
-This module was added in Wave 11 (subagent W11-B); its two original
-`sorry` placeholders were closed in Wave 14 (subagent W14-B). Its
-structure mirrors the sibling module `PMT.IVE.Soundness.StateWrites`
-(W11-A): both reuse the shared helpers `fieldInLayout` (a `List.any`-
+This module's two original
+`sorry` placeholders have been closed. Its
+structure mirrors the sibling module `PMT.IVE.Soundness.StateWrites`:
+both reuse the shared helpers `fieldInLayout` (a `List.any`-
 based Bool mirror of `f ∈ l.fields`) and `fieldInBounds` (a `≤`-coerced
 Bool mirror of `f.offset + f.size ≤ l.total_size`) defined in
 `StateWrites.lean`. The theorem `verify_state_reads_sound` is proved by
 `List.mem_map` reasoning plus an inline bridge from the Bool
 `fieldInLayout` to the Prop `f ∈ l.fields` (the shared
-`fieldInLayout_eq_mem` lemma is deferred to Wave 19, but the bridge is
+`fieldInLayout_eq_mem` lemma is deferred to future work, but the bridge is
 inlined here so the proof is `sorry`-free).
 -/
 

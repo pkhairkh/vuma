@@ -75,7 +75,7 @@
 // __vuma_load_u64 runtime stubs (real `mov ax,[rdi]; ret` / `mov
 // eax,[rdi]; ret` / `mov rax,[rdi]; ret` trampolines emitted by
 // src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs under the
-// "Wave 7: __vuma_load_*" entries). Same PMT-purity category as the
+// "__vuma_load_*" entries). Same PMT-purity category as the
 // write/read/exit syscall stubs and the __vuma_load_u32 stub used by
 // uart.vuma for MMIO and futex.vuma for the futex-word load. The State<T>
 // values (Elf64Ehdr, Elf64Phdr, ElfBuf) are held in `___pmt_buffer`-
@@ -209,7 +209,7 @@ layout ElfBuf = {
 // ────────────────────────────────────────────────────────────────────────────
 // __vuma_load_u32 / __vuma_load_u64 are runtime stubs emitted by
 // src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs under the
-// "Wave 7: __vuma_load_*" entries. They lower to:
+// "__vuma_load_*" entries. They lower to:
 //   __vuma_load_u32:  `mov eax, [rdi] ; ret`  (3 bytes — 8B 07 C3)
 //   __vuma_load_u64:  `mov rax, [rdi] ; ret`  (4 bytes — 48 8B 07 C3)
 // These are the PMT-pure way to perform raw memory loads: VUMA has no
@@ -225,7 +225,7 @@ layout ElfBuf = {
 //
 // __vuma_load_u16 is declared per the W38 task spec but is NOT yet
 // pre-registered in build_runtime_syscall_stubs (only u32 + u64 are
-// registered under the "Wave 7" entries — see src/codegen/src/x86_64/
+// registered under the "" entries — see src/codegen/src/x86_64/
 // mod.rs:3677-3705). Unresolved externs fall back to __ffi_fallback_stub
 // (`xor eax, eax; ret` → returns 0), so a direct call to
 // __vuma_load_u16(addr) would silently return 0 for every load —

@@ -20,7 +20,7 @@
 //! The free function [`monomorphize`] is the pipeline entry point — it
 //! drives a [`Monomorphizer`] over every function in an [`IRProgram`]. The
 //! orchestrator wires it from `pipeline.rs` immediately after SCG→IR
-//! lowering, before codegen-side optimization. (Wave 34 wires the entry
+//! lowering, before codegen-side optimization. ( wires the entry
 //! point; pipeline.rs integration is deferred to the orchestrator's final
 //! pass per the batch-3 strategy change.)
 
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(parse_generic_callee("id>i32<"), None);
     }
 
-    /// Wave 34 inline test: a generic `fn id<T>(x: T) -> T` called with
+    /// inline test: a generic `fn id<T>(x: T) -> T` called with
     /// `id<i32>(5)` and `id<i64>(7)` is monomorphized into two specialized
     /// clones (`id_i32`, `id_i64`), the original `id` is dropped, and the
     /// call sites are rewritten to the specialized names.
@@ -443,7 +443,7 @@ mod tests {
         );
     }
 
-    /// Wave 34 inline test: a single generic function called twice with
+    /// inline test: a single generic function called twice with
     /// the *same* type args produces exactly ONE specialization (not two).
     #[test]
     fn test_monomorphize_dedupes_same_instantiation() {

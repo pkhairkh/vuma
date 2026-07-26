@@ -50,9 +50,9 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 //   16-23: ast arena ptr (u64)
 //   24-27: ast count (u32)
 //   28-31: ast capacity (u32)
-//   32-39: src ptr (u64) — pointer to the raw source bytes (Wave 48)
+//   32-39: src ptr (u64) — pointer to the raw source bytes
 //
-// Wave 48 added the src pointer so the parser can compute name hashes
+//  added the src pointer so the parser can compute name hashes
 // (FNV-1a 32-bit) for identifiers, callees, let-bound names, and function
 // names. Without it, the IR builder's symbol table and the codegen's
 // print_int dispatch had nothing to key on.
@@ -69,7 +69,7 @@ fn fparser_new(tokens: Address, token_count: u32, ast: Address, ast_cap: u32) ->
     return p;
 }
 
-// Wave 48: bind the source buffer so the parser can hash identifiers.
+// bind the source buffer so the parser can hash identifiers.
 fn fparser_set_src(p: Address, src: Address) {
     store_u64(p, 32, src);
 }
@@ -93,7 +93,7 @@ fn peek_val(p: Address) -> u64 {
     return load_u64(tokens, pos * 24 + 12);
 }
 
-// Wave 48: peek the source-span start/len of the current token. The token
+// peek the source-span start/len of the current token. The token
 // layout is [type: u32][start: u32][len: u32][value: u64] = 24 bytes, so
 // `start` lives at offset 4 and `len` lives at offset 8 within the token.
 fn peek_start(p: Address) -> u32 {
@@ -108,7 +108,7 @@ fn peek_len(p: Address) -> u32 {
     return load_u32(tokens, pos * 24 + 8);
 }
 
-// Wave 48: FNV-1a 32-bit name hash over src[start..start+len]. Used to give
+// FNV-1a 32-bit name hash over src[start..start+len]. Used to give
 // identifiers a stable u32 handle for the IR builder's symbol table and for
 // the codegen's print_int dispatch (the codegen gets the print_int hash as
 // a parameter at emit time — see codegen_emit).
@@ -137,7 +137,7 @@ fn name_hash(src: Address, start: u32, len: u32) -> u32 {
     // the print_int routine). Masking here — at the single producer of the
     // hash — is the minimal fix; the alternative (teaching the codegen to
     // emit 32-bit ops for u32-typed IRInstr::Mul / IRInstr::Cmp) is a
-    // larger, riskier change reserved for a future wave.
+    // larger, riskier change reserved for a future effort.
     return hash & 0xFFFFFFFF;
 }
 
@@ -177,7 +177,7 @@ const NK_BINOP: u32 = 3;
 const NK_CALL: u32 = 5;
 const NK_DEREF: u32 = 6;
 const NK_ASSIGN: u32 = 7;
-// Wave P1-c-8: syscall() intrinsic. c1 = syscall nr (VUMA/asm-generic),
+// syscall() intrinsic. c1 = syscall nr (VUMA/asm-generic),
 // c3 = arg_count, val (lower 32) = arg0 AST node index (same stashing
 // pattern as NK_CALL; multi-arg needs a side buffer — TODO).
 const NK_SYSCALL: u32 = 8;
@@ -218,7 +218,7 @@ fn parse_primary_full(p: Address) -> u32 {
     }
     
     if t == 1 {  // IDENT — variable, function call, or field access
-        // Wave 48: capture the identifier's source span BEFORE advancing so
+        // capture the identifier's source span BEFORE advancing so
         // we can hash the name for the IR builder's symbol table and the
         // codegen's print_int dispatch.
         name_start: u32 = peek_start(p);
@@ -235,7 +235,7 @@ fn parse_primary_full(p: Address) -> u32 {
                 done: u32 = 0;
                 while done == 0 {
                     arg_idx: u32 = parse_expr_full(p);
-                    // Wave 48: stash the first arg's AST node index in the
+                    // stash the first arg's AST node index in the
                     // NK_CALL's `val` field (lower 32 bits). Multi-arg calls
                     // would need a side buffer — TODO, not needed for
                     // print_int which takes exactly 1 arg.
@@ -282,7 +282,7 @@ fn parse_primary_full(p: Address) -> u32 {
         return parse_closure(p);
     }
 
-    // Wave P1-c-8 / P1-c-8b: syscall() intrinsic (multi-arg, up to 4 args).
+    // 1-c-8b: syscall() intrinsic (multi-arg, up to 4 args).
     //   syscall ( <int_literal_nr> , <arg_expr> , ... )
     // The nr MUST be an integer literal (peek_type == 2, INT_LIT). We read
     // its value via peek_val, advance past it, then parse the comma-separated
@@ -503,7 +503,7 @@ fn parse_closure(p: Address) -> u32 {
 
 // parse_block_full: parse a { stmt* } block.
 //
-// Wave 48 fix: the old design assumed stmts occupied consecutive arena
+//  fix: the old design assumed stmts occupied consecutive arena
 // indices (stmt_start, stmt_start+1, ...). This is WRONG because
 // parse_stmt_full allocates child expression nodes BEFORE the stmt's root
 // node — e.g. for `print_int(42);`, the NK_INT(42) arg is allocated at
@@ -515,13 +515,13 @@ fn parse_closure(p: Address) -> u32 {
 // (returned by parse_stmt_full). Store the buffer's address in NK_BLOCK's
 // `val` field. irb_lower_block reads the buffer to find each stmt.
 //
-// NK_BLOCK layout (Wave 48):
+// NK_BLOCK layout:
 //   c1  = stmt_start (unused, kept for debugging — the old field)
 //   c2  = stmt_count
 //   val = side buffer ptr (heap-allocated array of u32 stmt indices)
 //
 // The side buffer is never freed (the compiler process exits after one
-// compile; a future wave can add arena-based allocation to reclaim it).
+// compile; a future effort can add arena-based allocation to reclaim it).
 fn parse_block_full(p: Address) -> u32 {
     expect(p, 63);  // LBRACE
     stmt_start: u32 = load_u32(fparser_ast(p), 0);  // kept for debugging
@@ -594,7 +594,7 @@ fn parse_stmt_full(p: Address) -> u32 {
         // let ident (: type)? = expr
         var_hash: u32 = 0;
         if peek_type(p) == 1 {
-            // Wave 48: capture the variable name's hash so the IR builder
+            // capture the variable name's hash so the IR builder
             // can insert it into the symbol table.
             name_start: u32 = peek_start(p);
             name_len: u32 = peek_len(p);
@@ -657,7 +657,7 @@ fn parse_stmt_full(p: Address) -> u32 {
 // Parse a function definition
 fn parse_fn_def_full(p: Address) -> u32 {
     advance(p);  // skip 'fn'
-    // Wave 48: capture the function name's hash so the IR builder can
+    // capture the function name's hash so the IR builder can
     // locate `main` (the codegen entry point) by hash.
     fn_hash: u32 = 0;
     if peek_type(p) == 1 {
@@ -790,7 +790,7 @@ fn parse_program_full(p: Address) -> u32 {
 }
 
 // ============================================================================
-// Wave 48 — public pipeline entry point
+//  — public pipeline entry point
 // ============================================================================
 // `parse` is the contract the bootstrap driver (full_lexer.vuma::main) calls.
 // Inputs:

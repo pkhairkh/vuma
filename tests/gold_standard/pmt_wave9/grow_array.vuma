@@ -1,4 +1,4 @@
-// grow_array — PMT Wave 9: extend an array by writing to the next position
+// grow_array — extend an array by writing to the next position
 // Expected exit code: 6
 //
 // A `GrowArr` layout with `count` + `data: [u32; 8]`. grow(s, v) writes
@@ -7,7 +7,7 @@
 // Transform verifier proves each grow() keeps `count ≤ 8` (the data field's
 // element capacity).
 //
-// Under the Wave 9 dependent-state-types model, this would be typed
+// Under the dependent-state-types model, this would be typed
 // `State<Vec<N>>` where N is the runtime element count. The proof
 // obligation `count * 4 ≤ 32` (data field's byte size) is checked by
 // `verify_dependent_transform(elem_size=4, count, offset=0, buffer_size=32)`.

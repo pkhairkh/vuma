@@ -459,12 +459,12 @@ mod tests {
     }
 }
 
-// ── Wave 91: IR-based information flow check (pipeline wiring) ───────
+// ── IR-based information flow check (pipeline wiring) ───────
 //
 // TASKS.md §0.5 requires that information flow checking be CALLED from
 // src/pipeline.rs, not just defined as library code with unit tests.
 
-/// IR-based information flow violation (Wave 91 pipeline wiring).
+/// IR-based information flow violation ( pipeline wiring).
 #[derive(Debug, Clone)]
 pub struct FlowViolationIR {
     /// Description of the violation.

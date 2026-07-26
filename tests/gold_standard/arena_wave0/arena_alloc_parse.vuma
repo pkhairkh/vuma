@@ -1,7 +1,7 @@
 // arena_wave0/arena_alloc_parse — arena_alloc + field access parse test
 // Expected exit code: 0
 //
-// Wave 1 test: arena_alloc parses and returns a State<T> that supports
+// Test: arena_alloc parses and returns a State<T> that supports
 // field access (same syntax as static states).
 //
 // NOTE: VUMA's parser doesn't support tuple destructuring in `let`, so

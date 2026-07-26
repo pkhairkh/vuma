@@ -2,12 +2,12 @@
 #
 # This file is the entry point for `lake build` from within `proof/`.
 # It declares a single Lean library `PMT` rooted at `PMT.lean`, which
-# re-exports the multi-module layout introduced in Wave 6:
+# re-exports the multi-module layout:
 #   PMT/Basic.lean     (§1-§2: Arena, Field, Layout, CapacityInvariant)
 #   PMT/Field.lean     (§3-§4: FieldBounds, Linearity, LinearResource)
 #   PMT/Liveness.lean  (§5-§6: Liveness predicate, GuardPage)
 #   PMT/Soundness.lean (§7:   Execution model, pmt_soundness theorem)
-# and the Wave 7 test harness modules under `PMT/Test/`:
+# and the test harness modules under `PMT/Test/`:
 #   PMT/Test/ValidProgram.lean      (W7-A: valid 2-step happy path)
 #   PMT/Test/UafProgram.lean        (W7-B: UAF trap detection)
 #   PMT/Test/OverflowProgram.lean   (W7-C: arena overflow trap)
@@ -69,7 +69,7 @@ root = "check_pmt"
 
 [[lean_exe]]
 name = "test"
-# Wave 7 test harness runner. Imports all PMT.Test.* modules (which are
+# Test harness runner. Imports all PMT.Test.* modules (which are
 # also built as part of the `PMT` library) and prints a success banner.
 # Invoked by `lake exe test` (or `make proof-test` / `just proof-test`
 # from the repo root). NOT a default target — run explicitly.

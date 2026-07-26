@@ -1,4 +1,4 @@
-// write_after_consume — PMT Wave 3 negative: linearity violation
+// write_after_consume — PMT negative: linearity violation
 // Expected: IVE rejects at verification (VerificationLevel::Pmt).
 //
 // Pattern:
@@ -31,9 +31,9 @@
 layout Point = { x: u32, y: u32 }
 layout Vec2 = { a: u32, b: u32 }
 
-// Wave 1a: the `transform` keyword is parsed but not yet lowered to a
+// the `transform` keyword is parsed but not yet lowered to a
 // callable form.  This file documents the intended violation pattern;
-// when Wave 4 lands transform lowering, the IVE will catch it.
+// when the pass lands transform lowering, the IVE will catch it.
 
 transform to_vec2(p: State<Point>) -> State<Vec2> {
     return p;

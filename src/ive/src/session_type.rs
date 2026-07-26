@@ -693,12 +693,12 @@ mod tests {
     }
 }
 
-// ── Wave 89: IR-based session type check (pipeline wiring) ───────────
+// ── IR-based session type check (pipeline wiring) ───────────
 //
 // TASKS.md §0.5 requires that session type checking be CALLED from
 // src/pipeline.rs, not just defined as library code with unit tests.
 
-/// IR-based session type violation (Wave 89 pipeline wiring).
+/// IR-based session type violation ( pipeline wiring).
 #[derive(Debug, Clone)]
 pub struct SessionViolationIR {
     /// Description of the violation.

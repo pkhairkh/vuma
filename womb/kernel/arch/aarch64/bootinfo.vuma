@@ -57,7 +57,7 @@
 //   The K13+ real implementation:
 //     1. Verify DTB magic at dtb_addr == 3735905741 (0xd00dfeed).
 //     2. Walk the reservation block — record any reserved region so kmain
-//        doesn't allocate over it. (Wave R1a's superset BootInfo has no
+//        doesn't allocate over it. (the superset BootInfo has no
 //        reservation field; K13+ may add one, or kmain can walk the DTB
 //        itself.)
 //     3. Walk the structure block — for each node:
@@ -72,7 +72,7 @@
 //            "height", "reg" — set bi.framebuffer / fb_width / fb_height.
 //     4. Set bi.boot_type = 1 (dtb).
 //
-//   For now (hosted mode / Wave R1b), the stub just stores the caller-
+//   For now (hosted mode / ), the stub just stores the caller-
 //   supplied dtb_addr / mem_start / mem_size unchanged and leaves
 //   cmdline/framebuffer at 0. The stub is sufficient for kmain's hosted-
 //   mode smoke tests (which only read boot_type/mem_start/mem_size/dtb_addr).

@@ -74,7 +74,7 @@
 //                                                fetches the handler, and
 //                                                if both present invokes
 //                                                the handler via the
-//                                                Wave 5 __call_indirect1
+//                                                 __call_indirect1
 //                                                trampoline (passing sig
 //                                                as the single SysV AMD64
 //                                                argument). Clears the
@@ -268,7 +268,7 @@
 //   manipulation requires the trap machinery from K3a/K3b/K3c.
 //
 //   W40 closes the "handler is never called" gap at the PMT-pure layer:
-//   signal_deliver invokes the handler via the Wave 5 __call_indirect1
+//   signal_deliver invokes the handler via the __call_indirect1
 //   trampoline (declared in this file's extern block — `mov rax,rdi;
 //   mov rdi,rsi; jmp rax`, an 8-byte tail-call stub registered in
 //   src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs). The
@@ -336,7 +336,7 @@
 //   broken field-access code in callers).
 //
 //   W40 adds ONE extern declaration: `__call_indirect1(ptr: u64, arg:
-//   u64) -> u64` (the Wave 5 indirect-call trampoline). It is NOT a C
+//   u64) -> u64` (the indirect-call trampoline). It is NOT a C
 //   library function — it's a runtime stub emitted by
 //   src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs (8
 //   bytes: `mov rax,rdi; mov rdi,rsi; jmp rax` — a tail call that
@@ -354,15 +354,15 @@
 //
 //   The handler addresses installed by signal_install are u64 values
 //   (NOT first-class function-pointer types — VUMA has no fn-ptr type).
-//   The W40 self-test installs a REAL handler address via the Wave 5
+//   The W40 self-test installs a REAL handler address via the
 //   FnAddr feature (`signal_test_handler as u64` — lowers to a
 //   compile-time `mov rax, imm64` constant load via IRInstr::GetAddress;
 //   see womb/kernel/syscall/syscall_init.vuma's header "Why `fn_name as
 //   u64`?" for the full lowering chain). The self-test's address-of-
 //   function reference is preserved by the O2 whole_program_dce pass
-//   per the Wave 39 fix (the pass now scans for IRInstr::GetAddress
+//   per the fix (the pass now scans for IRInstr::GetAddress
 //   references, not just IRInstr::Call — see syscall_init.vuma's header
-//   "Wave 39 codegen fix").
+//   " codegen fix").
 //
 //   State<T> params: 1 per function (tbl only), per the K4b contract's
 //   "1-2 per function" rule. The signal_* functions don't need a
@@ -398,7 +398,7 @@
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 //   This file is self-contained. It declares the SignalTable layout (new
 //   to this file — no prior VWK file declares a SignalTable) + the
-//   Wave 5 __call_indirect1 extern (re-declared byte-identically to
+//    __call_indirect1 extern (re-declared byte-identically to
 //   womb/kernel/syscall/dispatch.vuma, womb/kernel/trap/irq.vuma,
 //   womb/kernel/trap/trap.vuma, womb/kernel/drivers/char.vuma, and
 //   womb/kernel/fs/procfs.vuma — VUMA's lack of `import` means each
@@ -425,7 +425,7 @@
 //   (7-8)   block SIGTERM + send + check returns 0 (blocked); unblock +
 //           check returns 15 (now deliverable).
 //   (9-10)  [W40] install REAL handler for SIGUSR1 via `fn_name as u64`
-//           (Wave 5 FnAddr); send + signal_deliver returns 1 (handler
+//           ( FnAddr); send + signal_deliver returns 1 (handler
 //           actually invoked via __call_indirect1 — program reaches the
 //           check, proving the handler ran and returned).
 //   (11)    [W40] pending bit cleared after signal_deliver.
@@ -436,10 +436,10 @@
 //           SIGQUIT, both with real handlers) and clears all pending.
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampoline — indirect call (Wave 5, used by signal_deliver).
+// Extern "C" trampoline — indirect call (, used by signal_deliver).
 // ────────────────────────────────────────────────────────────────────────────
 extern "C" {
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by signal_deliver to
     // invoke the per-signal handler installed via signal_install. Same
     // stub category as write/read/exit — NOT a C library function. Real
@@ -711,7 +711,7 @@ fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
 //       for SIGINT/SIGTERM, ignore for SIGCHLD, etc.; K7b's
 //       signal_deliver just reports "not delivered" and leaves the
 //       pending bit set so a later install + deliver can still fire).
-//   (4) Call the handler via the Wave 5 indirect-call trampoline:
+//   (4) Call the handler via the indirect-call trampoline:
 //         let handler_ret = __call_indirect1(handler, sig as u64);
 //       The handler receives `sig as u64` as its single SysV AMD64
 //       argument (RDI). The u64 return value is currently discarded
@@ -754,7 +754,7 @@ fn signal_deliver(tbl: State<SignalTable>, sig: u32) -> u32 {
     if handler == 0 {
         return 0;  // no handler installed — default action is K8+
     }
-    // Wave 5: invoke the per-signal handler via the indirect-call
+    // invoke the per-signal handler via the indirect-call
     // trampoline. The handler receives `sig as u64` as its first SysV
     // AMD64 argument (RDI). The u64 return is discarded (POSIX signal
     // handlers conventionally return void). The State<SignalTable> is
@@ -861,10 +861,10 @@ fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
 //   (7) Block SIGTERM (sig=15), send it, check signal_check == 0 (blocked).
 //   (8) Unblock SIGTERM, check signal_check == 15 (now deliverable).
 //   ── W40: signal_deliver + signal_check_and_deliver ──
-//   (9)  Install a REAL handler for SIGUSR1 (sig=10) via the Wave 5
+//   (9) Install a REAL handler for SIGUSR1 (sig=10) via the
 //        FnAddr feature (`signal_test_handler as u64`). Verify the
 //        address reads back non-zero (catches the DCE-removed-handler
-//        bug documented in syscall_init.vuma's header — Wave 39's
+//        bug documented in syscall_init.vuma's header — the
 //        whole_program_dce fix preserves functions referenced via
 //        GetAddress).
 //   (10) Send SIGUSR1 + call signal_deliver(tbl, 10) → must return 1
@@ -913,7 +913,7 @@ fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
 // The verification is therefore INDIRECT but sound:
 //   (a) The handler installed in step 9 is a REAL VUMA function
 //       (`signal_test_handler` below) whose address is taken via the
-//       Wave 5 FnAddr feature (`fn_name as u64`). The address is a
+//        FnAddr feature (`fn_name as u64`). The address is a
 //       real .text section address — NOT the fake sentinel 1000 used
 //       in step 1's round-trip test (1000 would segfault if
 //       __call_indirect1 actually jumped to it).
@@ -948,7 +948,7 @@ fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
 // the same rule).
 
 // signal_test_handler: a real VUMA function whose address can be taken
-// via `signal_test_handler as u64` (Wave 5 FnAddr) and invoked via
+// via `signal_test_handler as u64` ( FnAddr) and invoked via
 // __call_indirect1. The handler receives the signal number as its
 // single SysV AMD64 argument (RDI) and returns `sig + 1000` (a magic
 // value signal_deliver discards — POSIX signal handlers conventionally
@@ -963,7 +963,7 @@ fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
 // to compute + return; an empty `return 0;` body would risk being
 // constant-folded away by the O2 DCE pass (verified: the
 // whole_program_dce pass preserves functions referenced via
-// IRInstr::GetAddress per the Wave 39 fix documented in
+// IRInstr::GetAddress per the fix documented in
 // syscall_init.vuma's header, so even `return 0;` would survive — but
 // the non-trivial body makes the preservation belt-and-suspenders).
 fn signal_test_handler(sig: u64) -> u64 {
@@ -1011,13 +1011,13 @@ fn main() -> i32 {
 
     // ── W40: signal_deliver + signal_check_and_deliver tests ──────────
 
-    // (9) Install a REAL handler for SIGUSR1 (10) via the Wave 5
+    // (9) Install a REAL handler for SIGUSR1 (10) via the
     // FnAddr feature (`signal_test_handler as u64`). The handler's
     // address is a real .text address — NOT the fake 1000 used for
     // the round-trip test above (1000 would crash if signal_deliver
     // actually invoked it via __call_indirect1). Verify the address
     // reads back non-zero (catches the DCE-removed-handler bug
-    // documented in syscall_init.vuma's header — the Wave 39
+    // documented in syscall_init.vuma's header — the
     // whole_program_dce fix preserves functions referenced via
     // IRInstr::GetAddress).
     signal_install(tbl, 10, signal_test_handler as u64);

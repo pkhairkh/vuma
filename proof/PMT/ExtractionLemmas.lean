@@ -5,7 +5,7 @@ import PMT.WellTypedStrong
 
 This module proves composition lemmas that combine the 4 verified checkers
 from `PMT.Extraction` into more complex properties. These lemmas are the
-basis for the extraction pipeline (Waves 27-29): they show that the
+basis for the extraction pipeline: they show that the
 extracted Rust functions preserve the PMT invariants when composed.
 
 All theorems in this file close without `sorry`.

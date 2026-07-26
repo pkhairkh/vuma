@@ -9,7 +9,7 @@
 //   2. Request builder   http_build_request(method, path, host, headers, body, out)
 //   3. Response parser   http_parse_response(data, len, status, reason, headers, body)
 //
-// PMT migration (Wave 8c): the local `temp = allocate(N)` scratch buffers
+// PMT migration: the local `temp = allocate(N)` scratch buffers
 // in `http_u32_to_decimal` / `http_u32_to_hex_minimal` and the `mtmp`
 // scratch buffer in `http_build_request` are replaced by typed
 // `State<HttpTempN>` states with `data: [u8; N]` array fields. The

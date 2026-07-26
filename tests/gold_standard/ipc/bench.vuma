@@ -1,4 +1,4 @@
-// bench — Wave 16d: performance baseline for IPC operations.
+// bench — performance baseline for IPC operations.
 //
 // Sends N messages through a channel and measures throughput.
 // The parent sends 1000 messages, the child receives and counts them.

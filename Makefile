@@ -233,7 +233,7 @@ regen-manifest:
 	@python3 scripts/regen_manifest.py --write
 	@python3 scripts/verify_manifest.py
 
-## qemu-smoke: Build vuma and run the Waves 13-14 QEMU smoke-test matrix.
+## qemu-smoke: Build vuma and run the QEMU smoke-test matrix.
 ##             Compiles 4 gold-standard .vuma programs per backend and runs
 ##             each under the appropriate emulator (qemu-<isa>-static for
 ##             the 12 native ISAs, wasmtime for wasm32). Checks process
@@ -258,7 +258,7 @@ help:
 	        awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
 	        sed 's/^## //'
 
-# FFI Wave 6 tests — real extern calls (aarch64 has ffi_stub, runs cleanly;
+# FFI tests — real extern calls (aarch64 has ffi_stub, runs cleanly;
 # x86_64 compiles but needs libc linking to run).
 ffi-test: $(COMPILE_DUMP)
 	@echo "=== FFI Wave 6 tests (aarch64) ==="
@@ -287,7 +287,7 @@ proof:
 proof-check:
 	./scripts/check-lean.sh
 
-## proof-test: Run the Lean 4 proof test harness (Wave 7 PMT.Test.* modules)
+## proof-test: Run the Lean 4 proof test harness (PMT.Test.* modules)
 proof-test:
 	cd proof && lake exe test
 

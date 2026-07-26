@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/vfs/ops.vuma
 // VWK VFS Subsystem — Per-superblock operations table (VfsOps) with
-// function-pointer dispatch via the Wave 5 __call_indirect1 trampoline
+// function-pointer dispatch via the __call_indirect1 trampoline
 // (PMT-pure).
 // ═══════════════════════════════════════════════════════════════════════════
 //
@@ -13,7 +13,7 @@
 // pointers (read / write / stat / readdir / unlink / open / mkdir /
 // rename / chmod); the vfs_ops_* dispatch wrappers look up the
 // corresponding field, guard against 0 (no handler registered — hosted
-// stub), and tail-call the Wave 5 __call_indirect1 trampoline.
+// stub), and tail-call the __call_indirect1 trampoline.
 //
 // ── What W45 provides ──────────────────────────────────────────────────────
 //   vfs_ops_read(ops, buf, count, pos) -> i64
@@ -41,7 +41,7 @@
 //   vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps>
 //     Populate a pre-allocated VfsOps (allocated by the CALLER via
 //     `state_new(VfsOps)` in main) with the address of each of the 9
-//     tmpfs_*_fn stubs (resolved at link time via the Wave 5 FnAddr
+//     tmpfs_*_fn stubs (resolved at link time via the FnAddr
 //     feature — `tmpfs_read_fn as u64` lowers to GetAddress +
 //     R_X86_64_64 reloc), and return the populated State<VfsOps>.
 //     This is the factory a real kmain would call when mounting a tmpfs
@@ -82,7 +82,7 @@
 //
 // ── Function pointers as u64 ────────────────────────────────────────────────
 // VUMA has no first-class function-pointer type and no `&function`
-// syntax. The Wave 5 FnAddr feature is the documented PMT-pure way to
+// syntax. The FnAddr feature is the documented PMT-pure way to
 // take a function's address:
 //   - `tmpfs_read_fn as u64` is parsed as `Expr::Cast { expr: Var
 //     ("tmpfs_read_fn"), ty: u64 }`. The Cast flattens to its inner
@@ -107,9 +107,9 @@
 // buffer (the State<VfsOps>'s backing ___pmt_buffer is the caller's
 // stack frame, valid for the lifetime of the state_new handle).
 //
-// ── Wave 39 codegen fix: whole_program_dce preserves GetAddress refs ───────
+// ── codegen fix: whole_program_dce preserves GetAddress refs ───────
 // The O2 `whole_program_dce` pass (src/codegen/src/opt.rs) preserves
-// functions referenced via `IRInstr::GetAddress` — without the Wave 39
+// functions referenced via `IRInstr::GetAddress` — without the
 // fix, the tmpfs_*_fn stubs would be DCE'd (they are never directly
 // CALLED, only referenced via `tmpfs_*_fn as u64`), and the
 // GetAddress relocations would fall through to the "Unresolved
@@ -129,8 +129,8 @@
 // (char.vuma:751-755) and procfs.vuma's procfs_read documents
 // (procfs.vuma:729-734).
 //
-// ── Extern: __call_indirect1 (Wave 5 dispatch trampoline) ───────────────────
-// The single extern declaration is the Wave 5 runtime stub
+// ── Extern: __call_indirect1 ( dispatch trampoline) ───────────────────
+// The single extern declaration is the runtime stub
 // `__call_indirect1(ptr: u64, arg: u64) -> u64`. It lowers to
 // `mov rax, rdi; mov rdi, rsi; jmp rax` — a tail call that invokes
 // the function at `ptr` with `arg` in RDI (SysV AMD64 first-argument
@@ -185,7 +185,7 @@
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It declares only VfsOps (new in W45 —
-// no prior wave's layouts need re-declaring here, since the dispatch
+// no prior effort's layouts need re-declaring here, since the dispatch
 // wrappers' only State<T> param is State<VfsOps>). K7+ (syscall
 // layer) will re-declare VfsOps byte-identically when it wires
 // sys_read → vfs_ops_read dispatch through a per-mount VfsOps table.
@@ -199,7 +199,7 @@
 //     /tmp/ops.bin ; echo "exit=$?"
 // Expected: IVE Pass, exit=0, no stdout (the self-test is pure — no
 // console output, just integer return codes). The self-test exercises:
-//   (1)  ops.read_fn != 0 (Wave 39 DCE-preservation belt-and-suspenders
+//   (1) ops.read_fn != 0 ( DCE-preservation belt-and-suspenders
 //        check — catches the "tmpfs_read_fn was DCE'd" bug).
 //   (2)  vfs_ops_read(ops, 0, 0, 0) → 0 (tmpfs_read_fn stub returns 0;
 //        verifies the indirect call was actually made and returned the
@@ -215,10 +215,10 @@
 //   (10) vfs_ops_readdir(zero_ops, 0, 0) → -38 (i32).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampoline — indirect call (Wave 5).
+// Extern "C" trampoline — indirect call.
 // ────────────────────────────────────────────────────────────────────────────
 extern "C" {
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by the vfs_ops_*
     // dispatch wrappers to invoke the per-superblock read_fn / write_fn
     // / stat_fn / readdir_fn. Same stub category as write/read/exit —
@@ -251,7 +251,7 @@ extern "C" {
 //   - <non-zero .text address> — the address of a VUMA function with
 //          the canonical __call_indirect1 handler signature
 //          `(buf: u64) -> u64` (single SysV AMD64 argument in RDI,
-//          u64 return in RAX). Resolved at link time via the Wave 5
+//          u64 return in RAX). Resolved at link time via the
 //          FnAddr feature (`fn_name as u64` → GetAddress →
 //          R_X86_64_64 reloc patched with text_vaddr +
 //          func_offsets[name]).
@@ -292,7 +292,7 @@ layout VfsOps = {
 // canonical __call_indirect1 handler signature `(buf: u64) -> u64` —
 // single SysV AMD64 argument (RDI), u64 return (RAX). The bodies
 // return 0 (no-op) — they exist purely so their addresses can be
-// taken via `tmpfs_*_fn as u64` (Wave 5 FnAddr) and stored in a
+// taken via `tmpfs_*_fn as u64` ( FnAddr) and stored in a
 // VfsOps. K11+ will replace these stubs with real tmpfs primitive
 // bodies (K5c's tmpfs_read / tmpfs_write / etc.) via VUMA's (future)
 // import mechanism OR a linker layer that selects the real-body
@@ -300,7 +300,7 @@ layout VfsOps = {
 //
 // The stub bodies are deliberately non-trivial in SIGNATURE only —
 // the body is `return 0;` (the simplest possible body that still
-// produces a callable function). The Wave 39 whole_program_dce fix
+// produces a callable function). The whole_program_dce fix
 // preserves functions referenced via IRInstr::GetAddress, so even an
 // empty `return 0;` body survives DCE (the GetAddress reference keeps
 // the function alive). The non-trivial aspect is the SIGNATURE
@@ -378,7 +378,7 @@ fn tmpfs_chmod_fn(buf: u64) -> u64 {
 // ────────────────────────────────────────────────────────────────────────────
 // Populate a pre-allocated VfsOps (allocated by the CALLER via
 // `state_new(VfsOps)` in main — the init-style API) with the address
-// of each of the 9 tmpfs_*_fn stubs (via the Wave 5 FnAddr feature —
+// of each of the 9 tmpfs_*_fn stubs (via the FnAddr feature —
 // `tmpfs_read_fn as u64` lowers to a GetAddress IR instruction patched
 // with the function's .text address at link time), and return the
 // populated State<VfsOps>.
@@ -450,7 +450,7 @@ fn vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
 // chardev_read / chardev_write pattern (char.vuma:760-797) and K5g's
 // procfs_read pattern (procfs.vuma:745-781): fetch the fn pointer,
 // guard against 0 (no handler registered — hosted-mode stub), and
-// invoke the Wave 5 __call_indirect1 trampoline.
+// invoke the __call_indirect1 trampoline.
 //
 // The single SysV AMD64 argument passed to the handler is `buf as u64`.
 // This matches the procfs_read convention (procfs.vuma:765 —
@@ -501,7 +501,7 @@ fn vfs_ops_read(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 {
     if read_fn == 0 {
         return 0 - 38;  // -ENOSYS: no read handler registered
     }
-    // Wave 5: invoke the per-superblock read handler via the indirect-
+    // invoke the per-superblock read handler via the indirect-
     // call trampoline. The handler receives `buf as u64` as its single
     // SysV AMD64 argument (RDI) and is expected to read count / pos
     // from the canonical syscall context (TrapFrame GPR slots — K7
@@ -561,7 +561,7 @@ fn vfs_ops_readdir(ops: State<VfsOps>, buf: Address, count: u32) -> i32 {
 //
 // Phase A — populated VfsOps (tmpfs factory). Allocate a VfsOps via
 // vfs_ops_tmpfs(), verify the factory populated the fn fields with
-// real .text addresses (Wave 39 DCE-preservation belt-and-suspenders
+// real .text addresses ( DCE-preservation belt-and-suspenders
 // check), and exercise each dispatch wrapper to confirm the indirect
 // call is actually made and returns the stub's value (0) — NOT
 // -ENOSYS. This proves the read_fn != 0 guard passes AND the
@@ -599,7 +599,7 @@ fn main() -> i32 {
     let ops_buf = state_new(VfsOps);
     let ops = vfs_ops_tmpfs(ops_buf);
 
-    // ── Check 1: ops.read_fn != 0 (Wave 39 DCE-preservation). ─────────
+    // ── Check 1: ops.read_fn != 0 ( DCE-preservation). ─────────
     // THE W45 DCE-PRESERVATION CHECK. vfs_ops_tmpfs stored
     // `tmpfs_read_fn as u64` into ops.read_fn — the `as u64` lowers to
     // a GetAddress IR instruction that the x86_64 backend patches with
@@ -607,7 +607,7 @@ fn main() -> i32 {
     // whole_program_dce pass had removed tmpfs_read_fn (because it's
     // never directly CALLED, only referenced via GetAddress), the
     // relocation would fall through to the "Unresolved external
-    // symbol" warning and ops.read_fn would be 0. The Wave 39 fix to
+    // symbol" warning and ops.read_fn would be 0. The fix to
     // whole_program_dce (src/codegen/src/opt.rs:2053-2067) preserves
     // functions referenced via IRInstr::GetAddress, so this check
     // passes. Same defensive check as syscall_init.vuma::main check 2

@@ -189,7 +189,7 @@ impl CapD {
     /// Construct a `CapD` containing *all* capabilities and no conditions
     /// (top element of the lattice).
     ///
-    /// # Wave 4c note
+    /// # note
     ///
     /// `Capability::StateConsume` is intentionally **excluded** from the
     /// top element. Because `StateConsume` is exclusive (once a state is
@@ -258,7 +258,7 @@ impl CapD {
     /// * Capabilities: union
     /// * Conditions: intersection (less restrictive)
     ///
-    /// # State-capability lattice rules (Wave 4c)
+    /// # State-capability lattice rules
     ///
     /// Two state-specific rules refine the plain set-union:
     ///
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn all_join_idempotent() {
-        // Regression for Wave 4c: CapD::all() must be idempotent under join.
+        // Regression for CapD::all() must be idempotent under join.
         // This held before adding the exclusive StateConsume rule (which
         // would otherwise collapse all → {StateConsume} and break the
         // lattice law a ⊔ a = a). The fix is to exclude StateConsume from
@@ -484,7 +484,7 @@ mod tests {
     }
 
     // =======================================================================
-    // New CapD tests — Wave 4c: state-access capabilities
+    // New CapD tests — state-access capabilities
     // =======================================================================
 
     #[test]

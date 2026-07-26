@@ -22,7 +22,7 @@
 //   close(fd)                                         -> syscall(57, fd)
 //   setsockopt(sockfd, level, optname, optval, optlen) -> syscall(208, ...)
 //
-// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers
+// PMT migration: the local `allocate(N)` scratch buffers
 // (`addr` for sockaddr_in, `optval`/`addrlen` for socklen_t) are replaced
 // by typed `State<SockaddrIn>` and `State<SockLen>` with `data: [u8; N]`
 // array fields. The `make_sockaddr_in` helper takes `State<SockaddrIn>`.

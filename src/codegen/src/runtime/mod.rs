@@ -2,8 +2,8 @@
 //!
 //! These are compiled into the VUMA binary and provide runtime services:
 //!   - ffi_scratch: thread-local scratchpad for FFI marshalling
-//!   - callback: re-entrancy guard for foreign callbacks (Wave 7)
-//!   - vuma_context: the vuma_context_t C-API accessors (Wave 7)
+//! - callback: re-entrancy guard for foreign callbacks
+//! - vuma_context: the vuma_context_t C-API accessors
 //!   - arena: Rust-level arena allocator for testing and callback path
 
 pub mod arena;

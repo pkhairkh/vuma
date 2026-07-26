@@ -163,9 +163,9 @@
 // the guard always fires and the switch is always reached — unlike
 // procfs.vuma where read_fn = 0 means the switch is the fallback).
 //
-// ── Wave 1 string literals for write content ───────────────────────────────
+// ── string literals for write content ───────────────────────────────
 // The devfs_console_write handler and the self-test pass content to
-// `write(1, "lit", n)` as `buf: Address`. Wave 1 lowers a string literal
+// `write(1, "lit", n)` as `buf: Address`. lowers a string literal
 // to a .rodata address (see src/pipeline.rs:8733 — Lit::String →
 // ScgExpr::Int(rodata_vaddr + offset)), and `write` accepts the Address
 // directly (same PMT "Borrowed read" pattern as shell.vuma's `write(1,
@@ -316,7 +316,7 @@
 // __call_indirect1) since the handlers are in the same file." So the
 // dispatch path is a plain `if idx == 0 { ... } else if idx == 1 { ... }
 // else if idx == 2 { ... } else { return 0 - 38; }` chain — no
-// trampoline, no indirect call, no NULL-deref risk. The Wave 5
+// trampoline, no indirect call, no NULL-deref risk. The
 // `__call_indirect1` extern (declared in dispatch.vuma / irq.vuma /
 // char.vuma / procfs.vuma) is intentionally omitted.
 
@@ -712,7 +712,7 @@ fn devfs_register(data: State<DevfsData>, name: State<DevfsName>, read_fn: u64, 
 // decimal ASCII constants. This is PMT-pure: no `&x`, no `*ptr`, no
 // pointer syntax. The write content in the self-test DOES use string
 // literals directly (e.g. `write(1, "devfs: console write ok\n", 24)`)
-// — Wave 1 lowers the literal to a .rodata address, passed as Address.
+// — lowers the literal to a .rodata address, passed as Address.
 
 fn devfs_init(data: State<DevfsData>) {
     devfs_data_init(data);
@@ -800,7 +800,7 @@ fn devfs_init(data: State<DevfsData>) {
 //   (1) The W21S5 task spec explicitly mandates direct switch dispatch.
 //   (2) The 3 handlers are declared in this same file, so the switch
 //       can call them directly — no indirect call needed.
-//   (3) Direct switch avoids the Wave 5 __call_indirect1 trampoline
+//   (3) Direct switch avoids the __call_indirect1 trampoline
 //       (`mov rax, rdi; mov rdi, rsi; jmp rax`) — no NULL-deref risk,
 //       no indirect-call gadget, simpler generated code.
 //
@@ -912,7 +912,7 @@ fn devfs_read(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64
 // The `write` extern is sys_write (nr 1 on x86_64) — pre-registered in
 // src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs. Takes
 // (fd, buf, count) in RDI/RSI/RDX, returns byte count in RAX. The
-// `buf: Address` accepts a .rodata literal address directly (Wave 1
+// `buf: Address` accepts a .rodata literal address directly (
 // lowers string literals to .rodata addresses — see src/pipeline.rs:
 // 8733) OR a u64 value cast to Address. The self-test passes a string
 // literal; K7+ will pass the user-space buffer address from the trap
@@ -1033,7 +1033,7 @@ fn devfs_zero_read(buf: Address, count: u64) -> i64 {
 // 24 / 21 / 20 / 16 / 0 / 1 / 2 / 38 constants are also decimal. The
 // "devfs: console write ok\n" / "devfs: null write ok\n" / "devfs:
 // zero read ok\n" string literals are passed directly as Address to
-// devfs_write (Wave 1 lowers them to .rodata addresses) — this is
+// devfs_write ( lowers them to .rodata addresses) — this is
 // PMT-pure (no `&x`, no `*ptr`, no `allocate`, no `free`).
 
 fn main() -> i32 {

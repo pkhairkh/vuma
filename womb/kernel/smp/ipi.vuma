@@ -6,7 +6,7 @@
 // This file is the K8e layer of the VWK kernel: the IPI (Inter-Processor
 // Interrupt) subsystem. K8 (Sync) is now complete: K8a (spinlock),
 // K8b (mutex), K8c (semaphore), K8d (rwlock), and K8e (this file — IPI).
-// K8e is the first sub-wave that actively SIGNALS ANOTHER CPU: K8a-K8d
+// K8e is the first sub-stage that actively SIGNALS ANOTHER CPU: K8a-K8d
 // all synchronize tasks running on the SAME CPU (or tasks that might be
 // scheduled onto this CPU), but the actual cross-CPU "wake the other
 // CPU up and make it do something" primitive is the IPI.
@@ -295,7 +295,7 @@ extern "C" {
     // K11 stub: ecall with the SBI send_ipi extension ID, passing the
     // physical address of the hart mask as the argument.
     fn sbi_send_ipi(cpu_mask: u64);
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by ipi_dispatch to
     // invoke the per-vector IPI handler. Same stub category as
     // write/read/exit — NOT a C library function. Real asm body
@@ -446,7 +446,7 @@ fn ipi_broadcast(vector: u32) {
 // the trap handler (K3a's trap_trampoline.vuma / K3b's riscv64
 // equivalent) when an IPI is received. Looks up the handler for
 // `vector` via ipi_get_handler; if non-zero, invokes it through the
-// Wave 5 __call_indirect1 runtime stub — VUMA has no first-class fn-
+//  __call_indirect1 runtime stub — VUMA has no first-class fn-
 // pointer type, so indirect dispatch is delegated to the asm trampoline
 // (see "Why no fn-pointer call in dispatch?" in the file header for the
 // rationale, and the extern block above for the stub signature).
@@ -475,7 +475,7 @@ fn ipi_dispatch(tbl: State<IpiTable>, vector: u32) {
     if vector >= 16 { return; }
     let handler = ipi_get_handler(tbl, vector);
     if handler != 0 {
-        // Wave 5: invoke the per-vector IPI handler via the indirect-
+        // invoke the per-vector IPI handler via the indirect-
         // call trampoline. The handler receives `vector as u64` as its
         // first SysV AMD64 argument (RDI) — the convention is "IPI
         // handlers take the vector they were invoked for as their first

@@ -1,7 +1,7 @@
 // arena_wave1/arena_overflow — arena_alloc past capacity must trap (exit 1)
 // Expected exit code: 1
 //
-// Wave 6 negative test: allocate an arena too small to hold the requested
+// Negative test: allocate an arena too small to hold the requested
 // layout, then arena_alloc must invoke the __arena_overflow stub (real
 // exit(1) syscall) rather than silently corrupt memory.
 //

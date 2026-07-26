@@ -274,7 +274,7 @@
 //       K11's kmain / scheduler only calls the ON-arch pair.
 // So this file compiles + IVE-verifies on all 3 arches (x86_64,
 // aarch64, riscv64) — the same single file. K4c's switch.vuma is the
-// only K4 wave that DIVERGES across arches (per-arch context-switch
+// only K4 effort that DIVERGES across arches (per-arch context-switch
 // asm); K4f is uniformly arch-agnostic like K4a/K4b/K4d/K4e.
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 // womb/lang/elf.vuma — Minimal ELF64 writer for x86_64
 // Generates a static ELF64 executable with a single executable segment.
 //
-// Wave 48: the entry point is now configurable via `entry_offset` (the byte
+// the entry point is now configurable via `entry_offset` (the byte
 // offset within the code buffer where execution should start). Previously
 // the entry was hardcoded to `0x401000 + header_size`, which was a bug —
 // the segment is loaded at vaddr 0x400000 from file offset 0, so file
@@ -47,7 +47,7 @@ const ELFMAG: u32 = 0x464C457F;  // \x7FELF
 //   out_fd       — open file descriptor to write to (caller opens "a.out"
 //                  with O_WRONLY|O_CREAT|O_TRUNC, mode 0o755, then closes)
 //   entry_offset — byte offset within `code` where execution should start
-//                  (Wave 48: the bootstrap passes PRINT_INT_SIZE = 86 so
+//                  (the bootstrap passes PRINT_INT_SIZE = 86 so
 //                  the ELF entry skips the print_int routine and lands on
 //                  main. Passing 0 would run print_int first with garbage
 //                  in rdi.)

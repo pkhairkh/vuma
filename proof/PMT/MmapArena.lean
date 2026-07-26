@@ -10,8 +10,7 @@ The same hazard exists for `Arena::grow` (arena.rs:209-214) after
 
 The Lean `RawArena` model (`PMT.RawArena`) has no `raw_create` function —
 `RawArena` is constructed by supplying fields directly, making
-allocator-null impossible. Per the W1-D arena-fidelity audit (see
-`docs/verification-reports/S2-W1-D-arena-fidelity.md`, §3 Gap 3), this is
+allocator-null impossible. Per the arena-fidelity audit, this is
 the most acute simulation-soundness gap: any proof that "every well-formed
 `RawArena` corresponds to a reachable Rust `Arena`" would be **false** in
 the model, since the model admits arenas the Rust constructor would have
@@ -45,14 +44,12 @@ This module closes that gap by adding:
     adds a `haligned : size % 8 = 0` precondition to bridge the
     `align8_nat size` vs `size` alignment gap (the same precondition used
     by `raw_alloc_simulates_alloc` in `PMT.RawArena`, q.v. for rationale).
-    Wave 17's alignment-relaxation work may relax this precondition.
+    A future refinement may relax this precondition.
 
 **Status**: `lake build PMT.MmapArena` produces no errors and no
 `sorry` warnings — the file is fully sorry-free.
 
 **References**.
-  * `docs/verification-reports/S2-W1-D-arena-fidelity.md` §3 Gap 3 —
-    the original audit finding this module addresses.
   * `src/codegen/src/runtime/arena.rs:138-146` — Rust `Arena::create`.
   * `src/codegen/src/runtime/arena.rs:209-214` — Rust `Arena::grow`
     (companion realloc-null path, not modeled here).
@@ -157,7 +154,7 @@ is phrased in terms of `size`, not `align8_nat size`. We add a
 `raw_alloc_simulates_alloc` in `PMT.RawArena`); via
 `align8_preserves_aligned`, this gives `align8_nat size = size`, so
 `hfit` rewrites directly to the form `raw_alloc_alive_succeeds`
-expects. Wave 17's alignment-relaxation work may relax this
+expects. A future refinement may relax this
 precondition (see `PMT.SimRel`'s TODO).
 -/
 

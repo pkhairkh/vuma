@@ -405,7 +405,7 @@ impl BDInferenceEngine {
                 // they inherit BD from their arguments (like Effect nodes).
                 self.compute_phantom_bd(scg, node_id, bd_map)
             }
-            // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+            // PMT ( TODO): StateInit/StateRead/StateWrite/StateTransform
             // nodes need proper BD inference — for now, treat them like
             // phantom nodes (inherit BD from inputs) so the build passes.
             NodeType::StateInit
@@ -894,7 +894,7 @@ impl BDInferenceEngine {
             | NodeType::Match
             | NodeType::ConstantTime
             | NodeType::Syscall => None,
-            // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+            // PMT ( TODO): StateInit/StateRead/StateWrite/StateTransform
             // nodes need proper usage-context inference — for now, return
             // None (no self-usage) so the build passes.
             NodeType::StateInit
@@ -1184,7 +1184,7 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
             layout: *layout,
             field: *field,
         },
-        // Wave 9 — Dependent state types: pass through unchanged. The
+        //  — Dependent state types: pass through unchanged. The
         // element may contain generics, so recurse; the count_var is a
         // runtime-variable name (not a type), kept as-is.
         RepD::DependentArray { elem, count_var } => RepD::DependentArray {

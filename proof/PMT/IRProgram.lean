@@ -11,12 +11,10 @@ This module mirrors the top-level IR types from `src/codegen/src/ir.rs`:
   - `IRTerminator`  ↔ Rust `IRTerminator`  (7 variants: jump/branch/ret/unreachable/switch/invoke/tailCall)
   - `DataSection`   ↔ Rust `DataSection`   (name + data bytes)
 
-The simulation relation (Wave 15) connects Lean `IRProgram` to Rust `IRProgram`.
+The simulation relation connects Lean `IRProgram` to Rust `IRProgram`.
 All theorems in this file close without `sorry`.
 
 **References.**
-  * `docs/verification-reports/W2-A-codegen-ir.md` — IR types audit.
-  * `docs/verification-reports/W8-faithful-ir.md` — Wave 8 plan.
   * Rust source: `src/codegen/src/ir.rs:1-200` (type definitions).
   * Related modules: `PMT.PmtInstr` (instruction type),
     `PMT.ExecFunction` (flattening to `Program`), `PMT.SimRel`.
@@ -24,12 +22,11 @@ All theorems in this file close without `sorry`.
 Design notes:
   - `instructions : List PmtInstr` uses the simplified `PmtInstr` from
     `PMT.PmtInstr` (7 PMT-relevant variants), NOT the full 32-variant
-    `IRInstr`. The Lean/Rust simulation relation (Wave 15) maps the 25
-    other `IRInstr` variants through `PmtInstr.call` / `PmtInstr.other`
-    (see `W8-faithful-ir.md` §"What's NOT Yet Modeled").
+    `IRInstr`. The Lean/Rust simulation relation maps the 25
+    other `IRInstr` variants through `PmtInstr.call` / `PmtInstr.other`.
   - `predecessors`/`successors` use `List String` instead of Rust's
     `HashSet<String>` — sufficient for our soundness proofs since IVE
-    traverses flat (`for func, block, instr` — see W2-A §6).
+    traverses flat (`for func, block, instr`).
   - `IRTerminator.ret` (not `return`) — `return` is a Lean 4 contextual
     keyword in `do`-notation; using `ret` avoids parser ambiguity.
 
@@ -52,13 +49,13 @@ namespace PMT
   | `branch c t f`  | `Branch`      | cond, then_label, else_label                    |
   | `ret vals`      | `Return vals` | return values (renamed: `return` is a Lean kw)  |
   | `unreachable`   | `Unreachable` | —                                               |
-  | `switch d ts`   | `Switch`      | discr, targets (default omitted — see W2-A §3)  |
+  | `switch d ts`   | `Switch`      | discr, targets (default omitted)                |
   | `invoke f a n u`| `Invoke`      | func, args, normal, unwind                      |
   | `tailCall f a`  | `TailCall`    | func, args                                      |
 
 Note: Rust `Switch` has a separate `default` label; we model it as
 `(Int, String)` targets with the convention that the *last* entry is
-the default (offset `0` is unused). Wave 15 simulation will document
+the default (offset `0` is unused). The simulation relation documents
 this mapping. -/
 inductive IRTerminator where
   | jump        : String → IRTerminator                       -- target label
@@ -83,10 +80,10 @@ pub struct IRBlock {
     pub source_line: u32,
 }
 ```
-Simplifications (see `W8-faithful-ir.md` §"What's NOT Yet Modeled"):
+Simplifications:
   - `instructions : List PmtInstr` (not full `IRInstr`)
   - `predecessors`/`successors : List String` (not `HashSet`)
-  - `source_line` omitted (not used by IVE-from-IR, see W2-A §6). -/
+  - `source_line` omitted (not used by IVE-from-IR). -/
 structure IRBlock where
   label        : String
   instructions : List PmtInstr       -- simplified: use PmtInstr, not full IRInstr
@@ -131,7 +128,7 @@ structure IRFunction where
 
 Simplifications:
   - `kind : DataSectionKind` (ReadOnly | Data | Bss) omitted — not
-    used by PMT soundness; will be added in Wave 15 if the simulation
+    used by PMT soundness; may be added later if the simulation
     relation needs to distinguish `.rodata` (immutable) from `.data`.
   - `align : u32` omitted — alignment is enforced via `WF_Layout`
     (PMT.Basic §1.2) on the consumer side, not on the section itself.
@@ -155,7 +152,7 @@ pub struct IRProgram {
 }
 ```
 A program is just functions + static data — no module table, no
-foreign decls, no metadata (W2-A §1). -/
+foreign decls, no metadata. -/
 structure IRProgram where
   functions     : List IRFunction
   data_sections : List DataSection
@@ -174,7 +171,7 @@ def IRFunction.find_block (f : IRFunction) (label : String) : Option IRBlock :=
   f.blocks.find? (·.label = label)
 
 /-- §8: All instructions in a function (flattened across blocks).
-Mirrors the IVE-from-IR traversal pattern (W2-A §6):
+Mirrors the IVE-from-IR traversal pattern:
 `for func in &program.functions { for block in &func.blocks { for instr in &block.instructions { … } } }`. -/
 def IRFunction.all_instrs (f : IRFunction) : List PmtInstr :=
   f.blocks.flatMap (·.instructions)
@@ -213,9 +210,8 @@ def IRFunction.out_vars_unique (f : IRFunction) : Prop :=
 to `PmtInstr.well_typed`) AND every predecessor label is either the
 block's own label or in its successors list (CFG consistency check).
 
-This is the block-level predicate that Wave 11 will strengthen
-(per `W8-faithful-ir.md` gap table: "Strengthen `WellTyped` to use
-`PmtInstr.well_typed`"). -/
+This is the block-level predicate that may be strengthened
+further (e.g., to use `PmtInstr.well_typed` more aggressively). -/
 def IRBlock.well_typed (b : IRBlock) (env : String → Layout) : Prop :=
   -- (a) Every instruction in the block is well-typed.
   (∀ i : PmtInstr, i ∈ b.instructions → i.well_typed env)
@@ -233,9 +229,8 @@ step list satisfies the SSA-like name-uniqueness discipline:
     invariant, mirroring the per-function uniqueness of `IRValue.register`
     IDs in the Rust IVE-from-IR pass).
 
-**W2-E (this commit).** Conjuncts (c) and (d) are NEW. They close the
-precondition gap documented in
-`docs/verification-reports/S3-W1-B-well-typed-gap.md` — without them,
+**Conjuncts (c) and (d) are NEW.** They close the
+precondition gap: without them,
 `IRProgram.well_typed` only enforces the `WF_Layout` half of `WellTyped`
 (the first conjunct), and the theorem
 `to_program_preserves_well_typed_full` is unprovable (see the concrete
@@ -258,7 +253,7 @@ def IRFunction.well_typed (f : IRFunction) (env : String → Layout) : Prop :=
 
 /-- §11: `IRProgram.well_typed` — every function in the program is
 well-typed. This is the top-level predicate that the simulation
-relation (Wave 17) will use as the Lean-side precondition. -/
+relation uses as the Lean-side precondition. -/
 def IRProgram.well_typed (p : IRProgram) (env : String → Layout) : Prop :=
   ∀ f : IRFunction, f ∈ p.functions → f.well_typed env
 

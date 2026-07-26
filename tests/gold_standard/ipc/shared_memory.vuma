@@ -1,4 +1,4 @@
-// shared_memory — Wave 13: parent writes to shared memory, child reads.
+// shared_memory — parent writes to shared memory, child reads.
 //
 // Uses mmap with MAP_SHARED|MAP_ANONYMOUS to create a memory region
 // shared between parent and child (via fork()). The parent writes

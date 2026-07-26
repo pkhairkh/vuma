@@ -1,7 +1,7 @@
 // ffi_wave4/sqlite_exec_callback — sqlite3_exec with a VUMA callback
 // Expected exit code: 0
 //
-// Wave 8 test: demonstrates a foreign function (sqlite3_exec) that calls
+// Test: demonstrates a foreign function (sqlite3_exec) that calls
 // back into VUMA via a vuma_context_t. The callback runs on an isolated
 // callback stack with its own scratchpad frame; the callback_live_set
 // guard prevents it from touching the caller's in-flight State.

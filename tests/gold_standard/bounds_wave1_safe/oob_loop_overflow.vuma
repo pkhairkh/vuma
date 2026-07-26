@@ -2,7 +2,7 @@
 // Expected exit code: 134
 // Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
 //
-// Bounds Wave 1 SAFE-ONLY negative test: allocate a 4-byte buffer
+// Bounds SAFE-ONLY negative test: allocate a 4-byte buffer
 // (`[u8; 4]`) and loop `i` over the closed range [0, 4] (using
 // `i <= 4` as the loop condition — a classic off-by-one in the loop
 // bound). Each iteration writes `i` to `b.data[i]`. With `--safe`,

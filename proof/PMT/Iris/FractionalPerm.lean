@@ -107,7 +107,7 @@ structure FracPointsTo (f : Field) (q : Frac) (v : Nat) : Prop where
     splitting rule for fractional points-to. We state and prove it for
     `q = 1` (the common case: split full into two halves); the general
     `↦{q} ≡ ↦{q/2} ∗ ↦{q/2}` case requires a `Frac.half_of` operation
-    and proper heap reasoning, which is left to a future wave.
+    and proper heap reasoning, which is left to future work.
 
     In this simplified model the proof is pair-introduction (since
     `FracPointsTo` is `True`-valued). In real Iris, the heap is
@@ -167,7 +167,7 @@ theorem frac_compat (f : Field) (q1 q2 : Frac) (v : Nat)
     multiple readers may share `↦{q<1}`, but a writer must hold `↦{1}`.
 
     The hypothesis `hwrite : Frac.isFull q` is a PLACEHOLDER for the
-    actual write predicate (which would be defined in a future wave as a
+    actual write predicate (which would be defined in a future refinement as a
     Hoare-triple precondition `{{ f ↦{1} v }} write f w {{ f ↦{1} w }}`).
     In the simplified `Prop`-valued encoding here (cf.
     `CapBndInvariant.lean` and `ArenaRes.lean`), the heap model is elided

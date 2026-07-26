@@ -423,7 +423,7 @@ transform sys_mmap(
     // For the K2f self-test, len <= 4096 so we allocate exactly one page.
     // The kernel would normally iterate over (len + 4095) / 4096 pages,
     // but the region table only records the FIRST paddr (the rest are
-    // implicit at paddr+4096, paddr+8192, ...). A future wave may extend
+    // implicit at paddr+4096, paddr+8192, ...). A future effort may extend
     // the region to record a page-array base + count.
     let paddr = pmm_alloc(pmm_pool, pmm, 0);
 
@@ -514,7 +514,7 @@ fn sys_munmap(
 //        - sys_munmap of a non-existent vaddr returns -1.
 //
 // (Part 2 is documented but not exercised by the current main() body —
-// the K2f DoD only requires part 1. A future wave may add the end-to-end
+// the K2f DoD only requires part 1. A future effort may add the end-to-end
 // sys_mmap / sys_munmap calls.)
 //
 // Returns 0 on pass.

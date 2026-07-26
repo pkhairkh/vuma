@@ -9,7 +9,7 @@ This module formalises the `[live_mirror]` invariant from
 `docs/architecture/pmt-iris-spec.md` §5 as a separation-logic resource
 with ghost state, following the Iris methodology and the pattern
 established by `PMT.Iris.CapBndInvariant` (the `[cap_bnd]` invariant,
-formalised in Wave 3).
+formalised earlier).
 
 **Spec (§5).**
 
@@ -198,7 +198,7 @@ theorem consume_updates_mirror (γ : GhostName) (var : String)
     exclusivity directly (see the axiom's docstring for why an axiom
     is the appropriate encoding here).
 
-    **Wave 4 status.** The `sorry` that previously admitted this
+    **Status.** The `sorry` that previously admitted this
     theorem is now closed. The file is fully sorry-free. The closure
     introduces one local axiom (`own_ex_exclusive`), consistent with
     the file's existing posture of "axiom-clean modulo

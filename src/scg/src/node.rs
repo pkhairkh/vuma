@@ -92,16 +92,16 @@ pub enum NodeType {
     ArenaGrow,
     /// Arena destruction node (Arena Model — `arena_free(arena)`).
     ArenaFree,
-    /// Channel creation node (Wave 2b — `channel_open<T>()`).
+    /// Channel creation node.
     /// Produces a fresh `Channel<T>` handle (pointer-sized opaque capability).
     ChannelOpen,
-    /// Channel send node (Wave 2b — `channel_send(ch, msg)`).
+    /// Channel send node.
     /// Enqueues a message of type `T` onto the channel.
     ChannelSend,
-    /// Channel receive node (Wave 2b — `channel_recv(ch) -> T`).
+    /// Channel receive node.
     /// Dequeues the next message of type `T` from the channel.
     ChannelRecv,
-    /// Channel close node (Wave 2b — `channel_close(ch)`).
+    /// Channel close node.
     /// Releases the channel's underlying kernel resource (linear consume).
     ChannelClose,
 }
@@ -389,7 +389,7 @@ pub struct ComputationNode {
     pub tail_call: bool,
 }
 
-// Wave 43 serde-migration: the `ComputationNodeHelper` struct + manual
+//  serde-migration: the `ComputationNodeHelper` struct + manual
 // `Deserialize` impl for `ComputationNode` (which provided backward
 // compatibility for the legacy JSON `operation` string field, converting
 // it to `ComputationKind::Other(operation)` when `kind` was absent) were
@@ -884,7 +884,7 @@ pub struct ForeignConsumeNode {
     pub layout_name: String,
 }
 
-// ── Arena State Model nodes (Wave 2) ─────────────────────────────────────
+// ── Arena State Model nodes ─────────────────────────────────────
 
 /// Data specific to an arena-new node (`NodeType::ArenaNew`).
 ///
@@ -939,7 +939,7 @@ pub struct ArenaFreeNode {
     pub arena_vreg: u32,
 }
 
-// ── Channel operation nodes (Wave 2b) ────────────────────────────────────
+// ── Channel operation nodes ────────────────────────────────────
 
 /// Data specific to a channel-open node (`NodeType::ChannelOpen`).
 ///
@@ -1000,7 +1000,7 @@ pub struct ChannelCloseNode {
 }
 
 // ---------------------------------------------------------------------------
-// Codegen-side SCG types (Wave 4-e — SCG unification track)
+// Codegen-side SCG types (-e — SCG unification track)
 // ---------------------------------------------------------------------------
 //
 // The canonical SCG IR in this crate is *graph-shaped* (`SCG` +
@@ -1009,10 +1009,10 @@ pub struct ChannelCloseNode {
 // *statement-list-shaped* SCG (`Vec<ScgStatement>` in source order,
 // with embedded `ScgExpr` operands).  The two shapes serve different
 // consumers (IVE vs `IRBuilder`) and a full unification is a
-// multi-wave effort — see the "SCG Unification Status" doc in
+// multi-stage effort — see the "SCG Unification Status" doc in
 // `src/codegen/src/scg_to_ir.rs`.
 //
-// Wave 4-e takes an incremental step: the *structure* of three
+// -e takes an incremental step: the *structure* of three
 // codegen-side SCG node types (`CastNode`, `ControlNode`, `SwitchArm`)
 // is moved here as **generic** types.  The concrete type parameters
 // (expression type `E`, statement type `S`, type representation `T`,
@@ -1124,7 +1124,7 @@ pub enum CodegenControlNode<E, S> {
 /// the allocation's static type) are filled in by the codegen crate via
 /// a type alias.
 ///
-/// (Wave 4-b) The codegen `AllocationNode` is an **enum** (statement-list
+/// (-b) The codegen `AllocationNode` is an **enum** (statement-list
 /// SCG), distinct from the semantic [`AllocationNode`] above (a struct
 /// payload for the graph-shaped SCG, with `size`/`align`/`region_id`/
 /// `type_name` fields).  Both types coexist: the semantic struct remains
@@ -1162,7 +1162,7 @@ pub enum CodegenAllocationNode<E, T> {
 /// (the IR-level type for the load/store) are filled in by the codegen
 /// crate via a type alias.
 ///
-/// (Wave 4-b) The codegen `AccessNode` is an **enum** (statement-list
+/// (-b) The codegen `AccessNode` is an **enum** (statement-list
 /// SCG), distinct from the semantic [`AccessNode`] above (a struct
 /// payload for the graph-shaped SCG, with `mode`/`region_id`/`offset`/
 /// `access_size` fields).  Both types coexist.
@@ -1206,7 +1206,7 @@ pub enum CodegenAccessNode<E, T> {
 /// user-visible variable name → vreg mappings across `x = expr` reassignments
 /// so that if/else merge points can construct correct phi nodes.
 ///
-/// (Wave 12-a) The codegen `ComputationNode` is a **struct** with operand
+/// (-a) The codegen `ComputationNode` is a **struct** with operand
 /// expressions inline (statement-list SCG), distinct from the semantic
 /// [`ComputationNode`] above (a graph-node payload with `kind` /
 /// `result_type` / `tail_call` fields, used by IVE capability-intrinsic
@@ -1244,7 +1244,7 @@ pub struct CodegenComputationNode<E, K> {
 /// node type, so there is no separate semantic `UnaryComputationNode` to
 /// coexist with.
 ///
-/// (Wave 13-c) The codegen `UnaryComputationNode` is a **struct** with
+/// (-c) The codegen `UnaryComputationNode` is a **struct** with
 /// the operand expression inline (statement-list SCG).  It is consumed
 /// by `IRBuilder::lower_unary_computation`.  The structure now lives in
 /// the canonical SCG crate as `CodegenUnaryComputationNode<E, K>`, and
@@ -1284,7 +1284,7 @@ pub struct CodegenUnaryComputationNode<E, K> {
 /// `out = atomic_load(...)`) in the names map so `resolve_expr` can find
 /// it later.
 ///
-/// (Wave 13-c) The codegen `CallNode` is a **struct** with argument
+/// (-c) The codegen `CallNode` is a **struct** with argument
 /// expressions inline.  It is consumed by `IRBuilder::lower_call`.  The
 /// structure now lives in the canonical SCG crate as
 /// `CodegenCallNode<E>`, and codegen instantiates it via the transparent

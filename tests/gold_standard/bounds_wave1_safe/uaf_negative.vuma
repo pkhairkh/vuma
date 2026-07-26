@@ -2,7 +2,7 @@
 // Expected exit code: 42
 // Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
 //
-// UAF Wave 1 SAFE-ONLY positive test: documents the LEGAL transform
+// UAF SAFE-ONLY positive test: documents the LEGAL transform
 // pattern (consume input → produce output → use output, never the
 // input). The IVE rejects the ILLEGAL pattern (write/read after
 // consume) at compile time via `state_write::verify_state_writes`
@@ -11,7 +11,7 @@
 // form (which fails IVE verification rather than running).
 //
 // Note: the `transform` keyword is parsed but not yet lowered to a
-// callable form (PMT Wave 1a limitation — see
+// callable form (PMT limitation — see
 // `pmt_wave2/transform_id.vuma` and `pmt_wave5/transform_identity.vuma`
 // for the same adaptation). To exercise the same state-operation
 // pipeline (StateInit → Alloc, StateWrite → Store, StateRead → Load)

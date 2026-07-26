@@ -3,7 +3,7 @@
 // Uses the vuma-native syscall() intrinsic for clock_gettime & nanosleep
 // syscalls (asm-generic nrs 113 / 101).
 //
-// PMT migration (Wave 8c): the local `allocate(16)` timespec scratch
+// PMT migration: the local `allocate(16)` timespec scratch
 // buffers (in `time_now`, `time_monotonic`, `time_monotonic_ns`,
 // `epoch_millis`, `sleep_ms`) are replaced by typed `State<Timespec>`
 // with `sec: i64` and `nsec: i64` fields. The byte-stitched

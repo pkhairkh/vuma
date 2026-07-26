@@ -1,4 +1,4 @@
-// supervised_worker — Wave 22: supervised workers
+// supervised_worker — supervised workers
 // A supervisor spawns a worker, monitors it, and detects when it exits.
 // Expected exit code: 1
 fn main() -> i32 {

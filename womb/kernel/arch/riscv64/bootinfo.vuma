@@ -36,7 +36,7 @@
 //       function) but does NOT store it in the superset BootInfo — there
 //       is no hartid field in the canonical superset (the boot CPU's
 //       hartid is not interesting to kmain; only secondary-CPU bringup in
-//       Wave K6 cares, and that walks the DTB's /cpus node directly).
+//        cares, and that walks the DTB's /cpus node directly).
 //       The hartid parameter is therefore intentionally unused in the
 //       stub — same VUMA-calling-convention pattern as x86_bootinfo_init's
 //       unused `mbi_addr` and sys_exec's `_entry`/`_stack` (commit
@@ -66,7 +66,7 @@
 //            secondary-CPU bringup — out of scope for R1c).
 //     3. Set bi.boot_type = 2 (sbi).
 //
-//   For now (hosted mode / Wave R1c), the stub just stores the caller-
+//   For now (hosted mode / ), the stub just stores the caller-
 //   supplied dtb_addr / mem_start / mem_size unchanged and leaves
 //   cmdline/framebuffer at 0. The stub is sufficient for kmain's hosted-
 //   mode smoke tests (which only read boot_type/mem_start/mem_size/dtb_addr).
@@ -170,7 +170,7 @@ fn bootinfo_init(bi: State<BootInfo>) {
 //              protocol). NOT stored in the superset BootInfo — there is
 //              no hartid field in the canonical layout (the boot CPU's
 //              hartid is not interesting to kmain; only secondary-CPU
-//              bringup in Wave K6 cares, and that walks the DTB's /cpus
+//              bringup cares, and that walks the DTB's /cpus
 //              node directly). Accepted as a parameter for signature
 //              compatibility with the boot stub that will call this
 //              function; intentionally unused in the stub. Per the VUMA

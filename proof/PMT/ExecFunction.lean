@@ -13,29 +13,25 @@ The flattening is structural:
   - Each `IRBlock.instructions` is a list of `PmtInstr`.
   - Each `PmtInstr` is converted to one or more `Step`s.
   - The `IRTerminator` is currently ignored (no control flow — we flatten
-    to a single straight-line program). Wave 11 will add control flow.
+    to a single straight-line program). A future refinement will add control flow.
 
 All theorems in this file close without `sorry`, including the
 previously-`sorry`-backed `to_program_preserves_well_typed_full` (§5.1),
-which was closed sorry-free in W2-E by strengthening
+which was closed sorry-free by strengthening
 `IRFunction.well_typed` (in `PMT/IRProgram.lean` §10) with the
 `in_vars_unique` / `out_vars_unique` conjuncts. See the §5.1 docstring
 for the proof strategy.
 
 **References.**
-  * `docs/verification-reports/W2-A-codegen-ir.md` — IR types audit.
-  * `docs/verification-reports/W8-faithful-ir.md` — Wave 8 plan.
-  * `docs/verification-reports/S3-W1-B-well-typed-gap.md` — gap analysis
-    motivating the `IRFunction.well_typed` strengthening.
   * Related modules: `PMT.PmtInstr` (instruction type + `PmtInstr.to_steps`),
     `PMT.IRProgram` (program structure + `IRFunction.flat_steps` /
     `IRFunction.well_typed`), `PMT.Soundness` (`Step`, `Program`, `exec`,
     `WellTyped`), `PMT.SimRel` (uses `to_program` for the
     `full_simulation_strong` theorem).
   * `PMT/SimRel.lean` §"Stub helper": `IRProgram.first_function_body` is
-    the previous stub that this module supersedes (Wave 9 provides the
+    the previous stub that this module supersedes (this module provides the
     real flattening; SimRel's stub remains for backwards-compatibility
-    with the not-yet-proven `full_simulation` theorem of Wave 17).
+    with the not-yet-proven `full_simulation` theorem).
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
@@ -152,7 +148,7 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
 /-- §2: Flatten an `IRBlock`'s `instructions` to a list of `Step`s.
 
 The `terminator`, `predecessors`, `successors`, and `label` are ignored
-in this straight-line flattening. Wave 11 will add control-flow-aware
+in this straight-line flattening. A future refinement will add control-flow-aware
 flattening that respects the terminator (jump/branch/ret). -/
 def IRBlock.to_steps (b : IRBlock) : List Step :=
   b.instructions.flatMap PmtInstr.to_steps
@@ -167,8 +163,8 @@ theorem IRBlock.to_steps_empty (b : IRBlock) (h : b.instructions = []) :
 /-- §3: Flatten an `IRFunction`'s `blocks` to a `Program`.
 
 Note: this ignores control flow (terminators, branches). It produces a
-straight-line program by concatenating all blocks in order. Wave 11 will
-replace this with control-flow-aware flattening. -/
+straight-line program by concatenating all blocks in order. A future
+refinement will replace this with control-flow-aware flattening. -/
 def IRFunction.to_program (f : IRFunction) : Program :=
   f.blocks.flatMap IRBlock.to_steps
 
@@ -202,21 +198,19 @@ theorem IRProgram.to_program_empty_first_function
     IRProgram.to_program ⟨f :: rest, []⟩ = [] := by
   simp only [IRProgram.to_program, IRFunction.to_program, h, List.flatMap_nil]
 
-/-! ## §5. Well-typedness preservation (Wave 2-E un-stub)
+/-! ## §5. Well-typedness preservation
 
 The full preservation theorem — "if `p.well_typed env` then
 `(p.to_program)` is `WellTyped`" — requires aligning the `Layout`
 assigned by `env` with the `Layout` embedded in each `PmtInstr` (e.g.
 `alloc out layout` uses `layout`, but `load`/`store`/`free` use a
-placeholder `⟨1, []⟩`). Wave 11 will refine `to_steps` to consult `env`
+placeholder `⟨1, []⟩`). A future refinement will refine `to_steps` to consult `env`
 for the load/store/free layouts, at which point the full lemma below
 will be provable.
 
-**Wave 2-E (this commit).** The previous §5 was a hard `True` stub —
+**The previous §5 was a hard `True` stub —
 vacuously satisfied, carrying no logical content, and identified by the
-W1-A proof-complexity audit
-(`docs/verification-reports/S2-W1-A-proof-complexity.md` §"Recommendation"
-item 5) as the *bottleneck* blocking the strengthening of
+proof-complexity audit as the *bottleneck* blocking the strengthening of
 `full_simulation` and `full_simulation_strong` (SimRel.lean §"Stub
 helper"). We replace the vacuous `True` with two real, non-trivially
 stated theorems:
@@ -224,15 +218,14 @@ stated theorems:
   * `to_program_preserves_well_typed` — the **layout-well-formedness
     half** of `WellTyped` (the first conjunct:
     `∀ s ∈ prog, WF_Layout s.layout`). This is the weakest non-vacuous
-    preservation property. **Closed sorry-free in W4-C.**
+    preservation property. **Closed sorry-free.**
   * `to_program_preserves_well_typed_full` — the **full** `WellTyped`
     predicate of `PMT.Soundness`, including the two name-uniqueness
-    conjuncts. This is the theorem the Wave 17 simulation relation
-    will ultimately invoke. **Closed sorry-free in W2-E** (this commit)
+    conjuncts. This is the theorem the simulation relation
+    will ultimately invoke. **Closed sorry-free**
     by strengthening `IRFunction.well_typed` with the
     `in_vars_unique` / `out_vars_unique` conjuncts (see
-    `PMT/IRProgram.lean` §10 and the gap report
-    `docs/verification-reports/S3-W1-B-well-typed-gap.md`).
+    `PMT/IRProgram.lean` §10 and the gap report).
 
 The §5.1 docstring below documents the proof strategy in detail.
 -/
@@ -256,7 +249,7 @@ from `IRBlock.well_typed` → `IRFunction.well_typed` →
 that require either (a) showing `WF_Layout ⟨1, []⟩` directly (which
 holds — see `PMT.Basic.WF_Layout_empty` and the `0 < total_size ∨
 fields = []` disjunct), or (b) refining `to_steps` to consult `env`
-(Wave 11 plan). The lift through `IRBlock.to_steps` (`flatMap`) and
+(planned). The lift through `IRBlock.to_steps` (`flatMap`) and
 `IRFunction.to_program` (`flatMap`) is via `List.mem_flatMap`. -/
 theorem IRProgram.to_program_preserves_well_typed
     (p : IRProgram) (env : String → Layout)
@@ -264,7 +257,7 @@ theorem IRProgram.to_program_preserves_well_typed
     -- The flattened Program's steps all carry a well-formed layout
     -- (first conjunct of `WellTyped`).
     ∀ s : Step, s ∈ IRProgram.to_program p → WF_Layout s.layout := by
-  -- W4-C: closed sorry-free. Strategy: destructure `p` into its
+  -- closed sorry-free. Strategy: destructure `p` into its
   -- `functions` / `data_sections` fields, case-split on `functions`,
   -- then for the cons case lift the per-instruction preservation lemma
   -- `PmtInstr.to_steps_preserves_WF_Layout` through two layers of
@@ -442,22 +435,21 @@ private theorem IRProgram.to_program_preserves_out_var_uniqueness
     exact filter_length_eq_one_of_pairwise_ne f.flat_steps (·.out_var) h_out_uniq s hs
 
 /-- §5.1: `to_program` preserves the **full** `WellTyped` predicate of
-`PMT.Soundness`. This is the stronger statement the W1-A audit
+`PMT.Soundness`. This is the stronger statement that
 identifies as the bottleneck for `full_simulation` and
-`full_simulation_strong` (see `docs/verification-reports/S2-W1-A-proof-complexity.md`
-§"Recommendation" item 5).
+`full_simulation_strong`.
 
 The three conjuncts of `WellTyped` (see `PMT.Soundness`):
   1. `∀ s ∈ prog, WF_Layout s.layout`  — **CLOSED** in §5
-     (`to_program_preserves_well_typed` above) as of W4-C.
+     (`to_program_preserves_well_typed` above).
   2. `∀ s ∈ prog, (List.filter (fun s' => s'.in_var == s.in_var) prog).length = 1`
      — uniqueness of `in_var` across the flattened program. Closed
-     sorry-free in W2-E (this commit) using the new
+     sorry-free using the new
      `IRFunction.in_vars_unique` conjunct (see `PMT/IRProgram.lean` §10).
   3. `∀ s ∈ prog, (List.filter (fun s' => s'.out_var == s.out_var) prog).length = 1`
      — same as (2) for `out_var`. Closed via `IRFunction.out_vars_unique`.
 
-**W2-E status (this commit): CLOSED sorry-free.** The previous
+**Status: CLOSED sorry-free.** The previous
 `IRProgram.well_typed` did not enforce name-uniqueness across the IR,
 and the flattening admitted counterexamples (e.g. a block whose
 `instructions` are `[.alloc "x" ⟨1,[]⟩, .store "x" v o t]` produces two
@@ -466,11 +458,11 @@ fix is to strengthen `IRFunction.well_typed` with two new conjuncts —
 `in_vars_unique` and `out_vars_unique` — that require pairwise
 distinctness of `in_var`s and `out_var`s over the *flattened* step
 list `f.flat_steps` (which is `f.all_instrs.flatMap PmtInstr.to_steps`).
-See `docs/verification-reports/S3-W1-B-well-typed-gap.md` for the full
+See the gap report for the full
 gap analysis and counterexamples.
 
 **Proof strategy.**
-  * **Conjunct 1.** Delegate to `to_program_preserves_well_typed` (W4-C).
+  * **Conjunct 1.** Delegate to `to_program_preserves_well_typed`.
   * **Conjunct 2 / 3.** Case-split on `p.functions`:
       - Empty list: `IRProgram.to_program p = []`, the universal
         quantifier is vacuous.
@@ -495,7 +487,7 @@ theorem IRProgram.to_program_preserves_well_typed_full
   -- (§5.1.3, §5.1.4); `to_program_preserves_well_typed` is in §5.
   unfold WellTyped
   refine ⟨?_, ?_, ?_⟩
-  · -- Conjunct 1: WF_Layout — closed sorry-free in W4-C.
+  · -- Conjunct 1: WF_Layout — closed sorry-free.
     exact IRProgram.to_program_preserves_well_typed p env hwf
   · -- Conjunct 2: in_var uniqueness.
     exact IRProgram.to_program_preserves_in_var_uniqueness p env hwf

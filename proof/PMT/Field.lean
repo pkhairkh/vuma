@@ -31,8 +31,7 @@ Note: the ghost-state liveness content (`state_read_requires_live`,
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
 `just proof`); the `lean-proofs` CI job runs the same command. The
 legacy single-file `lean PMT/Field.lean` invocation does not work
-since the multi-module split in Wave 6
-(`docs/verification-reports/W6-multi-module-test.md`).
+since the multi-module split.
 -/
 
 namespace PMT

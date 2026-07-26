@@ -1,4 +1,4 @@
-// state_param — PMT Wave 2: state-typed param, read field in callee
+// state_param — state-typed param, read field in callee
 // Expected exit code: 77
 //
 // `fn get_x(p: State<Point>) -> i32 { return p.x; }` — the callee reads

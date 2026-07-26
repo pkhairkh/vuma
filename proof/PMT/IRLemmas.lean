@@ -18,7 +18,7 @@ All theorems in this file close without `sorry`, except §3
     `IRTerminator`, `DataSection`) and `well_typed` predicates.
   * `PMT.ExecFunction` — flattening `IRProgram.to_program` / etc.
   * `PMT.SimRel` — `instr_sim`, `block_sim`, `function_sim`,
-    `program_sim` definitions (Waves 13-17).
+    `program_sim` definitions.
 
 **Build.** Part of the Lake package rooted at `proof/lakefile.toml`.
 Build with `lake build PMT.IRLemmas`.
@@ -63,7 +63,7 @@ instruction-count metric. For now, we state a simpler length fact
 that IS provable: the to_program of an empty program is empty.
 
 See `IRProgram.empty_no_functions` above for that simpler fact. -/
--- The full length-preservation theorem is deferred to a future wave
+-- The full length-preservation theorem is deferred
 -- once PmtInstr.to_steps is refined to consult `env`. It would require
 -- List.length_flatMap reasoning and is intentionally omitted to keep
 -- the library sorry-free.
@@ -90,7 +90,7 @@ theorem IRProgram.well_typed_implies_blocks_well_typed
 
 Each `*_sim_implies_*_sim` lemma peels one layer off the simulation
 relation, exposing the length equality and the per-index `*_sim`
-hypothesis. These are used by the W18 extraction/soundness pipeline to
+hypothesis. These are used by the extraction/soundness pipeline to
 go from `program_sim lean rust` down to individual `instr_sim`
 hypotheses without re-doing the `And` destructuring at each call site.
 -/

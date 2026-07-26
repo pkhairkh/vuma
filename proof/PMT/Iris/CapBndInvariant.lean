@@ -20,7 +20,7 @@ resource with ghost state, following the Iris methodology.
   - `alloc_preserves_cap_bnd` — frame-preserving update lemma
 
 This is the FIRST Iris construct formalised in this project. It directly
-addresses audit `S2-W1-C`'s recommendation to "formalize `[cap_bnd]` as
+addresses the audit recommendation to "formalize `[cap_bnd]` as
 a real Iris named invariant with `own(γ_used, ●used) ∗ own(γ_cap, Ag cap)`".
 
 The encoding is a SIMPLIFIED Iris model: real Iris requires a heap/world
@@ -36,8 +36,6 @@ associativity, frame rule) without the heap model.
 
 **References.**
   - `docs/architecture/pmt-iris-spec.md` §1 (ArenaRes), §3 (`[cap_bnd]`).
-  - `docs/verification-reports/S2-W1-C-iris-gap.md` — the audit this file
-    closes (row 8: `[cap_bnd]` named invariant ⚠️ → ✅).
   - `proof/PMT/Basic.lean` — `CapacityInvariant` (the bare `Prop` that
     `CapBndInv` upgrades to a separation-logic resource).
 -/

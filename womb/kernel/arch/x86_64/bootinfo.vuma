@@ -62,7 +62,7 @@
 //     5. On MBI_TAG_FRAMEBUFFER: set bi.framebuffer = fb_addr,
 //        bi.fb_width = fb_width, bi.fb_height = fb_height.
 //
-//   For now (hosted mode / Wave R1a), the stub just sets mem_start/mem_size
+//   For now (hosted mode / ), the stub just sets mem_start/mem_size
 //   to the defaults above and leaves cmdline/framebuffer at 0. The stub is
 //   sufficient for kmain's hosted-mode smoke tests (which only read
 //   mem_start/mem_size/boot_type).

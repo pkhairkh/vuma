@@ -10,7 +10,7 @@
 //
 // W34: the x86_64 walker (x86_map_page + x86_translate) is now inlined
 // into this file as REAL VUMA functions (not externs). They use the
-// Wave 7 VUMA intrinsics __vuma_load_u64 / __vuma_store_u64 for PTE
+//  VUMA intrinsics __vuma_load_u64 / __vuma_store_u64 for PTE
 // access — real `mov rax,[rdi]; ret` and `mov [rdi],rsi; ret` 4-byte
 // runtime stubs. Pre-W34 vmm_translate was a stub returning 0 (the
 // walker declared pte_read / pte_write as externs that resolved to
@@ -150,7 +150,7 @@ layout VaddrParts = {
 // Arch-specific extern stubs (real implementations in arch/*/vmm_hal.vuma).
 // ────────────────────────────────────────────────────────────────────────────
 // W34: x86_map_page and x86_translate are now REAL local VUMA functions
-// (defined below), not externs. They use the Wave 7 VUMA intrinsics
+// (defined below), not externs. They use the VUMA intrinsics
 // __vuma_load_u64 / __vuma_store_u64 for PTE access — real `mov
 // rax,[rdi]; ret` and `mov [rdi],rsi; ret` 4-byte runtime stubs (see
 // src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs). Pre-W34
@@ -176,11 +176,11 @@ layout VaddrParts = {
 // own its own page-table interpretation without generic-layer state.
 
 extern "C" {
-    // Wave 7 VUMA intrinsic 8-byte load/store stubs (real `mov`
+    //  VUMA intrinsic 8-byte load/store stubs (real `mov`
     // instructions — PMT-pure: no pointer dereference syntax in VUMA
     // source). Used by the local x86_map_page / x86_translate walkers
     // for PTE access. Same stubs as womb/kernel/arch/x86_64/vmm_hal.vuma
-    // (W34) and womb/kernel/syscall/handlers/fs.vuma (Wave 7).
+    // (W34) and womb/kernel/syscall/handlers/fs.vuma.
     fn __vuma_load_u64(addr: u64) -> u64;
     fn __vuma_store_u64(addr: u64, val: u64);
 

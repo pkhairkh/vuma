@@ -170,7 +170,7 @@ jobs:
   # ── Lean Proofs ─────────────────────────────────────────────────────────────
   # Builds and tests the Lean proof package under ./proof. Runs in parallel
   # with the Rust jobs (no `needs:` dependency) so Lean failures don't block
-  # Rust feedback and vice versa. Strict sorry check is enabled as of Wave 15
+  # Rust feedback and vice versa. Strict sorry check is enabled
   # (PMT proof library is sorry-free).
   lean-proofs:
     name: Lean Proofs
@@ -189,7 +189,7 @@ jobs:
 
       - name: Check sorry (strict)
         env:
-          # Strict mode (fail on any sorry) is enabled as of Wave 15 — the
+          # Strict mode (fail on any sorry) is enabled — the
           # PMT proof library is sorry-free.
           PROOF_CHECK_STRICT: "1"
         run: ./scripts/check-lean.sh
@@ -197,7 +197,7 @@ jobs:
       - name: Run proof tests
         run: cd proof && lake exe test
 
-  # ── QEMU smoke test (Waves 13-14 backends) ─────────────────────────────────
+  # ── QEMU smoke test ─────────────────────────────────────────────────────────
   # Builds the compiler, then for each of the 12 QEMU backends + wasm32
   # (wasmtime) compiles 4 gold-standard .vuma programs and runs them under
   # the appropriate emulator, checking the process exit code against the

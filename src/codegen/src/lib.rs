@@ -59,10 +59,10 @@ pub mod arm32;
 pub mod arm64;
 pub mod armeb;
 pub mod backend;
-/// Bitvector verification framework (Wave 7).
+/// Bitvector verification framework.
 /// Verifies e-graph rewrite rules by exhaustive enumeration.
 pub mod bv_verify;
-/// Capability tokens (Wave 11 — L2 Runtime Encapsulation).
+/// Capability tokens.
 /// Re-exports from [`ipc::capability`] to provide a canonical
 /// `crate::capability` path for pipeline consumers.
 pub mod capability;
@@ -78,10 +78,10 @@ pub mod ipc;
 pub mod ipc_lowering;
 pub mod ir;
 pub mod loongarch64;
-/// Correct loop unrolling (Wave 13b). Replaces the miscompiling vectorizer.
+/// Correct loop unrolling. Replaces the miscompiling vectorizer.
 pub mod loop_unroll;
 pub mod m68k;
-/// FFI Marshal Pass (Wave 10) — flattens `State<T>` args to raw pointers
+/// FFI Marshal Pass — flattens `State<T>` args to raw pointers
 /// at `extern` call sites and tracks whether the state is preserved
 /// (`#[pure]` foreign function) or invalidated (must be re-initialized).
 pub mod marshal;

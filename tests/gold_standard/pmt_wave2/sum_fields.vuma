@@ -1,4 +1,4 @@
-// sum_fields — PMT Wave 2: sum two state fields
+// sum_fields — sum two state fields
 // Expected exit code: 12
 //
 // Initializes a Point with x=5 y=7, returns x+y (=12). Verifies that

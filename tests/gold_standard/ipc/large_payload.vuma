@@ -1,4 +1,4 @@
-// large_payload — Wave 16a: multi-message framed channel with CRC verification
+// large_payload — multi-message framed channel with CRC verification
 //
 // Exercises the L1 framing + CRC32 verification on a larger payload: the
 // child sends 10 framed messages (each 56 bytes with MAGIC + type_hash +

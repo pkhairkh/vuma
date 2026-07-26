@@ -1,4 +1,4 @@
-// array_field — PMT Wave 2: layout with a fixed-size array field
+// array_field — layout with a fixed-size array field
 // Expected exit code: 65
 //
 // Declares `Buf = { data: [u8; 4] }`. The parser represents `data[0]` as

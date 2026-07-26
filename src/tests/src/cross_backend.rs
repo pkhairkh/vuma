@@ -1946,14 +1946,14 @@ fn test_cross_backend_regression_tracking() {
 // on the 6 tier-1 backends (x86_64, aarch64, riscv64, riscv32,
 // arm32, x86_32).  Implementation is in progress for the 8 tier-2/3
 // backends (alpha, hppa, m68k, mips64, ppc64, s390x, sparc64,
-// loongarch64) which currently `unimplemented!("… (Wave 12)")`.  The 4
+// loongarch64) which currently `unimplemented!("…")`. The 4
 // big-endian / LE wrapper backends (aarch64_be, armeb, mips64be,
 // ppc64le) automatically inherit from their parents.
 //
 // This test iterates over **all 19** BackendKind variants and categorizes
 // each result:
 //   - **PASS**: backend emits non-empty encoded bytes for the syscall.
-//   - **PENDING**: backend panics with the literal "Wave 12" message
+//   - **PENDING**: backend panics with the literal "" message
 //     (the tier-2/3 Syscall arm is not yet implemented).
 //   - **FAIL**: backend panics with an unexpected message, returns an
 //     error, or emits empty output.
@@ -2021,7 +2021,7 @@ fn build_syscall_ir_func() -> IRFunction {
 enum SyscallConformance {
     /// Backend emitted non-empty encoded bytes — conformance met.
     Pass(usize), // byte count
-    /// Backend panicked with the literal "Wave 12" message — the
+    /// Backend panicked with the literal "" message — the
     /// tier-2/3 Syscall arm is not yet implemented.
     Pending(String),
     /// Backend failed unexpectedly (wrong panic, error, or empty output).
@@ -2071,7 +2071,7 @@ fn check_syscall_conformance(kind: BackendKind) -> SyscallConformance {
 ///
 /// Iterates over all 19 backends and asserts that each one EITHER emits
 /// non-empty encoded output for `Syscall { nr: 1, .. }` OR panics with
-/// the literal "Wave 12" message (indicating the tier-2/3 implementation
+/// the literal "" message (indicating the tier-2/3 implementation
 /// is still pending).  Any other outcome (unexpected panic, error, or
 /// empty output) fails the test.
 #[test]
@@ -2117,7 +2117,7 @@ fn test_syscall_conformance_all_backends() {
     // ── Assertions ────────────────────────────────────────────────────
     //
     // 1. Zero FAILs — every backend must either emit non-empty output or
-    //    panic with the literal "Wave 12" message (pending).  Any other
+    //    panic with the literal "" message (pending). Any other
     //    outcome is a bug.
     assert_eq!(
         fail_count, 0,
@@ -2271,7 +2271,7 @@ enum Wave49SyscallOutcome {
     /// (e.g. Wasm32 emits `i32.const -ENOSYS` per Syscall but the
     /// emitted bytes may not grow strictly with N).  Carries byte size.
     PassFixed(usize),
-    /// Backend panicked with the literal "Wave 12" message — parent
+    /// Backend panicked with the literal "" message — parent
     /// Syscall implementation still pending.
     Pending(String),
     /// Backend failed unexpectedly.
@@ -2349,7 +2349,7 @@ fn check_wave49_syscall_conformance(kind: BackendKind) -> Wave49SyscallOutcome {
 ///   * Every backend either **passes** (emits non-empty encoded output
 ///     for both functions, with the 3-syscall output strictly larger
 ///     than the 1-syscall output — proving no syscalls were silently
-///     dropped) OR is **pending** (panics with the literal "Wave 12"
+/// dropped) OR is **pending** (panics with the literal ""
 ///     message because the parent backend's `IRInstr::Syscall` arm is
 ///     still `unimplemented!`).
 ///   * No backend **fails** unexpectedly.
@@ -2598,11 +2598,11 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
                 .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                 .unwrap_or("<non-string panic>");
             // Pending categories we tolerate:
-            //   * "Wave 12" — parent backend's Syscall arm still
+            //   * "" — parent backend's Syscall arm still
             //     unimplemented (some backends route print_* through
-            //     syscall stubs).  The string "Wave 12" is the literal
+            //     syscall stubs). The string "" is the literal
             //     panic message the backend emits.
-            //   * "Wave 13" / "Wave 49" — sibling pending work (literal
+            //   * "" / "" — sibling pending work (literal
             //     panic-message strings).
             //   * "print_int" / "print_hex" / "print_newline" —
             //     print-stub restoration pending on this backend.
@@ -2635,7 +2635,7 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
 ///   * Every backend either **passes** (emits non-empty encoded output
 ///     for the function) OR is **pending** (panics with a tolerable
 ///     message indicating print-helpers / sibling work is still in
-///     progress — e.g. the literal "Wave 12" string, "print_int not yet
+/// progress — e.g. the literal "" string, "print_int not yet
 ///     implemented", "unimplemented").
 ///   * No backend **fails** unexpectedly.
 ///   * For backends that populate `AllocatedFunction.relocations` for

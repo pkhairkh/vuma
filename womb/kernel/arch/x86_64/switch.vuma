@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/arch/x86_64/switch.vuma
-// x86_64 context switch on the superset TrapFrame (Wave R4a+b).
+// x86_64 context switch on the superset TrapFrame.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the R4a+b rewrite of K4c's x86_64 switch.vuma. K4c declared

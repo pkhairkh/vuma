@@ -2218,9 +2218,9 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
 /// for the instruction encoding, but records the physical register assignments
 /// in the AllocatedFunction's reads/writes fields.
 ///
-/// This is a hybrid approach (Wave 23): the instruction encoding still uses
+/// This is a hybrid approach: the instruction encoding still uses
 /// stack slots (for safety), but the allocation metadata records which vregs
-/// COULD be in real registers. A future wave will use this metadata to emit
+/// COULD be in real registers. A future effort will use this metadata to emit
 /// register-based instructions directly.
 fn sparc64_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     // Run the existing stack-slot allocator to get a working AllocatedFunction.
@@ -2884,7 +2884,7 @@ fn emit_instr(
                     // the negative signed result (e.g. -1.5 → -1 instead
                     // of the Rust `as u64` semantics of 0).
                     //
-                    // F1d FIX (Wave 11-c): clamp negative inputs to +0.0
+                    // F1d FIX (-c): clamp negative inputs to +0.0
                     // before FDTOX, matching Rust's `f64 as u64` /
                     // `f32 as u64` saturation semantics for negatives.
                     // After widening F32→F64 (FSTOD) above, the sign bit
@@ -3446,7 +3446,7 @@ fn emit_instr(
                 // Restore O0 = 0 (success return for pipe)
                 code.extend_from_slice(&Instruction::Or { rd: Gpr::O0, rs1: Gpr::G0, rs2: Gpr::G0 }.encode());
             }
-            // [Wave 81-88-ext] SPARC64 Linux syscall error convention:
+            // [ext] SPARC64 Linux syscall error convention:
             // %o0 = return value, carry flag (ICC.C) set on error with
             // %o0 = POSITIVE errno. Negate %o0 when carry is set so the
             // IR's I64 Cmp SLt(%o0, 0) check works (expects -errno).
@@ -3465,7 +3465,7 @@ fn emit_instr(
                 code.extend(ss_stx(Gpr::O0, dst_off));
             }
         }
-        // ── CallIndirect (Wave 49) ──
+        // ── CallIndirect ──
         // Indirect call through a function pointer vreg.
         // 1. Load args into %o0-%o5 (SPARC V9 ABI, 6 register args)
         // 2. Load func_ptr into %l0
@@ -3522,7 +3522,7 @@ fn emit_instr(
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-        // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+        // StarkProof — stub (Call-form builtin is the active path).
         | IRInstr::StarkProof { .. } => {}
     }
 }
@@ -4286,7 +4286,7 @@ fn emit_binop(
 /// the sign-bit heuristic is CORRECT for all non-NaN finite inputs
 /// (including mixed-sign — Task 1-f's "mixed-sign TODO" was incorrect).
 ///
-/// G5 FIX (Wave 11-c): NaN is now handled via magnitude comparison
+/// G5 FIX (-c): NaN is now handled via magnitude comparison
 /// (`|diff| > 0x7FF0_0000_0000_0000` for f64, `> 0x7F80_0000` for f32
 /// ⇒ NaN; Inf equals the threshold).  When the diff is NaN, ordered
 /// comparisons return 0 and `Ne` returns 1, per IEEE-754 unordered
@@ -4411,7 +4411,7 @@ fn emit_sparc64_fp_binop(
             //   Gt = !sign AND !is_zero
             //   Ge = !sign OR is_zero
             //
-            // G5 NaN fix (Wave 11-c): if the diff is NaN (because either
+            // G5 NaN fix (-c): if the diff is NaN (because either
             //   operand was NaN, OR the subtraction overflowed to NaN —
             //   which does not happen for finite inputs since FSUBS/D
             //   only produces NaN when an operand is NaN), IEEE-754 says
@@ -4773,7 +4773,7 @@ fn emit_sparc64_fp_binop(
 /// SPARC V9 (sparc64) code generation backend.
 pub struct Sparc64Backend {
     target_info: Sparc64TargetInfo,
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 
@@ -5151,13 +5151,13 @@ impl Backend for Sparc64Backend {
                 ("recvfrom", 125),
                 ("sendto", 133),
                 ("epoll_create1", 319),
-                // [wave 9 fix] epoll_ctl/epoll_wait corrected back to 194/195.
+                // [fix] epoll_ctl/epoll_wait corrected back to 194/195.
                 // A prior commit changed these to 294/295 claiming 194/195
                 // "collide with connect/getsockname" — that was wrong:
                 // sparc connect=98, getsockname=150 (no collision). Per
                 // arch/sparc/kernel/syscalls/syscall.tbl: 194=epoll_ctl,
                 // 195=epoll_wait, 294=readlinkat, 295=fchmodat. The 294/295
-                // values duplicated wave-7's readlinkat/fchmodat entries.
+                // values duplicated the readlinkat/fchmodat entries.
                 ("epoll_ctl", 194),
                 ("epoll_wait", 195),
                 ("clone", 217),
@@ -5169,7 +5169,7 @@ impl Backend for Sparc64Backend {
                 ("lstat", 40),
                 ("fstat", 62),
                 ("getcwd", 119),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (sparc unistd.h) ──
+                // ── POSIX file-metadata & I/O syscalls (sparc unistd.h) ──
                 // sparc64 has 6 reg args (o0-o5); all these take ≤5 args → simple_stub.
                 // sparc's chown=13/fchown=123 are the 16-bit-uid variants, so we
                 // expose the modern 32-bit ones: chown32=35, fchown32=32. Many
@@ -5208,7 +5208,7 @@ impl Backend for Sparc64Backend {
                 ("pwritev", 325),
                 ("fchdir", 176),
                 ("chroot", 61),
-                // ── Wave 9: POSIX system & advanced syscalls (sparc unistd.h) ──
+                // ── POSIX system & advanced syscalls (sparc unistd.h) ──
                 // sparc64 has 6 reg args (o0-o5); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(318), signalfd→signalfd4(317) = modern variants.
                 // sparc numbers diverge: mlock=237, mincore=78, madvise=75,
@@ -5236,7 +5236,7 @@ impl Backend for Sparc64Backend {
                 ("inotify_add_watch", 152),
                 ("inotify_rm_watch", 156),
                 ("ptrace", 26),
-                // ── Wave 8: POSIX process & identity syscalls (sparc64 syscall.tbl) ──
+                // ── POSIX process & identity syscalls (sparc64 syscall.tbl) ──
                 // sparc64 numbers are SunOS-derived and highly divergent. All take
                 // ≤5 args; sparc64 has 6 reg args (o0-o5) → simple_stub for all.
                 // Family 1: identity (no uid16 split on sparc64)
@@ -5279,7 +5279,7 @@ impl Backend for Sparc64Backend {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: REAL mmap syscall (sparc64 sys_mmap=71).
             // Args: O0=0(NULL), O1=4096, O2=3(PROT), O3=0x22(MAP), O4=-1(fd), O5=0(off).
             // Syscall nr in G1=71. TA 0x6d. Return via JMPL %o7+8.
@@ -6754,7 +6754,7 @@ mod tests {
         );
     }
 
-    // ── F1d (Wave 11-c) tests ────────────────────────────────────────────
+    // ── F1d (-c) tests ────────────────────────────────────────────
     //
     // The F1d fix clamps negative floats to +0.0 before FDTOX so that
     // `f64 as u64` / `f32 as u64` saturate to 0 for negative inputs
@@ -6867,7 +6867,7 @@ mod tests {
         );
     }
 
-    // ── G5 (Wave 11-c) tests ─────────────────────────────────────────────
+    // ── G5 (-c) tests ─────────────────────────────────────────────
     //
     // The G5 fix adds NaN detection via magnitude comparison
     // (|diff| > Inf_threshold) and ANDs the comparison result with

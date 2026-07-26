@@ -1,7 +1,7 @@
 // inbounds_loop_dynamic — Loop with dynamic bound
 // Expected exit code: 45
 //
-// Bounds Wave 1 positive test: loop `i` over [0, n) where `n = 9` is
+// Bounds positive test: loop `i` over [0, n) where `n = 9` is
 // a runtime variable (held in a local, not a compile-time constant),
 // writing `i+1` into `buf.data[i]` each iteration. Then sum the cells
 // into a state-field accumulator `acc.sum` (using the state-field

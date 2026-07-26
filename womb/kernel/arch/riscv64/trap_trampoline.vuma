@@ -27,7 +27,7 @@
 //                    fields from RiscVTrapFrame into the superset.
 //
 // In hosted mode every extern resolves to `__ffi_fallback_stub` (returns 0,
-// void calls no-op). In bare-metal mode (Wave K11) the same names link
+// void calls no-op). In bare-metal mode the same names link
 // against REAL asm stubs in womb/kernel/arch/riscv64/trap.S.
 //
 // ── RiscVTrapFrame register-save order ──────────────────────────────────────
@@ -85,7 +85,7 @@
 //                                       "duplicate-sp question" note)
 //   NOT migrated (left 0 by tf_init):
 //     sup.fpu[0..255]   — riscv64 saves F0..F31 state separately (not in
-//                         the RiscVTrapFrame); a future wave may extend
+//                         the RiscVTrapFrame); a future effort may extend
 //                         the save area and copy f0..f31 here.
 //
 // ── SCAUSE codes the dispatcher switches on ─────────────────────────────────
@@ -431,7 +431,7 @@ fn trap_is_page_fault(tf: State<RiscVTrapFrame>) -> u8 {
 //                                       fast-access path the dispatcher
 //                                       uses without a gpr unpack round-trip)
 //   NOT migrated: fpu (the RiscVTrapFrame doesn't save F0..F31 state —
-//                  a future wave may extend the save area).
+//                  a future effort may extend the save area).
 //
 // State<T> params: 2 (old: State<RiscVTrapFrame>, sup: State<TrapFrame>).
 // Pure reads of `old.*` + pure writes to `sup.*` via tf_set_gpr +

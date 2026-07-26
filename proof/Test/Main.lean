@@ -5,7 +5,7 @@ import PMT.Test.EmptyProgram
 import PMT.Test.MultiStepProgram
 
 /-!
-# PMT Test Runner — Wave 7 harness entry point
+# PMT Test Runner — harness entry point
 
 This is the `lake exe test` entry point (`root = "Test.Main"` in
 `lakefile.toml`). It imports every `PMT.Test.*` module so that running

@@ -25,10 +25,9 @@ This module defines the EXACT interface that extraction produces:
   * `verified_linearity_check` — mirrors IVE's `verify_state_writes`
     consumed-set check.
   * `verified_pmt_check` — the composition of all three.
-Waves 27-29 will implement the actual extraction pipeline.
+The actual extraction pipeline is implemented separately.
 
 **References.**
-  * `docs/verification-reports/W3-wave-plan.md` §Waves 27-29.
   * Lean 4 C backend: https://lean-lang.org/doc/reference/other-features.html#code-generation
   * Related modules: `PMT.Basic` (`Arena`, `Field`, `Layout`),
     `PMT.Soundness` (`CapacityInvariant`, `FieldBounds`),
@@ -138,7 +137,7 @@ theorem verified_pmt_check_correct
   · exact verified_linearity_check_correct _ _ hcheck.2.2
 
 /-- §7: Extraction manifest — the list of functions to extract.
-This is read by the extraction script (Wave 28) to know which Lean
+This is read by the extraction script to know which Lean
 definitions become Rust functions. -/
 def extraction_manifest : List String :=
   [ "verified_capacity_check",

@@ -126,7 +126,7 @@ pub enum Item {
     /// Layout definition: `layout Name = { field: Type, ... }`
     ///
     /// PMT (Programs as Memory Transformations) construct — a typed view of
-    /// a memory buffer region. Wave 1a: parsed only; not yet lowered to SCG.
+    /// a memory buffer region. parsed only; not yet lowered to SCG.
     LayoutDef(LayoutDef),
     /// State transformation: `transform name(p1: T1, ...) -> T { ... }`
     ///
@@ -409,13 +409,13 @@ pub struct ExternFnDecl {
 }
 
 // ---------------------------------------------------------------------------
-// PMT (Programs as Memory Transformations) — Wave 1a
+// PMT (Programs as Memory Transformations) —
 // ---------------------------------------------------------------------------
 //
 // These constructs introduce a "state-transformation" model alongside the
-// existing pointer-idiomatic syntax (nothing is removed). The Wave 1a scope
+// existing pointer-idiomatic syntax (nothing is removed). The scope
 // is parse-only: the parser produces the new AST nodes, the `to_scg` bridge
-// returns a clear "unimplemented" error if it ever sees them, and Wave 1c
+// returns a clear "unimplemented" error if it ever sees them, and
 // wires the actual lowering to the existing SCG + codegen IR.
 //
 // See <worklog §11–13> for the full design rationale.
@@ -472,7 +472,7 @@ pub struct TransformDef {
 
 /// Transform call statement: `let s2 = transform_name(s1);`
 ///
-/// Wave 1a: the parser produces a regular `Stmt::Let` with a function-call
+/// the parser produces a regular `Stmt::Let` with a function-call
 /// RHS for transform invocations — this `TransformCall` variant exists in
 /// the AST for future use (e.g. when an explicit `transform` keyword
 /// statement is desired), but is not yet emitted by the parser.
@@ -578,7 +578,7 @@ pub enum Stmt {
     Continue(ContinueStmt),
     /// BD directive: `bd(name, expr)`, `repd(name, expr)`, `capd(name, expr)`, `reld(name, expr)`
     BdDirective(BdDirectiveStmt),
-    /// PMT transform call: `let s2 = name(s1);` (Wave 1a: not yet emitted
+    /// PMT transform call: `let s2 = name(s1);` (not yet emitted
     /// by the parser; reserved for an explicit `transform` keyword form).
     TransformCall(TransformStmt),
     /// Expression statement: `expr;`
@@ -1255,7 +1255,7 @@ pub enum Expr {
         span: Span,
     },
 
-    // ---- PMT (Programs as Memory Transformations) — Wave 1a -------------
+    // ---- PMT (Programs as Memory Transformations) — -------------
     /// State initialization: `state_new(LayoutName)` — constructs a fresh
     /// `State<LayoutName>` value backed by a zero-initialized memory buffer.
     ///
@@ -1271,9 +1271,9 @@ pub enum Expr {
     },
     /// State field read: `state.field`
     ///
-    /// Wave 1a: the parser produces a regular `Expr::FieldAccess` for state
+    /// the parser produces a regular `Expr::FieldAccess` for state
     /// field reads — this variant exists in the AST for future type-driven
-    /// lowering (Wave 1c will rewrite `FieldAccess` on state-typed exprs to
+    /// lowering (A future pass will rewrite `FieldAccess` on state-typed exprs to
     /// `StateRead`).
     StateRead {
         /// The state expression being projected.
@@ -1286,9 +1286,9 @@ pub enum Expr {
     /// State field write: `state.field = value` (as expression, returns the
     /// updated state).
     ///
-    /// Wave 1a: not yet emitted by the parser — assignment-statement
+    /// not yet emitted by the parser — assignment-statement
     /// detection of state-typed targets requires type information that is
-    /// not available until Wave 1c.
+    /// not available until .
     StateWrite {
         /// The state expression being updated.
         state: Box<Expr>,
@@ -1300,7 +1300,7 @@ pub enum Expr {
         span: Span,
     },
 
-    // ---- Arena State Model — Wave 1 ---------------------------------------
+    // ---- Arena State Model — ---------------------------------------
     /// Arena creation: `arena_new(capacity)` — constructs a fresh
     /// `State<Arena>` backed by an mmap'd region of `capacity` bytes.
     ArenaNew {
@@ -1541,20 +1541,20 @@ pub enum Type {
         /// The field name being referenced.
         field: String,
     },
-    /// Wave 1b: `Channel<T>` — a typed channel endpoint carrying values
+    /// `Channel<T>` — a typed channel endpoint carrying values
     /// of type `T`. Surface syntax: `Channel<i32>`, `Channel<*u8>`, etc.
     /// The inner type is the message payload type.
     ///
-    /// Wave 89-90 (Session Types): the optional `session_type` field
+    /// (Session Types): the optional `session_type` field
     /// carries a session-typed protocol specification (e.g.
     /// `Send<i32, Recv<bool, End>>`). When `None`, the channel is
     /// untyped (the legacy behaviour). When `Some(_)`, the channel is
-    /// session-typed and the linear-type checker (Wave 95) will verify
+    /// session-typed and the linear-type checker will verify
     /// that send/recv operations follow the declared protocol order.
     Channel {
         /// The message payload type carried by the channel.
         inner: Box<Type>,
-        /// Optional session-type protocol annotation (Wave 89-90).
+        /// Optional session-type protocol annotation.
         /// `None` for plain untyped channels; `Some(_)` for session-typed
         /// channels whose send/recv order is checked at compile time.
         /// Boxed to break the Type ↔ SessionType size recursion.
@@ -1563,10 +1563,10 @@ pub enum Type {
 }
 
 // ---------------------------------------------------------------------------
-// Session Types (Wave 89-90)
+// Session Types
 // ---------------------------------------------------------------------------
 
-/// Wave 89-90: Session type for a channel endpoint.
+/// Session type for a channel endpoint.
 ///
 /// A session type is a linear protocol describing the sequence of
 /// send/recv operations a channel endpoint must perform. The type
@@ -1608,10 +1608,10 @@ impl std::fmt::Display for SessionType {
 }
 
 // ---------------------------------------------------------------------------
-// Information-Flow Types (Wave 91-92)
+// Information-Flow Types
 // ---------------------------------------------------------------------------
 
-/// Wave 91-92: Security label for information-flow control.
+/// Security label for information-flow control.
 ///
 /// A two-point lattice: `Low ⊑ High`. Information may flow from a `Low`
 /// source to a `High` sink (e.g. writing a public value into a secret
@@ -1663,7 +1663,7 @@ impl std::fmt::Display for SecurityLabel {
     }
 }
 
-/// Wave 91-92: Information-flow annotation attached to a variable or
+/// Information-flow annotation attached to a variable or
 /// expression.
 ///
 /// Carries a [`SecurityLabel`] and an optional declassification reason.

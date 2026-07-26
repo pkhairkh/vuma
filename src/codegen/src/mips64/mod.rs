@@ -1853,7 +1853,7 @@ pub struct Mips64Backend {
     /// Flag indicating big-endian mode (for mips64be wrapper).
     /// When true, 64-bit loads/stores use BE byte order.
     pub big_endian: bool,
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 
@@ -3182,7 +3182,7 @@ fn mips64_allocate_registers_ss(
                     code.extend(ss_sd(Gpr::T0, dst_off));
                 }
 
-                // ── CallIndirect (Wave 49) ──
+                // ── CallIndirect ──
                 // Indirect call through a function pointer vreg.
                 // 1. Load args into $a0-$a7 (N64 ABI)
                 // 2. Load func_ptr into $t9 (MIPS convention for indirect calls)
@@ -3532,7 +3532,7 @@ fn mips64_allocate_registers_ss(
                     // NOP (delay slot for SYSCALL — required on MIPS to avoid
                     // errata on some implementations)
                     code.extend_from_slice(&encode_nop());
-                    // [Wave 81-88-ext] MIPS syscall error convention:
+                    // [ext] MIPS syscall error convention:
                     // $a3=0 → success, $v0=return value
                     // $a3=1 → error, $v0=POSITIVE errno
                     // The IR expects x86_64-style -errno on error. Negate $v0
@@ -3556,15 +3556,15 @@ fn mips64_allocate_registers_ss(
                         code.extend(ss_sd(Gpr::V0, dst_off));
                     }
                 }
-                // ── VectorOp (Wave 29) ──
-                // MIPS64 has no SIMD encoder in the Wave 29 suite; emit nothing.
+                // ── VectorOp ──
+                // MIPS64 has no SIMD encoder in the suite; emit nothing.
                 IRInstr::VectorOp { .. } => {}
                 // ── Channel operations ──
                 // Backend lowering not yet implemented; emit nothing (no frontend
                 // generates channel IR yet).  Will be lowered to runtime calls.
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-            // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+            // StarkProof — stub (Call-form builtin is the active path).
             | IRInstr::StarkProof { .. } => {}
             }
         }
@@ -3636,9 +3636,9 @@ fn mips64_allocate_registers_ss(
 /// for the instruction encoding, but records the physical register assignments
 /// in the AllocatedFunction's reads/writes fields.
 ///
-/// This is a hybrid approach (Wave 23): the instruction encoding still uses
+/// This is a hybrid approach: the instruction encoding still uses
 /// stack slots (for safety), but the allocation metadata records which vregs
-/// COULD be in real registers. A future wave will use this metadata to emit
+/// COULD be in real registers. A future effort will use this metadata to emit
 /// register-based instructions directly.
 fn mips64_allocate_registers_real(
     func: &IRFunction,
@@ -3983,7 +3983,7 @@ impl Backend for Mips64Backend {
                 ("lstat", 5107),
                 ("recvfrom", 5207),
                 ("sendto", 5206),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (mips n64 unistd) ──
+                // ── POSIX file-metadata & I/O syscalls (mips n64 unistd) ──
                 // MIPS n64 uses a 5000 base offset (__NR_Linux=5000), so every
                 // number below is 5000 + the asm offset. mips64 has 8 reg args
                 // ($a0-$a7); all take ≤5 args → simple_stub. mips n64 chown=90/
@@ -4023,7 +4023,7 @@ impl Backend for Mips64Backend {
                 ("pwritev", 5290),
                 ("fchdir", 5079),
                 ("chroot", 5156),
-                // ── Wave 9: POSIX system & advanced syscalls (mips n64 unistd) ──
+                // ── POSIX system & advanced syscalls (mips n64 unistd) ──
                 // MIPS n64 uses a 5000 base offset; all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(5284), signalfd→signalfd4(5283) = modern variants.
                 ("mlock", 5146),
@@ -4049,7 +4049,7 @@ impl Backend for Mips64Backend {
                 ("inotify_add_watch", 5244),
                 ("inotify_rm_watch", 5245),
                 ("ptrace", 5099),
-                // ── Wave 8: POSIX process & identity syscalls (mips n64, +5000 base) ──
+                // ── POSIX process & identity syscalls (mips n64, +5000 base) ──
                 // mips n64 uses __NR_Linux=5000 base offset. All take ≤5 args;
                 // mips64 has 8 reg args ($a0-$a7) → simple_stub for all.
                 // Family 1: identity (mips64 is 64-bit, no uid16 split)
@@ -4820,7 +4820,7 @@ impl Backend for Mips64Backend {
                 stubs.push(("strcmp".to_string(), code));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: REAL mmap syscall (mips n64 sys_mmap=5009).
             // MIPS n64 passes args 5-6 on the stack; for a 6-arg syscall we'd
             // need stack setup. Since push_frame has no caller args, we clobber

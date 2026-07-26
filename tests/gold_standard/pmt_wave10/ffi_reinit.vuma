@@ -1,4 +1,4 @@
-// ffi_reinit — PMT Wave 10: FFI marshal pass — re-init after invalidation
+// ffi_reinit — FFI marshal pass — re-init after invalidation
 // Expected exit code: 0
 //
 // After a non-`#[pure]` foreign call invalidates a state, the state MUST

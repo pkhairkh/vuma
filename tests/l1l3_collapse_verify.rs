@@ -1,4 +1,4 @@
-//! Wave 4 verification: confirm `compile_with_path` runs `l1l3_collapse`
+//! verification: confirm `compile_with_path` runs `l1l3_collapse`
 //! and the result is observable (the pass records an `l1l3-collapse`
 //! entry in `CompilationOutput.stage_timings`, and the same proof can
 //! be re-computed by calling `vuma_ive::verification::l1l3_collapse` on
@@ -98,9 +98,9 @@ fn verify_l1l3_collapse_wired_in_channel_program() {
     // `l1l3_collapse` matches.  Those dedicated payloads are only created
     // later by `bridge_ast_to_codegen_scg` for the codegen SCG (which is
     // a separate SCG used for IR lowering, not the one `l1l3_collapse`
-    // is run on per the Wave 4 spec).  So for the semantic SCG, the
+    // is run on per the spec). So for the semantic SCG, the
     // folded-check count is currently 0 — this is a known limitation of
-    // the l1l3_collapse matcher, NOT a wiring bug.  The Wave 4 task only
+    // the l1l3_collapse matcher, NOT a wiring bug. The task only
     // requires that the call be wired in, the result be observable, and
     // the log line appear.
     //

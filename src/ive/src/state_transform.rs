@@ -33,7 +33,7 @@ pub enum TransformKind {
 }
 
 /// Layout info (same structure as state_read.rs/state_write.rs — duplicated
-/// for parallel development; unified in Wave 3d).
+/// for parallel development; unified in ).
 #[derive(Debug, Clone)]
 pub struct LayoutInfo {
     pub name: String,
@@ -136,7 +136,7 @@ pub fn all_valid(results: &[StateTransformVerification]) -> bool {
     results.iter().all(|r| r.valid)
 }
 
-/// **Wave 9 — Dependent state types:** Verify that a dependent-array state
+/// ** — Dependent state types:** Verify that a dependent-array state
 /// transform is safe.
 ///
 /// Checks the linear-arithmetic proof obligation:
@@ -280,7 +280,7 @@ mod tests {
     }
 
     // =======================================================================
-    // Wave 9 — Dependent state types (verify_dependent_transform)
+    //  — Dependent state types (verify_dependent_transform)
     // =======================================================================
 
     #[test]

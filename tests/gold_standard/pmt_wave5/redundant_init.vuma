@@ -1,4 +1,4 @@
-// redundant_init — PMT Wave 5: redundant state initialization (merge candidate)
+// redundant_init — redundant state initialization (merge candidate)
 // Expected exit code: 33
 //
 // Allocates two Point states with the same layout. Their lifetimes
@@ -11,13 +11,13 @@
 // Under the *current* optimizer, both Allocs are emitted — but the
 // program's observable behaviour is unchanged (exit 33), so this test
 // passes either way. The file serves as a forward-looking test case
-// for a future wave that implements lifetime-aware buffer merging.
+// for a future effort that implements lifetime-aware buffer merging.
 //
 // VUMA Key Concepts:
 //   - two state_new calls with the same layout
 //   - disjoint lifetimes (p dies before q is born)
 //   - the (stub) `state_merge_compatible_layouts` rule targets this
-//     pattern; a future wave will implement it as a post-
+//     pattern; a future effort will implement it as a post-
 //     equality-saturation buffer-merging pass
 
 layout Point = { x: u32, y: u32 }

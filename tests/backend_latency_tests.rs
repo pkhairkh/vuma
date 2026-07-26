@@ -1,4 +1,4 @@
-//! Backend latency table override tests (Wave 10 — proper wiring).
+//! Backend latency table override tests.
 //!
 //! These tests prove that each of the 15 TargetInfo impls overrides
 //! latency_table() with its real ISA-specific table, and that the 4 thin

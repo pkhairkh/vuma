@@ -1366,7 +1366,7 @@ impl Instruction {
                 // Hardware reads frC from bits 21:25; bits 16:20 (frB) must be 0.
                 // We build the word directly: rT=ft, rA=fa, rB=0, rC=fb.
                 //
-                // (Wave 50) The previous form wrote `((63u32 & 0x3F) << 26)`
+                //  The previous form wrote `((63u32 & 0x3F) << 26)`
                 // and `((0u32 & 0x1F) << 11)` for the PO and frB fields.
                 // Both masks were no-ops: `63 == 0x3F` (so `63 & 0x3F` is
                 // `eq_op`) and `0 & 0x1F` is always zero (`erasing_op`).
@@ -1921,7 +1921,7 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 /// PowerPC64 code generation backend (ELFv2 ABI, ppc64le).
 pub struct PPC64Backend {
     target_info: PowerPC64TargetInfo,
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 
@@ -4564,7 +4564,7 @@ impl Backend for PPC64Backend {
                         // ppc64 Linux syscall: args in R3-R8, nr in R0,
                         // `sc`, result in R3.
                         //
-                        // [Wave 7-ext-tryrecv-returnval] Unlike x86_64 (which
+                        // [ext-tryrecv-returnval] Unlike x86_64 (which
                         // returns -errno on failure), the ppc64 Linux ABI
                         // returns a POSITIVE errno in R3 with CR0.SO=1 on
                         // failure. The IPC lowering's `Cmp SLe(read_ret, 0)`
@@ -4613,7 +4613,7 @@ impl Backend for PPC64Backend {
                         }
                         code
                     }
-                    // ── CallIndirect (Wave 49) ──
+                    // ── CallIndirect ──
                     // Indirect call through a function pointer vreg.
                     // 1. Load args into R3-R10 (PPC64 ELFv2 ABI)
                     // 2. Load func_ptr into R12 (PPC64 indirect-call convention)
@@ -4662,15 +4662,15 @@ impl Backend for PPC64Backend {
                         }
                         code
                     }
-                    // ── VectorOp (Wave 29) ──
-                    // ppc64 (AltiVec/VSX) has no SIMD encoder in the Wave 29
+                    // ── VectorOp ──
+                    // ppc64 (AltiVec/VSX) has no SIMD encoder in the
                     // suite; emit nothing.
                     IRInstr::VectorOp { .. } => Vec::new(),
                     // ── Channel operations ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-                    // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                    // StarkProof — stub (Call-form builtin is the active path).
                     | IRInstr::StarkProof { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
@@ -4765,7 +4765,7 @@ impl Backend for PPC64Backend {
             wasm_locals: None,
         };
 
-        // Wave 23: If real register allocation is enabled, post-process the
+        // If real register allocation is enabled, post-process the
         // AllocatedFunction to record physical register assignments in the
         // reads/writes fields. The instruction encoding still uses stack slots
         // (safe, correct), but the metadata records which vregs COULD be in
@@ -5306,7 +5306,7 @@ impl Backend for PPC64Backend {
                 ("read", 3),
                 ("open", 5),
                 ("close", 6),
-                // [wave 6 — mmap ABI normalization, verified] ppc64's legacy
+                // [— mmap ABI normalization, verified] ppc64's legacy
                 // sys_mmap (90) is the DIRECT 6-arg form: (addr, len, prot,
                 // flags, fd, offset) all passed in R3-R8, with `offset` in
                 // BYTES (ppc64 has no mmap2; the kernel's sys_mmap handles the
@@ -5314,7 +5314,7 @@ impl Backend for PPC64Backend {
                 // the caller's R3-R8 straight through (no rearrangement, no
                 // >>12), which is exactly what __vuma_alloc does too (it sets
                 // up R3-R8 then `LI R0,90; SC`). Both use the SAME offset unit
-                // (bytes, via R8), so the wave-6 "same offset-unit handling as
+                // (bytes, via R8), so the effort-6 "same offset-unit handling as
                 // __vuma_alloc" requirement is satisfied. The VUMA ppc64 CC
                 // passes 8 args in R3-R10 (see Gpr::arg_register), so all 6
                 // mmap args fit in registers — no stack-arg plumbing needed.
@@ -5376,7 +5376,7 @@ impl Backend for PPC64Backend {
                 // program agree on byte order.
                 ("pipe", 42),
                 ("execve", 11),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (ppc unistd.h) ──
+                // ── POSIX file-metadata & I/O syscalls (ppc unistd.h) ──
                 // ppc64 has 8 reg args (R3-R10); all take ≤5 args → simple_stub.
                 // ppc's chown=181 is already the 32-bit-uid variant (ppc never
                 // had a separate chown32); fchown=95 likewise. pread64=179.
@@ -5413,7 +5413,7 @@ impl Backend for PPC64Backend {
                 ("pwritev", 321),
                 ("fchdir", 133),
                 ("chroot", 61),
-                // ── Wave 9: POSIX system & advanced syscalls (ppc unistd.h) ──
+                // ── POSIX system & advanced syscalls (ppc unistd.h) ──
                 // ppc64 has 8 reg args (R3-R10); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(314), signalfd→signalfd4(313) = modern variants.
                 ("mlock", 150),
@@ -5439,7 +5439,7 @@ impl Backend for PPC64Backend {
                 ("inotify_add_watch", 276),
                 ("inotify_rm_watch", 277),
                 ("ptrace", 26),
-                // ── Wave 8: POSIX process & identity syscalls (powerpc syscall.tbl) ──
+                // ── POSIX process & identity syscalls (powerpc syscall.tbl) ──
                 // ppc64 has no uid16 split (getuid=24 is already 32-bit). All take
                 // ≤5 args; ppc64 has 6 reg args (r3-r8) → simple_stub for all.
                 // Family 1: identity
@@ -5677,7 +5677,7 @@ impl Backend for PPC64Backend {
                 stubs.push(("sigaction".to_string(), code));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: real mmap syscall (ppc64 sys_mmap=90).
             // Allocates 4096 bytes, result in R3 (not stored — leaks but is
             // real code, not a return-0 stub).
@@ -6207,7 +6207,7 @@ impl Backend for PPC64Backend {
                         // 4 bytes; the byte offsets below are `index * 4` for
                         // the patched slots [0], [1], [4], [5] (slots [2] and
                         // [3] carry no immediate and are skipped).
-                        // (Wave 50) the previous `index * 4` form triggered
+                        //  the previous `index * 4` form triggered
                         // `clippy::erasing_op` for `0 * 4` and
                         // `clippy::identity_op` for `1 * 4`; the byte offsets
                         // are spelled out directly here, with the slot index

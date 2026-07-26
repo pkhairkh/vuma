@@ -2,13 +2,13 @@
 // No main() — importable library module.
 // Provides: atoi, atol, itoa, utoa, abs, min, max, clamp, min_u32, max_u32, etc.
 //
-// PMT migration (Wave 8c): the local `temp = allocate(N)` scratch buffers
+// PMT migration: the local `temp = allocate(N)` scratch buffers
 // used by `itoa`/`utoa`/`u64toa` for digit accumulation are replaced by
 // `State<Temp32>` / `State<Temp64>` with a `data: [u8; N]` array field.
 // Access via `*(temp + tp)` becomes `temp.data[tp]`. Address-typed
 // parameters (`s`, `buf`, `endptr`) and their `*(param + i)` access remain
 // (callers pass raw pointers — PMT field-access would require changing
-// the public API, deferred to a future wave). All `allocate`/`free` sites
+// the public API, deferred to a future effort). All `allocate`/`free` sites
 // in this file are eliminated.
 
 layout Temp32 = { data: [u8; 32] }

@@ -5,8 +5,8 @@ import PMT.Iris.GuardInvariant
 /-!
 ## Iris Composition — combining `[cap_bnd] ∗ [live_mirror] ∗ [guard]`
 
-This module proves that the three named Iris invariants formalised in
-Wave 3 — `[cap_bnd]` (`PMT.Iris.CapBndInvariant`), `[live_mirror]`
+This module proves that the three named Iris invariants formalised
+earlier — `[cap_bnd]` (`PMT.Iris.CapBndInvariant`), `[live_mirror]`
 (`PMT.Iris.LiveMirrorInvariant`), and `[guard]` (`PMT.Iris.GuardInvariant`)
 — compose: if all three hold before an `alloc`, all three hold after.
 
@@ -53,12 +53,12 @@ namespace PMT.Iris
 
 /-- The full PMT invariant bundle: `[cap_bnd] ∗ [live_mirror] ∗ [guard]`.
 
-    This is the composition of the three named Iris invariants from
-    Wave 3. Each field is one of the three named invariants:
+    This is the composition of the three named Iris invariants.
+    Each field is one of the three named invariants:
 
-      * `cap_bnd`     — `CapBndInv γ_used γ_cap a`        (Wave 3, §3)
-      * `live_mirror` — `LiveMirrorInv γ_live var live`   (Wave 3, §5)
-      * `guard`       — `GuardInv γ_guard a`              (Wave 3, §6)
+      * `cap_bnd`     — `CapBndInv γ_used γ_cap a`        (§3)
+      * `live_mirror` — `LiveMirrorInv γ_live var live`   (§5)
+      * `guard`       — `GuardInv γ_guard a`              (§6)
 
     The four ghost names `γ_used`, `γ_cap`, `γ_live`, `γ_guard` are all
     parameters: in Iris each named invariant lives at its own ghost
@@ -97,7 +97,7 @@ structure PMTInvariants (γ_used γ_cap γ_live γ_guard : GhostName)
     holds, then the bundle holds after `alloc` (with the `cap_bnd`
     ghost state updated: `●used` is bumped to `●(used + sz)`).
 
-    This is the composition theorem of the three Wave 3 preservation
+    This is the composition theorem of the three preservation
     lemmas:
 
       * `alloc_preserves_cap_bnd`     (`CapBndInvariant.lean`)
@@ -120,7 +120,7 @@ theorem alloc_preserves_all_invariants
   refine ⟨?_, ?_, ?_⟩
   · -- `[cap_bnd]` preserved: the bump-pointer is updated and stays
     -- within capacity. Ghost `●used` bumped to `●(used+sz)`; ghost
-    -- `Ag cap` persistent. (Wave 3 lemma.)
+    -- `Ag cap` persistent.
     exact alloc_preserves_cap_bnd γ_used γ_cap a l hinv.cap_bnd hfit
   · -- `[live_mirror]` preserved: `LiveMirrorInv γ_live var live`
     -- has no `Arena` parameter — only `γ_live`, `var`, and `live` —
@@ -135,14 +135,14 @@ theorem alloc_preserves_all_invariants
   · -- `[guard]` preserved: `alloc` does not move the guard page
     -- (only `used` is bumped; `base`/`capacity` are unchanged, so
     -- `base + capacity` is unchanged). Ghost `Ag (base+cap)`
-    -- persistent. (Wave 3 lemma.)
+    -- persistent.
     exact alloc_preserves_guard γ_guard a l hinv.guard
 
 /-! ## §7.2. Bridging theorems — bundle implies bare `Prop`s -/
 
 /-- The invariant bundle implies `CapacityInvariant` (the bare `Prop`
     from `PMT.Basic` that `pmt_soundness` uses as its hypothesis).
-    This delegates to `cap_bnd_implies_capacity` (Wave 3). -/
+    This delegates to `cap_bnd_implies_capacity`. -/
 theorem pmt_invariants_implies_capacity
     (γ_used γ_cap γ_live γ_guard : GhostName)
     (a : Arena) (var : String) (live : Liveness)
@@ -153,7 +153,7 @@ theorem pmt_invariants_implies_capacity
 /-- The invariant bundle implies `GuardPage` for addresses
     `addr ≥ a.base + a.capacity` (the overflow condition: any access
     past the live arena trips the guard). This delegates to
-    `guard_inv_implies_guard_page` (Wave 3). -/
+    `guard_inv_implies_guard_page`. -/
 theorem pmt_invariants_implies_guard_page
     (γ_used γ_cap γ_live γ_guard : GhostName)
     (a : Arena) (var : String) (live : Liveness)

@@ -1,4 +1,4 @@
-// pmt_accumulator.vuma — PMT Wave 7: running sum via State accumulator
+// pmt_accumulator.vuma — running sum via State accumulator
 // Expected exit code: 60
 //
 // A running sum held in a `State<Acc>` rather than a local variable.

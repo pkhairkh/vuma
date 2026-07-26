@@ -2,7 +2,7 @@
 // Expected exit code: 42
 // Compile: compile_dump <file> <out> <backend> --opt-level=O3 [--safe]
 //
-// UAF Wave 1 positive test: allocates a state buffer, writes 42 to
+// UAF positive test: allocates a state buffer, writes 42 to
 // data[0], and reads it back. The state is LIVE throughout — no
 // transform has been applied, so there is no UAF. Verifies the
 // baseline case: with a live state, read after write returns the

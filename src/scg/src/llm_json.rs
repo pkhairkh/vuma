@@ -1,6 +1,6 @@
 //! Minimal JSON value type, parser, and pretty-printer for LLM-facing DTOs.
 //!
-//! Wave 43 serde-migration: this module replaces `serde_json::Value` /
+//! serde-migration: this module replaces `serde_json::Value` /
 //! `serde_json::to_string_pretty` / `serde_json::from_str` usage in
 //! `src/scg/src/structured_output.rs` and `src/scg/src/diff.rs`. It is a
 //! hand-written recursive descent parser + pretty-printer for the JSON

@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 vuma-scg.workspace = true
-# serde/serde_json removed in Wave 43 — all codegen IR/regalloc/backend types
+# serde/serde_json removed — all codegen IR/regalloc/backend types
 # now rely on hand-written Debug + Clone derives only. The single JSON call
 # site (`ProfileData::from_json` in `src/codegen/src/egraph.rs`) was migrated
 # to a hand-written recursive descent parser (`parse_profile_json`) that

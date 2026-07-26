@@ -1,4 +1,4 @@
-// bad_offset — PMT Wave 3 negative: read a field that doesn't exist
+// bad_offset — PMT negative: read a field that doesn't exist
 // Expected: IVE rejects at verification (VerificationLevel::Pmt).
 //
 // Pattern:

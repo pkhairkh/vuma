@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/syscall/dispatch.vuma
 // VWK Syscall Dispatch — nr → handler lookup via the superset TrapFrame.
-// Wave R4c (PMT-pure).
+//  (PMT-pure).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the R4c rewrite of K3e's syscall dispatch layer. K3e's
@@ -49,14 +49,14 @@
 // the canonical slots via tf_get_gpr / tf_set_gpr. This is the R2 Golden
 // Rule: "Do not write arch-conditional logic inside kernel transforms."
 //
-// ── How is the handler-call wired? (Wave 5) ─────────────────────────────────
+// ── How is the handler-call wired? ─────────────────────────────────
 // VUMA has no first-class function-pointer type: `handler()` where
 // `handler` is a u64 won't compile (the parser only accepts direct fn-
 // identifier calls, not indirect calls through a u64). The K3e contract
 // documented this limitation; R4c left the handler-call as a stub
 // (`let result = 0;`) because no indirect-call mechanism existed yet.
 //
-// Wave 5 closed that gap by adding the `__call_indirect1(ptr: u64, arg:
+//  closed that gap by adding the `__call_indirect1(ptr: u64, arg:
 // u64) -> u64` runtime stub to the x86_64 backend (src/codegen/src/
 // x86_64/mod.rs::build_runtime_syscall_stubs). It lowers to `mov rax,
 // rdi; mov rdi, rsi; jmp rax` — a tail call that invokes the function
@@ -197,9 +197,9 @@
 // returns 0 via the stub and writes the return value to slot 7).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampoline — indirect call (Wave 5).
+// Extern "C" trampoline — indirect call.
 // ────────────────────────────────────────────────────────────────────────────
-// Wave 5 added the runtime stub `__call_indirect1(ptr: u64, arg: u64) -> u64`
+//  added the runtime stub `__call_indirect1(ptr: u64, arg: u64) -> u64`
 // to the x86_64 backend (src/codegen/src/x86_64/mod.rs::build_runtime_syscall_
 // stubs). It lowers to `mov rax, rdi; mov rdi, rsi; jmp rax` — a tail call
 // that invokes the function at `ptr` with `arg` in RDI (SysV AMD64 first-
@@ -358,7 +358,7 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // ────────────────────────────────────────────────────────────────────────────
 // syscall_dispatch_from_trap reads the syscall number from canonical
 // slot 0, looks up the handler, and writes the return value to canonical
-// slot 7. The handler-call is wired through the Wave 5 __call_indirect1
+// slot 7. The handler-call is wired through the __call_indirect1
 // runtime stub (see the extern block above) — VUMA has no first-class
 // fn-ptr type, so indirect dispatch is delegated to the asm trampoline.
 //
@@ -398,7 +398,7 @@ fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) ->
         tf_set_gpr(tf, 7, 38);
         return 38;
     }
-    // Wave 5: invoke the handler via __call_indirect1(handler, tf). The
+    // invoke the handler via __call_indirect1(handler, tf). The
     // stub tail-calls the function at `handler` with `tf as Address` as
     // its first argument (SysV AMD64 RDI). The handler reads its args
     // from the canonical GPR slots via tf_get_gpr and writes its return

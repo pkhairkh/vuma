@@ -35,7 +35,7 @@
 //! there is a control path that bypasses the loop header. Computing
 //! dominators on the CFG subgraph ensures correct back-edge identification.
 //!
-//! # Relationship to `codegen::regalloc::LoopDetector` (Wave 33 audit)
+//! # Relationship to `codegen::regalloc::LoopDetector` ( audit)
 //!
 //! There are two `LoopDetector` types in the workspace:
 //!
@@ -86,7 +86,7 @@
 //!    simpler dominator computation that doesn't need an edge-kind
 //!    filter.
 //!
-//! **PARTIALLY RESOLVED (Wave 33, Task 10-c):** the first concrete
+//! **PARTIALLY RESOLVED (, Task 10-c):** the first concrete
 //! step toward this unification has landed — a [`ControlFlowGraph`]
 //! trait now abstracts the minimal CFG view (control-flow edges + a
 //! list of entry nodes) that the loop-detection algorithm needs, and
@@ -113,11 +113,11 @@
 //!    it (plus the algorithm) into a future shared `vuma-core` crate
 //!    is now a mechanical move-and-rename once the codegen side is
 //!    ready to adopt it. That move is intentionally **not** done in
-//!    Wave 33 to avoid changing `vuma-codegen`'s public surface.
+//! to avoid changing `vuma-codegen`'s public surface.
 //!
 //! 3. **IR-side adoption.** `vuma-codegen::regalloc::LoopDetector`
 //!    still has its own copy of the algorithm. Migrating it to the
-//!    shared trait is left to a future wave.
+//! shared trait is left to a future effort.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -131,7 +131,7 @@ use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
 /// Minimal control-flow-graph view required by the generic loop-detection
 /// algorithm.
 ///
-/// Introduced in Wave 33 (Task 10-c) as the first concrete step toward
+/// Introduced (Task 10-c) as the first concrete step toward
 /// unifying the SCG-side and codegen-side `LoopDetector`s. See the module
 /// docs (search for "PARTIALLY RESOLVED") for the full rationale and the
 /// remaining work.
@@ -386,7 +386,7 @@ impl LoopDetector {
     /// whose `NodeId` is `vuma-scg`'s [`NodeId`].
     ///
     /// This is the algorithm core, lifted out of the SCG-specific entry point
-    /// in Wave 33 (Task 10-c) as the first step toward unifying the
+    /// (Task 10-c) as the first step toward unifying the
     /// SCG-side and codegen-side `LoopDetector`s. The SCG entry point
     /// ([`detect_natural_loops`](Self::detect_natural_loops)) now delegates
     /// here, and a `MockCfg`-based unit test in this module exercises the
@@ -595,7 +595,7 @@ impl LoopDetector {
     // construction that used to live here have been superseded by the
     // generic `ControlFlowGraph` trait impl above (see `impl
     // ControlFlowGraph for SCG`) and the free `build_adjacency` helper
-    // near the top of this file. They were removed in Wave 33 (Task
+    // near the top of this file. They were removed (Task
     // 10-c) when the algorithm core was lifted into
     // `detect_natural_loops_on`.
 
@@ -1199,7 +1199,7 @@ mod tests {
 
     // ── Test 14: Generic algorithm on a non-SCG CFG ───────────────────
     //
-    // This is the test added in Wave 33 (Task 10-c) to prove the
+    // This is the test added (Task 10-c) to prove the
     // `ControlFlowGraph` trait abstraction is sound: the generic
     // `LoopDetector::detect_natural_loops_on` runs against a `MockCfg`
     // that has *no* SCG node types, no `EdgeKind`, no `NodePayload` —

@@ -20,13 +20,12 @@ This is the bottom of the PMT module dependency stack:
   * `docs/architecture/pmt-formal-spec.md` — invariants + proof sketches.
   * `docs/architecture/pmt-iris-spec.md`  — Iris encoding (§1 ArenaRes,
     §2 StateValRes, §3 capacity_inv).
-  * `docs/verification-reports/W6-multi-module-test.md` — Lake split.
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
 `just proof`); the `lean-proofs` CI job runs the same command. The
 legacy single-file `lean PMT/Basic.lean` invocation does not work
-since the multi-module split in Wave 6.
+since the multi-module split.
 -/
 
 namespace PMT

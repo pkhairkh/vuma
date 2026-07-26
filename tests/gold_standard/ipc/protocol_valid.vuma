@@ -1,4 +1,4 @@
-// protocol_valid — Wave 14b: protocol state machine, valid transition sequence
+// protocol_valid — protocol state machine, valid transition sequence
 //
 // Exercises the channel_recv_proto(ch, expected_state) builtin, which
 // implements the L4 protocol state machine.  Before recv'ing, the builtin

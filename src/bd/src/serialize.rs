@@ -1,6 +1,6 @@
 //! # Hand-written Binary Serialization for BD Key Types
 //!
-//! Wave 43 — strips the *requirement* that core BD types (`RepD`, `CapD`,
+//! — strips the *requirement* that core BD types (`RepD`, `CapD`,
 //! `RelD`, `BD`) depend on `serde` derives for their on-disk representation.
 //! This module provides pure-Rust, `serde`-free binary (de)serialization via
 //! the [`BinaryWrite`] / [`BinaryRead`] traits plus free-function
@@ -26,7 +26,7 @@
 //!
 //! # Status
 //!
-//! This is the **minimal** Wave 43 deliverable: hand-written binary
+//! This is the **minimal** deliverable: hand-written binary
 //! serializers for the four key BD types + round-trip tests. The `serde`
 //! derives on these types (and on the ~40 other BD-internal types) are
 //! **left in place** for now; full feature-gating of every derive site is
@@ -898,7 +898,7 @@ impl BinaryWrite for RepD {
                 write_u32(w, field.0)?;
             }
             RepD::DependentArray { elem, count_var } => {
-                // Wave 9 — Dependent state types.
+                //  — Dependent state types.
                 write_u8(w, 13)?;
                 write_box(w, &**elem)?;
                 write_string(w, count_var)?;
@@ -940,7 +940,7 @@ impl BinaryRead for RepD {
                 Ok(RepD::Ref { layout, field })
             }
             13 => {
-                // Wave 9 — Dependent state types.
+                //  — Dependent state types.
                 let elem = read_box::<RepD, _>(r)?;
                 let count_var = read_string(r)?;
                 Ok(RepD::DependentArray { elem, count_var })

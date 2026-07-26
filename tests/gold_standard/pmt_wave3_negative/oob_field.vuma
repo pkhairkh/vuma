@@ -1,4 +1,4 @@
-// oob_field — PMT Wave 3 negative: out-of-bounds field access
+// oob_field — PMT negative: out-of-bounds field access
 // Expected: IVE rejects at verification (VerificationLevel::Pmt).
 //
 // Pattern:
@@ -27,7 +27,7 @@
 //   ✓ implemented in state_read::verify_state_reads and
 //     state_write::verify_state_writes (offset-overflow branch).
 //   ~ the existing pipeline never produces an inconsistent layout, so
-//     this path is not currently exercised end-to-end.  A future wave
+//     this path is not currently exercised end-to-end. A future effort
 //     that lowers the `offset + size > total_size` check from a
 //     hand-crafted PmtLayoutSpec will close the gap.
 //

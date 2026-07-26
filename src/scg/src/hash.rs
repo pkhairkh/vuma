@@ -74,7 +74,7 @@ mod tests {
         }
     }
 
-    // ── Gap 6 regression tests (Wave 5-d) ───────────────────────────
+    // ── Gap 6 regression tests (-d) ───────────────────────────
     //
     // These tests pin the FIX for caveats.md §2 row 6: `type_hash` is
     // now defined ONCE here (the single source of truth) and re-exported

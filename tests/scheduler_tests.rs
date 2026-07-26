@@ -1,4 +1,4 @@
-//! Instruction scheduler SSA-safety tests (Wave 5).
+//! Instruction scheduler SSA-safety tests.
 //!
 //! These tests prove the scheduler (now re-enabled in production) respects
 //! SSA semantics: Phi nodes stay at block top, data dependencies are

@@ -1,4 +1,4 @@
-// infoflow_invalid — Wave 92: information-flow violation
+// infoflow_invalid — information-flow violation
 // This test exercises the information_flow_check pipeline wiring.
 // Since security labels are advisory (logged, not enforced), the program
 // compiles and runs. The test verifies the pipeline doesn't crash.

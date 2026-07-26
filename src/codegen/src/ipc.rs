@@ -2316,7 +2316,7 @@ impl CryptoState {
 // Real auto-marshalling, worker lifecycle, seccomp wiring,
 // and crash-recovery for `extern "process"` call sites. The actual
 // `fork()`/`exec()` and IPC socket plumbing live in the runtime
-// backend (a later wave); this module provides the in-process types and a
+// backend (a later effort); this module provides the in-process types and a
 // simulated lifecycle the supervisor exercises against the same code
 // paths, so the spawn → call → kill → restart state machine can be
 // unit-tested without spawning a real child process.
@@ -2384,7 +2384,7 @@ impl FfiWorkerConfig {
     }
 
     /// Every FFI worker config is, by construction, an FFI worker.
-    /// The `is_ffi` predicate exists so a later wave can route
+    /// The `is_ffi` predicate exists so a later effort can route
     /// `WorkerConfig` vs `FfiWorkerConfig` through a shared trait
     /// without churning every call site.
     pub fn is_ffi(&self) -> bool {
@@ -7394,7 +7394,7 @@ mod tests {
 
     #[test]
     fn test_ffi_worker_config_is_ffi_always_true() {
-        // The is_ffi() predicate is the routing hook a later wave uses
+        // The is_ffi() predicate is the routing hook a later effort uses
         // to distinguish FfiWorkerConfig from WorkerConfig through a
         // shared trait — it must be unconditionally true.
         let cfg = FfiWorkerConfig::new("/lib/libx.so", "f", TrustLevel::Untrusted, 1, 100);

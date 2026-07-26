@@ -2,7 +2,7 @@
 // Expected exit code: 134
 // Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
 //
-// Bounds Wave 1 SAFE-ONLY negative test: allocate an 8-byte buffer
+// Bounds SAFE-ONLY negative test: allocate an 8-byte buffer
 // (`[u8; 8]`), seed indices 0/1, then compute `idx = 1 + 2 + 3 + 4 = 10`
 // at runtime and read `b.data[idx]`. With `--safe`, the injected
 // `UGe(idx, 8)` check evaluates to true (10 >= 8) and dispatches to

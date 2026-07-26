@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/trap/irq_ring.vuma
 // VWK IRQ Ring Buffer — lock-free decoupling of asm IRQ entry from PMT
-// dispatcher (Wave R2e).
+// dispatcher.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file defines a 32-entry lock-free ring buffer for IRQ vectors. The
@@ -32,7 +32,7 @@
 //   (the asm trampoline on this CPU — it runs with interrupts off, so it's
 //   already serialized) and exactly ONE consumer (the PMT dispatcher on
 //   this CPU — it runs after the trap return path has saved everything).
-//   No cross-CPU sharing today; a future wave (likely K9's SMP IRQ
+//   No cross-CPU sharing today; a future effort (likely K9's SMP IRQ
 //   steering) will replace the single-IrqRing with a per-CPU IrqRing and
 //   the lock-free semantics will fall out naturally. The `count` field is
 //   the SPSC watermark: the producer increments it AFTER the vector write

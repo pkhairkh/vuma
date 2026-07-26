@@ -2,7 +2,7 @@
 // and verify the full 8 bytes round-trip correctly.
 // Expected exit code: 1
 //
-// Wave 8d: exercises the full 8-byte write/read path. The value
+// exercises the full 8-byte write/read path. The value
 // 0x123456789ABCDEF0 has all 8 bytes distinct, so any byte-swap or
 // truncation bug would produce a wrong exit code. The program computes
 // (sent == recv) ? 1 : 0 and exits that value.
