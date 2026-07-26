@@ -137,9 +137,10 @@ verify:
 - **Simulation relation**: a step-wise simulation relation between the Lean
  model and the Rust `Arena` / `IRProgram` is defined and proven preserved
  by allocation and execution — .
-- **Extraction correctness**: the extracted Rust capacity/field-bounds/
- linearity/PMT checkers (`proof/extracted/pmt_check.rs`) are proven correct
- against their Lean specifications, with an FFI bridge stub — .
+- **Extraction correctness**: the Rust capacity/field-bounds/
+ linearity/PMT checkers (`proof/extracted/pmt_check.rs`) are hand-translated
+ from their Lean specifications and cross-checked by a parity test
+ (FFI extraction deferred to Wave 1, IVE-1-*) — .
 - **Iris invariants** `[cap_bnd]`, `[live_mirror]`, `[guard]`: formalized as
  proper separation-logic named invariants with ghost state (`ExRA` / `AgRA`
  / `Own` / `Sep`) and the Iris frame rule — -Iris / `proof/PMT/Iris/`.
@@ -186,8 +187,10 @@ verify:
  arena allocation in production (no longer a stub). `@[export]`
  attributes on `proof/PMT/Extraction.lean` (`lean_verified_capacity_check`,
  `lean_verified_field_bounds_check`, `lean_verified_linearity_check`,
- `lean_verified_pmt_check`) emit the C symbols used by the FFI bridge.
- The feature forwards from the root `Cargo.toml`, so
+ `lean_verified_pmt_check`) reserve C symbols for a future FFI bridge
+ (Wave 1 — IVE-1-*; not yet linked; the production path runs the
+ hand-translation in `src/codegen/src/runtime/pmt_check.rs`). The
+ feature forwards from the root `Cargo.toml`, so
  `cargo build --features pmt-runtime-check` works from the repo root.
  A parity test (`tests/pmt_parity_test.rs`, 5 tests) plus a feature-flag
  wiring test (`tests/pmt_feature_flag_test.rs`, 3 tests) confirm the
@@ -257,7 +260,7 @@ analysis). Module inventory:
 | `proof/PMT/Iris/WeakestPrecond.lean` | Iris `wp` calculus on PMT instructions (Hoare-triple machinery) |
 | `proof/PMT/IVE/Soundness/*.lean` | IVE soundness: `verify_transform_sound`, `verify_state_reads_sound`, `verify_state_writes_sound`, Composition (4 submodules) |
 | `proof/PMT/Extraction.lean` | Verified extraction of Rust capacity/field-bounds/linearity/PMT checkers |
-| `proof/PMT/ExtractionLemmas.lean` | Lemmas bridging Lean specs to extracted Rust (`src/codegen/src/runtime/pmt_check.rs`, parity-tested) |
+| `proof/PMT/ExtractionLemmas.lean` | Lemmas bridging Lean specs to the hand-translated Rust checkers (`src/codegen/src/runtime/pmt_check.rs`, parity-tested) |
 
 Test modules under `proof/PMT/Test/` (9): `ValidProgram`, `EmptyProgram`,
 `OverflowProgram`, `UafProgram`, `MultiStepProgram`, `PropertyTests`,
