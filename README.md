@@ -2,7 +2,14 @@
 
 VUMA is a statically-typed systems programming language and compiler framework
 whose distinguishing feature is **invariant verification at compile time**
-without runtime memory-safety overhead. Source programs are parsed to an AST,
+augmented by **mandatory runtime bounds checks on arena-allocated accesses**.
+The `--safe` CLI flag is always on (it is a no-op retained only for backward
+compatibility): every `Seq` access into an arena-allocated state buffer is
+preceded by an `UGe` bounds check that traps via the `__oob_trap` stub
+(exit 134) on out-of-bounds access, so the runtime memory-safety overhead of
+those arena accesses is intentionally **paid**, not avoided. Raw-pointer
+arithmetic and `length_expr=None` accesses are not bounded and remain
+unchecked (future SoftBound work). Source programs are parsed to an AST,
 lifted to a Semantic Code Graph (SCG), verified by the Invariant Verification
 Engine (IVE), lowered to a backend-neutral IR, optimized, register-allocated,
 and emitted as native object code (ELF) or WebAssembly. The compiler targets
