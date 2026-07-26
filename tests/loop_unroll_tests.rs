@@ -1,4 +1,4 @@
-//! Correct loop unrolling tests (Wave 13b).
+//! Correct loop unrolling tests.
 //!
 //! These tests prove the unroller is CORRECT: it changes the IV step from
 //! +1 to +F (so the loop runs N/F iterations, not N*F), substitutes the IV
@@ -310,7 +310,7 @@ fn wave13b_production_compile_with_unroller() {
     assert!(!output.binary.is_empty(), "should produce a binary");
 }
 
-// ── Wave 13c: General (multi-block) loop unrolling tests ──
+// ── General (multi-block) loop unrolling tests ──
 
 /// Build a 2-block loop (header + latch, no body blocks):
 ///   entry → header → latch → (header | exit)

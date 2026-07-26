@@ -1,4 +1,4 @@
-//! Arena overflow trap integration test (Wave 6-a).
+//! Arena overflow trap integration test (-a).
 //!
 //! Asserts that the runtime arena in `vuma_codegen::runtime::arena` traps
 //! with `exit(1)` on overflow — mirroring the codegen-emitted

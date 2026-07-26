@@ -1,7 +1,7 @@
 // ffi_wave1/write_real — real write() syscall via FFI
 // Expected exit code: 0
 //
-// Wave 6 test: declares write() as an extern "C" function and calls it.
+// Test: declares write() as an extern "C" function and calls it.
 // The backend resolves `write` to a real syscall stub (sys_write) — NOT
 // a no-op stub. On x86_64 this is syscall #1; on aarch64 it's #64.
 // write(1, buf, 16) writes 16 bytes to stdout and returns 16.

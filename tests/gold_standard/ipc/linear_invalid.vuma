@@ -1,4 +1,4 @@
-// linear_invalid — Wave 95: linear-type violation
+// linear_invalid — linear-type violation
 // This test exercises the linear_check pipeline wiring.
 // Variables are used multiple times (linear violations), but since
 // linear_check is advisory (logs warnings, doesn't abort), the program

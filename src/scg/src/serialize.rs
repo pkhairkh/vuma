@@ -75,7 +75,7 @@ const NODE_TYPE_ARENA_NEW: u32 = 20;
 const NODE_TYPE_ARENA_ALLOC: u32 = 21;
 const NODE_TYPE_ARENA_GROW: u32 = 22;
 const NODE_TYPE_ARENA_FREE: u32 = 23;
-// Wave 2b channel node tags (sequential after ARENA_FREE=23).
+//  channel node tags (sequential after ARENA_FREE=23).
 const NODE_TYPE_CHANNEL_OPEN: u32 = 24;
 const NODE_TYPE_CHANNEL_SEND: u32 = 25;
 const NODE_TYPE_CHANNEL_RECV: u32 = 26;
@@ -202,7 +202,7 @@ impl std::error::Error for DeserializeError {}
 
 // Note: `From<serde_json::Error> for DeserializeError` and the
 // `serialize_scg_json` / `deserialize_scg_json` functions were removed in
-// Wave 43 when `Serialize, Deserialize` derives were stripped from
+//  when `Serialize, Deserialize` derives were stripped from
 // `NodeData` / `EdgeData` / `SCGRegion`. The `DeserializeError::JsonError`
 // variant is retained for API stability and is still constructible directly.
 
@@ -574,7 +574,7 @@ fn tag_to_deployment_target(
 ///
 /// This struct flattens the SCG's internal `DiGraph` representation (see
 /// `crate::digraph`, the hand-written Vec-backed directed graph introduced
-/// in Wave 39 of the VUMA remediation plan as a petgraph replacement) into
+/// of the VUMA remediation plan as a petgraph replacement) into
 /// a simple structure that can be serialized with serde.
 #[derive(Debug, Clone)]
 struct SerializedSCG {
@@ -1619,7 +1619,7 @@ fn read_region(reader: &mut BinaryReader, index: usize) -> Result<SCGRegion, Des
     })
 }
 
-// ── JSON serialization (removed in Wave 43) ────────────────────────────
+// ── JSON serialization (removed in ) ────────────────────────────
 // The serde-derived `SerializedSCG` intermediate and the JSON
 // `serialize_scg_json` / `deserialize_scg_json` functions were removed when
 // `Serialize, Deserialize` derives were stripped from `NodeData` / `EdgeData`
@@ -1816,7 +1816,7 @@ fn format_node_label(node: &NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
-        // PMT node labels — full field coverage (Wave 1b resolved the
+        // PMT node labels — full field coverage ( resolved the
         // earlier "minimal stubs" comment that only emitted the layout
         // name; vregs and field names are now included for diagnostics).
         NodePayload::StateInit(s) => {
@@ -2171,7 +2171,7 @@ mod tests {
         ));
     }
 
-    // ── Test 6: JSON round-trip of a complex SCG (removed in Wave 43) ──
+    // ── Test 6: JSON round-trip of a complex SCG (removed in ) ──
     // The serde-derived `SerializedSCG` and `serialize_scg_json` /
     // `deserialize_scg_json` were removed when `Serialize, Deserialize`
     // derives were stripped from `NodeData` / `EdgeData` / `SCGRegion`.
@@ -2230,12 +2230,12 @@ mod tests {
         assert_eq!(version, FORMAT_VERSION);
     }
 
-    // ── Test 10: Cross-format consistency (removed in Wave 43) ────────
+    // ── Test 10: Cross-format consistency (removed in ) ────────
     // The JSON serialization path was removed along with the serde derives
     // on `NodeData` / `EdgeData` / `SCGRegion`. Binary round-trip
     // consistency is already verified by `test_binary_roundtrip_complex`.
 
-    // ── Test 11: Empty SCG JSON round-trip (removed in Wave 43) ─────────
+    // ── Test 11: Empty SCG JSON round-trip (removed in ) ─────────
     // The JSON serialization path was removed; binary empty-SCG round-trip
     // is verified by `test_binary_roundtrip_minimal`.
 
@@ -2353,7 +2353,7 @@ mod tests {
     // PMT variant, but no test exercised those arms — so a regression
     // that broke e.g. `StateWrite.value_vreg` ordering would slip
     // through silently. This test pins the binary round-trip behaviour
-    // for all 13 PMT node variants introduced in Wave 1b/2/2b.
+    // for all 13 PMT node variants introduced in .
     #[test]
     fn test_binary_roundtrip_pmt_nodes() {
         let mut scg = SCG::new();
@@ -2602,10 +2602,10 @@ mod tests {
         );
     }
 
-    // ── Wave 40 conformance test ────────────────────────────────────────
+    // ── conformance test ────────────────────────────────────────
     //
-    // Wave 40 of the VUMA remediation plan removes the `petgraph` dependency
-    // from the workspace. Wave 39 replaced every petgraph usage in the SCG
+    //  of the VUMA remediation plan removes the `petgraph` dependency
+    // from the workspace. replaced every petgraph usage in the SCG
     // with the hand-written `crate::digraph::DiGraph`. This test pins the
     // *behavioural* contract of the three graph algorithms
     // (`toposort`, `tarjan_scc`, `has_path_connecting`) to the same results

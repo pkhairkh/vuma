@@ -1497,7 +1497,7 @@ const HEAP_START: i32 = 65536;
 
 /// `ENOSYS` errno value (Linux / generic POSIX ABI) returned by the generic
 /// unknown-extern stub so callers can detect unsupported syscalls.  Used by
-/// the Wave 5 stub to replace the previous silent `-1` fallback.
+/// the stub to replace the previous silent `-1` fallback.
 const ENOSYS_ERRNO: i32 = 38;
 
 // ── WASI import function indices ─────────────────────────────────────────
@@ -1554,14 +1554,14 @@ const WASI_ARGS_GET_IDX: u32 = 8;
 // NOTE: indices 15-17 were vuma.read / vuma.write / vuma.close (declared
 // separately because they use a distinct type index for clarity).
 
-// ── Filesystem ops imports (indices 18-28, Wave 4) ──
+// ── Filesystem ops imports (indices 18-28, ) ──
 // (Historical: open=18, stat=19, fstat=20, lstat=21, unlink=22, mkdir=23,
 // rmdir=24, rename=25, link=26, symlink=27, readlink=28.)
 
-// ── Socket / process / sync ops imports (indices 29-44, Wave 5) ──
+// ── Socket / process / sync ops imports (indices 29-44, ) ──
 // POSIX-compatible socket, send/recv, socket-option, memory-management,
 // and sleep host functions.  Backed by the real OS via the wasmtime runner
-// (scripts/wasm32_runner.py), consistent with the Wave 4 filesystem pattern.
+// (scripts/wasm32_runner.py), consistent with the filesystem pattern.
 //
 // Note on sendmsg / recvmsg / futex / clone: these are intentionally NOT
 // mapped here.  They are fundamentally incompatible with the wasm32 sandbox
@@ -3023,7 +3023,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 return Ok(());
             }
 
-            // ── Channel builtins (Wave 4 / Task 4cd) ──
+            // ── Channel builtins (ask 4cd) ──
             // wasm32 has no pipe() syscall — use a ring buffer in linear
             // memory instead.  Layout (4112 bytes total):
             //   [base+0]  head     (i32, read cursor)
@@ -4123,7 +4123,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
         IRInstr::Syscall { nr, args, dst } => {
-            // Wave 12: wasm32 has no direct syscall instruction and no canonical
+            // wasm32 has no direct syscall instruction and no canonical
             // syscall number table. The `nr` field is arch-specific (e.g. x86_64
             // write=1, mips write=5001, etc.), so mapping it to vuma.* host
             // imports by number would be fragile and wrong for programs targeting
@@ -4134,7 +4134,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // vuma.* host imports by NAME (not number), not the raw
             // IRInstr::Syscall which carries an arch-specific number.
             //
-            // We return -ENOSYS (-38), matching the wave-5 unknown-extern
+            // We return -ENOSYS (-38), matching the effort-5 unknown-extern
             // fallback behavior. This lets callers detect the syscall is
             // unsupported on wasm32.
             // Translate VUMA-generic (asm-generic) syscall number to the
@@ -4204,17 +4204,17 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 }
             }
         }
-        // ── VectorOp (Wave 29) ──
-        // wasm32 has no SIMD encoder in the Wave 29 suite; emit nothing.
+        // ── VectorOp ──
+        // wasm32 has no SIMD encoder in the suite; emit nothing.
         // The vectorizer still produces the IR; this backend just cannot
         // lower it to SIMD wasm instructions.
         IRInstr::VectorOp { .. } => {}
-        // ── Channel operations (Wave 1d / Task 2a) ──
+        // ── Channel operations (ask 2a) ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-        // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+        // StarkProof — stub (Call-form builtin is the active path).
         | IRInstr::StarkProof { .. } => {}
 
         IRInstr::CallIndirect { dst, func_ptr, args } => {
@@ -5057,7 +5057,7 @@ impl Backend for Wasm32Backend {
         // The stub returns `-ENOSYS` (-38) so callers can *detect* that the
         // syscall is unsupported (rather than the previous silent -1, which
         // was indistinguishable from a real runtime error).  This is the
-        // Wave 5 resolution: unsupported syscalls surface a real errno.
+        //  resolution: unsupported syscalls surface a real errno.
         //
         // The stub is typed `() -> i32`.  Wasm's `call` instruction only
         // pops `params.len()` (=0) values, so any caller arguments stay on
@@ -5196,7 +5196,7 @@ impl Backend for Wasm32Backend {
             func_name_to_idx.insert(name.to_string(), stub_func_idx);
         }
 
-        // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+        // ── FFI scratchpad frame stubs (/fix) ──────────────────
         // ffi_scratch_push_frame / ffi_scratch_pop_frame: no-op stubs that
         // do NOTHING (no mem[0] write, no return value). The scratchpad is
         // not used on wasm32 (wasm has its own linear memory), so these are
@@ -5669,7 +5669,7 @@ fn resolve_call_relocations(
                 Some(&idx) => idx,
                 None => {
                     // External symbol — resolve to the generic stub that returns
-                    // -ENOSYS so callers can detect unsupported syscalls (Wave 5).
+                    // -ENOSYS so callers can detect unsupported syscalls.
                     // This allows tests to detect unsupported functionality gracefully
                     // (e.g. epoll_create1 returns -ENOSYS on wasm32/WASI).
                     vuma_log!(debug,
@@ -8364,7 +8364,7 @@ mod wasm_target_tests {
 
     #[test]
     fn test_wasm_module_filesystem_host_imports_conditional() {
-        // Wave 4 + conditional-emission fix: verify that vuma.open, vuma.stat,
+        //  + conditional-emission fix: verify that vuma.open, vuma.stat,
         // etc. host function imports are ONLY emitted when the program actually
         // calls them.  A program that doesn't use any filesystem ops should
         // produce a module with NO vuma.* imports (only the 9 WASI imports),

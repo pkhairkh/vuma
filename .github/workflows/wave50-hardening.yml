@@ -1,14 +1,14 @@
 # ============================================================================
-# VUMA Wave 50 — Final Hardening CI
+# VUMA — Final Hardening CI
 # ============================================================================
-# Wave 50 hardening jobs (Task 6-d reconciled the advisory/strict split):
+# Hardening jobs (Task 6-d reconciled the advisory/strict split):
 #   * clippy-advisory  — runs `cargo clippy --workspace`, fails only on
 #                        clippy ERRORS (not warnings).  Advisory only —
 #                        the codebase currently has ~658 pre-existing
 #                        clippy warnings (mostly in vuma-codegen); the
 #                        pre-existing `.github/workflows/ci.yml:124` job
 #                        `cargo clippy --workspace -- -D warnings` (added
-#                        in Wave 11) is the strict gate.  This job provides
+#                        previously) is the strict gate.  This job provides
 #                        additional clippy coverage (with `--all-targets`)
 #                        without enforcing.  Once the warning count trends
 #                        to zero, this job should switch to `-D warnings`
@@ -19,15 +19,15 @@
 #                        `continue-on-error: true` (advisory) to strict in
 #                        Task 6-d: the pre-existing `.github/workflows/ci.yml`
 #                        test job (line 84, `cargo test --workspace --verbose`)
-#                        has been the strict gate since Wave 11, and the
+#                        has been the strict gate, and the
 #                        codebase test suite is now green enough that
-#                        Wave 50's own job no longer needs to be advisory.
+#                        this job no longer needs to be advisory.
 #                        `--no-fail-fast` is retained so that all failures
 #                        in a single run are surfaced, not just the first.
 #
 # These jobs are SEPARATE from `.github/workflows/ci.yml` (which has
 # `-D warnings` clippy and a per-OS `cargo test --workspace` test job)
-# so that the existing gating jobs are unaffected.  Wave 50 introduces
+# so that the existing gating jobs are unaffected.  This workflow introduces
 # these jobs to surface additional clippy coverage (with --all-targets)
 # and a redundant strict test gate on every push.
 # ============================================================================
@@ -102,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
     # STRICT (blocking).  Upgraded from `continue-on-error: true` (advisory)
     # in Task 6-d: the pre-existing `.github/workflows/ci.yml` test job
-    # (line 84) has been the strict gate since Wave 11, and the Wave 50
+    # (line 84) has been the strict gate, and the
     # test suite is now green enough that this job no longer needs to be
     # advisory.  Verified locally with:
     #   * `cargo check --workspace`: 0 errors

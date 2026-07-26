@@ -1,4 +1,4 @@
-// byte_field — PMT Wave 2: u8 field round-trip
+// byte_field — u8 field round-trip
 // Expected exit code: 255
 //
 // Declares a layout with a u8 field, writes 255, reads it back. Verifies

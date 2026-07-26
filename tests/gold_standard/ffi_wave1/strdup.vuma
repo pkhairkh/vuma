@@ -1,7 +1,7 @@
 // ffi_wave1/strdup — strdup + unmarshal + free round-trip (aarch64)
 // Expected exit code: 0
 //
-// Wave 6 test: demonstrates the C-ownership memory round-trip pattern.
+// Test: demonstrates the C-ownership memory round-trip pattern.
 // strdup() returns a C-owned pointer the caller must free(). The
 // unmarshal builtin copies the result into ___pmt_buffer (always a copy,
 // never a borrow). free() is called on the original C pointer, not the

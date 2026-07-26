@@ -1,9 +1,9 @@
-// single_buffer — PMT Wave 8a: two states share ONE program-wide buffer
+// single_buffer — two states share ONE program-wide buffer
 // Expected exit code: 30
 //
 // Allocates two Points (p at buffer offset 0, q at buffer offset 16) and
 // verifies that writes to one state do NOT corrupt the other. Under the
-// Wave 8a single-buffer lowering, the IRBuilder emits ONE `Alloc` for
+// Single-buffer lowering, the IRBuilder emits ONE `Alloc` for
 // `___pmt_buffer` (sized 32 bytes = 16 + 16) at the start of `main`, then
 // lowers `let p = state_new(Point)` to `p = ___pmt_buffer + 0` and
 // `let q = state_new(Point)` to `q = ___pmt_buffer + 16` via `Offset`
@@ -16,7 +16,7 @@
 // (returning 40 instead of 30, or 20 instead of 30).
 //
 // VUMA Key Concepts:
-//   - Wave 8a single-buffer lowering (one Alloc, zero per-state Allocs)
+//   - Single-buffer lowering (one Alloc, zero per-state Allocs)
 //   - state-typed allocations are `Offset` into `___pmt_buffer`
 //   - each state gets a unique, 16-byte-aligned slot
 //   - field writes target the correct slot (no cross-contamination)

@@ -1,7 +1,7 @@
 // inbounds_dynamic_index — Runtime-computed index within bounds
 // Expected exit code: 25
 //
-// Bounds Wave 1 positive test: write 10/20/25 into buf.data[0..2],
+// Bounds positive test: write 10/20/25 into buf.data[0..2],
 // then read back via a runtime-computed index `idx = 2`. Because
 // `idx` is not a compile-time constant, the bounds check is forced
 // to be a genuine runtime `UGe(idx, 32)` test rather than folded by

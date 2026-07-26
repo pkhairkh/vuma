@@ -1,4 +1,4 @@
-// error_containment — Wave 20: error containment
+// error_containment — error containment
 // A child worker crashes (exit with non-zero), the parent detects via
 // wait_worker and handles the error gracefully.
 // Expected exit code: 1

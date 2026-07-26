@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/trap/irq.vuma
 // VWK IRQ Subsystem — IRQ ring-buffer dispatcher + handler table (PMT-pure).
-// Wave R2f — migrated onto the IRQ ring buffer (R2e).
+//  — migrated onto the IRQ ring buffer (R2e).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the IRQ subsystem. It maintains a 256-entry IRQ handler
@@ -267,7 +267,7 @@ extern "C" {
     // K11 stub: `mov al, 0x20; out 0x20, al; ret` (non-specific EOI to
     // the master PIC's command port).
     fn pic_eoi(irq: u8);
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by irq_dispatch_loop
     // to invoke the per-vector IRQ handler before sending EOI. Same stub
     // category as write/read/exit — NOT a C library function. Real asm
@@ -426,7 +426,7 @@ fn register_irq(tbl: State<IrqTable>, irq: u8, handler: u64) {
 //      9999 sentinel is caught at step 2 before the narrowing).
 //   4. Look up the handler via `irq_get_handler(tbl, irq)`.
 //   5. If non-zero: invoke the handler via `__call_indirect1(handler,
-//      irq as u64)` (Wave 5 — passes the IRQ vector as the handler's
+//      irq as u64)` ( — passes the IRQ vector as the handler's
 //      first argument in RDI per SysV AMD64), then send EOI via
 //      `pic_eoi(irq)`. The handler's u64 return is currently discarded
 //      (IRQ handlers conventionally return void or a status the
@@ -467,7 +467,7 @@ fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
         let irq = v as u8;
         let handler = irq_get_handler(tbl, irq);
         if handler != 0 {
-            // Wave 5: invoke the per-vector IRQ handler via the indirect-
+            // invoke the per-vector IRQ handler via the indirect-
             // call trampoline. The handler receives `irq as u64` (the
             // vector number) as its first SysV AMD64 argument (RDI). The
             // u64 return is currently ignored — IRQ handlers conventionally

@@ -153,7 +153,7 @@ fn enc_mov_edi_imm32(code: Address, pos: u32, val: u32) -> u32 {
     return pos + 5;
 }
 
-// ── Wave 48: additional x86_64 encoders for the full pipeline ──
+// ── additional x86_64 encoders for the full pipeline ──
 
 // MOV rcx, [rbp+disp32]: 48 8B 8D <disp32 LE>  (7 bytes)
 fn enc_load_rcx(code: Address, pos: u32, offset: u32) -> u32 {
@@ -285,7 +285,7 @@ fn enc_call_rel32(code: Address, pos: u32, target_offset: u32) -> u32 {
     return pos + 5;
 }
 
-// ── Wave P6.1: memory-op encoders (IR_ALLOC / IR_LOAD / IR_STORE) ──
+// ── memory-op encoders (IR_ALLOC / IR_LOAD / IR_STORE) ──
 // These three encoders back the IR_ALLOC (15), IR_LOAD (11), and IR_STORE
 // (12) handlers in codegen_emit. They use the same [rbp - disp] vreg-slot
 // addressing convention as enc_load_rax / enc_store_rax, plus a [rcx + disp]
@@ -350,7 +350,7 @@ fn enc_store_byte_rcx_rax(code: Address, pos: u32, offset: u32) -> u32 {
     return pos + 6;
 }
 
-// Wave P1-c-8: translate a VUMA/asm-generic syscall number to the x86_64
+// translate a VUMA/asm-generic syscall number to the x86_64
 // native syscall number. The bootstrap targets x86_64, so the generic nr
 // coming out of the AST (c1 of NK_SYSCALL) must be remapped before being
 // loaded into EAX. Unknown nrs fall through verbatim (same fallback as the
@@ -464,7 +464,7 @@ fn gen_epilogue(code: Address, pos: u32) -> u32 {
 }
 
 // ============================================================================
-// Wave 48 — print_int routine + codegen_emit entry point
+//  — print_int routine + codegen_emit entry point
 // ============================================================================
 // The bootstrap compiler emits a self-contained ELF executable with this
 // .text layout:
@@ -520,7 +520,7 @@ fn gen_epilogue(code: Address, pos: u32) -> u32 {
 
 const PRINT_INT_SIZE: u32 = 86;
 
-// Wave P6.2: label / fixup side buffers for IR_BRANCH / IR_COND_BRANCH.
+// label / fixup side buffers for IR_BRANCH / IR_COND_BRANCH.
 // Each label_id maps to a code offset (u64) in label_buf. Each branch
 // fixup records {fixup_pos:u32, target_label:u32} so we can back-patch the
 // rel32 once all labels have been resolved.
@@ -638,11 +638,11 @@ fn vreg_offset(vreg: u32) -> u32 {
 //   IR_CALL (13): dst = result vreg; lhs = callee_hash (NOT a vreg!);
 //                 rhs = arg_count (NOT a vreg!); imm (lower 32) = arg0_vreg.
 //   IR_LOAD (11): dst = result vreg; lhs = addr vreg; rhs = byte offset
-//                 (NOT a vreg — must skip). Wave P6.1.
+//                 (NOT a vreg — must skip).
 //   IR_STORE (12): dst = value vreg; lhs = addr vreg; rhs = byte offset
-//                  (NOT a vreg — must skip). Wave P6.1.
+//                  (NOT a vreg — must skip).
 //   IR_ALLOC (15): dst = result vreg (the allocated pointer); imm = size
-//                  (NOT a vreg — must skip). Wave P6.1.
+//                  (NOT a vreg — must skip).
 //   IR_SYSCALL (20): dst = result vreg; imm.lo/hi, aux.lo/hi = arg vregs.
 //   Other ops: not supported in the bootstrap codegen; skip.
 fn codegen_max_vreg(ir_buf: Address) -> u32 {
@@ -697,13 +697,13 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
             if sc_a2 > max { max = sc_a2; }
             if sc_a3 > max { max = sc_a3; }
         }}
-        else { if op == 10 {  // IR_CMP (Wave P6.2): dst, lhs, rhs are all vregs.
+        else { if op == 10 {  // IR_CMP: dst, lhs, rhs are all vregs.
             // (imm = cmp_type token, NOT a vreg — skip.)
             if dst > max { max = dst; }
             if lhs > max { max = lhs; }
             if rhs > max { max = rhs; }
         }}
-        else { if op == 18 {  // IR_COND_BRANCH (Wave P6.2): dst = cond_vreg.
+        else { if op == 18 {  // IR_COND_BRANCH: dst = cond_vreg.
             // (lhs = 0, rhs = target_label — NOT vregs — skip both.)
             if dst > max { max = dst; }
         }}
@@ -724,7 +724,7 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
 }
 
 // ============================================================================
-// Wave 52 — runtime stub emitters
+//  — runtime stub emitters
 // ============================================================================
 // The bootstrap compiler emits its own runtime stubs (previously these were
 // injected by the Rust-side x86_64 backend). The stubs are written at the
@@ -752,12 +752,12 @@ fn codegen_max_vreg(ir_buf: Address) -> u32 {
 // codegen_emit's IR_CALL handler passes print_int_offset = 15 to
 // enc_call_rel32 when emitting a call to print_int.
 //
-// LIMITATIONS (documented TODOs for a future wave):
+// LIMITATIONS (documented TODOs for a future effort):
 //   - __vuma_argc/__vuma_argv use a BSS placeholder (0xDEADBEEFCAFEBABE)
 //     that is NOT patched by the bootstrap (elf.vuma's write_elf64 does not
 //     allocate a BSS segment). Calls to these stubs will trap. hello.vuma
-//     does not call them, so the Wave 48 self-host test passes. A future
-//     wave should add BSS allocation to write_elf64 and patch the
+//     does not call them, so the self-host test passes. A future
+//     effort should add BSS allocation to write_elf64 and patch the
 //     placeholder (mirroring src/codegen/src/x86_64/mod.rs::encode_program).
 //   - _start does not save argc/argv to a BSS slot (would trap without BSS).
 //     The full _start stub (43 bytes, with BSS argv save) lives in the Rust
@@ -1124,7 +1124,7 @@ fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32 {
 // starts at start_offset, the return value is start_offset + user_code_size,
 // which is the total code size including runtime stubs).
 //
-// Supported IR opcodes (the hello.vuma subset + Wave P6.2 control flow):
+// Supported IR opcodes (the hello.vuma subset + control flow):
 //   IR_MOV (16)   — mov rax, imm64; mov [rbp-vreg_off], rax
 //   IR_ADD (1)    — load lhs,load rhs,add,store dst
 //   IR_SUB (2)    — same with sub
@@ -1134,17 +1134,17 @@ fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32 {
 //                     load arg0 into rdi; call print_int (rel32 to
 //                     print_int_offset = 15 in the stubs layout)
 //                   else: skip silently (real calls are a TODO)
-//   IR_LOAD (11)  — byte load from [addr_vreg + offset]            (Wave P6.1)
-//   IR_STORE (12) — byte store to [addr_vreg + offset]             (Wave P6.1)
-//   IR_ALLOC (15) — stack allocation (lea slot addr into the slot)  (Wave P6.1)
-//   IR_SYSCALL(20)— x86_64 syscall with up to 4 args               (Wave P1-c-8b)
-//   IR_NOP (0)    — label marker (dst=label_id): record code offset (Wave P6.2)
+//   IR_LOAD (11) — byte load from [addr_vreg + offset]
+//   IR_STORE (12) — byte store to [addr_vreg + offset]
+//   IR_ALLOC (15) — stack allocation (lea slot addr into the slot)
+//   IR_SYSCALL(20)— x86_64 syscall with up to 4 args
+//   IR_NOP (0) — label marker (dst=label_id): record code offset
 //                   true NOP (dst==0): emit nothing
-//   IR_CMP (10)   — cmp lhs,rhs; setCC al; movzx eax,al; store dst  (Wave P6.2)
+//   IR_CMP (10) — cmp lhs,rhs; setCC al; movzx eax,al; store dst
 //                   (imm.lo = cmp_type token 46..51)
-//   IR_COND_BRANCH(18) — test cond; jz <rel32 to rhs=label>         (Wave P6.2)
+//   IR_COND_BRANCH(18) — test cond; jz <rel32 to rhs=label>
 //                        (rel32 back-patched in a post-pass)
-//   IR_BRANCH (17)— jmp <rel32 to dst=label>                        (Wave P6.2)
+//   IR_BRANCH (17)— jmp <rel32 to dst=label>
 //                   (rel32 back-patched in a post-pass)
 //
 // Unsupported (silently skipped — documented TODO):
@@ -1152,7 +1152,7 @@ fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32 {
 fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32 {
     pos: u32 = start_offset;
 
-    // Wave P6.2: label / fixup side buffers for IR_BRANCH / IR_COND_BRANCH.
+    // label / fixup side buffers for IR_BRANCH / IR_COND_BRANCH.
     // label_buf[label_id] (u64) = code offset of the label marker (set when
     //   IR_NOP with dst=label_id is seen).
     // fixup_buf[fixup_count] = {fixup_pos:u32, target_label:u32} (recorded
@@ -1241,7 +1241,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             // allocate()/free() are handled via IR_SYSCALL (mmap/munmap),
             // not IR_CALL — no Rust-emitted wrapper stubs needed.
         }}
-        else { if op == 20 {  // IR_SYSCALL (Wave P1-c-8 / P1-c-8b)
+        else { if op == 20 {  // IR_SYSCALL (1-c-8b)
             // x86_64 syscall ABI: nr in EAX, args in RDI/RSI/RDX/R10/R8/R9,
             // result in RAX. lhs = VUMA/asm-generic nr (translate first),
             // rhs = arg_count, imm.lo=arg0_vreg, imm.hi=arg1_vreg,
@@ -1271,7 +1271,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = enc_syscall(code, pos);
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
-        else { if op == 15 {  // IR_ALLOC (Wave P6.1) — stack allocation.
+        else { if op == 15 {  // IR_ALLOC — stack allocation.
             // IR layout: op=15, dst=vreg, imm=size. The stack frame is
             // already allocated in the prologue (sub rsp, frame_size); each
             // vreg has an 8-byte slot at [rbp - vreg_offset(n)]. For
@@ -1283,7 +1283,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = enc_lea_rax_rbp_offset(code, pos, vreg_offset(dst));
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
-        else { if op == 12 {  // IR_STORE (Wave P6.1) — byte store to memory.
+        else { if op == 12 {  // IR_STORE — byte store to memory.
             // IR layout: op=12, dst=value_vreg, lhs=addr_vreg, rhs=byte_offset.
             // Emit: load value into RAX, load addr into RCX, store low byte
             // of RAX to [RCX + offset].
@@ -1294,7 +1294,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = enc_load_rcx(code, pos, vreg_offset(lhs));
             pos = enc_store_byte_rcx_rax(code, pos, rhs);
         }}
-        else { if op == 11 {  // IR_LOAD (Wave P6.1) — byte load from memory.
+        else { if op == 11 {  // IR_LOAD — byte load from memory.
             // IR layout: op=11, dst=result_vreg, lhs=addr_vreg, rhs=byte_offset.
             // Emit: load addr into RAX, zero-extend byte load from [RAX + offset]
             // into EAX (which zero-extends to RAX), store result to dst's slot.
@@ -1305,7 +1305,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = enc_movzbl_eax_rax_offset(code, pos, rhs);
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
-        else { if op == 0 {  // IR_NOP (Wave P6.2) — label marker or true NOP.
+        else { if op == 0 {  // IR_NOP — label marker or true NOP.
             // IR layout: op=0, dst=label_id (0 for a true NOP). When dst != 0,
             // record the current code position as the label's target offset
             // so subsequent IR_BRANCH / IR_COND_BRANCH fixups can resolve.
@@ -1314,7 +1314,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             }
             // dst == 0: true NOP — emit nothing.
         }}
-        else { if op == 10 {  // IR_CMP (Wave P6.2) — comparison.
+        else { if op == 10 {  // IR_CMP — comparison.
             // IR layout: op=10, dst=result_vreg, lhs=lhs_vreg, rhs=rhs_vreg,
             // imm (lower 32)=cmp_type token (46===, 47=!=, 48=<, 49=>,
             // 50=<=, 51=>=). Emit: load lhs→RAX, load rhs→RCX, cmp rax,rcx,
@@ -1347,7 +1347,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             pos = pos + 3;
             pos = enc_store_rax(code, pos, vreg_offset(dst));
         }}
-        else { if op == 18 {  // IR_COND_BRANCH (Wave P6.2) — conditional jump.
+        else { if op == 18 {  // IR_COND_BRANCH — conditional jump.
             // IR layout: op=18, dst=cond_vreg, lhs=0, rhs=target_label.
             // Emit: load cond→RAX, test rax,rax, jz <rel32 to target_label>.
             // The rel32 is back-patched in the fixup walk once all labels
@@ -1370,7 +1370,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
             fixup_count = fixup_count + 1;
             pos = pos + 6;                      // 2 opcode bytes + 4 rel32
         }}
-        else { if op == 17 {  // IR_BRANCH (Wave P6.2) — unconditional jump.
+        else { if op == 17 {  // IR_BRANCH — unconditional jump.
             // IR layout: op=17, dst=target_label, lhs=0, rhs=0.
             // Emit: jmp <rel32 to target_label>. Patched in the fixup walk.
             // jmp rel32: E9 <rel32>
@@ -1385,7 +1385,7 @@ fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32
         }}
         // IR_DIV/AND/OR/XOR/SHL/SHR (4-9), etc.: not handled in the bootstrap
         // codegen. hello.vuma doesn't use them; remaining ALU ops are
-        // documented TODO for a future wave.
+        // documented TODO for a future effort.
 
         i = i + 1;
     }

@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/trap/trap.vuma
 // VWK Trap Dispatcher — routes traps by vector number (PMT-pure).
-// Wave R2f — migrated onto the canonical superset TrapFrame (R2a).
-// Wave W13S1 — de-stubbed trap_panic / trap_syscall / trap_irq.
+//  — migrated onto the canonical superset TrapFrame (R2a).
+//  — de-stubbed trap_panic / trap_syscall / trap_irq.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the arch-independent trap dispatcher. After trap_entry (R2b/
@@ -59,7 +59,7 @@
 //      tion of `tf` is harmless, same pattern as dispatch.vuma's
 //      `let nr = tf_get_gpr(tf, 0);` before `__call_indirect1(handler, tf
 //      as Address)`).
-//   2. write(1, "*** KERNEL PANIC ***\n", 21) — Wave 1 string literal lowers
+//   2. write(1, "*** KERNEL PANIC ***\n", 21) — string literal lowers
 //      to a .rodata address; `write` takes it directly as `buf: Address`.
 //      Same PMT "Borrowed read" pattern as shell.vuma's `write(1, "vwk: ", 5)`.
 //   3. write(1, "vector=", 7) + trap_put_dec(buf, vec) + write(1, buf as
@@ -220,7 +220,7 @@ extern "C" {
     // declaration as panic.vuma:107.
     fn exit(code: i64);
 
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by
     // syscall_dispatch_from_trap (to invoke per-syscall handlers) and
     // irq_dispatch_loop (to invoke per-vector IRQ handlers). Same
@@ -580,7 +580,7 @@ fn trap_handler(tf: State<TrapFrame>, syscall_tbl: State<SyscallTable>, irq_ring
 // the post-extern invalidation of tf is harmless (same pattern as
 // dispatch.vuma's `let nr = tf_get_gpr(tf, 0);` before the indirect call).
 //
-// The banner + labels use Wave 1 string literals (lowered to .rodata
+// The banner + labels use string literals (lowered to .rodata
 // addresses; `write` takes them directly as `buf: Address`). The decimal
 // expansions of vec_val / pc_val go through a local State<PanicBuf> +
 // trap_put_dec + write(1, buf as Address, n) — same PMT "Borrowed read"

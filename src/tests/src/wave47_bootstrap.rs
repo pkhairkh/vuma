@@ -1,6 +1,6 @@
-//! # Wave 47 — Bootstrap argv parsing tests
+//! # — Bootstrap argv parsing tests
 //!
-//! Implements the test coverage required by TASKS.md Wave 47:
+//! Implements the test coverage required by TASKS.md
 //!
 //! 1. **Source-level smoke test** (`test_wave47_bootstrap_source_uses_argv`) —
 //!    reads `womb/lang/full_lexer.vuma` and asserts that:
@@ -9,7 +9,7 @@
 //!      code path, not just the hardcoded fallback).
 //!    - The fallback path (`write_fallback_path`) is still present for
 //!      backward compatibility when argc < 2.
-//!    - The stale "TODO: replace with argv[1]" and "ARGV TODO (Wave 47
+//! - The stale "TODO: replace with argv[1]" and "ARGV TODO (
 //!      deferral)" comments have been removed.
 //!
 //! 2. **Codegen-level stub test** (`test_wave47_argv_stubs_emitted_and_patched`) —
@@ -33,7 +33,7 @@
 //! `.vuma` bootstrap compiler is not yet invokable from the Rust runtime
 //! (see `wave50.rs:617-628 test_wave50_bootstrap_milestone` for the same
 //! limitation). The Rust-side `Compile` subcommand uses the canonical Rust
-//! pipeline, not the `.vuma` bootstrap. A future wave must add a runtime
+//! pipeline, not the `.vuma` bootstrap. A future effort must add a runtime
 //! path that compiles + links the `.vuma` files into a `vumac` binary;
 //! then the end-to-end test becomes `./vumac womb/lang/hello.vuma &&
 //! ./a.out` → exit 0.

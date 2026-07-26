@@ -21,16 +21,11 @@ This is NOT a direct FFI link (Lean cannot import Rust). It is a
 specification-level simulation: if the Lean model is sound, and the
 Rust pipeline conforms to the specification, then the compiled binary
 is safe. The conformance assumption `hconforms : PipelineSpec prog s`
-is the translation-validation side that future waves (W13-17) will
-discharge by extraction + parity testing (see
-`docs/verification-reports/S2-W1-B-rust-connection.md` for the audit
-that motivates this module).
+is the translation-validation side that future work
+will discharge by extraction + parity testing.
 
 References:
   - Rust: `src/pipeline.rs::compile` (10-stage pipeline)
-  - Audit: `docs/verification-reports/S2-W1-B-rust-connection.md`
-    ("NOT CONNECTED" — this module is the first Lean-side reference
-    to `pipeline::compile`).
   - CompCert: Leroy, JAR 2009.
 -/
 
@@ -55,8 +50,8 @@ This is the FIRST Lean-side reference to the Rust `pipeline::compile`
 function. The `hconforms : PipelineSpec prog s` hypothesis that appears
 in `pipeline_compile_sound` and `pipeline_compile_no_oob` below is the
 "translation validation" assumption: it asserts that the Rust pipeline
-conforms to this specification. Combined with `pmt_soundness` (sorry-free,
-Wave 3), it yields end-to-end safety of the compiled binary. -/
+conforms to this specification. Combined with `pmt_soundness` (sorry-free),
+it yields end-to-end safety of the compiled binary. -/
 structure PipelineSpec (prog : Program) (s : ExecState) : Prop where
   /-- The compiled binary's observable behavior matches Lean `exec`.
   Identity for now (refinement is via the Lean-side `exec`). -/
@@ -72,8 +67,7 @@ structure PipelineSpec (prog : Program) (s : ExecState) : Prop where
 
 This is the Lean-side half of the simulation: Lean's own execution
 already meets the specification that the Rust `pipeline::compile`
-claims to meet. The proof delegates to `pmt_soundness` (sorry-free,
-eliminated in Wave 3 — see `docs/verification-reports/W3-sorry-fix.md`). -/
+claims to meet. The proof delegates to `pmt_soundness` (sorry-free). -/
 theorem exec_satisfies_pipeline_spec
     (prog : Program) (s : ExecState)
     (hwf : WellTyped prog)
@@ -104,8 +98,7 @@ compiled binary.
 This is the FIRST Lean theorem whose conclusion is conditional on the
 Rust `pipeline::compile`'s correctness (via `hconforms`). Closing the
 gap between Lean `exec` and the actual Rust `pipeline::compile` output
-is the work of Waves 13-17 (extraction + parity testing per
-`docs/verification-reports/S2-W1-B-rust-connection.md`'s 7-step plan). -/
+is the work of future extraction + parity testing. -/
 theorem pipeline_compile_sound
     (prog : Program) (s : ExecState)
     (hwf : WellTyped prog)
@@ -142,7 +135,7 @@ equivalent to
 `match exec prog s with | Result.trap 134 => False | _ => True`
 (since the only `False`-producing pattern is `Result.trap 134`). The
 neq form is used because it composes directly with the sorry-free
-`no_oob_trap_for_well_typed_strong` (W11-A). -/
+`no_oob_trap_for_well_typed_strong`. -/
 theorem pipeline_compile_no_oob
     (prog : Program) (initial_var : String) (s : ExecState)
     (hwf : WellTypedStrong prog initial_var)
@@ -154,7 +147,7 @@ theorem pipeline_compile_no_oob
     (hconforms : PipelineSpec prog s) :
     -- Conclusion: the compiled binary never traps with exit code 134.
     exec prog s ≠ Result.trap 134 := by
-  -- Delegate to `no_oob_trap_for_well_typed_strong` (sorry-free, W11-A).
+  -- Delegate to `no_oob_trap_for_well_typed_strong` (sorry-free).
   -- The `hconforms` assumption ties this to the Rust `pipeline::compile`:
   -- without it, this theorem would just restate the Lean-internal
   -- `no_oob_trap_for_well_typed_strong` result.

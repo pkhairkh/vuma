@@ -1,6 +1,6 @@
-// womb/lang/hello.vuma — canonical test input for the Wave 48 self-host test.
+// womb/lang/hello.vuma — canonical test input for the self-host test.
 //
-// Wave 48 self-host contract:
+// Self-host contract:
 //   1. The bootstrap compiler (entry in full_lexer.vuma::main) compiles THIS file
 //      through the full pipeline: lex → parse → AST → IR → x86_64 codegen → ELF64.
 //   2. The emitted ELF (a.out) is `chmod +x` and runnable on Linux x86_64.

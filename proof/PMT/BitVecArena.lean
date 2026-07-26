@@ -12,8 +12,8 @@ arithmetic overflow, which is the actual failure mode the Rust
 
 ### Why this module exists
 
-Per the W1-D arena-fidelity audit
-(`docs/verification-reports/S2-W1-D-arena-fidelity.md`), the existing
+Per the arena-fidelity audit,
+the existing
 `RawArena` uses `Nat` for `offset` and `capacity`, which is structurally
 unbounded — so `offset + aligned_size` can never wrap. The Rust
 `Arena::alloc_raw` (at `src/codegen/src/runtime/arena.rs:168`) calls
@@ -44,7 +44,7 @@ bit-blasting. A future refinement may also bound it.
 
 The **definitions** and all three **proofs** (`bv_checked_add_overflow`,
 `bv_alloc_traps_on_arithmetic_overflow`, `bv_alloc_traps_on_capacity_overflow`)
-are complete and `lake build`-clean. Closed in W3-E using only stdlib
+are complete and `lake build`-clean. Closed using only stdlib
 `BitVec.toNat_*` lemmas and `omega` (no Mathlib / `bv_decide` dependency).
 The key idea: reduce every `BitVec 64` comparison to a `Nat` comparison
 on `.toNat`, then dispatch to `omega` with the bound `x.toNat < 2^64`
@@ -53,13 +53,11 @@ from `BitVec.isLt`.
 ### References
 
   * Rust source: `src/codegen/src/runtime/arena.rs` (`checked_add`
-    at line 168, per W1-B audit).
-  * Audit: `docs/verification-reports/S2-W1-D-arena-fidelity.md`
-    (gap 1: "usize arithmetic overflow is structurally unrepresentable").
+    at line 168).
   * Prior Lean model: `proof/PMT/RawArena.lean` (the `Nat`-based model
     this file complements, NOT replaces).
   * Related: `proof/PMT/SimRel.lean` (Lean↔Rust simulation — to be
-    extended to cover `BitVecArena` in a later wave).
+    extended to cover `BitVecArena` in a later refinement).
 
 **Build.** Part of the Lake package rooted at `proof/lakefile.toml`.
 Build with `lake build PMT.BitVecArena` (or `lake build` from `proof/`).

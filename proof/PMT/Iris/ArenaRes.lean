@@ -7,7 +7,7 @@ import PMT.Iris.CapBndInvariant
 This module formalises `ArenaRes` from `docs/architecture/pmt-iris-spec.md`
 §1 as a separation-logic resource, following the Iris methodology and the
 pattern established by `PMT.Iris.CapBndInvariant` (the `[cap_bnd]`
-invariant, formalised earlier in Wave 3).
+invariant, formalised earlier).
 
 **Spec (§1).**
 
@@ -40,7 +40,7 @@ splitting rule
       3. `points_to : PointsTo a.base []`              — the points-to
          for the arena's backing memory at `a.base` (bytes elided).
       4. `cap_bnd   : CapBndInv γ_used γ_cap a`        — the derived
-         `[cap_bnd]` invariant (Wave 3, `PMT.Iris.CapBndInvariant`).
+         `[cap_bnd]` invariant (`PMT.Iris.CapBndInvariant`).
 
   - `arena_res_implies_cap_bnd`    — bundle ⇒ `[cap_bnd]` (projection).
   - `arena_res_implies_capacity`   — bundle ⇒ bare `CapacityInvariant`.
@@ -67,7 +67,7 @@ not depend on the guard page).
 **References.**
   - `docs/architecture/pmt-iris-spec.md` §1 (ArenaRes), §3 (`[cap_bnd]`).
   - `proof/PMT/Iris/CapBndInvariant.lean` — the `[cap_bnd]` invariant
-    whose pattern this file mirrors (Wave 3, sibling module).
+    whose pattern this file mirrors (sibling module).
   - `proof/PMT/Basic.lean` — `Arena`, `alloc`, `CapacityInvariant`
     (the bare `Prop` that `ArenaRes` refines to a separation-logic
     resource).
@@ -155,7 +155,7 @@ theorem arena_res_implies_cap_bnd (γ_used γ_cap : GhostName) (a : Arena)
     `PMT.Basic` that `pmt_soundness` uses as its hypothesis). This
     bridges the new Iris-style resource to the existing soundness proof
     by composing the projection `arena_res_implies_cap_bnd` with
-    `cap_bnd_implies_capacity` (Wave 3). -/
+    `cap_bnd_implies_capacity`. -/
 theorem arena_res_implies_capacity (γ_used γ_cap : GhostName) (a : Arena)
     (hres : ArenaRes γ_used γ_cap a) :
     CapacityInvariant a :=
@@ -168,8 +168,8 @@ theorem arena_res_implies_capacity (γ_used γ_cap : GhostName) (a : Arena)
     unchanged), the capacity agreement is preserved (capacity is
     unchanged, and agreement is duplicable), the bump-pointer ghost
     `●A.used` is updated to `●(A.used + sz)`, and the derived
-    `[cap_bnd]` invariant is preserved by `alloc_preserves_cap_bnd`
-    (Wave 3). This is the Iris `alloc_preserves_cap` lemma from §3,
+    `[cap_bnd]` invariant is preserved by `alloc_preserves_cap_bnd`.
+    This is the Iris `alloc_preserves_cap` lemma from §3,
     upgraded to the full `ArenaRes` bundle. -/
 theorem alloc_preserves_arena_res
     (γ_used γ_cap : GhostName) (a : Arena) (l : Layout)
@@ -201,7 +201,7 @@ theorem alloc_preserves_arena_res
     -- implicit, so the witness is reused verbatim).
     show PointsTo a.base []
     exact hres.points_to
-  · -- Derived `[cap_bnd]` invariant preserved (Wave 3 lemma):
+  · -- Derived `[cap_bnd]` invariant preserved:
     -- `alloc_preserves_cap_bnd : CapBndInv … a → … → CapBndInv … (alloc a l)`.
     exact alloc_preserves_cap_bnd γ_used γ_cap a l hres.cap_bnd hfit
 

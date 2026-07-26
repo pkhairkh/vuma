@@ -1,4 +1,4 @@
-// match_recv — Wave 8b: match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }
+// match_recv — match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }
 //
 // Exercises the first-class fallible-recv match lowering:
 //   - The parser recognises `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`

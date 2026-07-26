@@ -1,7 +1,7 @@
 // inbounds_last_index — Access at last valid index
 // Expected exit code: 7
 //
-// Bounds Wave 1 positive test: allocate an 8-byte buffer (via PMT
+// Bounds positive test: allocate an 8-byte buffer (via PMT
 // state_new of a layout containing a `[u8; 8]` array field), write
 // the value 7 to index 7 (the last valid index, == length-1), then
 // read it back. With `--safe`, the index 7 is within `[0, 8)` so the

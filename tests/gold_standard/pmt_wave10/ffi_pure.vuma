@@ -1,4 +1,4 @@
-// ffi_pure — PMT Wave 10: FFI marshal pass — #[pure] preserves state
+// ffi_pure — FFI marshal pass — #[pure] preserves state
 // Expected exit code: 0
 //
 // A foreign function declared `#[pure]` promises not to modify its state

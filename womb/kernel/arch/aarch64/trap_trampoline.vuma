@@ -25,7 +25,7 @@
 //                    copies fields from Arm64TrapFrame into the superset.
 //
 // In hosted mode every extern resolves to `__ffi_fallback_stub` (returns 0,
-// void calls no-op). In bare-metal mode (Wave K11) the same names link
+// void calls no-op). In bare-metal mode the same names link
 // against REAL asm stubs in womb/kernel/arch/aarch64/trap.S.
 //
 // ── Arm64TrapFrame register-save order ──────────────────────────────────────
@@ -72,7 +72,7 @@
 //     sup.sp         ← old.sp_el0        (EL0 stack pointer)
 //   NOT migrated (left 0 by tf_init):
 //     sup.fpu[0..255]   — aarch64 saves V0..V31 state separately (not in
-//                         the Arm64TrapFrame); a future wave may extend
+//                         the Arm64TrapFrame); a future effort may extend
 //                         the save area and copy v0..v31 here.
 //
 // ── ESR_EL1 Exception Class (EC) field ─────────────────────────────────────
@@ -406,7 +406,7 @@ fn trap_exception_class(tf: State<Arm64TrapFrame>) -> u32 {
 //   sup.error_code ← old.esr_el1
 //   sup.sp         ← old.sp_el0
 //   NOT migrated: fpu (the Arm64TrapFrame doesn't save V-register state —
-//                  a future wave may extend the save area).
+//                  a future effort may extend the save area).
 //
 // State<T> params: 2 (old: State<Arm64TrapFrame>, sup: State<TrapFrame>).
 // Pure reads of `old.*` + pure writes to `sup.*` via tf_set_gpr +

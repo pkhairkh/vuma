@@ -1,4 +1,4 @@
-// cap_revoke — Wave 35: capability revocation
+// cap_revoke — capability revocation
 // Verifies that the capability_delegate builtin works correctly.
 // The parent grants a capability, delegates it, and the delegation succeeds.
 // Expected exit code: 1

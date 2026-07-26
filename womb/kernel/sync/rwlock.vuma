@@ -58,7 +58,7 @@
 //   there are waiting writers (the `write_waitq` counter is diagnostic
 //   only — it does not block readers). A "writer-preference" variant
 //   (readers wait if any writer is waiting) would require an extra
-//   atomic field and is left for a future wave.
+//   atomic field and is left for a future effort.
 //
 //   State transition diagram:
 //
@@ -325,7 +325,7 @@
 //   writers — unlike K8b's mutex_acquire which bumps waitq_count on
 //   the slow path). This file follows the contract: write_waitq is
 //   initialized to 0 in rwlock_init and never modified again. A future
-//   wave that wants accurate writer-waiter counts would add the
+//   effort that wants accurate writer-waiter counts would add the
 //   increment in write_acquire's spin loop (before the inner spin) and
 //   the decrement after the CAS succeeds (same shape as K8b's
 //   mutex_acquire waitq_count bookkeeping).
@@ -361,7 +361,7 @@
 //   ownership — readers are anonymous (any task can release a read
 //   lock, even one it didn't acquire — this is a known limitation of
 //   the basic rwlock design; a "owned rwlock" variant would add a
-//   reader-count-per-task map, which is left for a future wave). The
+//   reader-count-per-task map, which is left for a future effort). The
 //   writer is similarly anonymous — any task can call write_release.
 //   This matches Linux's struct rw_semaphore (which doesn't track the
 //   writer's task_struct either — ownership is the caller's
@@ -730,7 +730,7 @@ fn rwlock_read_acquire(l: State<RwLock>) -> i32 {
 // in the file header) — any task can release a read lock, even one it
 // didn't acquire. This is a known limitation of the basic rwlock design
 // (matches Linux's struct rw_semaphore). A "owned rwlock" variant would
-// add a reader-count-per-task map, which is left for a future wave.
+// add a reader-count-per-task map, which is left for a future effort.
 //
 // wake_one simulation (W43): after the CAS-loop decrement succeeds,
 //   `if l.waitq_count > 0 { l.waitq_count = l.waitq_count - 1 }`.

@@ -15,7 +15,7 @@
 //   - s390x diag  (SCLP / DIAGNOSE 0x4 surfacing to the LPAR)    con_type = 3
 //   - wasm host   (host import `write(1, buf, 1)` → fd 1)        con_type = 4
 //
-// The R1a/R1b+c bootinfo wave gave us the boot-protocol recap (multiboot2 on
+// The R1a/R1b+c bootinfo effort gave us the boot-protocol recap (multiboot2 on
 // x86_64, FDT on aarch64/riscv64); R1d is the bring-up console sibling. R1e
 // (kmain integration) will call `early_console_init` immediately after
 // `x86_bootinfo_init` / `arm64_bootinfo_init` / `riscv_bootinfo_init`, then

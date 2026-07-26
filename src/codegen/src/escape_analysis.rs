@@ -20,7 +20,7 @@
 //! historical `docs/architecture/caveats.md §2` row 12 citation of
 //! `ive/src/escape.rs` was a stale path: that file never existed in
 //! this branch; escape analysis has always lived here in `codegen/`.
-//! See Wave 5-f worklog entry for the audit.
+//! See -f worklog entry for the audit.
 //!
 //! # Algorithm
 //!
@@ -33,9 +33,9 @@
 //!    - It's used in a Phi that could propagate to an escape
 //! 3. Non-escaping allocations are marked for stack allocation.
 //!
-//! # Wave 32 Additions
+//! # Additions
 //!
-//! Wave 32 wires this analysis into the O2+ pipeline (see `pipeline.rs`)
+//! wires this analysis into the O2+ pipeline (see `pipeline.rs`)
 //! and adds two optimisation transforms driven by the escape info:
 //!
 //! * [`scalar_replace_aggregates`] (SROA): for each non-escaping
@@ -126,7 +126,7 @@ fn terminator_used_regs(term: &IRTerminator) -> Vec<u32> {
 /// Both `IRInstr::Alloc` (stack) and `IRInstr::Call` to
 /// `__vuma_alloc`/`allocate` (heap) are tracked as allocations.
 ///
-/// **Soundness (Wave 3 fix):** An allocation ESCAPES unless PROVEN
+/// **Soundness ( fix):** An allocation ESCAPES unless PROVEN
 /// non-escaping. The only "safe" (non-escaping) uses of an allocation
 /// vreg are:
 ///   * direct `Load`/`Store`/`AtomicLoad`/`AtomicStore`/`AtomicCas`
@@ -138,7 +138,7 @@ fn terminator_used_regs(term: &IRTerminator) -> Vec<u32> {
 ///     syscall, returning, branching on it, etc. — marks the allocation as
 ///     escaping. This prevents SROA / alloc-elision from removing an
 ///     allocation whose address is observed through a derived alias (the
-///     root cause of the Wave 2 SIGSEGV regressions on `mem_copy_buffer`,
+/// root cause of the SIGSEGV regressions on `mem_copy_buffer`,
 ///     `doubly_linked_list`, `mf_address_return`, etc.).
 pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
     let mut allocs: HashSet<u32> = HashSet::new();
@@ -406,14 +406,14 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(rhs, from, to);
                 }
                 IRInstr::Branch { .. } => {}
-                // ── VectorOp (Wave 29) ──
+                // ── VectorOp ──
                 // Substitute dst/lhs/rhs vregs (lanes/elem_size are not vregs).
                 IRInstr::VectorOp { dst, lhs, rhs, .. } => {
                     sub(dst, from, to);
                     sub(lhs, from, to);
                     sub(rhs, from, to);
                 }
-                // ── Channel operations (Wave 1d / Task 2a) ──
+                // ── Channel operations (ask 2a) ──
                 // Vreg renumbering applies to all operands (including opaque
                 // channel handles, which are ordinary vregs at the IR level).
                 IRInstr::ChannelOpen { dst, .. } => sub(dst, from, to),
@@ -429,7 +429,7 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(ch, from, to);
                     sub(dst, from, to);
                 }
-                // Wave 8b: renumber ch, value dst, and err_dst.
+                // renumber ch, value dst, and err_dst.
                 IRInstr::ChannelRecvResult {
                     ch, dst, err_dst, ..
                 } => {
@@ -438,12 +438,12 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(err_dst, from, to);
                 }
                 IRInstr::ChannelClose { ch } => sub(ch, from, to),
-                // Wave 93-94: renumber the proof-handle dst and public input.
+                // renumber the proof-handle dst and public input.
                 IRInstr::StarkProof { input, dst, .. } => {
                     sub(input, from, to);
                     sub(dst, from, to);
                 }
-                // Wave 49: renumber func_ptr + args of indirect call.
+                // renumber func_ptr + args of indirect call.
                 IRInstr::CallIndirect {
                     dst,
                     func_ptr,
@@ -607,7 +607,7 @@ pub fn scalar_replace_aggregates(
                             }
                         }
                     }
-                    // Defense-in-depth (Wave 3): the Alloc itself and the
+                    // Defense-in-depth: the Alloc itself and the
                     // matching Free/__vuma_free call are allowed (they don't
                     // create aliases). Any OTHER instruction that uses the
                     // alloc vreg — `Add`/`Sub`/`Cast`/`Select`/`Call`/
@@ -718,7 +718,7 @@ pub fn scalar_replace_aggregates(
 ///   `__vuma_alloc` Call, and remove the matching `Free` / `__vuma_free`
 ///   / `free` Call that takes `A` as its sole argument.
 ///
-/// **Soundness (Wave 3 fix):** The previous check only looked for direct
+/// **Soundness ( fix):** The previous check only looked for direct
 /// `Load`/`Store` with `addr == A`. This missed accesses through derived
 /// aliases (`A + i` computed via `Add`, then used as a `Store` addr),
 /// causing the allocation to be incorrectly elided while the aliasing
@@ -1299,9 +1299,9 @@ mod tests {
         );
     }
 
-    // ── Wave 3 regression tests: pointer-arithmetic aliasing ──────────
+    // ── regression tests: pointer-arithmetic aliasing ──────────
     //
-    // The root cause of the Wave 2 SIGSEGV regressions on mem_copy_buffer,
+    // The root cause of the SIGSEGV regressions on mem_copy_buffer,
     // doubly_linked_list, mf_address_return, etc. was that the previous
     // escape analysis only checked direct Load/Store with addr == alloc,
     // missing accesses through derived aliases (alloc + i computed via Add,

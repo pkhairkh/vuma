@@ -1,4 +1,4 @@
-//! Cross-function constant propagation tests (Wave 11 LTO).
+//! Cross-function constant propagation tests ( LTO).
 //!
 //! These tests prove that the LTO pass propagates constants from call sites
 //! into function bodies — a whole-program optimization that requires seeing

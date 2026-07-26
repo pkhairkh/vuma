@@ -371,7 +371,7 @@ impl SCGDiff {
     /// Includes summary statistics, affected functions, and a list of
     /// changes with human-readable descriptions.
     ///
-    /// Wave 43 serde-migration: previously used `serde_json::to_string_pretty(&llm_diff)`.
+    /// serde-migration: previously used `serde_json::to_string_pretty(&llm_diff)`.
     /// Now calls `LlmDiff::to_json_value(&self).to_string_pretty()` (hand-written
     /// serializer in `src/scg/src/llm_json.rs`). The on-disk JSON shape is
     /// byte-identical.
@@ -494,7 +494,7 @@ pub struct LlmDiffChange {
     pub description: String,
 }
 
-// ── Hand-written JSON serialization for LlmDiff (Wave 43 serde-migration) ─
+// ── Hand-written JSON serialization for LlmDiff ( serde-migration) ─
 
 impl LlmDiff {
     /// Serialize this diff DTO to a `JsonValue` (which can then be

@@ -1,4 +1,4 @@
-// linear_valid — Wave 95: linear-type checking (each variable used once).
+// linear_valid — linear-type checking (each variable used once).
 //
 // A linear variable is one that must be used exactly once — using it
 // twice is a linear-type violation (a "double-use"). This program is

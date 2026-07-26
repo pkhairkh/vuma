@@ -19,7 +19,7 @@
 //   uart_init_pl011(base)       — initialize the PL011 (hosted: no-op).
 //   uart_putc_pl011(base, c)    — send one byte (hosted: same as 8250).
 //
-// In bare-metal mode (Wave K11), the uart_putc_8250 / uart_putc_pl011
+// In bare-metal mode, the uart_putc_8250 / uart_putc_pl011
 // bodies will be replaced with the MMIO-trampoline path that's now only
 // in the comments: `while (mmio_read8(base + 5) & 32) == 0 { }` spin-wait
 // on LSR.TX-empty, then `mmio_write8(base + 0, c)` to the THR. The hosted
@@ -45,7 +45,7 @@
 // ── Layouts (Uart8250Regs + Pl011Regs) ─────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares every
 // layout it uses. The Uart8250Regs and Pl011Regs layouts are NEW (K6a
-// introduces them — they don't exist in any prior wave). They're declared
+// introduces them — they don't exist in any prior effort). They're declared
 // here for documentation + future use (K11's bare-metal uart_putc_8250
 // will pass `base as Address` cast to a Uart8250Regs pointer for direct
 // field access via `(*regs).lsr` style — but VUMA's PMT discipline forbids
@@ -54,7 +54,7 @@
 // + 5)` for LSR). The layouts are still useful as the canonical register
 // map for the driver and for K6's console layer (which may eventually
 // pass State<Uart8250Regs> for typed access if we add MMIO state-struct
-// wrappers in a later wave).
+// wrappers in a later effort).
 //
 //   Uart8250Regs (8 bytes total, all u8):
 //     data  @ 0  TX/RX buffer (DLAB=0) or divisor latch low (DLAB=1)
@@ -241,7 +241,7 @@ extern "C" {
     fn mmio_write32(addr: u64, val: u32);
 }
 
-// VUMA intrinsic MMIO stubs (Wave 7+). These are 3-byte runtime stubs
+// VUMA intrinsic MMIO stubs (+). These are 3-byte runtime stubs
 // registered in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
 //   __vuma_load_u32(addr)  -> u32  = `mov eax, [rdi]; ret`  (8B 07 C3)
 //   __vuma_store_u32(a, v)        = `mov [rdi], esi; ret`  (89 37 C3)

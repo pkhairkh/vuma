@@ -35,12 +35,12 @@ and `layouts` into a single total function `env : String → Layout` (the
 caller-side well-formedness hypothesis `hwf_env` ensures `WF_Layout (env var)`
 for every var). The type-matching check (6) is omitted from this Lean
 model — it is a pure syntactic check on `String`s that does not bear on
-memory safety; it will be added in Wave 18 if the simulation relation
+memory safety; it may be added later if the simulation relation
 requires it.
 
-This module is part of Wave 11 (subagent W11-C). The two theorems
-`verify_state_writes_sound` and `verify_state_writes_no_uaf` carry
-`sorry` placeholders that Waves 19–20 will close via `List.map_mem`
+This module defines the two theorems
+`verify_state_writes_sound` and `verify_state_writes_no_uaf`. They
+carry `sorry` placeholders that future work will close via `List.map_mem`
 reasoning and the `fieldInLayout_eq_mem` lemma.
 -/
 
@@ -52,7 +52,7 @@ Mirrors Rust `StateWriteOp { var_name, field_name, value_type, after_consume }`
   - `field_name : String` (Rust) is replaced by `f : Field` (Lean), which
     carries `(offset, size)` directly. The caller resolves the Rust
     field *name* to a `Field` via `Layout.fields.find?` before invoking
-    the Lean model — this is the W2-D "string-tagged" simplification.
+    the Lean model — this is the "string-tagged" simplification.
   - `value_type : String` (Rust) is dropped — see module doc.
   - `after_consume : bool` (Rust) is folded into the `consumed` list:
     a write with `after_consume = true` corresponds to `w.var ∈ consumed`.
@@ -76,7 +76,7 @@ structure StateWriteVerification where
 /-- Helper: is field `f` registered in layout `l`?
 Compares by `(offset, size)` since `PMT.Field` does not derive `BEq` /
 `DecidableEq` (see `PMT.Basic`). The corresponding propositional form is
-`f ∈ l.fields`; the lemma `fieldInLayout_eq_mem` (proven in Wave 19)
+`f ∈ l.fields`; the lemma `fieldInLayout_eq_mem`
 connects the two. -/
 def fieldInLayout (l : PMT.Layout) (f : PMT.Field) : Bool :=
   l.fields.any (fun g => g.offset == f.offset && g.size == f.size)

@@ -443,7 +443,7 @@
 // External runtime stub (PMT-pure memory read).
 // ────────────────────────────────────────────────────────────────────────────
 // __vuma_load_u32(addr: u64) -> u32 is a 3-byte runtime stub emitted by the
-// x86_64 codegen (src/codegen/src/x86_64/mod.rs, Wave 7) whose body is
+// x86_64 codegen (src/codegen/src/x86_64/mod.rs, ) whose body is
 // literally `mov eax, [rdi] ; ret` (8B 07 C3). It reads a 32-bit value
 // from any address without requiring pointer syntax in VUMA source — the
 // same PMT-purity category as the write/read/exit externs declared in
@@ -793,7 +793,7 @@ fn sys_futex(tbl: State<FutexTable>, uaddr: u64, op: u32, val: u32) -> i64 {
         //
         // The load is done via the __vuma_load_u32 runtime stub
         // (declared extern "C" above) — a 3-byte `mov eax,[rdi]; ret`
-        // trampoline emitted by the x86_64 codegen (Wave 7). This reads
+        // trampoline emitted by the x86_64 codegen. This reads
         // *uaddr without any pointer syntax in VUMA source, preserving
         // PMT purity (same category as the write/read/exit externs in
         // womb/kernel/kernel.vuma).

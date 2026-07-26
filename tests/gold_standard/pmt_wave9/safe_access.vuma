@@ -1,4 +1,4 @@
-// safe_access — PMT Wave 9: access elements 0..N with N known at compile time
+// safe_access — access elements 0..N with N known at compile time
 // Expected exit code: 100
 //
 // A `FixedBuf` layout with a fixed-size `data: [u32; 8]` array. All
@@ -7,7 +7,7 @@
 // obligation `offset + (count * elem_size) ≤ buffer_size` trivially holds
 // when `count` is a compile-time constant ≤ 8 (i.e. `0 + 4*4 ≤ 32`).
 //
-// Under the Wave 9 dependent-state-types model, this is the degenerate case
+// Under the dependent-state-types model, this is the degenerate case
 // where the runtime count happens to be statically known. The proof is
 // still by linear arithmetic — `verify_dependent_transform(elem_size=4,
 // count=4, offset=0, buffer_size=32)` returns `true`. The same machinery

@@ -1,9 +1,9 @@
-// layout_nested — PMT Wave 1a: nested layout (layout referencing another layout)
+// layout_nested — nested layout (layout referencing another layout)
 // Expected exit code: 0
 //
-// Wave 1a parse-only smoke test: declares `Point` first, then `Line` whose
+// Parse-only smoke test: declares `Point` first, then `Line` whose
 // fields are themselves `Point` layouts. Verifies the parser handles layout
-// names as field types (resolving to `Type::BDBase("Point")` for now; Wave 1c
+// names as field types (resolving to `Type::BDBase("Point")` for now;
 // will promote them to first-class layout-typed fields).
 //
 // VUMA Key Concepts:

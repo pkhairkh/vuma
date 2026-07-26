@@ -156,7 +156,7 @@
 // Task layout (with `regs: TrapFrame`) has the same latent bug, but
 // K4a's self-test uses parallel flat arrays (ProcessTable) instead of
 // nested Task fields, so the bug was never triggered. K7a is the first
-// wave to actually exercise nested-layout field writes — hence the
+// effort to actually exercise nested-layout field writes — hence the
 // discovery here.
 //
 // Verification: the IVE verifier PASSES on the Pipe layout (with or

@@ -99,15 +99,15 @@
 // foreground process group requires K4's task layer + K3's syscall layer +
 // a TTY foreground-process-group pointer (which doesn't exist yet). K6b's
 // stub is the line-discipline half of SIGINT: the byte 3 is consumed and
-// the in-progress line is discarded. A later wave (K7? K8?) will hook the
+// the in-progress line is discarded. A later effort (K7? K8?) will hook the
 // actual signal_raise() call after the flush. Same for Ctrl-D: K6b pushes
-// the 0 byte; a later wave will close the TTY's read side when readline
+// the 0 byte; a later effort will close the TTY's read side when readline
 // returns 0 from an empty buffer (true POSIX EOF semantics).
 //
 // ── Layouts (TtyLine + LineBuf) ─────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares every
 // layout it uses. The two layouts are NEW (K6b introduces them — they
-// don't exist in any prior wave):
+// don't exist in any prior effort):
 //
 //   TtyLine (272 bytes total — 272 is divisible by both 4 and 8, so no
 //   trailing padding is added):
@@ -171,7 +171,7 @@
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It declares only TtyLine + LineBuf (both
-// new in K6b — no prior wave's layouts need re-declaring here, since
+// new in K6b — no prior effort's layouts need re-declaring here, since
 // K6b's only I/O is via State<TtyLine> and State<LineBuf>, not via
 // external layouts). K6c (char device framework) will re-declare TtyLine
 // byte-identically when it wraps the TTY as /dev/ttyS0; K6d (serial
@@ -182,7 +182,7 @@
 // extern declarations. The line discipline is purely computational — it
 // doesn't touch hardware, doesn't call syscalls, doesn't do FFI. It's
 // the cleanest possible PMT-pure module: layouts + functions + self-test.
-// (A future wave that adds `tty_set_raw(tty, 1)` style ioctls would still
+// (A future effort that adds `tty_set_raw(tty, 1)` style ioctls would still
 // not need externs — the discipline is a pure state machine. The
 // integration with the UART driver happens at the CALLER: kmain wires
 // `uart_getc_8250(base) → tty_receive(tty, c)`, and the discipline
@@ -273,7 +273,7 @@ fn tty_receive(tty: State<TtyLine>, c: u8) {
     // Cooked (line) mode — handle control characters first.
     if c == 3 {
         // Ctrl-C (0x03): SIGINT — flush the entire buffer.
-        // K6b stub: just clear head/tail/count. A later wave will hook
+        // K6b stub: just clear head/tail/count. A later effort will hook
         // the actual signal_raise() to deliver SIGINT to the foreground
         // process group (requires K4's task layer + a TTY fg-pgrp pointer).
         tty.head = 0;

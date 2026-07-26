@@ -1,4 +1,4 @@
-// graceful_degradation — Wave 21: graceful degradation
+// graceful_degradation — graceful degradation
 // When a worker pool is exhausted, the system degrades gracefully.
 // This test verifies the wait_worker/supervisor_call path works for
 // multiple workers.

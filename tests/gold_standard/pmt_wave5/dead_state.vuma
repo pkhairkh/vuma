@@ -1,4 +1,4 @@
-// dead_state — PMT Wave 5: dead state elimination
+// dead_state — dead state elimination
 // Expected exit code: 0
 //
 // Allocates a Point state but never reads from it. The dead-state
@@ -11,7 +11,7 @@
 // Under the *current* optimizer (which feeds only BinOps to the
 // e-graph), the Alloc is still emitted — but the program's observable
 // behaviour is unchanged (exit 0), so this test passes either way.
-// The file serves as a forward-looking test case for the wave that
+// The file serves as a forward-looking test case for the effort that
 // wires state ops into `equality_saturation_with_cost`.
 //
 // VUMA Key Concepts:

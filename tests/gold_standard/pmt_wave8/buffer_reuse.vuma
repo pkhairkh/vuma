@@ -1,8 +1,8 @@
-// buffer_reuse — PMT Wave 8a: sequential states reuse buffer design
+// buffer_reuse — sequential states reuse buffer design
 // Expected exit code: 30
 //
 // Allocates state p, "consumes" it by passing it to a function that
-// reads p.x, then allocates state q. Under Wave 8a's "sum of all state
+// reads p.x, then allocates state q. Under the "sum of all state
 // sizes" buffer sizing, p and q get DIFFERENT offsets (p at 0, q at 16)
 // — there is no live-range-based reuse yet. The test verifies that the
 // single-buffer design correctly handles sequential state lifetimes:
@@ -11,7 +11,7 @@
 //
 // This is a forward-looking test for the future live-range-based buffer
 // reuse optimisation: when state p's live range ends (after consume(p)
-// returns), a future wave could assign q the SAME offset as p (slot 0)
+// returns), a future effort could assign q the SAME offset as p (slot 0)
 // instead of a fresh slot (16). The "sum" sizing would then shrink from
 // 32 bytes to 16 bytes. This test passes either way (the observable
 // behaviour is identical); it documents the intended reuse pattern.

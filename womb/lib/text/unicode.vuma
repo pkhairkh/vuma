@@ -44,7 +44,7 @@ const UTF8_U32_MAX: u32 = 4294967295;       // 0xFFFFFFFF
 // womb/lib/unicode.vuma — Unicode (UTF-8) String Utilities
 // No main() — importable library module.
 //
-// PMT migration (Wave 8c): the local `allocate(4)` scratch buffers
+// PMT migration: the local `allocate(4)` scratch buffers
 // (`pos_buf` for the byte-cursor, `enc_buf` for re-encoding scratch)
 // are replaced by typed `State<PosBuf>` (single `v: u32` field) and
 // `State<EncBuf>` (`data: [u8; 4]` array field). The `utf8_load_pos` /

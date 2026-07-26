@@ -1,7 +1,7 @@
 // ffi_wave0/borrow_attr — #[borrow] on an extern fn param (parse-only)
 // Expected exit code: 0
 //
-// Wave 1 test: #[borrow] is a valid FFI attribute on an extern fn parameter.
+// Test: #[borrow] is a valid FFI attribute on an extern fn parameter.
 // It declares that C will read (but not mutate) the argument and will not
 // hold the pointer after the call returns.
 

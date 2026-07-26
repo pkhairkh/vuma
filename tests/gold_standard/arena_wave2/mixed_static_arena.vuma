@@ -1,7 +1,7 @@
 // arena_wave2/mixed_static_arena — static + arena states coexist
 // Expected exit code: 0
 //
-// Wave 6 test: verify that static states (state_new) and arena states
+// Test: verify that static states (state_new) and arena states
 // (arena_alloc) can coexist in the same function. Static states use
 // ___pmt_buffer; arena states use mmap'd memory. Both use State<T>.
 

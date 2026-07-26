@@ -1,4 +1,4 @@
-// init_read — PMT Wave 2: state_new + field write + field read
+// init_read — state_new + field write + field read
 // Expected exit code: 42
 //
 // Initializes a State<Point>, writes 42 to p.x, then reads p.x back.

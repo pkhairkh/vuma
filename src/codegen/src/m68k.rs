@@ -2349,7 +2349,7 @@ fn emit_binop(
             );
         }
         BinOpKind::Mul => {
-            // [Wave B-m68k-muluw] I64 Mul on m68k using MULU.W (16×16→32).
+            // [m68k-muluw] I64 Mul on m68k using MULU.W (16×16→32).
             //
             // QEMU-m68k defaults to the m68000 CPU model, which does NOT support
             // the 68020+ MULU.L (32×32→64) instruction. The previous code used
@@ -4745,7 +4745,7 @@ impl Backend for M68kBackend {
             // NOTE: the previous bytes here were 0x5F 0xC4, which decode to
             // `SLE D4` (Scc with cc=LE into D4) — a no-op on SP that left the
             // pushed pgoff on the stack, so RTS would pop pgoff(0) as the
-            // return address and crash. Fixed in wave 6 to the real ADDQ.
+            // return address and crash. Fixed to the real ADDQ.
             code.extend_from_slice(&[0x58, 0x8F]); // ADDQ.L #4, A7 = 0x589F (bit8=0=ADDQ, sz=10=long)
                                                    // Restore D3-D5: three individual `MOVE.L (SP)+, Dn` (2 bytes each).
                                                    // Pop order is D3,D4,D5 to match the push order (D3 at [SP]).
@@ -4862,7 +4862,7 @@ impl Backend for M68kBackend {
                 ("recvfrom", 350),
                 ("clone", 120),
                 ("fork", 2),
-                // [wave 9 fix] epoll numbers corrected from kernel m68k syscall.tbl:
+                // [fix] epoll numbers corrected from kernel m68k syscall.tbl:
                 //   old (wrong): 449/424/425 (those are inotify_init1/pidfd_send_signal/io_uring_setup)
                 //   correct:      325/250/251
                 ("epoll_create1", 325),
@@ -5172,7 +5172,7 @@ impl Backend for M68kBackend {
         let mut syscall_stubs = syscall_stubs;
         syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
 
-        // ── mmap2 offset-in-pages stub (wave 6: mmap ABI normalization) ──
+        // ── mmap2 offset-in-pages stub (mmap ABI normalization) ──
         // mmap(addr, length, prot, flags, fd, offset) → void*  [m68k __NR_mmap2 = 192]
         //
         // m68k Linux syscall convention: syscall # in D0, args 1-5 in D1-D5,
@@ -5186,13 +5186,13 @@ impl Backend for M68kBackend {
         // the caller CANNOT pass a byte `offset` for mmap, so this stub
         // hardcodes pgoff = 0 — exactly matching `__vuma_alloc` above, which
         // also calls mmap2(..., offset=0). Both use the same offset-unit
-        // handling (mmap2, offset-in-pages, value 0), satisfying the wave-6
+        // handling (mmap2, offset-in-pages, value 0), satisfying the effort-6
         // "same offset-unit handling as __vuma_alloc" requirement.
         //
         // Limitation: only anonymous / zero-offset mappings are supported on
         // the m68k backend. File-backed mmap with a non-zero offset would
         // require extending the m68k Call lowering to push a 6th stack
-        // argument — out of scope for wave 6 (which is per-backend mmap ABI
+        // argument — out of scope (which is per-backend mmap ABI
         // normalization only). Callers needing file-backed mmap should target
         // a backend with a 6-arg calling convention (x86_64, ppc64, riscv32,
         // aarch64, ...). The test suite already avoids mmap on 32-bit

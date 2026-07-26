@@ -15,7 +15,7 @@ is the Lean mirror of IVE's `verify_state_reads` / `verify_state_writes`
 / `verify_transform` checks (see `PMT.IVE.Soundness.{Transform,
 StateReads,StateWrites}`).
 
-The simulation relation `pmt_instr_simulates_ir_instr` (proven in Wave 14)
+The simulation relation `pmt_instr_simulates_ir_instr`
 connects each `PmtInstr` variant to its Rust `IRInstr` counterpart. All
 theorems in this file close without `sorry`.
 
@@ -24,9 +24,6 @@ theorems in this file close without `sorry`.
 (which flattens `PmtInstr` to `Step`), and `PMT.WellTypedStrong`.
 
 **References.**
-  * `docs/verification-reports/W2-A-codegen-ir.md` — IR audit.
-  * `docs/verification-reports/W8-faithful-ir.md` — Wave 8 plan.
-  * `docs/verification-reports/W4-oob-design.md` — `PmtOp` migration note.
   * Rust source: `src/codegen/src/ir.rs` (3,481 lines, 32 IRInstr variants).
   * Related modules: `PMT.IRProgram`, `PMT.ExecFunction`,
     `PMT.WellTypedStrong`, `PMT.SimRel`.
@@ -60,11 +57,11 @@ inductive IRType where
   | struct : Layout → IRType       -- aggregate
   deriving Repr
 
-/-! **W9-A note.** The `PmtOp` inductive previously declared in this
-module (Wave 8, with 7 constructors including `load`/`store`/`free`/
-`call`) has been migrated to `PMT.Soundness` per the W4-C design
-(`docs/verification-reports/W4-oob-design.md`). The migrated `PmtOp`
-has the W4-C-specified 3-constructor shape (`alloc | field_access
+/-! **Note on `PmtOp` migration.** The `PmtOp` inductive previously declared in this
+module (with 7 constructors including `load`/`store`/`free`/
+`call`) has been migrated to `PMT.Soundness` per the
+design. The migrated `PmtOp`
+has the 3-constructor shape (`alloc | field_access
 Field | transform`), which is the minimal shape needed to make
 `TrapCode.oob` reachable in the Lean model. The IR-level operation
 tagging that the previous 7-constructor `PmtOp` supported is now
@@ -178,8 +175,8 @@ Mapping rationale (mirrors the IVE-from-IR traversal in W2-A §6):
       appears exactly once as `in_var` and once as `out_var` in this step
       — the filter counts each step once.)
   - `load in_var out _ _` → 1 step: `⟨in_var, out, ⟨1, []⟩⟩`
-      (reads `in_var`, produces `out`; size 1 is a placeholder — Wave 11
-      will use the IRType to compute the actual byte size.)
+      (reads `in_var`, produces `out`; size 1 is a placeholder — a future
+      refinement will use the IRType to compute the actual byte size.)
   - `store in_var _ _ _`  → 1 step: `⟨in_var, in_var, ⟨1, []⟩⟩`
       (writes through `in_var` without producing a new region.)
   - `free in_var`         → 1 step: `⟨in_var, in_var, ⟨1, []⟩⟩`
@@ -188,7 +185,7 @@ Mapping rationale (mirrors the IVE-from-IR traversal in W2-A §6):
       (consumes `in_var`, produces `out` with the given layout.)
   - `call _ args`         → `args.map (fun v => ⟨v, v, ⟨1, []⟩⟩)`
       (each argument variable becomes a self-loop step; placeholder
-      until Wave 11 models call semantics.)
+      until call semantics are modeled.)
   - `ret _`               → `[]`
       (return has no further memory effect in this straight-line model.)
 -/

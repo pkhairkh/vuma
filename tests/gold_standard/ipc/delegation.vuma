@@ -1,4 +1,4 @@
-// delegation — Wave 33-40: capability delegation.
+// delegation — capability delegation.
 //
 // Exercises the capability_grant builtin (mints a root token at compile
 // time) and the capability_delegate builtin (mints a delegated child

@@ -10,9 +10,9 @@ a program, then the program satisfies all PMT memory-safety invariants.
 
 This is the capstone theorem for IVE soundness. It ties together the
 three independent soundness results proven in
-`PMT.IVE.Soundness.StateReads` (W11-B/W14-B),
-`PMT.IVE.Soundness.StateWrites` (W11-A), and
-`PMT.IVE.Soundness.Transform` (W11-D) into a single guarantee:
+`PMT.IVE.Soundness.StateReads`,
+`PMT.IVE.Soundness.StateWrites`, and
+`PMT.IVE.Soundness.Transform` into a single guarantee:
 
   **If the program is `FullyVerified`, then**
     (1) every read accesses a registered, in-bounds field, and
@@ -22,9 +22,9 @@ three independent soundness results proven in
 
 The corollary `fully_verified_no_memory_safety_traps` distills the
 memory-safety-critical conjuncts (no `.oob`, no `.uaf`) for downstream
-consumers (Wave 18 simulation relation, Wave 27 extraction).
+consumers (the simulation relation and extraction).
 
-This module was added in Wave 17 (subagent W17-B). It is `sorry`-free.
+This module is `sorry`-free.
 -/
 
 namespace PMT.IVE.Soundness
@@ -109,7 +109,7 @@ This distils the three memory-safety-critical conjuncts out of
   (3) No write traps with `.oob` — write byte ranges always fit.
 
 Together, these are the "no memory-safety traps" guarantee that the
-PMT-simulation layer (Wave 18) and the extraction (Wave 27) consume. -/
+PMT-simulation layer and the extraction consume. -/
 theorem fully_verified_no_memory_safety_traps
     (env : String → PMT.Layout)
     (consumed : List String)

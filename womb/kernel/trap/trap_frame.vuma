@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/trap/trap_frame.vuma
-// VWK Canonical Superset TrapFrame (Wave R2a).
+// VWK Canonical Superset TrapFrame.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file defines the **canonical superset** TrapFrame layout — the single
@@ -334,7 +334,7 @@ fn tf_init(tf: State<TrapFrame>) {
 //      fill invariant (tf_init no longer explicitly zeros the gpr array,
 //      but state_new(TrapFrame) zero-fills the entire 576-byte buffer
 //      before tf_init is called, so gpr[0] is still 0). This check is
-//      the regression guard for the Fix 7 change: if a future wave breaks
+//      the regression guard for the Fix 7 change: if a future effort breaks
 //      state_new's zero-fill, this check will catch it.
 //   4. tf_set_gpr(tf, 0, 42) then tf_get_gpr(tf, 0) == 42 — round-trip
 //      through the lowest GPR slot (byte offset 0..7). Verifies the 8-byte

@@ -1,4 +1,4 @@
-// ffi_basic — Wave 25-32: FFI process isolation via process_call.
+// ffi_basic — FFI process isolation via process_call.
 //
 // The process_call(fn_name, arg) builtin marshals a foreign-function call
 // across a process boundary via a channel: it sends `arg` as a framed L1

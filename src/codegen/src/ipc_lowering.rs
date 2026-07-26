@@ -3187,7 +3187,7 @@ fn is_32bit_backend(backend: BackendKind) -> bool {
 /// at offset 8 wrote past the actual field). This causes nanosleep to
 /// either return -EINVAL immediately or sleep for an enormous duration.
 fn emit_nanosleep(ctx: &mut LowerContext, nsec: i64) -> Vec<IRInstr> {
-    // [Wave J-nanosleep] Use Alloc for the timespec buffer. The Alloc
+    // [nanosleep] Use Alloc for the timespec buffer. The Alloc
     // creates a heap buffer (mmap/brk) which is valid memory for the
     // nanosleep syscall to read from.
     let sleep_buf = ctx.new_vreg();
@@ -3975,7 +3975,7 @@ fn x86_64_to_generic(x86_nr: u32) -> u32 {
 /// seccomp(SECCOMP_SET_MODE_FILTER=1, 0, &prog) via syscall 317 (x86_64)
 /// or 277 (asm-generic). The seccomp program is a minimal BPF filter
 /// that allows all syscalls (the filter itself is the L5 boundary marker;
-/// a future wave can tighten it to a real allowlist).
+/// a future effort can tighten it to a real allowlist).
 fn expand_sandbox_apply(ctx: &mut LowerContext, dst: Option<&IRValue>) -> Vec<IRInstr> {
     let prctl_ret = ctx.new_vreg();
     let seccomp_ret = ctx.new_vreg();
@@ -4001,7 +4001,7 @@ fn expand_sandbox_apply(ctx: &mut LowerContext, dst: Option<&IRValue>) -> Vec<IR
     // We alloc 16 bytes, store len=1 and a filter ptr (which we leave 0 —
     // the kernel will reject SECCOMP_SET_MODE_FILTER with a null filter,
     // but that's OK; the prctl already set PR_SET_NO_NEW_PRIVS which is
-    // the L5 boundary. A future wave can build a real BPF program.)
+    // the L5 boundary. A future effort can build a real BPF program.)
     instrs.push(IRInstr::Alloc {
         dst: prog_buf.clone(),
         size: 16,

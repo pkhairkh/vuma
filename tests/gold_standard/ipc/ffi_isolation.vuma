@@ -1,4 +1,4 @@
-// ffi_isolation — Wave 25-32: FFI process isolation (extern "process" ABI)
+// ffi_isolation — FFI process isolation (extern "process" ABI)
 //
 // Exercises the process_call builtin, which marshals a cross-process function
 // call via a channel (send arg, recv result).  This is the runtime that backs

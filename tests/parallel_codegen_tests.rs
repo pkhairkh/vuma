@@ -1,4 +1,4 @@
-//! Parallel codegen tests (Wave 9).
+//! Parallel codegen tests.
 //!
 //! These tests prove that parallel register allocation (via rayon) produces
 //! identical results to sequential allocation. The parallel path runs in

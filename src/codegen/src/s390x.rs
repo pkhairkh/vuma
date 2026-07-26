@@ -1299,9 +1299,9 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
 /// for the instruction encoding, but records the physical register assignments
 /// in the AllocatedFunction's reads/writes fields.
 ///
-/// This is a hybrid approach (Wave 23): the instruction encoding still uses
+/// This is a hybrid approach: the instruction encoding still uses
 /// stack slots (for safety), but the allocation metadata records which vregs
-/// COULD be in real registers. A future wave will use this metadata to emit
+/// COULD be in real registers. A future effort will use this metadata to emit
 /// register-based instructions directly.
 fn s390x_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     // Run the existing stack-slot allocator to get a working AllocatedFunction.
@@ -2207,10 +2207,10 @@ fn emit_instr(
                 code.extend(ss_st(Gpr::R2, dst_off));
             }
         }
-        // ── VectorOp (Wave 29) ──
-        // s390x has no SIMD encoder in the Wave 29 suite; emit nothing.
+        // ── VectorOp ──
+        // s390x has no SIMD encoder in the suite; emit nothing.
         IRInstr::VectorOp { .. } => {}
-        // ── CallIndirect (Wave 49) ──
+        // ── CallIndirect ──
         // Indirect call through a function pointer vreg.
         // 1. Load args into R2-R6 (5 register args); stack args at R15+160
         // 2. Load func_ptr into R1 (s390x convention for indirect call target)
@@ -2242,12 +2242,12 @@ fn emit_instr(
                 code.extend(ss_st(S0, d_off));
             }
         }
-        // ── Channel operations (Wave 1d / Task 2a) ──
+        // ── Channel operations (ask 2a) ──
         // Backend lowering not yet implemented; emit nothing (no frontend
         // generates channel IR yet).  Will be lowered to runtime calls.
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-        // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+        // StarkProof — stub (Call-form builtin is the active path).
         | IRInstr::StarkProof { .. } => {}
     }
 }
@@ -2915,7 +2915,7 @@ fn emit_s390x_fp_binop(
 /// s390x (IBM System Z) code generation backend.
 pub struct S390XBackend {
     target_info: S390XTargetInfo,
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 
@@ -3212,7 +3212,7 @@ impl Backend for S390XBackend {
                 ("lstat", 107),
                 ("fstat", 108),
                 ("getcwd", 183),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (s390 unistd.h) ──
+                // ── POSIX file-metadata & I/O syscalls (s390 unistd.h) ──
                 // s390x has 5 reg args (R2-R6); all these take ≤5 args → simple_stub.
                 // chown=212/fchown=207 are the modern 32-bit-uid variants
                 // (s390's old 16-bit chown slot was repurposed; 212 is sys_chown).
@@ -3249,7 +3249,7 @@ impl Backend for S390XBackend {
                 ("pwritev", 329),
                 ("fchdir", 133),
                 ("chroot", 61),
-                // ── Wave 9: POSIX system & advanced syscalls (s390 unistd.h) ──
+                // ── POSIX system & advanced syscalls (s390 unistd.h) ──
                 // s390x has 5 reg args (R2-R6); all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(323), signalfd→signalfd4(322) = modern variants.
                 ("mlock", 150),
@@ -3274,7 +3274,7 @@ impl Backend for S390XBackend {
                 ("inotify_add_watch", 285),
                 ("inotify_rm_watch", 286),
                 ("ptrace", 26),
-                // ── Wave 8: POSIX process & identity syscalls (s390x syscall.tbl) ──
+                // ── POSIX process & identity syscalls (s390x syscall.tbl) ──
                 // s390x uid syscalls are at 199-214 (already 32-bit, no *32 suffix).
                 // All take ≤5 args; s390x has 5 reg args (r2-r6) → simple_stub for all.
                 // Family 1: identity
@@ -3317,7 +3317,7 @@ impl Backend for S390XBackend {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: REAL mmap via old_mmap (s390x syscall 90).
             // s390x syscall 90 is old_mmap (struct pointer). The stub builds a
             // mmap_arg_struct on the stack with:

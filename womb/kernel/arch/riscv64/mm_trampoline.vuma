@@ -14,7 +14,7 @@
 // In hosted mode (this file compiles on x86_64 — the declarations are
 // pure type + extern, no arch-specific code), those four names resolve
 // to `__ffi_fallback_stub` (xor eax, eax; ret — returns 0, no-op for
-// void functions) at link time. In bare-metal mode (Wave K11), the
+// void functions) at link time. In bare-metal mode, the
 // same four names link against REAL asm stubs registered by the
 // riscv64 backend (src/codegen/src/riscv64.rs — or wherever the
 // riscv64 backend's build_runtime_syscall_stubs equivalent lives):

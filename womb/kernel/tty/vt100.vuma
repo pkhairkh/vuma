@@ -149,7 +149,7 @@
 //
 // ── Layout (Vt100State) ─────────────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file declares its own layout.
-// Vt100State is NEW in K6c (no prior wave uses it). The layout (W23S2 added
+// Vt100State is NEW in K6c (no prior effort uses it). The layout (W23S2 added
 // the glyphs buffer after `save_col`; W23S1 added bold/underline/reverse +
 // save_row/save_col after `cols`):
 //

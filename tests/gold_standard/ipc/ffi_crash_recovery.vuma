@@ -1,4 +1,4 @@
-// ffi_crash_recovery — Wave 27: FFI crash recovery
+// ffi_crash_recovery — FFI crash recovery
 // The child (FFI server) exits without sending a reply. The parent
 // detects this via wait_worker (child exit code != 0) and recovers.
 // Expected exit code: 1

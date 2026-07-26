@@ -29,13 +29,13 @@ pub struct TargetDesc {
     pub calling_convention: CallingConventionDesc,
     /// Instruction category metadata.
     pub instruction_categories: Vec<InstCategoryDesc>,
-    /// Instruction latency table for the scheduler (Wave 5).
+    /// Instruction latency table for the scheduler.
     /// Maps instruction category → (latency_cycles, throughput_per_cycle).
     /// If empty, the scheduler assumes uniform latency 1.
     pub latency_table: LatencyTable,
 }
 
-/// Latency table for instruction scheduling (Wave 5).
+/// Latency table for instruction scheduling.
 ///
 /// Models pipeline hazards for list-scheduling. Each entry maps an
 /// instruction category to its latency (cycles until result is available)
@@ -1177,13 +1177,13 @@ impl RegDesc {
 }
 
 // ---------------------------------------------------------------------------
-// RegisterClass (Wave 24)
+// RegisterClass
 // ---------------------------------------------------------------------------
 
 /// A summary view of one register class on a target, extracted from a
 /// [`TargetDesc`].
 ///
-/// (Wave 24) The target-agnostic register allocator
+/// The target-agnostic register allocator
 /// ([`crate::regalloc::TargetAgnosticRegAlloc`]) needs a per-class view of
 /// the register file that exposes:
 /// - which registers are allocatable,
@@ -1238,7 +1238,7 @@ impl TargetDesc {
     /// in this target's register file (one entry per distinct `RegClass`
     /// value actually used by some `RegDesc`).
     ///
-    /// (Wave 24) The summaries are computed by scanning
+    /// The summaries are computed by scanning
     /// `self.registers` and grouping by `RegDesc::class`.  The `move_cost`
     /// for each class is taken from [`TargetDesc::move_cost`].
     pub fn register_classes(&self) -> Vec<RegisterClass> {
@@ -1283,7 +1283,7 @@ impl TargetDesc {
 
     /// Returns the allocatable register descriptors for a given class.
     ///
-    /// (Wave 24) Convenience accessor used by the target-agnostic
+    /// Convenience accessor used by the target-agnostic
     /// allocator's pool-construction code.
     pub fn allocatable_regs(&self, class: RegClass) -> Vec<&RegDesc> {
         self.registers
@@ -1295,7 +1295,7 @@ impl TargetDesc {
     /// Returns the move cost (in arbitrary "latency units") for a
     /// register-to-register move within the given class on this target.
     ///
-    /// (Wave 24) Defaults are conservative and ISA-agnostic:
+    /// Defaults are conservative and ISA-agnostic:
     /// - `Gpr` → 1 (single-cycle `mov` / `orr` on all modeled ISAs)
     /// - `SimdFp` → 1 (single-cycle `vmov` / `movaps` / `fmv`)
     /// - `Condition` → 2 (CR-field ops on PPC are 2-cycle)
@@ -2854,10 +2854,10 @@ mod tests {
     }
 
     // ====================================================================
-    // Wave 24 tests — RegisterClass + TargetDesc modeling
+    //  tests — RegisterClass + TargetDesc modeling
     // ====================================================================
 
-    /// (Wave 24, sub-task 3) `TargetDesc::register_classes()` returns a
+    /// (, sub-task 3) `TargetDesc::register_classes()` returns a
     /// `RegisterClass` summary for each class present in the target's
     /// register file.  Verify the counts and metadata for x86_64.
     #[test]
@@ -2919,7 +2919,7 @@ mod tests {
         assert_eq!(fpr.move_cost, 1);
     }
 
-    /// (Wave 24, sub-task 3) `TargetDesc::allocatable_regs(class)` filters
+    /// (, sub-task 3) `TargetDesc::allocatable_regs(class)` filters
     /// the register file to allocatable regs of the given class.
     #[test]
     fn wave24_allocatable_regs_filter() {
@@ -2948,7 +2948,7 @@ mod tests {
         assert!(x86.allocatable_regs(RegClass::Special).is_empty());
     }
 
-    /// (Wave 24, sub-task 3) `TargetDesc::move_cost(class)` returns sane
+    /// (, sub-task 3) `TargetDesc::move_cost(class)` returns sane
     /// per-class move costs.  Verify the defaults and that they're
     /// consistent with what `register_classes()` reports.
     #[test]
@@ -2974,7 +2974,7 @@ mod tests {
         }
     }
 
-    /// (Wave 24, sub-task 3) Every ISA in the registry should produce a
+    /// (, sub-task 3) Every ISA in the registry should produce a
     /// non-empty `register_classes()` list, and the counts should be
     /// self-consistent (allocatable == caller + callee; total >= allocatable).
     #[test]

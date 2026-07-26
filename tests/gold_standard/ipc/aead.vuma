@@ -1,4 +1,4 @@
-// aead — Wave D (L8): verify the AEAD seal/open round-trip using the
+// aead — (L8): verify the AEAD seal/open round-trip using the
 // library's REAL wire format:  nonce(8B) | ciphertext(N bytes) | tag(4B).
 //
 // The parent allocates a 64-byte shared-memory buffer, writes a known

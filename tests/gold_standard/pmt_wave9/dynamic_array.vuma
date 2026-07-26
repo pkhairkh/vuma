@@ -1,9 +1,9 @@
-// dynamic_array — PMT Wave 9: dynamic array pattern using State
+// dynamic_array — dynamic array pattern using State
 // Expected exit code: 60
 //
 // A `DynArr` layout with a `count` field (runtime count) and a fixed-size
 // `data: [u32; 8]` buffer (32 bytes). The "logical" array length is the
-// runtime `count` value (≤ 8). Under the Wave 9 dependent-state-types
+// runtime `count` value (≤ 8). Under the dependent-state-types
 // model, this would be typed `State<List<N>>` where N is a runtime count;
 // the State Transform verifier proves `offset + (count * elem_size) ≤
 // buffer_size` using linear arithmetic (Presburger — decidable).

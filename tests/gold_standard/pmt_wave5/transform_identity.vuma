@@ -1,4 +1,4 @@
-// transform_identity — PMT Wave 5: identity transform elision
+// transform_identity — identity transform elision
 // Expected exit code: 7
 //
 // The `state_transform_elision` rewrite rule targets
@@ -20,7 +20,7 @@
 // Under the *current* optimizer (which feeds only BinOps to the
 // e-graph), the call is emitted as-is — but the program's observable
 // behaviour is unchanged (exit 7), so this test passes either way.
-// The file serves as a forward-looking test case for the wave that
+// The file serves as a forward-looking test case for the effort that
 // wires state ops into `equality_saturation_with_cost`.
 //
 // VUMA Key Concepts:

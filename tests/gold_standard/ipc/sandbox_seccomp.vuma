@@ -1,4 +1,4 @@
-// sandbox_seccomp — Wave 17c extended: verify BPF filter is installed.
+// sandbox_seccomp — extended: verify BPF filter is installed.
 //
 // The child calls sandbox_seccomp() which installs a seccomp BPF filter
 // allowing only read(0), write(1), exit(60), exit_group(231). After

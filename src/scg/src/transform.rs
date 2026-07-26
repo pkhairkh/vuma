@@ -149,7 +149,7 @@ impl DeadCodeElimination {
                 | NodeType::Allocation
                 | NodeType::Deallocation
                 | NodeType::Phantom
-                // (Wave 3-E) Channel operations are side-effecting
+                // (-E) Channel operations are side-effecting
                 // (kernel fd lifecycle: open/send/recv/close).  Even
                 // `channel_send` / `channel_close` — which produce no
                 // value and therefore have no outgoing `DataFlow`
@@ -550,7 +550,7 @@ impl InliningPass {
     /// Collects all nodes in the function body reachable from a
     /// `FunctionEntry` node.
     ///
-    /// (Wave 3-E) Only follows `ControlFlow` edges — NOT `DataFlow` /
+    /// (-E) Only follows `ControlFlow` edges — NOT `DataFlow` /
     /// `Derivation` — so that the "body" is bounded by the function's
     /// own control-flow region (FunctionEntry → … → FunctionReturn).
     /// Previously this followed every edge kind, which meant any
@@ -662,7 +662,7 @@ impl SCGPass for InliningPass {
 
         // Find all FunctionEntry call sites.
         //
-        // (Wave 3-E) Only collect CALL-SITE entries (label starts with
+        // (-E) Only collect CALL-SITE entries (label starts with
         // "call_"), NOT function-definition entries (label like
         // "fn_<name>_entry(...)").  Previously this matched EVERY
         // FunctionEntry, including the function-definition entry for
@@ -4048,11 +4048,11 @@ mod tests {
         assert_eq!(removed.len(), 2); // alloc + dealloc
     }
 
-    // ── Wave 33: PassManager-wired SCGPass trait tests ────────────────
+    // ── PassManager-wired SCGPass trait tests ────────────────
     //
     // The tests above exercise the standalone helper functions
     // (`strength_reduce`, `detect_tail_calls`, `dead_region_elim`).
-    // Wave 33 wires the `SCGPass`-implementing structs
+    //  wires the `SCGPass`-implementing structs
     // (`StrengthReduction`, `TailCallOptDetection`,
     // `DeadRegionElimination`) into `PassManager` at O1+/O2+, so we
     // add three tests that invoke `SCGPass::run` directly to verify
@@ -4210,7 +4210,7 @@ mod tests {
     }
 
     /// Sanity test: a PassManager configured like the O2 pipeline
-    /// actually invokes all three Wave-33 passes.  We construct a
+    /// actually invokes all three passes. We construct a
     /// tiny SCG that each pass can act on and verify the pipeline runs
     /// without error and reports at least one change.
     #[test]
@@ -4304,7 +4304,7 @@ mod tests {
         pm.add_pass(DeadRegionElimination::new());
 
         let result = pm.run(&mut scg);
-        // At least one of the three Wave-33 passes should have fired.
+        // At least one of the three passes should have fired.
         let wave33_changed = result.pass_results.iter().any(|r| {
             matches!(
                 r.pass_name.as_str(),

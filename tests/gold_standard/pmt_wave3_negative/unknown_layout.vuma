@@ -1,4 +1,4 @@
-// unknown_layout — PMT Wave 3 negative: transform referencing an undeclared layout
+// unknown_layout — PMT negative: transform referencing an undeclared layout
 // Expected: IVE rejects at verification (VerificationLevel::Pmt).
 //
 // Pattern:

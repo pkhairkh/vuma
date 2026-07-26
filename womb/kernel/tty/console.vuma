@@ -148,7 +148,7 @@
 //
 // The K6e self-test exercises path (1) explicitly (putc 10 → flush). It
 // does NOT exercise path (2) — the self-test only puts 6 bytes max per
-// flush cycle, well below the 255 threshold. A future wave that adds a
+// flush cycle, well below the 255 threshold. A future effort that adds a
 // printf-style formatter (K6f? K7?) would naturally exercise path (2) by
 // formatting a >255-byte string.
 //
@@ -221,7 +221,7 @@
 // This file is self-contained. It re-declares Console (new — different
 // field order from the K1 stub) + ConsoleStr (new — replaces K1's String
 // layout, drops the `len` field). K6e's only I/O is via State<Console> /
-// State<ConsoleStr> + the `write` / `read` externs; no prior wave's
+// State<ConsoleStr> + the `write` / `read` externs; no prior effort's
 // layouts need re-declaring here. K7+ (which wires tty + vt100 into the
 // Console layout as `tty: State<TtyLine>` / `vt: State<Vt100State>`
 // fields) will re-declare those layouts byte-identically when it extends
@@ -407,7 +407,7 @@ fn console_puts(c: State<Console>, s: State<ConsoleStr>) {
 // flush the buffer is reset to length 0 so subsequent putc calls start
 // fresh — same K1 stub behavior.
 //
-// Return value of `write` is currently ignored — a later wave may add
+// Return value of `write` is currently ignored — a later effort may add
 // error reporting (e.g. retry on EINTR, panic on EBADF).
 fn console_flush(c: State<Console>) {
     if c.len > 0 {
@@ -474,9 +474,9 @@ fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
 //   4 = blue, 5 = magenta, 6 = cyan, 7 = white.
 //
 // PMT discipline:
-//   - The fixed sequences (ESC[1m, ESC[0m) use Wave 1 string literals —
+//   - The fixed sequences (ESC[1m, ESC[0m) use string literals —
 //     `write(1, "\x1b[1m", 4)` — the lexer's `\x1b` hex escape produces
-//     the ESC byte (27), and Wave 1's .rodata lowering turns the literal
+//     the ESC byte (27), and the .rodata lowering turns the literal
 //     into a compile-time address (see docs/language-reference.md §17.2 +
 //     the pipeline.rs Lit::String → ScgExpr::Int(addr) bridge). Same PMT
 //     "Borrowed read" pattern as trap.vuma's `write(1, "*** KERNEL PANIC
@@ -515,7 +515,7 @@ fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
 // magenta/cyan/white). Emits ESC[<color+30>m (5 bytes: ESC '[' tens ones 'm').
 //
 // The byte-by-byte build (rather than a string literal) is required because
-// the SGR code is dynamic — Wave 1 string literals lower to compile-time
+// the SGR code is dynamic — string literals lower to compile-time
 // .rodata addresses, so the color byte must be computed at runtime and
 // stored into a State<ConsoleStr> slot via `buf.data[i] = <byte>`. The
 // `let addr = buf as Address; write(1, addr, 5);` pattern is the same
@@ -548,7 +548,7 @@ fn console_set_bg(con: State<Console>, color: u8) {
     write(1, addr, 5);
 }
 
-// Enable the bold SGR attribute. Emits ESC[1m (4 bytes). Uses a Wave 1
+// Enable the bold SGR attribute. Emits ESC[1m (4 bytes). Uses a
 // string literal — the `\x1b` hex escape produces ESC (byte 27), and Wave
 // 1's .rodata lowering turns the literal into a compile-time address
 // handed to `write` as `buf: Address`. Same PMT "Borrowed read" pattern
@@ -559,7 +559,7 @@ fn console_set_bold(con: State<Console>) {
 }
 
 // Reset all SGR attributes (foreground, background, bold) to defaults.
-// Emits ESC[0m (4 bytes). Same Wave 1 string-literal pattern as
+// Emits ESC[0m (4 bytes). Same string-literal pattern as
 // console_set_bold. A console_set_* call without a matching reset before
 // the next flush would leave the terminal in the colored/bold state —
 // callers should pair set/reset around the colored span (or call this at
@@ -590,7 +590,7 @@ fn console_reset_color(con: State<Console>) {
 //       Verifies: console_set_fg / console_set_bg / console_set_bold /
 //       console_reset_color compile, link, and execute without faulting;
 //       the byte-by-byte buffer build (state_new + buf.data[i] = … +
-//       buf as Address + write) and the Wave 1 string-literal `write(1,
+//       buf as Address + write) and the string-literal `write(1,
 //       "\x1b[1m", 4)` pattern both lower correctly.
 //
 // All assertions return distinct non-zero codes (1, 2, 3, 4) so a failure

@@ -1,4 +1,4 @@
-//! # Register-Allocation-Aware Emit Helpers (Wave 22)
+//! # Register-Allocation-Aware Emit Helpers
 //!
 //! Shared infrastructure for the `emit_function_regalloc` method on each
 //! tier-1 backend.  This module provides:
@@ -27,7 +27,7 @@
 //!
 //! The encoded bytes remain correct (they use the stack-slot path), but the
 //! `reads`/`writes` metadata now reflects the real register allocation.
-//! A future wave can use this metadata to generate optimized code that keeps
+//! A future effort can use this metadata to generate optimized code that keeps
 //! values in registers instead of spilling to stack.
 
 use crate::backend::{AllocatedFunction, AllocatedInstruction, PhysicalReg};
@@ -133,7 +133,7 @@ fn annotate_instruction(instr: &mut AllocatedInstruction, alloc: &RegAllocResult
     // mapping between IR instructions and AllocatedInstructions which
     // the stack-slot ISel does not currently provide.
     //
-    // For Wave 22, we add the callee-saved registers that the regalloc
+    // For , we add the callee-saved registers that the regalloc
     // marked as used — these MUST be saved/restored in the prologue/epilogue.
     for &preg in &alloc.used_callee_saved {
         // Callee-saved registers are both read and written (save/restore).

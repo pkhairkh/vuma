@@ -1,4 +1,4 @@
-// shared_memory_rw — Wave 16a: shared memory read+write roundtrip
+// shared_memory_rw — shared memory read+write roundtrip
 //
 // Distinct from shared_memory.vuma (which tests parent-write-child-read),
 // this test exercises BOTH shared_memory_write AND shared_memory_read on

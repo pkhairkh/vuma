@@ -1,4 +1,4 @@
-// pmt_swap.vuma — PMT Wave 7: swap two fields in a state
+// pmt_swap.vuma — swap two fields in a state
 // Expected exit code: 1
 //
 // PMT migration of concurrency/conc_swap.vuma: instead of two

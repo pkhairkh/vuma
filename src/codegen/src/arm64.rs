@@ -1222,7 +1222,7 @@ pub enum Instruction {
     /// No-operation: `NOP`
     NOP,
 
-    // ---- NEON SIMD (Wave 29 ISel wiring) ----
+    // ---- NEON SIMD ( ISel wiring) ----
     /// Raw 32-bit NEON instruction word, pre-encoded by `encode_neon_*`.
     ///
     /// Used by `select_from_ir` when lowering `IRInstr::VectorOp` — the
@@ -1765,7 +1765,7 @@ impl Instruction {
                 // BLR Xn: 1101 0110 0011 1111 0000 00nn nnn0 0000
                 // Base = 0xD63F0000 (low 5 bits MUST be 0 — bit 0 set is UNDEF).
                 // The previous 0xD63F0001 encoding caused SIGILL on aarch64
-                // whenever CallIndirect (Wave 49 driver_isolation) emitted BLR.
+                // whenever CallIndirect ( driver_isolation) emitted BLR.
                 Ok(0xD63F0000u32 | (rn.encoding() << 5))
             }
 
@@ -2179,7 +2179,7 @@ impl Instruction {
             // NOP: 1 1 0 1 0 1 0 1 0 0 0 0 0 0 1 1 0 0 1 0 0 0 0 0 1 1 1 0 0 0 0 0
             Instruction::NOP => Ok(0xD503201F),
 
-            // ---- NEON_RAW (Wave 29) ----
+            // ---- NEON_RAW ----
             // Pre-encoded NEON instruction word — pass through unchanged.
             Instruction::NEON_RAW { enc, mnemonic: _ } => Ok(*enc),
         }
@@ -3429,7 +3429,7 @@ impl std::fmt::Display for Operand {
 }
 
 // ---------------------------------------------------------------------------
-// NEON SIMD Encoders (Wave 29)
+// NEON SIMD Encoders
 // ---------------------------------------------------------------------------
 //
 // Free-standing encoders for Advanced SIMD (NEON) instructions used by the
@@ -4753,7 +4753,7 @@ impl InstructionSelector {
             IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
                 // Atomic operations handled by the emitter's emit_ir_instr.
             }
-            // ── Syscall (Wave 11) ──────────────────────────────────────────
+            // ── Syscall ──────────────────────────────────────────
             // dst = syscall(nr, args…) — raw Linux syscall.
             // AArch64 ABI: args in X0-X5, nr in X8, SVC #0, result in X0.
             // Move args high→low to avoid clobbering, then MOVZ X8 + SVC.
@@ -4789,12 +4789,12 @@ impl InstructionSelector {
                 }
             }
 
-            // ── VectorOp (Wave 29) ───────────────────────────────────────
+            // ── VectorOp ───────────────────────────────────────
             // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
             // We invoke the existing NEON encoder helpers with fixed V0/V1/V2
             // (indices 0/1/2) and push a single `NEON_RAW` instruction.
             //
-            // Selection rules (matching the Wave 29 NEON encoder suite —
+            // Selection rules (matching the NEON encoder suite —
             // all 4S = 4×i32, the only width the encoders currently cover):
             //   - Add → `add v0.4s, v1.4s, v2.4s`  (0x4E208400 base)
             //   - Sub → `sub v0.4s, v1.4s, v2.4s`  (0x6E208400 base)
@@ -4817,12 +4817,12 @@ impl InstructionSelector {
                 };
                 self.push(Instruction::NEON_RAW { enc, mnemonic });
             }
-            // ── Channel operations (Wave 1d / Task 2a) ──
+            // ── Channel operations (ask 2a) ──
             // Backend lowering not yet implemented; emit nothing (no frontend
             // generates channel IR yet).  Will be lowered to runtime calls.
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
             | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::CallIndirect { .. } | IRInstr::ChannelClose { .. }
-            // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+            // StarkProof — stub (Call-form builtin is the active path).
             | IRInstr::StarkProof { .. } => {}
         }
         Ok(())
@@ -6403,7 +6403,7 @@ mod tests {
         assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 5) | 0);
     }
 
-    // ── NEON SIMD Encoder Tests (Wave 29) ──────────────────────────────
+    // ── NEON SIMD Encoder Tests ──────────────────────────────
 
     #[test]
     fn test_neon_add_v0_v1_v2() {

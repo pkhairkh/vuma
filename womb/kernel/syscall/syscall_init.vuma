@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/syscall/syscall_init.vuma
 // VWK Syscall Init — register all syscall handlers at Linux asm-generic
-// numbers (PMT-pure, Wave 5 FnAddr).
+// numbers (PMT-pure, FnAddr).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the syscall-table bootstrap. K11's kmain calls
@@ -13,8 +13,8 @@
 // (sibling dispatch.vuma) can route user-space syscall traps to the
 // registered handlers via __call_indirect1.
 //
-// ── Why this file exists (Wave 39) ──────────────────────────────────────────
-// Wave 5 closed the indirect-call gap by adding the __call_indirect1
+// ── Why this file exists ──────────────────────────────────────────
+//  closed the indirect-call gap by adding the __call_indirect1
 // runtime stub (src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs
 // — `mov rax, rdi; mov rdi, rsi; jmp rax`) AND the GetAddress IR
 // instruction (src/codegen/src/ir.rs::IRInstr::GetAddress), so VUMA
@@ -24,7 +24,7 @@
 // handler address (8192) — no file actually populated the SyscallTable
 // with REAL handler addresses.
 //
-// Wave 39 closes that loop. This file:
+//  closes that loop. This file:
 //   1. Re-declares the SyscallTable layout byte-identically to
 //      table.vuma (VUMA has no `import`).
 //   2. Re-declares syscall_table_get / syscall_table_set /
@@ -54,7 +54,7 @@
 //      at its Linux asm-generic syscall number.
 //
 // ── Why `fn_name as u64` instead of `&fn_name` or `fn_name`? ────────────────
-// VUMA has no first-class function-pointer type. The Wave 5 FnAddr
+// VUMA has no first-class function-pointer type. The FnAddr
 // feature is the documented PMT-pure way to take a function's address:
 //   - `fn_name` alone is parsed as a Var expression; the parser's
 //     `function_names` set (src/pipeline.rs::bridge_ast_to_codegen_scg,
@@ -85,7 +85,7 @@
 // ___pmt_buffer is the caller's stack frame, valid for the lifetime
 // of the state_new handle).
 //
-// ── Wave 39 codegen fix: whole_program_dce preserves GetAddress refs ───────
+// ── codegen fix: whole_program_dce preserves GetAddress refs ───────
 // While developing this file, a codegen bug was discovered: the O2
 // `whole_program_dce` pass (src/codegen/src/opt.rs::whole_program_dce)
 // was removing functions whose address was taken via `fn_name as u64`
@@ -479,7 +479,7 @@ fn sys_rename(oldpath: u64, newpath: u64) -> i64 {
 // Walks the 30 (nr, handler) pairs and calls syscall_register for each.
 // After init, tbl.count == 30 (assuming the caller zero-init'd count
 // before calling — see the self-test below). The handler addresses are
-// compile-time constants baked into the .text section via the Wave 5
+// compile-time constants baked into the .text section via the
 // GetAddress lowering (see file header "Why `fn_name as u64`?").
 //
 // The nr literals are DECIMAL per the W39 task spec — they match the
@@ -552,7 +552,7 @@ fn syscall_init(tbl: State<SyscallTable>) {
 //   (2) syscall_table_get(tbl, 64) != 0  — sys_write registered at
 //       nr=64. The handler address is a real .text address (not 0).
 //       Returns 2 on failure. Catches the "DCE removed the handler
-//       function" bug documented in the file header (Wave 39 codegen
+//       function" bug documented in the file header ( codegen
 //       fix to whole_program_dce).
 //   (3) syscall_table_get(tbl, 222) != 0  — sys_mmap registered at
 //       nr=222. Independent spot-check on a different handler. Returns

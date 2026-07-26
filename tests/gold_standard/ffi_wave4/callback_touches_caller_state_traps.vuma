@@ -1,7 +1,7 @@
 // ffi_wave4/callback_touches_caller_state_traps — re-entrancy violation traps
 // Expected: RUNTIME TRAP (non-zero exit with diagnostic)
 //
-// Wave 8 negative test: a callback that writes to a caller-live State
+// Negative test: a callback that writes to a caller-live State
 // triggers a re-entrancy violation. The callback_live_set guard detects
 // the access to a caller-live offset and aborts with a diagnostic.
 //

@@ -1,4 +1,4 @@
-// cap_flow — Wave 34: capability flow verification
+// cap_flow — capability flow verification
 // Verifies that capability tokens flow correctly between processes.
 // The parent grants a capability, sends with it, and the child receives.
 // Expected exit code: 42

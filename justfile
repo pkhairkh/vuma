@@ -220,7 +220,7 @@ proof:
 proof-check:
     ./scripts/check-lean.sh
 
-# Run the Lean 4 proof test harness (Wave 7 PMT.Test.* modules via `lake exe test`).
+# Run the Lean 4 proof test harness (PMT.Test.* modules via `lake exe test`).
 proof-test:
     cd proof && lake exe test
 

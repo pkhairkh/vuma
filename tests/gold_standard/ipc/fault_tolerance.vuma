@@ -1,4 +1,4 @@
-// fault_tolerance — Wave 22 + 65-72: circuit breaker with a real
+// fault_tolerance — circuit breaker with a real
 // Closed/Open/HalfOpen state machine.
 //
 // circuit_breaker_call(fn_ptr, threshold) calls fn_ptr ONCE (not a retry

@@ -1,6 +1,6 @@
 //! # ARM32 Big-Endian Backend (armeb)
 //!
-//! **Wave 49 — wrapper pattern documentation.**  **Wave 13 — Wrapper Summary
+//! ** — wrapper pattern documentation.** ** — Wrapper Summary
 //! added** (Task 7-d).
 //!
 //! ## Wrapper Summary
@@ -9,7 +9,7 @@
 //! |-------|-------|
 //! | **Wraps** | `Arm32Backend` (`crate::arm32`), constructed via `Arm32Backend::new()` |
 //! | **Byte-swap policy** | **LE→BE for every 4-byte instruction word** (BE32 mode), plus `swap_le_elf32_to_be` flips ELF32 header / PHDR / SHDR fields |
-//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:145-147`), instruction selection, register allocation, `IRInstr::Syscall` (Wave 11) |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:145-147`), instruction selection, register allocation, `IRInstr::Syscall` |
 //! | **Overridden** | `encode_program`, `encode_function`, `return_stub`, `trampoline`, `disassemble` — each performs the BE32 word-swap (or BE→LE for `disassemble`) |
 //! | **Known gaps** | None — `IRInstr::Syscall` works via inheritance (parent's `MOV R7, nr; SVC #0` at `arm32/mod.rs:6835`). Float-op verifier `verify_function_float_ops` is now applied **centrally in all 5 compilation drivers** (`src/main.rs`, `src/pipeline.rs`, `src/api.rs`, `src/bin/compile_dump.rs`) per Task 7-a — so this backend is covered via the driver, NOT via `Arm32Backend::allocate_registers` (which still skips it). See caveat §4 row 3. |
 //!
@@ -39,13 +39,13 @@
 //! LE words (each encoder writes `word.to_le_bytes()`), so `qemu-armeb`
 //! fetches the correct big-endian instruction words.
 //!
-//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//! ## `IRInstr::Syscall` inheritance
 //!
 //! `IRInstr::Syscall` emission is **automatically inherited** from the
 //! parent `Arm32Backend`. This backend delegates `allocate_registers`
 //! to `self.inner.allocate_registers(func)`, which calls the parent's
 //! instruction selector. The parent's `IRInstr::Syscall { nr, args, dst }`
-//! arm (added in Wave 11, `arm32/mod.rs:6835`) emits `MOV R7, nr; SVC #0`
+//! arm (added in , `arm32/mod.rs:6835`) emits `MOV R7, nr; SVC #0`
 //! with arg moves into R0-R3 (and stack for args 5-6). `encode_function`
 //! then byte-swaps each 4-byte instruction word from LE to BE (BE32 mode)
 //! so `qemu-armeb` fetches the correct big-endian instruction words. The
@@ -242,7 +242,7 @@ impl Backend for ArmEbBackend {
 }
 
 // ===========================================================================
-// Tests — IRInstr::Syscall inheritance (Wave 13)
+// Tests — IRInstr::Syscall inheritance
 // ===========================================================================
 
 #[cfg(test)]
@@ -251,7 +251,7 @@ mod tests {
     use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
     use std::collections::HashSet;
 
-    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }` is
+    /// conformance: verify that `IRInstr::Syscall { nr: 1, .. }` is
     /// inherited from the parent `Arm32Backend` and produces non-empty
     /// encoded instruction bytes.  `encode_function` byte-swaps each 4-byte
     /// word from LE to BE (BE32 mode), but the output remains non-empty.

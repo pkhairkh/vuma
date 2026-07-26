@@ -1,4 +1,4 @@
-// checkpoint — Wave 19-21: real Checkpoint wire format with integrity hash.
+// checkpoint — real Checkpoint wire format with integrity hash.
 //
 // checkpoint_save(value) now persists a 96-byte record mirroring the
 // library Checkpoint struct:

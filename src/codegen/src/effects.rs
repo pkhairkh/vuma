@@ -10,7 +10,7 @@
 //! Effects are inferred from the IR and can be annotated in source.
 //! The compiler can optimize pure functions (CSE, memoization, etc.).
 //!
-//! # Wave 32: Interprocedural Effect Propagation
+//! # Interprocedural Effect Propagation
 //!
 //! [`analyze_program_effects`] now performs fixpoint propagation across
 //! call edges: if `f` calls `g`, then `f` inherits all of `g`'s

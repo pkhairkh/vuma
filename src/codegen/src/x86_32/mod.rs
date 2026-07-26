@@ -2409,13 +2409,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // i386 has no plain mmap syscall; mmap2 takes offset in 4KB pages instead
     // of bytes.  We convert the caller's byte offset to pages (>> 12).
     //
-    // [wave 6 — mmap ABI normalization] This stub exposes mmap2 (offset-in-
+    // [— mmap ABI normalization] This stub exposes mmap2 (offset-in-
     // pages) semantics for the bare `extern "C" { fn mmap(...) }` declaration,
     // mirroring how `__vuma_alloc` above (line ~2139) calls mmap2(192) with a
     // page-granular offset. The only difference is that __vuma_alloc hardcodes
     // offset=0 (anonymous), whereas this stub accepts the caller's byte offset
     // from the stack and converts it to pages — both use the SAME offset unit
-    // (pages, via syscall 192), satisfying the wave-6 requirement.
+    // (pages, via syscall 192), satisfying the effort-6 requirement.
     //
     // VUMA calling convention (i386): args 0-3 in registers, args 4-5 on stack.
     //   EDI=addr, ESI=length, EDX=prot, ECX=flags,
@@ -3079,13 +3079,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("print_newline".to_string(), code));
     }
 
-    // ── Wave 7: POSIX file-metadata & I/O syscalls (i386 syscall_32.tbl) ──
+    // ── POSIX file-metadata & I/O syscalls (i386 syscall_32.tbl) ──
     // i386 SysV passes the first 4 args in EDI/ESI/EDX/ECX and args 5-6 on the
     // caller's stack ([ESP+4]/[ESP+8] at entry). The i386 syscall ABI instead
     // wants args in EBX/ECX/EDX/ESI/EDI/EBP with the syscall number in EAX.
     // EBX is callee-saved so every stub saves/restores it. The closure below
     // emits the correct per-arg-count shuffle (high→low, stack-based) and is
-    // used for all wave-7 syscalls (max 5 args — EBP/arg6 is never needed).
+    // used for all syscalls (max 5 args — EBP/arg6 is never needed).
     // chown=212/fchown=207 are the modern 32-bit-uid chown32/fchown32 (i386's
     // chown=182 is the 16-bit sys_chown16, NOT exposed).
     let syscall_stub = |num: i32, nargs: usize| -> Vec<u8> {
@@ -3127,7 +3127,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
                 code.extend(encode_pop(Gpr::Rcx)); // ECX = arg2
                 code.extend(encode_pop(Gpr::Rsi)); // ESI = arg4
             }
-            _ => {} // 6-arg syscalls not needed for wave 7
+            _ => {} // 6-arg syscalls not needed for
         }
         code.extend(encode_mov_reg_imm32(Gpr::Rax, num));
         code.extend(encode_syscall());
@@ -3175,7 +3175,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Family 7: cwd/root (getcwd/chdir already registered above)
         ("fchdir", 133, 1),
         ("chroot", 61, 1),
-        // ── Wave 9: POSIX system & advanced syscalls (i386 syscall_32.tbl) ──
+        // ── POSIX system & advanced syscalls (i386 syscall_32.tbl) ──
         // eventfd→eventfd2(328), signalfd→signalfd4(327) = modern variants.
         // mremap is 5-arg (old_addr, old_size, new_size, flags, new_addr).
         ("mlock", 150, 2),
@@ -3201,8 +3201,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("inotify_add_watch", 292, 3),
         ("inotify_rm_watch", 293, 2),
         ("ptrace", 26, 4),
-        // ── Wave 8: POSIX process & identity syscalls (i386 syscall_32.tbl) ──
-        // Identity uses the modern *32 variants (199-214) per Wave 7 precedent.
+        // ── POSIX process & identity syscalls (i386 syscall_32.tbl) ──
+        // Identity uses the modern *32 variants (199-214) per precedent.
         // 5-arg syscalls (waitid/execveat/prctl) use nargs=5 → syscall_stub
         // moves arg1 EDI→EBX then loads arg5 from [ESP+16] into EDI.
         // Family 1: identity
@@ -3246,7 +3246,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push((name.to_string(), syscall_stub(num, nargs)));
     }
 
-    // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────────────
+    // ── FFI scratchpad frame stubs (/fix) ──────────────────────────
     // ffi_scratch_push_frame: real mmap via int 0x80 (i386 sys_mmap2=192).
     // sys_mmap2(addr, len, prot, flags, fd, pgoffset) — args in EBX,ECX,EDX,ESI,EDI,EBP.
     // CRITICAL: EBX, ESI, EDI, EBP are callee-saved on i386 SysV ABI. The mmap2
@@ -3337,7 +3337,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
 /// x86_32 code generation backend (SystemV ABI).
 pub struct X86_32Backend {
     target_info: X86_32TargetInfo,
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 
@@ -3407,7 +3407,7 @@ impl Backend for X86_32Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let mut allocated = stack_slot_isel::allocate_registers(func)?;
 
-        // Wave 23: If real register allocation is enabled, post-process the
+        // If real register allocation is enabled, post-process the
         // AllocatedFunction to record physical register assignments.
         if self.use_real_regalloc {
             let max_real_regs = 6u32; // EAX, ECX, EDX, EBX, ESI, EDI

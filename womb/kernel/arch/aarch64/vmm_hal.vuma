@@ -4,7 +4,7 @@
 // the R3b dispatcher's arm_map_page / arm_translate entry points.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Wave R3e. Implements the aarch64 half of the R3b HAL boundary:
+//  Implements the aarch64 half of the R3b HAL boundary:
 //   - arm_map_page(root, vaddr, paddr, flags, levels) — walk PGD→PUD→PMD→PTE,
 //     write the leaf PTE.
 //   - arm_translate(root, vaddr) — walk to leaf, return the mapped paddr.

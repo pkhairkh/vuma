@@ -1,4 +1,4 @@
-// session_valid — Wave 89: session type valid sequence
+// session_valid — session type valid sequence
 // A channel is opened, a message is sent then received — a valid protocol.
 // The session_type_check in the pipeline (verify_session_types_from_ir)
 // scans the IR and verifies the channel operations follow a valid order.

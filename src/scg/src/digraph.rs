@@ -1,7 +1,7 @@
 //! Hand-written directed graph (`DiGraph<N, E>`) with linked-list adjacency.
 //!
 //! This module replaces `petgraph::graph::DiGraph` as the backing store for the
-//! SCG (see wave 39 of the VUMA remediation plan). The design mirrors the
+//! SCG (see the VUMA remediation plan). The design mirrors the
 //! VUMA-native `womb/graph/digraph.vuma` in spirit: each node owns a pair of
 //! adjacency lists (outgoing / incoming edge indices), and edges are stored in
 //! a side table so that `EdgeIndex` is a stable, opaque handle.

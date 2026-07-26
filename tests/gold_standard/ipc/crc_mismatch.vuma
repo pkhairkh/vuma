@@ -1,4 +1,4 @@
-// crc_mismatch — Wave 10b rejection-path test.
+// crc_mismatch — rejection-path test.
 //
 // Verifies that ChannelRecv rejects a frame with a bad CRC32 by
 // returning the error sentinel. The parent writes a valid-looking

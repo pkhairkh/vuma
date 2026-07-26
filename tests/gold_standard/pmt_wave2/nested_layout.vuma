@@ -1,4 +1,4 @@
-// nested_layout — PMT Wave 2: nested layout field access
+// nested_layout — nested layout field access
 // Expected exit code: 3
 //
 // Declares `Line = { a: Point, b: Point }` where Point is itself a layout.

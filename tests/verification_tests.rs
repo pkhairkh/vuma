@@ -1,4 +1,4 @@
-//! SMT/verification tests (Wave 7).
+//! SMT/verification tests.
 //!
 //! These tests prove that the e-graph rewrite rules are verified sound by
 //! the bitvector verification framework — not by a hardcoded `verified: true`
@@ -8,7 +8,7 @@ use vuma_codegen::bv_verify::{assert_all_rules_sound, count_verified, verify_all
 
 #[test]
 fn wave7_all_rules_verified_sound() {
-    // THE Wave 7 test: every rewrite rule in the e-graph must pass
+    // THE Test: every rewrite rule in the e-graph must pass
     // exhaustive bitvector verification. If any rule is unsound, this
     // test fails with a counterexample.
     let results = verify_all_rules();

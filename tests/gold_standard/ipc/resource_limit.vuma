@@ -1,4 +1,4 @@
-// resource_limit — Wave 18: verify setrlimit syscall emission.
+// resource_limit — verify setrlimit syscall emission.
 //
 // The child calls set_resource_limit(9, 1048576) which emits
 // setrlimit(RLIMIT_AS=9, {rlim_cur=1MB, rlim_max=1MB}). This limits

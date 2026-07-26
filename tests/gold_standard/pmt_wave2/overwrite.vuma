@@ -1,4 +1,4 @@
-// overwrite — PMT Wave 2: overwrite a state field, read the latest value
+// overwrite — overwrite a state field, read the latest value
 // Expected exit code: 2
 //
 // Writes 1 to p.x, then overwrites with 2. Returns p.x (=2). Verifies

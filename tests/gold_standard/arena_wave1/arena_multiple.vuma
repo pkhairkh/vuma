@@ -1,7 +1,7 @@
 // arena_wave1/arena_multiple — multiple arena_alloc with different layouts
 // Expected exit code: 0
 //
-// Wave 6 test: allocate multiple states of different layouts inside the
+// Test: allocate multiple states of different layouts inside the
 // same arena. Each allocation bumps the arena offset. Verify all states
 // are writable and don't interfere.
 

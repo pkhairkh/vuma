@@ -1,4 +1,4 @@
-// multi_write — PMT Wave 2: write 3 fields, read them back, return sum
+// multi_write — write 3 fields, read them back, return sum
 // Expected exit code: 6
 //
 // Same as three_fields.vuma but structured to emphasize the multi-write

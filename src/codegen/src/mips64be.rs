@@ -1,8 +1,8 @@
 //! # MIPS64 Big-Endian Backend (mips64be)
 //!
-//! **Wave 49 — wrapper pattern documentation.**  **Wave 13 — Wrapper Summary
-//! added** (Task 7-d).  **Wave 7-f — Syscall status updated** (Task 7-f:
-//! Wave 12 RESOLVED on parent `mips64`).
+//! ** — wrapper pattern documentation.** ** — Wrapper Summary
+//! added** (Task 7-d). **-f — Syscall status updated** (Task 7-f:
+//! RESOLVED on parent `mips64`).
 //!
 //! ## Wrapper Summary
 //!
@@ -10,9 +10,9 @@
 //! |-------|-------|
 //! | **Wraps** | `Mips64Backend` (`crate::mips64`), constructed via `Mips64Backend::new_be()` (parent already emits BE ELF header natively post p3b) |
 //! | **Byte-swap policy** | **LE→BE for every 4-byte instruction word** in the executable `PT_LOAD` segment of `encode_program`, plus `encode_function` / `return_stub` / `trampoline` / `disassemble`. The ELF header / PHDR fields are NOT swapped here (parent already emits them BE). |
-//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:160-162`), instruction selection, register allocation, `IRInstr::Syscall` (Wave 7-f / Task 7-f — fully implemented on parent at `mips64/mod.rs:3251`) |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:160-162`), instruction selection, register allocation, `IRInstr::Syscall` (-f / Task 7-f — fully implemented on parent at `mips64/mod.rs:3251`) |
 //! | **Overridden** | `encode_program` (runs `swap_le_elf_to_be` which only touches instruction words since the parent's ELF header is already BE), `encode_function`, `return_stub`, `trampoline`, `disassemble` |
-//! | **Known gaps** | **None — `IRInstr::Syscall` works via inheritance** (parent `mips64` backend's Syscall arm is fully implemented per Task 7-f; emits `LI V0, native_nr; SYSCALL; NOP; BEQ A3, Zero, +8; NOP; DSUBU V0, Zero, V0` N64-ABI sequence, 64 bytes for the test below). The earlier "Wave 12 PENDING" status reported by Task 1-c's survey is STALE — `unimplemented!()` was removed. Float-op verifier `verify_function_float_ops` is now applied **centrally in all 5 compilation drivers** per Task 7-a, so this backend is covered via the driver (parent `Mips64Backend::allocate_registers` still skips it). See caveat §4 row 3. |
+//! | **Known gaps** | **None — `IRInstr::Syscall` works via inheritance** (parent `mips64` backend's Syscall arm is fully implemented per Task 7-f; emits `LI V0, native_nr; SYSCALL; NOP; BEQ A3, Zero, +8; NOP; DSUBU V0, Zero, V0` N64-ABI sequence, 64 bytes for the test below). The earlier " PENDING" status reported by Task 1-c's survey is STALE — `unimplemented!()` was removed. Float-op verifier `verify_function_float_ops` is now applied **centrally in all 5 compilation drivers** per Task 7-a, so this backend is covered via the driver (parent `Mips64Backend::allocate_registers` still skips it). See caveat §4 row 3. |
 //!
 //! `mips64be` is a thin wrapper around the `Mips64Backend`
 //! (field `inner: Mips64Backend`, constructed via `Mips64Backend::new_be()`)
@@ -44,7 +44,7 @@
 //! this wrapper re-serialises every 4-byte word in BE byte order so that
 //! `qemu-mips64` fetches the correct big-endian instruction stream.
 //!
-//! ## `IRInstr::Syscall` inheritance (Wave 13 / Wave 7-f)
+//! ## `IRInstr::Syscall` inheritance (-f)
 //!
 //! `IRInstr::Syscall` emission is **automatically inherited** from the
 //! parent `Mips64Backend`. This backend delegates `allocate_registers`
@@ -60,10 +60,10 @@
 //! word from LE to BE so `qemu-mips64` fetches the correct big-endian
 //! instruction words.
 //!
-//! **Status (Task 7-f / Wave 7-f): RESOLVED.** Earlier doc comments
+//! **Status (Task 7-f / -f): RESOLVED.** Earlier doc comments
 //! (and the §4 caveat in `docs/architecture/caveats.md` row "4 thin-wrapper
 //! backends", plus Task 1-c's survey note) claimed the parent had
-//! `unimplemented!("… (Wave 12)")` at `mips64/mod.rs:3906`. That claim is
+//! `unimplemented!("…")` at `mips64/mod.rs:3906`. That claim is
 //! **stale** — no `unimplemented!()` exists anywhere in `mips64/mod.rs`
 //! (verified by `rg 'unimplemented!' src/codegen/src/mips64/mod.rs` → no
 //! matches). The Syscall arm has been fully implemented (including the
@@ -261,7 +261,7 @@ impl Backend for Mips64BeBackend {
 }
 
 // ===========================================================================
-// Tests — IRInstr::Syscall inheritance (Wave 13)
+// Tests — IRInstr::Syscall inheritance
 // ===========================================================================
 
 #[cfg(test)]
@@ -271,7 +271,7 @@ mod tests {
     use std::collections::HashSet;
     use std::panic;
 
-    /// Wave 13 conformance (post Task 7-f): verify that
+    /// conformance (post Task 7-f): verify that
     /// `IRInstr::Syscall { nr: 1, .. }` inheritance from the parent
     /// `Mips64Backend` works. The parent's Syscall arm at
     /// `mips64/mod.rs:3251` is fully implemented — it emits the N64-ABI
@@ -307,7 +307,7 @@ mod tests {
             source_file: String::new(),
         };
 
-        // Wave 7-f: parent mips64 backend's Syscall arm is implemented.
+        // -f: parent mips64 backend's Syscall arm is implemented.
         // We still wrap in catch_unwind for defense-in-depth, but the
         // panic branch should now be unreachable.
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {

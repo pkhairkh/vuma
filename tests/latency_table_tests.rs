@@ -1,7 +1,7 @@
-//! Per-ISA latency table tests (Wave 10).
+//! Per-ISA latency table tests.
 //!
 //! These tests prove that the e-graph extraction makes different decisions
-//! based on the target's latency table — the core Wave 10 feature. On an
+//! based on the target's latency table — the core feature. On an
 //! ISA where multiply is cheap, `x*2` stays as `x*2`; on an ISA where
 //! multiply is expensive, `x*2` is strength-reduced to `x+x`.
 

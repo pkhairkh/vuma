@@ -3,7 +3,7 @@
 // Provides: trig, exp/log, power, rounding, classification, constants
 // Uses VUMA's native f64/f32 arithmetic (compiled to FP instructions on all 10 backends)
 //
-// PMT migration (Wave 8c): the single `allocate(8)` scratch buffer in
+// PMT migration: the single `allocate(8)` scratch buffer in
 // `ln_f64` (used to receive the `exp_out` integer from `frexp_f64`) is
 // replaced by a `State<ExpBuf>` with a typed `v: i32` field. The
 // `frexp_f64` API takes `State<ExpBuf>` instead of `Address`; callers

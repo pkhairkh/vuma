@@ -7,7 +7,7 @@ import PMT.ExecFunction
 
 This module DEFINES the simulation relation types that connect the Lean
 formal model to the Rust implementation, and PROVES the initialization
-and preservation lemmas (Wave 13 work, refined further in Waves 14-17).
+and preservation lemmas.
 
 The simulation relation has three layers:
   1. `arena_sim` — RawArena (Lean) ↔ Arena (Rust)
@@ -21,38 +21,32 @@ Each layer is a relation (Prop-valued) plus a set of lemmas proving:
 
 NOTE — `IRProgram.first_function_body` is a STUB helper.
 The real flattening from `IRFunction.blocks` (List IRBlock) to
-`Program` (List Step) is part of Wave 11's `exec_function` work.
+`Program` (List Step) is part of the `exec_function` work.
 For now it returns `[]` so the `exec` call in `full_simulation`
-type-checks; Wave 17 will replace this with the real flattening.
+type-checks; a future refinement will replace this with the real flattening.
 
-**Wave 13 status (W13-E) — all three primary sim-rel lemmas CLOSED:**
+**Status — all three primary sim-rel lemmas CLOSED:**
   - `initial_state_sim` — CLOSED (existence via explicit construction).
   - `arena_sim_preserved_by_alloc` — CLOSED with added `haligned`
     hypothesis (`size % 8 = 0`); the alignment gap between
     `alloc` (uses `size`) and `raw_alloc` (uses `align8_nat size`)
     is bridged by the alignment precondition.
   - `full_simulation` — CLOSED via the stub `first_function_body = []`
-    (the real composition is Wave 17's job).
+    (the real composition is left as future work).
 
-**Wave 14 status (W14-D header pass) → Wave 15 (W15-A) closure.**
+**Strengthened `full_simulation_strong`.**
 The strengthened `full_simulation_strong` theorem (taking
 `lean_prog : IRProgram` and a non-emptiness precondition) was STATED
-in Wave 14 and ADMITTED via a single `sorry`. In Wave 15 (subagent
-W15-A) the `sorry` was CLOSED by observing that
+earlier and ADMITTED via a single `sorry`. The `sorry` was later CLOSED by observing that
 `state_sim lean_state raw []` (with `live_vars = []`) forces EVERY
 variable in `lean_state` to be `Liveness.dead`, so the FIRST `step`
 of `exec lean_prog.to_program lean_state` traps with `.uaf` (exit
 135). See the proof body for the case-split. This file is now
 **FULLY sorry-free**: all 4 main theorems (`initial_state_sim`,
 `arena_sim_preserved_by_alloc`, `full_simulation`, and
-`full_simulation_strong`) are closed. The Wave 14 sibling tasks
-W14-A/B/C (closing RawArena / StateReads / StateWrites sorries)
-operated on files outside this module.
+`full_simulation_strong`) are closed.
 
 **References.**
-  * `docs/verification-reports/W3-wave-plan.md` §Waves 13-17.
-  * `docs/verification-reports/W8-faithful-ir.md` — IR simulation plan.
-  * `docs/verification-reports/W13-*` — Wave 13 sim-rel status.
   * Related modules: `PMT.RawArena` (arena sim-rel),
     `PMT.PmtInstr` (instr sim-rel), `PMT.IRProgram` (program sim-rel),
     `PMT.Soundness` (`exec`, `Step`, `ExecState`), `PMT.ExecFunction`
@@ -61,8 +55,8 @@ operated on files outside this module.
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
 `just proof`); the `lean-proofs` CI job in
-`.github/workflows/proof-verify.yml` runs the same command. As of
-Wave 15 (W15-A), `lake build` produces **zero** `declaration uses
+`.github/workflows/proof-verify.yml` runs the same command.
+`lake build` produces **zero** `declaration uses
 'sorry'` warnings — the entire PMT proof library is now sorry-free.
 -/
 
@@ -86,10 +80,10 @@ instance : Inhabited IRFunction :=
 
 /-- STUB helper: extract the body of an IRProgram's first function as
 a `Program` (List Step). The real flattening (IRFunction.blocks →
-List PmtInstr → Program) is part of Wave 11's `exec_function` work.
+List PmtInstr → Program) is part of the `exec_function` work.
 For now, returns `[]` (empty program) so the `exec` call in
-`full_simulation` type-checks. Wave 17 will replace this with the
-real flattening.
+`full_simulation` type-checks. A future refinement will replace this
+with the real flattening.
 
 Note: the implementation always returns `[]` — whether or not the
 program has a first function. This is exploited by `full_simulation`
@@ -121,7 +115,7 @@ corresponds to a Rust IRInstr. The relation is partial — not all
 Rust IRInstr variants have a Lean counterpart (only the PMT-relevant
 subset does). -/
 def instr_sim (lean : PmtInstr) (rust : PmtInstr) : Prop :=
-  lean = rust  -- trivial for now; Wave 14 will refine
+  lean = rust  -- trivial for now; a future refinement will distinguish cases
 
 /-- §3: Block simulation relation. -/
 def block_sim (lean : IRBlock) (rust : IRBlock) : Prop :=
@@ -152,7 +146,7 @@ def state_sim (lean : ExecState) (raw : RawArena) (live_vars : List String) : Pr
 
 /-! ## Preservation + initialization lemmas -/
 
-/-- §7: Preservation lemma (CLOSED in Wave 13).
+/-- §7: Preservation lemma (CLOSED).
 
 If `arena_sim lean raw` and `raw_alloc raw size = .ok raw'`,
 then `∃ lean', alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw'`.
@@ -167,7 +161,7 @@ when `size` is already 8-aligned). With this, the Lean-side `alloc`
 and the Rust-side `raw_alloc` advance their pointers by the same
 amount, so the simulation is preserved field-by-field.
 
-TODO Wave 17: relax the `haligned` precondition by either (a) refining
+TODO: relax the `haligned` precondition by either (a) refining
 the abstract model to track alignment, or (b) weakening the simulation
 relation to allow `lean.used ≤ raw.offset` (with a bound). -/
 theorem arena_sim_preserved_by_alloc
@@ -213,7 +207,7 @@ theorem arena_sim_preserved_by_alloc
       show lean.used + size = raw.offset + size
       rw [hused]
 
-/-- §8: Initialization lemma (CLOSED in Wave 13).
+/-- §8: Initialization lemma (CLOSED).
 
 The initial Lean state simulates the initial Rust state. We construct
 both explicitly:
@@ -242,7 +236,7 @@ theorem initial_state_sim
   intro v
   by_cases hv : v ∈ live_vars <;> simp [hv]
 
-/-- §9: Full simulation theorem (CLOSED in Wave 13 via stub).
+/-- §9: Full simulation theorem (CLOSED via stub).
 
 If `program_sim lean_prog rust_prog` and `lean_prog` is well-typed,
 then executing `lean_prog` simulates executing `rust_prog`.
@@ -254,7 +248,7 @@ a STUB that always returns `[]` (empty program). Hence
 branch of the postcondition (`True`). The hypotheses `hprog`, `hwf`,
 `raw`, `hstate` are kept as future-proofing — they are unused here
 but will be needed when `first_function_body` is replaced with the
-real IR-to-Program flattening (Wave 17). -/
+real IR-to-Program flattening. -/
 theorem full_simulation
     (lean_prog rust_prog : IRProgram)
     (_hprog : program_sim lean_prog rust_prog)
@@ -297,7 +291,7 @@ This theorem requires the non-emptiness precondition
 has a first function to flatten (otherwise `to_program` returns `[]`,
 which is the trivial case already covered by `full_simulation`).
 
-This theorem was CLOSED in Wave 15 (W15-A). The key insight is that
+This theorem was CLOSED previously. The key insight is that
 `state_sim lean_state raw []` (with `live_vars = []`) forces EVERY
 variable in `lean_state` to be `Liveness.dead` — because the iff
 `lean.live v = .live ↔ v ∈ []` reduces to `lean.live v = .live ↔ False`,
@@ -314,7 +308,7 @@ This proof therefore does NOT need `hwf` (well-typedness of `lean_prog`),
 `hprog` (program_sim), `hnonempty` (non-emptiness of functions), `raw`
 (the Rust RawArena), or any property of `lean_prog.to_program` other
 than whether it is empty. The hypotheses remain as future-proofing: a
-stronger Wave-17-style composition would lift `pmt_soundness` from
+stronger composition would lift `pmt_soundness` from
 `Program` to `IRProgram`, requiring the IR-level `well_typed` to
 project down to `WellTyped lean_prog.to_program`, at which point the
 trap-free `.ok` case could deliver `fu ≤ capacity` from the actual

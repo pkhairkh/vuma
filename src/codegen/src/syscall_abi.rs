@@ -60,7 +60,7 @@ use crate::backend::BackendKind;
 /// for numbers outside the table. The table covers at least the entries
 /// listed in the existing `backend.rs:2930+` generic stub table (which
 /// already uses asm-generic numbers) plus the `*at` family used by the
-/// Wave-7 / Wave-8 / Wave-9 POSIX syscall stubs.
+/// POSIX syscall stubs.
 ///
 /// This is the authoritative source for VUMA-generic syscall names. The
 /// legacy `ir::generic_syscall_name` (which uses x86_64-style numbers) is

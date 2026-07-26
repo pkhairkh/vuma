@@ -1,4 +1,4 @@
-//! Edge-case tests for the VUMA parser (Wave 14 — parser fuzzing harness).
+//! Edge-case tests for the VUMA parser.
 //!
 //! These tests verify that the parser never panics on tricky or malformed
 //! inputs and handles boundary conditions correctly.
@@ -355,7 +355,7 @@ fn test_parse_loop_keyword() {
     assert_eq!(program.items.len(), 1, "should have exactly one function");
 }
 
-// ---- Wave 10: syscall() intrinsic parsing ----
+// ---- syscall() intrinsic parsing ----
 
 #[test]
 fn test_parse_syscall_basic() {
@@ -393,7 +393,7 @@ fn test_parse_syscall_in_expression() {
     assert!(result.is_ok(), "syscall in expression should parse");
 }
 
-// ---- Wave 48: regression tests for `else { if X { ... } else { if Y { ... } } }`
+// ---- regression tests for `else { if X { ... } else { if Y { ... } } }`
 // ---- (the "dangling-else across block boundary" construct used heavily by
 // ---- womb/lang/full_lexer.vuma keyword matching). These tests ensure the
 // ---- parser's `parse_else_clause` special-case (see parser.rs ~line 1384)
@@ -488,7 +488,7 @@ fn test_parse_else_block_unbalanced_braces_does_not_panic() {
     assert_no_panic(source);
 }
 
-// ---- Wave 48 (Task 7-b): BD-directive keyword collision regression tests ----
+// ---- (Task 7-b): BD-directive keyword collision regression tests ----
 //
 // The BD-directive keywords `bd`/`repd`/`capd`/`reld` are reserved in the
 // lexer (form `bd(name, expr);`), but they are also valid identifier names
@@ -501,7 +501,7 @@ fn test_parse_else_block_unbalanced_braces_does_not_panic() {
 // `parse_bd_directive`, which expected `(` immediately after the keyword
 // and failed with
 // `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`,
-// blocking the Wave 48 bootstrap self-host test. The fix in
+// blocking the bootstrap self-host test. The fix in
 // `parser.rs::parse_stmt` (see the `TokenKind::Bd | TokenKind::Repd |
 // TokenKind::Capd | TokenKind::Reld` dispatch arm) is parser
 // context-awareness: peek the token after the keyword and treat it as a
@@ -516,7 +516,7 @@ use vuma_parser::ast::BdDirectiveKind;
 
 /// `repd` used as an identifier in a type-ascription let-statement
 /// (`repd: i32 = 5;`) followed by a `return repd;` — the exact construct
-/// that broke the Wave 48 bootstrap at `womb/lang/ir_builder.vuma:593`.
+/// that broke the bootstrap at `womb/lang/ir_builder.vuma:593`.
 #[test]
 fn test_repd_as_identifier_in_let() {
     let source = "fn main() { repd: i32 = 5; return repd; }";
@@ -730,7 +730,7 @@ fn test_bd_keyword_as_identifier_in_assign_and_expr() {
     );
 }
 
-// ---- Wave 48 (Task A): additional context-aware dispatch edge cases ----
+// ---- (Task A): additional context-aware dispatch edge cases ----
 //
 // The earlier tests in this file cover the common cases (let-with-ascription,
 // assignment, BD-directive form).  These three additional tests pin down

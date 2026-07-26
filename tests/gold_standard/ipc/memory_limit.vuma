@@ -1,4 +1,4 @@
-// memory_limit — Wave 18c: set_memory_limit(bytes) builtin
+// memory_limit — set_memory_limit(bytes) builtin
 //
 // Exercises the set_memory_limit builtin, which emits
 // setrlimit(RLIMIT_AS=9, {bytes, bytes}) to cap the process's virtual

@@ -1,7 +1,7 @@
 // inbounds_pmt_state — PMT state buffer access within bounds
 // Expected exit code: 42
 //
-// Bounds Wave 1 positive test: PMT state with three u32 fields
+// Bounds positive test: PMT state with three u32 fields
 // (offsets 0, 4, 8 — total 12 bytes). Write a=10, b=20, c=12 and
 // return their sum (10+20+12 = 42). Field accesses are SAFE pointers
 // (no offset, statically-known layout), so the bounds-check injection

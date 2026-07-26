@@ -1101,7 +1101,7 @@ impl LspServer {
         }
 
         // 3. Add built-in types
-        // Wave 1d: `Channel` is a built-in generic type (like `State`/`Ref`
+        // `Channel` is a built-in generic type (like `State`/`Ref`
         // but recognised by name in the parser rather than via a keyword).
         // Surfaced here so IDEs offer it alongside u32/i64/etc. when the
         // user is typing a type annotation.
@@ -1263,7 +1263,7 @@ impl LspServer {
             return Ok(build_hover(markdown, range).to_json_value());
         }
 
-        // Wave 1d: Channel<T> type hover.  `Channel` is a built-in generic
+        // Channel<T> type hover. `Channel` is a built-in generic
         // type (not a user-defined struct), so it never appears in
         // `DocumentInfo::structs`.  Surface its IPC semantics directly so
         // IDE users understand what `Channel<T>` means without reading the
@@ -2077,11 +2077,11 @@ fn format_type(ty: &Type) -> String {
             _ => name.clone(),
         },
         // Channel<T> — typed IPC channel for inter-process communication
-        // (Wave 1).  Rendered explicitly (rather than falling through to
+        // . Rendered explicitly (rather than falling through to
         // the catch-all `Display` impl) so the element type is itself run
         // through `format_type` and picks up the f32/f64 hover enrichment
         // for FP element types like `Channel<f32>`.
-        // Wave 89-90 (Session Types): if a session type is attached, render
+        //  (Session Types): if a session type is attached, render
         // it alongside the payload type.
         Type::Channel {
             inner,
@@ -2311,7 +2311,7 @@ mod tests {
         assert!(labels.contains(&"fn"));
         assert!(labels.contains(&"let"));
         assert!(labels.contains(&"struct"));
-        // Wave 1d: `Channel` is surfaced as a built-in type completion so
+        // `Channel` is surfaced as a built-in type completion so
         // IDEs suggest it when the user is typing a type annotation.
         assert!(labels.contains(&"Channel"));
     }
@@ -2528,9 +2528,9 @@ mod tests {
         assert_eq!(format_type(&Type::BDBase("i64".to_string())), "i64");
     }
 
-    // Wave 1d: Channel<T> type formatting.
+    // Channel<T> type formatting.
     //
-    // `Channel<T>` is the typed IPC channel added by Wave 1.  The LSP
+    // `Channel<T>` is the typed IPC channel added by . The LSP
     // `format_type` helper renders it as `Channel<inner>` so the hover
     // tooltip shows the message payload type alongside the channel
     // wrapper (e.g. `Channel<i32>` for an i32-message channel).  This

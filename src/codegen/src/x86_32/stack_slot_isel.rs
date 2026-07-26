@@ -3438,7 +3438,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ── Syscall (Wave 11) ──────────────────────────────────────
+                // ── Syscall ──────────────────────────────────────
                 // dst = syscall(nr, args…) — raw Linux syscall.
                 // i386 syscall ABI: args in EBX/ECX/EDX/ESI/EDI/EBP, nr in EAX,
                 // INT 0x80, result in EAX. EBX is callee-saved → save/restore.
@@ -3513,17 +3513,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_pop(Gpr::Rbx));
                     code
                 }
-                // ── VectorOp (Wave 29) ──
-                // x86_32 has no SIMD encoder in the Wave 29 suite (only x86_64
+                // ── VectorOp ──
+                // x86_32 has no SIMD encoder in the suite (only x86_64
                 // and aarch64 do); emit nothing.
                 IRInstr::VectorOp { .. } => Vec::new(),
-                // ── Channel operations (Wave 1d / Task 2a) ──
+                // ── Channel operations (ask 2a) ──
                 // Backend lowering not yet implemented; emit no bytes.
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-                // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                // StarkProof — stub (Call-form builtin is the active path).
                 | IRInstr::StarkProof { .. } => Vec::new(),
-                // ── CallIndirect (Wave 49: driver_call) ──
+                // ── CallIndirect (driver_call) ──
                 // Lower an indirect call: load args into stack (i386 ABI:
                 // args pushed right-to-left), load func_ptr into EAX,
                 // CALL EAX, clean up stack, store return value.

@@ -1,9 +1,9 @@
 // ffi_wave3/foreign_consume_emitted — #[foreign_consume] emits consume marker
 // Expected exit code: 0
 //
-// Wave 5 test: a #[foreign_consume] extern call (e.g. sqlite3_close) emits
+// Test: a #[foreign_consume] extern call (e.g. sqlite3_close) emits
 // a ForeignConsume marker statement at the call site. The marker is visible
-// in the codegen SCG; the IVE's consumed-set wiring (from Wave 2b) treats
+// in the codegen SCG; the IVE's consumed-set wiring treats
 // the State's vreg as consumed.
 //
 // sqlite3_close is a C library function (not a syscall), so this test does
@@ -33,7 +33,7 @@ fn main() -> i32 {
     // be a linearity error (caught by the IVE once full semantic-SCG
     // integration is wired).
     //
-    // The ForeignConsume SCG marker is emitted at the call site (Wave 5).
+    // The ForeignConsume SCG marker is emitted at the call site.
     // The scratchpad hooks (push_frame/pop_frame) fire because this function
     // uses FFI (has an extern call declaration), and resolve to real
     // mmap/RET stubs on x86_64 and the FFI return-0 stub on aarch64.

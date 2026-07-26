@@ -70,7 +70,7 @@
 //   99 = 0x63 (0b01100011), 42 = 0x2A (0b00101010).
 //   0x63 XOR 0x2A = 0x49 (0b01001001) = 73 decimal.
 //   The XOR fallback is the SAME as K10b's stub AES round function
-//   (aes_encrypt_block) — this preserves cross-wave behavioral parity
+//   (aes_encrypt_block) — this preserves cross-stage behavioral parity
 //   (K10e's fallback path produces the same ciphertext byte as K10b's
 //   standalone AES stub for the same key+input, so existing K10b KAT
 //   vectors that exercise the XOR path still pass under K10e).
@@ -209,7 +209,7 @@ fn hw_aes_available() -> u8 {
 //
 // Fallback path (K10e hosted-mode test, or any CPU without AES-NI):
 // XORs each input byte with the corresponding key byte — identical to
-// K10b's aes_encrypt_block stub. This preserves cross-wave behavioral
+// K10b's aes_encrypt_block stub. This preserves cross-stage behavioral
 // parity (see file header "Why 99 XOR 42 == 73?").
 fn hw_aes_encrypt(key: State<HwAesKey>, input: State<HwAesBlock>, output: State<HwAesBlock>) {
     if hw_aes_available() == 1 {
