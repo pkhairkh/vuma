@@ -9,11 +9,23 @@ that is relevant to PMT memory safety verification. The full `IRInstr` enum
 includes many variants (VectorOp, StarkProof, AtomicCas, etc.) that are not
 directly exercised by PMT invariants; those are out of scope for this model.
 
-The 7 PMT-relevant variants are: `alloc`, `load`, `store`, `free`,
-`transform`, `call`, `other`. The `well_typed` per-instruction predicate
-is the Lean mirror of IVE's `verify_state_reads` / `verify_state_writes`
-/ `verify_transform` checks (see `PMT.IVE.Soundness.{Transform,
-StateReads,StateWrites}`).
+The PMT-relevant variants fall into two groups:
+
+  * **Memory variants (7):** `alloc`, `load`, `store`, `free`,
+    `transform`, `call`, `ret`. These produce / consume arena regions
+    and are subject to the per-instruction `well_typed` check (Lean
+    mirror of IVE's `verify_state_reads` / `verify_state_writes` /
+    `verify_transform` — see `PMT.IVE.Soundness.{Transform,
+    StateReads,StateWrites}`).
+
+  * **Pure-arithmetic variants (12, added in PMT-1-A):** `bin_op`,
+    `unary_op`, `cast`, `add`, `sub`, `mul`, `div`, `cmp`, `select`,
+    `ct_select`, `ct_eq`, `get_address`. These are pure
+    register-to-register computations with no arena effect:
+    `effect = .none`, `to_steps = []`, `well_typed = True`. Mirroring
+    them in the Lean model lets PMT simulation-relation proofs traverse
+    IR functions whose body contains arithmetic interleaved with memory
+    operations without needing to abstract the arithmetic away first.
 
 The simulation relation `pmt_instr_simulates_ir_instr`
 connects each `PmtInstr` variant to its Rust `IRInstr` counterpart. All
@@ -22,6 +34,12 @@ theorems in this file close without `sorry`.
 **Module dependency.** `PMT.PmtInstr` is depended on by `PMT.IRProgram`
 (which embeds it in `IRBlock.instructions`), `PMT.ExecFunction`
 (which flattens `PmtInstr` to `Step`), and `PMT.WellTypedStrong`.
+
+The 12 arithmetic variants (PMT-1-A) are pure: they flatten to `[]`
+under `PmtInstr.to_steps`, so they do not contribute `Step`s to
+`IRFunction.flat_steps` and therefore do not perturb the
+name-uniqueness conjuncts of `WellTyped` — `pmt_soundness` is
+preserved sorry-free.
 
 **References.**
   * Rust source: `src/codegen/src/ir.rs` (3,481 lines, 32 IRInstr variants).
@@ -57,6 +75,86 @@ inductive IRType where
   | struct : Layout → IRType       -- aggregate
   deriving Repr
 
+/-! ## §3. Op-kind tags (mirrors of Rust enums used by the arithmetic variants)
+
+The four inductives below mirror the eponymous Rust enums in
+`src/codegen/src/ir.rs`:
+  * `BinOpKind`   — `src/codegen/src/ir.rs:1080` (25 variants).
+  * `UnaryOpKind` — `src/codegen/src/ir.rs:1195` (5 variants).
+  * `CmpKind`     — `src/codegen/src/ir.rs:1282` (10 variants).
+  * `CastKind`    — `src/codegen/src/ir.rs:1324` (9 variants).
+
+They are pure tag types: `PmtInstr.well_typed` does not inspect them
+(the arithmetic `PmtInstr` variants are all `True`-well-typed), so the
+Lean variants are present solely to faithfully mirror the Rust IR shape
+for `instr_sim` / `block_sim` traversal in `PMT.SimRel`. -/
+
+/-- §3.1: Binary operator kind — mirror of Rust `BinOpKind`.
+Covers arithmetic, bitwise, shift, rotate, and comparison sub-kinds. -/
+inductive BinOpKind where
+  | add   : BinOpKind
+  | sub   : BinOpKind
+  | mul   : BinOpKind
+  | sdiv  : BinOpKind
+  | udiv  : BinOpKind
+  | srem  : BinOpKind
+  | urem  : BinOpKind
+  | «and» : BinOpKind
+  | «or»  : BinOpKind
+  | xor   : BinOpKind
+  | shl   : BinOpKind
+  | shrL  : BinOpKind
+  | shrA  : BinOpKind
+  | ror   : BinOpKind
+  | rol   : BinOpKind
+  | sLt   : BinOpKind
+  | sLe   : BinOpKind
+  | sGt   : BinOpKind
+  | sGe   : BinOpKind
+  | uLt   : BinOpKind
+  | uLe   : BinOpKind
+  | uGt   : BinOpKind
+  | uGe   : BinOpKind
+  | eq    : BinOpKind
+  | ne    : BinOpKind
+  deriving Repr
+
+/-- §3.2: Unary operator kind — mirror of Rust `UnaryOpKind`. -/
+inductive UnaryOpKind where
+  | neg    : UnaryOpKind
+  | not    : UnaryOpKind
+  | clz    : UnaryOpKind
+  | ctz    : UnaryOpKind
+  | popcnt : UnaryOpKind
+  deriving Repr
+
+/-- §3.3: Comparison kind — mirror of Rust `CmpKind`. -/
+inductive CmpKind where
+  | eq  : CmpKind
+  | ne  : CmpKind
+  | sLt : CmpKind
+  | sLe : CmpKind
+  | sGt : CmpKind
+  | sGe : CmpKind
+  | uLt : CmpKind
+  | uLe : CmpKind
+  | uGt : CmpKind
+  | uGe : CmpKind
+  deriving Repr
+
+/-- §3.4: Cast kind — mirror of Rust `CastKind`. -/
+inductive CastKind where
+  | zExt         : CastKind
+  | sExt         : CastKind
+  | trunc        : CastKind
+  | bitCast      : CastKind
+  | intToFloat   : CastKind
+  | uIntToFloat  : CastKind
+  | floatToInt   : CastKind
+  | floatToUInt  : CastKind
+  | floatToFloat : CastKind
+  deriving Repr
+
 /-! **Note on `PmtOp` migration.** The `PmtOp` inductive previously declared in this
 module (with 7 constructors including `load`/`store`/`free`/
 `call`) has been migrated to `PMT.Soundness` per the
@@ -70,27 +168,80 @@ expressed directly through the `PmtInstr` variants themselves
 was unused and has been removed. -/
 
 /-- §4: PmtInstr — a single PMT-relevant instruction.
-Mirrors the Rust `IRInstr` variants relevant to memory safety:
-  - Rust `IRInstr::Alloc` ↔ Lean `PmtInstr.alloc`
-  - Rust `IRInstr::Load` ↔ Lean `PmtInstr.load`
-  - Rust `IRInstr::Store` ↔ Lean `PmtInstr.store`
-  - Rust `IRInstr::Free` ↔ Lean `PmtInstr.free`
-  - Rust `IRInstr::Call` ↔ Lean `PmtInstr.call`
-  - Rust `IRInstr::Ret` ↔ Lean `PmtInstr.ret`
 
-Other IRInstr variants (BinOp, UnaryOp, Cast, Select, Phi, Atomic*, VectorOp,
-Channel*, StarkProof) are not directly modeled here. They are either:
+**Memory variants (7):** mirror the Rust `IRInstr` variants with arena
+effect:
+  - Rust `IRInstr::Alloc`      ↔ Lean `PmtInstr.alloc`
+  - Rust `IRInstr::Load`       ↔ Lean `PmtInstr.load`
+  - Rust `IRInstr::Store`      ↔ Lean `PmtInstr.store`
+  - Rust `IRInstr::Free`       ↔ Lean `PmtInstr.free`
+  - Rust `IRInstr::Call`       ↔ Lean `PmtInstr.call`
+  - Rust `IRInstr::Ret`        ↔ Lean `PmtInstr.ret`
+
+**Pure-arithmetic variants (12, PMT-1-A):** mirror the Rust `IRInstr`
+variants that are pure register-to-register computations. Each has
+`effect = .none`, `well_typed = True`, `to_steps = []`:
+  - Rust `IRInstr::BinOp`     ↔ Lean `PmtInstr.bin_op`
+  - Rust `IRInstr::UnaryOp`   ↔ Lean `PmtInstr.unary_op`
+  - Rust `IRInstr::Cast`      ↔ Lean `PmtInstr.cast`
+  - Rust `IRInstr::Add`       ↔ Lean `PmtInstr.add`
+  - Rust `IRInstr::Sub`       ↔ Lean `PmtInstr.sub`
+  - Rust `IRInstr::Mul`       ↔ Lean `PmtInstr.mul`
+  - Rust `IRInstr::Div`       ↔ Lean `PmtInstr.div`
+  - Rust `IRInstr::Cmp`       ↔ Lean `PmtInstr.cmp`
+  - Rust `IRInstr::Select`    ↔ Lean `PmtInstr.select`
+  - Rust `IRInstr::CtSelect`  ↔ Lean `PmtInstr.ct_select`
+  - Rust `IRInstr::CtEq`      ↔ Lean `PmtInstr.ct_eq`
+  - Rust `IRInstr::GetAddress` ↔ Lean `PmtInstr.get_address`
+
+Field shapes mirror Rust (`src/codegen/src/ir.rs:1394-1689`). For
+`BinOp`/`UnaryOp`/`Cast`/`Cmp`/`Add`/`Sub`/`Mul`/`Div`/`Select`/
+`CtSelect`/`CtEq`, the Rust `ty: Option<IRType>` field is modeled
+here as `ty : IRType` (the `None` default is omitted — the existing
+`PmtInstr.load`/`.store` precedent uses non-`Option` `IRType`). For
+`GetAddress`, the Rust `{ dst, name }` shape is mirrored faithfully
+(the `Offset { dst, base, offset }` variant is a separate Rust
+variant not in PMT scope).
+
+Other Rust `IRInstr` variants (Phi, Atomic*, VectorOp, Channel*,
+StarkProof, Offset, Syscall) are not modeled here. They are either:
   - Pure computation (no memory effect) — out of scope for PMT.
   - Channel operations — modeled via `PmtInstr.call "channel_send"`.
 -/
 inductive PmtInstr where
-  | alloc      : String → Layout → PmtInstr           -- (out_var, layout)
-  | load       : String → String → Nat → IRType → PmtInstr  -- (in_var, out_var, offset, type)
-  | store      : String → IRValue → Nat → IRType → PmtInstr  -- (in_var, value, offset, type)
-  | free       : String → PmtInstr                    -- (in_var)
-  | transform  : String → String → Layout → PmtInstr  -- (in_var, out_var, layout)
-  | call       : String → List String → PmtInstr      -- (builtin_name, arg_vars)
-  | ret        : IRValue → PmtInstr                   -- (return value)
+  -- Memory variants (7)
+  | alloc       : String → Layout → PmtInstr                  -- (out_var, layout)
+  | load        : String → String → Nat → IRType → PmtInstr   -- (in_var, out_var, offset, type)
+  | store       : String → IRValue → Nat → IRType → PmtInstr  -- (in_var, value, offset, type)
+  | free        : String → PmtInstr                           -- (in_var)
+  | transform   : String → String → Layout → PmtInstr         -- (in_var, out_var, layout)
+  | call        : String → List String → PmtInstr             -- (builtin_name, arg_vars)
+  | ret         : IRValue → PmtInstr                          -- (return value)
+  -- Pure-arithmetic variants (12, PMT-1-A) — `effect = .none`, `to_steps = []`
+  | bin_op      : BinOpKind → IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `BinOp { op, dst, lhs, rhs, ty }`
+  | unary_op    : UnaryOpKind → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `UnaryOp { op, dst, operand, ty }`
+  | cast        : CastKind → IRValue → IRValue → IRType → IRType → PmtInstr
+    -- Rust `Cast { kind, dst, src, from_ty, to_ty }`
+  | add         : IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `Add { dst, lhs, rhs, ty }`
+  | sub         : IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `Sub { dst, lhs, rhs, ty }`
+  | mul         : IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `Mul { dst, lhs, rhs, ty }`
+  | div         : IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `Div { dst, lhs, rhs, ty }`
+  | cmp         : CmpKind → IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `Cmp { kind, dst, lhs, rhs, ty }`
+  | select      : IRValue → IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `Select { dst, cond, true_val, false_val, ty }`
+  | ct_select   : IRValue → IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `CtSelect { dst, cond, true_val, false_val, ty }`
+  | ct_eq       : IRValue → IRValue → IRValue → IRType → PmtInstr
+    -- Rust `CtEq { dst, lhs, rhs, ty }`
+  | get_address : IRValue → String → PmtInstr
+    -- Rust `GetAddress { dst, name }`
   deriving Repr
 
 /-- §5: A PMT-relevant basic block — a list of PmtInstr. -/
@@ -118,7 +269,11 @@ inductive PmtEffect where
   | none     : PmtEffect
   deriving Repr
 
-/-- §9: Classify an instruction's effect. -/
+/-- §9: Classify an instruction's effect.
+
+The 12 pure-arithmetic variants (PMT-1-A) all classify as `.none` —
+they neither read from nor write to a state variable, nor do they
+consume one. -/
 def PmtInstr.effect : PmtInstr → PmtEffect
   | .alloc out _ => .writes out
   | .load in_var _ _ _ => .reads in_var
@@ -127,10 +282,28 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .transform in_var _ _ => .consumes in_var  -- NOTE: also writes out, but consumes dominates
   | .call _ _ => .none
   | .ret _ => .none
+  -- Pure-arithmetic variants (PMT-1-A): no state effect.
+  | .bin_op _ _ _ _ _ => .none
+  | .unary_op _ _ _ _ => .none
+  | .cast _ _ _ _ _ => .none
+  | .add _ _ _ _ => .none
+  | .sub _ _ _ _ => .none
+  | .mul _ _ _ _ => .none
+  | .div _ _ _ _ => .none
+  | .cmp _ _ _ _ _ => .none
+  | .select _ _ _ _ _ => .none
+  | .ct_select _ _ _ _ _ => .none
+  | .ct_eq _ _ _ _ => .none
+  | .get_address _ _ => .none
 
 /-- §10: WellTypedness for PmtInstr (per-instruction).
 This is the per-instruction check that IVE's `verify_state_reads` /
-`verify_state_writes` / `verify_transform` perform. -/
+`verify_state_writes` / `verify_transform` perform.
+
+The 12 pure-arithmetic variants (PMT-1-A) all reduce to `True`: they
+are pure register-to-register computations with no arena
+involvement, so the per-instruction `WF_Layout` check does not
+apply. -/
 def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :=
   match i with
   | .alloc _out layout => WF_Layout layout
@@ -141,6 +314,19 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
       WF_Layout layout ∧ WF_Layout (layout_env in_var)
   | .call _ _ => True
   | .ret _ => True
+  -- Pure-arithmetic variants (PMT-1-A): pure computation, no arena involvement.
+  | .bin_op _ _ _ _ _ => True
+  | .unary_op _ _ _ _ => True
+  | .cast _ _ _ _ _ => True
+  | .add _ _ _ _ => True
+  | .sub _ _ _ _ => True
+  | .mul _ _ _ _ => True
+  | .div _ _ _ _ => True
+  | .cmp _ _ _ _ _ => True
+  | .select _ _ _ _ _ => True
+  | .ct_select _ _ _ _ _ => True
+  | .ct_eq _ _ _ _ => True
+  | .get_address _ _ => True
 
 /-- §11: WellTypedness for a PmtBlock. -/
 def PmtBlock.well_typed (b : PmtBlock) (env : String → Layout) : Prop :=
@@ -188,7 +374,12 @@ Mapping rationale (mirrors the IVE-from-IR traversal in W2-A §6):
       until call semantics are modeled.)
   - `ret _`               → `[]`
       (return has no further memory effect in this straight-line model.)
--/
+
+  The 12 pure-arithmetic variants (PMT-1-A) all map to `[]`: they are
+  pure register-to-register computations and contribute no `Step`s to
+  the flattened program. Consequently they do not perturb the
+  name-uniqueness conjuncts of `WellTyped` (a `Step`-free instruction
+  cannot introduce a duplicate `in_var` / `out_var`). -/
 def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   match i with
   | .alloc out layout => [⟨out, out, layout, .transform⟩]
@@ -198,5 +389,18 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .transform in_var out layout => [⟨in_var, out, layout, .transform⟩]
   | .call _ args => args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)
   | .ret _ => []
+  -- Pure-arithmetic variants (PMT-1-A): pure computation, no Steps emitted.
+  | .bin_op _ _ _ _ _ => []
+  | .unary_op _ _ _ _ => []
+  | .cast _ _ _ _ _ => []
+  | .add _ _ _ _ => []
+  | .sub _ _ _ _ => []
+  | .mul _ _ _ _ => []
+  | .div _ _ _ _ => []
+  | .cmp _ _ _ _ _ => []
+  | .select _ _ _ _ _ => []
+  | .ct_select _ _ _ _ _ => []
+  | .ct_eq _ _ _ _ => []
+  | .get_address _ _ => []
 
 end PMT
