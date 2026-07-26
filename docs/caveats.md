@@ -10,6 +10,12 @@ above them. When a citation doesn't land on the expected symbol, grep
 for the named symbol (e.g. `rg -n 'Item::LayoutDef' src/parser/src/to_scg.rs`)
 rather than trusting the line number verbatim.
 
+## 0. README / `--safe` Contradiction — RESOLVED
+
+| Issue | Location | Description |
+|-------|----------|-------------|
+| README headline claimed "invariant verification at compile time **without runtime memory-safety overhead**" while `--safe` is hard-coded on and `__oob_trap` bounds checks ARE emitted — **RESOLVED** (PMT Wave 0, task PMT-0-A) | `README.md` (intro paragraphs); `src/main.rs:607` (`safe: true, // safe is always on (--safe is a no-op)`); `src/codegen/src/memory_safety.rs:1014` (`inject_bounds_check_ir`, invoked at `src/pipeline.rs:6139`); cross-ref §3 "PMT & Memory Safety" below and Stage 5 of `docs/pipeline.md` | The README intro previously marketed invariant verification "without runtime memory-safety overhead", which self-contradicted (a) `src/main.rs:607` hard-coding `safe: true` with the comment that `--safe` is a no-op (always on), and (b) the `__oob_trap` runtime bounds checks (`ComputationNode(UGe)` + `ControlNode::If { __oob_trap }`) that `inject_bounds_check_ir` prepends to every bounded `Seq` access into an arena-allocated state buffer. The contradiction has been resolved by rewriting the README headline + intro to honestly state that `--safe` is always on and that arena-allocated accesses DO incur a `__oob_trap` bounds check at runtime (so the overhead is paid, not avoided), while raw-pointer / `length_expr=None` accesses remain unchecked (future SoftBound work). **No source code (`src/**`) or Lean proof (`proof/**`) files were modified** — only `README.md` and this `docs/caveats.md` §0 entry. This entry is APPEND-ONLY: no pre-existing line in this file was edited to add it. |
+
 ## 1. Parsing & Frontend
 
 | Issue | Location | Description |
