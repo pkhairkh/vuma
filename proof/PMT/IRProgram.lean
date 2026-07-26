@@ -21,14 +21,27 @@ All theorems in this file close without `sorry`.
 
 Design notes:
   - `instructions : List PmtInstr` uses the simplified `PmtInstr` from
-    `PMT.PmtInstr` (7 PMT-relevant variants), NOT the full 32-variant
-    `IRInstr`. The Lean/Rust simulation relation maps the 25
-    other `IRInstr` variants through `PmtInstr.call` / `PmtInstr.other`.
+    `PMT.PmtInstr` (now 22 variants: 7 memory + 12 arithmetic + 3
+    control-flow), NOT the full 32-variant `IRInstr`. The Lean/Rust
+    simulation relation maps the 10 other `IRInstr` variants through
+    `PmtInstr.call` / `PmtInstr.other`.
   - `predecessors`/`successors` use `List String` instead of Rust's
     `HashSet<String>` — sufficient for our soundness proofs since IVE
     traverses flat (`for func, block, instr`).
   - `IRTerminator.ret` (not `return`) — `return` is a Lean 4 contextual
     keyword in `do`-notation; using `ret` avoids parser ambiguity.
+  - **Control flow vs. terminators (PMT-1-B).** Rust `IRInstr` has
+    `Branch`/`CondBranch` as instruction-level variants (in
+    `IRBlock.instructions`), *alongside* the `IRTerminator::Jump`/
+    `IRTerminator::Branch` variants (in `IRBlock.terminator`). The Lean
+    model mirrors this redundancy: `PmtInstr.branch` / `PmtInstr.cond_branch`
+    live in `IRBlock.instructions`, while `IRTerminator.jump` /
+    `IRTerminator.branch` live in `IRBlock.terminator`. The helper
+    `PmtInstr.successor_labels` (§6.5) classifies the CFG-target labels
+    contributed by each control-flow instruction; `IRBlock.successors_from_instrs`
+    (§6.6) collects these across a block. Both are unused by the current
+    straight-line flattening (`IRFunction.to_program`) but are provided
+    for the future control-flow-aware refinement noted in `ExecFunction.lean` §3.
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
@@ -159,6 +172,70 @@ structure IRProgram where
   deriving Repr
 
 /-! ## §6. IRFunction helpers -/
+
+/-! ## §6.5. Control-flow resolution helpers (PMT-1-B)
+
+The three control-flow `PmtInstr` variants added in PMT-1-B (`phi`,
+`branch`, `cond_branch`) carry no memory effect — they all flatten to
+`[]` under `PmtInstr.to_steps`. Their semantics are instead resolved
+at the CFG level: each contributes zero or more block labels to the
+enclosing `IRBlock`'s successor set. The two helpers below expose
+that CFG-level information so that the future control-flow-aware
+flattening (noted in `ExecFunction.lean` §3) and any CFG-consistency
+strengthening of `IRBlock.well_typed` (§9) can consult it without
+re-implementing the constructor case-split.
+
+These helpers are not used by the current `pmt_soundness` proof (which
+operates on the flattened `Program = List Step`, to which
+control-flow instructions contribute nothing). They are provided for
+forward-compatibility with the control-flow-aware refinement. -/
+
+/-- §6.5: `PmtInstr.successor_labels` — the CFG successor block labels
+contributed by a `PmtInstr`. Returns:
+  * `[]` for every non-control-flow instruction (memory, arithmetic, `phi`),
+  * `[target]` for `branch target`,
+  * `[true_target, false_target]` for `cond_branch cond true_target false_target`.
+
+`phi` returns `[]` because it consumes predecessors (its `incoming`
+pairs reference predecessor blocks) rather than producing successors —
+the predecessor-side classification is `PmtInstr.predecessor_labels`
+(§6.5.1). -/
+def PmtInstr.successor_labels : PmtInstr → List String
+  | .branch target => [target]
+  | .cond_branch _ true_target false_target => [true_target, false_target]
+  | _ => []
+
+/-- §6.5.1: `PmtInstr.predecessor_labels` — the CFG predecessor block
+labels referenced by a `PmtInstr`. Returns:
+  * the list of `incoming` predecessor labels for `phi`,
+  * `[]` for every other instruction.
+
+This is the predecessor-side analog of `PmtInstr.successor_labels`. -/
+def PmtInstr.predecessor_labels : PmtInstr → List String
+  | .phi _ incoming => incoming.map (·.2)
+  | _ => []
+
+/-- §6.5.2: `PmtInstr.is_terminator` — `true` for the two control-flow
+variants that end a basic block (`branch`, `cond_branch`). Returns
+`false` for `phi` (which is typically the *first* instruction of a
+block, not the last) and for every non-control-flow instruction. -/
+def PmtInstr.is_terminator : PmtInstr → Bool
+  | .branch _ => true
+  | .cond_branch _ _ _ => true
+  | _ => false
+
+/-- §6.6: `IRBlock.successors_from_instrs` — collect the CFG successor
+labels contributed by the control-flow instructions in a block's
+`instructions` list. This is the instruction-derived analog of
+`IRBlock.successors` (which is the explicit, declared successor list).
+
+The two need not agree in general — the explicit `successors` field
+may include targets reached via the `IRTerminator` that are not
+expressible as `PmtInstr` control-flow variants. A future
+CFG-consistency strengthening of `IRBlock.well_typed` (§9) may require
+`successors_from_instrs ⊆ successors`. -/
+def IRBlock.successors_from_instrs (b : IRBlock) : List String :=
+  b.instructions.flatMap PmtInstr.successor_labels
 
 /-- §6: Entry block of a function (first block). Returns `none` if the
 function has no blocks (which violates `IRFunction.well_typed`). -/
