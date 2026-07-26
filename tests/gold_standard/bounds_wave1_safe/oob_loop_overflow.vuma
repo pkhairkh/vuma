@@ -1,0 +1,38 @@
+// oob_loop_overflow — Loop goes one past array end
+// Expected exit code: 134
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+//
+// Bounds Wave 1 SAFE-ONLY negative test: allocate a 4-byte buffer
+// (`[u8; 4]`) and loop `i` over the closed range [0, 4] (using
+// `i <= 4` as the loop condition — a classic off-by-one in the loop
+// bound). Each iteration writes `i` to `b.data[i]`. With `--safe`,
+// on the final iteration (i == 4) the injected `UGe(i, 4)` bounds
+// check evaluates to true (4 >= 4) and dispatches to `__oob_trap`,
+// which aborts with exit code 134 (SIGABRT, 128 + 6).
+//
+// IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
+// standard suite because it only passes when compiled with `--safe`.
+// Without `--safe`, the OOB write corrupts adjacent memory and
+// behaviour is undefined. The expected exit code below assumes
+// `--safe` was passed at compile time.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocation (PMT idiom)
+//   - `[u8; 4]` array field with a known 4-byte size
+//   - while-loop with `i <= 4` (closed range) — exercises the
+//     bounds check inside a loop body, where the index `i` is a
+//     phi-merged SSA value that the optimiser cannot fold away
+//   - exit 134 == SIGABRT (128 + 6) emitted by `__oob_trap`.
+
+layout Buf = { data: [u8; 4] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    let i = 0;
+    // Loop bound is `<= 4` — on the i==4 iteration the Store traps
+    while i <= 4 {
+        b.data[i] = i;
+        i = i + 1;
+    }
+    return 0;
+}

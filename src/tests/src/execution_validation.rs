@@ -64,7 +64,7 @@ fn make_add_scg() -> Scg {
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Var("b".to_string()),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -78,8 +78,13 @@ fn compile_to_aarch64_elf(scg: &Scg) -> Vec<u8> {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
     let config = EmitConfig::linux_elf();
-    emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
-        .expect("ELF emission should succeed")
+    emit_elf(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        &config,
+        &[],
+    )
+    .expect("ELF emission should succeed")
 }
 
 /// Compile an SCG to ARM64 machine code words (using Emitter directly).
@@ -112,8 +117,8 @@ fn compile_to_wasm(scg: &Scg) -> Vec<u8> {
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     backend
@@ -133,8 +138,8 @@ mod x86_64_native {
     /// allocate RW memory, copy code in, switch to RWX, call as
     /// `extern "C" fn() -> i64`, munmap.
     fn execute_native(code: &[u8]) -> i64 {
-        use std::ptr;
         use crate::ffi_types as ffi;
+        use std::ptr;
 
         let len = code.len();
         let page_size = 4096usize;

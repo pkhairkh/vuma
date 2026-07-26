@@ -55,40 +55,13 @@ pub use error::{
     ParseErrorKind, ParseResult, Severity, SourceLocation, Span, VUMA_KEYWORDS,
 };
 pub use lexer::{Lexer, Position, Token, TokenKind};
-pub use parser::Parser;
+pub use parser::{Parser, MAX_EXPR_DEPTH};
 pub use resolver::{ModuleResolver, ResolveError};
 pub use to_scg::AstToScg;
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-
-    /// Full pipeline test: source → tokens → AST → SCG.
-    #[test]
-    fn full_pipeline_example() {
-        let source = r#"
-            region memory_pool = allocate(1024);
-            fn process() {
-                node_ptr = memory_pool + 64;
-                header = node_ptr as *NodeHeader;
-            }
-            free(memory_pool);
-        "#;
-
-        // Parse.
-        let mut parser = Parser::new(source);
-        let program = parser.parse_program().unwrap();
-
-        // Verify AST structure.
-        assert!(program.items.len() >= 2, "should have region + fn + free");
-
-        // Convert to SCG.
-        let mut converter = AstToScg::new();
-        let scg = converter.convert(&program).expect("convert should succeed");
-
-        // SCG should have nodes.
-        assert!(scg.node_count() > 0, "SCG should not be empty");
-    }
 
     #[test]
     fn parse_round_trip_keywords() {

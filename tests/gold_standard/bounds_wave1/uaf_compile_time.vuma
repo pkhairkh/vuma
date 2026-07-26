@@ -1,0 +1,35 @@
+// uaf_compile_time — Compile-time UAF detection baseline (live state)
+// Expected exit code: 42
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3 [--safe]
+//
+// UAF Wave 1 positive test: allocates a state buffer, writes 42 to
+// data[0], and reads it back. The state is LIVE throughout — no
+// transform has been applied, so there is no UAF. Verifies the
+// baseline case: with a live state, read after write returns the
+// written value (42).
+//
+// Runtime UAF detection (`__uaf_trap`, exit 135) is currently a
+// dormant stub on all 16 backends (see INV-UAF-1 worklog). UAF is
+// enforced at compile time via IVE linearity (§4 of
+// pmt-formal-spec.md): any StateWrite/StateRead whose vreg has been
+// consumed by a StateTransform is rejected by
+// `state_write::verify_state_writes` / `state_read::verify_state_reads`.
+// The runtime `__uaf_trap` stub fires only if a future
+// `inject_liveness_check_ir` pass is added to `memory_safety.rs`.
+//
+// This test passes both with and without `--safe` — the state is
+// always live, so no liveness check (even if injected) would trap.
+//
+// VUMA Key Concepts:
+//   - state_new(Buf) allocates a typed buffer (LIVE)
+//   - b.data[0] = 42 lowers to Store at offset 0
+//   - b.data[0] read lowers to Load at offset 0
+//   - No transform → no consumption → no UAF possible
+
+layout Buf = { data: [u8; 8] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 42;
+    return b.data[0];
+}

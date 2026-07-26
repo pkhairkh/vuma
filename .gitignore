@@ -30,7 +30,16 @@ MANIFEST.md
 # per-run artifacts that bloat the repo and go stale; they should not be
 # committed. If you need to share test results, paste them in a PR comment
 # or attach to a release.
-test_results/
+#
+# EXCEPTION (Task 9-c): test_results/history/ IS committed. It holds an
+# append-only archive of prior summary.json snapshots (one per rebuild)
+# used by scripts/show_trend.py to plot pass-rate trends across rebuilds.
+# Each file is <1 KB; the directory grows by ~1 KB per suite run, which is
+# acceptable for trend visibility. The per-run summary.json itself is still
+# ignored (overwritten in place each run).
+test_results/*
+!test_results/history/
+!test_results/history/**
 
 /tmp/vuma_results/
 /tmp/qemu_bins/
@@ -52,3 +61,11 @@ flamegraph.svg
 wasmtime
 a.out
 *.txt
+
+# Lean / Lake build artifacts
+proof/.lake/
+proof/build/
+*.olean
+*.ilean
+*.trace
+.lake/

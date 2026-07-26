@@ -2,7 +2,7 @@
 # VUMA CI Pipeline
 # ============================================================================
 # Runs on every push to main and on pull requests targeting main.
-# Jobs: build, test (matrix), fmt, clippy, docs
+# Jobs: build, manifest, test (matrix), fmt, clippy, docs, lean-proofs, qemu-smoke
 # ============================================================================
 
 name: CI
@@ -48,6 +48,20 @@ jobs:
 
       - name: Build workspace
         run: cargo build --workspace --verbose
+
+  # ── Manifest reconciliation ───────────────────────────────────────────────
+  # Verifies that tests/gold_standard/manifest.json (the canonical source of
+  # truth for the gold-standard test suite) matches the .vuma files actually
+  # present on disk. Drift fails the build. See Task 9-b / caveats.md §6 row 1.
+  manifest:
+    name: Gold-standard manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify manifest matches filesystem
+        run: make verify-manifest
 
   # ── Test ───────────────────────────────────────────────────────────────────
   test:
@@ -151,4 +165,86 @@ jobs:
         with:
           name: vuma-docs
           path: target/doc
+          retention-days: 7
+
+  # ── Lean Proofs ─────────────────────────────────────────────────────────────
+  # Builds and tests the Lean proof package under ./proof. Runs in parallel
+  # with the Rust jobs (no `needs:` dependency) so Lean failures don't block
+  # Rust feedback and vice versa. Strict sorry check is enabled as of Wave 15
+  # (PMT proof library is sorry-free).
+  lean-proofs:
+    name: Lean Proofs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain)
+        uses: oravirt/elan-action@v2
+        with:
+          lean-version: leanprover/lean4:v4.21.0
+
+      - name: Build proofs
+        run: cd proof && lake build
+
+      - name: Check sorry (strict)
+        env:
+          # Strict mode (fail on any sorry) is enabled as of Wave 15 — the
+          # PMT proof library is sorry-free.
+          PROOF_CHECK_STRICT: "1"
+        run: ./scripts/check-lean.sh
+
+      - name: Run proof tests
+        run: cd proof && lake exe test
+
+  # ── QEMU smoke test (Waves 13-14 backends) ─────────────────────────────────
+  # Builds the compiler, then for each of the 12 QEMU backends + wasm32
+  # (wasmtime) compiles 4 gold-standard .vuma programs and runs them under
+  # the appropriate emulator, checking the process exit code against the
+  # `// Expected exit code:` header in each test file. See
+  # scripts/qemu_smoke_test.sh for details.
+  qemu-smoke:
+    name: QEMU smoke test (12 ISAs + wasm32)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-03-01
+          components: rust-src
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: qemu-smoke-${{ runner.os }}
+
+      - name: Install qemu-user-static (all 12 ISAs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static
+          # Sanity-check the 12 emulators we exercise are on PATH.
+          for isa in aarch64 x86_64 riscv64 s390x arm ppc64 m68k sparc64 hppa alpha loongarch64 mips64el; do
+            command -v qemu-${isa}-static >/dev/null || { echo "missing qemu-${isa}-static"; exit 1; }
+          done
+
+      - name: Install wasmtime (wasm32 backend)
+        run: |
+          curl -sSfL https://wasmtime.dev/install.sh | bash -s -- --version 47.0.2
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Run QEMU smoke-test matrix
+        run: make qemu-smoke
+
+      - name: Upload smoke-test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-smoke-log
+          path: |
+            target/release/vuma
           retention-days: 7

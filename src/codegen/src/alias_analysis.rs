@@ -17,8 +17,8 @@
 //!
 //! Two pointers alias if and only if their alias classes overlap.
 
-use std::collections::HashMap;
 use crate::ir::{IRFunction, IRInstr, IRValue};
+use std::collections::HashMap;
 
 /// Alias class for a pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,8 +83,7 @@ impl AliasAnalysis {
 
                     // BinOp (pointer arithmetic) inherits base's class
                     IRInstr::BinOp { dst, lhs, .. } => {
-                        if let (Some(vreg), Some(lhs_vreg)) =
-                            (dst.as_register(), lhs.as_register())
+                        if let (Some(vreg), Some(lhs_vreg)) = (dst.as_register(), lhs.as_register())
                         {
                             if let Some(class) = classes.get(&lhs_vreg) {
                                 classes.insert(vreg, *class);
@@ -125,8 +124,7 @@ impl AliasAnalysis {
                     // through the typed pointer can't alias a Store to the
                     // original allocation.
                     IRInstr::Cast { dst, src, .. } => {
-                        if let (Some(vreg), Some(src_vreg)) =
-                            (dst.as_register(), src.as_register())
+                        if let (Some(vreg), Some(src_vreg)) = (dst.as_register(), src.as_register())
                         {
                             if let Some(class) = classes.get(&src_vreg) {
                                 classes.insert(vreg, *class);

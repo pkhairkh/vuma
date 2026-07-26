@@ -5,7 +5,7 @@
 //! intervals inside loops get exponentially higher spill weight.
 
 use vuma_codegen::ir::{BinOpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
-use vuma_codegen::regalloc::{LinearScanAllocator, compute_vreg_loop_depths, LiveInterval};
+use vuma_codegen::regalloc::{compute_vreg_loop_depths, LinearScanAllocator, LiveInterval};
 
 /// Build a function with a self-loop (loop depth 1).
 fn make_loop_function() -> IRFunction {
@@ -134,7 +134,11 @@ fn wave6_production_allocator_runs_with_loop_depth() {
     let func = make_loop_function();
     let allocator = LinearScanAllocator::new();
     let result = allocator.allocate_function(&func);
-    assert!(result.is_ok(), "allocation should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "allocation should succeed: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -144,15 +148,13 @@ fn wave6_loop_depth_zero_outside_loops() {
     func.params = vec![IRValue::Register(0)];
     func.param_types = vec![IRType::I64];
     func.blocks[0].label = "entry".to_string();
-    func.blocks[0].instructions = vec![
-        IRInstr::BinOp {
-            op: BinOpKind::Add,
-            dst: IRValue::Register(1),
-            lhs: IRValue::Register(0),
-            rhs: IRValue::Immediate(1),
-            ty: None,
-        },
-    ];
+    func.blocks[0].instructions = vec![IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst: IRValue::Register(1),
+        lhs: IRValue::Register(0),
+        rhs: IRValue::Immediate(1),
+        ty: None,
+    }];
     func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
     let depths = compute_vreg_loop_depths(&func);

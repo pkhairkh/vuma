@@ -22,6 +22,4 @@ vuma-scg.workspace = true
 vuma-parser.workspace = true
 vuma-ive.workspace = true
 vuma-bd.workspace = true
-vuma-cor.workspace = true
 vuma-codegen.workspace = true
-vuma-proof.workspace = true

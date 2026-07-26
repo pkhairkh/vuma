@@ -1,4 +1,12 @@
-#![allow(clippy::manual_range_contains, clippy::map_unwrap_or, clippy::unnecessary_cast, clippy::redundant_closure, clippy::if_same_then_else, clippy::collapsible_if, clippy::useless_format)]
+#![allow(
+    clippy::manual_range_contains,
+    clippy::map_unwrap_or,
+    clippy::unnecessary_cast,
+    clippy::redundant_closure,
+    clippy::if_same_then_else,
+    clippy::collapsible_if,
+    clippy::useless_format
+)]
 //! VUMA CLI — Command-line interface for the VUMA compiler.
 //!
 //! Subcommands:
@@ -16,12 +24,12 @@ use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use vuma::logging::{global_logger, init_logger, LogLevel};
 use vuma::pipeline::{
-    bridge_ast_to_codegen_scg, compile_modules, compile_with_path, CompileConfig, CompileResult, CompileTarget, OptLevel,
-    VerificationLevel, VumaError,
+    bridge_ast_to_codegen_scg, compile_modules, compile_with_path, CompileConfig, CompileResult,
+    CompileTarget, OptLevel, VerificationLevel, VumaError,
 };
 use vuma::telemetry::TelemetryCollector;
-use vuma::logging::{LogLevel, init_logger, global_logger};
 use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
 
@@ -45,11 +53,28 @@ struct Cli {
     /// [default: pmt]
     verification: VerificationArg,
 
-    /// Strict verification: treat `Inconclusive` verdicts as compilation-
-    /// blocking errors (Wave 19). By default `Inconclusive` (unverified
-    /// but no proven violation) is allowed; `--strict-verification` makes
-    /// it a hard error.
-    strict_verification: bool,
+    /// Allow `Inconclusive` verdicts to soft-pass. Now ACTIVE — this
+    /// flag is the opt-out escape hatch from the Inconclusive-hard-fail
+    /// default. When passed, an `OverallVerdict::Inconclusive` verdict is
+    /// soft-passed (compilation continues) with an explicit SOUNDNESS WAIVER
+    /// logged via `vuma_log!(warn, ...)` (visible with `VUMA_LOG=1`). Default
+    /// behaviour (flag absent): Inconclusive is a HARD failure.
+    allow_inconclusive: bool,
+
+    /// Promote the remaining ADVISORY IVE verifier — `bv_verify` (e-graph
+    /// soundness) — to a HARD failure. Default `false`: `bv_verify` only
+    /// `vuma_log!(warn)` on violations. When `--strict-ive` is passed, the
+    /// `bv_verify` gate returns `VumaError::Transform { ... }` and aborts
+    /// compilation.
+    ///
+    /// The linear-channel discipline check was previously also gated by
+    /// this flag, but has been promoted to UNCONDITIONAL HARD-FAIL — any
+    /// genuine linear-channel violation (use-after-close, double-close,
+    /// use-without-open) returns `VumaError::Transform { pass_name: "linear-channel", ... }`
+    /// and aborts compilation, regardless of `--strict-ive`. See
+    /// `pipeline.rs` Stage 7c comment and `docs/architecture/caveats.md`
+    /// §2 row 2 for the promotion history.
+    strict_ive: bool,
 
     /// Include debug info in output (alias: --debug-info)
     debug: bool,
@@ -74,6 +99,13 @@ struct Cli {
 
     /// Output telemetry data as JSON
     telemetry: bool,
+
+    /// Maximum expression nesting depth accepted by the recursive-descent
+    /// parser. Default [`vuma_parser::MAX_EXPR_DEPTH`] (= 1024). Lower values
+    /// give faster failure on pathological input; higher values accommodate
+    /// machine-generated code. Plumbed through `CompileConfig::max_expr_depth`
+    /// into `Parser::with_max_depth`.
+    max_expr_depth: u32,
 
     command: Option<Commands>,
 }
@@ -386,9 +418,7 @@ enum Commands {
     Lsp,
 
     /// Package manager subcommands
-    Pkg {
-        cmd: PkgCommand,
-    },
+    Pkg { cmd: PkgCommand },
 }
 
 /// Package manager subcommands.
@@ -512,11 +542,14 @@ fn print_usage() {
          \x20      --opt-level <OPT_LEVEL>        Optimization level [mandatory: O3] (only O3 is accepted in VUMA 2.0)\n\
          \x20      --verification <VERIFICATION>  Verification level [mandatory: pmt] (only pmt is accepted in VUMA 2.0)\n\
          \x20      --strict-verification          Treat Inconclusive verdicts as compilation-blocking errors\n\
+         \x20      --allow-inconclusive           Acknowledge Inconclusive soft-pass waiver (no-op today; reserved for future K3 default-flip)\n\
+         \x20      --strict-ive                   Promote the bv_verify advisory IVE verifier to a hard failure (linear-channel is always hard-fail as of Task 15-a)\n\
          \x20      --debug                        Include debug info in output (alias: --debug-info)\n\
          \x20      --sections                     Emit full ELF section headers in the output binary\n\
          \x20      --repl                         Launch the interactive REPL (shorthand for `vuma repl`)\n\
          \x20      --safe                         Enable runtime memory safety checks\n\
          \x20      --bench                        Run performance benchmarks instead of compiling\n\
+         \x20      --max-expr-depth <N>           Maximum expression nesting depth [default: 1024]\n\
          \x20  -v, --verbose                     Enable verbose/debug logging\n\
          \x20  -q, --quiet                       Suppress non-error output\n\
          \x20      --telemetry                    Output telemetry data as JSON\n\
@@ -566,15 +599,17 @@ where
     let mut cli = Cli {
         opt_level: OptLevelArg::O3, // O3 is mandatory in VUMA 2.0 (only accepted value)
         verification: VerificationArg::Pmt, // VUMA 2.0: PMT-only (only accepted value)
-        strict_verification: false,
+        allow_inconclusive: false,
+        strict_ive: false,
         debug: false,
         sections: false,
         repl: false,
-        safe: false,
+        safe: true, // `safe` is always on (--safe is a no-op)
         bench: false,
         verbose: false,
         quiet: false,
         telemetry: false,
+        max_expr_depth: vuma_parser::MAX_EXPR_DEPTH,
         command: None,
     };
 
@@ -630,17 +665,67 @@ fn try_consume_global_flag(
         // VUMA 2.0: `--no-verify` is REMOVED — verification is mandatory.
         // Reject the flag with a hard error so users learn it's gone
         // rather than silently ignoring it.
-        "--no-verify" => {
-            Err(ParseError::Msg(
-                "error: --no-verify has been removed in VUMA 2.0; \
+        "--no-verify" => Err(ParseError::Msg(
+            "error: --no-verify has been removed in VUMA 2.0; \
                  verification is mandatory (PMT-only). Use --verification pmt \
                  (the default) to confirm PMT verification is on."
+                .to_string(),
+        )),
+        "--strict-verification" => {
+            // VUMA 2.0: `--strict-verification` is REMOVED — Inconclusive
+            // is already a HARD failure by default. The flag is now a no-op
+            // (only `--allow-inconclusive` can soft-pass). Reject with a
+            // hard error so users learn the flag is gone.
+            Err(ParseError::Msg(
+                "error: --strict-verification has been removed in VUMA 2.0; \
+                 Inconclusive is now a HARD failure by default. Use \
+                 --allow-inconclusive to opt back into the soft-pass \
+                 behaviour (with a logged SOUNDNESS WAIVER)."
                     .to_string(),
             ))
         }
-        "--strict-verification" => {
+        "--allow-inconclusive" => {
             iter.next();
-            cli.strict_verification = true;
+            cli.allow_inconclusive = true;
+            // Now ACTIVE. When passed, an `OverallVerdict::Inconclusive`
+            // verdict is soft-passed (compilation continues) with an explicit
+            // SOUNDNESS WAIVER logged via `vuma_log!(warn, ...)` (visible
+            // with `VUMA_LOG=1`). Default behaviour (flag absent):
+            // Inconclusive is a HARD failure, blocking compilation.
+            vuma::vuma_log!(
+                info,
+                "--allow-inconclusive accepted: Inconclusive verdicts will be \
+                 soft-passed with a logged SOUNDNESS WAIVER (visible via \
+                 VUMA_LOG=1). Without this flag, Inconclusive is a HARD \
+                 failure by default (Gap 1 full flip)."
+            );
+            Ok(true)
+        }
+        "--strict-ive" => {
+            // Promote the remaining ADVISORY IVE verifier (bv_verify) to
+            // HARD-FAIL on any detected violation. Plumbed via
+            // `CompileConfig::strict_ive` -> `make_config` ->
+            // `pipeline.rs` Stage 7a (bv_verify). Default behaviour
+            // (flag absent): `bv_verify` only `vuma_log!(warn)` —
+            // preserving the historical advisory behaviour.
+            //
+            // The linear-channel gate (Stage 7c) was previously also
+            // gated by `--strict-ive`, but has been promoted to
+            // UNCONDITIONAL HARD-FAIL — any genuine linear-channel
+            // violation aborts compilation regardless of this flag.
+            // The earlier false-positive fix made this safe (the call
+            // site now extracts the handle's variable name from the
+            // NodePayload variants instead of the SCG node index).
+            // See `pipeline.rs` Stage 7c comment for the full history.
+            iter.next();
+            cli.strict_ive = true;
+            vuma::vuma_log!(
+                info,
+                "--strict-ive accepted: bv_verify is now a HARD failure \
+                 (any unsound e-graph rule aborts compilation). The \
+                 linear-channel gate is ALWAYS a HARD failure as of \
+                 Task 15-a (independent of this flag)."
+            );
             Ok(true)
         }
         "--debug" | "--debug-info" => {
@@ -660,21 +745,38 @@ fn try_consume_global_flag(
         }
         "--safe" => {
             iter.next();
-            cli.safe = true;
+            // No-op — `safe` is always `true`.
+            // Flag accepted for backwards compatibility.
             Ok(true)
         }
         // VUMA 2.0: `--no-memory-safety` is REMOVED — memory-safety
         // analysis is mandatory. Reject the flag with a hard error.
-        "--no-memory-safety" => {
-            Err(ParseError::Msg(
-                "error: --no-memory-safety has been removed in VUMA 2.0; \
+        "--no-memory-safety" => Err(ParseError::Msg(
+            "error: --no-memory-safety has been removed in VUMA 2.0; \
                  memory-safety analysis is mandatory."
-                    .to_string(),
-            ))
-        }
+                .to_string(),
+        )),
         "--bench" => {
             iter.next();
             cli.bench = true;
+            Ok(true)
+        }
+        "--max-expr-depth" => {
+            iter.next();
+            let val = take_value(iter, "--max-expr-depth <N>")?;
+            cli.max_expr_depth = val.parse::<u32>().map_err(|_| {
+                ParseError::Msg(format!(
+                    "error: invalid value '{val}' for '--max-expr-depth <N>': \
+                         expected a non-negative integer in 1..=u32::MAX"
+                ))
+            })?;
+            if cli.max_expr_depth == 0 {
+                return Err(ParseError::Msg(
+                    "error: invalid value '0' for '--max-expr-depth <N>': \
+                     must be at least 1"
+                        .to_string(),
+                ));
+            }
             Ok(true)
         }
         "-v" | "--verbose" => {
@@ -708,11 +810,7 @@ fn take_value(iter: &mut ArgIter, name: &str) -> Result<String, ParseError> {
 
 /// Dispatch to a subcommand-specific parser. The subcommand name has
 /// already been consumed from `iter`.
-fn parse_subcommand(
-    name: &str,
-    iter: &mut ArgIter,
-    cli: &mut Cli,
-) -> Result<Commands, ParseError> {
+fn parse_subcommand(name: &str, iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> {
     match name {
         "build" => parse_build(iter, cli),
         "run" => parse_run(iter, cli),
@@ -798,7 +896,12 @@ fn parse_build(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError
         )
     })?;
 
-    Ok(Commands::Build { file, output, target, isa })
+    Ok(Commands::Build {
+        file,
+        output,
+        target,
+        isa,
+    })
 }
 
 /// `vuma run [--isa <isa>] <file> [args...]` (trailing-var-arg).
@@ -854,7 +957,11 @@ fn parse_run(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError> 
         )
     })?;
 
-    Ok(Commands::Run { isa, file, args: trailing_args })
+    Ok(Commands::Run {
+        isa,
+        file,
+        args: trailing_args,
+    })
 }
 
 /// `vuma check <file>`
@@ -932,7 +1039,11 @@ fn parse_emit(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError>
     }
 
     if positionals.len() < 2 {
-        let missing = if positionals.is_empty() { "<ISA> <FILE>" } else { "<FILE>" };
+        let missing = if positionals.is_empty() {
+            "<ISA> <FILE>"
+        } else {
+            "<FILE>"
+        };
         return Err(ParseError::Msg(format!(
             "error: the following required arguments were not provided:\n  {missing}\n\n\
              Usage: vuma emit <ISA> <FILE> [OPTIONS]\n\n\
@@ -1016,7 +1127,12 @@ fn parse_compile(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseErr
         )
     })?;
 
-    Ok(Commands::Compile { file, output, target, format })
+    Ok(Commands::Compile {
+        file,
+        output,
+        target,
+        format,
+    })
 }
 
 /// `vuma disasm <file> [--isa aarch64] [--base-addr 0x400000]`
@@ -1076,7 +1192,11 @@ fn parse_disasm(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseErro
         )
     })?;
 
-    Ok(Commands::Disasm { file, isa, base_addr })
+    Ok(Commands::Disasm {
+        file,
+        isa,
+        base_addr,
+    })
 }
 
 /// `vuma link <file1> <file2> ... [-o <out>] [--isa <isa>] [--run]`
@@ -1135,7 +1255,12 @@ fn parse_link(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseError>
         ));
     }
 
-    Ok(Commands::Link { files, output, isa, run })
+    Ok(Commands::Link {
+        files,
+        output,
+        isa,
+        run,
+    })
 }
 
 /// `vuma verify <file>`
@@ -1308,7 +1433,9 @@ fn parse_pkg_init(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseEr
         )
     })?;
 
-    Ok(Commands::Pkg { cmd: PkgCommand::Init { name } })
+    Ok(Commands::Pkg {
+        cmd: PkgCommand::Init { name },
+    })
 }
 
 /// `vuma pkg build`
@@ -1328,7 +1455,9 @@ fn parse_pkg_build(iter: &mut ArgIter, cli: &mut Cli) -> Result<Commands, ParseE
              For more information, try '--help'."
         )));
     }
-    Ok(Commands::Pkg { cmd: PkgCommand::Build })
+    Ok(Commands::Pkg {
+        cmd: PkgCommand::Build,
+    })
 }
 
 /// `vuma pkg add <dep> [version]` (default version "*")
@@ -1430,15 +1559,11 @@ fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
         target,
         opt_level: OptLevel::from(cli.opt_level),
         verification_level,
-        strict_verification: cli.strict_verification,
-        debug_info: cli.debug,
+        allow_inconclusive: cli.allow_inconclusive,
+        strict_ive: cli.strict_ive,
         section_headers: cli.sections,
         runtime_bounds_checks: cli.safe,
-        // VUMA 2.0: memory-safety analysis is MANDATORY — the
-        // `--no-memory-safety` flag has been removed. The pipeline
-        // ignores this field (always runs the analyzer), but we set
-        // `true` here for API consistency.
-        memory_safety: true,
+        max_expr_depth: cli.max_expr_depth,
         ..CompileConfig::default()
     }
 }
@@ -1466,16 +1591,20 @@ fn default_output_path(input: &Path) -> PathBuf {
 /// from the AST, attaches the PMT layout registry, runs the 3 PMT state
 /// verifiers (state_read / state_write / state_transform) via
 /// `InvariantAggregator` at the `Pmt` level, and returns `Err` if the
-/// overall verdict is `Fail`. `Inconclusive` and `NoChecks` are
-/// non-blocking (matching `compile_with_path`'s default non-strict
-/// behaviour). This guarantees that no CLI subcommand can emit a binary
-/// for a PMT-violating program.
-fn verify_pmt_on_ast(program: &vuma_parser::Program) -> Result<(), String> {
+/// overall verdict is `Fail`. `Inconclusive` is now a HARD failure by
+/// default — matching the canonical pipeline gates at `pipeline.rs:5170`. Pass `allow_inconclusive=true` to opt back into the
+/// legacy soft-pass behaviour, which logs an explicit SOUNDNESS WAIVER
+/// warning (visible with `VUMA_LOG=1`). This guarantees that no CLI
+/// subcommand can emit a binary for a PMT-violating program OR a
+/// PMT-inconclusive program (by default).
+fn verify_pmt_on_ast(
+    program: &vuma_parser::Program,
+    allow_inconclusive: bool,
+) -> Result<(), String> {
     use vuma::pipeline::build_pmt_layout_specs;
     use vuma_ive::{
-        InvariantAggregator, OverallVerdict,
+        verification::VerificationInput, InvariantAggregator, OverallVerdict,
         VerificationLevel as IveVerificationLevel,
-        verification::VerificationInput,
     };
 
     // Build the semantic SCG (required input for the IVE PMT verifiers).
@@ -1499,6 +1628,36 @@ fn verify_pmt_on_ast(program: &vuma_parser::Program) -> Result<(), String> {
              (use `vuma verify` for details)",
             result.summary.failed
         ));
+    }
+    // Handle `Inconclusive` — now a HARD failure by default (matching
+    // the canonical pipeline gates at `pipeline.rs:5170`). The default is
+    // hard-fail; only an explicit `allow_inconclusive=true` opt-out
+    // soft-passes with a logged SOUNDNESS WAIVER (visible via VUMA_LOG=1).
+    if result.overall == OverallVerdict::Inconclusive && !allow_inconclusive {
+        return Err(format!(
+            "PMT state verification returned Inconclusive: {} invariant(s) \
+             unverified (passed={}, total_checked={}). Inconclusive is now a \
+             HARD failure by default (Gap 1 full flip). Re-run with \
+             --allow-inconclusive to soft-pass with a logged soundness waiver.",
+            result.summary.total_checked - result.summary.passed - result.summary.failed,
+            result.summary.passed,
+            result.summary.total_checked
+        ));
+    }
+    // SOUNDNESS WAIVER — only logged when the user has explicitly opted
+    // in via `--allow-inconclusive`.
+    if allow_inconclusive && result.overall == OverallVerdict::Inconclusive {
+        vuma::vuma_log!(
+            warn,
+            "SOUNDNESS WAIVER: IVE verification returned Inconclusive for \
+             PMT verification on AST (passed={}, failed={}, \
+             total_checked={}); compilation continues because \
+             --allow-inconclusive was passed. Inconclusive is now a HARD \
+             failure by default.",
+            result.summary.passed,
+            result.summary.failed,
+            result.summary.total_checked
+        );
     }
     Ok(())
 }
@@ -1525,11 +1684,13 @@ fn compile_to_binary_direct(
     source: &str,
     isa: IsaArg,
     _opt_level: OptLevel,
+    allow_inconclusive: bool,
+    max_expr_depth: u32,
 ) -> Result<Vec<u8>, String> {
     let backend_kind = BackendKind::from(isa);
 
     // Step 1: Parse source → AST.
-    let mut parser = vuma_parser::Parser::new(source);
+    let mut parser = vuma_parser::Parser::with_max_depth(source, max_expr_depth);
     let parse_result = parser.parse_program();
     if parse_result.is_err() {
         return Err(format!("parse error: {:?}", parse_result.errors));
@@ -1549,25 +1710,29 @@ fn compile_to_binary_direct(
     // The direct path bypasses `compile_with_path`'s Stage 6 IVE gate,
     // so we run PMT verification explicitly here. A `Fail` verdict is a
     // hard error — no binary is emitted for a PMT-violating program.
-    verify_pmt_on_ast(&program)?;
+    verify_pmt_on_ast(&program, allow_inconclusive)?;
 
     // Step 2: Bridge parser AST → codegen SCG.
     let codegen_scg = bridge_ast_to_codegen_scg(&program);
 
     // Step 3: Lower codegen SCG → IR.
     let mut ir_builder = ScgToIr::new();
-    let mut ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
-        format!("IR conversion error: {}", e)
-    })?;
+    let mut ir_program = ir_builder
+        .convert(&codegen_scg)
+        .map_err(|e| format!("IR conversion error: {}", e))?;
 
-    // Step 3b: Run codegen-level IR optimization (Wave 10 proper).
+    // Step 3b: Run codegen-level IR optimization.
     // Use the actual backend's latency table for per-ISA optimization.
     // In VUMA 2.0 O3 is mandatory, so the codegen-opt pass always runs
     // (the `opt_level` argument is retained for API stability but has no
     // effect — every path runs the full O3 codegen-opt pass).
     {
         let backend_for_table = create_backend(backend_kind).map_err(|e| {
-            format!("error: cannot create {} backend for latency table: {}", backend_kind.isa_name(), e)
+            format!(
+                "error: cannot create {} backend for latency table: {}",
+                backend_kind.isa_name(),
+                e
+            )
         })?;
         let latency_table = backend_for_table.target_info().latency_table();
         ir_program = vuma_codegen::opt::run_optimizations_with_target(ir_program, &latency_table);
@@ -1587,8 +1752,19 @@ fn compile_to_binary_direct(
     // know whether to store R1 (high word) after a function call returns.
     {
         use std::collections::HashSet;
-        let func_64bit: HashSet<String> = ir_program.functions.iter()
-            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64 | vuma_codegen::ir::IRType::F64)))
+        let func_64bit: HashSet<String> = ir_program
+            .functions
+            .iter()
+            .filter(|f| {
+                f.result_types.iter().any(|t| {
+                    matches!(
+                        t,
+                        vuma_codegen::ir::IRType::I64
+                            | vuma_codegen::ir::IRType::U64
+                            | vuma_codegen::ir::IRType::F64
+                    )
+                })
+            })
             .map(|f| f.name.clone())
             .collect();
         vuma_codegen::backend::set_64bit_returns(&func_64bit);
@@ -1599,10 +1775,29 @@ fn compile_to_binary_direct(
     // argument with the correct wasm type (F64 vs I32).
     {
         let func_params: std::collections::HashMap<String, Vec<vuma_codegen::ir::IRType>> =
-            ir_program.functions.iter()
+            ir_program
+                .functions
+                .iter()
                 .map(|f| (f.name.clone(), f.param_types.clone()))
                 .collect();
         vuma_codegen::backend::set_func_param_types(&func_params);
+    }
+
+    // Central pre-lowering float-op verification.
+    //
+    // Reject bitwise/shift/remainder ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/
+    // `ShrA`/`Ror`/`Rol`/`SRem`/`URem`) on `F32`/`F64` operands BEFORE
+    // any backend's `allocate_registers` runs, so all 19 backends
+    // (including the 4 thin wrappers) benefit without per-backend
+    // wiring.  The previous AArch64-only call site in
+    // `AArch64Backend::allocate_registers` has been removed — this
+    // central call subsumes it.  See `verify_program_float_ops` in
+    // `codegen/src/backend.rs` for the full rationale.
+    if let Err(errs) = vuma_codegen::backend::verify_program_float_ops(&ir_program) {
+        return Err(format!(
+            "error: pre-lowering float-op verification failed: {}",
+            errs.join("; ")
+        ));
     }
 
     let mut allocated_functions = Vec::new();
@@ -1679,11 +1874,15 @@ fn cmd_build(
         None
     };
 
-    if let Some(ref mut tc) = telemetry { tc.stage_start("compile"); }
+    if let Some(ref mut tc) = telemetry {
+        tc.stage_start("compile");
+    }
 
     let compile_result = vuma::compile_with_recovery(&source, Some(file), &config);
 
-    if let Some(ref mut tc) = telemetry { tc.stage_end("compile"); }
+    if let Some(ref mut tc) = telemetry {
+        tc.stage_end("compile");
+    }
 
     match compile_result {
         CompileResult::Success(result) => {
@@ -1754,7 +1953,8 @@ fn cmd_build(
             Err(format!(
                 "compilation failed with {} error(s) (last completed stage: {})",
                 partial.diagnostics.len(),
-                partial.last_completed_stage
+                partial
+                    .last_completed_stage
                     .map(|s| format!("{:?}", s))
                     .unwrap_or_else(|| "none".to_string())
             ))
@@ -1781,7 +1981,13 @@ fn cmd_build_direct(
         backend_kind.isa_name(),
     );
 
-    let binary = compile_to_binary_direct(source, isa, OptLevel::from(cli.opt_level))?;
+    let binary = compile_to_binary_direct(
+        source,
+        isa,
+        OptLevel::from(cli.opt_level),
+        cli.allow_inconclusive,
+        cli.max_expr_depth,
+    )?;
 
     let out_path = output
         .as_ref()
@@ -1832,7 +2038,8 @@ fn cmd_build_direct(
 ///   1. Try to execute the binary natively (works when the resolved ISA
 ///      matches the host ISA).
 ///   2. On native-exec failure (ENOEXEC, etc.), try `qemu-<isa>` as a
-///      user-space emulator.
+///      user-space emulator; if that is not on PATH, fall back to
+///      `qemu-<isa>-static` (shipped by `qemu-user-static` packages).
 ///   3. If both fail, print a clear, actionable error message naming the
 ///      ISA, the host arch, and the suggested remedy (install qemu or
 ///      compile for the host via `vuma emit`).
@@ -1850,11 +2057,15 @@ fn cmd_run(
 
     // Build via the direct path so the binary targets `resolved_isa`
     // (NOT the canonical pipeline's hardcoded AArch64).
-    let binary = compile_to_binary_direct(&source, resolved_isa, OptLevel::from(_cli.opt_level)).map_err(|err| {
-        global_logger().error(
-            "run",
-            &format!("compilation failed: {}", err),
-        );
+    let binary = compile_to_binary_direct(
+        &source,
+        resolved_isa,
+        OptLevel::from(_cli.opt_level),
+        _cli.allow_inconclusive,
+        _cli.max_expr_depth,
+    )
+    .map_err(|err| {
+        global_logger().error("run", &format!("compilation failed: {}", err));
         err
     })?;
 
@@ -1892,16 +2103,41 @@ fn cmd_run(
             // mismatch). Try the appropriate qemu-user emulator.
             // qemu-user binary names: qemu-aarch64, qemu-x86_64,
             // qemu-riscv64, qemu-arm (for arm32), etc.
-            let qemu_bin = format!("qemu-{}", isa_name);
-            match Command::new(&qemu_bin)
+            //
+            // We first try `qemu-<isa>`; if that is not on PATH we
+            // fall back to `qemu-<isa>-static` (the variant shipped
+            // by `qemu-user-static` packages on Debian/Ubuntu and
+            // commonly the only one available in CI containers).
+            // If neither is found, surface a clear error listing
+            // both attempted paths so the user knows exactly what to
+            // install.
+            let qemu_primary = format!("qemu-{}", isa_name);
+            let qemu_static = format!("qemu-{}-static", isa_name);
+            let qemu_out_res = Command::new(&qemu_primary)
                 .arg(&exe_path)
                 .args(args)
-                .output()
-            {
+                .output();
+            let qemu_out_res = match qemu_out_res {
+                Ok(o) => Ok(o),
+                Err(primary_err) => {
+                    // Primary qemu-<isa> missing/unavailable; try
+                    // the `-static` fallback before giving up.
+                    match Command::new(&qemu_static)
+                        .arg(&exe_path)
+                        .args(args)
+                        .output()
+                    {
+                        Ok(o) => Ok(o),
+                        Err(static_err) => Err((primary_err, static_err)),
+                    }
+                }
+            };
+            match qemu_out_res {
                 Ok(qemu_out) => qemu_out,
-                Err(qemu_err) => {
-                    // Step 3: both failed. Clean up and surface a clear,
-                    // actionable error.
+                Err((primary_err, static_err)) => {
+                    // Step 3: both failed. Clean up and surface a
+                    // clear, actionable error listing both attempted
+                    // QEMU binary names.
                     let _ = fs::remove_file(&exe_path);
                     let host_isa_name = host_isa()
                         .map(|i| BackendKind::from(i).isa_name())
@@ -1909,16 +2145,21 @@ fn cmd_run(
                     return Err(format!(
                         "error: cannot execute {isa} binary on {host} host.\n\
                          Native exec failed: {native_err}\n\
-                         {qemu} not found: {qemu_err2}\n\
+                         Tried QEMU emulators:\n\
+                         \x20  - {qemu_primary}: {primary_err}\n\
+                         \x20  - {qemu_static}: {static_err}\n\
                          \n\
                          To fix this, either:\n\
-                         (1) install qemu-{isa} (e.g. `apt install qemu-user`), or\n\
+                         (1) install qemu-{isa} or qemu-{isa}-static\n\
+                         \x20   (e.g. `apt install qemu-user` or `apt install qemu-user-static`), or\n\
                          (2) compile for the host instead: `vuma emit {host_isa} {file}`",
                         isa = isa_name,
                         host = host_arch,
                         native_err = native_err,
-                        qemu = qemu_bin,
-                        qemu_err2 = qemu_err,
+                        qemu_primary = qemu_primary,
+                        primary_err = primary_err,
+                        qemu_static = qemu_static,
+                        static_err = static_err,
                         host_isa = host_isa_name,
                         file = file.display(),
                     ));
@@ -1958,7 +2199,10 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     // it just verifies the program compiles and passes verification.
     let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
-        global_logger().error("check", &format!("check failed with {} error(s)", errors.len()));
+        global_logger().error(
+            "check",
+            &format!("check failed with {} error(s)", errors.len()),
+        );
         format!("check failed with {} error(s)", errors.len())
     })?;
 
@@ -1983,144 +2227,91 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 
 /// `vuma emit <isa> <file>` — Compile to a specific ISA target.
 ///
-/// Uses the direct AST → codegen SCG → IR path for better code quality
-/// than the main pipeline (which goes through the semantic SCG and loses
-/// most program semantics in the SCG→IR bridge).
+/// Originally this command was routed through the canonical pipeline
+/// (`compile_with_path`) so the IVE gate suite would run before emission.
+/// However, the QEMU smoke tests found that the canonical pipeline's
+/// Stage 10 (`emit_binary` → `emit_elf` in `codegen/src/emit.rs`) uses the
+/// AArch64-only `Emitter` for ALL backends — only the ELF `e_machine`
+/// header is set per-backend. The result was that `vuma emit x86_64`
+/// produced an x86_64-labeled ELF containing AArch64 instructions (SIGSEGV
+/// under qemu-x86_64), and `vuma emit aarch64` produced a binary whose
+/// entry point was `main` with NO `_start` stub and NO exit syscall (SIGSEGV
+/// under qemu-aarch64 because `ret x30` jumped to garbage).
+///
+/// Fix: `cmd_emit` now uses the SAME direct AST→codegen path
+/// (`compile_to_binary_direct`) that `cmd_build_direct` and `cmd_run` use.
+/// This calls `backend.encode_program(ir_program)`, which for every backend
+/// (AArch64 in `backend.rs:2838`, x86_64 in `x86_64/mod.rs:3908`, etc.)
+/// emits the proper ISA-specific machine code WITH a real `_start` stub and
+/// exit syscall wrapper. PMT state verification (`verify_pmt_on_ast`) still
+/// runs as a mandatory gate inside the direct path. The full IVE suite
+/// (Stage 6b memory-safety, Stage 7c linear-channel, Stage 8b advisory
+/// verifiers) is NOT run on this path — users who want the full IVE gate
+/// should use `vuma build` (which routes through the canonical pipeline and
+/// only emits a binary once IVE passes).
 fn cmd_emit(
-    _cli: &Cli,
+    cli: &Cli,
     isa: &IsaArg,
     file: &PathBuf,
     output: &Option<PathBuf>,
 ) -> Result<(), String> {
-    // NOTE: This command uses the direct AST→codegen SCG bridge
-    // (bridge_ast_to_codegen_scg) which bypasses the canonical
-    // semantic SCG pipeline. For full verification support, use
-    // `vuma build` or `vuma compile` which route through the
-    // canonical pipeline (src/pipeline.rs).
-    // TODO: Unify this path with the canonical pipeline.
-    eprintln!("[emit] Note: using direct AST→codegen path (not canonical pipeline)");
     let source = read_source(file)?;
     let backend_kind = BackendKind::from(*isa);
 
-    // Step 1: Parse source → AST.
-    let mut parser = vuma_parser::Parser::new(&source);
-    let parse_result = parser.parse_program();
-    if parse_result.is_err() {
-        return Err(format!("parse error: {:?}", parse_result.errors));
-    }
-    if !parse_result.errors.is_empty() {
-        eprintln!("[emit] WARNING: {} non-fatal parse errors:", parse_result.errors.len());
-        for err in &parse_result.errors {
-            eprintln!("[emit]   {:?}", err);
-        }
-    }
-    let program = parse_result.value.unwrap();
-
-    // Step 1b: PMT state verification (VUMA 2.0 — MANDATORY gate).
-    // `vuma emit` uses the direct AST→codegen path, bypassing the
-    // canonical pipeline's Stage 6 IVE gate. Run PMT verification
-    // explicitly here so no PMT-violating program can be emitted.
-    verify_pmt_on_ast(&program)?;
-
-    // Step 2: Bridge parser AST → codegen SCG.
-    let codegen_scg = bridge_ast_to_codegen_scg(&program);
-
-    // Step 3: Lower codegen SCG → IR.
-    let mut ir_builder = ScgToIr::new();
-    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
-        format!("IR conversion error: {}", e)
+    // Use the direct AST→codegen path (same as `cmd_build_direct` and
+    // `cmd_run`) so the binary targets the requested ISA via the backend's
+    // own `encode_program` (which emits a real `_start` stub + exit syscall)
+    // rather than the AArch64-only `Emitter` in `codegen/src/emit.rs::emit_elf`.
+    // PMT state verification still runs as a mandatory gate inside
+    // `compile_to_binary_direct` (via `verify_pmt_on_ast`).
+    let binary = compile_to_binary_direct(
+        &source,
+        *isa,
+        OptLevel::from(cli.opt_level),
+        cli.allow_inconclusive,
+        cli.max_expr_depth,
+    )
+    .map_err(|err| {
+        eprintln!("[emit] direct-path compilation failed: {}", err);
+        err
     })?;
-
-    eprintln!("[emit] IR program has {} functions", ir_program.functions.len());
-    for func in &ir_program.functions {
-        eprintln!("[emit] Function: {} ({} params, {} vregs)", func.name, func.params.len(), func.vregs.len());
-        for block in &func.blocks {
-            eprintln!("[emit]   Block: {}", block.label);
-            for instr in &block.instructions {
-                eprintln!("[emit]     {:?}", instr);
-            }
-        }
-    }
-
-    // Step 4: Create backend and allocate registers (with fallback).
-    let backend = match create_backend(backend_kind) {
-        Ok(b) => b,
-        Err(e) => {
-            let err_msg = format!("{}", e);
-            global_logger().warn("emit", &format!("{} backend failed: {}", backend_kind.isa_name(), err_msg));
-            // Try fallback to AArch64 if not already trying it
-            if backend_kind != BackendKind::AArch64 {
-                global_logger().info("emit", "falling back to aarch64 backend");
-                create_backend(BackendKind::AArch64).map_err(|e2| {
-                    format!("error: cannot create {} backend: {}, aarch64 fallback also failed: {}",
-                        backend_kind.isa_name(), err_msg, e2)
-                })?
-            } else {
-                return Err(format!("error: cannot create {} backend: {}", backend_kind.isa_name(), err_msg));
-            }
-        }
-    };
-
-    let mut allocated_functions = Vec::new();
-    for func in &ir_program.functions {
-        match backend.allocate_registers(func) {
-            Ok(allocated) => allocated_functions.push(allocated),
-            Err(e) => {
-                eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
-            }
-        }
-    }
 
     let out_path = output
         .as_ref()
         .cloned()
         .unwrap_or_else(|| default_output_path(file));
 
-    // Step 5: Encode and write output.
-    if !allocated_functions.is_empty() {
-        let allocated_program = vuma_codegen::backend::AllocatedProgram {
-            functions: allocated_functions,
-            total_code_size: 0,
-            total_data_size: 0,
-            rodata_data: Vec::new(),
-            function_names: std::collections::HashSet::new(),
-        };
-        match backend.encode_program(&allocated_program) {
-            Ok(bytes) => {
-                fs::write(&out_path, &bytes).map_err(|e| {
-                    format!("error: cannot write output file '{}': {}", out_path.display(), e)
-                })?;
-                // Make the output file executable on Unix.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(&out_path)
-                        .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
-                        .permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&out_path, perms)
-                        .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
-                }
-                println!(
-                    "Emitted {} -> {} ({} bytes, ISA: {})",
-                    file.display(),
-                    out_path.display(),
-                    bytes.len(),
-                    backend.name(),
-                );
-            }
-            Err(e) => {
-                use vuma_codegen::backend::BackendError;
-                let prefix = match &e {
-                    BackendError::UnresolvedRelocation { .. } => "E037",
-                    _ => "error",
-                };
-                return Err(format!("{}: {} encoding failed: {}", prefix, backend.name(), e));
-            }
-        }
-    } else {
-        return Err("no functions were successfully allocated".to_string());
+    fs::write(&out_path, &binary).map_err(|e| {
+        format!(
+            "error: cannot write output file '{}': {}",
+            out_path.display(),
+            e
+        )
+    })?;
+
+    // Make the output file executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&out_path)
+            .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&out_path, perms)
+            .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
     }
+
+    // PMT state verification runs as a mandatory gate inside
+    // `compile_to_binary_direct`; the full canonical-pipeline IVE suite
+    // (memory-safety, advisory verifiers) is NOT run on this path.
+    // Use `vuma build` for full IVE gating.
+    println!(
+        "Emitted {} -> {} ({} bytes, ISA: {}, PMT-verified)",
+        file.display(),
+        out_path.display(),
+        binary.len(),
+        backend_kind.isa_name(),
+    );
 
     Ok(())
 }
@@ -2134,7 +2325,7 @@ fn cmd_emit(
 ///   vuma compile --format obj --target x86_64 program.vuma -o program.o
 ///   ld -o program program.o -lc
 fn cmd_compile(
-    _cli: &Cli,
+    cli: &Cli,
     file: &PathBuf,
     output: &Option<PathBuf>,
     target: &IsaArg,
@@ -2144,13 +2335,16 @@ fn cmd_compile(
     let backend_kind = BackendKind::from(*target);
 
     // Step 1: Parse source → AST.
-    let mut parser = vuma_parser::Parser::new(&source);
+    let mut parser = vuma_parser::Parser::with_max_depth(&source, cli.max_expr_depth);
     let parse_result = parser.parse_program();
     if parse_result.is_err() {
         return Err(format!("parse error: {:?}", parse_result.errors));
     }
     if !parse_result.errors.is_empty() {
-        eprintln!("[compile] WARNING: {} non-fatal parse errors:", parse_result.errors.len());
+        eprintln!(
+            "[compile] WARNING: {} non-fatal parse errors:",
+            parse_result.errors.len()
+        );
         for err in &parse_result.errors {
             eprintln!("[compile]   {:?}", err);
         }
@@ -2161,22 +2355,29 @@ fn cmd_compile(
     // `vuma compile` uses the direct AST→codegen path, bypassing the
     // canonical pipeline's Stage 6 IVE gate. Run PMT verification
     // explicitly here so no PMT-violating program can be compiled.
-    verify_pmt_on_ast(&program)?;
+    verify_pmt_on_ast(&program, cli.allow_inconclusive)?;
 
     // Step 2: Bridge parser AST → codegen SCG (with extern awareness).
     let codegen_scg = bridge_ast_to_codegen_scg(&program);
 
     // Step 3: Lower codegen SCG → IR.
     let mut ir_builder = ScgToIr::new();
-    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
-        format!("IR conversion error: {}", e)
-    })?;
+    let ir_program = ir_builder
+        .convert(&codegen_scg)
+        .map_err(|e| format!("IR conversion error: {}", e))?;
 
-    eprintln!("[compile] IR program has {} functions", ir_program.functions.len());
+    eprintln!(
+        "[compile] IR program has {} functions",
+        ir_program.functions.len()
+    );
 
     // Step 4: Create backend and allocate registers.
     let backend = create_backend(backend_kind).map_err(|e| {
-        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
+        format!(
+            "error: cannot create {} backend: {}",
+            backend_kind.isa_name(),
+            e
+        )
     })?;
 
     let mut allocated_functions = Vec::new();
@@ -2184,19 +2385,19 @@ fn cmd_compile(
         match backend.allocate_registers(func) {
             Ok(allocated) => allocated_functions.push(allocated),
             Err(e) => {
-                eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
+                eprintln!(
+                    "warning: register allocation failed for '{}': {}",
+                    func.name, e
+                );
             }
         }
     }
 
-    let out_path = output
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| {
-            let stem = file.file_stem().unwrap_or_default().to_string_lossy();
-            let dir = file.parent().unwrap_or(std::path::Path::new("."));
-            dir.join(format!("{}.o", stem))
-        });
+    let out_path = output.as_ref().cloned().unwrap_or_else(|| {
+        let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+        let dir = file.parent().unwrap_or(std::path::Path::new("."));
+        dir.join(format!("{}.o", stem))
+    });
 
     // Step 5: Encode and write output.
     if !allocated_functions.is_empty() {
@@ -2239,7 +2440,11 @@ fn cmd_compile(
                             }
                         }
                         fs::write(&out_path, &out_bytes).map_err(|e| {
-                            format!("error: cannot write output file '{}': {}", out_path.display(), e)
+                            format!(
+                                "error: cannot write output file '{}': {}",
+                                out_path.display(),
+                                e
+                            )
                         })?;
                         println!(
                             "Compiled {} -> {} ({} bytes, ISA: {}, format: obj)",
@@ -2255,7 +2460,12 @@ fn cmd_compile(
                             BackendError::UnresolvedRelocation { .. } => "E037",
                             _ => "error",
                         };
-                        return Err(format!("{}: {} compile failed: {}", prefix, backend.name(), e));
+                        return Err(format!(
+                            "{}: {} compile failed: {}",
+                            prefix,
+                            backend.name(),
+                            e
+                        ));
                     }
                 }
             }
@@ -2264,7 +2474,11 @@ fn cmd_compile(
                 match backend.encode_program(&allocated_program) {
                     Ok(bytes) => {
                         fs::write(&out_path, &bytes).map_err(|e| {
-                            format!("error: cannot write output file '{}': {}", out_path.display(), e)
+                            format!(
+                                "error: cannot write output file '{}': {}",
+                                out_path.display(),
+                                e
+                            )
                         })?;
                         println!(
                             "Compiled {} -> {} ({} bytes, ISA: {}, format: {:?})",
@@ -2609,8 +2823,14 @@ fn cmd_bench(_cli: &Cli) {
             (BackendKind::S390X, "s390x"),
         ];
 
-        println!("  {:15} {:>12} {:>12} {:>12}", "Backend", "Time (ms)", "Size (B)", "Instrs");
-        println!("  {:15} {:>12} {:>12} {:>12}", "───────", "────────", "────────", "────────");
+        println!(
+            "  {:15} {:>12} {:>12} {:>12}",
+            "Backend", "Time (ms)", "Size (B)", "Instrs"
+        );
+        println!(
+            "  {:15} {:>12} {:>12} {:>12}",
+            "───────", "────────", "────────", "────────"
+        );
 
         for (kind, name) in &backends {
             let start = std::time::Instant::now();
@@ -2638,7 +2858,9 @@ fn cmd_bench(_cli: &Cli) {
             let _ir_time = start.elapsed();
 
             if let Ok(ir_program) = ir_result {
-                let ir_instr_count: usize = ir_program.functions.iter()
+                let ir_instr_count: usize = ir_program
+                    .functions
+                    .iter()
                     .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
                     .sum();
 
@@ -2680,10 +2902,7 @@ fn cmd_bench(_cli: &Cli) {
 
                 println!(
                     "  {:15} {:>12} {:>12} {:>12}",
-                    name,
-                    codegen_time_ms,
-                    binary_size,
-                    ir_instr_count
+                    name, codegen_time_ms, binary_size, ir_instr_count
                 );
             } else {
                 println!("  {:15} {:>12} {:>12} {:>12}", name, "IR_ERR", "-", "-");
@@ -2694,8 +2913,14 @@ fn cmd_bench(_cli: &Cli) {
 
     // ── Benchmark 2: Compilation speed at varying program sizes ──
     println!("── Benchmark 2: Compilation Speed ──");
-    println!("  {:20} {:>12} {:>12} {:>12}", "Program Size", "Parse (μs)", "SCG (μs)", "Total (μs)");
-    println!("  {:20} {:>12} {:>12} {:>12}", "────────────", "──────────", "────────", "─────────");
+    println!(
+        "  {:20} {:>12} {:>12} {:>12}",
+        "Program Size", "Parse (μs)", "SCG (μs)", "Total (μs)"
+    );
+    println!(
+        "  {:20} {:>12} {:>12} {:>12}",
+        "────────────", "──────────", "────────", "─────────"
+    );
 
     for &line_count in &[10, 50, 100, 500] {
         // Generate a synthetic program of the given size
@@ -2794,8 +3019,14 @@ fn cmd_bench(_cli: &Cli) {
             let elapsed = start.elapsed();
 
             println!("  Analysis time:         {}μs", elapsed.as_micros());
-            println!("  Heap allocations:      {}", report.heap_allocations_analyzed);
-            println!("  Stack allocations:     {}", report.stack_allocations_analyzed);
+            println!(
+                "  Heap allocations:      {}",
+                report.heap_allocations_analyzed
+            );
+            println!(
+                "  Stack allocations:     {}",
+                report.stack_allocations_analyzed
+            );
             println!("  Access sites:          {}", report.access_sites_analyzed);
             println!("  Violations found:      {}", report.violations.len());
             if !report.violations.is_empty() {
@@ -2908,7 +3139,8 @@ fn main() {
 
 /// `vuma pkg init/build/add` — Package manager subcommands.
 fn cmd_pkg(cmd: &PkgCommand) -> Result<(), String> {
-    let dir = std::env::current_dir().map_err(|e| format!("cannot get current directory: {}", e))?;
+    let dir =
+        std::env::current_dir().map_err(|e| format!("cannot get current directory: {}", e))?;
     match cmd {
         PkgCommand::Init { name } => {
             vuma::init_package(&dir, name).map_err(|e| format!("pkg init failed: {}", e))?;
@@ -2921,7 +3153,8 @@ fn cmd_pkg(cmd: &PkgCommand) -> Result<(), String> {
             Ok(())
         }
         PkgCommand::Add { dep, version } => {
-            vuma::add_dependency(&dir, dep, version).map_err(|e| format!("pkg add failed: {}", e))?;
+            vuma::add_dependency(&dir, dep, version)
+                .map_err(|e| format!("pkg add failed: {}", e))?;
             println!("Added dependency {} @ {}", dep, version);
             Ok(())
         }
@@ -2950,7 +3183,10 @@ mod tests {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
                 assert_eq!(target, &TargetArg::Linux);
-                assert!(isa.is_none(), "--isa should default to None (resolved at runtime)");
+                assert!(
+                    isa.is_none(),
+                    "--isa should default to None (resolved at runtime)"
+                );
             }
             _ => panic!("expected Build command"),
         }
@@ -2987,16 +3223,11 @@ mod tests {
     /// Test 2b: `vuma build hello.vuma --isa x86_64` parses the --isa flag.
     #[test]
     fn test_build_with_isa() {
-        let cli = parse_cli_from([
-            "vuma",
-            "build",
-            "hello.vuma",
-            "--isa",
-            "x86_64",
-        ])
-        .unwrap();
+        let cli = parse_cli_from(["vuma", "build", "hello.vuma", "--isa", "x86_64"]).unwrap();
         match cli.command {
-            Some(Commands::Build { ref file, ref isa, .. }) => {
+            Some(Commands::Build {
+                ref file, ref isa, ..
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(*isa, Some(IsaArg::X86_64));
             }
@@ -3009,7 +3240,11 @@ mod tests {
     fn test_run_basic() {
         let cli = parse_cli_from(["vuma", "run", "hello.vuma"]).unwrap();
         match cli.command {
-            Some(Commands::Run { ref file, ref args, isa: _ }) => {
+            Some(Commands::Run {
+                ref file,
+                ref args,
+                isa: _,
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(args.is_empty());
             }
@@ -3022,7 +3257,9 @@ mod tests {
     fn test_run_with_args() {
         let cli = parse_cli_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
         match cli.command {
-            Some(Commands::Run { ref file, ref args, .. }) => {
+            Some(Commands::Run {
+                ref file, ref args, ..
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(args, &vec!["arg1".to_string(), "arg2".to_string()]);
             }
@@ -3034,12 +3271,14 @@ mod tests {
     /// (must come BEFORE the file because of `trailing_var_arg`).
     #[test]
     fn test_run_with_isa() {
-        let cli = parse_cli_from([
-            "vuma", "run", "--isa", "aarch64", "hello.vuma", "arg1",
-        ])
-        .unwrap();
+        let cli =
+            parse_cli_from(["vuma", "run", "--isa", "aarch64", "hello.vuma", "arg1"]).unwrap();
         match cli.command {
-            Some(Commands::Run { ref file, ref args, ref isa }) => {
+            Some(Commands::Run {
+                ref file,
+                ref args,
+                ref isa,
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(*isa, Some(IsaArg::Aarch64));
                 assert_eq!(args, &vec!["arg1".to_string()]);
@@ -3056,10 +3295,22 @@ mod tests {
         // falls back to AArch64 — verify that fallback works too.
         let resolved = resolve_isa(&None);
         let _ = resolved; // just ensure it doesn't panic.
-        // On any of the supported arches, host_isa() should be Some.
-        let known = ["x86_64", "aarch64", "riscv64", "arm", "powerpc64", "mips", "loongarch64"];
+                          // On any of the supported arches, host_isa() should be Some.
+        let known = [
+            "x86_64",
+            "aarch64",
+            "riscv64",
+            "arm",
+            "powerpc64",
+            "mips",
+            "loongarch64",
+        ];
         if known.contains(&std::env::consts::ARCH) {
-            assert!(host_isa().is_some(), "host_isa() should return Some on supported arch {}", std::env::consts::ARCH);
+            assert!(
+                host_isa().is_some(),
+                "host_isa() should return Some on supported arch {}",
+                std::env::consts::ARCH
+            );
         }
     }
 
@@ -3096,8 +3347,7 @@ mod tests {
     /// Test 7: `vuma emit x86-64 hello.vuma -o out.o` parses correctly.
     #[test]
     fn test_emit_x86_64_with_output() {
-        let cli =
-            parse_cli_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
+        let cli = parse_cli_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
         match cli.command {
             Some(Commands::Emit {
                 isa,
@@ -3174,8 +3424,7 @@ mod tests {
     /// values (O0/O1/O2) are rejected with a hard error.
     #[test]
     fn test_global_opt_level() {
-        let cli =
-            parse_cli_from(["vuma", "--opt-level", "O3", "build", "hello.vuma"]).unwrap();
+        let cli = parse_cli_from(["vuma", "--opt-level", "O3", "build", "hello.vuma"]).unwrap();
         assert_eq!(cli.opt_level, OptLevelArg::O3);
     }
 
@@ -3183,13 +3432,7 @@ mod tests {
     #[test]
     fn test_global_opt_level_rejects_lower() {
         for bad in ["O0", "O1", "O2"] {
-            let result = parse_cli_from([
-                "vuma",
-                "--opt-level",
-                bad,
-                "build",
-                "hello.vuma",
-            ]);
+            let result = parse_cli_from(["vuma", "--opt-level", bad, "build", "hello.vuma"]);
             assert!(
                 result.is_err(),
                 "--opt-level {} should be rejected (O3 is mandatory)",
@@ -3203,14 +3446,7 @@ mod tests {
     /// VUMA 2.0: only `pmt` is accepted.
     #[test]
     fn test_global_verification_level() {
-        let cli = parse_cli_from([
-            "vuma",
-            "--verification",
-            "pmt",
-            "build",
-            "hello.vuma",
-        ])
-        .unwrap();
+        let cli = parse_cli_from(["vuma", "--verification", "pmt", "build", "hello.vuma"]).unwrap();
         assert_eq!(cli.verification, VerificationArg::Pmt);
     }
 
@@ -3218,13 +3454,7 @@ mod tests {
     #[test]
     fn test_global_verification_level_rejects_non_pmt() {
         for bad in ["quick", "normal", "exhaustive", "none"] {
-            let result = parse_cli_from([
-                "vuma",
-                "--verification",
-                bad,
-                "build",
-                "hello.vuma",
-            ]);
+            let result = parse_cli_from(["vuma", "--verification", bad, "build", "hello.vuma"]);
             assert!(
                 result.is_err(),
                 "--verification {} should be rejected (PMT is mandatory)",

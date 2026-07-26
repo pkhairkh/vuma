@@ -40,19 +40,26 @@
 //! ## Scope / honest limitations
 //!
 //! Full vector-IR plumbing through the backend ISel (reg-alloc, scheduler,
-//! instruction selection) is too deep for this wave. We:
+//! instruction selection) is too deep for one wave. We:
 //! - Fix the IV-step miscompilation (the core bug).
 //! - Emit a vectorization plan the backend can consume.
 //! - Provide SSE/AVX/NEON encoders (in `x86_64/mod.rs` and `arm64.rs`).
-//! - Leave full ISel integration as a `TODO(wave29)` — the encoders and plan
-//!   exist and are unit-tested, but the backend does not yet lower `PackedOp`
-//!   to real machine code.
+//! - **Wave 11-e (PARTIAL):** wire `PackedOp` lowering into ISel via the new
+//!   [`lower_packed_ops_to_vectorops`] helper. For each `PackedOp` in the plan,
+//!   the helper rewrites the lane-0 scalar BinOp into an `IRInstr::VectorOp`,
+//!   which the existing `IRInstr::VectorOp` arm in
+//!   `x86_64::stack_slot_isel::allocate_registers` (and the aarch64
+//!   equivalent) lowers to real SSE/AVX/NEON bytes — proving the plan flows
+//!   through to real machine code. Full semantic correctness (XMM/V-reg
+//!   allocation, per-lane dst vregs, lane-extract instructions) is still
+//!   deferred: see [`lower_packed_ops_to_vectorops`] for the three
+//!   documented paths to full resolution.
 
-use crate::ir::{
-    size_of, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, BinOpKind,
-};
 #[cfg(test)]
-use crate::ir::{IRType, VectorOpKind};
+use crate::ir::IRType;
+use crate::ir::{
+    size_of, BinOpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRValue, VectorOpKind,
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Constants
@@ -186,6 +193,123 @@ pub fn vectorize_function_with_plan(mut func: IRFunction) -> (IRFunction, Vector
     // Final CFG rebuild so predecessors/successors are consistent.
     func.rebuild_cfg();
     (func, plan)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ISel wiring (Wave 11-e, partial)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Lower `PackedOp`s from a [`VectorizationPlan`] into `IRInstr::VectorOp`
+/// instructions in the IR — the wiring from the vectorizer's side-channel
+/// plan to the backend instruction selectors.
+///
+/// For each `PackedOp` in the plan, this function:
+///
+/// 1. Finds the block named `packed.block`.
+/// 2. Finds the lane-0 scalar `BinOp` / `Add` / `Sub` / `Mul` whose
+///    destination vreg equals `packed.dst_lane0` and whose arithmetic kind
+///    matches `packed.kind` (re-using [`classify_packable_binop`]).
+/// 3. Replaces that scalar op with an
+///    `IRInstr::VectorOp { op, lanes, elem_size, dst, lhs, rhs }` carrying
+///    the same `dst` / `lhs` / `rhs` vregs.
+///
+/// The lane-1..N scalar BinOps (the duplicated body copies emitted by loop
+/// vectorization, or the second op of an SLP pair) are LEFT in the IR — they
+/// still execute correctly (each lane's scalar op produces the right result
+/// for that lane). The `VectorOp` is emitted IN ADDITION, lowering to real
+/// SSE/AVX bytes via the existing `IRInstr::VectorOp` arm in
+/// `x86_64::stack_slot_isel::allocate_registers` and the aarch64 equivalent
+/// in `arm64::InstructionSelector::select_from_ir`.
+///
+/// # Return value
+///
+/// The number of `PackedOp`s successfully lowered (0 if the plan was empty
+/// or no matching lane-0 BinOp was found for any op). Each `PackedOp` lowers
+/// at most one scalar op — lane-1..N are left intact.
+///
+/// # Known limitations (PARTIAL wiring — `docs/architecture/caveats.md` §8 #17)
+///
+/// This is a **proof-of-concept** wiring. It proves that the vectorization
+/// plan flows through to real SSE/AVX/NEON machine bytes (see
+/// `test_wave11e_packed_op_lowered_to_avx_in_x86_64_isel`), but does NOT
+/// guarantee SIMD execution of lanes 1..N or correct lane-0 dst vreg
+/// propagation. Full semantic correctness requires one of the following
+/// (deferred to a future wave):
+///
+/// - **(a) Per-lane dst vregs + lane-extract.** The current `IRInstr::VectorOp`
+///   IR has a single `dst` (lane 0). Lanes 1..N have their own scalar dst
+///   vregs (still computed by the remaining scalar BinOps). For full SIMD
+///   utilization, `VectorOp` would need to support per-lane dst vregs and
+///   emit lane-extract instructions (`pextrd` / `umov` from XMM/V lane to
+///   GPR) so downstream uses of lanes 1..N read from the SIMD result.
+///
+/// - **(b) XMM/V register allocation + spill/reload.** The current
+///   `VectorOp` lowering uses fixed XMM0/XMM1/XMM2 (x86_64) and V0/V1/V2
+///   (aarch64). The IR-level `dst`/`lhs`/`rhs` vregs are tracked for
+///   dataflow (`defined_regs`/`used_regs`) but the SIMD result is NOT
+///   written back to the dst vreg's stack slot — so downstream uses of
+///   lane-0's dst vreg read stale data (the value that the lane-0 scalar
+///   BinOp would have written, which has now been replaced by the
+///   `VectorOp`). Full correctness requires XMM/V register allocation
+///   that spills the SIMD result to the dst vreg's stack slot.
+///
+/// - **(c) Plan-aware ISel consuming `PackedOp` directly.** Rather than
+///   rewriting the IR, the backend's ISel could accept the
+///   `VectorizationPlan` as a side input and emit SIMD instructions
+///   directly for each `PackedOp` group, skipping the scalar BinOps for
+///   lanes 1..N. This would require plumbing the plan through
+///   `allocate_registers` (which is implemented per-backend — touching
+///   5+ backend files). The current per-backend `allocate_registers`
+///   signature takes only `&IRFunction`, so this is the most invasive
+///   option.
+///
+/// Until one of (a)/(b)/(c) lands, this wiring is **diagnostic**: it
+/// demonstrates the plan-to-machine-bytes pipeline and unblocks writing
+/// tests that assert "the vectorizer actually emitted SIMD bytes for this
+/// loop", but it should NOT be enabled on production code paths.
+pub fn lower_packed_ops_to_vectorops(func: &mut IRFunction, plan: &VectorizationPlan) -> usize {
+    let mut count = 0usize;
+    for packed in &plan.packed_ops {
+        let vop_kind = match packed.kind {
+            PackedOpKind::Add => VectorOpKind::Add,
+            PackedOpKind::Sub => VectorOpKind::Sub,
+            PackedOpKind::Mul => VectorOpKind::Mul,
+        };
+        // Find the matching block by label.
+        let blk = func.blocks.iter_mut().find(|b| b.label == packed.block);
+        let Some(blk) = blk else {
+            continue;
+        };
+        // Find the lane-0 scalar BinOp matching `dst_lane0` and `kind`.
+        // `classify_packable_binop` already handles all four shapes
+        // (`BinOp`/`Add`/`Sub`/`Mul`) and rejects immediate-operand ops.
+        for instr in &mut blk.instructions {
+            let classified = classify_packable_binop(instr);
+            let Some((kind, dst, srcs)) = classified else {
+                continue;
+            };
+            if kind != packed.kind || dst != packed.dst_lane0 || srcs.len() < 2 {
+                continue;
+            }
+            // Replace this scalar op with a `VectorOp`. The dst/lhs/rhs
+            // vregs are preserved so the backend's `defined_regs` /
+            // `used_regs` dataflow tracking still sees the same vregs
+            // (the stack-slot allocator will assign them slots; the
+            // existing `VectorOp` ISel arm ignores them and emits fixed
+            // XMM0/XMM1/XMM2 bytes — see `x86_64/stack_slot_isel.rs:3148`).
+            *instr = IRInstr::VectorOp {
+                op: vop_kind,
+                lanes: packed.lanes,
+                elem_size: packed.elem_size,
+                dst: IRValue::Register(dst),
+                lhs: IRValue::Register(srcs[0]),
+                rhs: IRValue::Register(srcs[1]),
+            };
+            count += 1;
+            break;
+        }
+    }
+    count
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -646,10 +770,18 @@ fn build_remainder_loop(orig: &IRBlock, new_label: &str) -> IRBlock {
 /// `i*4` address scaling) are not vectorizable compute and are skipped.
 fn classify_packable_binop(instr: &IRInstr) -> Option<(PackedOpKind, u32, Vec<u32>)> {
     let (op_kind, dst, lhs, rhs) = match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs, .. } => (*op, dst.clone(), lhs.clone(), rhs.clone()),
-        IRInstr::Add { dst, lhs, rhs, .. } => (BinOpKind::Add, dst.clone(), lhs.clone(), rhs.clone()),
-        IRInstr::Sub { dst, lhs, rhs, .. } => (BinOpKind::Sub, dst.clone(), lhs.clone(), rhs.clone()),
-        IRInstr::Mul { dst, lhs, rhs, .. } => (BinOpKind::Mul, dst.clone(), lhs.clone(), rhs.clone()),
+        IRInstr::BinOp {
+            op, dst, lhs, rhs, ..
+        } => (*op, dst.clone(), lhs.clone(), rhs.clone()),
+        IRInstr::Add { dst, lhs, rhs, .. } => {
+            (BinOpKind::Add, dst.clone(), lhs.clone(), rhs.clone())
+        }
+        IRInstr::Sub { dst, lhs, rhs, .. } => {
+            (BinOpKind::Sub, dst.clone(), lhs.clone(), rhs.clone())
+        }
+        IRInstr::Mul { dst, lhs, rhs, .. } => {
+            (BinOpKind::Mul, dst.clone(), lhs.clone(), rhs.clone())
+        }
         _ => return None,
     };
     let kind = match op_kind {
@@ -736,7 +868,8 @@ fn slp_vectorize_block(block: &IRBlock) -> Vec<PackedOp> {
                 let a_writes_b_reads = srcs_b.contains(&dst_a);
                 let b_writes_a_reads = srcs_a.contains(&dst_b);
                 if !a_writes_b_reads && !b_writes_a_reads {
-                    let elem_size = binop_elem_size(&instrs[i]).max(binop_elem_size(&instrs[i + 1]));
+                    let elem_size =
+                        binop_elem_size(&instrs[i]).max(binop_elem_size(&instrs[i + 1]));
                     ops.push(PackedOp {
                         kind: ka,
                         lanes: 2,
@@ -826,7 +959,13 @@ fn substitute_vreg(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32) {
             sub_val(src, old_vreg, new_vreg);
             let _ = dst;
         }
-        IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+        IRInstr::Select {
+            dst,
+            cond,
+            true_val,
+            false_val,
+            ..
+        } => {
             sub_val(cond, old_vreg, new_vreg);
             sub_val(true_val, old_vreg, new_vreg);
             sub_val(false_val, old_vreg, new_vreg);
@@ -867,7 +1006,10 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
                 *r = fresh;
             }
         }
-        IRInstr::Cmp { dst: IRValue::Register(r), .. } => {
+        IRInstr::Cmp {
+            dst: IRValue::Register(r),
+            ..
+        } => {
             *r = fresh;
         }
         _ => {}
@@ -1085,7 +1227,9 @@ mod tests {
         assert_eq!(plan.vf, 4);
         assert_eq!(plan.elem_size, 4);
         assert!(
-            plan.packed_ops.iter().any(|op| op.kind == PackedOpKind::Add),
+            plan.packed_ops
+                .iter()
+                .any(|op| op.kind == PackedOpKind::Add),
             "plan must contain a PackedAdd, got {:?}",
             plan.packed_ops
         );
@@ -1115,7 +1259,10 @@ mod tests {
             "remainder loop must have a +1 scalar IV step"
         );
 
-        assert_eq!(plan.remainder_loop_block, Some("loop_remainder".to_string()));
+        assert_eq!(
+            plan.remainder_loop_block,
+            Some("loop_remainder".to_string())
+        );
     }
 
     #[test]
@@ -1217,7 +1364,8 @@ mod tests {
             }
         });
         assert_eq!(
-            iv_step, Some(4),
+            iv_step,
+            Some(4),
             "IV step must be vf=4 (element-index IV), got {:?}",
             iv_step
         );
@@ -1228,11 +1376,7 @@ mod tests {
     fn test_loop_vectorization_bails_on_unsafe_body() {
         // A loop with a Call in the body must not be vectorized.
         let mut func = build_add_loop_function();
-        let loop_idx = func
-            .blocks
-            .iter()
-            .position(|b| b.label == "loop")
-            .unwrap();
+        let loop_idx = func.blocks.iter().position(|b| b.label == "loop").unwrap();
         // Inject a Call before the increment (which is the second-to-last instr
         // before the Cmp). Compute insert index first to avoid double-borrow.
         let insert_at = func.blocks[loop_idx].instructions.len() - 2;
@@ -1246,11 +1390,7 @@ mod tests {
             },
         );
         let (new_func, plan) = vectorize_function_with_plan(func);
-        let vec_blk = new_func
-            .blocks
-            .iter()
-            .find(|b| b.label == "loop")
-            .unwrap();
+        let vec_blk = new_func.blocks.iter().find(|b| b.label == "loop").unwrap();
         let iv_step = vec_blk.instructions.iter().find_map(|instr| {
             if let IRInstr::BinOp {
                 op: BinOpKind::Add,
@@ -1311,7 +1451,11 @@ mod tests {
             ty: Some(IRType::I32),
         });
         let ops = slp_vectorize_block(&blk);
-        assert!(ops.is_empty(), "dependent pair must not pack, got {:?}", ops);
+        assert!(
+            ops.is_empty(),
+            "dependent pair must not pack, got {:?}",
+            ops
+        );
     }
 
     // ── Legacy alias-analysis tests ────────────────────────────────────
@@ -1344,7 +1488,7 @@ mod tests {
     /// encoders existed but were called only from `#[test]` functions.
     #[test]
     fn test_wave29_simd_emitted_in_x86_64_isel() {
-        use crate::backend::{BackendKind, create_backend};
+        use crate::backend::{create_backend, BackendKind};
         use crate::ir::VirtualRegister;
         let mut blk = IRBlock::new("entry");
         blk.instructions.push(IRInstr::VectorOp {
@@ -1381,7 +1525,7 @@ mod tests {
 
     #[test]
     fn test_wave29_simd_emitted_in_aarch64_isel() {
-        use crate::backend::{BackendKind, create_backend};
+        use crate::backend::{create_backend, BackendKind};
         use crate::ir::VirtualRegister;
         let mut blk = IRBlock::new("entry");
         blk.instructions.push(IRInstr::VectorOp {
@@ -1428,5 +1572,224 @@ mod tests {
             return false;
         }
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ── Wave 11-e PackedOp → ISel wiring tests ──────────────────────────
+
+    /// Build a function with two adjacent SLP-able i32 Adds in a single
+    /// block — the simplest input that exercises both the SLP planner and
+    /// the [`lower_packed_ops_to_vectorops`] wiring helper end-to-end.
+    fn build_slp_pair_function() -> IRFunction {
+        use crate::ir::VirtualRegister;
+        let mut func = IRFunction::new("slp_pair");
+        // vregs 1..4 are scalar params (x, y, z, w).
+        // vregs 10, 11 are the two scalar sum destinations.
+        for v in [1u32, 2, 3, 4, 10, 11] {
+            func.vregs.insert(v, VirtualRegister::anonymous(v));
+        }
+        func.params = vec![
+            IRValue::Register(1),
+            IRValue::Register(2),
+            IRValue::Register(3),
+            IRValue::Register(4),
+        ];
+        let mut blk = IRBlock::new("entry");
+        // sum0 = x + y   (lane 0 — will be replaced by VectorOp)
+        blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(10),
+            lhs: IRValue::Register(1),
+            rhs: IRValue::Register(2),
+            ty: Some(IRType::I32),
+        });
+        // sum1 = z + w   (lane 1 — remains scalar)
+        blk.instructions.push(IRInstr::Add {
+            dst: IRValue::Register(11),
+            lhs: IRValue::Register(3),
+            rhs: IRValue::Register(4),
+            ty: Some(IRType::I32),
+        });
+        blk.terminator = IRTerminator::Return(vec![IRValue::Register(10), IRValue::Register(11)]);
+        func.blocks[0] = blk;
+        func
+    }
+
+    /// Wave 11-e wiring: verify the vectorizer's side-channel plan flows
+    /// through to real SSE/AVX machine bytes in the x86_64 backend ISel.
+    ///
+    /// Before this wiring (per Task 1-f audit / caveats.md §8 #17):
+    /// `vectorize_function_with_plan` produced a `VectorizationPlan` with
+    /// `PackedOp`s, but no caller fed those `PackedOp`s back into the IR
+    /// or into the backend — the encoders existed and were unit-tested,
+    /// but the backend never lowered a `PackedOp` to real machine code.
+    ///
+    /// After this wiring: [`lower_packed_ops_to_vectorops`] rewrites the
+    /// lane-0 scalar BinOp into an `IRInstr::VectorOp`, and the existing
+    /// `IRInstr::VectorOp` arm in `x86_64::stack_slot_isel::allocate_registers`
+    /// emits the SSE/AVX bytes.
+    #[test]
+    fn test_wave11e_packed_op_lowered_to_avx_in_x86_64_isel() {
+        use crate::backend::{create_backend, BackendKind};
+
+        // 1. Build the SLP-pair function and vectorize it (SLP plan only —
+        //    there's no counted loop, so loop vectorization is a no-op).
+        let func = build_slp_pair_function();
+        let (mut new_func, plan) = vectorize_function_with_plan(func);
+
+        // 2. The plan must contain exactly one SLP PackedOp for the two
+        //    adjacent i32 Adds: kind=Add, lanes=2, elem_size=4, dst_lane0=10,
+        //    block="entry".
+        assert!(
+            !plan.packed_ops.is_empty(),
+            "SLP plan must contain at least one PackedOp; got {:?}",
+            plan.packed_ops
+        );
+        let slp_add = plan
+            .packed_ops
+            .iter()
+            .find(|op| {
+                op.kind == PackedOpKind::Add
+                    && op.lanes == 2
+                    && op.elem_size == 4
+                    && op.dst_lane0 == 10
+                    && op.block == "entry"
+            })
+            .unwrap_or_else(|| {
+                panic!("expected SLP Add PackedOp (lanes=2, elem_size=4, dst=10, block=entry); got {:?}", plan.packed_ops)
+            });
+        assert_eq!(
+            slp_add.src_lane0,
+            vec![1, 2],
+            "lane-0 sources must be vregs 1, 2"
+        );
+
+        // 3. Before lowering, the IR must NOT contain a VectorOp (only
+        //    scalar Adds — this is the pre-wiring state).
+        let has_vectorop_before = new_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| matches!(i, IRInstr::VectorOp { .. }))
+        });
+        assert!(
+            !has_vectorop_before,
+            "IR must not contain VectorOp before lower_packed_ops_to_vectorops"
+        );
+
+        // 4. Wire the plan into the IR.
+        let lowered = lower_packed_ops_to_vectorops(&mut new_func, &plan);
+        assert_eq!(
+            lowered, 1,
+            "exactly one PackedOp must be lowered (the SLP pair's lane-0 Add)"
+        );
+
+        // 5. After lowering, the IR MUST contain a VectorOp for lane 0.
+        let lane0_vop = new_func
+            .blocks
+            .iter()
+            .find(|b| b.label == "entry")
+            .and_then(|b| {
+                b.instructions.iter().find_map(|i| {
+                    if let IRInstr::VectorOp {
+                        op,
+                        lanes,
+                        elem_size,
+                        dst,
+                        lhs,
+                        rhs,
+                    } = i
+                    {
+                        Some((
+                            *op,
+                            *lanes,
+                            *elem_size,
+                            dst.clone(),
+                            lhs.clone(),
+                            rhs.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .expect("IR must contain a VectorOp after lower_packed_ops_to_vectorops");
+        assert_eq!(lane0_vop.0, VectorOpKind::Add);
+        assert_eq!(lane0_vop.1, 2, "lanes must be 2 (SLP pair)");
+        assert_eq!(lane0_vop.2, 4, "elem_size must be 4 (i32)");
+        assert_eq!(lane0_vop.3, IRValue::Register(10), "dst must be vreg 10");
+        assert_eq!(lane0_vop.4, IRValue::Register(1), "lhs must be vreg 1");
+        assert_eq!(lane0_vop.5, IRValue::Register(2), "rhs must be vreg 2");
+
+        // 6. Lane-1's scalar Add (dst=11) must REMAIN in the IR — the
+        //    wiring only replaces lane 0 (see the function's known
+        //    limitations in its doc comment).
+        let lane1_add_present = new_func
+            .blocks
+            .iter()
+            .find(|b| b.label == "entry")
+            .map(|b| {
+                b.instructions.iter().any(|i| {
+                    matches!(
+                        i,
+                        IRInstr::Add {
+                            dst: IRValue::Register(11),
+                            ..
+                        }
+                    )
+                })
+            })
+            .unwrap_or(false);
+        assert!(
+            lane1_add_present,
+            "lane-1 scalar Add (dst=11) must remain in IR after wiring (partial wiring)"
+        );
+
+        // 7. Run the x86_64 backend's `allocate_registers` and collect all
+        //    emitted bytes. The `IRInstr::VectorOp { op: Add, elem_size: 4 }`
+        //    arm in `x86_64::stack_slot_isel.rs` emits AVX `vpaddq xmm0,
+        //    xmm1, xmm2` = `C5 F1 D4 D0` (VEX.128.66.0F.WIG D4 /r). We
+        //    assert the prefix bytes `C5 F1 D4` appear somewhere in the
+        //    stream — this is the proof that the PackedOp side-channel
+        //    actually flowed through to real SSE/AVX machine bytes.
+        let backend = create_backend(BackendKind::X86_64).expect("x86_64 backend");
+        let allocated = backend
+            .allocate_registers(&new_func)
+            .expect("x86_64 allocate_registers must succeed on the wired IR");
+        let mut all_bytes = Vec::new();
+        for b in &allocated.blocks {
+            for instr in &b.instructions {
+                all_bytes.extend_from_slice(&instr.encoded);
+            }
+        }
+        assert!(
+            window_contains(&all_bytes, &[0xC5, 0xF1, 0xD4]),
+            "x86_64 PackedOp(Add, i32) lowered via VectorOp must emit AVX \
+             vpaddq (C5 F1 D4 ..); got {:02X?}",
+            all_bytes
+        );
+    }
+
+    /// Wave 11-e wiring: verify the wiring helper is a no-op when given an
+    /// empty plan (e.g. for a function with no vectorizable ops). This
+    /// guards against regressions where the helper might spuriously rewrite
+    /// unrelated scalar BinOps.
+    #[test]
+    fn test_wave11e_lower_packed_ops_noop_on_empty_plan() {
+        let func = build_slp_pair_function();
+        let original_instrs = func.blocks[0].instructions.clone();
+        let mut func = func;
+        let empty_plan = VectorizationPlan::default();
+        let lowered = lower_packed_ops_to_vectorops(&mut func, &empty_plan);
+        assert_eq!(lowered, 0, "no PackedOps to lower");
+        assert_eq!(
+            func.blocks[0].instructions.len(),
+            original_instrs.len(),
+            "IR must be unchanged"
+        );
+        assert!(
+            func.blocks[0]
+                .instructions
+                .iter()
+                .all(|i| !matches!(i, IRInstr::VectorOp { .. })),
+            "no VectorOp must have been introduced"
+        );
     }
 }

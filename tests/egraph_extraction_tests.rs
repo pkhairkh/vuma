@@ -289,8 +289,16 @@ fn egraph_folds_sub_self_variant_to_zero() {
     let result = equality_saturation(func);
     match &result.blocks[0].instructions[0] {
         IRInstr::Sub { lhs, rhs, .. } => {
-            assert!(matches!(lhs, IRValue::Immediate(0)), "lhs should be 0, got {:?}", lhs);
-            assert!(matches!(rhs, IRValue::Immediate(0)), "rhs should be 0, got {:?}", rhs);
+            assert!(
+                matches!(lhs, IRValue::Immediate(0)),
+                "lhs should be 0, got {:?}",
+                lhs
+            );
+            assert!(
+                matches!(rhs, IRValue::Immediate(0)),
+                "rhs should be 0, got {:?}",
+                rhs
+            );
         }
         other => panic!("expected Sub after saturation, got {:?}", other),
     }
@@ -314,8 +322,16 @@ fn egraph_folds_mul_zero_variant_to_zero() {
         IRInstr::Mul { lhs, rhs, .. } => {
             // x*0 → Lit(0). Lit extraction for Mul sets rhs=1 (val*1=val identity).
             // So the instruction becomes Mul(0, 1) = 0. Correct.
-            assert!(matches!(lhs, IRValue::Immediate(0)), "x*0 should fold lhs to 0, got {:?}", lhs);
-            assert!(matches!(rhs, IRValue::Immediate(1)), "x*0 Lit extraction uses rhs=1 (Mul identity), got {:?}", rhs);
+            assert!(
+                matches!(lhs, IRValue::Immediate(0)),
+                "x*0 should fold lhs to 0, got {:?}",
+                lhs
+            );
+            assert!(
+                matches!(rhs, IRValue::Immediate(1)),
+                "x*0 Lit extraction uses rhs=1 (Mul identity), got {:?}",
+                rhs
+            );
         }
         other => panic!("expected Mul after saturation, got {:?}", other),
     }
@@ -337,8 +353,16 @@ fn egraph_folds_add_zero_variant_to_identity() {
     let result = equality_saturation(func);
     match &result.blocks[0].instructions[0] {
         IRInstr::Add { lhs, rhs, .. } => {
-            assert!(matches!(lhs, IRValue::Register(0)), "x+0 should keep lhs as v0, got {:?}", lhs);
-            assert!(matches!(rhs, IRValue::Immediate(0)), "x+0 rhs should be 0, got {:?}", rhs);
+            assert!(
+                matches!(lhs, IRValue::Register(0)),
+                "x+0 should keep lhs as v0, got {:?}",
+                lhs
+            );
+            assert!(
+                matches!(rhs, IRValue::Immediate(0)),
+                "x+0 rhs should be 0, got {:?}",
+                rhs
+            );
         }
         other => panic!("expected Add after saturation, got {:?}", other),
     }

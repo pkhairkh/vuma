@@ -51,10 +51,7 @@ impl RegistryIndex {
 
     /// Get the list of available versions for a package.
     pub fn get_versions(&self, name: &str) -> &[String] {
-        self.packages
-            .get(name)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.packages.get(name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Serialize the index to a TOML string.
@@ -71,10 +68,7 @@ impl RegistryIndex {
         let mut sorted: Vec<(&String, &Vec<String>)> = self.packages.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(b.0));
         for (name, versions) in sorted {
-            let arr: Vec<Value> = versions
-                .iter()
-                .map(|v| Value::String(v.clone()))
-                .collect();
+            let arr: Vec<Value> = versions.iter().map(|v| Value::String(v.clone())).collect();
             packages_table.insert(name.clone(), Value::Array(arr));
         }
         let mut root = BTreeMap::new();
@@ -364,8 +358,7 @@ fn create_temp_dir() -> PackageResult<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir()
-        .join(format!("vuma-{}-{}.tmp", std::process::id(), n));
+    let path = std::env::temp_dir().join(format!("vuma-{}-{}.tmp", std::process::id(), n));
     std::fs::create_dir(&path)?;
     Ok(path)
 }

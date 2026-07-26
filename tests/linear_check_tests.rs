@@ -1,4 +1,4 @@
-//! # Wave 3 — Linear Channel-Type Checker Integration Tests
+//! # Linear Channel-Type Checker Integration Tests
 //!
 //! These tests verify that the linear channel-type checker
 //! (`vuma::pipeline::check_linear_channels_in_codegen_scg`, wired into
@@ -34,6 +34,40 @@
 //! runtime.  Conversely, a leak on ANY path (e.g. a channel opened
 //! before an `if` with no `channel_close` in the else-branch) IS a
 //! leak, even if the channel is closed on the then-path.
+//!
+//! ## Parser emits `NodePayload::Channel*` variants
+//!
+//! Stage 7c in `src/pipeline.rs` matches
+//! `NodePayload::ChannelOpen(ChannelOpenNode)` /
+//! `ChannelSend(ChannelSendNode)` / `ChannelRecv(ChannelRecvNode)` /
+//! `ChannelClose(ChannelCloseNode)` to build the `ChannelEvent` list.
+//! The parser (`parser/src/to_scg.rs::try_emit_channel_node`, called
+//! from `emit_call_nodes`) emits those dedicated variants for the four
+//! channel builtins instead of the previous generic
+//! `ControlNode { label: "call_channel_*" }` representation.
+//!
+//! As a result the linear-channel gate is LIVE for programs compiled
+//! through the parser: the `events` Vec is populated, `verify_linear_channels`
+//! returns violations when the program is linearly-invalid, and the gate
+//! fires as an UNCONDITIONAL HARD-FAIL. The five NEGATIVE tests below
+//! (leak / use-after-close / double-close / leak-on-one-path /
+//! use-after-close-in-branch) are now run by default.
+//!
+//! ### Known verifier limitation: open-without-close is not flagged
+//!
+//! The current `verify_linear_channels` implementation
+//! (`src/ive/src/borrow_region.rs`) only flags a leak when the SAME handle
+//! is re-opened without an intervening close (see
+//! `test_linear_open_without_close_is_leak_warning`). A single
+//! `channel_open` with no matching `channel_close` is NOT flagged (the OS
+//! is trusted to clean up). The two leak tests below
+//! (`wave3_leak_open_without_close_fails` and
+//! `wave3_leak_on_one_path_fails`) document the EXPECTED leak-on-fall-off
+//! behavior; if `verify_linear_channels` is later extended to flag
+//! open-without-close at function exit, those tests will turn green. Until
+//! then they may fail — see the test doc comments.
+//!
+//! See `docs/caveats.md` for the full caveat resolution history.
 
 use vuma::pipeline::{compile_with_path, CompileConfig, OptLevel, VerificationLevel, VumaError};
 
@@ -50,11 +84,20 @@ fn compile_source(source: &str) -> Result<vuma::pipeline::CompilationOutput, Vec
     compile_with_path(source, None, &cfg)
 }
 
-/// Returns `true` iff `errors` contains a `VumaError::LinearCheck` with
-/// at least one violation whose message contains `needle`.
+/// Returns `true` iff `errors` contains a `VumaError::Transform` with
+/// `pass_name == "linear-channel"` and at least one violation whose
+/// message contains `needle`.
+///
+/// The former `VumaError::LinearCheck` variant was merged into
+/// `VumaError::Transform` — linear-channel violations now surface as
+/// `VumaError::Transform { pass_name: "linear-channel", .. }` and are
+/// an UNCONDITIONAL HARD-FAIL (no `--strict-ive` opt-out).
 fn has_linear_error_containing(errors: &[VumaError], needle: &str) -> bool {
     errors.iter().any(|e| match e {
-        VumaError::LinearCheck { errors: errs } => errs.iter().any(|m| m.contains(needle)),
+        VumaError::Transform {
+            pass_name,
+            errors: errs,
+        } if pass_name == "linear-channel" => errs.iter().any(|m| m.contains(needle)),
         _ => false,
     })
 }
@@ -141,14 +184,17 @@ fn wave3_close_in_each_if_branch_compiles() {
 // Negative tests — linearly-invalid programs MUST fail to compile.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// NOTE: the parser now emits `NodePayload::Channel*` variants for
+// channel builtins (see `parser/src/to_scg.rs` `try_emit_channel_node`),
+// so the linear-channel gate fires on real programs and this test runs
+// by default.
 #[test]
 fn wave3_leak_open_without_close_fails() {
     // LEAK: a channel is opened but never closed.  The linear
     // discipline requires every opened channel to be closed on every
     // path; falling off the end of `main` with `ch` still open is a
-    // leak.  This is the canonical violation pattern called out in the
-    // Wave 3 task spec ("a channel that's opened but never closed
-    // should fail to compile").
+    // leak.  This is the canonical violation pattern: a channel that's
+    // opened but never closed should fail to compile.
     let src = r#"
         fn main() -> i32 {
             ch = channel_open<i32>();
@@ -164,6 +210,8 @@ fn wave3_leak_open_without_close_fails() {
     );
 }
 
+// NOTE: the parser now emits `NodePayload::Channel*` variants, so
+// this test runs by default.
 #[test]
 fn wave3_use_after_close_fails() {
     // USE-AFTER-CLOSE: `channel_recv` on a handle that was already
@@ -186,6 +234,8 @@ fn wave3_use_after_close_fails() {
     );
 }
 
+// NOTE: the parser now emits `NodePayload::Channel*` variants, so
+// this test runs by default.
 #[test]
 fn wave3_double_close_in_straight_line_fails() {
     // DOUBLE-CLOSE: `channel_close` on a handle that is already closed
@@ -230,6 +280,8 @@ fn wave3_close_without_open_fails() {
     );
 }
 
+// NOTE: the parser now emits `NodePayload::Channel*` variants, so
+// this test runs by default.
 #[test]
 fn wave3_leak_on_one_path_fails() {
     // LEAK ON ONE PATH: the channel is closed on the then-path but not
@@ -255,6 +307,8 @@ fn wave3_leak_on_one_path_fails() {
     );
 }
 
+// NOTE: the parser now emits `NodePayload::Channel*` variants, so
+// this test runs by default.
 #[test]
 fn wave3_send_after_close_in_branch_fails() {
     // USE-AFTER-CLOSE in straight-line code within a branch.  The

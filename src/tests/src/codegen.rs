@@ -54,8 +54,13 @@ fn compile_scg(scg: &Scg) -> (IRProgram, Vec<u32>) {
 fn compile_to_elf(scg: &Scg, config: &EmitConfig) -> Vec<u8> {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(scg).expect("IRBuilder should succeed");
-    emit_elf(&ir_program.functions, &ir_program.data_sections, config, &[])
-        .expect("ELF emission should succeed")
+    emit_elf(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        config,
+        &[],
+    )
+    .expect("ELF emission should succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +96,7 @@ fn test_codegen_simple_add() {
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Var("b".to_string()),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -207,13 +212,13 @@ fn test_codegen_load_store() {
                     ptr: ScgExpr::Var("ptr".to_string()),
                     offset: None,
                     value: ScgExpr::Int(42),
- ty: None,
+                    ty: None,
                 }),
                 ScgStatement::Access(AccessNode::Load {
                     dst: "val".to_string(),
                     ptr: ScgExpr::Var("ptr".to_string()),
                     offset: None,
- ty: None,
+                    ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("val".to_string())]),
             ],
@@ -268,7 +273,7 @@ fn test_codegen_if_else() {
                         lhs: ScgExpr::Var("cond".to_string()),
                         rhs: ScgExpr::Int(1),
                         tail_call: false,
- reassigns: None,
+                        reassigns: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "result".to_string(),
@@ -276,7 +281,7 @@ fn test_codegen_if_else() {
                         lhs: ScgExpr::Var("cond".to_string()),
                         rhs: ScgExpr::Int(1),
                         tail_call: false,
- reassigns: None,
+                        reassigns: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
@@ -337,7 +342,8 @@ fn test_codegen_loop() {
                         tail_call: false,
                         reassigns: None,
                     })],
- for_range: None, while_cond: None,
+                    for_range: None,
+                    while_cond: None,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -389,7 +395,7 @@ fn test_codegen_function_call() {
                     func: "callee".to_string(),
                     args: vec![ScgExpr::Int(42)],
                     is_extern: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -436,7 +442,7 @@ fn test_codegen_multi_function_elf() {
                         func: "helper".to_string(),
                         args: vec![ScgExpr::Int(1)],
                         is_extern: false,
- reassigns: None,
+                        reassigns: None,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var("r".to_string())]),
                 ],
@@ -456,7 +462,7 @@ fn test_codegen_multi_function_elf() {
                         lhs: ScgExpr::Var("x".to_string()),
                         rhs: ScgExpr::Var("x".to_string()),
                         tail_call: false,
- reassigns: None,
+                        reassigns: None,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var("doubled".to_string())]),
                 ],
@@ -564,7 +570,7 @@ fn test_codegen_bare_metal_raw() {
                     lhs: ScgExpr::Int(1),
                     rhs: ScgExpr::Int(2),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -576,7 +582,8 @@ fn test_codegen_bare_metal_raw() {
     let ir_program = builder.build(&scg).expect("IRBuilder should succeed");
 
     let config = EmitConfig::bare_metal_raw();
-    let raw_bytes = emit_raw(&ir_program.functions, &[], &config).expect("Raw emission should succeed");
+    let raw_bytes =
+        emit_raw(&ir_program.functions, &[], &config).expect("Raw emission should succeed");
 
     // Raw binary should NOT start with ELF magic
     if raw_bytes.len() >= 4 {

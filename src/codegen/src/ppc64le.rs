@@ -1,6 +1,14 @@
 //! # PowerPC64 Little-Endian Backend (ppc64le)
 //!
-//! **Wave 49 — wrapper pattern & ABI documentation.**
+//! ## Wrapper Summary
+//!
+//! | Field | Value |
+//! |-------|-------|
+//! | **Wraps** | `PPC64Backend` (`crate::ppc64`), constructed via `PPC64Backend::new_le()` (parent always emits ELFv2; `new_le()` flips `is_le=true`) |
+//! | **Byte-swap policy** | **BE→LE for every 4-byte instruction word** in `.text`, plus `swap_be_elf_to_le` flips `EI_DATA` (`MSB→LSB`), all ELF64 header fields, all PHDR fields, all SHDR fields. The instruction encoding itself is byte-order-independent at the Power ISA level; only in-memory storage differs. |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:354-360`), instruction selection, register allocation, ELFv2 ABI, `IRInstr::Syscall` (fully implemented on parent at `ppc64/mod.rs:3996`) |
+//! | **Overridden** | `encode_program` (runs `swap_be_elf_to_le`), `encode_function` / `return_stub` / `trampoline` (run `swap_instruction_words` BE→LE), `disassemble` (re-serialises each 4-byte chunk BE→LE before delegating to parent's BE decoder) |
+//! | **Known gaps** | None — `IRInstr::Syscall` works via inheritance (parent `ppc64` backend's Syscall arm is fully implemented; emits `LI R0, native_nr; SC; BC 4, 3, +2; NEG R3, R3` PPC64 positive-errno to negative-errno conversion, 40 bytes for the test below). Float-op verifier `verify_function_float_ops` is applied centrally in all 5 compilation drivers, so this backend is covered via the driver. |
 //!
 //! `ppc64le` is a thin wrapper around the big-endian `PPC64Backend` (field
 //! `inner: PPC64Backend`, constructed via `PPC64Backend::new_le()`) that
@@ -46,23 +54,35 @@
 //! (`e_flags = 0x2`) and `EM_PPC64` (21) machine type are identical
 //! between the two; only the byte order differs.
 //!
-//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//! ## `IRInstr::Syscall` inheritance ( / -f)
 //!
 //! `IRInstr::Syscall` emission is **automatically inherited** from the
 //! parent `PPC64Backend`. This backend delegates `allocate_registers`
 //! to `self.inner.allocate_registers(func)`, which calls the parent's
-//! instruction selector. Once Wave 12 implements the parent's
-//! `IRInstr::Syscall { nr, args, dst }` arm (emitting `LI R0, nr; SC`),
-//! this wrapper will automatically produce the same instructions —
-//! `encode_function` then byte-swaps each 4-byte word from BE to LE so
-//! `qemu-ppc64le` fetches the correct little-endian instruction words.
+//! instruction selector. The parent's `IRInstr::Syscall { nr, args, dst }`
+//! arm at `ppc64/mod.rs:3996` emits the full PPC64 syscall sequence:
+//! `LI R0, native_nr; SC; BC 4, 3, +2; NEG R3, R3` (the last two
+//! instructions convert PPC64's positive-errno-in-R3-with-CR0.SO=1
+//! convention into the x86_64-style `-errno` convention the rest of
+//! the IR expects — matches glibc's syscall wrapper). The syscall
+//! number is translated via
+//! `crate::syscall_abi::translate_or_warn(BackendKind::PowerPC64, nr)`
+//! at `ppc64/mod.rs:4018`. `encode_function` then byte-swaps each 4-byte
+//! word from BE to LE so `qemu-ppc64le` fetches the correct
+//! little-endian instruction words.
 //!
-//! **Current status:** The parent `ppc64` backend has
-//! `IRInstr::Syscall { .. } => unimplemented!("… (Wave 12)")` at
-//! `ppc64/mod.rs:4096` and `ppc64/mod.rs:5744`. Until Wave 12 lands,
-//! `allocate_registers` will panic on `IRInstr::Syscall`. The conformance
-//! test in `src/tests/src/cross_backend.rs` uses `catch_unwind` to
-//! gracefully report this as "pending Wave 12" rather than failing.
+//! **Status ( / -f): RESOLVED.** Earlier doc comments
+//! (and the §4 caveat in `docs/architecture/caveats.md` row "4 thin-wrapper
+//! backends", plus 's survey note) claimed the parent had
+//! `unimplemented!("… ()")` at `ppc64/mod.rs:4096` and
+//! `ppc64/mod.rs:5744`. That claim is **stale** — no `unimplemented!()`
+//! exists anywhere in `ppc64/mod.rs` (verified by
+//! `rg 'unimplemented!' src/codegen/src/ppc64/mod.rs` → no matches).
+//! The Syscall arm has been fully implemented (including the
+//! PPC64-specific positive-errno → negative-errno conversion) and
+//! produces 40 bytes of encoded instructions for the conformance test
+//! below. The `catch_unwind` in the test below is retained as
+//! defense-in-depth but is no longer reachable on the success path.
 //!
 //! ## Approach
 //!
@@ -97,9 +117,7 @@
 // Re-export the PPC64 ISA primitives — they are identical for ppc64le.
 pub use crate::ppc64::{CrField, Fpr, Gpr, Instruction};
 
-use crate::backend::{
-    AllocatedFunction, AllocatedProgram, Backend, BackendError,
-};
+use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
 use crate::ppc64::PPC64Backend;
 
@@ -211,20 +229,32 @@ fn swap_be_elf_to_le(elf: &mut [u8]) {
     //   e_shnum     : u16 @ 60
     //   e_shstrndx  : u16 @ 62
     let mut p = 16usize;
-    swap_u16(elf, p); p += 2; // e_type
-    swap_u16(elf, p); p += 2; // e_machine
-    swap_u32(elf, p); p += 4; // e_version
-    swap_u64(elf, p); p += 8; // e_entry
-    swap_u64(elf, p); p += 8; // e_phoff
-    swap_u64(elf, p); p += 8; // e_shoff
-    swap_u32(elf, p); p += 4; // e_flags
-    swap_u16(elf, p); p += 2; // e_ehsize
-    swap_u16(elf, p); p += 2; // e_phentsize
-    swap_u16(elf, p); p += 2; // e_phnum
-    swap_u16(elf, p); p += 2; // e_shentsize
-    swap_u16(elf, p); p += 2; // e_shnum
+    swap_u16(elf, p);
+    p += 2; // e_type
+    swap_u16(elf, p);
+    p += 2; // e_machine
+    swap_u32(elf, p);
+    p += 4; // e_version
+    swap_u64(elf, p);
+    p += 8; // e_entry
+    swap_u64(elf, p);
+    p += 8; // e_phoff
+    swap_u64(elf, p);
+    p += 8; // e_shoff
+    swap_u32(elf, p);
+    p += 4; // e_flags
+    swap_u16(elf, p);
+    p += 2; // e_ehsize
+    swap_u16(elf, p);
+    p += 2; // e_phentsize
+    swap_u16(elf, p);
+    p += 2; // e_phnum
+    swap_u16(elf, p);
+    p += 2; // e_shentsize
+    swap_u16(elf, p);
+    p += 2; // e_shnum
     swap_u16(elf, p); // e_shstrndx
-    // p == 64
+                      // p == 64
 
     // Read phoff/shoff/phnum/shnum/shentsize now in LE for the loops below.
     let phoff = read_u64_le(elf, 32) as usize;
@@ -250,15 +280,22 @@ fn swap_be_elf_to_le(elf: &mut [u8]) {
             break;
         }
         let mut q = base;
-        swap_u32(elf, q); q += 4; // p_type
-        swap_u32(elf, q); q += 4; // p_flags
-        swap_u64(elf, q); q += 8; // p_offset
-        swap_u64(elf, q); q += 8; // p_vaddr
-        swap_u64(elf, q); q += 8; // p_paddr
-        swap_u64(elf, q); q += 8; // p_filesz
-        swap_u64(elf, q); q += 8; // p_memsz
+        swap_u32(elf, q);
+        q += 4; // p_type
+        swap_u32(elf, q);
+        q += 4; // p_flags
+        swap_u64(elf, q);
+        q += 8; // p_offset
+        swap_u64(elf, q);
+        q += 8; // p_vaddr
+        swap_u64(elf, q);
+        q += 8; // p_paddr
+        swap_u64(elf, q);
+        q += 8; // p_filesz
+        swap_u64(elf, q);
+        q += 8; // p_memsz
         swap_u64(elf, q); // p_align (final field — no increment needed)
-        // q == base + 48 (p_align is at offset 48)
+                          // q == base + 48 (p_align is at offset 48)
     }
 
     // ── 4. Section headers (Elf64_Shdr, 64 bytes each) ────────────────
@@ -284,17 +321,26 @@ fn swap_be_elf_to_le(elf: &mut [u8]) {
             break;
         }
         let mut q = base;
-        swap_u32(elf, q); q += 4; // sh_name
-        swap_u32(elf, q); q += 4; // sh_type
-        swap_u64(elf, q); q += 8; // sh_flags
-        swap_u64(elf, q); q += 8; // sh_addr
-        swap_u64(elf, q); q += 8; // sh_offset
-        swap_u64(elf, q); q += 8; // sh_size
-        swap_u32(elf, q); q += 4; // sh_link
-        swap_u32(elf, q); q += 4; // sh_info
-        swap_u64(elf, q); q += 8; // sh_addralign
+        swap_u32(elf, q);
+        q += 4; // sh_name
+        swap_u32(elf, q);
+        q += 4; // sh_type
+        swap_u64(elf, q);
+        q += 8; // sh_flags
+        swap_u64(elf, q);
+        q += 8; // sh_addr
+        swap_u64(elf, q);
+        q += 8; // sh_offset
+        swap_u64(elf, q);
+        q += 8; // sh_size
+        swap_u32(elf, q);
+        q += 4; // sh_link
+        swap_u32(elf, q);
+        q += 4; // sh_info
+        swap_u64(elf, q);
+        q += 8; // sh_addralign
         swap_u64(elf, q); // sh_entsize (final field — no increment needed)
-        // q == base + 56 (sh_entsize is at offset 56)
+                          // q == base + 56 (sh_entsize is at offset 56)
 
         // Read sh_type / sh_flags / sh_offset / sh_size (now LE) to identify
         // the executable .text section.
@@ -457,13 +503,15 @@ mod tests {
         assert_eq!(bytes, vec![0x4E, 0x80, 0x00, 0x20]);
     }
 
-    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }`
-    /// inheritance from the parent `PPC64Backend` works.  Because Wave 12
-    /// has not yet implemented Syscall on the parent ppc64 backend, this
-    /// test uses `catch_unwind` and asserts that the result is EITHER
-    /// non-empty encoded output (Wave 12 landed) OR a panic containing
-    /// "Wave 12" (still pending).  Once Wave 12 lands, the test will
-    /// automatically require non-empty output.
+    ///  conformance (post ): verify that
+    /// `IRInstr::Syscall { nr: 1, .. }` inheritance from the parent
+    /// `PPC64Backend` works. The parent's Syscall arm at
+    /// `ppc64/mod.rs:3996` is fully implemented — it emits the PPC64
+    /// syscall sequence (LI R0, nr; SC; BC 4,3,+2; NEG R3,R3; STD R3,
+    /// dst_off) totalling 40 bytes for this minimal test case. This
+    /// test therefore asserts the success path directly; the
+    /// `catch_unwind` wrapper is retained as defense-in-depth but is
+    /// no longer required by the implementation.
     #[test]
     fn test_syscall_inherited_from_ppc64() {
         use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
@@ -493,7 +541,9 @@ mod tests {
             source_file: String::new(),
         };
 
-        // Attempt allocation + encoding, catching the Wave 12 panic.
+        // -f: parent ppc64 backend's Syscall arm is implemented.
+        // We still wrap in catch_unwind for defense-in-depth, but the
+        // panic branch should now be unreachable.
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let allocated = backend.allocate_registers(&func)?;
             backend.encode_function(&allocated)
@@ -501,15 +551,29 @@ mod tests {
 
         match result {
             Ok(Ok(bytes)) => {
+                // Parent ppc64 emits 40 bytes for this minimal Syscall
+                // (LI + SC + BC + NEG + STD). The wrapper byte-swaps
+                // each 4-byte word BE→LE but does not change the total
+                // length.
+                assert!(
+                    !bytes.is_empty(),
+                    "wave13/7-f: ppc64le should emit non-empty bytes for IRInstr::Syscall (got 0)"
+                );
                 assert_eq!(
                     bytes.len(),
-                    32,
-                    "wave13: ppc64le should emit exactly 32 bytes for IRInstr::Syscall"
+                    40,
+                    "wave13/7-f: ppc64le should emit exactly 40 bytes for IRInstr::Syscall (got {})",
+                    bytes.len()
+                );
+                assert_eq!(
+                    bytes.len() % 4,
+                    0,
+                    "wave13/7-f: ppc64le output must be 4-byte aligned"
                 );
             }
             Ok(Err(e)) => {
                 panic!(
-                    "ppc64le allocate_registers/encode_function returned error (not Wave 12 panic): {}",
+                    "ppc64le allocate_registers/encode_function returned error: {}",
                     e
                 );
             }
@@ -519,9 +583,8 @@ mod tests {
                     .map(|s| s.as_str())
                     .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                     .unwrap_or("<non-string panic>");
-                assert!(
-                    msg.contains("Wave 12"),
-                    "ppc64le panicked with unexpected message (expected 'Wave 12' pending): {}",
+                panic!(
+                    "ppc64le Syscall unexpectedly panicked (parent arm is implemented as of ): {}",
                     msg
                 );
             }

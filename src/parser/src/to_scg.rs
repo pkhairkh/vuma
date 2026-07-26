@@ -65,9 +65,11 @@ use crate::ast::*;
 use crate::error::{ParseError, Span};
 use std::collections::HashMap;
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, CastNode, ClosureEnvNode, node::ComputationKind, ComputationNode, ControlKind,
-    ControlNode, DeallocationNode, DeploymentTarget, EdgeKind, EffectNode, NodeId, NodePayload,
-    NodeType, PhantomNode, ProgramPoint, RegionId, SCGRegion, SyscallNode, VTableNode, SCG,
+    node::ComputationKind, node::StructDefNode, node::StructFieldInfo, AccessMode, AccessNode,
+    AllocationNode, CastNode, ChannelCloseNode, ChannelOpenNode, ChannelRecvNode, ChannelSendNode,
+    ClosureEnvNode, ComputationNode, ControlKind, ControlNode, DeallocationNode, DeploymentTarget,
+    EdgeKind, EffectNode, NodeId, NodePayload, NodeType, PhantomNode, ProgramPoint, RegionId,
+    SCGRegion, SyscallNode, VTableNode, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,12 +101,12 @@ pub struct AstToScg {
     current_return_type: Option<String>,
     /// Struct definitions: maps struct name → list of (field_name, field_type, offset)
     struct_table: HashMap<String, Vec<(String, String, u64)>>,
-    /// PMT (Wave 2): layout definitions — maps layout name → list of
+    /// PMT: layout definitions — maps layout name → list of
     /// (field_name, field_type, byte_offset). Built from `Item::LayoutDef`
     /// items at the start of `convert()`, before any function bodies are
     /// lowered. Used to compute field offsets for state.field reads/writes.
     layouts: HashMap<String, Vec<(String, Type, u64)>>,
-    /// PMT (Wave 2): state-typed variable scopes — maps var name → layout
+    /// PMT: state-typed variable scopes — maps var name → layout
     /// name. Pushed/popped alongside `scopes`. A var is state-typed if it
     /// was bound by `let p = state_new(Layout)` or annotated `: State<L>`,
     /// or is a `State<L>` function parameter.
@@ -138,7 +140,7 @@ impl AstToScg {
     pub fn convert(&mut self, program: &Program) -> Result<SCG, ParseError> {
         let mut scg = SCG::new();
 
-        // PMT (Wave 2): pre-pass — register all layout definitions before
+        // PMT: pre-pass — register all layout definitions before
         // lowering any function bodies. Field offsets are computed once
         // here and reused by state.field reads/writes during body lowering.
         for item in &program.items {
@@ -168,7 +170,7 @@ impl AstToScg {
         Ok(scg)
     }
 
-    /// PMT (Wave 2): register a layout definition. Computes field offsets
+    /// PMT: register a layout definition. Computes field offsets
     /// sequentially with alignment padding (mirroring `LayoutRegistry` in
     /// vuma-bd, which we don't depend on to keep the parser crate lean).
     fn register_layout(&mut self, ld: &LayoutDef) {
@@ -178,7 +180,7 @@ impl AstToScg {
         for (fname, ftype) in &ld.fields {
             let falign = self.type_alignment(Some(ftype)).max(1);
             let fsize = self.type_size(ftype);
-            if falign > 1 && offset % falign != 0 {
+            if falign > 1 && !offset.is_multiple_of(falign) {
                 offset = align_to_local(offset, falign);
             }
             max_align = max_align.max(falign);
@@ -186,7 +188,7 @@ impl AstToScg {
             offset += fsize;
         }
         let alignment = max_align.max(1);
-        if offset > 0 && offset % alignment != 0 {
+        if offset > 0 && !offset.is_multiple_of(alignment) {
             offset = align_to_local(offset, alignment);
         }
         // `offset` is now the layout's total_size (used by StateInit → Alloc).
@@ -194,12 +196,12 @@ impl AstToScg {
         self.layouts.insert(ld.name.clone(), fields);
     }
 
-    /// PMT (Wave 2): look up a layout by name.
+    /// PMT: look up a layout by name.
     fn lookup_layout(&self, name: &str) -> Option<&Vec<(String, Type, u64)>> {
         self.layouts.get(name)
     }
 
-    /// PMT (Wave 2): compute a layout's total size (sum of field sizes with
+    /// PMT: compute a layout's total size (sum of field sizes with
     /// alignment padding + tail padding to the layout's alignment).
     fn layout_total_size(&self, name: &str) -> u64 {
         let fields = match self.lookup_layout(name) {
@@ -211,19 +213,19 @@ impl AstToScg {
         for (_, ftype, _) in fields {
             let falign = self.type_alignment(Some(ftype)).max(1);
             let fsize = self.type_size(ftype);
-            if falign > 1 && total % falign != 0 {
+            if falign > 1 && !total.is_multiple_of(falign) {
                 total = align_to_local(total, falign);
             }
             max_align = max_align.max(falign);
             total += fsize;
         }
-        if total > 0 && total % max_align != 0 {
+        if total > 0 && !total.is_multiple_of(max_align) {
             total = align_to_local(total, max_align);
         }
         total
     }
 
-    /// PMT (Wave 2): look up a field's (offset, size, Type) within a layout.
+    /// PMT: look up a field's (offset, size, Type) within a layout.
     /// Supports nested layout-typed fields via cumulative offset computation.
     fn lookup_field(&self, layout_name: &str, field: &str) -> Option<(u64, u64, Type)> {
         let fields = self.lookup_layout(layout_name)?;
@@ -236,7 +238,7 @@ impl AstToScg {
         None
     }
 
-    /// PMT (Wave 2): compute the cumulative (offset, size, leaf_type) for a
+    /// PMT: compute the cumulative (offset, size, leaf_type) for a
     /// chain of field accesses starting from a state-typed var. For example,
     /// `l.a.x` where `l: Line`, `a: Point` (at offset 0 in Line), `x: u32`
     /// (at offset 0 in Point) → (0, 4, u32).
@@ -268,10 +270,7 @@ impl AstToScg {
                 }
             }
         }
-        match last_type {
-            Some(t) => Some((cum_offset, last_size, t)),
-            None => None,
-        }
+        last_type.map(|t| (cum_offset, last_size, t))
     }
 
     fn define_var_type(&mut self, name: &str, layout_name: &str) {
@@ -288,7 +287,7 @@ impl AstToScg {
         None
     }
 
-    // -- PMT (Wave 2): state field read/write lowering ----------------------
+    // -- PMT: state field read/write lowering ----------------------
 
     /// Walk an `AssignTarget` and detect whether it's a state-typed field
     /// write. Returns `Some((state_var_name, field_chain))` when the target
@@ -308,7 +307,11 @@ impl AstToScg {
         let mut current = expr.as_ref();
         loop {
             match current {
-                Expr::FieldAccess { expr: inner, field: f, .. } => {
+                Expr::FieldAccess {
+                    expr: inner,
+                    field: f,
+                    ..
+                } => {
                     chain.push(f.clone());
                     current = inner.as_ref();
                 }
@@ -330,7 +333,9 @@ impl AstToScg {
         let mut current = expr;
         loop {
             match current {
-                Expr::FieldAccess { expr: inner, field, .. } => {
+                Expr::FieldAccess {
+                    expr: inner, field, ..
+                } => {
                     chain.push(field.clone());
                     current = inner.as_ref();
                 }
@@ -346,7 +351,7 @@ impl AstToScg {
         }
     }
 
-    /// PMT (Wave 2): walk an `Expr` tree, find any `state.field` reads (i.e.
+    /// PMT: walk an `Expr` tree, find any `state.field` reads (i.e.
     /// `Expr::FieldAccess` chains rooted at a state-typed Var), emit an
     /// `Access(Read)` node for each, and rewrite the FieldAccess into a
     /// `Var("v_<node_id>")` referring to the Load's result.
@@ -364,7 +369,9 @@ impl AstToScg {
             Expr::FieldAccess { .. } => {
                 // Try to interpret as a state-field read.
                 if let Some((var_name, chain)) = Self::extract_state_read_chain(expr) {
-                    if let Some(layout_name) = self.lookup_var_type(&var_name).map(|s| s.to_string()) {
+                    if let Some(layout_name) =
+                        self.lookup_var_type(&var_name).map(|s| s.to_string())
+                    {
                         if let Some((offset, size, _field_ty)) =
                             self.resolve_field_chain(&layout_name, &chain)
                         {
@@ -377,7 +384,12 @@ impl AstToScg {
                                     offset: Some(offset),
                                     access_size: Some(size),
                                 }),
-                                ProgramPoint { file: None, line: None, column: None, offset: None },
+                                ProgramPoint {
+                                    file: None,
+                                    line: None,
+                                    column: None,
+                                    offset: None,
+                                },
                             );
                             region.add_node(access_id);
 
@@ -412,7 +424,11 @@ impl AstToScg {
                 rhs: Box::new(self.lower_state_reads_in_expr(rhs, scg, region)),
                 span: *span,
             },
-            Expr::UnOp { op, expr: inner, span } => Expr::UnOp {
+            Expr::UnOp {
+                op,
+                expr: inner,
+                span,
+            } => Expr::UnOp {
                 op: *op,
                 expr: Box::new(self.lower_state_reads_in_expr(inner, scg, region)),
                 span: *span,
@@ -429,17 +445,29 @@ impl AstToScg {
                     span: *span,
                 }
             }
-            Expr::Cast { expr: inner, target_type, span } => Expr::Cast {
+            Expr::Cast {
+                expr: inner,
+                target_type,
+                span,
+            } => Expr::Cast {
                 expr: Box::new(self.lower_state_reads_in_expr(inner, scg, region)),
                 target_type: target_type.clone(),
                 span: *span,
             },
-            Expr::Index { expr: inner, index, span } => Expr::Index {
+            Expr::Index {
+                expr: inner,
+                index,
+                span,
+            } => Expr::Index {
                 expr: Box::new(self.lower_state_reads_in_expr(inner, scg, region)),
                 index: Box::new(self.lower_state_reads_in_expr(index, scg, region)),
                 span: *span,
             },
-            Expr::TypeAscription { expr: inner, ty, span } => Expr::TypeAscription {
+            Expr::TypeAscription {
+                expr: inner,
+                ty,
+                span,
+            } => Expr::TypeAscription {
                 expr: Box::new(self.lower_state_reads_in_expr(inner, scg, region)),
                 ty: ty.clone(),
                 span: *span,
@@ -448,7 +476,6 @@ impl AstToScg {
             _ => expr.clone(),
         }
     }
-
 
     // -- helpers: span → ProgramPoint ---------------------------------------
 
@@ -534,7 +561,11 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(format!("struct {} {{ {} }}", s.name, fields_str.join(", "))),
+                        kind: ComputationKind::Other(format!(
+                            "struct {} {{ {} }}",
+                            s.name,
+                            fields_str.join(", ")
+                        )),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -548,7 +579,11 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(format!("enum {} {{ {} }}", e.name, variants_str.join(", "))),
+                        kind: ComputationKind::Other(format!(
+                            "enum {} {{ {} }}",
+                            e.name,
+                            variants_str.join(", ")
+                        )),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -597,7 +632,11 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(format!("trait {} {{ {} }}", t.name, methods_str.join(", "))),
+                        kind: ComputationKind::Other(format!(
+                            "trait {} {{ {} }}",
+                            t.name,
+                            methods_str.join(", ")
+                        )),
                         result_type: None,
                         tail_call: false,
                     }),
@@ -641,30 +680,60 @@ impl AstToScg {
                 default_region.add_node(id);
                 Ok(id)
             }
-            // PMT (Wave 1a): LayoutDef and TransformDef are parsed but not
-            // yet lowered to SCG. Wave 1c will wire them. For now, emit a
-            // Computation node with a descriptive label so the SCG retains
-            // a trace of the construct (parallel with how StructDef/EnumDef
-            // are handled above) WITHOUT crashing or failing the build —
-            // this lets the parse-only test files in
-            // tests/gold_standard/pmt_wave1/ compile end-to-end and run
-            // `fn main() { return 0; }` to exit 0.
+            // PMT: LayoutDef is now lowered to a real
+            // `NodeType::StructDef` node carrying `StructFieldInfo { name,
+            // type_name, offset, size }` plus `total_size` and `alignment`.
+            // This lets IVE's `state_read`/`state_write` verifiers consult
+            // the SCG directly rather than re-deriving offsets from the AST
+            // (closes caveat §2's "pmt_layouts trusted from parser").
+            //
+            // Field offsets/alignment are reused from the pre-pass
+            // `register_layout` (see `convert()` lines 144-148), which stores
+            // `(name, Type, byte_offset)` per field in `self.layouts`. Field
+            // sizes are re-derived via `type_size`; alignment via the max of
+            // per-field `type_alignment`; total_size via `layout_total_size`
+            // (which applies tail padding). All three helpers mirror the
+            // arithmetic in `register_layout` so the SCG node and the
+            // converter-internal `self.layouts` table stay consistent.
+            //
+            // `Item::LayoutDef` reuses `NodeType::StructDef` (rather than
+            // introducing a layout-specific variant) because the SCG's
+            // `StructDefNode` shape — `(name, fields[(name, type_name, offset,
+            // size)], total_size, alignment)` — already captures exactly what
+            // IVE needs. The `attrs` (e.g. `#[foreign(raw)]`) are not modeled
+            // on the SCG node; they remain accessible via the AST
+            // `LayoutDef`, which `build_pmt_layout_specs` (pipeline.rs) reads
+            // separately for any attrs-based logic. Reusing `StructDef` keeps
+            // the blast radius to a single file (`to_scg.rs`) — no new
+            // `NodeType` variant, no `node.rs` changes.
             Item::LayoutDef(ld) => {
-                let fields_str: Vec<String> = ld
+                let fields: Vec<StructFieldInfo> = self
+                    .lookup_layout(&ld.name)
+                    .map(|reg| {
+                        reg.iter()
+                            .map(|(fname, ftype, foffset)| StructFieldInfo {
+                                name: fname.clone(),
+                                type_name: ftype.to_string(),
+                                offset: *foffset,
+                                size: self.type_size(ftype),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let alignment = ld
                     .fields
                     .iter()
-                    .map(|(n, t)| format!("{}: {}", n, t))
-                    .collect();
+                    .map(|(_, t)| self.type_alignment(Some(t)).max(1))
+                    .max()
+                    .unwrap_or(1);
+                let total_size = self.layout_total_size(&ld.name);
                 let id = scg.add_node(
-                    NodeType::Computation,
-                    NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(format!(
-                            "layout {} {{ {} }}  // PMT Wave 1c TODO",
-                            ld.name,
-                            fields_str.join(", ")
-                        )),
-                        result_type: None,
-                        tail_call: false,
+                    NodeType::StructDef,
+                    NodePayload::StructDef(StructDefNode {
+                        name: ld.name.clone(),
+                        fields,
+                        total_size,
+                        alignment,
                     }),
                     self.span_to_pp(&ld.span),
                 );
@@ -716,7 +785,11 @@ impl AstToScg {
             .as_ref()
             .map(|t| t.to_string())
             .unwrap_or_else(|| "void".to_string());
-        self.current_return_type = if ret_type_str != "void" { Some(ret_type_str.clone()) } else { None };
+        self.current_return_type = if ret_type_str != "void" {
+            Some(ret_type_str.clone())
+        } else {
+            None
+        };
         let entry_label = format!("fn_{}_entry({})", f.name, ret_type_str);
 
         // FunctionEntry node.
@@ -744,7 +817,7 @@ impl AstToScg {
             );
             fn_region.add_node(param_id);
             self.define_var(&p.name, param_id);
-            // PMT (Wave 2): if the param's type is `State<L>`, register it as
+            // PMT: if the param's type is `State<L>`, register it as
             // a state-typed var so `param.field` accesses lower to Loads with
             // the layout's field offsets.
             if let Some(ty) = &p.ty {
@@ -876,7 +949,7 @@ impl AstToScg {
         match stmt {
             // 2. Let bindings → Computation nodes (enhanced: type propagation)
             Stmt::Let(l) => {
-                // PMT (Wave 2): pre-process the RHS — emit Load nodes for any
+                // PMT: pre-process the RHS — emit Load nodes for any
                 // state.field reads and rewrite them to temp Var references.
                 // This must happen BEFORE stringifying the expr so the label
                 // uses the temp var names (which the codegen bridge resolves
@@ -893,7 +966,11 @@ impl AstToScg {
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(desc),
+                        // Route through `from_op_name` so bare intrinsic names
+                        // (if ever used as the RHS description) are nominally
+                        // typed as `Intrinsic(IntrinsicKind)` instead of
+                        // `Other(s)`.
+                        kind: ComputationKind::from_op_name(&desc),
                         result_type: result_type.clone(),
                         tail_call: false,
                     }),
@@ -921,7 +998,7 @@ impl AstToScg {
 
                 // If the RHS is a function call — emit FunctionEntry/Return.
                 if let Expr::Call { callee, args, .. } = &value_rewritten {
-                    self.emit_call_nodes(callee, args, id, scg, region)?;
+                    self.emit_call_nodes(callee, args, id, Some(&l.name), scg, region)?;
                 }
 
                 // If the RHS is a direct syscall — emit a Syscall node.
@@ -953,7 +1030,7 @@ impl AstToScg {
                     )?;
                 }
 
-                // PMT (Wave 2): if the RHS is `state_new(Layout)` → emit an
+                // PMT: if the RHS is `state_new(Layout)` → emit an
                 // Allocation node sized to the layout's total_size. The
                 // resulting buffer pointer is the state's value; subsequent
                 // `state.field` reads/writes use it as the Load/Store address.
@@ -978,7 +1055,7 @@ impl AstToScg {
                     self.define_var_type(&l.name, layout_name);
                 }
 
-                // PMT (Wave 2): if the let-binding has a `State<L>` type
+                // PMT: if the let-binding has a `State<L>` type
                 // annotation, register the var as state-typed. This covers
                 // `let p: State<Point> = ...` (e.g., when p is a function
                 // param passed through, or assigned from another state var).
@@ -1026,18 +1103,22 @@ impl AstToScg {
 
             // 2b. Assignment → Computation + optional Write access
             Stmt::Assign(a) => {
-                // PMT (Wave 2): pre-process the RHS — emit Load nodes for any
+                // PMT: pre-process the RHS — emit Load nodes for any
                 // state.field reads and rewrite them to temp Var references.
                 let value_rewritten = self.lower_state_reads_in_expr(&a.value, scg, region);
 
-                // PMT (Wave 2): detect state-typed field write. The parser
+                // PMT: detect state-typed field write. The parser
                 // represents `p.x = val` as `AssignTarget::DerefField { expr:
                 // Var("p"), field: "x" }`. For nested writes like `l.a.x = v`
                 // the target's `expr` is itself a FieldAccess chain.
                 let state_write_info = self.extract_state_write_target(&a.target);
 
                 let target_name = self.assign_target_name(&a.target);
-                let desc = format!("{} = {}", target_name, self.expr_to_string(&value_rewritten));
+                let desc = format!(
+                    "{} = {}",
+                    target_name,
+                    self.expr_to_string(&value_rewritten)
+                );
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
@@ -1049,11 +1130,13 @@ impl AstToScg {
                 );
                 region.add_node(id);
 
-                // PMT (Wave 2): state-field write — emit an Access(Write) node
+                // PMT: state-field write — emit an Access(Write) node
                 // with the field's cumulative offset and size. The DataFlow
                 // edges are ordered: [0] = state buffer pointer, [1] = value.
                 if let Some((state_var, field_chain)) = &state_write_info {
-                    if let Some(layout_name) = self.lookup_var_type(state_var).map(|s| s.to_string()) {
+                    if let Some(layout_name) =
+                        self.lookup_var_type(state_var).map(|s| s.to_string())
+                    {
                         if let Some((offset, size, _field_ty)) =
                             self.resolve_field_chain(&layout_name, field_chain)
                         {
@@ -1119,7 +1202,7 @@ impl AstToScg {
 
                 // Check if the RHS is a function call.
                 if let Expr::Call { callee, args, .. } = &value_rewritten {
-                    self.emit_call_nodes(callee, args, id, scg, region)?;
+                    self.emit_call_nodes(callee, args, id, Some(&target_name), scg, region)?;
                 }
 
                 // Check if the RHS is a direct syscall.
@@ -1191,13 +1274,8 @@ impl AstToScg {
                 if let Expr::Allocate { size, .. } = &value_rewritten {
                     if let AssignTarget::Var { name, .. } = &a.target {
                         self.emit_alloc_from_expr(
-                            size,
-                            name,
-                            None, // no type annotation on Assign
-                            id,
-                            scg,
-                            region,
-                            &a.span,
+                            size, name, None, // no type annotation on Assign
+                            id, scg, region, &a.span,
                         )?;
                     }
                 }
@@ -1247,9 +1325,7 @@ impl AstToScg {
                         // Then try looking up the var's NodeId and trace back
                         if alloc_node_id.is_none() {
                             if let Some(var_nid) = self.lookup_var(name) {
-                                if let Some(alloc_nid) =
-                                    Self::find_alloc_for_var(scg, var_nid)
-                                {
+                                if let Some(alloc_nid) = Self::find_alloc_for_var(scg, var_nid) {
                                     alloc_node_id = Some(alloc_nid);
                                     // Cache for future lookups
                                     self.define_alloc(name, alloc_nid);
@@ -1700,7 +1776,12 @@ impl AstToScg {
                     // Computation node for the arm body.
                     // If the arm body is a Block expression, convert each
                     // statement in the block as a separate SCG node.
-                    let body_id = if let Expr::Block { statements, trailing_expr, .. } = &arm.body {
+                    let body_id = if let Expr::Block {
+                        statements,
+                        trailing_expr,
+                        ..
+                    } = &arm.body
+                    {
                         // Convert each statement in the block
                         let mut prev_id = arm_entry;
                         for stmt in statements {
@@ -1714,7 +1795,10 @@ impl AstToScg {
                             let te_id = scg.add_node(
                                 NodeType::Computation,
                                 NodePayload::Computation(ComputationNode {
-                                    kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, te_desc)),
+                                    kind: ComputationKind::Other(format!(
+                                        "match_arm[{}]: {}",
+                                        arm_idx, te_desc
+                                    )),
                                     result_type: None,
                                     tail_call: false,
                                 }),
@@ -1729,7 +1813,10 @@ impl AstToScg {
                             let dummy_id = scg.add_node(
                                 NodeType::Computation,
                                 NodePayload::Computation(ComputationNode {
-                                    kind: ComputationKind::Other(format!("match_arm[{}]: block_end", arm_idx)),
+                                    kind: ComputationKind::Other(format!(
+                                        "match_arm[{}]: block_end",
+                                        arm_idx
+                                    )),
                                     result_type: None,
                                     tail_call: false,
                                 }),
@@ -1744,7 +1831,10 @@ impl AstToScg {
                         let bid = scg.add_node(
                             NodeType::Computation,
                             NodePayload::Computation(ComputationNode {
-                                kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, arm_body_desc)),
+                                kind: ComputationKind::Other(format!(
+                                    "match_arm[{}]: {}",
+                                    arm_idx, arm_body_desc
+                                )),
                                 result_type: None,
                                 tail_call: false,
                             }),
@@ -1773,7 +1863,10 @@ impl AstToScg {
                             let field_comp_id = scg.add_node(
                                 NodeType::Computation,
                                 NodePayload::Computation(ComputationNode {
-                                    kind: ComputationKind::Other(format!("destructure {}.{}", name, field)),
+                                    kind: ComputationKind::Other(format!(
+                                        "destructure {}.{}",
+                                        name, field
+                                    )),
                                     result_type: None,
                                     tail_call: false,
                                 }),
@@ -1909,7 +2002,7 @@ impl AstToScg {
                 region.add_node(id);
 
                 if let Some(v) = &r.value {
-                    // PMT (Wave 2): pre-process the return value — emit Load
+                    // PMT: pre-process the return value — emit Load
                     // nodes for any state.field reads and rewrite them to temp
                     // Var references. This handles `return p.x;` etc.
                     let v_rewritten = self.lower_state_reads_in_expr(v, scg, region);
@@ -1948,7 +2041,7 @@ impl AstToScg {
                             self.span_to_pp(&r.span),
                         );
                         region.add_node(call_comp_id);
-                        self.emit_call_nodes(callee, args, call_comp_id, scg, region)?;
+                        self.emit_call_nodes(callee, args, call_comp_id, None, scg, region)?;
                         let _ = scg.add_edge(call_comp_id, id, EdgeKind::DataFlow);
                         let _ = scg.add_edge(call_comp_id, id, EdgeKind::ControlFlow);
                         return Ok(call_comp_id);
@@ -1980,7 +2073,7 @@ impl AstToScg {
             }
 
             Stmt::Expr(e) => {
-                // PMT (Wave 2): pre-process the expression — emit Load nodes
+                // PMT: pre-process the expression — emit Load nodes
                 // for any state.field reads and rewrite them to temp Vars.
                 let expr_rewritten = self.lower_state_reads_in_expr(&e.expr, scg, region);
                 let desc = self.expr_to_string(&expr_rewritten);
@@ -1998,7 +2091,7 @@ impl AstToScg {
 
                 // 10. Function calls → FunctionEntry/FunctionReturn nodes
                 if let Expr::Call { callee, args, .. } = &expr_rewritten {
-                    self.emit_call_nodes(callee, args, id, scg, region)?;
+                    self.emit_call_nodes(callee, args, id, None, scg, region)?;
                 }
 
                 // Direct syscall → Syscall node.
@@ -2241,24 +2334,48 @@ impl AstToScg {
                 }
                 Ok(id)
             }
-            // PMT (Wave 1a): TransformCall is parsed-but-not-emitted in
-            // Wave 1a (the parser produces Stmt::Let with a function-call
-            // RHS for transform invocations). Stub arm produces no SCG
-            // node so the build does not crash; Wave 1c will lower this.
+            // PMT: lower `let tc.dst = tc.transform_name(tc.arg)`
+            // exactly like a `Stmt::Let` whose RHS is an `Expr::Call`. The
+            // transform definition itself is already lowered to an `FnDef`
+            // (see `Item::TransformDef` arm above, line 683), so the call
+            // site just needs to reuse `emit_call_nodes` to produce the
+            // FunctionEntry/FunctionReturn pair + per-argument DataFlow
+            // edges, plus a `ComputationNode` for the let-binding that
+            // defines `tc.dst` for downstream DCE/liveness.
             Stmt::TransformCall(tc) => {
+                // Synthetic `Expr::Call { callee: <transform_name>, args: [tc.arg] }`
+                // so we can reuse the regular call-lowering path.
+                let callee = Expr::Var {
+                    name: tc.transform_name.clone(),
+                    span: tc.span,
+                };
+                let args = vec![tc.arg.clone()];
+                let call_str = format!("{}({})", tc.transform_name, self.expr_to_string(&tc.arg));
+                let desc = format!("let {} = {}", tc.dst, call_str);
+
+                // 1. Let-binding computation node — defines `tc.dst`.
                 let id = scg.add_node(
                     NodeType::Computation,
                     NodePayload::Computation(ComputationNode {
-                        kind: ComputationKind::Other(format!(
-                            "transform_call {} = {}(...)  // PMT Wave 1c TODO",
-                            tc.dst, tc.transform_name
-                        )),
+                        kind: ComputationKind::from_op_name(&desc),
                         result_type: None,
                         tail_call: false,
                     }),
                     self.span_to_pp(&tc.span),
                 );
                 region.add_node(id);
+                self.define_var(&tc.dst, id);
+
+                // 2. DataFlow edges from the argument expression into the
+                //    binding node (mirrors `Stmt::Let` at line 908).
+                self.add_data_flow_edges(&tc.arg, id, scg);
+
+                // 3. FunctionEntry/FunctionReturn pair + per-argument
+                //    DataFlow edges + return-value DataFlow edge back into
+                //    `id`. This is the same path `Stmt::Let` takes when its
+                //    RHS is an `Expr::Call` (line 927-929).
+                self.emit_call_nodes(&callee, &args, id, Some(&tc.dst), scg, region)?;
+
                 Ok(id)
             }
         }
@@ -2267,29 +2384,54 @@ impl AstToScg {
     // -- 10. Function calls → FunctionEntry/FunctionReturn nodes -------------
     //    Enhanced: per-argument DataFlow edges; return value DataFlow.
     //
-    //    Wave 2c: channel builtins (`channel_open`, `channel_send`,
+    //    Channel builtins (`channel_open`, `channel_send`,
     //    `channel_recv`, `channel_close`) are parsed as regular
     //    `Expr::Call` nodes (the `channel_open<T>` type parameter is
     //    consumed by the parser but not retained on the AST — see
-    //    `parse_postfix`).  They flow through this generic lowering
-    //    path and produce SCG FunctionEntry/FunctionReturn ControlNodes
-    //    labelled `call_channel_open`, `call_channel_send`,
-    //    `call_channel_recv`, `call_channel_close` respectively.
-    //    Task 2b did not add a dedicated ChannelNode variant to the
-    //    parser SCG, so CallNode-shaped lowering (FunctionEntry/Return
-    //    pair) is the correct SCG representation.  Wave 3 codegen will
-    //    recognise these callee names and emit the appropriate runtime
-    //    calls.
+    //    `parse_postfix`).  They flow through this lowering path and are
+    //    now intercepted by `try_emit_channel_node`, which emits the
+    //    dedicated `NodePayload::Channel{Open,Send,Recv,Close}` variants
+    //    that the linear-channel gate (Stage 7c in `pipeline.rs`)
+    //    pattern-matches to build the `ChannelEvent` list.  Previously
+    //    these builtins fell through to the generic
+    //    FunctionEntry/FunctionReturn ControlNode lowering (labelled
+    //    `call_channel_*`), which left the gate dormant — see the module
+    //    docs in `tests/linear_check_tests.rs` and
+    //    `tests/linear_channel_hard_fail.rs` for the full gap history.
+    //
+    //    `dst_var` carries the name of the variable being bound by the
+    //    enclosing `let` / assignment (e.g. `"ch"` for `ch = channel_open<T>()`
+    //    or `"x"` for `x = channel_recv(ch)`).  It is `None` for
+    //    statement-position calls (`channel_close(ch);`) and for return
+    //    values.  The dedicated Channel* payloads use this name as the
+    //    handle's variable identifier so the verifier can correlate
+    //    multiple operations on the SAME handle.
 
     fn emit_call_nodes(
         &self,
         callee: &Expr,
         args: &[Expr],
         caller_node: NodeId,
+        dst_var: Option<&str>,
         scg: &mut SCG,
         region: &mut SCGRegion,
     ) -> Result<(), ParseError> {
         let callee_name = self.expr_to_string(callee);
+
+        // Channel builtins → dedicated NodePayload::Channel*
+        // variants.  Returning early here means the generic
+        // FunctionEntry/FunctionReturn ControlNode pair is NOT emitted
+        // for these builtins (the dedicated node replaces it).
+        if self.try_emit_channel_node(
+            &callee_name,
+            args,
+            caller_node,
+            dst_var,
+            scg,
+            region,
+        )? {
+            return Ok(());
+        }
 
         let entry_id = scg.add_node(
             NodeType::Control,
@@ -2339,6 +2481,159 @@ impl AstToScg {
         let _ = scg.add_edge(ret_id, caller_node, EdgeKind::DataFlow);
 
         Ok(())
+    }
+
+    /// Emit a dedicated `NodePayload::Channel*` node for one of
+    /// the four channel builtins (`channel_open`, `channel_send`,
+    /// `channel_recv`, `channel_close`).
+    ///
+    /// Returns `Ok(true)` if `callee_name` matched a channel builtin and a
+    /// dedicated node was emitted; `Ok(false)` if `callee_name` is some
+    /// other callee and the caller should fall through to the generic
+    /// FunctionEntry/FunctionReturn lowering.
+    ///
+    /// The dedicated payloads carry the channel handle's VARIABLE NAME
+    /// (e.g. `"ch"`) so the linear-channel verifier (Stage 7c in
+    /// `pipeline.rs`) can correlate multiple operations on the same
+    /// handle via `ChannelEvent::vreg`.
+    ///
+    /// `dst_var` is the name of the variable being bound by the enclosing
+    /// `let` / assignment (used as `ChannelOpenNode.dst` /
+    /// `ChannelRecvNode.dst`).  When `None` (statement-position call or
+    /// return value), a synthetic name is generated so the payload fields
+    /// remain populated; the synthetic name does not affect verifier
+    /// correlation because `channel_open` only ever appears once per
+    /// handle and `channel_recv`'s `dst` is not used for correlation
+    /// (only `channel` is).
+    fn try_emit_channel_node(
+        &self,
+        callee_name: &str,
+        args: &[Expr],
+        caller_node: NodeId,
+        dst_var: Option<&str>,
+        scg: &mut SCG,
+        region: &mut SCGRegion,
+    ) -> Result<bool, ParseError> {
+        let pp = ProgramPoint {
+            file: None,
+            line: None,
+            column: None,
+            offset: None,
+        };
+        match callee_name {
+            "channel_open" => {
+                // `channel_open<T>()` → `Channel<T>`. The type parameter
+                // `T` is parsed by `parse_postfix` but not retained on
+                // the AST. We record a placeholder `"unknown"` element
+                // type — the linear-channel verifier does not consult
+                // `elem_type`, and the codegen SCG (built independently
+                // via `bridge_ast_to_codegen_scg`) recovers the real
+                // element type from the channel's runtime descriptor.
+                let dst = dst_var
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("__ch_open_{}", caller_node.as_u64()));
+                let id = scg.add_node(
+                    NodeType::ChannelOpen,
+                    NodePayload::ChannelOpen(ChannelOpenNode {
+                        dst,
+                        elem_type: "unknown".to_string(),
+                    }),
+                    pp,
+                );
+                region.add_node(id);
+                let _ = scg.add_edge(caller_node, id, EdgeKind::ControlFlow);
+                // Return-value DataFlow: the open produces the handle
+                // consumed by the enclosing let/assign binding.
+                let _ = scg.add_edge(id, caller_node, EdgeKind::DataFlow);
+                Ok(true)
+            }
+            "channel_send" => {
+                // `channel_send(ch, msg)` → void. The channel handle is
+                // borrowed (not consumed) — the verifier treats this as
+                // a `Use` event on `cs.channel`. The message operand is
+                // recorded as a best-effort string for diagnostics; the
+                // codegen SCG resolves it independently from the AST.
+                let channel = args
+                    .first()
+                    .map(|a| self.expr_to_string(a))
+                    .unwrap_or_default();
+                let message = args
+                    .get(1)
+                    .map(|a| self.expr_to_string(a))
+                    .unwrap_or_default();
+                let id = scg.add_node(
+                    NodeType::ChannelSend,
+                    NodePayload::ChannelSend(ChannelSendNode {
+                        channel,
+                        message,
+                        ty: "unknown".to_string(),
+                    }),
+                    pp,
+                );
+                region.add_node(id);
+                // Per-argument DataFlow edges (channel + message) so
+                // downstream consumers can trace operands.
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    let arg_label = format!("arg{}", arg_idx);
+                    self.add_df_edges_recursive_labeled(arg, id, scg, &arg_label);
+                }
+                let _ = scg.add_edge(caller_node, id, EdgeKind::ControlFlow);
+                Ok(true)
+            }
+            "channel_recv" => {
+                // `channel_recv(ch)` → T. The message is stored into
+                // `dst` (the let/assign binding's variable name). The
+                // verifier treats this as a `Use` event on `cr.channel`.
+                let dst = dst_var
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("__ch_recv_{}", caller_node.as_u64()));
+                let channel = args
+                    .first()
+                    .map(|a| self.expr_to_string(a))
+                    .unwrap_or_default();
+                let id = scg.add_node(
+                    NodeType::ChannelRecv,
+                    NodePayload::ChannelRecv(ChannelRecvNode {
+                        dst,
+                        channel,
+                        ty: "unknown".to_string(),
+                    }),
+                    pp,
+                );
+                region.add_node(id);
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    let arg_label = format!("arg{}", arg_idx);
+                    self.add_df_edges_recursive_labeled(arg, id, scg, &arg_label);
+                }
+                let _ = scg.add_edge(caller_node, id, EdgeKind::ControlFlow);
+                // Return-value DataFlow: the recv produces the message
+                // consumed by the enclosing let/assign binding.
+                let _ = scg.add_edge(id, caller_node, EdgeKind::DataFlow);
+                Ok(true)
+            }
+            "channel_close" => {
+                // `channel_close(ch)` → void. The channel handle is
+                // consumed (linear) — the verifier treats this as a
+                // `Close` event on `cc.channel`.
+                let channel = args
+                    .first()
+                    .map(|a| self.expr_to_string(a))
+                    .unwrap_or_default();
+                let id = scg.add_node(
+                    NodeType::ChannelClose,
+                    NodePayload::ChannelClose(ChannelCloseNode { channel }),
+                    pp,
+                );
+                region.add_node(id);
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    let arg_label = format!("arg{}", arg_idx);
+                    self.add_df_edges_recursive_labeled(arg, id, scg, &arg_label);
+                }
+                let _ = scg.add_edge(caller_node, id, EdgeKind::ControlFlow);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     // -- 11c. Syscall → Syscall node ----------------------------------------
@@ -2580,70 +2875,13 @@ impl AstToScg {
     }
 
     // -- Async/await lowering (2c) -------------------------------------------
-
-    #[allow(dead_code)]
-    fn emit_async_await_lowering(
-        &mut self,
-        expr: &Expr,
-        parent_id: NodeId,
-        scg: &mut SCG,
-        region: &mut SCGRegion,
-        span: &Span,
-    ) -> Result<NodeId, ParseError> {
-        // Create a FuturePoll node for this await point.
-        let poll_id = scg.add_node(
-            NodeType::Control,
-            NodePayload::Control(ControlNode {
-                kind: ControlKind::FuturePoll,
-                label: Some("future_poll".to_string()),
-            }),
-            self.span_to_pp(span),
-        );
-        region.add_node(poll_id);
-        let _ = scg.add_edge(parent_id, poll_id, EdgeKind::ControlFlow);
-        self.add_data_flow_edges(expr, poll_id, scg);
-
-        // Create a WakerRegistration node.
-        let waker_id = scg.add_node(
-            NodeType::Control,
-            NodePayload::Control(ControlNode {
-                kind: ControlKind::WakerRegistration,
-                label: Some("waker_register".to_string()),
-            }),
-            self.span_to_pp(span),
-        );
-        region.add_node(waker_id);
-        let _ = scg.add_edge(poll_id, waker_id, EdgeKind::ControlFlow);
-
-        // Create a StateTransition node (the await is a split point in the state machine).
-        let state_id = scg.add_node(
-            NodeType::Control,
-            NodePayload::Control(ControlNode {
-                kind: ControlKind::StateTransition,
-                label: Some("await_suspend".to_string()),
-            }),
-            self.span_to_pp(span),
-        );
-        region.add_node(state_id);
-        let _ = scg.add_edge(waker_id, state_id, EdgeKind::ControlFlow);
-
-        // DataFlow edge from the awaited expression.
-        self.add_data_flow_edges(expr, state_id, scg);
-
-        // The resume point after the await.
-        let resume_id = scg.add_node(
-            NodeType::Control,
-            NodePayload::Control(ControlNode {
-                kind: ControlKind::FuturePoll,
-                label: Some("future_resume".to_string()),
-            }),
-            self.span_to_pp(span),
-        );
-        region.add_node(resume_id);
-        let _ = scg.add_edge(state_id, resume_id, EdgeKind::ControlFlow);
-
-        Ok(poll_id)
-    }
+    //
+    // The `emit_async_await_lowering` helper that previously lived
+    // here was removed as dead code — it had zero callers (the async/await
+    // lowering pass is not yet wired into `lower_expr`). The companion SCG
+    // `ControlKind::FuturePoll` / `WakerRegistration` variants remain defined
+    // (see `scg/src/node.rs`) and are matched in `pipeline.rs` for fallthrough
+    // display purposes; they will be exercised when the future lowering lands.
 
     // -- Trait dispatch lowering (2d) ----------------------------------------
 
@@ -2901,7 +3139,7 @@ impl AstToScg {
 
         // If the spawned expression is a call, emit FunctionEntry/Return.
         if let Expr::Call { callee, args, .. } = expr {
-            self.emit_call_nodes(callee, args, id, scg, region)?;
+            self.emit_call_nodes(callee, args, id, None, scg, region)?;
         }
 
         let _ = scg.add_edge(parent_id, id, EdgeKind::Derivation);
@@ -3123,7 +3361,12 @@ impl AstToScg {
                         result_type: None,
                         tail_call: false,
                     }),
-                    ProgramPoint { file: None, line: None, column: None, offset: None },
+                    ProgramPoint {
+                        file: None,
+                        line: None,
+                        column: None,
+                        offset: None,
+                    },
                 );
                 let eid = scg.add_edge(lit_id, target_node, EdgeKind::DataFlow);
                 if let Ok(id) = eid {
@@ -3144,7 +3387,9 @@ impl AstToScg {
             Expr::FieldAccess { expr: inner, .. } => {
                 self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
             }
-            Expr::Index { expr: inner, index, .. } => {
+            Expr::Index {
+                expr: inner, index, ..
+            } => {
                 self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
                 self.add_df_edges_recursive_labeled(index, target_node, scg, label);
             }
@@ -3192,7 +3437,12 @@ impl AstToScg {
                         result_type: None,
                         tail_call: false,
                     }),
-                    ProgramPoint { file: None, line: None, column: None, offset: None },
+                    ProgramPoint {
+                        file: None,
+                        line: None,
+                        column: None,
+                        offset: None,
+                    },
                 );
                 let _ = scg.add_edge(lit_id, target_node, EdgeKind::DataFlow);
             }
@@ -3208,7 +3458,9 @@ impl AstToScg {
             Expr::FieldAccess { expr: inner, .. } => {
                 self.add_df_edges_recursive(inner, target_node, scg);
             }
-            Expr::Index { expr: inner, index, .. } => {
+            Expr::Index {
+                expr: inner, index, ..
+            } => {
                 self.add_df_edges_recursive(inner, target_node, scg);
                 self.add_df_edges_recursive(index, target_node, scg);
             }
@@ -3219,7 +3471,12 @@ impl AstToScg {
                 self.add_df_edges_recursive(addr, target_node, scg);
                 self.add_df_edges_recursive(value, target_node, scg);
             }
-            Expr::AtomicCas { addr, expected, desired, .. } => {
+            Expr::AtomicCas {
+                addr,
+                expected,
+                desired,
+                ..
+            } => {
                 self.add_df_edges_recursive(addr, target_node, scg);
                 self.add_df_edges_recursive(expected, target_node, scg);
                 self.add_df_edges_recursive(desired, target_node, scg);
@@ -3329,7 +3586,7 @@ impl AstToScg {
                     self.collect_uses(a, uses);
                 }
             }
-            // PMT (Wave 1a): the parser does not yet emit these variants
+            // PMT: the parser does not yet emit these variants
             // (StateInit intercepts `state_new(Name)` in parse_postfix;
             // StateRead reuses FieldAccess; StateWrite is reserved). The
             // arms are present so the match stays exhaustive.
@@ -3341,21 +3598,30 @@ impl AstToScg {
                 self.collect_uses(state, uses);
                 self.collect_uses(value, uses);
             }
-            // Arena State Model (Wave 1)
+            // Arena State Model
             Expr::ArenaNew { capacity, .. } => {
                 self.collect_uses(capacity, uses);
             }
             Expr::ArenaAlloc { arena, .. } => {
                 self.collect_uses(arena, uses);
             }
-            Expr::ArenaGrow { arena, min_capacity, .. } => {
+            Expr::ArenaGrow {
+                arena,
+                min_capacity,
+                ..
+            } => {
                 self.collect_uses(arena, uses);
                 self.collect_uses(min_capacity, uses);
             }
             Expr::ArenaFree { arena, .. } => {
                 self.collect_uses(arena, uses);
             }
-            Expr::IfExpr { condition, then_block, else_block, .. } => {
+            Expr::IfExpr {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.collect_uses(condition, uses);
                 for stmt in &then_block.statements {
                     self.collect_stmt_uses(stmt, uses);
@@ -3453,13 +3719,14 @@ impl AstToScg {
             Some(Type::Func { .. }) => 8,
             Some(Type::Generic { .. }) => 8,
             Some(Type::BdAnnot { .. }) => 8,
-            // PMT (Wave 1a): State<T> is a typed view over a memory
+            // PMT: State<T> is a typed view over a memory
             // buffer — pointer-sized handle. Ref<State, F> is an offset
-            // into one. Wave 1c will compute proper layout-based sizes.
+            // into one. Layout-based sizes will be computed once layouts
+            // are tracked.
             Some(Type::State(_)) => 8,
             Some(Type::Ref { .. }) => 8,
-            // Wave 1b: `Channel<T>` is a pointer-sized channel handle.
-            // Wave 89-90: session_type field doesn't change the handle size.
+            // `Channel<T>` is a pointer-sized channel handle.
+            // The session_type field doesn't change the handle size.
             Some(Type::Channel { .. }) => 8,
             None => 8,
         }
@@ -3475,12 +3742,12 @@ impl AstToScg {
             Type::Func { .. } => 8,
             Type::Generic { .. } => 8,
             Type::BdAnnot { .. } => 0,
-            // PMT (Wave 1a): pointer-sized handles for now. Wave 1c will
-            // look up the layout's actual size once layouts are tracked.
+            // PMT: pointer-sized handles for now. Layout-based sizes will
+            // be computed once layouts are tracked.
             Type::State(_) => 8,
             Type::Ref { .. } => 8,
-            // Wave 1b: `Channel<T>` is a pointer-sized channel handle.
-            // Wave 89-90: session_type field doesn't change the handle size.
+            // `Channel<T>` is a pointer-sized channel handle.
+            // The session_type field doesn't change the handle size.
             Type::Channel { .. } => 8,
         }
     }
@@ -3542,12 +3809,12 @@ impl AstToScg {
             Expr::MatchExpr { .. } => "unknown".to_string(),
             // Linux syscalls return `isize`, which is `i64` on the 64-bit ABI.
             Expr::Syscall { .. } => "i64".to_string(),
-            // PMT (Wave 1a) — best-effort type names. Wave 1c will track
-            // State<T> types properly through the SCG.
+            // PMT — best-effort type names. State<T> types will be
+            // tracked properly through the SCG in a future refinement.
             Expr::StateInit { layout_name, .. } => format!("State<{}>", layout_name),
             Expr::StateRead { .. } => "unknown".to_string(),
             Expr::StateWrite { .. } => "unknown".to_string(),
-            // Arena State Model (Wave 1)
+            // Arena State Model
             Expr::ArenaNew { .. } => "State<Arena>".to_string(),
             Expr::ArenaAlloc { layout_name, .. } => format!("State<{}>", layout_name),
             Expr::ArenaGrow { .. } => "State<Arena>".to_string(),
@@ -3611,15 +3878,21 @@ impl AstToScg {
         // Try to find the field name and struct type from the expression.
         // For FieldAccess: expr.field → look up struct type of expr,
         // then find field offset.
-        if let Expr::FieldAccess { expr: inner, field, .. } = expr {
+        if let Expr::FieldAccess {
+            expr: inner, field, ..
+        } = expr
+        {
             // Try to determine the struct type of the inner expression.
             // For now, we look for a variable whose name matches a struct
             // and find the field offset.
             // This is a best-effort approach — a proper implementation would
             // track types through the SCG.
-            
+
             // Check if inner is a dereference: (*ptr).field
-            if let Expr::Deref { expr: _deref_inner, .. } = inner.as_ref() {
+            if let Expr::Deref {
+                expr: _deref_inner, ..
+            } = inner.as_ref()
+            {
                 // (*ptr).field — look up the field in all known structs
                 for layout in self.struct_table.values() {
                     for (fname, _ftype, foffset) in layout {
@@ -3629,7 +3902,7 @@ impl AstToScg {
                     }
                 }
             }
-            
+
             // Direct field access: var.field — look up in struct_table
             for layout in self.struct_table.values() {
                 for (fname, _ftype, foffset) in layout {
@@ -3760,14 +4033,19 @@ impl AstToScg {
                 let a: Vec<String> = args.iter().map(|e| self.expr_to_string(e)).collect();
                 format!("syscall({}, {})", nr, a.join(", "))
             }
-            // PMT (Wave 1a) — best-effort string forms.
+            // PMT — best-effort string forms.
             Expr::StateInit { layout_name, .. } => {
                 format!("state_new({})", layout_name)
             }
             Expr::StateRead { state, field, .. } => {
                 format!("{}.{}", self.expr_to_string(state), field)
             }
-            Expr::StateWrite { state, field, value, .. } => {
+            Expr::StateWrite {
+                state,
+                field,
+                value,
+                ..
+            } => {
                 format!(
                     "{}.{} = {}",
                     self.expr_to_string(state),
@@ -3775,21 +4053,38 @@ impl AstToScg {
                     self.expr_to_string(value)
                 )
             }
-            // Arena State Model (Wave 1)
+            // Arena State Model
             Expr::ArenaNew { capacity, .. } => {
                 format!("arena_new({})", self.expr_to_string(capacity))
             }
-            Expr::ArenaAlloc { arena, layout_name, .. } => {
-                format!("arena_alloc({}, {})", self.expr_to_string(arena), layout_name)
+            Expr::ArenaAlloc {
+                arena, layout_name, ..
+            } => {
+                format!(
+                    "arena_alloc({}, {})",
+                    self.expr_to_string(arena),
+                    layout_name
+                )
             }
-            Expr::ArenaGrow { arena, min_capacity, .. } => {
-                format!("arena_grow({}, {})", self.expr_to_string(arena), self.expr_to_string(min_capacity))
+            Expr::ArenaGrow {
+                arena,
+                min_capacity,
+                ..
+            } => {
+                format!(
+                    "arena_grow({}, {})",
+                    self.expr_to_string(arena),
+                    self.expr_to_string(min_capacity)
+                )
             }
             Expr::ArenaFree { arena, .. } => {
                 format!("arena_free({})", self.expr_to_string(arena))
             }
             Expr::IfExpr { condition, .. } => {
-                format!("if {} {{ ... }} else {{ ... }}", self.expr_to_string(condition))
+                format!(
+                    "if {} {{ ... }} else {{ ... }}",
+                    self.expr_to_string(condition)
+                )
             }
         }
     }
@@ -3893,7 +4188,7 @@ impl Default for AstToScg {
     }
 }
 
-/// PMT (Wave 2): local align_to helper (mirrors `vuma_bd::repd::align_to`
+/// PMT: local align_to helper (mirrors `vuma_bd::repd::align_to`
 /// without taking a vuma-bd dependency). Rounds `val` up to the next
 /// multiple of `align` (align must be a power of two).
 fn align_to_local(val: u64, align: u64) -> u64 {
@@ -3903,7 +4198,7 @@ fn align_to_local(val: u64, align: u64) -> u64 {
     (val + align - 1) & !(align - 1)
 }
 
-/// PMT (Wave 2): if `ty` is `State<LayoutName>`, return `Some(layout_name)`.
+/// PMT: if `ty` is `State<LayoutName>`, return `Some(layout_name)`.
 /// Otherwise return `None`. Used to detect state-typed function parameters
 /// and let-binding type annotations.
 fn extract_state_layout_name(ty: &Type) -> Option<String> {
@@ -4023,87 +4318,6 @@ mod tests {
         }
     }
 
-    // ── Test 3: Allocation with size/alignment from type ──────────────────
-
-    #[test]
-    fn test_region_creates_allocation_node() {
-        let scg = parse_and_convert("region pool = allocate(1024);");
-
-        let alloc_count = count_nodes_by_type(&scg, NodeType::Allocation);
-        assert!(alloc_count >= 1, "should have at least one Allocation node");
-
-        let alloc_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Allocation(a) if a.size == 1024));
-        assert!(
-            alloc_node.is_some(),
-            "should find allocation with size 1024"
-        );
-
-        let has_derivation = scg.edges().any(|e| e.kind == EdgeKind::Derivation);
-        assert!(has_derivation, "should have Derivation edge");
-    }
-
-    // ── Test 4: Free → Deallocation referencing allocation ────────────────
-
-    #[test]
-    fn test_free_creates_deallocation_referencing_alloc() {
-        let scg = parse_and_convert("region pool = allocate(256); free(pool);");
-
-        let dealloc_count = count_nodes_by_type(&scg, NodeType::Deallocation);
-        assert!(dealloc_count >= 1, "should have a Deallocation node");
-
-        let alloc_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Allocation(_)));
-        let dealloc_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Deallocation(_)));
-
-        assert!(alloc_node.is_some());
-        assert!(dealloc_node.is_some());
-
-        if let (Some(alloc), Some(dealloc)) = (alloc_node, dealloc_node) {
-            if let NodePayload::Deallocation(d) = &dealloc.payload {
-                assert_eq!(
-                    d.allocation_node, alloc.id,
-                    "deallocation should reference the allocation node"
-                );
-            }
-        }
-
-        let derivation_edges: Vec<_> = scg
-            .edges()
-            .filter(|e| e.kind == EdgeKind::Derivation)
-            .collect();
-        assert!(!derivation_edges.is_empty(), "should have Derivation edges");
-    }
-
-    // ── Test 5: Pointer offset → Derivation edges (enhanced: labelled) ───
-
-    #[test]
-    fn test_pointer_offset_creates_derivation_edge() {
-        let scg = parse_and_convert("region pool = allocate(1024); ptr = pool + 64;");
-
-        let derivation_edges: Vec<_> = scg
-            .edges()
-            .filter(|e| e.kind == EdgeKind::Derivation)
-            .collect();
-        assert!(
-            !derivation_edges.is_empty(),
-            "pointer offset should create Derivation edges"
-        );
-
-        // Enhanced: check that the derivation edge has an offset label.
-        let labelled = derivation_edges
-            .iter()
-            .any(|e| e.label.as_ref().map_or(false, |l| l.contains("offset=64")));
-        assert!(
-            labelled,
-            "derivation edge should be labelled with offset=64"
-        );
-    }
-
     // ── Test 6: Cast → Cast node with source/target BD ───────────────────
 
     #[test]
@@ -4123,21 +4337,6 @@ mod tests {
                 assert_eq!(c.to_type, "u64");
             }
         }
-    }
-
-    // ── Test 7: Read/Write → Access nodes ────────────────────────────────
-
-    #[test]
-    fn test_access_creates_access_node() {
-        let scg = parse_and_convert("region pool = allocate(1024); *pool;");
-
-        let access_count = count_nodes_by_type(&scg, NodeType::Access);
-        assert!(access_count >= 1, "dereference should create Access node");
-
-        let access_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Access(a) if a.mode == AccessMode::Read));
-        assert!(access_node.is_some(), "should have Read Access node");
     }
 
     // ── Test 8: If/else → Control flow with branching (enhanced: labels) ─
@@ -4294,53 +4493,6 @@ mod tests {
         assert!(sync_exit.is_some(), "should have sync_exit effect node");
     }
 
-    // ── Test 14: Complex program ─────────────────────────────────────────
-
-    #[test]
-    fn test_complex_program_structure() {
-        let source = r#"
-            region memory_pool = allocate(4096);
-            fn process(data: u32) -> u32 {
-                let x = data + 1;
-                return x;
-            }
-            let result = process(42);
-            free(memory_pool);
-        "#;
-        let scg = parse_and_convert(source);
-
-        assert!(
-            count_nodes_by_type(&scg, NodeType::Allocation) >= 1,
-            "should have Allocation nodes"
-        );
-        assert!(
-            count_nodes_by_type(&scg, NodeType::Deallocation) >= 1,
-            "should have Deallocation nodes"
-        );
-        assert!(
-            count_nodes_by_type(&scg, NodeType::Control) >= 2,
-            "should have Control nodes (fn entry/return)"
-        );
-        assert!(
-            count_nodes_by_type(&scg, NodeType::Computation) >= 2,
-            "should have Computation nodes"
-        );
-
-        assert!(
-            scg.region_count() >= 2,
-            "should have function + default regions"
-        );
-
-        let derivation_count = scg
-            .edges()
-            .filter(|e| e.kind == EdgeKind::Derivation)
-            .count();
-        assert!(derivation_count >= 1, "should have Derivation edges");
-
-        let data_flow_count = scg.edges().filter(|e| e.kind == EdgeKind::DataFlow).count();
-        assert!(data_flow_count >= 1, "should have DataFlow edges");
-    }
-
     // ── Test 15: Data-flow dependency tracking ────────────────────────────
 
     #[test]
@@ -4364,35 +4516,6 @@ mod tests {
         }
     }
 
-    // ── Test 16: Example program from docs ────────────────────────────────
-
-    #[test]
-    fn test_example_program_from_docs() {
-        let source = r#"
-            region memory_pool = allocate(1024);
-            fn main() {
-                node_ptr = memory_pool + 64;
-                header = node_ptr as *NodeHeader;
-            }
-        "#;
-        let scg = parse_and_convert(source);
-
-        assert!(scg.node_count() >= 4, "should have multiple nodes");
-        assert!(
-            scg.region_count() >= 2,
-            "should have function + default regions"
-        );
-
-        let derivation_count = scg
-            .edges()
-            .filter(|e| e.kind == EdgeKind::Derivation)
-            .count();
-        assert!(
-            derivation_count >= 1,
-            "should have Derivation edges from allocation"
-        );
-    }
-
     // ── Test 17: For loop → LoopHeader/LoopExit with back edges ──────────
 
     #[test]
@@ -4404,25 +4527,6 @@ mod tests {
 
         let exit = find_control_node(&scg, ControlKind::LoopExit);
         assert!(exit.is_some(), "for should create LoopExit node");
-    }
-
-    // ── Test 18: Write access through dereference assignment ──────────────
-
-    #[test]
-    fn test_deref_assign_creates_write_access() {
-        let scg = parse_and_convert("region pool = allocate(64); *pool = 42;");
-
-        let write_access = scg.nodes().find(|n| {
-            if let NodePayload::Access(a) = &n.payload {
-                a.mode == AccessMode::Write
-            } else {
-                false
-            }
-        });
-        assert!(
-            write_access.is_some(),
-            "dereference assignment should create Write Access node"
-        );
     }
 
     // ── Test 19: Cast node lossless property ─────────────────────────────
@@ -4440,29 +4544,6 @@ mod tests {
                 assert!(c.is_lossless, "i64→u64 should be lossless (same size)");
             }
         }
-    }
-
-    // ── Test 20: SCG validation on output ────────────────────────────────
-
-    #[test]
-    fn test_scg_validation_on_output() {
-        let source = r#"
-            region pool = allocate(256);
-            fn compute(x: u32) -> u32 {
-                let y = x + 1;
-                return y;
-            }
-            let result = compute(10);
-            free(pool);
-        "#;
-        let scg = parse_and_convert(source);
-
-        let validation = scg.validate();
-        assert!(
-            validation.is_valid,
-            "SCG should validate: errors = {:?}",
-            validation.errors
-        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4654,114 +4735,6 @@ mod tests {
         );
     }
 
-    // ── Test 28: Write access has Derivation from pointer variable ────────
-
-    #[test]
-    fn test_write_access_has_derivation_from_pointer() {
-        let scg = parse_and_convert("region pool = allocate(64); *pool = 42;");
-
-        let write_access = scg.nodes().find(|n| {
-            if let NodePayload::Access(a) = &n.payload {
-                a.mode == AccessMode::Write
-            } else {
-                false
-            }
-        });
-        assert!(write_access.is_some());
-
-        let alloc_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Allocation(_)));
-        assert!(alloc_node.is_some());
-
-        // Enhanced: there should be a Derivation edge from the alloc node
-        // (which is what 'pool' resolves to) to the write Access node.
-        if let (Some(alloc), Some(access)) = (&alloc_node, &write_access) {
-            let has_derivation = scg.edges().any(|e| {
-                e.source == alloc.id && e.target == access.id && e.kind == EdgeKind::Derivation
-            });
-            assert!(
-                has_derivation,
-                "should have Derivation edge from allocation to Write Access node"
-            );
-        }
-    }
-
-    // ── Test 29: Complex snippet with alloc/free/call/if/while ───────────
-
-    #[test]
-    fn test_complex_snippet_alloc_free_call_if_while() {
-        let source = r#"
-            region heap = allocate(4096);
-            fn init(buf: u32) -> u32 {
-                let x = buf + 1;
-                if x {
-                    let y = x;
-                }
-                return x;
-            }
-            let r = init(0);
-            while r {
-                let z = r;
-            }
-            free(heap);
-        "#;
-        let scg = parse_and_convert(source);
-
-        // Verify all node types present.
-        assert!(count_nodes_by_type(&scg, NodeType::Allocation) >= 1);
-        assert!(count_nodes_by_type(&scg, NodeType::Deallocation) >= 1);
-        assert!(
-            count_nodes_by_type(&scg, NodeType::Control) >= 4,
-            "should have fn entry, fn return, branch, loop header, loop exit, join"
-        );
-        assert!(count_nodes_by_type(&scg, NodeType::Computation) >= 3);
-
-        // Verify regions: default + fn region.
-        assert!(scg.region_count() >= 2);
-
-        // Verify derivation chain: alloc → free.
-        let alloc_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Allocation(_)));
-        let dealloc_node = scg
-            .nodes()
-            .find(|n| matches!(&n.payload, NodePayload::Deallocation(_)));
-        if let (Some(a), Some(d)) = (&alloc_node, &dealloc_node) {
-            let has_derivation = scg
-                .edges()
-                .any(|e| e.source == a.id && e.target == d.id && e.kind == EdgeKind::Derivation);
-            assert!(
-                has_derivation,
-                "alloc → dealloc should have Derivation edge"
-            );
-        }
-
-        // Verify validation.
-        let validation = scg.validate();
-        assert!(
-            validation.is_valid,
-            "complex SCG should validate: errors = {:?}",
-            validation.errors
-        );
-    }
-
-    // ── Test 30: Derive expression creates derivation edges ──────────────
-
-    #[test]
-    fn test_derive_expression_creates_derivation_edges() {
-        let scg = parse_and_convert("region pool = allocate(1024); derive(pool, pool);");
-
-        let derivation_edges: Vec<_> = scg
-            .edges()
-            .filter(|e| e.kind == EdgeKind::Derivation)
-            .collect();
-        assert!(
-            derivation_edges.len() >= 2,
-            "derive() should create Derivation edges (from alloc + derive expr)"
-        );
-    }
-
     // ── Test 31: Async + spawn parallel pattern ──────────────────────────
 
     #[test]
@@ -4827,5 +4800,3 @@ mod tests {
         }
     }
 }
-
-

@@ -1,0 +1,25 @@
+// inbounds_array_read — Array read within bounds
+// Expected exit code: 42
+//
+// Bounds Wave 1 positive test: allocate a 16-byte buffer (via PMT
+// state_new of a layout containing a `[u8; 16]` array field), write
+// the value 42 to index 0, then read it back. With `--safe`, the
+// index 0 is within `[0, 16)` so no `__oob_trap` fires and execution
+// proceeds normally. Without `--safe` (this gold-standard mode), the
+// behaviour is identical: in-bounds access is well-defined.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocation (PMT idiom)
+//   - layout with fixed-size array field: `data: [u8; 16]`
+//   - in-bounds `b.data[0]` Store + Load round-trip
+//   - exercises the bounds-check injection site (SEQ pointer) with a
+//     named allocation whose size is statically known; the emitted
+//     `UGe(idx, size)` check evaluates to false → no trap.
+
+layout Buf = { data: [u8; 16] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 42;
+    return b.data[0];
+}

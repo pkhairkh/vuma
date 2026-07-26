@@ -331,7 +331,7 @@ pub struct LiveInterval {
     /// are tracked here so that the allocator can map them all to the same
     /// physical register.
     pub coalesced_vregs: Vec<IRValueId>,
-    /// Loop nesting depth at the interval's start position (Wave 6).
+    /// Loop nesting depth at the interval's start position.
     /// 0 = not in a loop, 1 = one level of nesting, etc.
     /// Used to compute spill weight: deeper loops = higher spill cost.
     pub loop_depth: u32,
@@ -407,7 +407,7 @@ impl LiveInterval {
 
         // Loop depth: if this interval is live inside a loop, spilling it
         // costs load/store on every iteration. Weight increases with depth.
-        // (Wave 6: loop-depth-aware spill weights)
+        // (loop-depth-aware spill weights)
         let loop_multiplier = 1u32 << self.loop_depth.min(4); // 1, 2, 4, 8, 16
 
         base_weight * call_multiplier * loop_multiplier
@@ -420,7 +420,7 @@ impl LiveInterval {
         self.spill_weight() / len
     }
 
-    /// Pressure-aware spill weight (Wave 24).
+    /// Pressure-aware spill weight.
     ///
     /// Returns this interval's `spill_weight()` adjusted for the current
     /// register pressure.  When `current_pressure` (the number of
@@ -437,11 +437,7 @@ impl LiveInterval {
     ///
     /// See `LinearScanAllocator::spill_gpr` / `spill_simd` for the call
     /// site that uses this.
-    pub fn spill_weight_with_pressure(
-        &self,
-        current_pressure: u32,
-        available_regs: u32,
-    ) -> u32 {
+    pub fn spill_weight_with_pressure(&self, current_pressure: u32, available_regs: u32) -> u32 {
         let base = self.spill_weight();
         if current_pressure > available_regs {
             // Overflow = how many intervals beyond the register count are
@@ -458,7 +454,7 @@ impl LiveInterval {
         }
     }
 
-    /// Pressure-aware weight per unit length (Wave 24).
+    /// Pressure-aware weight per unit length.
     ///
     /// Convenience wrapper: `spill_weight_with_pressure(p, r) / len`.
     pub fn weight_per_length_with_pressure(
@@ -482,7 +478,7 @@ impl LiveInterval {
 /// generation.
 #[derive(Debug, Clone)]
 pub struct AllocationResult {
-    /// (Wave 21) Name of the function this result applies to.
+    /// Name of the function this result applies to.
     /// Used by the emit path to match AllocationResults to IRFunctions.
     pub function_name: String,
     /// Mapping from virtual register ID to physical register.
@@ -1170,7 +1166,7 @@ impl LinearScanAllocator {
         let computer = LiveRangeComputer::new();
         let (mut intervals, call_positions) = computer.compute(func);
 
-        // Wave 6: Compute loop-nesting depth for each vreg and set it on
+        // Compute loop-nesting depth for each vreg and set it on
         // the intervals. This makes the spill_weight() loop_multiplier
         // (1 << loop_depth.min(4)) actually take effect — intervals inside
         // loops get exponentially higher spill weight, so the allocator
@@ -1184,7 +1180,7 @@ impl LinearScanAllocator {
 
         // Sort intervals by start position, then by end position (longer
         // intervals first at the same start — they're harder to allocate).
-        // Wave 6: also sort by loop depth (deeper loops first) so that
+        // Also sort by loop depth (deeper loops first) so that
         // loop-carried intervals get register priority.
         intervals.sort_by(|a, b| {
             a.start
@@ -1339,7 +1335,7 @@ impl LinearScanAllocator {
         }
 
         // No free register — need to spill/evict.
-        // (Wave 24) Pass the available register count so the spill
+        // Pass the available register count so the spill
         // heuristic can factor in current live-range pressure.
         Self::spill_gpr(
             interval,
@@ -1354,7 +1350,7 @@ impl LinearScanAllocator {
     /// spill weight per length, or spill the current one if it has the
     /// lowest weight.
     ///
-    /// (Wave 24) `available_regs` is the size of the allocatable GPR pool.
+    /// `available_regs` is the size of the allocatable GPR pool.
     /// It's used by the pressure-aware spill-weight heuristic
     /// ([`LiveInterval::spill_weight_with_pressure`]) to decide whether to
     /// bias toward spilling the current interval (when pressure exceeds
@@ -1394,7 +1390,7 @@ impl LinearScanAllocator {
             .unwrap();
 
         let (evict_vreg, evict_reg, evict_end, evict_weight) = active[evict_idx];
-        // (Wave 24) Pressure-aware spill weight: when the number of
+        // Pressure-aware spill weight: when the number of
         // simultaneously-live intervals (active + the one being allocated
         // now) exceeds the register count, the current interval's effective
         // weight is reduced.  This biases toward spilling the current
@@ -1474,7 +1470,7 @@ impl LinearScanAllocator {
         }
 
         // No free register — spill.
-        // (Wave 24) Pass the available register count for pressure-aware
+        // Pass the available register count for pressure-aware
         // spill heuristic.
         Self::spill_simd(
             interval,
@@ -1487,9 +1483,9 @@ impl LinearScanAllocator {
 
     /// Spill logic for SIMD/FP registers with weight-based eviction.
     ///
-    /// (Wave 24) `available_regs` is the size of the allocatable SIMD/FP
-    /// pool; see [`LinearScanAllocator::spill_gpr`] for the pressure-aware
-    /// heuristic description.
+    /// `available_regs` is the size of the allocatable SIMD/FP pool; see
+    /// [`LinearScanAllocator::spill_gpr`] for the pressure-aware heuristic
+    /// description.
     fn spill_simd(
         interval: &LiveInterval,
         active: &mut Vec<(IRValueId, SimdFpRegister, u32, u32)>,
@@ -1517,7 +1513,7 @@ impl LinearScanAllocator {
             .unwrap();
 
         let (evict_vreg, evict_reg, evict_end, evict_weight) = active[evict_idx];
-        // (Wave 24) Pressure-aware spill weight (see `spill_gpr`).
+        // Pressure-aware spill weight (see `spill_gpr`).
         let current_pressure = active.len() as u32 + 1; // +1 for `interval`
         let current_weight =
             interval.weight_per_length_with_pressure(current_pressure, available_regs);
@@ -1709,7 +1705,7 @@ impl LinearScanAllocator {
         Ok(results)
     }
 
-    /// Post-allocation copy coalescing pass (Wave 24).
+    /// Post-allocation copy coalescing pass.
     ///
     /// This is a complementary pass to the conservative pre-allocation
     /// coalescing in [`LiveRangeComputer::coalesce_intervals`].  Whereas
@@ -1801,9 +1797,10 @@ impl LinearScanAllocator {
                     }
 
                     // Need interval info for both src and dst.
-                    let (Some(src_iv), Some(dst_iv)) =
-                        (interval_map.get(&src_id).copied(), interval_map.get(&dst_id).copied())
-                    else {
+                    let (Some(src_iv), Some(dst_iv)) = (
+                        interval_map.get(&src_id).copied(),
+                        interval_map.get(&dst_id).copied(),
+                    ) else {
                         pos += 2;
                         continue;
                     };
@@ -1917,12 +1914,12 @@ impl Default for LinearScanAllocator {
 // Legacy RegAllocator (kept for backward compatibility with emit.rs)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Wave 24 decision: KEEP (do not delete).
+// Decision: KEEP (do not delete).
 //
 // Despite the task description suggesting this was "gated out by
-// `STACK_SLOT_VREG_THRESHOLD=0`", that hack was removed in Wave 21
-// (the threshold was set to `u32::MAX`, then in Wave 50 the
-// `vreg_count > STACK_SLOT_VREG_THRESHOLD` dispatch was deleted
+// `STACK_SLOT_VREG_THRESHOLD=0`", that hack was removed (the threshold
+// was set to `u32::MAX`, then the `vreg_count > STACK_SLOT_VREG_THRESHOLD`
+// dispatch was deleted
 // entirely as dead code — see `emit.rs::emit_function`).  The
 // legacy greedy allocator is still actively used by `codegen::emit::Emitter`
 // (see `emit.rs:570` — `reg_alloc: RegAllocator` field, constructed in
@@ -2015,11 +2012,19 @@ impl RegAllocator {
     pub fn allocate(&mut self, vreg: IRValueId) -> Result<Arm64RegAllocResult> {
         // If already allocated (in caller-saved pool), return the same register.
         if let Some(&reg) = self.used_regs.get(&vreg) {
-            return Ok(Arm64RegAllocResult { reg, spilled: None, reload_slot: None });
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spilled: None,
+                reload_slot: None,
+            });
         }
         // If already allocated (in callee-saved pool), return the same register.
         if let Some(&reg) = self.callee_saved_used.get(&vreg) {
-            return Ok(Arm64RegAllocResult { reg, spilled: None, reload_slot: None });
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spilled: None,
+                reload_slot: None,
+            });
         }
         // If the vreg was previously spilled, we need to reload it.
         // Remove it from the spill map — the emitter will emit the LDR.
@@ -2035,7 +2040,11 @@ impl RegAllocator {
         }
         if let Some(reg) = self.callee_saved_pool.pop() {
             self.callee_saved_used.insert(vreg, reg);
-            return Ok(Arm64RegAllocResult { reg, spilled: None, reload_slot });
+            return Ok(Arm64RegAllocResult {
+                reg,
+                spilled: None,
+                reload_slot,
+            });
         }
         // Need to spill to free a register
         let spill_info = self.spill()?;
@@ -2135,7 +2144,8 @@ impl RegAllocator {
         self.spill_map.insert(vreg_to_spill, slot);
         self.free_regs.push(reg);
 
-        vuma_log!(debug,
+        vuma_log!(
+            debug,
             "spilled vreg {} to stack slot {} (freed {})",
             vreg_to_spill,
             slot,
@@ -2167,11 +2177,8 @@ impl RegAllocator {
     /// callee (e.g. fn_multiple_callers: caller1's return in X15 was
     /// overwritten by caller2's body, giving 5+5=10 instead of 4+5=9).
     pub fn spill_caller_saved(&mut self) -> Vec<(IRValueId, Register, u32)> {
-        let to_spill: Vec<(IRValueId, Register)> = self
-            .used_regs
-            .iter()
-            .map(|(id, reg)| (*id, *reg))
-            .collect();
+        let to_spill: Vec<(IRValueId, Register)> =
+            self.used_regs.iter().map(|(id, reg)| (*id, *reg)).collect();
         let mut spilled = Vec::new();
         for (vreg, reg) in to_spill {
             let slot = self.next_spill_slot;
@@ -2236,7 +2243,7 @@ impl RegAllocator {
     /// Used to enforce calling conventions: function parameter virtual
     /// registers must be mapped to the correct argument registers (X0–X7).
     ///
-    /// (Wave 53) Also used by `emit_function_regalloc` to seed the greedy
+    /// Also used by `emit_function_regalloc` to seed the greedy
     /// allocator with the `LinearScanAllocator`'s `vreg_to_preg` mapping so
     /// that the emitted code uses the regalloc-assigned physical registers
     /// rather than the greedy allocator's on-the-fly choices.  When `reg`
@@ -2290,8 +2297,14 @@ impl RegAllocator {
     pub fn allocate_function(&mut self, func: &IRFunction) -> Result<HashMap<IRValueId, Register>> {
         // Pre-assign function parameter virtual registers to argument registers.
         let arg_regs = [
-            Register::X0, Register::X1, Register::X2, Register::X3,
-            Register::X4, Register::X5, Register::X6, Register::X7,
+            Register::X0,
+            Register::X1,
+            Register::X2,
+            Register::X3,
+            Register::X4,
+            Register::X5,
+            Register::X6,
+            Register::X7,
         ];
         for (i, param) in func.params.iter().enumerate() {
             if let IRValue::Register(vreg_id) = param {
@@ -2456,7 +2469,7 @@ impl TargetAgnosticRegAlloc {
     /// Returns a `RegAllocResult` mapping virtual registers to physical
     /// registers, with spill slot assignments for evicted intervals.
     ///
-    /// (Wave 24) This is the entry point backends without a custom
+    /// This is the entry point backends without a custom
     /// allocator should call.  The convenience wrapper
     /// [`crate::regalloc_emit::run_regalloc`] looks up the `TargetDesc`
     /// for an ISA name from the [`crate::target_desc::TargetDescRegistry`]
@@ -3088,6 +3101,19 @@ impl LoopDetector {
         }
 
         // Step 4: For each back edge, compute the natural loop body.
+        // Build a predecessor index map from terminator successor labels
+        // (rather than relying on `block.predecessors`, which is left
+        // empty by test fixtures and some IR construction paths). This
+        // matches `compute_dominators`'s approach and is robust to
+        // fixtures that don't populate `predecessors`.
+        let mut pred_map: Vec<Vec<usize>> = vec![Vec::new(); func.blocks.len()];
+        for (idx, block) in func.blocks.iter().enumerate() {
+            for succ_label in block.terminator.successor_labels() {
+                if let Some(&succ_idx) = label_to_idx.get(succ_label) {
+                    pred_map[succ_idx].push(idx);
+                }
+            }
+        }
         let mut loops: Vec<LoopInfo> = Vec::new();
         for (latch_idx, header_idx) in &back_edges {
             let header_label = func.blocks[*header_idx].label.clone();
@@ -3103,11 +3129,12 @@ impl LoopDetector {
                 }
                 let b_label = func.blocks[b_idx].label.clone();
                 if loop_blocks.insert(b_label) {
-                    // Add all predecessors of b to the worklist.
-                    for pred_label in &func.blocks[b_idx].predecessors {
-                        if let Some(&pred_idx) = label_to_idx.get(pred_label) {
-                            worklist.push(pred_idx);
-                        }
+                    // Add all predecessors of b to the worklist (use the
+                    // terminator-derived `pred_map` rather than
+                    // `block.predecessors`, which may be empty in
+                    // fixtures).
+                    for &pred_idx in &pred_map[b_idx] {
+                        worklist.push(pred_idx);
                     }
                 }
             }
@@ -3159,16 +3186,10 @@ impl LoopDetector {
                 }
                 for instr in &block.instructions {
                     for &def_vreg in &instr.defined_regs() {
-                        vreg_defs_in_loop
-                            .entry(def_vreg)
-                            .or_default()
-                            .push(instr);
+                        vreg_defs_in_loop.entry(def_vreg).or_default().push(instr);
                     }
                     for &use_vreg in &instr.used_regs() {
-                        vreg_uses_in_loop
-                            .entry(use_vreg)
-                            .or_default()
-                            .push(instr);
+                        vreg_uses_in_loop.entry(use_vreg).or_default().push(instr);
                     }
                 }
             }
@@ -3217,10 +3238,7 @@ impl LoopDetector {
     ///
     /// Returns `doms[i]` = the immediate dominator of block i.
     /// Entry block has dominator = itself.
-    fn compute_dominators(
-        func: &IRFunction,
-        label_to_idx: &HashMap<String, usize>,
-    ) -> Vec<usize> {
+    fn compute_dominators(func: &IRFunction, label_to_idx: &HashMap<String, usize>) -> Vec<usize> {
         let n = func.blocks.len();
         if n == 0 {
             return Vec::new();
@@ -3385,7 +3403,10 @@ pub fn compute_vreg_loop_depths(func: &IRFunction) -> HashMap<IRValueId, u32> {
         }
         // Also check terminator uses.
         match &block.terminator {
-            IRTerminator::Branch { cond: IRValue::Register(vreg), .. } => {
+            IRTerminator::Branch {
+                cond: IRValue::Register(vreg),
+                ..
+            } => {
                 let entry = vreg_depths.entry(*vreg).or_insert(0);
                 *entry = (*entry).max(depth);
             }
@@ -3397,7 +3418,10 @@ pub fn compute_vreg_loop_depths(func: &IRFunction) -> HashMap<IRValueId, u32> {
                     }
                 }
             }
-            IRTerminator::Switch { discr: IRValue::Register(vreg), .. } => {
+            IRTerminator::Switch {
+                discr: IRValue::Register(vreg),
+                ..
+            } => {
                 let entry = vreg_depths.entry(*vreg).or_insert(0);
                 *entry = (*entry).max(depth);
             }
@@ -3428,11 +3452,7 @@ impl LiveInterval {
     ///   in registers (they are accessed many more times due to the loop)
     /// - Induction variables (loop counters) get an extra priority boost
     /// - Single-use variables outside loops are first candidates for spilling
-    pub fn enhanced_spill_weight(
-        &self,
-        max_loop_depth: u32,
-        is_induction_var: bool,
-    ) -> u32 {
+    pub fn enhanced_spill_weight(&self, max_loop_depth: u32, is_induction_var: bool) -> u32 {
         let use_count = self.use_positions.len() as u32;
         let def_count = self.def_positions.len() as u32;
         let base_weight = (use_count + def_count).max(1);
@@ -3453,11 +3473,7 @@ impl LiveInterval {
     }
 
     /// Compute enhanced weight per length of live range.
-    pub fn enhanced_weight_per_length(
-        &self,
-        max_loop_depth: u32,
-        is_induction_var: bool,
-    ) -> u32 {
+    pub fn enhanced_weight_per_length(&self, max_loop_depth: u32, is_induction_var: bool) -> u32 {
         let len = self.len().max(1);
         self.enhanced_spill_weight(max_loop_depth, is_induction_var) / len
     }
@@ -3614,15 +3630,18 @@ impl GreedyRegCache {
         let max_reg = alloc_regs.iter().copied().max().unwrap_or(0) as usize;
         let num_regs = max_reg + 1;
 
-        Self::new(num_regs, alloc_regs, caller_saved, callee_saved, vreg_stack_offsets)
+        Self::new(
+            num_regs,
+            alloc_regs,
+            caller_saved,
+            callee_saved,
+            vreg_stack_offsets,
+        )
     }
 
     /// Get the stack offset for a vreg.
     pub fn stack_offset(&self, vreg: IRValueId) -> i32 {
-        self.vreg_stack_offsets
-            .get(&vreg)
-            .copied()
-            .unwrap_or(-8)
+        self.vreg_stack_offsets.get(&vreg).copied().unwrap_or(-8)
     }
 
     /// Touch a register, updating its last-used timestamp.
@@ -3685,11 +3704,7 @@ impl GreedyRegCache {
     /// stack slot before using the register.
     ///
     /// The `hint` parameter is an optional preferred register index.
-    pub fn alloc_vreg(
-        &mut self,
-        vreg: IRValueId,
-        hint: Option<u32>,
-    ) -> (u32, bool) {
+    pub fn alloc_vreg(&mut self, vreg: IRValueId, hint: Option<u32>) -> (u32, bool) {
         // Already in a register?
         if let Some(preg) = self.vreg_in_reg(vreg) {
             self.touch(preg);
@@ -3799,8 +3814,7 @@ impl GreedyRegCache {
             if let Some(old_vid) = self.reg_states[idx].vreg {
                 if old_vid != vreg {
                     let offset = self.stack_offset(old_vid);
-                    self.vreg_locs
-                        .insert(old_vid, VregLocation::Stack(offset));
+                    self.vreg_locs.insert(old_vid, VregLocation::Stack(offset));
                 }
             }
 
@@ -3809,13 +3823,8 @@ impl GreedyRegCache {
                 dirty,
                 last_used: 0,
             };
-            self.vreg_locs.insert(
-                vreg,
-                VregLocation::Register {
-                    preg_index,
-                    dirty,
-                },
-            );
+            self.vreg_locs
+                .insert(vreg, VregLocation::Register { preg_index, dirty });
         }
     }
 
@@ -4065,10 +4074,8 @@ impl TargetAgnosticRegAlloc {
         let mut result = RegAllocResult::new();
 
         // Active intervals: (vreg, PhysicalReg, end_pos, enhanced_weight_per_length)
-        let mut active_gprs: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> =
-            Vec::new();
-        let mut active_fps: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> =
-            Vec::new();
+        let mut active_gprs: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> = Vec::new();
+        let mut active_fps: Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)> = Vec::new();
 
         // Free register pools.
         let mut free_caller_gprs = self.caller_saved_gprs.clone();
@@ -4329,9 +4336,10 @@ impl LivenessAnalysis {
             }
             // Terminator uses.
             match &block.terminator {
-                IRTerminator::Branch { cond: IRValue::Register(vreg), .. }
-                    if !block_def[idx].contains(vreg) =>
-                {
+                IRTerminator::Branch {
+                    cond: IRValue::Register(vreg),
+                    ..
+                } if !block_def[idx].contains(vreg) => {
                     block_use[idx].insert(*vreg);
                 }
                 IRTerminator::Return(vals) => {
@@ -4343,9 +4351,10 @@ impl LivenessAnalysis {
                         }
                     }
                 }
-                IRTerminator::Switch { discr: IRValue::Register(vreg), .. }
-                    if !block_def[idx].contains(vreg) =>
-                {
+                IRTerminator::Switch {
+                    discr: IRValue::Register(vreg),
+                    ..
+                } if !block_def[idx].contains(vreg) => {
                     block_use[idx].insert(*vreg);
                 }
                 _ => {}
@@ -4376,10 +4385,7 @@ impl LivenessAnalysis {
 
                 let (old_in, old_out) = &block_liveness[&block.label];
                 if *old_in != new_live_in || *old_out != new_live_out {
-                    block_liveness.insert(
-                        block.label.clone(),
-                        (new_live_in, new_live_out),
-                    );
+                    block_liveness.insert(block.label.clone(), (new_live_in, new_live_out));
                     changed = true;
                 }
             }
@@ -4466,7 +4472,7 @@ impl LivenessAnalysis {
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(test)] // Wave 24: re-enabled (was #[cfg(any())] — broken tests fixed).
+#[cfg(test)] // re-enabled (was #[cfg(any())] — broken tests fixed).
 mod tests {
     use super::*;
     use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator};
@@ -4478,7 +4484,7 @@ mod tests {
         let mut alloc = RegAllocator::new();
         let r0 = alloc.allocate(0).unwrap();
         let r1 = alloc.allocate(1).unwrap();
-        // Wave 24: compare `.reg` — `Arm64RegAllocResult` is not `PartialEq`.
+        // Compare `.reg` — `Arm64RegAllocResult` is not `PartialEq`.
         assert_ne!(r0.reg, r1.reg);
     }
 
@@ -4488,7 +4494,7 @@ mod tests {
         let r0 = alloc.allocate(0).unwrap();
         alloc.free(0);
         let r1 = alloc.allocate(1).unwrap();
-        // Wave 24: compare `.reg` — `Arm64RegAllocResult` is not `PartialEq`.
+        // Compare `.reg` — `Arm64RegAllocResult` is not `PartialEq`.
         assert_eq!(r0.reg, r1.reg);
     }
 
@@ -5176,12 +5182,12 @@ mod tests {
     }
 
     // ====================================================================
-    // Wave 24 tests
+    // Tests
     // ====================================================================
 
-    /// (Wave 24, sub-task 2) `TargetAgnosticRegAlloc::allocate_function`
-    /// can be called directly with a `TargetDesc` from the registry and
-    /// produces a non-empty `RegAllocResult` for a simple function.
+    /// `TargetAgnosticRegAlloc::allocate_function` can be called directly
+    /// with a `TargetDesc` from the registry and produces a non-empty
+    /// `RegAllocResult` for a simple function.
     #[test]
     fn wave24_target_agnostic_allocate_function_direct_call() {
         use crate::regalloc::TargetAgnosticRegAlloc;
@@ -5216,9 +5222,9 @@ mod tests {
         assert!(alloc.gpr_count() >= 14, "x86_64 should have >=14 GPRs");
         assert!(alloc.fp_count() >= 16, "x86_64 should have >=16 FP regs");
 
-        let result = alloc.allocate_function(&func).expect(
-            "target-agnostic allocate_function should succeed on a well-formed function",
-        );
+        let result = alloc
+            .allocate_function(&func)
+            .expect("target-agnostic allocate_function should succeed on a well-formed function");
 
         // All three vregs should be assigned a physical register (3 vregs
         // << 14 GPRs, so no spills expected).
@@ -5240,11 +5246,10 @@ mod tests {
         );
     }
 
-    /// (Wave 24, sub-task 5) Pressure-aware spill weight: when pressure
-    /// exceeds the available register count, the effective weight should
-    /// be lower than the base weight (making the interval more attractive
-    /// to spill).  When pressure is at or below the register count, the
-    /// weight should equal the base.
+    /// Pressure-aware spill weight: when pressure exceeds the available
+    /// register count, the effective weight should be lower than the base
+    /// weight (making the interval more attractive to spill).  When pressure
+    /// is at or below the register count, the weight should equal the base.
     #[test]
     fn wave24_pressure_aware_spill_weight() {
         let mut iv = LiveInterval::new(0, RegClass::Gpr, 0, 10);
@@ -5284,10 +5289,9 @@ mod tests {
         );
     }
 
-    /// (Wave 24, sub-task 4) Post-allocation copy coalescing: a
-    /// `Cast::BitCast` copy where `src` dies at the copy should be
-    /// coalesced (src and dst end up sharing a physical register) when
-    /// the post-allocation pass runs.
+    /// Post-allocation copy coalescing: a `Cast::BitCast` copy where
+    /// `src` dies at the copy should be coalesced (src and dst end up
+    /// sharing a physical register) when the post-allocation pass runs.
     #[test]
     fn wave24_coalesce_copies_post_alloc_basic() {
         // Function:
@@ -5354,9 +5358,9 @@ mod tests {
         );
     }
 
-    /// (Wave 24, sub-task 4) Post-allocation coalescing must NOT coalesce
-    /// when `src` is still live after the copy (src's last use is NOT at
-    /// the copy position).  In that case the copy is left in place.
+    /// Post-allocation coalescing must NOT coalesce when `src` is still
+    /// live after the copy (src's last use is NOT at the copy position).
+    /// In that case the copy is left in place.
     #[test]
     fn wave24_coalesce_copies_post_alloc_no_coalesce_when_src_live() {
         // Function:
@@ -5481,7 +5485,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -5496,7 +5500,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         loop_block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -5511,10 +5515,7 @@ mod greedy_cache_tests {
         func.rebuild_cfg();
 
         let loops = LoopDetector::detect(&func);
-        assert!(
-            !loops.is_empty(),
-            "should detect at least one loop"
-        );
+        assert!(!loops.is_empty(), "should detect at least one loop");
         assert!(
             loops[0].blocks.contains("loop_header"),
             "loop should contain the loop_header block"
@@ -5541,7 +5542,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         loop_block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(1),
@@ -5586,7 +5587,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         loop_block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -5627,7 +5628,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         loop_block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(1),
@@ -5732,13 +5733,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0, 1, 2].into_iter().collect();
         let callee_saved = vec![3, 4].into_iter().collect();
 
-        let mut cache = GreedyRegCache::new(
-            5,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(5, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vreg 0 to a register.
         let (preg, needs_spill) = cache.alloc_vreg(0, None);
@@ -5765,13 +5761,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0].into_iter().collect();
         let callee_saved = vec![1].into_iter().collect();
 
-        let mut cache = GreedyRegCache::new(
-            2,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(2, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vreg 0.
         cache.alloc_vreg(0, None);
@@ -5800,13 +5791,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0].into_iter().collect();
         let callee_saved = vec![1].into_iter().collect();
 
-        let mut cache = GreedyRegCache::new(
-            2,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(2, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vregs 0 and 1 (fills both registers).
         cache.alloc_vreg(0, None);
@@ -5841,7 +5827,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         // v2 = v0 + v0 — loop-carried value
         loop_block.push(IRInstr::BinOp {
@@ -5849,7 +5835,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Register(0),
-        ty: None,
+            ty: None,
         });
         loop_block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -5900,7 +5886,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(0),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         loop_block.terminator = IRTerminator::Branch {
             cond: IRValue::Register(0),
@@ -5937,7 +5923,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         // v2 = v1 + 1 — v1 is used here, v2 is defined
         block.push(IRInstr::BinOp {
@@ -5945,7 +5931,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(1),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         // Only v2 is returned — v0 and v1 are dead.
         block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
@@ -5988,7 +5974,7 @@ mod greedy_cache_tests {
             dst: IRValue::Register(1),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(1),
-        ty: None,
+            ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -6015,13 +6001,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0].into_iter().collect();
         let callee_saved = vec![1].into_iter().collect();
 
-        let mut cache = GreedyRegCache::new(
-            2,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(2, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vreg 0 and 1 (fills both registers).
         cache.alloc_vreg(0, None);
@@ -6049,13 +6030,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0].into_iter().collect();
         let callee_saved = vec![1].into_iter().collect();
 
-        let mut cache = GreedyRegCache::new(
-            2,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(2, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vregs and mark them dirty.
         cache.alloc_vreg(0, None);
@@ -6084,13 +6060,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0].into_iter().collect();
         let callee_saved = vec![1].into_iter().collect();
 
-        let mut cache = GreedyRegCache::new(
-            2,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(2, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vregs.
         cache.alloc_vreg(0, None); // caller-saved
@@ -6150,13 +6121,8 @@ mod greedy_cache_tests {
         let caller_saved = vec![0].into_iter().collect();
         let callee_saved: HashSet<u32> = HashSet::new();
 
-        let mut cache = GreedyRegCache::new(
-            1,
-            alloc_regs,
-            caller_saved,
-            callee_saved,
-            stack_offsets,
-        );
+        let mut cache =
+            GreedyRegCache::new(1, alloc_regs, caller_saved, callee_saved, stack_offsets);
 
         // Allocate vreg 0.
         let (preg0, _) = cache.alloc_vreg(0, None);

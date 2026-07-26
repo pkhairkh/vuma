@@ -149,6 +149,21 @@ impl DeadCodeElimination {
                 | NodeType::Allocation
                 | NodeType::Deallocation
                 | NodeType::Phantom
+                // (Wave 3-E) Channel operations are side-effecting
+                // (kernel fd lifecycle: open/send/recv/close).  Even
+                // `channel_send` / `channel_close` — which produce no
+                // value and therefore have no outgoing `DataFlow`
+                // edges — must be preserved so the linear-channel
+                // gate (Stage 7c) can observe the full lifecycle and
+                // so codegen emits the runtime calls.  Without this,
+                // DCE was silently dropping `channel_close` / `channel_send`
+                // nodes, leaving the linear-channel `events` Vec
+                // incomplete and producing false "Ok" results on
+                // use-after-close / double-close programs.
+                | NodeType::ChannelOpen
+                | NodeType::ChannelSend
+                | NodeType::ChannelRecv
+                | NodeType::ChannelClose
         )
     }
 
@@ -534,17 +549,35 @@ impl InliningPass {
 
     /// Collects all nodes in the function body reachable from a
     /// `FunctionEntry` node.
+    ///
+    /// (Wave 3-E) Only follows `ControlFlow` edges — NOT `DataFlow` /
+    /// `Derivation` — so that the "body" is bounded by the function's
+    /// own control-flow region (FunctionEntry → … → FunctionReturn).
+    /// Previously this followed every edge kind, which meant any
+    /// `FunctionEntry` for an extern call (e.g. `spawn_worker()`)
+    /// whose `FunctionReturn` has a `DataFlow` edge back to the
+    /// caller's `Computation` node would traverse the ENTIRE rest of
+    /// the program graph. That in turn duplicated every reachable node
+    /// (including `NodePayload::Channel*` nodes emitted by the parser)
+    /// when the inliner cloned the "body", producing spurious
+    /// linear-channel violations. Restricting the traversal to
+    /// `ControlFlow` edges keeps the body bounded while still
+    /// collecting all control-reachable nodes between entry and return.
     fn collect_function_body(scg: &SCG, entry: NodeId) -> Vec<NodeId> {
         let mut visited = HashSet::new();
         let mut stack = vec![entry];
 
         while let Some(current) = stack.pop() {
             if visited.insert(current) {
-                if let Some(succs) = scg.successors(current) {
-                    for succ in succs {
-                        if !visited.contains(&succ) {
-                            stack.push(succ);
-                        }
+                // Only follow ControlFlow edges. DataFlow/Derivation
+                // edges represent data dependencies, not control
+                // membership in the function body.
+                for edge in scg.edges() {
+                    if edge.source == current
+                        && edge.kind == EdgeKind::ControlFlow
+                        && !visited.contains(&edge.target)
+                    {
+                        stack.push(edge.target);
                     }
                 }
             }
@@ -627,13 +660,30 @@ impl SCGPass for InliningPass {
     fn run(&self, scg: &mut SCG) -> PassResult {
         let mut result = PassResult::new(self.name());
 
-        // Find all FunctionEntry call sites
+        // Find all FunctionEntry call sites.
+        //
+        // (Wave 3-E) Only collect CALL-SITE entries (label starts with
+        // "call_"), NOT function-definition entries (label like
+        // "fn_<name>_entry(...)").  Previously this matched EVERY
+        // FunctionEntry, including the function-definition entry for
+        // `main` itself, which meant `collect_function_body` traversed
+        // the entire function's control-flow graph and the inliner
+        // cloned every reachable node (including `NodePayload::Channel*`
+        // nodes).  The duplicated Channel* nodes then produced spurious
+        // linear-channel violations.  Restricting to call-site entries
+        // ensures only actual call sites (entry→return pairs with no
+        // body of their own) are considered for inlining.
         let call_sites: Vec<NodeId> = scg
             .nodes()
             .filter(|n| {
                 matches!(
                     &n.payload,
-                    NodePayload::Control(ctrl) if ctrl.kind == ControlKind::FunctionEntry
+                    NodePayload::Control(ctrl)
+                        if ctrl.kind == ControlKind::FunctionEntry
+                            && ctrl
+                                .label
+                                .as_ref()
+                                .is_some_and(|l| l.starts_with("call_"))
                 )
             })
             .map(|n| n.id)
@@ -1155,7 +1205,6 @@ impl SCGPass for InterproceduralAllocFlow {
             })
             .collect();
 
-
         for (call_entry, callee_name) in &call_sites {
             // Find the callee's definition
             let callee_entry = match Self::find_callee_entry(scg, callee_name) {
@@ -1231,7 +1280,9 @@ impl InterproceduralAllocFlow {
                 if let NodePayload::Computation(comp) = &n.payload {
                     if let ComputationKind::Other(desc) = &comp.kind {
                         // Parse "free(var_name)" — extract var_name
-                        if let Some(var) = desc.strip_prefix("free(").and_then(|s| s.strip_suffix(')')) {
+                        if let Some(var) =
+                            desc.strip_prefix("free(").and_then(|s| s.strip_suffix(')'))
+                        {
                             return Some((n.id, var.to_string()));
                         }
                     }
@@ -1256,15 +1307,12 @@ impl InterproceduralAllocFlow {
             });
 
             // Strategy 3: Name-based matching.
-            let alloc_id = alloc_id.or_else(|| {
-                Self::find_allocation_by_name(scg, var_name, &already_matched)
-            });
+            let alloc_id =
+                alloc_id.or_else(|| Self::find_allocation_by_name(scg, var_name, &already_matched));
 
             // Strategy 4: Fallback for loop pointer traversal.
-            let alloc_id = alloc_id.or_else(|| {
-                Self::find_first_unmatched_allocation(scg, &already_matched)
-            });
-
+            let alloc_id =
+                alloc_id.or_else(|| Self::find_first_unmatched_allocation(scg, &already_matched));
 
             if let Some(alloc_id) = alloc_id {
                 already_matched.insert(alloc_id);
@@ -1411,7 +1459,11 @@ impl InterproceduralAllocFlow {
     /// DataFlow edges connect variables to their uses (e.g., the
     /// Computation node for `counter = counter_new()` has a DataFlow
     /// edge to the Computation node for `free(counter)`).
-    fn find_connected_allocation(scg: &SCG, start: NodeId, already_matched: &HashSet<NodeId>) -> Option<NodeId> {
+    fn find_connected_allocation(
+        scg: &SCG,
+        start: NodeId,
+        already_matched: &HashSet<NodeId>,
+    ) -> Option<NodeId> {
         // BFS through Derivation and DataFlow edges (bidirectional).
         // Stop at the first Allocation node found that is NOT already
         // matched to another free().
@@ -1425,11 +1477,13 @@ impl InterproceduralAllocFlow {
                 continue;
             }
             if let Some(node) = scg.get_node(curr) {
-                if node.node_type == NodeType::Allocation && curr != start
-                    && !already_matched.contains(&curr) {
-                        return Some(curr);
-                    }
-                    // Already matched — skip but continue BFS
+                if node.node_type == NodeType::Allocation
+                    && curr != start
+                    && !already_matched.contains(&curr)
+                {
+                    return Some(curr);
+                }
+                // Already matched — skip but continue BFS
             }
             // Collect neighbors via Derivation and DataFlow edges
             for edge in scg.edges() {
@@ -2421,7 +2475,8 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        ComputationKind, ComputationNode, ControlKind, ControlNode, EffectNode, NodePayload, NodeType, ProgramPoint,
+        ComputationKind, ComputationNode, ControlKind, ControlNode, EffectNode, NodePayload,
+        NodeType, ProgramPoint,
     };
 
     /// Helper: create a default program point for tests.
@@ -2788,7 +2843,7 @@ mod tests {
             NodeType::Control,
             NodePayload::Control(ControlNode {
                 kind: ControlKind::FunctionEntry,
-                label: Some("foo".to_string()),
+                label: Some("call_foo".to_string()),
             }),
             pp(),
         );
@@ -4144,7 +4199,10 @@ mod tests {
             "should remove at least the alloc + dealloc (got {})",
             result.nodes_removed
         );
-        assert!(scg.get_node(alloc).is_none(), "alloc node should be removed");
+        assert!(
+            scg.get_node(alloc).is_none(),
+            "alloc node should be removed"
+        );
         assert!(
             scg.get_node(dealloc).is_none(),
             "dealloc node should be removed"
@@ -4237,7 +4295,9 @@ mod tests {
         scg.add_edge(call_node, ret, EdgeKind::ControlFlow).unwrap();
 
         // Mirror the O2 pipeline from `run_scg_transforms`.
-        let mut pm = PassManager::new().verify_between(false).stop_on_error(false);
+        let mut pm = PassManager::new()
+            .verify_between(false)
+            .stop_on_error(false);
         pm.add_pass(DeadCodeElimination::new());
         pm.add_pass(StrengthReduction::new());
         pm.add_pass(TailCallOptDetection::new());
@@ -4245,11 +4305,12 @@ mod tests {
 
         let result = pm.run(&mut scg);
         // At least one of the three Wave-33 passes should have fired.
-        let wave33_changed = result
-            .pass_results
-            .iter()
-            .any(|r| matches!(r.pass_name.as_str(), "StrengthReduction" | "TailCallOptDetection" | "DeadRegionElimination")
-                && r.changed);
+        let wave33_changed = result.pass_results.iter().any(|r| {
+            matches!(
+                r.pass_name.as_str(),
+                "StrengthReduction" | "TailCallOptDetection" | "DeadRegionElimination"
+            ) && r.changed
+        });
         assert!(
             wave33_changed,
             "at least one Wave-33 pass should fire; results = {:?}",

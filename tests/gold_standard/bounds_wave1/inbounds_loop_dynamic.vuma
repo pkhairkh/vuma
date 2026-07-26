@@ -1,0 +1,48 @@
+// inbounds_loop_dynamic — Loop with dynamic bound
+// Expected exit code: 45
+//
+// Bounds Wave 1 positive test: loop `i` over [0, n) where `n = 9` is
+// a runtime variable (held in a local, not a compile-time constant),
+// writing `i+1` into `buf.data[i]` each iteration. Then sum the cells
+// into a state-field accumulator `acc.sum` (using the state-field
+// Load+Store cycle to dodge the known "while-body local assignments
+// don't propagate" codegen bug — see inbounds_loop.vuma). Returns
+// 1+2+...+9 = 45.
+//
+// With `--safe`, every `buf.data[i]` access is checked at runtime:
+// `i` ranges over [0,9) and the buffer has 16 bytes, so each
+// `UGe(i, 16)` evaluates to false → no `__oob_trap`.
+//
+// VUMA Key Concepts:
+//   - dynamic (non-constant) loop upper bound `n` — forces the loop
+//     trip count and the bounds-check `UGe(i, 16)` to remain genuine
+//     runtime tests rather than being folded by constant propagation
+//   - state_new for both the array buffer and a separate accumulator
+//   - while-loop with counter `i` (and a separate `j` for the read
+//     pass) driving the array index
+//   - 9 write + 9 read bounds-check sites in a loop
+
+layout Buf = { data: [u8; 16] }
+layout Acc = { sum: u32 }
+
+fn main() -> i32 {
+    let buf = state_new(Buf);
+    let acc = state_new(Acc);
+
+    let n: u32 = 9;
+    let i = 0;
+    while i < n {
+        buf.data[i] = i + 1;
+        i = i + 1;
+    }
+
+    acc.sum = 0;
+    let j = 0;
+    while j < n {
+        let v = buf.data[j];
+        acc.sum = acc.sum + v;
+        j = j + 1;
+    }
+
+    return acc.sum;
+}

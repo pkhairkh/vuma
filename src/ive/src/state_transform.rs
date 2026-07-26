@@ -126,7 +126,8 @@ pub fn verify_all_transforms(
     layouts: &HashMap<String, LayoutInfo>,
     transforms: &[(String, String)],
 ) -> Vec<StateTransformVerification> {
-    transforms.iter()
+    transforms
+        .iter()
         .map(|(inp, out)| verify_transform(layouts, inp, out))
         .collect()
 }
@@ -214,9 +215,7 @@ mod tests {
 
     #[test]
     fn test_identity_transform() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", 8)),
-        ]);
+        let layouts = HashMap::from([("Point".to_string(), make_layout("Point", 8))]);
         let result = verify_transform(&layouts, "Point", "Point");
         assert!(result.valid);
         assert_eq!(result.transform_kind, TransformKind::Identity);
@@ -246,9 +245,7 @@ mod tests {
 
     #[test]
     fn test_unknown_input_layout() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", 8)),
-        ]);
+        let layouts = HashMap::from([("Point".to_string(), make_layout("Point", 8))]);
         let result = verify_transform(&layouts, "Unknown", "Point");
         assert!(!result.valid);
         assert!(result.error.as_ref().unwrap().contains("input layout"));
@@ -256,9 +253,7 @@ mod tests {
 
     #[test]
     fn test_unknown_output_layout() {
-        let layouts = HashMap::from([
-            ("Point".to_string(), make_layout("Point", 8)),
-        ]);
+        let layouts = HashMap::from([("Point".to_string(), make_layout("Point", 8))]);
         let result = verify_transform(&layouts, "Point", "Unknown");
         assert!(!result.valid);
         assert!(result.error.as_ref().unwrap().contains("output layout"));
@@ -272,9 +267,9 @@ mod tests {
             ("C".to_string(), make_layout("C", 16)),
         ]);
         let transforms = vec![
-            ("A".to_string(), "B".to_string()),   // reinterpret
-            ("B".to_string(), "C".to_string()),   // copy
-            ("C".to_string(), "C".to_string()),   // identity
+            ("A".to_string(), "B".to_string()), // reinterpret
+            ("B".to_string(), "C".to_string()), // copy
+            ("C".to_string(), "C".to_string()), // identity
         ];
         let results = verify_all_transforms(&layouts, &transforms);
         assert!(all_valid(&results));

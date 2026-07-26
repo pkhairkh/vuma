@@ -1,4 +1,12 @@
-#![allow(clippy::manual_range_contains, clippy::map_unwrap_or, clippy::unnecessary_cast, clippy::redundant_closure, clippy::if_same_then_else, clippy::collapsible_if, clippy::useless_format)]
+#![allow(
+    clippy::manual_range_contains,
+    clippy::map_unwrap_or,
+    clippy::unnecessary_cast,
+    clippy::redundant_closure,
+    clippy::if_same_then_else,
+    clippy::collapsible_if,
+    clippy::useless_format
+)]
 //! # VUMA Core — Verified-Unsafe Memory Access
 //!
 //! This crate provides the foundational data types and the Memory State Graph
@@ -50,16 +58,18 @@
 
 #[macro_use]
 mod vuma_log_w44 {
-    /// VUMA-native logging macro (Wave 44). Replaces the `log` crate in core
-    /// crates. No-op in release builds (format args still type-checked via
-    /// `format_args!`); `eprintln!` in debug. Not `#[macro_export]` to avoid
-    /// cross-crate name collisions — each core crate carries its own copy.
+    /// Logging macro for VUMA compiler diagnostics.
+    ///
+    /// In debug builds: always emits to stderr.
+    /// In release builds: emits to stderr if `VUMA_LOG` env var is set.
+    /// This ensures advisory verification warnings are visible in production.
+    #[macro_export]
     macro_rules! vuma_log {
         ($level:ident, $($arg:tt)*) => {{
-            #[cfg(debug_assertions)]
-            eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
-            #[cfg(not(debug_assertions))]
-            { let _ = format_args!($($arg)*); }
+            let emit = cfg!(debug_assertions) || std::env::var("VUMA_LOG").is_ok();
+            if emit {
+                eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
+            }
         }};
     }
 }

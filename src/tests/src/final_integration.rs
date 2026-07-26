@@ -14,13 +14,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use vuma::llm_api::{LLMCompileResult, VumaForLLM};
-use vuma::api::{VumaCompiler, VerificationVerdict, InvariantVerificationStatus};
+use vuma::api::{InvariantVerificationStatus, VerificationVerdict, VumaCompiler};
 use vuma::diagnostics::DiagnosticSeverity;
+use vuma::llm_api::{LLMCompileResult, VumaForLLM};
 use vuma::pipeline::{compile, compile_to_wasm, compile_with_path, CompileConfig};
-use vuma_codegen::backend::{
-    create_backend, AllocatedProgram, Backend, BackendKind, OutputFormat,
-};
+use vuma_codegen::backend::{create_backend, AllocatedProgram, Backend, BackendKind, OutputFormat};
 use vuma_codegen::ir::{
     BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister,
 };
@@ -124,7 +122,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                     lhs: ScgExpr::Int(10),
                     rhs: ScgExpr::Int(20),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "b".to_string(),
@@ -132,7 +130,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Int(3),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "c".to_string(),
@@ -140,7 +138,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                     lhs: ScgExpr::Var("b".to_string()),
                     rhs: ScgExpr::Int(5),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("c".to_string())]),
             ],
@@ -160,17 +158,15 @@ fn compile_scg_for_backend(backend: &dyn Backend, scg: &Scg, label: &str) -> Vec
     // Register allocation + encode
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
-        let allocated = backend
-            .allocate_registers(func)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{}: allocate_registers failed for {} / {}: {}",
-                    backend.name(),
-                    label,
-                    func.name,
-                    e
-                )
-            });
+        let allocated = backend.allocate_registers(func).unwrap_or_else(|e| {
+            panic!(
+                "{}: allocate_registers failed for {} / {}: {}",
+                backend.name(),
+                label,
+                func.name,
+                e
+            )
+        });
         allocated_functions.push(allocated);
     }
 
@@ -179,20 +175,18 @@ fn compile_scg_for_backend(backend: &dyn Backend, scg: &Scg, label: &str) -> Vec
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
-    backend
-        .encode_program(&program)
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}: encode_program failed for {}: {}",
-                backend.name(),
-                label,
-                e
-            )
-        })
+    backend.encode_program(&program).unwrap_or_else(|e| {
+        panic!(
+            "{}: encode_program failed for {}: {}",
+            backend.name(),
+            label,
+            e
+        )
+    })
 }
 
 /// Validate an ELF header for the given backend.
@@ -226,7 +220,11 @@ fn validate_elf_header(bytes: &[u8], kind: BackendKind) {
         "{}: ELF class should be {}",
         name, expected_class
     );
-    assert_eq!(bytes[6], 1, "{}: ELF version should be EV_CURRENT (1)", name);
+    assert_eq!(
+        bytes[6], 1,
+        "{}: ELF version should be EV_CURRENT (1)",
+        name
+    );
     let e_machine = if bytes[5] == 2 {
         u16::from_be_bytes([bytes[18], bytes[19]])
     } else {
@@ -362,6 +360,21 @@ fn test_full_pipeline_parse_to_elf() {
 }
 
 /// Test: Parse sha256d.vuma through the full pipeline for AArch64.
+//
+// Previously a KNOWN REGRESSION: `IRBuilder::build` failed with
+// `UnknownVariable { name: "HashState" }`
+// when lowering the `state_new(HashState)` call inside `fn sha256d(...)` at
+// examples/sha256d.vuma:363. The deprecated semantic-SCG → codegen-SCG
+// bridge (`bridge_scg_to_codegen`) mis-lowered `state_new(HashState)` as a
+// regular `CallNode` with `args=[Var("HashState")]` (the layout name leaked
+// through as a bare identifier because `extract_calls_from_label` in
+// `pipeline.rs` does not skip `state_new`). The IRBuilder's `lower_call`
+// then tried to resolve `Var("HashState")` as a variable and panicked.
+//
+// FIX: `IRBuilder::lower_call` now has a `state_new` builtin case that
+// recognizes the layout-name argument is NOT a variable, skips arg
+// resolution, and emits an `Alloc` for the state buffer. See the comment
+// on the `"state_new"` arm in `src/codegen/src/scg_to_ir.rs::lower_call`.
 #[test]
 fn test_full_pipeline_sha256d_aarch64() {
     let sha256d_source = include_str!("../../../examples/sha256d.vuma");
@@ -387,10 +400,7 @@ fn test_full_pipeline_sha256d_aarch64() {
     );
 
     let scg = scg_result.unwrap();
-    assert!(
-        scg.node_count() > 0,
-        "sha256d.vuma SCG should have nodes"
-    );
+    assert!(scg.node_count() > 0, "sha256d.vuma SCG should have nodes");
 
     // SCG → codegen-level SCG → IR → regalloc → encode for AArch64
     let codegen_scg = vuma::pipeline::bridge_scg_to_codegen(&scg);
@@ -424,11 +434,13 @@ fn test_full_pipeline_sha256d_aarch64() {
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
-    let binary = backend.encode_program(&program).expect("AArch64 encode should succeed");
+    let binary = backend
+        .encode_program(&program)
+        .expect("AArch64 encode should succeed");
     assert!(
         !binary.is_empty(),
         "sha256d AArch64 binary should be non-empty"
@@ -508,8 +520,8 @@ fn test_full_pipeline_sha256d_all_backends() {
             functions: allocated_functions,
             total_code_size,
             total_data_size: 0,
-        rodata_data: Vec::new(),
-        function_names: std::collections::HashSet::new(),
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
 
         match backend.encode_program(&program) {
@@ -581,12 +593,18 @@ fn test_llm_compile_invalid() {
 #[test]
 fn test_llm_check_invalid() {
     let diags = VumaForLLM::check("fn 123bad() {}");
-    assert!(!diags.is_empty(), "check() should return diagnostics for invalid code");
+    assert!(
+        !diags.is_empty(),
+        "check() should return diagnostics for invalid code"
+    );
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
         .collect();
-    assert!(!errors.is_empty(), "should have at least one error diagnostic");
+    assert!(
+        !errors.is_empty(),
+        "should have at least one error diagnostic"
+    );
 }
 
 /// Test: VumaForLLM::check() returns empty errors for valid code.
@@ -597,7 +615,10 @@ fn test_llm_check_valid() {
         .iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
         .collect();
-    assert!(errors.is_empty(), "check() should return no errors for valid code");
+    assert!(
+        errors.is_empty(),
+        "check() should return no errors for valid code"
+    );
 }
 
 /// Test: VumaForLLM::analyze() returns SCG JSON.
@@ -618,10 +639,7 @@ fn test_llm_to_wasm_valid() {
     let result = VumaForLLM::to_wasm("fn main() {}");
     match result {
         Ok(wasm_bytes) => {
-            assert!(
-                !wasm_bytes.is_empty(),
-                "Wasm binary should be non-empty"
-            );
+            assert!(!wasm_bytes.is_empty(), "Wasm binary should be non-empty");
             // Verify Wasm magic bytes
             assert!(
                 wasm_bytes.len() >= 8,
@@ -709,14 +727,12 @@ fn test_module_system_import_resolution() {
 
     // helper.vuma: defines a utility function
     let helper_source = r#"fn double(x: i64) -> i64 { return x + x; }"#;
-    std::fs::write(&helper_path, helper_source)
-        .expect("should write helper.vuma");
+    std::fs::write(&helper_path, helper_source).expect("should write helper.vuma");
 
     // main.vuma: imports and uses helper
     let main_source = r#"import "helper.vuma"
 fn main() -> i64 { let y = double(21); return y; }"#;
-    std::fs::write(&main_path, main_source)
-        .expect("should write main.vuma");
+    std::fs::write(&main_path, main_source).expect("should write main.vuma");
 
     // Compile main.vuma with import resolution
     let config = CompileConfig::default();
@@ -773,14 +789,16 @@ fn test_module_system_missing_import() {
     let main_path = tmp_dir.join("main_missing.vuma");
     let main_source = r#"import "nonexistent.vuma"
 fn main() {}"#;
-    std::fs::write(&main_path, main_source)
-        .expect("should write main_missing.vuma");
+    std::fs::write(&main_path, main_source).expect("should write main_missing.vuma");
 
     let config = CompileConfig::default();
     let result = compile_with_path(main_source, Some(&main_path), &config);
 
     // Should fail with module resolution error
-    assert!(result.is_err(), "Missing import should cause compilation error");
+    assert!(
+        result.is_err(),
+        "Missing import should cause compilation error"
+    );
     let errors = result.unwrap_err();
     let has_import_error = errors.iter().any(|e| {
         let msg = format!("{}", e);
@@ -888,11 +906,12 @@ fn test_error_recovery_suggestions() {
                 || s.message.contains("type")
                 || s.message.contains("Replace")
         });
-        // Check legacy suggestions
-        let has_legacy = d.legacy_suggestions.iter().any(|s| {
-            s.contains("i32") || s.contains("i64") || s.contains("type")
-        });
-        has_structured || has_legacy
+        // Check text suggestions
+        let has_text = d
+            .text_suggestions
+            .iter()
+            .any(|s| s.contains("i32") || s.contains("i64") || s.contains("type"));
+        has_structured || has_text
     });
 
     if !has_suggestion {
@@ -965,10 +984,7 @@ fn test_verification_invariants() {
     if report.overall_verdict != VerificationVerdict::Error {
         // Each invariant should have a kind, status, and message
         for inv in &report.invariants {
-            assert!(
-                !inv.kind.is_empty(),
-                "Invariant kind should not be empty"
-            );
+            assert!(!inv.kind.is_empty(), "Invariant kind should not be empty");
             assert!(
                 matches!(
                     inv.status,
@@ -1146,11 +1162,7 @@ fn test_cross_backend_binary_format_validation() {
         match expected_output_format(kind) {
             OutputFormat::Elf32 => {
                 // 32-bit ELF
-                assert!(
-                    binary.len() >= 52,
-                    "{}: ELF32 binary too short",
-                    name
-                );
+                assert!(binary.len() >= 52, "{}: ELF32 binary too short", name);
                 assert_eq!(
                     &binary[0..4],
                     &[0x7f, b'E', b'L', b'F'],
@@ -1161,11 +1173,7 @@ fn test_cross_backend_binary_format_validation() {
             }
             OutputFormat::Elf64 => {
                 // 64-bit ELF
-                assert!(
-                    binary.len() >= 64,
-                    "{}: ELF64 binary too short",
-                    name
-                );
+                assert!(binary.len() >= 64, "{}: ELF64 binary too short", name);
                 assert_eq!(
                     &binary[0..4],
                     &[0x7f, b'E', b'L', b'F'],
@@ -1176,10 +1184,7 @@ fn test_cross_backend_binary_format_validation() {
             }
             OutputFormat::WasmBinary => {
                 // Wasm module
-                assert!(
-                    binary.len() >= 8,
-                    "wasm32: binary too short"
-                );
+                assert!(binary.len() >= 8, "wasm32: binary too short");
                 assert_eq!(
                     &binary[0..4],
                     &[0x00, 0x61, 0x73, 0x6D],

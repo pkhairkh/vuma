@@ -1,8 +1,8 @@
 //! Dump the IR for a .vuma file
-use vuma_codegen::scg_to_ir::IRBuilder;
-use vuma_parser::{ModuleResolver};
 use vuma::pipeline::bridge_ast_to_codegen_scg;
 use vuma_codegen::backend::{create_backend, BackendKind};
+use vuma_codegen::scg_to_ir::IRBuilder;
+use vuma_parser::ModuleResolver;
 
 fn backend_from_name(name: &str) -> Result<BackendKind, String> {
     match name.to_ascii_lowercase().as_str() {
@@ -32,7 +32,11 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = &args[1];
-    let backend_name = if args.len() > 2 { args[2].as_str() } else { "arm32" };
+    let backend_name = if args.len() > 2 {
+        args[2].as_str()
+    } else {
+        "arm32"
+    };
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::Arm32);
     let source = std::fs::read_to_string(path).unwrap();
     let file_path = std::path::Path::new(path);
@@ -49,9 +53,15 @@ fn main() {
     }
     // Use the full production pipeline (matches compile_dump) so the IR
     // we display reflects all post-lowering opts + backend latency table.
-    use vuma::pipeline::{CompileConfig, run_ir_pipeline, CompileTarget, OptLevel, VerificationLevel};
+    use vuma::pipeline::{
+        run_ir_pipeline, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
+    };
     let cfg = CompileConfig {
-        target: if kind == vuma_codegen::backend::BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
+        target: if kind == vuma_codegen::backend::BackendKind::Wasm32 {
+            CompileTarget::Wasm32
+        } else {
+            CompileTarget::Linux
+        },
         opt_level: OptLevel::O3,
         verification_level: VerificationLevel::Normal,
         inline_threshold: 0,
@@ -62,10 +72,15 @@ fn main() {
 
     println!("=== IR for {} (backend={}) ===", path, backend_name);
     for func in &ir_program.functions {
-        println!("\n--- Function: {} (params={:?} returns={:?}) ---",
-            func.name, func.param_types, func.result_types);
+        println!(
+            "\n--- Function: {} (params={:?} returns={:?}) ---",
+            func.name, func.param_types, func.result_types
+        );
         for (i, bb) in func.blocks.iter().enumerate() {
-            println!("  bb{}: label={:?} preds={:?}", i, bb.label, bb.predecessors);
+            println!(
+                "  bb{}: label={:?} preds={:?}",
+                i, bb.label, bb.predecessors
+            );
             for instr in &bb.instructions {
                 println!("    {:?}", instr);
             }

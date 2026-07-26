@@ -1,0 +1,44 @@
+// inbounds_loop — Loop over array within bounds
+// Expected exit code: 10
+//
+// Bounds Wave 1 positive test: loop `i` over [0,4), writing `i+1`
+// into `buf.data[i]` each iteration (1,2,3,4), then sum the four
+// cells into `acc.sum` (via a state-field accumulator to dodge the
+// known "while-body local assignments don't propagate" codegen bug).
+// Returns 1+2+3+4 = 10.
+//
+// With `--safe`, every `buf.data[i]` access is checked at runtime:
+// `i` ranges over [0,4) and the buffer has 32 bytes, so each
+// `UGe(i, 32)` evaluates to false → no `__oob_trap`.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) for both the array buffer and a separate
+//     accumulator state
+//   - while-loop with counter `i` driving the array index
+//   - state-field accumulator (`acc.sum = acc.sum + v`) — Load+Store
+//     cycle through memory, avoiding the local-propagation bug
+//   - exercises 4 write + 4 read bounds-check sites in a loop
+
+layout Buf = { data: [u8; 32] }
+layout Acc = { sum: u32 }
+
+fn main() -> i32 {
+    let buf = state_new(Buf);
+    let acc = state_new(Acc);
+
+    let i = 0;
+    while i < 4 {
+        buf.data[i] = i + 1;
+        i = i + 1;
+    }
+
+    acc.sum = 0;
+    let j = 0;
+    while j < 4 {
+        let v = buf.data[j];
+        acc.sum = acc.sum + v;
+        j = j + 1;
+    }
+
+    return acc.sum;
+}

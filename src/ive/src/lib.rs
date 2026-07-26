@@ -4,25 +4,22 @@
 //!
 //! 1. **Inference**: Deriving behavioral descriptions (BDs), constraints,
 //!    and type information from the Semantic Compute Graph (SCG).
-//! 2. **Verification**: Checking VUMA's five core invariants (liveness,
-//!    exclusivity, interpretation, origin, cleanup) against program
-//!    fragments and returning structured verification results.
+//! 2. **Verification**: Checking the PMT state invariant (state-field
+//!    reads/writes + state transformations) against program fragments
+//!    and returning structured verification results.  (Legacy cleanup:
+//!    the five pointer-invariant verifiers — liveness / exclusivity /
+//!    interpretation / origin / cleanup — have been removed.)
 //! 3. **Debt tracking**: Recording verification obligations that have not
 //!    yet been discharged, ordered by priority.
 //!
 //! # Module Layout
 //!
 //! - [`inference`]           — Inference engine (BD propagation, constraint derivation).
-//! - [`verification`]        — Verification engine (5 invariant checks).
-//! - [`invariant_aggregator`] — Aggregator that runs all checks and produces unified results.
+//! - [`verification`]        — Verification engine (PMT state check).
+//! - [`invariant_aggregator`] — Aggregator that runs the PMT check and produces unified results.
 //! - [`result`]              — Verification result and status types.
 //! - [`debt`]                — Verification debt tracking.
 //! - [`constraint`]          — Constraint types (temporal, resource flow, security, …).
-//! - [`liveness`]            — Liveness invariant verifier.
-//! - [`exclusivity`]         — Exclusivity invariant verifier.
-//! - [`interpretation`]      — Interpretation invariant verifier.
-//! - [`origin`]              — Origin invariant verifier.
-//! - [`cleanup`]             — Cleanup invariant verifier.
 //!
 //! # Example
 //!
@@ -46,46 +43,34 @@
 
 #[macro_use]
 mod vuma_log_w44 {
-    /// VUMA-native logging macro (Wave 44). Replaces the `log` crate in core
-    /// crates. No-op in release builds (format args still type-checked via
-    /// `format_args!`); `eprintln!` in debug. Not `#[macro_export]` to avoid
-    /// cross-crate name collisions — each core crate carries its own copy.
+    /// Logging macro for VUMA compiler diagnostics.
+    ///
+    /// In debug builds: always emits to stderr.
+    /// In release builds: emits to stderr if `VUMA_LOG` env var is set.
+    /// This ensures advisory verification warnings are visible in production.
+    #[macro_export]
     macro_rules! vuma_log {
         ($level:ident, $($arg:tt)*) => {{
-            #[cfg(debug_assertions)]
-            eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
-            #[cfg(not(debug_assertions))]
-            { let _ = format_args!($($arg)*); }
+            let emit = cfg!(debug_assertions) || std::env::var("VUMA_LOG").is_ok();
+            if emit {
+                eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
+            }
         }};
     }
 }
-pub mod borrow_region;
 pub mod arena_bounds;
+pub mod borrow_region;
 pub mod cache;
-pub mod cleanup;
 pub mod constraint;
 pub mod debt;
-pub mod escape;
-pub mod constant_time;
+pub mod inference;
 /// CT2: Information-flow type checker (security-label lattice).
 pub mod information_flow;
-/// CT4: Refinement type checker (predicate-based subtyping).
-pub mod refinement;
-/// CT1: Session type checker (compile-time protocol verification).
-pub mod session_type;
-/// FFI Safety Verifier (Wave 10) — proves states are not read after
-/// invalidation by a non-pure foreign call.
-pub mod ffi;
-pub mod exclusivity;
-pub mod inference;
-pub mod interpretation;
-pub mod interprocedural;
 pub mod invariant_aggregator;
-pub mod liveness;
-pub mod origin;
-pub mod modular;
 pub mod query;
 pub mod result;
+/// CT1: Session type checker (compile-time protocol verification).
+pub mod session_type;
 pub mod state_read;
 pub mod state_transform;
 pub mod state_write;
@@ -96,39 +81,15 @@ pub use cache::{
     compute_fingerprint, InvariantViolation as CacheInvariantViolation, Severity as CacheSeverity,
     VerificationCache,
 };
-pub use cleanup::{
-    CleanupGraph, CleanupReport, CleanupVerifier, CleanupViolation, NodeId as CleanupNodeId,
-    OperationKind, ResourceId as CleanupResourceId, ResourceKind as CleanupResourceKind,
-    ViolationKind,
-};
 pub use constraint::{Constraint, ConstraintId};
 pub use debt::{DebtItem, DebtStatus, Priority, VerificationDebt};
-pub use escape::{analyze_escapes, EscapeKind};
-pub use exclusivity::{
-    AccessId as ExclusivityAccessId, AccessKind as ExclusivityAccessKind, AccessRecord, CapDInfo,
-    Conflict, ConflictKind, ExclusivityInput, ExclusivityOutput, ExclusivityVerifier,
-    InterferenceGraph, SyncEdgeRecord, SyncOrdering,
-};
 pub use inference::{InferenceEngine, InferenceError, InferenceResult};
-pub use interpretation::{
-    AccessEvent, CapDTransitionResult, InterpretationStrictness, InterpretationVerificationDetail,
-    InterpretationVerifier, InterpretationViolation, LocationId, ProgramPointId, SafetyProof,
-    UnverifiedPair, VerificationWarning, WriteReadPair,
-};
-pub use interprocedural::{
-    compute_summaries, verify_interprocedural_invariants, FunctionSummary, InterproceduralViolation,
-};
 pub use invariant_aggregator::{
     AggregatedResult, DiagnosticsReport, InvariantAggregator, InvariantDelta, InvariantKind,
     OverallVerdict, VerificationLevel, VerificationSummary,
-};
-pub use liveness::{
-    verify_liveness, EventAction, LivenessInput, LivenessVerificationResult, LivenessVerifier,
-    LivenessViolation, ObligationKind, PointId, ProofObligation, ResourceEvent, ResourceId,
-    ResourceKind, ThreadId, WaitForDependency,
 };
 pub use result::{
     Assumption, BatchedViolations, ConfidenceLevel, CounterExample, Evidence, InvariantName,
     InvariantViolation, ProgramPoint, ProofStep, Severity, VerificationResult, VerificationStatus,
 };
-pub use verification::{VerificationEngine, VerificationInput, PmtFieldSpec, PmtLayoutSpec};
+pub use verification::{PmtFieldSpec, PmtLayoutSpec, VerificationEngine, VerificationInput};

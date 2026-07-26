@@ -46,7 +46,7 @@
 //! assert_verifies("region buf = allocate(256); free(buf);");
 //!
 //! // Assert that a specific invariant is violated.
-//! assert_violation("region buf = allocate(256);", InvariantKind::Cleanup);
+//! assert_violation("state_read(unknown_layout)", InvariantKind::Pmt);
 //! ```
 
 use std::collections::HashMap;
@@ -662,8 +662,8 @@ pub fn verify_program(source: &str) -> AggregatedResult {
 ///
 /// ```rust,ignore
 /// use vuma_ive::VerificationLevel;
-/// let result = verify_program_at_level("region buf = allocate(256);", VerificationLevel::Quick);
-/// assert_eq!(result.per_invariant.len(), 2); // Quick only runs 2 checks
+/// let result = verify_program_at_level("fn main() { return; }", VerificationLevel::Pmt);
+/// assert_eq!(result.per_invariant.len(), 1); // PMT runs a single state check
 /// ```
 pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> AggregatedResult {
     let scg = build_scg_from_source(source).unwrap_or_default();
@@ -1075,10 +1075,10 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
         | PStmt::UnsafeBlock { .. }
         | PStmt::Match(_)
         | PStmt::Access(_)
-        // PMT (Wave 1a): TransformCall is parsed-but-not-emitted by the
-        // parser in Wave 1a (the parser produces Stmt::Let with a
-        // function-call RHS for transform invocations). Stub: emit no
-        // statements so this match stays exhaustive.
+        // PMT: TransformCall is parsed-but-not-emitted by the parser
+        // (the parser produces Stmt::Let with a function-call RHS for
+        // transform invocations). Stub: emit no statements so this
+        // match stays exhaustive.
         | PStmt::TransformCall(_) => vec![],
     }
 }
@@ -1100,7 +1100,9 @@ fn bridge_expr_to_scg_expr(expr: &vuma_parser::ast::Expr) -> CodegenScgExpr {
             Lit::Bool(b) => CodegenScgExpr::Int(if *b { 1 } else { 0 }),
             _ => CodegenScgExpr::Int(0),
         },
-        Expr::BinOp { op, lhs, rhs: _, .. } => {
+        Expr::BinOp {
+            op, lhs, rhs: _, ..
+        } => {
             // Recursively bridge nested binary operations.
             let cg_op = match op {
                 vuma_parser::ast::BinOp::Add => BinOpKind::Add,
@@ -1127,7 +1129,9 @@ fn bridge_expr_to_scg_expr(expr: &vuma_parser::ast::Expr) -> CodegenScgExpr {
             let _ = cg_op;
             bridge_expr_to_scg_expr(lhs)
         }
-        Expr::UnOp { op, expr: operand, .. } => {
+        Expr::UnOp {
+            op, expr: operand, ..
+        } => {
             match op {
                 UnOp::BitNot => {
                     // ~x → XOR(x, -1)
@@ -1223,36 +1227,33 @@ fn bridge_expr_to_binop(
                 bridge_expr_to_scg_expr(rhs),
             )
         }
-        Expr::UnOp { op, expr: operand, .. } => {
-            match op {
-                UnOp::BitNot => (
-                    BinOpKind::Xor,
-                    bridge_expr_to_scg_expr(operand),
-                    CodegenScgExpr::Int(-1),
-                ),
-                UnOp::Neg => (
-                    BinOpKind::Sub,
-                    CodegenScgExpr::Int(0),
-                    bridge_expr_to_scg_expr(operand),
-                ),
-                _ => (
-                    BinOpKind::Add,
-                    bridge_expr_to_scg_expr(operand),
-                    CodegenScgExpr::Int(0),
-                ),
-            }
-        }
+        Expr::UnOp {
+            op, expr: operand, ..
+        } => match op {
+            UnOp::BitNot => (
+                BinOpKind::Xor,
+                bridge_expr_to_scg_expr(operand),
+                CodegenScgExpr::Int(-1),
+            ),
+            UnOp::Neg => (
+                BinOpKind::Sub,
+                CodegenScgExpr::Int(0),
+                bridge_expr_to_scg_expr(operand),
+            ),
+            _ => (
+                BinOpKind::Add,
+                bridge_expr_to_scg_expr(operand),
+                CodegenScgExpr::Int(0),
+            ),
+        },
         Expr::Call { callee, args, .. } => {
             // Function call: preserve callee and arguments.
-            let lhs = args.first()
+            let lhs = args
+                .first()
                 .map(bridge_expr_to_scg_expr)
                 .unwrap_or(CodegenScgExpr::Int(0));
             let _ = callee;
-            (
-                BinOpKind::Add,
-                lhs,
-                CodegenScgExpr::Int(0),
-            )
+            (BinOpKind::Add, lhs, CodegenScgExpr::Int(0))
         }
         Expr::Deref { expr, .. } => (
             BinOpKind::Add,
@@ -1264,27 +1265,21 @@ fn bridge_expr_to_binop(
             bridge_expr_to_scg_expr(expr),
             CodegenScgExpr::Int(0),
         ),
-        Expr::Index { expr, index, .. } => {
-            (
-                BinOpKind::Add,
-                bridge_expr_to_scg_expr(expr),
-                bridge_expr_to_scg_expr(index),
-            )
-        }
-        Expr::Range { start, end, .. } => {
-            (
-                BinOpKind::Add,
-                bridge_expr_to_scg_expr(start),
-                bridge_expr_to_scg_expr(end),
-            )
-        }
-        _ => {
-            (
-                BinOpKind::Add,
-                CodegenScgExpr::Int(0),
-                CodegenScgExpr::Int(0),
-            )
-        }
+        Expr::Index { expr, index, .. } => (
+            BinOpKind::Add,
+            bridge_expr_to_scg_expr(expr),
+            bridge_expr_to_scg_expr(index),
+        ),
+        Expr::Range { start, end, .. } => (
+            BinOpKind::Add,
+            bridge_expr_to_scg_expr(start),
+            bridge_expr_to_scg_expr(end),
+        ),
+        _ => (
+            BinOpKind::Add,
+            CodegenScgExpr::Int(0),
+            CodegenScgExpr::Int(0),
+        ),
     }
 }
 
@@ -1936,7 +1931,7 @@ mod tests {
             result.per_invariant.len()
         );
 
-        // After Wave 2 wiring, the IVE returns real results.
+        // With IVE wiring in place, the IVE returns real results.
         // A well-formed program should now get Proven/Pass rather than
         // the placeholder Inconclusive verdict.
         assert_ne!(
@@ -2135,46 +2130,6 @@ mod tests {
         // SCG and verification should not be produced.
         assert!(result.scg.is_none());
         assert!(result.verification.is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 14: verify_program_at_level — Quick level
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_verify_program_at_quick_level() {
-        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
-        // V1.0 `region buf = allocate(256); free(buf);` source.
-        let source = "fn main() { return; }";
-        let result = verify_program_at_level(source, VerificationLevel::Quick);
-
-        // (Wave 19) Quick now runs ALL 5 invariants (not just the 2-invariant
-        // quick_set) at reduced depth.
-        assert!(
-            result.per_invariant.len() >= 1,
-            "Quick verification should run at least 1 PMT state verifier, got {}",
-            result.per_invariant.len()
-        );
-        assert_eq!(result.level, VerificationLevel::Quick);
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 15: verify_program_at_level — Exhaustive level
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_verify_program_at_exhaustive_level() {
-        // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
-        // V1.0 `region buf = allocate(256); free(buf);` source.
-        let source = "fn main() { return; }";
-        let result = verify_program_at_level(source, VerificationLevel::Exhaustive);
-
-        // Exhaustive level runs the core 5 invariants + interprocedural
-        // analysis (6 total).
-        assert!(
-            result.per_invariant.len() >= 1,
-            "Exhaustive verification should run at least 1 PMT state verifier, got {}",
-            result.per_invariant.len()
-        );
-        assert_eq!(result.level, VerificationLevel::Exhaustive);
     }
 
     // -----------------------------------------------------------------------

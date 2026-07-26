@@ -3,17 +3,22 @@
 version = 4
 
 [[package]]
+name = "bitflags"
+version = "2.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+
+[[package]]
 name = "vuma"
 version = "0.2.0-alpha.1"
 dependencies = [
+ "bitflags",
  "vuma-bd",
  "vuma-codegen",
- "vuma-cor",
  "vuma-core",
  "vuma-ive",
  "vuma-package",
  "vuma-parser",
- "vuma-proof",
  "vuma-scg",
 ]
 
@@ -32,23 +37,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "vuma-cor"
-version = "0.2.0-alpha.1"
-dependencies = [
- "vuma-codegen",
- "vuma-scg",
-]
-
-[[package]]
 name = "vuma-core"
 version = "0.2.0-alpha.1"
 dependencies = [
  "vuma-bd",
  "vuma-codegen",
- "vuma-cor",
  "vuma-ive",
  "vuma-parser",
- "vuma-proof",
  "vuma-scg",
 ]
 
@@ -73,13 +68,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vuma-proof"
-version = "0.2.0-alpha.1"
-dependencies = [
- "vuma-scg",
-]
-
-[[package]]
 name = "vuma-scg"
 version = "0.2.0-alpha.1"
 
@@ -90,10 +78,8 @@ dependencies = [
  "vuma",
  "vuma-bd",
  "vuma-codegen",
- "vuma-cor",
  "vuma-core",
  "vuma-ive",
  "vuma-parser",
- "vuma-proof",
  "vuma-scg",
 ]

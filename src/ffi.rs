@@ -166,12 +166,12 @@ pub fn linux_syscall_bindings() -> ExternBlock {
             ExternFn {
                 name: "mmap".to_string(),
                 param_types: vec![
-                    ExternType::Ptr,  // addr
-                    ExternType::I64,  // length
-                    ExternType::I64,  // prot
-                    ExternType::I64,  // flags
-                    ExternType::I64,  // fd
-                    ExternType::I64,  // offset
+                    ExternType::Ptr, // addr
+                    ExternType::I64, // length
+                    ExternType::I64, // prot
+                    ExternType::I64, // flags
+                    ExternType::I64, // fd
+                    ExternType::I64, // offset
                 ],
                 return_type: Some(ExternType::Ptr),
             },
@@ -630,7 +630,7 @@ fn aarch64_syscalls() -> HashMap<SyscallName, u64> {
     [
         (Read, 63),
         (Write, 64),
-        (Open, 35),    // openat
+        (Open, 35), // openat
         (Close, 57),
         (Exit, 93),
         (ExitGroup, 94),
@@ -657,7 +657,7 @@ fn riscv64_syscalls() -> HashMap<SyscallName, u64> {
     [
         (Read, 63),
         (Write, 64),
-        (Open, 35),    // openat
+        (Open, 35), // openat
         (Close, 57),
         (Exit, 93),
         (ExitGroup, 94),
@@ -688,7 +688,7 @@ fn arm32_syscalls() -> HashMap<SyscallName, u64> {
         (Close, 6),
         (Exit, 1),
         (ExitGroup, 248),
-        (Mmap, 192),   // mmap2 on ARM
+        (Mmap, 192), // mmap2 on ARM
         (Munmap, 91),
         (Brk, 45),
         (Ioctl, 54),
@@ -765,7 +765,7 @@ fn loongarch64_syscalls() -> HashMap<SyscallName, u64> {
     [
         (Read, 63),
         (Write, 64),
-        (Open, 35),    // openat
+        (Open, 35), // openat
         (Close, 57),
         (Exit, 93),
         (ExitGroup, 94),
@@ -802,7 +802,7 @@ fn x86_32_syscalls() -> HashMap<SyscallName, u64> {
         (Close, 6),
         (Exit, 1),
         (ExitGroup, 252),
-        (Mmap, 192),   // mmap2 on i386 (offset in pages, not bytes)
+        (Mmap, 192), // mmap2 on i386 (offset in pages, not bytes)
         (Munmap, 91),
         (Brk, 45),
         (Ioctl, 54),
@@ -830,7 +830,7 @@ fn riscv32_syscalls() -> HashMap<SyscallName, u64> {
     [
         (Read, 63),
         (Write, 64),
-        (Open, 35),    // openat
+        (Open, 35), // openat
         (Close, 57),
         (Exit, 93),
         (ExitGroup, 94),
@@ -1016,16 +1016,43 @@ mod tests {
 
     #[test]
     fn test_relocation_kind_for_arch() {
-        assert_eq!(RelocationKind::for_arch("aarch64"), RelocationKind::AArch64Call26);
-        assert_eq!(RelocationKind::for_arch("x86_64"), RelocationKind::X86_64Plt32);
-        assert_eq!(RelocationKind::for_arch("riscv64"), RelocationKind::RiscvCall);
-        assert_eq!(RelocationKind::for_arch("riscv32"), RelocationKind::RiscvCall);
+        assert_eq!(
+            RelocationKind::for_arch("aarch64"),
+            RelocationKind::AArch64Call26
+        );
+        assert_eq!(
+            RelocationKind::for_arch("x86_64"),
+            RelocationKind::X86_64Plt32
+        );
+        assert_eq!(
+            RelocationKind::for_arch("riscv64"),
+            RelocationKind::RiscvCall
+        );
+        assert_eq!(
+            RelocationKind::for_arch("riscv32"),
+            RelocationKind::RiscvCall
+        );
         assert_eq!(RelocationKind::for_arch("arm32"), RelocationKind::Arm32Call);
         assert_eq!(RelocationKind::for_arch("mips64"), RelocationKind::Mips26);
-        assert_eq!(RelocationKind::for_arch("ppc64"), RelocationKind::Ppc64Rel24);
-        assert_eq!(RelocationKind::for_arch("loongarch64"), RelocationKind::LoongArchB26);
-        assert_eq!(RelocationKind::for_arch("x86_32"), RelocationKind::X86_32Plt32);
-        assert_eq!(RelocationKind::for_arch("i386"), RelocationKind::X86_32Plt32);
-        assert_eq!(RelocationKind::for_arch("unknown"), RelocationKind::GenericCall32);
+        assert_eq!(
+            RelocationKind::for_arch("ppc64"),
+            RelocationKind::Ppc64Rel24
+        );
+        assert_eq!(
+            RelocationKind::for_arch("loongarch64"),
+            RelocationKind::LoongArchB26
+        );
+        assert_eq!(
+            RelocationKind::for_arch("x86_32"),
+            RelocationKind::X86_32Plt32
+        );
+        assert_eq!(
+            RelocationKind::for_arch("i386"),
+            RelocationKind::X86_32Plt32
+        );
+        assert_eq!(
+            RelocationKind::for_arch("unknown"),
+            RelocationKind::GenericCall32
+        );
     }
 }

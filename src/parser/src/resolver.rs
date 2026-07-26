@@ -168,6 +168,13 @@ pub struct ModuleResolver {
     /// If we encounter an import whose canonical path is already in this
     /// set, we have a circular import.
     in_progress: HashSet<PathBuf>,
+
+    /// Maximum expression recursion depth passed to [`Parser::with_max_depth`]
+    /// when parsing the root source and each imported file. Defaults to
+    /// [`crate::parser::MAX_EXPR_DEPTH`] (= 1024). Override via
+    /// [`ModuleResolver::with_max_depth`] so the `--max-expr-depth N`
+    /// CLI flag applies uniformly across the root module and its imports.
+    max_depth: u32,
 }
 
 impl ModuleResolver {
@@ -176,7 +183,21 @@ impl ModuleResolver {
         Self {
             cache: HashMap::new(),
             in_progress: HashSet::new(),
+            max_depth: crate::parser::MAX_EXPR_DEPTH,
         }
+    }
+
+    /// Builder-style override of the parser's maximum expression nesting
+    /// depth. Imported files are parsed with the same limit as the root
+    /// source so a deeply-nested import cannot bypass the limit set for
+    /// the root module.
+    ///
+    /// Used by `pipeline::parse_and_resolve` to forward
+    /// `CompileConfig::max_expr_depth` (i.e. the `--max-expr-depth N`
+    /// CLI flag) into the resolver.
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
+        self
     }
 
     /// Resolve a single source file and all its imports.
@@ -219,7 +240,7 @@ impl ModuleResolver {
         let mut errors = Vec::new();
 
         // Parse the root source.
-        let program = match Self::parse_source(source) {
+        let program = match Self::parse_source(source, self.max_depth) {
             Ok(p) => p,
             Err(e) => {
                 errors.push(ResolveError::Parse {
@@ -314,7 +335,7 @@ impl ModuleResolver {
         };
 
         // Parse the file.
-        let program = match Self::parse_source(&source) {
+        let program = match Self::parse_source(&source, self.max_depth) {
             Ok(p) => p,
             Err(e) => {
                 errors.push(ResolveError::Parse {
@@ -327,10 +348,7 @@ impl ModuleResolver {
         };
 
         // Resolve imports in this file.
-        let base_dir = file_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        let base_dir = file_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         let merged = self.merge_imports(program, &base_dir, errors);
 
@@ -462,9 +480,10 @@ impl ModuleResolver {
             // The main file's definitions take precedence.
             let i_name = item_name(&item);
             if let Some(name) = &i_name {
-                if merged_items.iter().any(|existing| {
-                    item_name(existing).as_ref() == Some(name)
-                }) {
+                if merged_items
+                    .iter()
+                    .any(|existing| item_name(existing).as_ref() == Some(name))
+                {
                     continue;
                 }
             }
@@ -505,8 +524,8 @@ impl ModuleResolver {
     }
 
     /// Parse a source string into a Program.
-    fn parse_source(source: &str) -> Result<Program, ParseError> {
-        let mut parser = Parser::new(source);
+    fn parse_source(source: &str, max_depth: u32) -> Result<Program, ParseError> {
+        let mut parser = Parser::with_max_depth(source, max_depth);
         let result = parser.parse_program();
         if result.is_err() {
             // Return the first fatal error.
@@ -547,10 +566,10 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Static(s) => Some(s.name.clone()),
         Item::ModuleDef(m) => Some(m.name.clone()),
         Item::TraitDef(t) => Some(t.name.clone()),
-        Item::ImplBlock(_) => None, // impl blocks are not named items
-        Item::Import(_) => None,     // imports are not definitions
-        Item::Export(_) => None,     // exports are not definitions
-        Item::Stmt(_) => None,       // top-level statements are not named
+        Item::ImplBlock(_) => None,   // impl blocks are not named items
+        Item::Import(_) => None,      // imports are not definitions
+        Item::Export(_) => None,      // exports are not definitions
+        Item::Stmt(_) => None,        // top-level statements are not named
         Item::ExternBlock(_) => None, // extern blocks are not named
         // PMT (Wave 1a)
         Item::LayoutDef(l) => Some(l.name.clone()),
@@ -653,6 +672,8 @@ mod tests {
         let result = resolver.resolve_source(source, None);
         assert!(result.is_err());
         let errors = result.unwrap_err();
-        assert!(errors.iter().any(|e| matches!(e, ResolveError::FileNotFound { .. })));
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ResolveError::FileNotFound { .. })));
     }
 }

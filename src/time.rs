@@ -172,10 +172,7 @@ mod tests {
     /// 18_321 days * 86_400 + (12*3600 + 34*60 + 56) = 1_582_979_696.
     #[test]
     fn rfc3339_known_timestamp() {
-        assert_eq!(
-            format_secs_rfc3339(1_582_979_696),
-            "2020-02-29T12:34:56Z"
-        );
+        assert_eq!(format_secs_rfc3339(1_582_979_696), "2020-02-29T12:34:56Z");
     }
 
     /// Negative epoch seconds (pre-1970) still format correctly.

@@ -396,7 +396,11 @@ fn test_infer_security_level() {
     );
     let computation = scg.add_node(
         NodeType::Computation,
-        NodePayload::Computation(ComputationNode::new("parse_int", Some("i32".to_string()), false)),
+        NodePayload::Computation(ComputationNode::new(
+            "parse_int",
+            Some("i32".to_string()),
+            false,
+        )),
         pp(),
     );
 

@@ -17,8 +17,8 @@
 //! ```
 
 use crate::context::Context;
-use std::collections::HashSet;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -291,13 +291,10 @@ impl CapD {
         }
 
         // Plain union of capabilities.
-        let mut caps: HashSet<Capability> =
-            self.caps.union(&other.caps).copied().collect();
+        let mut caps: HashSet<Capability> = self.caps.union(&other.caps).copied().collect();
 
         // Rule 2: StateRead + StateWrite ⇒ StateTransform.
-        if caps.contains(&Capability::StateRead)
-            && caps.contains(&Capability::StateWrite)
-        {
+        if caps.contains(&Capability::StateRead) && caps.contains(&Capability::StateWrite) {
             caps.insert(Capability::StateTransform);
         }
 
@@ -494,14 +491,8 @@ mod tests {
     fn state_capabilities_display() {
         assert_eq!(format!("{}", Capability::StateRead), "StateRead");
         assert_eq!(format!("{}", Capability::StateWrite), "StateWrite");
-        assert_eq!(
-            format!("{}", Capability::StateTransform),
-            "StateTransform"
-        );
-        assert_eq!(
-            format!("{}", Capability::StateConsume),
-            "StateConsume"
-        );
+        assert_eq!(format!("{}", Capability::StateTransform), "StateTransform");
+        assert_eq!(format!("{}", Capability::StateConsume), "StateConsume");
     }
 
     #[test]
@@ -613,14 +604,13 @@ mod tests {
     fn join_state_consume_drops_all_other_caps() {
         // Even when the other operand has many capabilities (including the
         // synthesized StateTransform pair), StateConsume wins outright.
-        let rich = CapD::empty()
-            .strengthen(&[
-                Capability::StateRead,
-                Capability::StateWrite,
-                Capability::Read,
-                Capability::Write,
-                Capability::Move,
-            ]);
+        let rich = CapD::empty().strengthen(&[
+            Capability::StateRead,
+            Capability::StateWrite,
+            Capability::Read,
+            Capability::Write,
+            Capability::Move,
+        ]);
         let consume = CapD::empty().strengthen(&[Capability::StateConsume]);
         let j = rich.join(&consume);
         assert_eq!(j.caps.len(), 1);
@@ -681,10 +671,7 @@ mod tests {
 
     #[test]
     fn weaken_drops_state_capabilities() {
-        let capd = CapD::empty().strengthen(&[
-            Capability::StateRead,
-            Capability::StateWrite,
-        ]);
+        let capd = CapD::empty().strengthen(&[Capability::StateRead, Capability::StateWrite]);
         let weakened = capd.weaken(&[Capability::StateRead]);
         assert!(!weakened.caps.contains(&Capability::StateRead));
         assert!(weakened.caps.contains(&Capability::StateWrite));

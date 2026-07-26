@@ -30,12 +30,10 @@ use std::io::{self, BufRead, Read as IoRead, Write as IoWrite};
 
 use crate::json_value::{json_str, JsonValue};
 
+use vuma_parser::ast::{Block, Item, Program, Stmt, Type};
+use vuma_parser::error::Span;
 use vuma_parser::lexer::{Lexer, TokenKind};
 use vuma_parser::parser::Parser;
-use vuma_parser::ast::{
-    Block, Item, Program, Stmt, Type,
-};
-use vuma_parser::error::Span;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LSP Type Definitions
@@ -60,7 +58,10 @@ impl Position {
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
             ("line".to_string(), JsonValue::U64(self.line as u64)),
-            ("character".to_string(), JsonValue::U64(self.character as u64)),
+            (
+                "character".to_string(),
+                JsonValue::U64(self.character as u64),
+            ),
         ])
     }
 }
@@ -83,7 +84,10 @@ impl Range {
     /// Degenerate range at a single position.
     pub fn at(line: u32, character: u32) -> Self {
         let pos = Position::new(line, character);
-        Self { start: pos.clone(), end: pos }
+        Self {
+            start: pos.clone(),
+            end: pos,
+        }
     }
 
     /// Build the [`JsonValue`] representation.
@@ -236,9 +240,7 @@ pub struct CompletionItem {
 impl CompletionItem {
     /// Build the [`JsonValue`] representation (camelCase field names).
     pub fn to_json_value(&self) -> JsonValue {
-        let mut entries = vec![
-            ("label".to_string(), json_str(&self.label)),
-        ];
+        let mut entries = vec![("label".to_string(), json_str(&self.label))];
         if let Some(k) = self.kind {
             entries.push(("kind".to_string(), JsonValue::U64(k.as_u32() as u64)));
         }
@@ -258,7 +260,10 @@ impl CompletionItem {
             entries.push(("textEdit".to_string(), t.clone()));
         }
         if let Some(a) = &self.additional_text_edits {
-            entries.push(("additionalTextEdits".to_string(), JsonValue::Array(a.clone())));
+            entries.push((
+                "additionalTextEdits".to_string(),
+                JsonValue::Array(a.clone()),
+            ));
         }
         JsonValue::Object(entries)
     }
@@ -330,17 +335,24 @@ impl DocumentSymbol {
     pub fn to_json_value(&self) -> JsonValue {
         let mut entries = vec![
             ("name".to_string(), json_str(&self.name)),
-            ("kind".to_string(), JsonValue::U64(self.kind.as_u32() as u64)),
+            (
+                "kind".to_string(),
+                JsonValue::U64(self.kind.as_u32() as u64),
+            ),
             ("range".to_string(), self.range.to_json_value()),
-            ("selectionRange".to_string(), self.selection_range.to_json_value()),
+            (
+                "selectionRange".to_string(),
+                self.selection_range.to_json_value(),
+            ),
         ];
         if let Some(d) = &self.detail {
             entries.push(("detail".to_string(), json_str(d)));
         }
         if let Some(c) = &self.children {
-            entries.push(("children".to_string(), JsonValue::Array(
-                c.iter().map(|x| x.to_json_value()).collect(),
-            )));
+            entries.push((
+                "children".to_string(),
+                JsonValue::Array(c.iter().map(|x| x.to_json_value()).collect()),
+            ));
         }
         JsonValue::Object(entries)
     }
@@ -426,12 +438,14 @@ impl SemanticTokensLegend {
     /// Build the [`JsonValue`] representation.
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
-            ("tokenTypes".to_string(), JsonValue::Array(
-                self.token_types.iter().map(json_str).collect(),
-            )),
-            ("tokenModifiers".to_string(), JsonValue::Array(
-                self.token_modifiers.iter().map(json_str).collect(),
-            )),
+            (
+                "tokenTypes".to_string(),
+                JsonValue::Array(self.token_types.iter().map(json_str).collect()),
+            ),
+            (
+                "tokenModifiers".to_string(),
+                JsonValue::Array(self.token_modifiers.iter().map(json_str).collect()),
+            ),
         ])
     }
 }
@@ -485,11 +499,15 @@ pub struct SemanticTokens {
 impl SemanticTokens {
     /// Build the [`JsonValue`] representation (camelCase field names).
     pub fn to_json_value(&self) -> JsonValue {
-        JsonValue::Object(vec![
-            ("data".to_string(), JsonValue::Array(
-                self.data.iter().map(|n| JsonValue::U64(*n as u64)).collect(),
-            )),
-        ])
+        JsonValue::Object(vec![(
+            "data".to_string(),
+            JsonValue::Array(
+                self.data
+                    .iter()
+                    .map(|n| JsonValue::U64(*n as u64))
+                    .collect(),
+            ),
+        )])
     }
 }
 
@@ -524,9 +542,7 @@ pub struct Hover {
 impl Hover {
     /// Build the [`JsonValue`] representation (camelCase field names).
     pub fn to_json_value(&self) -> JsonValue {
-        let mut entries = vec![
-            ("contents".to_string(), self.contents.clone()),
-        ];
+        let mut entries = vec![("contents".to_string(), self.contents.clone())];
         if let Some(r) = &self.range {
             entries.push(("range".to_string(), r.to_json_value()));
         }
@@ -589,9 +605,11 @@ fn read_message() -> io::Result<Option<String>> {
             break;
         }
         if let Some(rest) = line.strip_prefix("Content-Length: ") {
-            content_length = Some(rest.trim().parse::<usize>().map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, e)
-            })?);
+            content_length = Some(
+                rest.trim()
+                    .parse::<usize>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            );
         }
     }
 
@@ -610,7 +628,12 @@ fn read_message() -> io::Result<Option<String>> {
 fn write_message(content: &str) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    write!(handle, "Content-Length: {}\r\n\r\n{}", content.len(), content)?;
+    write!(
+        handle,
+        "Content-Length: {}\r\n\r\n{}",
+        content.len(),
+        content
+    )?;
     handle.flush()?;
     Ok(())
 }
@@ -757,10 +780,10 @@ impl LspServer {
                             id_val.clone(),
                             Err(JsonValue::Object(vec![
                                 ("code".to_string(), JsonValue::I64(-32601)),
-                                ("message".to_string(), json_str(format!(
-                                    "Method not found: {}",
-                                    method
-                                ))),
+                                (
+                                    "message".to_string(),
+                                    json_str(format!("Method not found: {}", method)),
+                                ),
                             ])),
                         );
                     }
@@ -805,45 +828,73 @@ impl LspServer {
     /// Handle the `initialize` request.
     pub fn handle_initialize(&mut self, _params: JsonValue) -> JsonValue {
         self.initialized = true;
-        JsonValue::Object(vec![
-            ("capabilities".to_string(), JsonValue::Object(vec![
-                ("textDocumentSync".to_string(), JsonValue::Object(vec![
-                    ("openClose".to_string(), JsonValue::Bool(true)),
-                    ("change".to_string(), JsonValue::U64(1)), // Full document sync
-                ])),
-                ("completionProvider".to_string(), JsonValue::Object(vec![
-                    ("triggerCharacters".to_string(), JsonValue::Array(vec![
-                        json_str("."), json_str(":"),
-                    ])),
-                    ("resolveProvider".to_string(), JsonValue::Bool(false)),
-                ])),
+        JsonValue::Object(vec![(
+            "capabilities".to_string(),
+            JsonValue::Object(vec![
+                (
+                    "textDocumentSync".to_string(),
+                    JsonValue::Object(vec![
+                        ("openClose".to_string(), JsonValue::Bool(true)),
+                        ("change".to_string(), JsonValue::U64(1)), // Full document sync
+                    ]),
+                ),
+                (
+                    "completionProvider".to_string(),
+                    JsonValue::Object(vec![
+                        (
+                            "triggerCharacters".to_string(),
+                            JsonValue::Array(vec![json_str("."), json_str(":")]),
+                        ),
+                        ("resolveProvider".to_string(), JsonValue::Bool(false)),
+                    ]),
+                ),
                 ("hoverProvider".to_string(), JsonValue::Bool(true)),
                 ("definitionProvider".to_string(), JsonValue::Bool(true)),
                 ("documentSymbolProvider".to_string(), JsonValue::Bool(true)),
-                ("semanticTokensProvider".to_string(), JsonValue::Object(vec![
-                    ("full".to_string(), JsonValue::Bool(true)),
-                    ("delta".to_string(), JsonValue::Bool(false)),
-                    ("range".to_string(), JsonValue::Bool(false)),
-                    ("legend".to_string(), SemanticTokensLegend::default().to_json_value()),
-                ])),
-                ("workspace".to_string(), JsonValue::Object(vec![
-                    ("workspaceFolders".to_string(), JsonValue::Object(vec![
-                        ("supported".to_string(), JsonValue::Bool(true)),
-                    ])),
-                ])),
-            ])),
-        ])
+                (
+                    "semanticTokensProvider".to_string(),
+                    JsonValue::Object(vec![
+                        ("full".to_string(), JsonValue::Bool(true)),
+                        ("delta".to_string(), JsonValue::Bool(false)),
+                        ("range".to_string(), JsonValue::Bool(false)),
+                        (
+                            "legend".to_string(),
+                            SemanticTokensLegend::default().to_json_value(),
+                        ),
+                    ]),
+                ),
+                (
+                    "workspace".to_string(),
+                    JsonValue::Object(vec![(
+                        "workspaceFolders".to_string(),
+                        JsonValue::Object(vec![("supported".to_string(), JsonValue::Bool(true))]),
+                    )]),
+                ),
+            ]),
+        )])
     }
 
     /// Handle `textDocument/didOpen` notification.
     pub fn handle_text_document_did_open(&mut self, params: JsonValue) {
         let text_doc = params.get("textDocument");
         if let Some(td) = text_doc {
-            let uri = td.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let text = td.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let uri = td
+                .get("uri")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = td
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let version = td.get("version").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
 
-            let doc = VumaDocument { uri: uri.clone(), text, version };
+            let doc = VumaDocument {
+                uri: uri.clone(),
+                text,
+                version,
+            };
             self.reparse_document(&doc);
             self.documents.insert(uri.clone(), doc);
 
@@ -880,7 +931,11 @@ impl LspServer {
             .unwrap_or("")
             .to_string();
 
-        let doc = VumaDocument { uri: uri.clone(), text, version };
+        let doc = VumaDocument {
+            uri: uri.clone(),
+            text,
+            version,
+        };
         self.reparse_document(&doc);
         self.documents.insert(uri.clone(), doc);
 
@@ -1050,9 +1105,10 @@ impl LspServer {
         // but recognised by name in the parser rather than via a keyword).
         // Surfaced here so IDEs offer it alongside u32/i64/etc. when the
         // user is typing a type annotation.
-        for builtin in &["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
-                         "f32", "f64", "bool", "usize", "void", "ptr", "null",
-                         "Channel"] {
+        for builtin in &[
+            "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "usize",
+            "void", "ptr", "null", "Channel",
+        ] {
             items.push(CompletionItem {
                 label: builtin.to_string(),
                 kind: Some(CompletionItemKind::TypeParameter),
@@ -1067,9 +1123,10 @@ impl LspServer {
 
         JsonValue::Object(vec![
             ("isIncomplete".to_string(), JsonValue::Bool(false)),
-            ("items".to_string(), JsonValue::Array(
-                items.iter().map(|i| i.to_json_value()).collect(),
-            )),
+            (
+                "items".to_string(),
+                JsonValue::Array(items.iter().map(|i| i.to_json_value()).collect()),
+            ),
         ])
     }
 
@@ -1136,10 +1193,7 @@ impl LspServer {
                 // binding (mirrors how u32/i64 hover but adds the
                 // precision tooltip added by F1's FP codegen rollout).
                 let markdown = match float_type_note(type_str) {
-                    Some(note) => format!(
-                        "```vuma\nlet {}: {}\n```\n\n{}",
-                        name, type_str, note,
-                    ),
+                    Some(note) => format!("```vuma\nlet {}: {}\n```\n\n{}", name, type_str, note,),
                     None => format!("```vuma\nlet {}: {}\n```", name, type_str),
                 };
                 return Ok(build_hover(markdown, range.clone()).to_json_value());
@@ -1152,10 +1206,9 @@ impl LspServer {
                 let type_str = ty.as_deref().unwrap_or("unknown");
                 // F5a: IEEE 754 width note for f32/f64 consts.
                 let markdown = match float_type_note(type_str) {
-                    Some(note) => format!(
-                        "```vuma\nconst {}: {}\n```\n\n{}",
-                        name, type_str, note,
-                    ),
+                    Some(note) => {
+                        format!("```vuma\nconst {}: {}\n```\n\n{}", name, type_str, note,)
+                    }
                     None => format!("```vuma\nconst {}: {}\n```", name, type_str),
                 };
                 return Ok(build_hover(markdown, range.clone()).to_json_value());
@@ -1217,9 +1270,7 @@ impl LspServer {
         // spec.  The hover fires when the user hovers over the `Channel`
         // identifier in a type position (e.g. `let ch: Channel<i32>`).
         if word == "Channel" {
-            let markdown = format!(
-                "```vuma\nChannel<T>\n```\n\nTyped IPC channel for inter-process communication.\n\n                 The element type `T` is the message payload. Channel handles are\n                 pointer-sized opaque capabilities passed in general-purpose\n                 registers under the C ABI (see Wave 1)."
-            );
+            let markdown = "```vuma\nChannel<T>\n```\n\nTyped IPC channel for inter-process communication.\n\n                 The element type `T` is the message payload. Channel handles are\n                 pointer-sized opaque capabilities passed in general-purpose\n                 registers under the C ABI (see Wave 1).".to_string();
             let range = Range::at(line as u32, character as u32);
             return Ok(build_hover(markdown, range).to_json_value());
         }
@@ -1428,9 +1479,10 @@ impl LspServer {
             "textDocument/publishDiagnostics",
             JsonValue::Object(vec![
                 ("uri".to_string(), json_str(uri)),
-                ("diagnostics".to_string(), JsonValue::Array(
-                    diagnostics.iter().map(|d| d.to_json_value()).collect(),
-                )),
+                (
+                    "diagnostics".to_string(),
+                    JsonValue::Array(diagnostics.iter().map(|d| d.to_json_value()).collect()),
+                ),
             ]),
         );
     }
@@ -1452,16 +1504,19 @@ impl LspServer {
             // Even on parse error, try to get partial results
             // The parser may have produced partial AST with error recovery
             self.parse_cache.insert(doc.uri.clone(), None);
-            self.info_cache.insert(doc.uri.clone(), DocumentInfo {
-                functions: vec![],
-                structs: vec![],
-                enums: vec![],
-                regions: vec![],
-                constants: vec![],
-                traits: vec![],
-                variables: vec![],
-                type_names: vec![],
-            });
+            self.info_cache.insert(
+                doc.uri.clone(),
+                DocumentInfo {
+                    functions: vec![],
+                    structs: vec![],
+                    enums: vec![],
+                    regions: vec![],
+                    constants: vec![],
+                    traits: vec![],
+                    variables: vec![],
+                    type_names: vec![],
+                },
+            );
         }
     }
 
@@ -1574,8 +1629,7 @@ impl LspServer {
         for i in 0..tokens.len() {
             let tok = &tokens[i];
             let is_float_operand = tok.kind == TokenKind::Float
-                || (tok.kind == TokenKind::Ident
-                    && float_var_names.contains(&tok.lexeme));
+                || (tok.kind == TokenKind::Ident && float_var_names.contains(&tok.lexeme));
             if !is_float_operand {
                 continue;
             }
@@ -1732,7 +1786,11 @@ impl LspServer {
                 info.type_names.push(traitdef.name.clone());
 
                 // Extract method signatures
-                for method in traitdef.required_methods.iter().chain(traitdef.provided_methods.iter()) {
+                for method in traitdef
+                    .required_methods
+                    .iter()
+                    .chain(traitdef.provided_methods.iter())
+                {
                     let range = self.span_to_range(text, method.span);
                     let ret_type = method.return_type.as_ref().map(format_type);
                     info.functions.push((method.name.clone(), range, ret_type));
@@ -1833,30 +1891,77 @@ impl LspServer {
 
             let token_type = match token.kind {
                 // Keywords
-                TokenKind::Fn | TokenKind::Let | TokenKind::Pub | TokenKind::Crate |
-                TokenKind::Ptr | TokenKind::Region | TokenKind::Alloc | TokenKind::Allocate |
-                TokenKind::Free | TokenKind::Derive | TokenKind::Cast | TokenKind::Read |
-                TokenKind::Write | TokenKind::Sync | TokenKind::If | TokenKind::Else |
-                TokenKind::While | TokenKind::For | TokenKind::Return | TokenKind::Struct |
-                TokenKind::Enum | TokenKind::Match | TokenKind::Unsafe | TokenKind::Safe |
-                TokenKind::Bd | TokenKind::Repd | TokenKind::Capd | TokenKind::Reld |
-                TokenKind::Import | TokenKind::Export | TokenKind::Mod | TokenKind::Use |
-                TokenKind::SelfKw | TokenKind::Super | TokenKind::Async | TokenKind::Await |
-                TokenKind::Spawn | TokenKind::Lock | TokenKind::Unlock | TokenKind::Channel |
-                TokenKind::Send | TokenKind::Recv | TokenKind::True | TokenKind::False |
-                TokenKind::Null | TokenKind::As | TokenKind::Sizeof | TokenKind::Alignof |
-                TokenKind::Break | TokenKind::Continue | TokenKind::Loop | TokenKind::Where |
-                TokenKind::Impl | TokenKind::Trait | TokenKind::Type | TokenKind::Const |
-                TokenKind::Static | TokenKind::Mut | TokenKind::Ref |
-                TokenKind::OptionKw | TokenKind::SomeKw | TokenKind::NoneKw |
-                TokenKind::ResultKw | TokenKind::OkKw | TokenKind::ErrKw => {
-                    SemanticTokenType::Keyword
-                }
+                TokenKind::Fn
+                | TokenKind::Let
+                | TokenKind::Pub
+                | TokenKind::Crate
+                | TokenKind::Ptr
+                | TokenKind::Region
+                | TokenKind::Alloc
+                | TokenKind::Allocate
+                | TokenKind::Free
+                | TokenKind::Derive
+                | TokenKind::Cast
+                | TokenKind::Read
+                | TokenKind::Write
+                | TokenKind::Sync
+                | TokenKind::If
+                | TokenKind::Else
+                | TokenKind::While
+                | TokenKind::For
+                | TokenKind::Return
+                | TokenKind::Struct
+                | TokenKind::Enum
+                | TokenKind::Match
+                | TokenKind::Unsafe
+                | TokenKind::Safe
+                | TokenKind::Bd
+                | TokenKind::Repd
+                | TokenKind::Capd
+                | TokenKind::Reld
+                | TokenKind::Import
+                | TokenKind::Export
+                | TokenKind::Mod
+                | TokenKind::Use
+                | TokenKind::SelfKw
+                | TokenKind::Super
+                | TokenKind::Async
+                | TokenKind::Await
+                | TokenKind::Spawn
+                | TokenKind::Lock
+                | TokenKind::Unlock
+                | TokenKind::Channel
+                | TokenKind::Send
+                | TokenKind::Recv
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Null
+                | TokenKind::As
+                | TokenKind::Sizeof
+                | TokenKind::Alignof
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::Loop
+                | TokenKind::Where
+                | TokenKind::Impl
+                | TokenKind::Trait
+                | TokenKind::Type
+                | TokenKind::Const
+                | TokenKind::Static
+                | TokenKind::Mut
+                | TokenKind::Ref
+                | TokenKind::OptionKw
+                | TokenKind::SomeKw
+                | TokenKind::NoneKw
+                | TokenKind::ResultKw
+                | TokenKind::OkKw
+                | TokenKind::ErrKw => SemanticTokenType::Keyword,
                 // Strings
-                TokenKind::String | TokenKind::RawStr | TokenKind::ByteStr |
-                TokenKind::FormatStr | TokenKind::Char => {
-                    SemanticTokenType::String
-                }
+                TokenKind::String
+                | TokenKind::RawStr
+                | TokenKind::ByteStr
+                | TokenKind::FormatStr
+                | TokenKind::Char => SemanticTokenType::String,
                 // Numbers
                 TokenKind::Number | TokenKind::Float | TokenKind::Address => {
                     SemanticTokenType::Number
@@ -1864,28 +1969,55 @@ impl LspServer {
                 // Identifiers — could be variable, function, or type
                 TokenKind::Ident => {
                     // Heuristic: if it starts with uppercase, it's likely a type
-                    if token.lexeme.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    if token
+                        .lexeme
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_uppercase())
+                    {
                         SemanticTokenType::Type
                     } else {
                         SemanticTokenType::Variable
                     }
                 }
                 // Comments
-                TokenKind::DocComment | TokenKind::ModuleDoc => {
-                    SemanticTokenType::Comment
-                }
+                TokenKind::DocComment | TokenKind::ModuleDoc => SemanticTokenType::Comment,
                 // Operators
-                TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash |
-                TokenKind::Percent | TokenKind::Ampersand | TokenKind::Pipe | TokenKind::Caret |
-                TokenKind::Tilde | TokenKind::Bang | TokenKind::Assign | TokenKind::EqEq |
-                TokenKind::Ne | TokenKind::Lt | TokenKind::Le | TokenKind::Gt | TokenKind::Ge |
-                TokenKind::Shl | TokenKind::Shr | TokenKind::AndAnd | TokenKind::OrOr |
-                TokenKind::Arrow | TokenKind::FatArrow | TokenKind::PathSep | TokenKind::Colon |
-                TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq |
-                TokenKind::PercentEq | TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq |
-                TokenKind::ShlEq | TokenKind::ShrEq => {
-                    SemanticTokenType::Operator
-                }
+                TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::Ampersand
+                | TokenKind::Pipe
+                | TokenKind::Caret
+                | TokenKind::Tilde
+                | TokenKind::Bang
+                | TokenKind::Assign
+                | TokenKind::EqEq
+                | TokenKind::Ne
+                | TokenKind::Lt
+                | TokenKind::Le
+                | TokenKind::Gt
+                | TokenKind::Ge
+                | TokenKind::Shl
+                | TokenKind::Shr
+                | TokenKind::AndAnd
+                | TokenKind::OrOr
+                | TokenKind::Arrow
+                | TokenKind::FatArrow
+                | TokenKind::PathSep
+                | TokenKind::Colon
+                | TokenKind::PlusEq
+                | TokenKind::MinusEq
+                | TokenKind::StarEq
+                | TokenKind::SlashEq
+                | TokenKind::PercentEq
+                | TokenKind::AmpEq
+                | TokenKind::PipeEq
+                | TokenKind::CaretEq
+                | TokenKind::ShlEq
+                | TokenKind::ShrEq => SemanticTokenType::Operator,
                 // Skip delimiters and other tokens
                 _ => continue,
             };
@@ -1951,7 +2083,10 @@ fn format_type(ty: &Type) -> String {
         // for FP element types like `Channel<f32>`.
         // Wave 89-90 (Session Types): if a session type is attached, render
         // it alongside the payload type.
-        Type::Channel { inner, session_type } => match session_type {
+        Type::Channel {
+            inner,
+            session_type,
+        } => match session_type {
             Some(st) => format!("Channel<{}, {}>", format_type(inner), st),
             None => format!("Channel<{}>", format_type(inner)),
         },
@@ -2063,14 +2198,15 @@ mod tests {
         server.initialized = true;
 
         // Open a document with a syntax error
-        let params = JsonValue::Object(vec![
-            ("textDocument".to_string(), JsonValue::Object(vec![
+        let params = JsonValue::Object(vec![(
+            "textDocument".to_string(),
+            JsonValue::Object(vec![
                 ("uri".to_string(), json_str("file:///test.vuma")),
                 ("languageId".to_string(), json_str("vuma")),
                 ("version".to_string(), JsonValue::U64(1)),
                 ("text".to_string(), json_str("fn main( { }")),
-            ])),
-        ]);
+            ]),
+        )]);
 
         server.handle_text_document_did_open(params);
         assert!(server.documents.contains_key("file:///test.vuma"));
@@ -2082,27 +2218,33 @@ mod tests {
         server.initialized = true;
 
         // Open document
-        let open_params = JsonValue::Object(vec![
-            ("textDocument".to_string(), JsonValue::Object(vec![
+        let open_params = JsonValue::Object(vec![(
+            "textDocument".to_string(),
+            JsonValue::Object(vec![
                 ("uri".to_string(), json_str("file:///test.vuma")),
                 ("languageId".to_string(), json_str("vuma")),
                 ("version".to_string(), JsonValue::U64(1)),
                 ("text".to_string(), json_str("fn main() {}")),
-            ])),
-        ]);
+            ]),
+        )]);
         server.handle_text_document_did_open(open_params);
 
         // Change document
         let change_params = JsonValue::Object(vec![
-            ("textDocument".to_string(), JsonValue::Object(vec![
-                ("uri".to_string(), json_str("file:///test.vuma")),
-                ("version".to_string(), JsonValue::U64(2)),
-            ])),
-            ("contentChanges".to_string(), JsonValue::Array(vec![
+            (
+                "textDocument".to_string(),
                 JsonValue::Object(vec![
-                    ("text".to_string(), json_str("fn main() {\n    let x = 42;\n}")),
+                    ("uri".to_string(), json_str("file:///test.vuma")),
+                    ("version".to_string(), JsonValue::U64(2)),
                 ]),
-            ])),
+            ),
+            (
+                "contentChanges".to_string(),
+                JsonValue::Array(vec![JsonValue::Object(vec![(
+                    "text".to_string(),
+                    json_str("fn main() {\n    let x = 42;\n}"),
+                )])]),
+            ),
         ]);
         server.handle_text_document_did_change(change_params);
 
@@ -2112,34 +2254,38 @@ mod tests {
     }
 
     fn make_text_document_params(uri: &str, text: &str) -> JsonValue {
-        JsonValue::Object(vec![
-            ("textDocument".to_string(), JsonValue::Object(vec![
+        JsonValue::Object(vec![(
+            "textDocument".to_string(),
+            JsonValue::Object(vec![
                 ("uri".to_string(), json_str(uri)),
                 ("languageId".to_string(), json_str("vuma")),
                 ("version".to_string(), JsonValue::U64(1)),
                 ("text".to_string(), json_str(text)),
-            ])),
-        ])
+            ]),
+        )])
     }
 
     fn make_position_params(uri: &str, line: u64, character: u64) -> JsonValue {
         JsonValue::Object(vec![
-            ("textDocument".to_string(), JsonValue::Object(vec![
-                ("uri".to_string(), json_str(uri)),
-            ])),
-            ("position".to_string(), JsonValue::Object(vec![
-                ("line".to_string(), JsonValue::U64(line)),
-                ("character".to_string(), JsonValue::U64(character)),
-            ])),
+            (
+                "textDocument".to_string(),
+                JsonValue::Object(vec![("uri".to_string(), json_str(uri))]),
+            ),
+            (
+                "position".to_string(),
+                JsonValue::Object(vec![
+                    ("line".to_string(), JsonValue::U64(line)),
+                    ("character".to_string(), JsonValue::U64(character)),
+                ]),
+            ),
         ])
     }
 
     fn make_doc_only_params(uri: &str) -> JsonValue {
-        JsonValue::Object(vec![
-            ("textDocument".to_string(), JsonValue::Object(vec![
-                ("uri".to_string(), json_str(uri)),
-            ])),
-        ])
+        JsonValue::Object(vec![(
+            "textDocument".to_string(),
+            JsonValue::Object(vec![("uri".to_string(), json_str(uri))]),
+        )])
     }
 
     #[test]
@@ -2158,7 +2304,8 @@ mod tests {
         assert!(items.len() > 20);
 
         // Check that some keywords are present
-        let labels: Vec<&str> = items.iter()
+        let labels: Vec<&str> = items
+            .iter()
             .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
             .collect();
         assert!(labels.contains(&"fn"));
@@ -2184,7 +2331,8 @@ mod tests {
         let result = server.handle_text_document_completion(completion_params);
         let items = result.get("items").unwrap().as_array().unwrap();
 
-        let labels: Vec<&str> = items.iter()
+        let labels: Vec<&str> = items
+            .iter()
             .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
             .collect();
         assert!(labels.contains(&"hello"));
@@ -2251,7 +2399,8 @@ mod tests {
         // Should have: main, helper, Data, x, Color
         assert!(symbols.len() >= 4);
 
-        let names: Vec<&str> = symbols.iter()
+        let names: Vec<&str> = symbols
+            .iter()
             .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
             .collect();
         assert!(names.contains(&"main"));
@@ -2265,10 +2414,8 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = make_text_document_params(
-            "file:///test.vuma",
-            "fn main() {\n    let x = 42;\n}",
-        );
+        let open_params =
+            make_text_document_params("file:///test.vuma", "fn main() {\n    let x = 42;\n}");
         server.handle_text_document_did_open(open_params);
 
         let tokens_params = make_doc_only_params("file:///test.vuma");
@@ -2466,10 +2613,8 @@ mod tests {
         // column 0123456789012345678901234567890123456
         //                 1111111111222222222233333333
         // `inttofloat` occupies columns 20..30 on line 0.
-        let open_params = make_text_document_params(
-            "file:///test.vuma",
-            "fn main() { let x = inttofloat(3); }",
-        );
+        let open_params =
+            make_text_document_params("file:///test.vuma", "fn main() { let x = inttofloat(3); }");
         server.handle_text_document_did_open(open_params);
 
         let hover_params = make_position_params("file:///test.vuma", 0, 20);
@@ -2508,10 +2653,8 @@ mod tests {
         //        fn main() { let x: f32 = 3.0; }
         // column 0123456789012345678901234567890123
         //                 1111111111222222222233333
-        let open_params = make_text_document_params(
-            "file:///test.vuma",
-            "fn main() { let x: f32 = 3.0; }",
-        );
+        let open_params =
+            make_text_document_params("file:///test.vuma", "fn main() { let x: f32 = 3.0; }");
         server.handle_text_document_did_open(open_params);
 
         let hover_params = make_position_params("file:///test.vuma", 0, 16);

@@ -126,9 +126,7 @@ pub enum ReturnMode {
 pub fn classify_return_mode(decl_attrs: &[AttrInfo]) -> ReturnMode {
     for attr in decl_attrs {
         if attr.name == "unmarshal" {
-            return ReturnMode::Unmarshal(
-                attr.value.clone().unwrap_or_default(),
-            );
+            return ReturnMode::Unmarshal(attr.value.clone().unwrap_or_default());
         }
         if attr.name == "foreign_return" {
             return ReturnMode::ForeignWrap(
@@ -184,11 +182,7 @@ pub struct MarshalResult {
 ///
 /// This is the legacy API kept for backward compatibility with existing
 /// callers. New code should use `marshal_arg` with an explicit `ArgMode`.
-pub fn marshal_state_for_ffi(
-    state_var: &str,
-    layout_size: u64,
-    is_pure: bool,
-) -> MarshalResult {
+pub fn marshal_state_for_ffi(state_var: &str, layout_size: u64, is_pure: bool) -> MarshalResult {
     let _ = layout_size;
     let mode = if is_pure {
         ArgMode::Borrow

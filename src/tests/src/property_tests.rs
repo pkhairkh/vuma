@@ -30,9 +30,8 @@
 //!   SHN_UNDEF symbols in ELF output.
 
 use vuma_scg::{
-    AccessMode, AccessNode, AllocationNode, ComputationNode, ControlKind,
-    ControlNode, DeallocationNode, EdgeKind, NodeId, NodePayload, NodeType,
-    ProgramPoint, RegionId, SCG,
+    AccessMode, AccessNode, AllocationNode, ComputationNode, ControlKind, ControlNode,
+    DeallocationNode, EdgeKind, NodeId, NodePayload, NodeType, ProgramPoint, RegionId, SCG,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -270,11 +269,7 @@ fn payload_type(payload: &NodePayload) -> NodeType {
 /// variant exercised by the SCG construction tests.
 fn sample_node_payloads() -> Vec<NodePayload> {
     vec![
-        NodePayload::Computation(ComputationNode::new(
-            "add",
-            Some("i64".to_string()),
-            false,
-        )),
+        NodePayload::Computation(ComputationNode::new("add", Some("i64".to_string()), false)),
         NodePayload::Computation(ComputationNode::new("mul", None, false)),
         NodePayload::Allocation(AllocationNode {
             size: 64,
@@ -423,8 +418,7 @@ fn prop_cross_backend_all_produce_output() {
             assert!(
                 result.success,
                 "Compilation should succeed for target '{}'. Diagnostics: {:?}",
-                target,
-                result.diagnostics
+                target, result.diagnostics
             );
             assert!(
                 result.target.is_some(),
@@ -521,8 +515,7 @@ fn prop_scg_edges_connect_valid_nodes() {
         };
 
         // Collect all node IDs.
-        let node_ids: std::collections::HashSet<NodeId> =
-            scg.nodes().map(|n| n.id).collect();
+        let node_ids: std::collections::HashSet<NodeId> = scg.nodes().map(|n| n.id).collect();
 
         // Verify every edge connects existing nodes.
         for edge in scg.edges() {
@@ -640,8 +633,11 @@ fn prop_scg_edge_to_nonexistent_node_fails() {
     for payload in sample_node_payloads() {
         for kind in all_edge_kinds() {
             let mut scg = SCG::new();
-            let node_id =
-                scg.add_node(payload_type(&payload), payload.clone(), sample_program_point());
+            let node_id = scg.add_node(
+                payload_type(&payload),
+                payload.clone(),
+                sample_program_point(),
+            );
             let fake_id = NodeId::new(99999);
 
             // Edge from real to fake should fail.
@@ -771,12 +767,9 @@ fn prop_float_int_float_roundtrip() {
             let back = as_i64 as f64;
             // The integer value should convert back exactly.
             assert_eq!(
-                back,
-                as_i64 as f64,
+                back, as_i64 as f64,
                 "f64→i64→f64 roundtrip for integer-equivalent value: {} → {} → {}",
-                v,
-                as_i64,
-                back
+                v, as_i64, back
             );
         }
     }
@@ -870,13 +863,21 @@ fn prop_atomic_cas_compiles() {
 /// Rotate left (64-bit).
 fn rol64(x: u64, n: u32) -> u64 {
     let n = n % 64;
-    if n == 0 { x } else { (x << n) | (x >> (64 - n)) }
+    if n == 0 {
+        x
+    } else {
+        (x << n) | (x >> (64 - n))
+    }
 }
 
 /// Rotate right (64-bit).
 fn ror64(x: u64, n: u32) -> u64 {
     let n = n % 64;
-    if n == 0 { x } else { (x >> n) | (x << (64 - n)) }
+    if n == 0 {
+        x
+    } else {
+        (x >> n) | (x << (64 - n))
+    }
 }
 
 #[test]
@@ -944,7 +945,8 @@ fn prop_rotate_large_amount_roundtrip() {
             let rotated = rol64(x, n);
             let restored = ror64(rotated, n);
             assert_eq!(
-                restored, x,
+                restored,
+                x,
                 "ROL/ROR roundtrip with n={} (mod 64 = {}) failed",
                 n,
                 n % 64
@@ -961,14 +963,16 @@ fn prop_rotate_large_amount_roundtrip() {
 /// parameter (or 0 if no params).  This mirrors the helper in
 /// `abi_conformance.rs`.
 fn build_ir_function_with_n_args(name: &str, n: usize) -> vuma_codegen::ir::IRFunction {
-    use vuma_codegen::ir::{IRFunction, IRType, IRValue, IRTerminator, VirtualRegister};
+    use vuma_codegen::ir::{IRFunction, IRTerminator, IRType, IRValue, VirtualRegister};
 
     let mut func = IRFunction::new(name);
     for i in 0..n {
         func.param_types.push(IRType::I64);
         func.params.push(IRValue::Register(i as u32));
-        func.vregs
-            .insert(i as u32, VirtualRegister::named(i as u32, format!("a{}", i)));
+        func.vregs.insert(
+            i as u32,
+            VirtualRegister::named(i as u32, format!("a{}", i)),
+        );
     }
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(n as u32));
@@ -1016,8 +1020,8 @@ fn prop_abi_varying_arg_counts_compile() {
                         functions: vec![allocated],
                         total_code_size: 0,
                         total_data_size: 0,
-                    rodata_data: Vec::new(),
-                    function_names: std::collections::HashSet::new(),
+                        rodata_data: Vec::new(),
+                        function_names: std::collections::HashSet::new(),
                     };
                     // Encoding should also not panic.
                     let encode_result = backend.encode_program(&program);
@@ -1051,19 +1055,20 @@ fn prop_abi_same_arg_count_same_size() {
                     functions: vec![a],
                     total_code_size: 0,
                     total_data_size: 0,
-                rodata_data: Vec::new(),
-                function_names: std::collections::HashSet::new(),
+                    rodata_data: Vec::new(),
+                    function_names: std::collections::HashSet::new(),
                 };
                 let prog_b = AllocatedProgram {
                     functions: vec![b],
                     total_code_size: 0,
                     total_data_size: 0,
-                rodata_data: Vec::new(),
-                function_names: std::collections::HashSet::new(),
+                    rodata_data: Vec::new(),
+                    function_names: std::collections::HashSet::new(),
                 };
-                if let (Ok(bin_a), Ok(bin_b)) =
-                    (backend.encode_program(&prog_a), backend.encode_program(&prog_b))
-                {
+                if let (Ok(bin_a), Ok(bin_b)) = (
+                    backend.encode_program(&prog_a),
+                    backend.encode_program(&prog_b),
+                ) {
                     assert_eq!(
                         bin_a.len(),
                         bin_b.len(),
@@ -1084,34 +1089,42 @@ fn prop_abi_same_arg_count_same_size() {
 /// headers.  Returns `None` if the ELF cannot be parsed or .text is not
 /// found.
 fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
-    if elf.len() < 64 { return None; }
-    if &elf[0..4] != b"\x7fELF" { return None; }
+    if elf.len() < 64 {
+        return None;
+    }
+    if &elf[0..4] != b"\x7fELF" {
+        return None;
+    }
 
     let is_64 = elf[4] == 2;
     let is_le = elf[5] == 1;
 
     let read_u16 = |b: &[u8]| -> u16 {
-        if is_le { u16::from_le_bytes([b[0], b[1]]) }
-        else { u16::from_be_bytes([b[0], b[1]]) }
+        if is_le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
     };
     let read_u32 = |b: &[u8]| -> u32 {
-        if is_le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
-        else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) }
+        if is_le {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        }
     };
     let read_u64 = |b: &[u8]| -> u64 {
         if is_le {
-            u64::from_le_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            ])
+            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
         } else {
-            u64::from_be_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            ])
+            u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
         }
     };
 
     let (e_shoff, e_shentsize, e_shnum, e_shstrndx) = if is_64 {
-        if elf.len() < 64 { return None; }
+        if elf.len() < 64 {
+            return None;
+        }
         (
             read_u64(&elf[40..48]) as usize,
             read_u16(&elf[58..60]) as usize,
@@ -1119,7 +1132,9 @@ fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
             read_u16(&elf[62..64]) as usize,
         )
     } else {
-        if elf.len() < 52 { return None; }
+        if elf.len() < 52 {
+            return None;
+        }
         (
             read_u32(&elf[32..36]) as usize,
             read_u16(&elf[46..48]) as usize,
@@ -1128,16 +1143,22 @@ fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
         )
     };
 
-    if e_shoff == 0 || e_shnum == 0 { return None; }
+    if e_shoff == 0 || e_shnum == 0 {
+        return None;
+    }
 
     // Find the section-header string table.
     let shstrtab_off = if e_shstrndx > 0 && (e_shstrndx as usize) < e_shnum {
         let shdr_off = e_shoff + (e_shstrndx as usize) * e_shentsize;
         if is_64 {
-            if shdr_off + 64 > elf.len() { return None; }
+            if shdr_off + 64 > elf.len() {
+                return None;
+            }
             read_u64(&elf[shdr_off + 24..shdr_off + 32]) as usize
         } else {
-            if shdr_off + 40 > elf.len() { return None; }
+            if shdr_off + 40 > elf.len() {
+                return None;
+            }
             read_u32(&elf[shdr_off + 16..shdr_off + 20]) as usize
         }
     } else {
@@ -1148,7 +1169,9 @@ fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
     for i in 0..e_shnum {
         let shdr_off = e_shoff + i * e_shentsize;
         if is_64 {
-            if shdr_off + 64 > elf.len() { break; }
+            if shdr_off + 64 > elf.len() {
+                break;
+            }
             let sh_name = read_u32(&elf[shdr_off..shdr_off + 4]) as usize;
             let sh_offset = read_u64(&elf[shdr_off + 24..shdr_off + 32]) as usize;
             let sh_size = read_u64(&elf[shdr_off + 32..shdr_off + 40]) as usize;
@@ -1156,12 +1179,12 @@ fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
             // Read the name from shstrtab.
             let name_start = shstrtab_off + sh_name;
             if name_start < elf.len() {
-                let name_end = elf[name_start..].iter()
+                let name_end = elf[name_start..]
+                    .iter()
                     .position(|&b| b == 0)
                     .map(|p| name_start + p)
                     .unwrap_or(elf.len());
-                let name = std::str::from_utf8(&elf[name_start..name_end])
-                    .unwrap_or("");
+                let name = std::str::from_utf8(&elf[name_start..name_end]).unwrap_or("");
                 if name == ".text" {
                     if sh_offset + sh_size <= elf.len() {
                         return Some(elf[sh_offset..sh_offset + sh_size].to_vec());
@@ -1169,19 +1192,21 @@ fn extract_text_section(elf: &[u8]) -> Option<Vec<u8>> {
                 }
             }
         } else {
-            if shdr_off + 40 > elf.len() { break; }
+            if shdr_off + 40 > elf.len() {
+                break;
+            }
             let sh_name = read_u32(&elf[shdr_off..shdr_off + 4]) as usize;
             let sh_offset = read_u32(&elf[shdr_off + 16..shdr_off + 20]) as usize;
             let sh_size = read_u32(&elf[shdr_off + 20..shdr_off + 24]) as usize;
 
             let name_start = shstrtab_off + sh_name;
             if name_start < elf.len() {
-                let name_end = elf[name_start..].iter()
+                let name_end = elf[name_start..]
+                    .iter()
                     .position(|&b| b == 0)
                     .map(|p| name_start + p)
                     .unwrap_or(elf.len());
-                let name = std::str::from_utf8(&elf[name_start..name_end])
-                    .unwrap_or("");
+                let name = std::str::from_utf8(&elf[name_start..name_end]).unwrap_or("");
                 if name == ".text" {
                     if sh_offset + sh_size <= elf.len() {
                         return Some(elf[sh_offset..sh_offset + sh_size].to_vec());
@@ -1228,10 +1253,7 @@ fn prop_dwarf_text_section_unchanged() {
             let text_d = extract_text_section(d);
 
             if let (Some(t_nd), Some(t_d)) = (text_nd, text_d) {
-                assert_eq!(
-                    t_nd, t_d,
-                    "Debug info should not change .text section"
-                );
+                assert_eq!(t_nd, t_d, "Debug info should not change .text section");
             }
             // If we couldn't parse .text, that's OK — the ELF may not
             // have section headers.  The important thing is no panic.
@@ -1247,29 +1269,35 @@ fn prop_dwarf_text_section_unchanged() {
 /// SHN_UNDEF (section index 0), i.e., undefined/external symbols.
 fn find_undef_symbols(elf: &[u8]) -> Vec<String> {
     let mut undef_syms = Vec::new();
-    if elf.len() < 64 { return undef_syms; }
-    if &elf[0..4] != b"\x7fELF" { return undef_syms; }
+    if elf.len() < 64 {
+        return undef_syms;
+    }
+    if &elf[0..4] != b"\x7fELF" {
+        return undef_syms;
+    }
 
     let is_64 = elf[4] == 2;
     let is_le = elf[5] == 1;
 
     let read_u16 = |b: &[u8]| -> u16 {
-        if is_le { u16::from_le_bytes([b[0], b[1]]) }
-        else { u16::from_be_bytes([b[0], b[1]]) }
+        if is_le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        }
     };
     let read_u32 = |b: &[u8]| -> u32 {
-        if is_le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
-        else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) }
+        if is_le {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        }
     };
     let read_u64 = |b: &[u8]| -> u64 {
         if is_le {
-            u64::from_le_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            ])
+            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
         } else {
-            u64::from_be_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            ])
+            u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
         }
     };
 
@@ -1289,25 +1317,33 @@ fn find_undef_symbols(elf: &[u8]) -> Vec<String> {
         )
     };
 
-    if e_shoff == 0 || e_shnum == 0 { return undef_syms; }
+    if e_shoff == 0 || e_shnum == 0 {
+        return undef_syms;
+    }
 
     // Find SHT_SYMTAB (type 2) and its linked string table.
     for i in 0..e_shnum {
         let shdr_off = e_shoff + i * e_shentsize;
         if is_64 {
-            if shdr_off + 64 > elf.len() { break; }
+            if shdr_off + 64 > elf.len() {
+                break;
+            }
             let sh_type = read_u32(&elf[shdr_off + 4..shdr_off + 8]);
             let sh_offset = read_u64(&elf[shdr_off + 24..shdr_off + 32]) as usize;
             let sh_size = read_u64(&elf[shdr_off + 32..shdr_off + 40]) as usize;
             let sh_link = read_u32(&elf[shdr_off + 40..shdr_off + 44]) as usize;
             let sh_entsize = read_u64(&elf[shdr_off + 56..shdr_off + 64]) as usize;
 
-            if sh_type != 2 { continue; } // Not SHT_SYMTAB
+            if sh_type != 2 {
+                continue;
+            } // Not SHT_SYMTAB
 
             // Load the linked string table.
             let strtab_off = if sh_link > 0 && sh_link < e_shnum {
                 let str_shdr_off = e_shoff + sh_link * e_shentsize;
-                if str_shdr_off + 64 > elf.len() { continue; }
+                if str_shdr_off + 64 > elf.len() {
+                    continue;
+                }
                 read_u64(&elf[str_shdr_off + 24..str_shdr_off + 32]) as usize
             } else {
                 continue;
@@ -1316,18 +1352,23 @@ fn find_undef_symbols(elf: &[u8]) -> Vec<String> {
             let entry_size = if sh_entsize > 0 { sh_entsize } else { 24 };
             let num_syms = sh_size / entry_size;
 
-            for j in 1..num_syms { // Skip symbol 0 (null)
+            for j in 1..num_syms {
+                // Skip symbol 0 (null)
                 let sym_off = sh_offset + j * entry_size;
-                if sym_off + 24 > elf.len() { break; }
+                if sym_off + 24 > elf.len() {
+                    break;
+                }
                 let st_name = read_u32(&elf[sym_off..sym_off + 4]) as usize;
                 let _st_info = elf[sym_off + 4];
                 let _st_other = elf[sym_off + 5];
                 let st_shndx = read_u16(&elf[sym_off + 6..sym_off + 8]);
 
-                if st_shndx == 0 { // SHN_UNDEF
+                if st_shndx == 0 {
+                    // SHN_UNDEF
                     let name_start = strtab_off + st_name;
                     if name_start < elf.len() {
-                        let name_end = elf[name_start..].iter()
+                        let name_end = elf[name_start..]
+                            .iter()
                             .position(|&b| b == 0)
                             .map(|p| name_start + p)
                             .unwrap_or(elf.len());
@@ -1340,18 +1381,24 @@ fn find_undef_symbols(elf: &[u8]) -> Vec<String> {
                 }
             }
         } else {
-            if shdr_off + 40 > elf.len() { break; }
+            if shdr_off + 40 > elf.len() {
+                break;
+            }
             let sh_type = read_u32(&elf[shdr_off + 4..shdr_off + 8]);
             let sh_offset = read_u32(&elf[shdr_off + 16..shdr_off + 20]) as usize;
             let sh_size = read_u32(&elf[shdr_off + 20..shdr_off + 24]) as usize;
             let sh_link = read_u32(&elf[shdr_off + 24..shdr_off + 28]) as usize;
             let sh_entsize = read_u32(&elf[shdr_off + 36..shdr_off + 40]) as usize;
 
-            if sh_type != 2 { continue; }
+            if sh_type != 2 {
+                continue;
+            }
 
             let strtab_off = if sh_link > 0 && sh_link < e_shnum {
                 let str_shdr_off = e_shoff + sh_link * e_shentsize;
-                if str_shdr_off + 40 > elf.len() { continue; }
+                if str_shdr_off + 40 > elf.len() {
+                    continue;
+                }
                 read_u32(&elf[str_shdr_off + 16..str_shdr_off + 20]) as usize
             } else {
                 continue;
@@ -1362,16 +1409,20 @@ fn find_undef_symbols(elf: &[u8]) -> Vec<String> {
 
             for j in 1..num_syms {
                 let sym_off = sh_offset + j * entry_size;
-                if sym_off + 16 > elf.len() { break; }
+                if sym_off + 16 > elf.len() {
+                    break;
+                }
                 let st_name = read_u32(&elf[sym_off..sym_off + 4]) as usize;
                 let _st_info = elf[sym_off + 4];
                 let _st_other = elf[sym_off + 5];
                 let st_shndx = read_u16(&elf[sym_off + 6..sym_off + 8]);
 
-                if st_shndx == 0 { // SHN_UNDEF
+                if st_shndx == 0 {
+                    // SHN_UNDEF
                     let name_start = strtab_off + st_name;
                     if name_start < elf.len() {
-                        let name_end = elf[name_start..].iter()
+                        let name_end = elf[name_start..]
+                            .iter()
                             .position(|&b| b == 0)
                             .map(|p| name_start + p)
                             .unwrap_or(elf.len());
@@ -1487,7 +1538,7 @@ fn fuzz_int_edge_cases_bitcast() {
         let bits = v as u64;
         let f = f64::from_bits(bits);
         let _ = f; // Don't care about value, just no panic.
-        // f64 → u64 roundtrip.
+                   // f64 → u64 roundtrip.
         let bits_back = f.to_bits();
         assert_eq!(bits_back, bits, "Bit roundtrip failed for i64={}", v);
     }
@@ -1530,20 +1581,27 @@ fn fuzz_rotation_edge_cases() {
         let x: u64 = 1;
         let rotated = rol64(x, n);
         let restored = ror64(rotated, n);
-        assert_eq!(restored, x,
-            "ROL/ROR roundtrip failed for x={}, n={}", x, n);
+        assert_eq!(restored, x, "ROL/ROR roundtrip failed for x={}, n={}", x, n);
 
         // Test with all bits set.
         let x_all: u64 = !0;
         let rotated_all = rol64(x_all, n);
-        assert_eq!(rotated_all, x_all,
-            "ROL of all-ones should be all-ones for n={}", n);
+        assert_eq!(
+            rotated_all, x_all,
+            "ROL of all-ones should be all-ones for n={}",
+            n
+        );
 
         // ROL(x, n) should equal ROR(x, 64-n%64) for non-zero n.
         if n % 64 != 0 {
             let via_ror = ror64(x, 64 - (n % 64));
-            assert_eq!(rotated, via_ror,
-                "ROL(x, {}) should equal ROR(x, {})", n, 64 - (n % 64));
+            assert_eq!(
+                rotated,
+                via_ror,
+                "ROL(x, {}) should equal ROR(x, {})",
+                n,
+                64 - (n % 64)
+            );
         }
     }
 }
@@ -1566,7 +1624,9 @@ fn fuzz_arg_count_edge_cases() {
                 assert!(
                     result.is_ok(),
                     "Register allocation for {} args on {:?} failed: {:?}",
-                    n, kind, result.err()
+                    n,
+                    kind,
+                    result.err()
                 );
 
                 if let Ok(allocated) = result {
@@ -1574,14 +1634,16 @@ fn fuzz_arg_count_edge_cases() {
                         functions: vec![allocated],
                         total_code_size: 0,
                         total_data_size: 0,
-                    rodata_data: Vec::new(),
-                    function_names: std::collections::HashSet::new(),
+                        rodata_data: Vec::new(),
+                        function_names: std::collections::HashSet::new(),
                     };
                     let encode_result = backend.encode_program(&program);
                     assert!(
                         encode_result.is_ok(),
                         "Encoding for {} args on {:?} failed: {:?}",
-                        n, kind, encode_result.err()
+                        n,
+                        kind,
+                        encode_result.err()
                     );
                 }
             }
@@ -1611,15 +1673,11 @@ fn fuzz_dwarf_text_consistency_simple() {
     let result_d = compiler_debug.compile(source);
 
     if result_nd.success && result_d.success {
-        if let (Some(t_nd), Some(t_d)) = (
-            result_nd.target.as_ref(),
-            result_d.target.as_ref(),
-        ) {
+        if let (Some(t_nd), Some(t_d)) = (result_nd.target.as_ref(), result_d.target.as_ref()) {
             let text_nd = extract_text_section(&t_nd.binary);
             let text_d = extract_text_section(&t_d.binary);
             if let (Some(tn), Some(td)) = (text_nd, text_d) {
-                assert_eq!(tn, td,
-                    "Debug info should not change .text section");
+                assert_eq!(tn, td, "Debug info should not change .text section");
             }
         }
     }

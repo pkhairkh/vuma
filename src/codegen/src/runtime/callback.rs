@@ -38,7 +38,9 @@ pub struct LiveSet {
 impl LiveSet {
     /// Create an empty live set.
     pub fn new() -> Self {
-        Self { regions: Vec::new() }
+        Self {
+            regions: Vec::new(),
+        }
     }
 
     /// Create a live set from a slice of (start, end) tuples.
@@ -58,7 +60,9 @@ impl LiveSet {
 
     /// Returns true if `offset` falls within any live region.
     pub fn contains(&self, offset: u64) -> bool {
-        self.regions.iter().any(|r| offset >= r.start && offset < r.end)
+        self.regions
+            .iter()
+            .any(|r| offset >= r.start && offset < r.end)
     }
 
     /// Returns the number of live regions.
@@ -81,7 +85,7 @@ pub struct CallbackContext {
 thread_local! {
     /// The current callback depth (0 = no callback in flight).
     /// Used to detect nested callbacks and enforce single-threaded operation.
-    static CALLBACK_DEPTH: RefCell<usize> = RefCell::new(0);
+    static CALLBACK_DEPTH: RefCell<usize> = const { RefCell::new(0) };
 }
 
 /// Enter a callback. Pushes an isolated scratchpad frame and records the
@@ -165,7 +169,7 @@ mod tests {
         let ctx = enter_callback(&[(0, 16)]);
         assert_eq!(callback_depth(), 1);
         assert!(check_access(&ctx, 32)); // 32 is not in [0,16) — OK
-        assert!(!check_access(&ctx, 8));  // 8 is in [0,16) — violation
+        assert!(!check_access(&ctx, 8)); // 8 is in [0,16) — violation
         exit_callback(ctx);
         assert_eq!(callback_depth(), 0);
     }
@@ -177,9 +181,9 @@ mod tests {
         assert_eq!(callback_depth(), 1);
         let ctx2 = enter_callback(&[(0, 16), (32, 48)]); // nested
         assert_eq!(callback_depth(), 2);
-        assert!(!check_access(&ctx2, 8));  // in [0,16) — violation
+        assert!(!check_access(&ctx2, 8)); // in [0,16) — violation
         assert!(!check_access(&ctx2, 40)); // in [32,48) — violation
-        assert!(check_access(&ctx2, 64));   // free — OK
+        assert!(check_access(&ctx2, 64)); // free — OK
         exit_callback(ctx2);
         assert_eq!(callback_depth(), 1);
         exit_callback(ctx1);

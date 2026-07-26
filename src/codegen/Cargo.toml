@@ -18,3 +18,10 @@ vuma-scg.workspace = true
 # to a hand-written recursive descent parser (`parse_profile_json`) that
 # understands the shape `{"hotness": {"<id>": <u64>, ...}}` — the on-disk
 # JSON format produced by `ProfileData::to_json` is unchanged.
+
+[features]
+# pmt-runtime-check: when enabled, compiles the verified Lean-translated PMT
+# checkers from proof/extracted/pmt_check.rs into the runtime. The checkers
+# are NOT yet wired into arena.rs (future wave); this flag only gates module
+# compilation so downstream work can opt-in incrementally.
+pmt-runtime-check = []

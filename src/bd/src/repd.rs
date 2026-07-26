@@ -765,13 +765,25 @@ impl fmt::Display for RepD {
                 write!(f, ")")
             }
             RepD::ManifoldSpatial(m) => {
-                write!(f, "manifold(dims={}, {:?}, curve={:?})", m.dimensions, m.dim_sizes, m.curve)
+                write!(
+                    f,
+                    "manifold(dims={}, {:?}, curve={:?})",
+                    m.dimensions, m.dim_sizes, m.curve
+                )
             }
             RepD::GestaltSuperposition(g) => {
-                write!(f, "gestalt({:?}, size={}, degraded={})", g.variants, g.max_size, g.degraded)
+                write!(
+                    f,
+                    "gestalt({:?}, size={}, degraded={})",
+                    g.variants, g.max_size, g.degraded
+                )
             }
             RepD::ConceptRelational(c) => {
-                write!(f, "concept({:?}, size={}, soa={})", c.field_names, c.total_size, c.use_soa)
+                write!(
+                    f,
+                    "concept({:?}, size={}, soa={})",
+                    c.field_names, c.total_size, c.use_soa
+                )
             }
             RepD::State { layout } => write!(f, "state(layout={})", layout.0),
             RepD::Ref { layout, field } => {
@@ -937,7 +949,7 @@ impl LayoutRegistry {
             let field_size = repd.size();
 
             // Bump the running offset up to the field's required alignment.
-            if field_align > 1 && current_offset % field_align != 0 {
+            if field_align > 1 && !current_offset.is_multiple_of(field_align) {
                 current_offset = align_to(current_offset, field_align);
             }
 
@@ -959,7 +971,7 @@ impl LayoutRegistry {
         let alignment = max_align.max(1);
         let total_size = if current_offset == 0 {
             0
-        } else if current_offset % alignment == 0 {
+        } else if current_offset.is_multiple_of(alignment) {
             current_offset
         } else {
             align_to(current_offset, alignment)
@@ -1771,8 +1783,13 @@ mod tests {
             RepD::Ptr(PtrRep {
                 pointee: Box::new(RepD::Byte(ByteRep { size: 1, align: 1 })),
             }),
-            RepD::State { layout: LayoutId(0) },  // returns 0 (needs registry)
-            RepD::Ref { layout: LayoutId(0), field: FieldId(0) },  // POINTER_SIZE
+            RepD::State {
+                layout: LayoutId(0),
+            }, // returns 0 (needs registry)
+            RepD::Ref {
+                layout: LayoutId(0),
+                field: FieldId(0),
+            }, // POINTER_SIZE
         ];
         for r in &cases {
             assert_eq!(r.size_of(), r.size(), "size_of != size for {r}");
@@ -1787,7 +1804,13 @@ mod tests {
             POINTER_SIZE
         );
         // State returns 0 (resolved via LayoutRegistry::state_size).
-        assert_eq!(RepD::State { layout: LayoutId(0) }.size_of(), 0);
+        assert_eq!(
+            RepD::State {
+                layout: LayoutId(0)
+            }
+            .size_of(),
+            0
+        );
     }
 
     #[test]
@@ -1866,7 +1889,10 @@ mod tests {
         let id = reg.register(
             "Typed",
             vec![
-                ("byte4".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
+                (
+                    "byte4".to_string(),
+                    RepD::Byte(ByteRep { size: 4, align: 4 }),
+                ),
                 (
                     "ptr".to_string(),
                     RepD::Ptr(PtrRep {
@@ -2059,10 +2085,7 @@ mod tests {
             count_var: "n".to_string(),
         };
         let outer = RepD::Struct(StructRep {
-            fields: vec![
-                (0, RepD::Byte(ByteRep { size: 4, align: 4 })),
-                (4, inner),
-            ],
+            fields: vec![(0, RepD::Byte(ByteRep { size: 4, align: 4 })), (4, inner)],
             total_size: 4, // dep array contributes 0 to compile-time size
             align: 4,
         });

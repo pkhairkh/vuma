@@ -594,6 +594,10 @@ pub struct LetStmt {
     pub ty: Option<Type>,
     /// Initializer expression.
     pub value: Expr,
+    /// Outer attributes (e.g. `#[secret]` for Gap 8 constant-time tainting).
+    /// Populated when the parser sees `#[...]` immediately before `let`.
+    /// Empty for the type-ascription form (`name: T = expr;`).
+    pub attrs: Vec<Attribute>,
     /// Source span.
     pub span: Span,
 }
@@ -1642,7 +1646,11 @@ impl SecurityLabel {
     /// Used when combining data from two sources (the result carries the
     /// more restrictive label).
     pub fn join(self, other: SecurityLabel) -> SecurityLabel {
-        if self >= other { self } else { other }
+        if self >= other {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -1677,7 +1685,10 @@ pub struct InformationFlow {
 impl InformationFlow {
     /// Construct a non-declassified annotation with the given label.
     pub fn new(label: SecurityLabel) -> Self {
-        Self { label, declassified: None }
+        Self {
+            label,
+            declassified: None,
+        }
     }
 
     /// Construct a declassified annotation (label becomes `Low`, with
@@ -1731,12 +1742,13 @@ impl std::fmt::Display for Type {
             Type::BdAnnot { name } => write!(f, "#bd({})", name),
             Type::State(inner) => write!(f, "State<{}>", inner),
             Type::Ref { state, field } => write!(f, "Ref<{}, {}>", state, field),
-            Type::Channel { inner, session_type } => {
-                match session_type {
-                    Some(st) => write!(f, "Channel<{}, {}>", inner, st),
-                    None => write!(f, "Channel<{}>", inner),
-                }
-            }
+            Type::Channel {
+                inner,
+                session_type,
+            } => match session_type {
+                Some(st) => write!(f, "Channel<{}, {}>", inner, st),
+                None => write!(f, "Channel<{}>", inner),
+            },
         }
     }
 }

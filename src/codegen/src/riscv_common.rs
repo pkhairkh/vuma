@@ -22,10 +22,38 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Gpr {
-    Zero, Ra, Sp, Gp, Tp, T0, T1, T2,
-    S0, S1, A0, A1, A2, A3, A4, A5,
-    A6, A7, S2, S3, S4, S5, S6, S7,
-    S8, S9, S10, S11, T3, T4, T5, T6,
+    Zero,
+    Ra,
+    Sp,
+    Gp,
+    Tp,
+    T0,
+    T1,
+    T2,
+    S0,
+    S1,
+    A0,
+    A1,
+    A2,
+    A3,
+    A4,
+    A5,
+    A6,
+    A7,
+    S2,
+    S3,
+    S4,
+    S5,
+    S6,
+    S7,
+    S8,
+    S9,
+    S10,
+    S11,
+    T3,
+    T4,
+    T5,
+    T6,
 }
 
 impl Gpr {
@@ -34,20 +62,37 @@ impl Gpr {
     }
 
     pub fn from_encoding(enc: u32) -> Option<Self> {
-        if enc > 31 { return None; }
+        if enc > 31 {
+            return None;
+        }
         // SAFETY: Gpr is a fieldless enum with repr(u32) and 32 variants 0..31
         Some(unsafe { std::mem::transmute::<u32, Gpr>(enc) })
     }
 
     pub fn is_callee_saved(&self) -> bool {
-        matches!(self, Gpr::Sp | Gpr::S0 | Gpr::S1 | Gpr::S2 | Gpr::S3
-            | Gpr::S4 | Gpr::S5 | Gpr::S6 | Gpr::S7 | Gpr::S8 | Gpr::S9
-            | Gpr::S10 | Gpr::S11)
+        matches!(
+            self,
+            Gpr::Sp
+                | Gpr::S0
+                | Gpr::S1
+                | Gpr::S2
+                | Gpr::S3
+                | Gpr::S4
+                | Gpr::S5
+                | Gpr::S6
+                | Gpr::S7
+                | Gpr::S8
+                | Gpr::S9
+                | Gpr::S10
+                | Gpr::S11
+        )
     }
 
     pub fn is_arg_reg(&self) -> bool {
-        matches!(self, Gpr::A0 | Gpr::A1 | Gpr::A2 | Gpr::A3
-            | Gpr::A4 | Gpr::A5 | Gpr::A6 | Gpr::A7)
+        matches!(
+            self,
+            Gpr::A0 | Gpr::A1 | Gpr::A2 | Gpr::A3 | Gpr::A4 | Gpr::A5 | Gpr::A6 | Gpr::A7
+        )
     }
 
     pub fn is_available(&self) -> bool {
@@ -56,22 +101,51 @@ impl Gpr {
 
     pub fn asm_name(&self) -> &'static str {
         match self {
-            Gpr::Zero => "zero", Gpr::Ra => "ra", Gpr::Sp => "sp", Gpr::Gp => "gp",
-            Gpr::Tp => "tp", Gpr::T0 => "t0", Gpr::T1 => "t1", Gpr::T2 => "t2",
-            Gpr::S0 => "s0", Gpr::S1 => "s1", Gpr::A0 => "a0", Gpr::A1 => "a1",
-            Gpr::A2 => "a2", Gpr::A3 => "a3", Gpr::A4 => "a4", Gpr::A5 => "a5",
-            Gpr::A6 => "a6", Gpr::A7 => "a7", Gpr::S2 => "s2", Gpr::S3 => "s3",
-            Gpr::S4 => "s4", Gpr::S5 => "s5", Gpr::S6 => "s6", Gpr::S7 => "s7",
-            Gpr::S8 => "s8", Gpr::S9 => "s9", Gpr::S10 => "s10", Gpr::S11 => "s11",
-            Gpr::T3 => "t3", Gpr::T4 => "t4", Gpr::T5 => "t5", Gpr::T6 => "t6",
+            Gpr::Zero => "zero",
+            Gpr::Ra => "ra",
+            Gpr::Sp => "sp",
+            Gpr::Gp => "gp",
+            Gpr::Tp => "tp",
+            Gpr::T0 => "t0",
+            Gpr::T1 => "t1",
+            Gpr::T2 => "t2",
+            Gpr::S0 => "s0",
+            Gpr::S1 => "s1",
+            Gpr::A0 => "a0",
+            Gpr::A1 => "a1",
+            Gpr::A2 => "a2",
+            Gpr::A3 => "a3",
+            Gpr::A4 => "a4",
+            Gpr::A5 => "a5",
+            Gpr::A6 => "a6",
+            Gpr::A7 => "a7",
+            Gpr::S2 => "s2",
+            Gpr::S3 => "s3",
+            Gpr::S4 => "s4",
+            Gpr::S5 => "s5",
+            Gpr::S6 => "s6",
+            Gpr::S7 => "s7",
+            Gpr::S8 => "s8",
+            Gpr::S9 => "s9",
+            Gpr::S10 => "s10",
+            Gpr::S11 => "s11",
+            Gpr::T3 => "t3",
+            Gpr::T4 => "t4",
+            Gpr::T5 => "t5",
+            Gpr::T6 => "t6",
         }
     }
 
     pub fn for_arg(idx: usize) -> Option<Self> {
         match idx {
-            0 => Some(Gpr::A0), 1 => Some(Gpr::A1), 2 => Some(Gpr::A2),
-            3 => Some(Gpr::A3), 4 => Some(Gpr::A4), 5 => Some(Gpr::A5),
-            6 => Some(Gpr::A6), 7 => Some(Gpr::A7),
+            0 => Some(Gpr::A0),
+            1 => Some(Gpr::A1),
+            2 => Some(Gpr::A2),
+            3 => Some(Gpr::A3),
+            4 => Some(Gpr::A4),
+            5 => Some(Gpr::A5),
+            6 => Some(Gpr::A6),
+            7 => Some(Gpr::A7),
             _ => None,
         }
     }
@@ -91,10 +165,38 @@ impl fmt::Display for Gpr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum Fpr {
-    F0, F1, F2, F3, F4, F5, F6, F7,
-    F8, F9, F10, F11, F12, F13, F14, F15,
-    F16, F17, F18, F19, F20, F21, F22, F23,
-    F24, F25, F26, F27, F28, F29, F30, F31,
+    F0,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    F13,
+    F14,
+    F15,
+    F16,
+    F17,
+    F18,
+    F19,
+    F20,
+    F21,
+    F22,
+    F23,
+    F24,
+    F25,
+    F26,
+    F27,
+    F28,
+    F29,
+    F30,
+    F31,
 }
 
 impl Fpr {
@@ -103,32 +205,71 @@ impl Fpr {
     }
 
     pub fn from_encoding(enc: u32) -> Option<Self> {
-        if enc > 31 { return None; }
+        if enc > 31 {
+            return None;
+        }
         Some(unsafe { std::mem::transmute::<u32, Fpr>(enc) })
     }
 
     pub fn is_callee_saved(&self) -> bool {
-        matches!(self, Fpr::F8 | Fpr::F9 | Fpr::F18 | Fpr::F19
-            | Fpr::F20 | Fpr::F21 | Fpr::F22 | Fpr::F23
-            | Fpr::F24 | Fpr::F25 | Fpr::F26 | Fpr::F27)
+        matches!(
+            self,
+            Fpr::F8
+                | Fpr::F9
+                | Fpr::F18
+                | Fpr::F19
+                | Fpr::F20
+                | Fpr::F21
+                | Fpr::F22
+                | Fpr::F23
+                | Fpr::F24
+                | Fpr::F25
+                | Fpr::F26
+                | Fpr::F27
+        )
     }
 
     pub fn is_arg_reg(&self) -> bool {
-        matches!(self, Fpr::F0 | Fpr::F1 | Fpr::F2 | Fpr::F3
-            | Fpr::F4 | Fpr::F5 | Fpr::F6 | Fpr::F7)
+        matches!(
+            self,
+            Fpr::F0 | Fpr::F1 | Fpr::F2 | Fpr::F3 | Fpr::F4 | Fpr::F5 | Fpr::F6 | Fpr::F7
+        )
     }
 
     pub fn asm_name(&self) -> &'static str {
         match self {
-            Fpr::F0 => "fa0", Fpr::F1 => "fa1", Fpr::F2 => "fa2", Fpr::F3 => "fa3",
-            Fpr::F4 => "fa4", Fpr::F5 => "fa5", Fpr::F6 => "fa6", Fpr::F7 => "fa7",
-            Fpr::F8 => "fs0", Fpr::F9 => "fs1",
-            Fpr::F10 => "ft0", Fpr::F11 => "ft1", Fpr::F12 => "ft2", Fpr::F13 => "ft3",
-            Fpr::F14 => "ft4", Fpr::F15 => "ft5", Fpr::F16 => "ft6", Fpr::F17 => "ft7",
-            Fpr::F18 => "fs2", Fpr::F19 => "fs3", Fpr::F20 => "fs4", Fpr::F21 => "fs5",
-            Fpr::F22 => "fs6", Fpr::F23 => "fs7", Fpr::F24 => "fs8", Fpr::F25 => "fs9",
-            Fpr::F26 => "fs10", Fpr::F27 => "fs11",
-            Fpr::F28 => "ft8", Fpr::F29 => "ft9", Fpr::F30 => "ft10", Fpr::F31 => "ft11",
+            Fpr::F0 => "fa0",
+            Fpr::F1 => "fa1",
+            Fpr::F2 => "fa2",
+            Fpr::F3 => "fa3",
+            Fpr::F4 => "fa4",
+            Fpr::F5 => "fa5",
+            Fpr::F6 => "fa6",
+            Fpr::F7 => "fa7",
+            Fpr::F8 => "fs0",
+            Fpr::F9 => "fs1",
+            Fpr::F10 => "ft0",
+            Fpr::F11 => "ft1",
+            Fpr::F12 => "ft2",
+            Fpr::F13 => "ft3",
+            Fpr::F14 => "ft4",
+            Fpr::F15 => "ft5",
+            Fpr::F16 => "ft6",
+            Fpr::F17 => "ft7",
+            Fpr::F18 => "fs2",
+            Fpr::F19 => "fs3",
+            Fpr::F20 => "fs4",
+            Fpr::F21 => "fs5",
+            Fpr::F22 => "fs6",
+            Fpr::F23 => "fs7",
+            Fpr::F24 => "fs8",
+            Fpr::F25 => "fs9",
+            Fpr::F26 => "fs10",
+            Fpr::F27 => "fs11",
+            Fpr::F28 => "ft8",
+            Fpr::F29 => "ft9",
+            Fpr::F30 => "ft10",
+            Fpr::F31 => "ft11",
         }
     }
 }
@@ -144,7 +285,14 @@ impl fmt::Display for Fpr {
 // ===========================================================================
 
 /// R-type: funct7[31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
-pub fn encode_r_type(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> [u8; 4] {
+pub fn encode_r_type(
+    funct7: u32,
+    rs2: u32,
+    rs1: u32,
+    funct3: u32,
+    rd: u32,
+    opcode: u32,
+) -> [u8; 4] {
     let word = ((funct7 & 0x7F) << 25)
         | ((rs2 & 0x1F) << 20)
         | ((rs1 & 0x1F) << 15)
@@ -248,7 +396,12 @@ pub const OPC_MSUB: u32 = 0x47;
 // ===========================================================================
 
 /// Build a simple syscall stub: `addi a7, zero, #num; ecall; ret`
-pub fn simple_stub(_num: i32, _jalr: fn() -> [u8; 4], _addi: fn(u32, u32, i32) -> [u8; 4], _ecall: fn() -> [u8; 4]) -> Vec<u8> {
+pub fn simple_stub(
+    _num: i32,
+    _jalr: fn() -> [u8; 4],
+    _addi: fn(u32, u32, i32) -> [u8; 4],
+    _ecall: fn() -> [u8; 4],
+) -> Vec<u8> {
     // This is a placeholder — actual implementation needs the backend's
     // Instruction enum. Each backend keeps its own simple_stub.
     // This function is here for documentation but not used directly.
@@ -259,6 +412,12 @@ pub fn simple_stub(_num: i32, _jalr: fn() -> [u8; 4], _addi: fn(u32, u32, i32) -
 #[macro_export]
 macro_rules! rv_mv {
     ($rd:expr, $rs:expr) => {
-        $crate::riscv_common::encode_i_type($crate::riscv_common::OPC_OP_IMM, $rd.encoding(), 0, $rs.encoding(), 0)
+        $crate::riscv_common::encode_i_type(
+            $crate::riscv_common::OPC_OP_IMM,
+            $rd.encoding(),
+            0,
+            $rs.encoding(),
+            0,
+        )
     };
 }

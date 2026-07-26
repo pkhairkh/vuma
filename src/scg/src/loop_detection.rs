@@ -86,19 +86,149 @@
 //!    simpler dominator computation that doesn't need an edge-kind
 //!    filter.
 //!
-//! **TODO (deferred):** if a future refactor moves loop detection
-//! into a shared `vuma-core` crate that both `vuma-scg` and
-//! `vuma-codegen` depend on, the two `LoopDetector`s could be unified
-//! as a generic `LoopDetector<G: ControlFlowGraph>` with `NaturalLoop`
-//! and `LoopInfo` as two result adaptors.  This is a non-trivial
-//! cross-crate refactor and is **not** done in Wave 33 to avoid
-//! destabilising regalloc.
+//! **PARTIALLY RESOLVED (Wave 33, Task 10-c):** the first concrete
+//! step toward this unification has landed — a [`ControlFlowGraph`]
+//! trait now abstracts the minimal CFG view (control-flow edges + a
+//! list of entry nodes) that the loop-detection algorithm needs, and
+//! [`LoopDetector::detect_natural_loops_on`] runs the full algorithm
+//! against any `G: ControlFlowGraph<NodeId = NodeId>`. `SCG` itself
+//! implements the trait, so the existing SCG entry point
+//! [`LoopDetector::detect_natural_loops`] now delegates to the
+//! generic one. A unit test in this module exercises the generic
+//! algorithm against a `MockCfg` (a plain `Vec<(NodeId, NodeId)>`
+//! plus a designated entry), proving the abstraction does not depend
+//! on `SCG`.
+//!
+//! What is **still deferred** (and why this is PARTIAL):
+//!
+//! 1. **Result-type divergence.** `NaturalLoop` still carries
+//!    `NodeId`s and `exits: HashSet<NodeId>`, while the codegen
+//!    `LoopInfo` carries block-label `String`s and an
+//!    `induction_vars: HashSet<IRValueId>` set. Fully unifying the
+//!    two `LoopDetector`s would require either a trait-abstract
+//!    node-id or a pair of result adaptors — both non-trivial
+//!    cross-crate changes that would destabilise regalloc.
+//!
+//! 2. **Crate location.** The trait lives inside `vuma-scg`. Lifting
+//!    it (plus the algorithm) into a future shared `vuma-core` crate
+//!    is now a mechanical move-and-rename once the codegen side is
+//!    ready to adopt it. That move is intentionally **not** done in
+//!    Wave 33 to avoid changing `vuma-codegen`'s public surface.
+//!
+//! 3. **IR-side adoption.** `vuma-codegen::regalloc::LoopDetector`
+//!    still has its own copy of the algorithm. Migrating it to the
+//!    shared trait is left to a future wave.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 
 use crate::edge::EdgeKind;
 use crate::graph::SCG;
 use crate::node::{ControlKind, NodeId, NodePayload, NodeType};
+
+// ─── ControlFlowGraph Trait ──────────────────────────────────────────────
+
+/// Minimal control-flow-graph view required by the generic loop-detection
+/// algorithm.
+///
+/// Introduced in Wave 33 (Task 10-c) as the first concrete step toward
+/// unifying the SCG-side and codegen-side `LoopDetector`s. See the module
+/// docs (search for "PARTIALLY RESOLVED") for the full rationale and the
+/// remaining work.
+///
+/// Any type that can enumerate its control-flow edges and its entry nodes
+/// can be fed to [`LoopDetector::detect_natural_loops_on`]. `SCG` itself
+/// implements this trait; a `MockCfg` in the test module proves the
+/// abstraction is independent of `SCG`.
+///
+/// # Why only two methods?
+///
+/// The loop-detection algorithm needs exactly three things from the graph:
+///
+/// 1. The list of `(source, target)` control-flow edges (used to build
+///    successor/predecessor adjacency).
+/// 2. The list of entry nodes (used to root the dominator computation).
+/// 3. A `NodeId` type that is `Eq + Hash + Clone + Copy`.
+///
+/// Everything else (dominator tree, back-edge discovery, body/exit
+/// computation) is implemented in terms of those adjacency lists inside
+/// [`LoopDetector`].
+pub trait ControlFlowGraph {
+    /// The node identifier used by this CFG.
+    type NodeId: Eq + Hash + Clone;
+
+    /// Returns the list of control-flow edges as `(source, target)` pairs.
+    ///
+    /// The order does not matter; the algorithm sorts them into successor
+    /// and predecessor adjacency lists internally.
+    fn cf_edges(&self) -> Vec<(Self::NodeId, Self::NodeId)>;
+
+    /// Returns the entry nodes of the CFG (e.g. function-entry blocks).
+    ///
+    /// The algorithm uses `entry_nodes()[0]` as the dominator-tree root.
+    /// Implementations should return at least one entry for any non-empty
+    /// CFG; if the list is empty, [`LoopDetector::detect_natural_loops_on`]
+    /// returns an empty `Vec` (no loops).
+    fn entry_nodes(&self) -> Vec<Self::NodeId>;
+}
+
+impl ControlFlowGraph for SCG {
+    type NodeId = NodeId;
+
+    fn cf_edges(&self) -> Vec<(NodeId, NodeId)> {
+        self.edges()
+            .filter(|e| matches!(e.kind, EdgeKind::ControlFlow))
+            .map(|e| (e.source, e.target))
+            .collect()
+    }
+
+    fn entry_nodes(&self) -> Vec<NodeId> {
+        // Primary source: FunctionEntry control nodes.
+        let mut entries: Vec<NodeId> = self
+            .nodes()
+            .filter(|n| {
+                if let NodePayload::Control(ctrl) = &n.payload {
+                    ctrl.kind == ControlKind::FunctionEntry
+                } else {
+                    false
+                }
+            })
+            .map(|n| n.id)
+            .collect();
+
+        if entries.is_empty() {
+            // Fallback: nodes with no CF predecessors (computed from the
+            // same `cf_edges` view the algorithm itself uses).
+            let has_pred: HashSet<NodeId> = self.cf_edges().iter().map(|(_, t)| *t).collect();
+            for node in self.nodes() {
+                if !has_pred.contains(&node.id) {
+                    entries.push(node.id);
+                }
+            }
+        }
+
+        entries
+    }
+}
+
+/// Builds `(succs, preds)` adjacency lists from a flat list of edges.
+///
+/// This is the generic, SCG-agnostic counterpart of the old
+/// `LoopDetector::build_cf_adjacency` helper. It is used by the generic
+/// algorithm ([`LoopDetector::detect_natural_loops_on`]) so that any
+/// `ControlFlowGraph` can be lowered to the same adjacency representation
+/// the dominator and back-edge passes expect.
+fn build_adjacency<N: Eq + Hash + Clone>(
+    edges: Vec<(N, N)>,
+) -> (HashMap<N, Vec<N>>, HashMap<N, Vec<N>>) {
+    let mut succs: HashMap<N, Vec<N>> = HashMap::new();
+    let mut preds: HashMap<N, Vec<N>> = HashMap::new();
+    for (s, t) in edges {
+        succs.entry(s.clone()).or_default().push(t.clone());
+        preds.entry(t).or_default().push(s);
+    }
+    (succs, preds)
+}
 
 // ─── Natural Loop ─────────────────────────────────────────────────────────
 
@@ -234,6 +364,11 @@ impl LoopDetector {
     /// dominates the source in the CFG). The loop body is computed by walking
     /// predecessors from the back-edge source until reaching the header.
     ///
+    /// This is a thin SCG-specific wrapper around
+    /// [`detect_natural_loops_on`](Self::detect_natural_loops_on); see that
+    /// method for the generic algorithm and the [`ControlFlowGraph`] trait
+    /// for the abstraction that lets the same code run against non-SCG CFGs.
+    ///
     /// # Algorithm
     ///
     /// 1. Build the CFG adjacency lists (only `ControlFlow` edges).
@@ -244,17 +379,48 @@ impl LoopDetector {
     ///    loop algorithm (walk CF predecessors from backedge_source to header).
     /// 5. Compute exit nodes (body nodes with CF successors outside the body).
     pub fn detect_natural_loops(scg: &SCG) -> Vec<NaturalLoop> {
+        Self::detect_natural_loops_on(scg)
+    }
+
+    /// Generic natural-loop detection operating on any [`ControlFlowGraph`]
+    /// whose `NodeId` is `vuma-scg`'s [`NodeId`].
+    ///
+    /// This is the algorithm core, lifted out of the SCG-specific entry point
+    /// in Wave 33 (Task 10-c) as the first step toward unifying the
+    /// SCG-side and codegen-side `LoopDetector`s. The SCG entry point
+    /// ([`detect_natural_loops`](Self::detect_natural_loops)) now delegates
+    /// here, and a `MockCfg`-based unit test in this module exercises the
+    /// same algorithm against a non-SCG CFG, proving the abstraction is
+    /// sound.
+    ///
+    /// See the module docs (search for "PARTIALLY RESOLVED") for the
+    /// remaining work toward full cross-crate unification.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Pull the `(source, target)` CF edge list and entry nodes from the
+    ///    `ControlFlowGraph` trait.
+    /// 2. Build CFG adjacency lists via [`build_adjacency`].
+    /// 3. Compute the dominator tree on the CFG subgraph.
+    /// 4. Find all back-edges by checking if each CF edge's target dominates
+    ///    its source.
+    /// 5. For each back-edge, compute the loop body using the standard
+    ///    natural-loop algorithm (walk CF predecessors from backedge_source
+    ///    to header).
+    /// 6. Compute exit nodes (body nodes with CF successors outside the body).
+    pub fn detect_natural_loops_on<G: ControlFlowGraph<NodeId = NodeId>>(
+        g: &G,
+    ) -> Vec<NaturalLoop> {
         let mut loops = Vec::new();
 
-        // We need an entry node. Find a reasonable one:
-        // Use FunctionEntry nodes, or fall back to nodes with no CF predecessors.
-        let entry_nodes = Self::find_entry_nodes(scg);
+        // We need an entry node. Pull it from the trait.
+        let entry_nodes = g.entry_nodes();
         if entry_nodes.is_empty() {
             return loops;
         }
 
-        // Build CFG-only adjacency lists.
-        let (cf_succs, cf_preds) = Self::build_cf_adjacency(scg);
+        // Build CFG-only adjacency lists from the trait's cf_edges() view.
+        let (cf_succs, cf_preds) = build_adjacency(g.cf_edges());
 
         // Compute dominator tree on the CFG subgraph from the first entry.
         let dom_tree = Self::compute_cfg_dominators(&cf_succs, &cf_preds, entry_nodes[0]);
@@ -424,54 +590,14 @@ impl LoopDetector {
     }
 
     // ─── Internal Helpers ───────────────────────────────────────────────
-
-    /// Finds entry nodes for the SCG (FunctionEntry or nodes with no CF predecessors).
-    fn find_entry_nodes(scg: &SCG) -> Vec<NodeId> {
-        let mut entries: Vec<NodeId> = scg
-            .nodes()
-            .filter(|n| {
-                if let NodePayload::Control(ctrl) = &n.payload {
-                    ctrl.kind == ControlKind::FunctionEntry
-                } else {
-                    false
-                }
-            })
-            .map(|n| n.id)
-            .collect();
-
-        if entries.is_empty() {
-            // Fallback: use nodes with no CF predecessors.
-            let (_, cf_preds) = Self::build_cf_adjacency(scg);
-            for node in scg.nodes() {
-                let has_preds = cf_preds.get(&node.id).is_some_and(|p| !p.is_empty());
-                if !has_preds {
-                    entries.push(node.id);
-                }
-            }
-        }
-
-        entries
-    }
-
-    /// Builds adjacency lists for the CFG subgraph (ControlFlow edges only).
-    ///
-    /// Returns `(succs, preds)` where `succs[n]` is the list of CF successors
-    /// of node `n`, and `preds[n]` is the list of CF predecessors.
-    fn build_cf_adjacency(
-        scg: &SCG,
-    ) -> (HashMap<NodeId, Vec<NodeId>>, HashMap<NodeId, Vec<NodeId>>) {
-        let mut succs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut preds: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-
-        for edge in scg.edges() {
-            if matches!(edge.kind, EdgeKind::ControlFlow) {
-                succs.entry(edge.source).or_default().push(edge.target);
-                preds.entry(edge.target).or_default().push(edge.source);
-            }
-        }
-
-        (succs, preds)
-    }
+    //
+    // Note: the SCG-specific entry-node discovery and adjacency-list
+    // construction that used to live here have been superseded by the
+    // generic `ControlFlowGraph` trait impl above (see `impl
+    // ControlFlowGraph for SCG`) and the free `build_adjacency` helper
+    // near the top of this file. They were removed in Wave 33 (Task
+    // 10-c) when the algorithm core was lifted into
+    // `detect_natural_loops_on`.
 
     /// Computes the dominator tree on the CFG subgraph using the iterative
     /// Cooper-Harvey-Kennedy algorithm.
@@ -691,7 +817,8 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        ComputationKind, ComputationNode, ControlKind, ControlNode, NodeId, NodePayload, NodeType, ProgramPoint,
+        ComputationKind, ComputationNode, ControlKind, ControlNode, NodeId, NodePayload, NodeType,
+        ProgramPoint,
     };
 
     fn pp() -> ProgramPoint {
@@ -1068,5 +1195,142 @@ mod tests {
 
         let children = tree.children(outer_idx);
         assert_eq!(children.len(), 1, "outer loop should have one child");
+    }
+
+    // ── Test 14: Generic algorithm on a non-SCG CFG ───────────────────
+    //
+    // This is the test added in Wave 33 (Task 10-c) to prove the
+    // `ControlFlowGraph` trait abstraction is sound: the generic
+    // `LoopDetector::detect_natural_loops_on` runs against a `MockCfg`
+    // that has *no* SCG node types, no `EdgeKind`, no `NodePayload` —
+    // just a flat `Vec<(NodeId, NodeId)>` plus a designated entry.
+    // If the algorithm is ever lifted into `vuma-core`, this test will
+    // move with it almost verbatim.
+
+    /// Minimal CFG for exercising the generic algorithm.
+    ///
+    /// Holds a designated entry node plus a flat list of `(src, dst)`
+    /// control-flow edges. Implements `ControlFlowGraph` so it can be
+    /// fed to `LoopDetector::detect_natural_loops_on`.
+    struct MockCfg {
+        entry: NodeId,
+        edges: Vec<(NodeId, NodeId)>,
+    }
+
+    impl ControlFlowGraph for MockCfg {
+        type NodeId = NodeId;
+
+        fn cf_edges(&self) -> Vec<(NodeId, NodeId)> {
+            self.edges.clone()
+        }
+
+        fn entry_nodes(&self) -> Vec<NodeId> {
+            vec![self.entry]
+        }
+    }
+
+    /// Helper: build a NodeId from a small int (matches the values
+    /// printed by `NodeId::Display` so test failures are readable).
+    fn nid(n: u64) -> NodeId {
+        NodeId::new(n)
+    }
+
+    #[test]
+    fn test_generic_loop_detection_on_mock_cfg() {
+        // Build the same simple-loop shape used by `build_simple_loop`,
+        // but on a `MockCfg` with zero SCG dependency:
+        //
+        //   entry(1) → header(2) → body(3) → latch(4) → header(2) [back-edge]
+        //                       ↘ exit(5)
+        let cfg = MockCfg {
+            entry: nid(1),
+            edges: vec![
+                (nid(1), nid(2)),
+                (nid(2), nid(3)),
+                (nid(2), nid(5)),
+                (nid(3), nid(4)),
+                (nid(4), nid(2)), // back-edge
+            ],
+        };
+
+        let loops = LoopDetector::detect_natural_loops_on(&cfg);
+        assert_eq!(loops.len(), 1, "generic algo should detect one loop");
+
+        let loop_ = &loops[0];
+        assert_eq!(loop_.header, nid(2), "header should be node 2");
+        assert_eq!(
+            loop_.backedge_source,
+            nid(4),
+            "back-edge source should be latch (4)"
+        );
+        assert!(loop_.body.contains(&nid(2)), "header in body");
+        assert!(loop_.body.contains(&nid(3)), "body in body");
+        assert!(loop_.body.contains(&nid(4)), "latch in body");
+        assert!(
+            !loop_.body.contains(&nid(1)),
+            "entry should NOT be in body (dominates the header from outside)"
+        );
+        assert!(!loop_.body.contains(&nid(5)), "exit should NOT be in body");
+        // header(2) has a CF edge to exit(5) which is outside the body,
+        // so header is an exit node.
+        assert!(
+            loop_.exits.contains(&nid(2)),
+            "header should be an exit (has edge to exit node)"
+        );
+    }
+
+    #[test]
+    fn test_generic_loop_detection_empty_cfg() {
+        // A MockCfg with a designated entry but no edges: the algorithm
+        // builds an empty adjacency, finds no back-edges, and must
+        // return no loops.
+        let cfg = MockCfg {
+            entry: nid(1),
+            edges: vec![],
+        };
+        let loops = LoopDetector::detect_natural_loops_on(&cfg);
+        assert!(loops.is_empty(), "edge-less CFG should have no loops");
+    }
+
+    #[test]
+    fn test_generic_loop_detection_no_entry_returns_empty() {
+        // Exercises the `entry_nodes().is_empty()` early-return path
+        // in the generic algorithm.
+        struct NoEntryCfg;
+        impl ControlFlowGraph for NoEntryCfg {
+            type NodeId = NodeId;
+            fn cf_edges(&self) -> Vec<(NodeId, NodeId)> {
+                vec![]
+            }
+            fn entry_nodes(&self) -> Vec<NodeId> {
+                vec![]
+            }
+        }
+        let loops = LoopDetector::detect_natural_loops_on(&NoEntryCfg);
+        assert!(
+            loops.is_empty(),
+            "CFG with no entry nodes should short-circuit to no loops"
+        );
+    }
+
+    #[test]
+    fn test_generic_loop_detection_diamond_no_loop() {
+        // entry(1) → a(2) → c(4)
+        //              ↘ b(3) ↗
+        // Diamond, no back-edge ⇒ no loops.
+        let cfg = MockCfg {
+            entry: nid(1),
+            edges: vec![
+                (nid(1), nid(2)),
+                (nid(1), nid(3)),
+                (nid(2), nid(4)),
+                (nid(3), nid(4)),
+            ],
+        };
+        let loops = LoopDetector::detect_natural_loops_on(&cfg);
+        assert!(
+            loops.is_empty(),
+            "diamond CFG without back-edges should have no loops"
+        );
     }
 }

@@ -914,8 +914,8 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AccessMode, AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode, NodePayload,
-        NodeType, ProgramPoint,
+        AccessMode, AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode,
+        NodePayload, NodeType, ProgramPoint,
     };
 
     fn pp() -> ProgramPoint {

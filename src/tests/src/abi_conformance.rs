@@ -25,8 +25,7 @@ use vuma_codegen::backend::{
     create_backend, BackendKind, Endianness, OutputFormat, RegClass, TargetInfo,
 };
 use vuma_codegen::ir::{
-    BinOpKind, CastKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue,
-    VirtualRegister,
+    BinOpKind, CastKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister,
 };
 
 // ===========================================================================
@@ -45,7 +44,10 @@ fn make_func_with_n_args(name: &str, n: usize) -> IRFunction {
     for i in 0..n {
         func.param_types.push(IRType::I64);
         func.params.push(IRValue::Register(i as u32));
-        func.vregs.insert(i as u32, vuma_codegen::ir::VirtualRegister::named(i as u32, format!("a{}", i)));
+        func.vregs.insert(
+            i as u32,
+            vuma_codegen::ir::VirtualRegister::named(i as u32, format!("a{}", i)),
+        );
     }
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(n as u32));
@@ -65,7 +67,8 @@ fn make_func_with_n_args(name: &str, n: usize) -> IRFunction {
 fn make_func_with_call_n_args(n: usize) -> IRFunction {
     let mut func = IRFunction::new("caller");
     // vreg 0 = the call result
-    func.vregs.insert(0, vuma_codegen::ir::VirtualRegister::anonymous(0));
+    func.vregs
+        .insert(0, vuma_codegen::ir::VirtualRegister::anonymous(0));
 
     // Build argument values: all immediates 1..=n
     let args: Vec<IRValue> = (1..=n as i64).map(IRValue::Immediate).collect();
@@ -92,9 +95,11 @@ fn validate_cc_info(info: &dyn TargetInfo) {
     // num_int_arg_regs must be consistent with has_registers
     if !info.has_registers() {
         assert_eq!(
-            info.num_int_arg_regs(), 0,
+            info.num_int_arg_regs(),
+            0,
             "{}: has_registers=false but num_int_arg_regs={}",
-            isa, info.num_int_arg_regs()
+            isa,
+            info.num_int_arg_regs()
         );
     } else {
         assert!(
@@ -113,17 +118,33 @@ fn validate_cc_info(info: &dyn TargetInfo) {
 
     // stack_alignment must be a power of 2
     let sa = info.stack_alignment();
-    assert!(sa > 0 && sa.is_power_of_two(),
-        "{}: stack alignment {} must be a positive power of 2", isa, sa);
+    assert!(
+        sa > 0 && sa.is_power_of_two(),
+        "{}: stack alignment {} must be a positive power of 2",
+        isa,
+        sa
+    );
 
     // pointer_width must match output format
     match info.output_format() {
-        OutputFormat::Elf32 => assert_eq!(info.pointer_width(), 4,
-            "{}: Elf32 output must have 4-byte pointers", isa),
-        OutputFormat::Elf64 => assert_eq!(info.pointer_width(), 8,
-            "{}: Elf64 output must have 8-byte pointers", isa),
-        OutputFormat::WasmBinary => assert_eq!(info.pointer_width(), 4,
-            "{}: Wasm32 must have 4-byte pointers", isa),
+        OutputFormat::Elf32 => assert_eq!(
+            info.pointer_width(),
+            4,
+            "{}: Elf32 output must have 4-byte pointers",
+            isa
+        ),
+        OutputFormat::Elf64 => assert_eq!(
+            info.pointer_width(),
+            8,
+            "{}: Elf64 output must have 8-byte pointers",
+            isa
+        ),
+        OutputFormat::WasmBinary => assert_eq!(
+            info.pointer_width(),
+            4,
+            "{}: Wasm32 must have 4-byte pointers",
+            isa
+        ),
         OutputFormat::RawBinary => {} // no constraint
     }
 }
@@ -139,11 +160,22 @@ fn test_x86_64_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "x86_64");
     assert_eq!(info.calling_convention_name(), "systemv");
-    assert_eq!(info.num_int_arg_regs(), 6, "System V: 6 integer arg regs (RDI,RSI,RDX,RCX,R8,R9)");
-    assert_eq!(info.num_fp_arg_regs(), 8, "System V: 8 FP arg regs (XMM0-XMM7)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        6,
+        "System V: 6 integer arg regs (RDI,RSI,RDX,RCX,R8,R9)"
+    );
+    assert_eq!(
+        info.num_fp_arg_regs(),
+        8,
+        "System V: 8 FP arg regs (XMM0-XMM7)"
+    );
     assert_eq!(info.pointer_width(), 8);
     assert_eq!(info.stack_alignment(), 16);
-    assert!(!info.has_link_register(), "x86_64 pushes return address on stack");
+    assert!(
+        !info.has_link_register(),
+        "x86_64 pushes return address on stack"
+    );
     validate_cc_info(info);
 }
 
@@ -153,14 +185,20 @@ fn test_x86_64_abi_allocation() {
     // Test with 6 args (all fit in registers)
     let func = make_func_with_n_args("test_6args", 6);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "6-arg function should allocate on x86_64");
+    assert!(
+        allocated.is_ok(),
+        "6-arg function should allocate on x86_64"
+    );
     let af = allocated.unwrap();
     assert!(!af.blocks.is_empty(), "allocated function must have blocks");
 
     // Test with 8 args (2 must go on stack)
     let func = make_func_with_n_args("test_8args", 8);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "8-arg function should allocate on x86_64");
+    assert!(
+        allocated.is_ok(),
+        "8-arg function should allocate on x86_64"
+    );
 }
 
 // -- AArch64: AAPCS64 --
@@ -170,11 +208,18 @@ fn test_aarch64_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "aarch64");
     assert_eq!(info.calling_convention_name(), "aapcs64");
-    assert_eq!(info.num_int_arg_regs(), 8, "AAPCS64: 8 integer arg regs (X0-X7)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        8,
+        "AAPCS64: 8 integer arg regs (X0-X7)"
+    );
     assert_eq!(info.num_fp_arg_regs(), 8, "AAPCS64: 8 FP arg regs (V0-V7)");
     assert_eq!(info.pointer_width(), 8);
     assert_eq!(info.stack_alignment(), 16);
-    assert!(info.has_link_register(), "AArch64 uses X30 (LR) as link register");
+    assert!(
+        info.has_link_register(),
+        "AArch64 uses X30 (LR) as link register"
+    );
     assert!(info.has_hardwired_zero(), "AArch64 has XZR");
     validate_cc_info(info);
 }
@@ -185,12 +230,18 @@ fn test_aarch64_abi_allocation() {
     // Test with 8 args (all fit in X0-X7)
     let func = make_func_with_n_args("test_8args", 8);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "8-arg function should allocate on AArch64");
+    assert!(
+        allocated.is_ok(),
+        "8-arg function should allocate on AArch64"
+    );
 
     // Test with 10 args (2 must go on stack)
     let func = make_func_with_n_args("test_10args", 10);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "10-arg function should allocate on AArch64");
+    assert!(
+        allocated.is_ok(),
+        "10-arg function should allocate on AArch64"
+    );
 }
 
 // -- RISC-V 64: RV64G LP64D --
@@ -200,13 +251,27 @@ fn test_riscv64_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "riscv64");
     assert_eq!(info.calling_convention_name(), "lp64d");
-    assert_eq!(info.num_int_arg_regs(), 8, "RV64G: 8 integer arg regs (A0-A7, x10-x17)");
-    assert_eq!(info.num_fp_arg_regs(), 8, "RV64G: 8 FP arg regs (FA0-FA7, f10-f17)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        8,
+        "RV64G: 8 integer arg regs (A0-A7, x10-x17)"
+    );
+    assert_eq!(
+        info.num_fp_arg_regs(),
+        8,
+        "RV64G: 8 FP arg regs (FA0-FA7, f10-f17)"
+    );
     assert_eq!(info.pointer_width(), 8);
     assert_eq!(info.stack_alignment(), 16);
-    assert!(info.has_link_register(), "RISC-V uses x1 (ra) as link register");
+    assert!(
+        info.has_link_register(),
+        "RISC-V uses x1 (ra) as link register"
+    );
     assert!(info.has_hardwired_zero(), "RISC-V has x0 (zero)");
-    assert!(!info.has_branch_delay_slots(), "RISC-V does NOT have branch delay slots");
+    assert!(
+        !info.has_branch_delay_slots(),
+        "RISC-V does NOT have branch delay slots"
+    );
     validate_cc_info(info);
 }
 
@@ -215,11 +280,17 @@ fn test_riscv64_abi_allocation() {
     let backend = create_backend(BackendKind::RiscV64).unwrap();
     let func = make_func_with_n_args("test_8args", 8);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "8-arg function should allocate on RISC-V 64");
+    assert!(
+        allocated.is_ok(),
+        "8-arg function should allocate on RISC-V 64"
+    );
 
     let func = make_func_with_n_args("test_10args", 10);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "10-arg function should allocate on RISC-V 64");
+    assert!(
+        allocated.is_ok(),
+        "10-arg function should allocate on RISC-V 64"
+    );
 }
 
 // -- ARM32: AAPCS --
@@ -229,12 +300,23 @@ fn test_arm32_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "arm32");
     assert_eq!(info.calling_convention_name(), "aapcs");
-    assert_eq!(info.num_int_arg_regs(), 4, "AAPCS: 4 integer arg regs (R0-R3)");
-    assert_eq!(info.num_fp_arg_regs(), 16, "AAPCS VFP: 16 FP arg regs (D0-D15)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        4,
+        "AAPCS: 4 integer arg regs (R0-R3)"
+    );
+    assert_eq!(
+        info.num_fp_arg_regs(),
+        16,
+        "AAPCS VFP: 16 FP arg regs (D0-D15)"
+    );
     assert_eq!(info.pointer_width(), 4, "ARM32 has 32-bit pointers");
     assert_eq!(info.stack_alignment(), 8, "AAPCS: 8-byte stack alignment");
     assert_eq!(info.output_format(), OutputFormat::Elf32);
-    assert!(info.has_link_register(), "ARM32 uses R14 (LR) as link register");
+    assert!(
+        info.has_link_register(),
+        "ARM32 uses R14 (LR) as link register"
+    );
     validate_cc_info(info);
 }
 
@@ -259,16 +341,26 @@ fn test_mips64_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "mips64");
     assert_eq!(info.calling_convention_name(), "n64");
-    assert_eq!(info.num_int_arg_regs(), 8, "N64: 8 integer arg regs ($a0-$a7, $4-$11)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        8,
+        "N64: 8 integer arg regs ($a0-$a7, $4-$11)"
+    );
     assert_eq!(info.num_fp_arg_regs(), 8, "N64: 8 FP arg regs ($f12-$f19)");
     assert_eq!(info.pointer_width(), 8);
     assert_eq!(info.stack_alignment(), 16);
-    assert!(info.has_link_register(), "MIPS uses $31 ($ra) as link register");
+    assert!(
+        info.has_link_register(),
+        "MIPS uses $31 ($ra) as link register"
+    );
     assert!(info.has_hardwired_zero(), "MIPS has $0 (zero)");
     assert!(info.has_branch_delay_slots(), "MIPS has branch delay slots");
-    // Mips64Backend::new() emits a big-endian ELF (ELFDATA2MSB, qemu-mips64).
-    // The Mips64BeBackend wrapper is retained as an explicit BE alias.
-    assert_eq!(info.endianness(), Endianness::Big);
+    // Mips64Backend::new() emits a little-endian ELF (ELFDATA2LSB,
+    // qemu-mips64el) — see src/codegen/src/mips64/mod.rs:1743-1855
+    // (build_mips64_elf_2seg pushes ELFDATA2LSB at line 1779, and
+    // Mips64TargetInfo::endianness() returns Endianness::Little). The
+    // Mips64BeBackend wrapper is the big-endian variant for qemu-mips64.
+    assert_eq!(info.endianness(), Endianness::Little);
     validate_cc_info(info);
 }
 
@@ -277,11 +369,17 @@ fn test_mips64_abi_allocation() {
     let backend = create_backend(BackendKind::Mips64).unwrap();
     let func = make_func_with_n_args("test_8args", 8);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "8-arg function should allocate on MIPS64");
+    assert!(
+        allocated.is_ok(),
+        "8-arg function should allocate on MIPS64"
+    );
 
     let func = make_func_with_n_args("test_10args", 10);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "10-arg function should allocate on MIPS64");
+    assert!(
+        allocated.is_ok(),
+        "10-arg function should allocate on MIPS64"
+    );
 }
 
 // -- PPC64: ELFv2 ABI --
@@ -291,11 +389,18 @@ fn test_ppc64_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "ppc64");
     assert_eq!(info.calling_convention_name(), "elfv2");
-    assert_eq!(info.num_int_arg_regs(), 8, "ELFv2: 8 integer arg regs (R3-R10)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        8,
+        "ELFv2: 8 integer arg regs (R3-R10)"
+    );
     assert_eq!(info.num_fp_arg_regs(), 13, "ELFv2: 13 FP arg regs (F1-F13)");
     assert_eq!(info.pointer_width(), 8);
     assert_eq!(info.stack_alignment(), 16);
-    assert!(info.has_link_register(), "PPC64 uses LR (SPR) as link register");
+    assert!(
+        info.has_link_register(),
+        "PPC64 uses LR (SPR) as link register"
+    );
     assert!(info.has_toc_pointer(), "PPC64 has TOC pointer in R2");
     assert!(info.has_condition_registers(), "PPC64 has CR0-CR7");
     validate_cc_info(info);
@@ -310,7 +415,10 @@ fn test_ppc64_abi_allocation() {
 
     let func = make_func_with_n_args("test_10args", 10);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "10-arg function should allocate on PPC64");
+    assert!(
+        allocated.is_ok(),
+        "10-arg function should allocate on PPC64"
+    );
 }
 
 // -- LoongArch64: LP64 ABI --
@@ -320,11 +428,18 @@ fn test_loongarch64_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "loongarch64");
     assert_eq!(info.calling_convention_name(), "lp64");
-    assert_eq!(info.num_int_arg_regs(), 8, "LP64: 8 integer arg regs ($a0-$a7, $r4-$r11)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        8,
+        "LP64: 8 integer arg regs ($a0-$a7, $r4-$r11)"
+    );
     assert_eq!(info.num_fp_arg_regs(), 8, "LP64: 8 FP arg regs ($fa0-$fa7)");
     assert_eq!(info.pointer_width(), 8);
     assert_eq!(info.stack_alignment(), 16);
-    assert!(info.has_link_register(), "LoongArch uses $r1 (ra) as link register");
+    assert!(
+        info.has_link_register(),
+        "LoongArch uses $r1 (ra) as link register"
+    );
     assert!(info.has_hardwired_zero(), "LoongArch has $r0 (zero)");
     validate_cc_info(info);
 }
@@ -334,11 +449,17 @@ fn test_loongarch64_abi_allocation() {
     let backend = create_backend(BackendKind::LoongArch64).unwrap();
     let func = make_func_with_n_args("test_8args", 8);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "8-arg function should allocate on LoongArch64");
+    assert!(
+        allocated.is_ok(),
+        "8-arg function should allocate on LoongArch64"
+    );
 
     let func = make_func_with_n_args("test_10args", 10);
     let allocated = backend.allocate_registers(&func);
-    assert!(allocated.is_ok(), "10-arg function should allocate on LoongArch64");
+    assert!(
+        allocated.is_ok(),
+        "10-arg function should allocate on LoongArch64"
+    );
 }
 
 // -- Wasm32: Stack machine --
@@ -348,7 +469,11 @@ fn test_wasm32_abi_target_info() {
     let info = backend.target_info();
     assert_eq!(info.isa_name(), "wasm32");
     assert_eq!(info.calling_convention_name(), "wasm-stack");
-    assert_eq!(info.num_int_arg_regs(), 0, "Wasm32: no register args (stack machine)");
+    assert_eq!(
+        info.num_int_arg_regs(),
+        0,
+        "Wasm32: no register args (stack machine)"
+    );
     assert_eq!(info.num_fp_arg_regs(), 0, "Wasm32: no FP register args");
     assert_eq!(info.pointer_width(), 4, "Wasm32 has 32-bit pointers");
     assert!(!info.has_registers(), "Wasm32 is a stack machine");
@@ -539,7 +664,9 @@ fn test_all_backends_return_in_gpr() {
         let func = make_func_with_n_args("ret_test", 1);
         if let Ok(af) = backend.allocate_registers(&func) {
             // Collect all register writes across all instructions
-            let all_writes: Vec<_> = af.blocks.iter()
+            let all_writes: Vec<_> = af
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .flat_map(|i| i.writes.iter())
                 .collect();
@@ -548,7 +675,8 @@ fn test_all_backends_return_in_gpr() {
             // for a function returning i64. If writes are empty, the backend uses
             // a different encoding strategy (direct machine code), which is fine.
             if !all_writes.is_empty() {
-                let has_gpr_writes: Vec<_> = all_writes.iter()
+                let has_gpr_writes: Vec<_> = all_writes
+                    .iter()
                     .filter(|r| r.class == RegClass::Gpr)
                     .collect();
                 assert!(
@@ -559,7 +687,11 @@ fn test_all_backends_return_in_gpr() {
             }
             // Regardless, the encoded output should be non-empty
             if let Ok(bytes) = backend.encode_function(&af) {
-                assert!(!bytes.is_empty(), "{}: encoded output must not be empty", kind.isa_name());
+                assert!(
+                    !bytes.is_empty(),
+                    "{}: encoded output must not be empty",
+                    kind.isa_name()
+                );
             }
         }
     }
@@ -575,10 +707,15 @@ fn test_x86_64_arg_register_indices() {
 
     // The function should be allocatable and encodable
     let encoded = backend.encode_function(&af).unwrap();
-    assert!(!encoded.is_empty(), "x86_64: encoded function must not be empty");
+    assert!(
+        !encoded.is_empty(),
+        "x86_64: encoded function must not be empty"
+    );
 
     // Collect all GPR registers that appear in the allocated function
-    let gpr_reads: Vec<u32> = af.blocks.iter()
+    let gpr_reads: Vec<u32> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .flat_map(|i| i.reads.iter())
         .filter(|r| r.class == RegClass::Gpr)
@@ -602,7 +739,9 @@ fn test_aarch64_arg_register_range() {
     let func = make_func_with_n_args("a64_args", 8);
     let af = backend.allocate_registers(&func).unwrap();
 
-    let gpr_indices: Vec<u32> = af.blocks.iter()
+    let gpr_indices: Vec<u32> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
         .filter(|r| r.class == RegClass::Gpr)
@@ -626,7 +765,9 @@ fn test_arm32_arg_register_range() {
     let func = make_func_with_n_args("arm32_args", 4);
     let af = backend.allocate_registers(&func).unwrap();
 
-    let gpr_indices: Vec<u32> = af.blocks.iter()
+    let gpr_indices: Vec<u32> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
         .filter(|r| r.class == RegClass::Gpr)
@@ -653,7 +794,10 @@ fn test_ppc64_toc_register() {
     // Verify the backend can allocate a function (TOC is handled internally)
     let func = make_func_with_n_args("ppc_toc_test", 2);
     let result = backend.allocate_registers(&func);
-    assert!(result.is_ok(), "PPC64 allocation should handle TOC properly");
+    assert!(
+        result.is_ok(),
+        "PPC64 allocation should handle TOC properly"
+    );
 }
 
 // ===========================================================================
@@ -664,47 +808,53 @@ fn test_ppc64_toc_register() {
 #[test]
 fn test_all_backends_abi_data() {
     let cases = vec![
-        (BackendKind::X86_64,       "systemv",     6,  8, 8, 16, 8),
-        (BackendKind::AArch64,      "aapcs64",     8,  8, 8, 16, 8),
-        (BackendKind::RiscV64,      "lp64d",       8,  8, 8, 16, 8),
-        (BackendKind::Arm32,        "aapcs",       4, 16, 4,  8, 4),
-        (BackendKind::Mips64,       "n64",         8,  8, 8, 16, 8),
-        (BackendKind::PowerPC64,    "elfv2",       8, 13, 8, 16, 8),
-        (BackendKind::LoongArch64,  "lp64",        8,  8, 8, 16, 8),
-        (BackendKind::Wasm32,       "wasm-stack",  0,  0, 4,  8, 4),
+        (BackendKind::X86_64, "systemv", 6, 8, 8, 16, 8),
+        (BackendKind::AArch64, "aapcs64", 8, 8, 8, 16, 8),
+        (BackendKind::RiscV64, "lp64d", 8, 8, 8, 16, 8),
+        (BackendKind::Arm32, "aapcs", 4, 16, 4, 8, 4),
+        (BackendKind::Mips64, "n64", 8, 8, 8, 16, 8),
+        (BackendKind::PowerPC64, "elfv2", 8, 13, 8, 16, 8),
+        (BackendKind::LoongArch64, "lp64", 8, 8, 8, 16, 8),
+        (BackendKind::Wasm32, "wasm-stack", 0, 0, 4, 8, 4),
     ];
 
     for (kind, cc_name, int_regs, fp_regs, ptr_width, stack_align, addr_size) in cases {
         let backend = create_backend(kind).unwrap();
         let info = backend.target_info();
         assert_eq!(
-            info.calling_convention_name(), cc_name,
+            info.calling_convention_name(),
+            cc_name,
             "{}: calling convention name mismatch",
             kind.isa_name()
         );
         assert_eq!(
-            info.num_int_arg_regs(), int_regs,
+            info.num_int_arg_regs(),
+            int_regs,
             "{}: integer arg register count mismatch",
             kind.isa_name()
         );
         assert_eq!(
-            info.num_fp_arg_regs(), fp_regs,
+            info.num_fp_arg_regs(),
+            fp_regs,
             "{}: FP arg register count mismatch",
             kind.isa_name()
         );
         assert_eq!(
-            info.pointer_width(), ptr_width,
+            info.pointer_width(),
+            ptr_width,
             "{}: pointer width mismatch",
             kind.isa_name()
         );
         assert_eq!(
-            info.stack_alignment(), stack_align,
+            info.stack_alignment(),
+            stack_align,
             "{}: stack alignment mismatch",
             kind.isa_name()
         );
         // Address size equals pointer width for all supported targets
         assert_eq!(
-            info.pointer_width(), addr_size,
+            info.pointer_width(),
+            addr_size,
             "{}: address size must equal pointer width",
             kind.isa_name()
         );
@@ -735,8 +885,8 @@ fn test_all_backends_full_program() {
             functions: vec![af1, af2],
             total_code_size: 0,
             total_data_size: 0,
-        rodata_data: Vec::new(),
-        function_names: std::collections::HashSet::new(),
+            rodata_data: Vec::new(),
+            function_names: std::collections::HashSet::new(),
         };
 
         let result = backend.encode_program(&program);
@@ -796,7 +946,10 @@ fn test_arm32_stack_passed_args_allocation() {
         allocated.err()
     );
     let af = allocated.unwrap();
-    assert!(!af.blocks.is_empty(), "ARM32: allocated function must have blocks");
+    assert!(
+        !af.blocks.is_empty(),
+        "ARM32: allocated function must have blocks"
+    );
 }
 
 #[test]
@@ -823,7 +976,9 @@ fn test_arm32_stack_passed_args_ldr_str_opcodes() {
     // The prologue should emit "ldr+str" opcodes for stack-passed args (4, 5).
     // Arg 4 is at [R11 + 8 + 0*4] = [R11 + 8]
     // Arg 5 is at [R11 + 8 + 1*4] = [R11 + 12]
-    let ldr_str_opcodes: Vec<&str> = af.blocks.iter()
+    let ldr_str_opcodes: Vec<&str> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.as_str())
         .filter(|op| *op == "ldr+str")
@@ -835,7 +990,8 @@ fn test_arm32_stack_passed_args_ldr_str_opcodes() {
         !ldr_str_opcodes.is_empty(),
         "ARM32: expected 'ldr+str' opcodes for stack-passed arguments, \
          but found none. All opcodes: {:?}",
-        af.blocks.iter()
+        af.blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .map(|i| i.opcode.as_str())
             .collect::<Vec<_>>()
@@ -1035,7 +1191,9 @@ fn test_all_backends_atomic_cas_patterns() {
         let af = backend.allocate_registers(&func).unwrap();
 
         // Strategy 1: Check the opcode strings in AllocatedInstruction
-        let all_opcodes: Vec<String> = af.blocks.iter()
+        let all_opcodes: Vec<String> = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .map(|i| i.opcode.to_lowercase())
             .collect();
@@ -1086,7 +1244,9 @@ fn test_all_backends_atomic_cas_patterns() {
 
         // The fundamental assertion: the CAS function must produce
         // non-trivial code (more than just a return stub).
-        let total_bytes: usize = af.blocks.iter()
+        let total_bytes: usize = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .map(|i| i.encoded.len())
             .sum();
@@ -1118,7 +1278,9 @@ fn test_wasm32_atomic_cas() {
     // "wasm_body" AllocatedInstruction (to preserve exact byte offsets for
     // call-relocation patching), so we first check the opcode strings and
     // then fall back to disassembling the encoded bytes.
-    let all_opcodes: Vec<String> = af.blocks.iter()
+    let all_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1136,8 +1298,7 @@ fn test_wasm32_atomic_cas() {
         if let Ok(bytes) = backend.encode_function(&af) {
             let lines = backend.disassemble(&bytes, 0x400000);
             let disasm_text = lines.join("\n").to_lowercase();
-            has_atomic = disasm_text.contains("cmpxchg")
-                || disasm_text.contains("atomic");
+            has_atomic = disasm_text.contains("cmpxchg") || disasm_text.contains("atomic");
         }
     }
 
@@ -1245,7 +1406,9 @@ fn test_all_backends_fp_conversion_emit_real_instructions() {
         let func = make_fp_conv_func("fp_conv_emit");
         let af = backend.allocate_registers(&func).unwrap();
 
-        let all_opcodes: Vec<String> = af.blocks.iter()
+        let all_opcodes: Vec<String> = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .map(|i| i.opcode.to_lowercase())
             .collect();
@@ -1253,7 +1416,9 @@ fn test_all_backends_fp_conversion_emit_real_instructions() {
 
         // The function must contain at least one FP/SIMD register reference
         // (proving that the conversion uses the FP unit, not just GPR moves)
-        let has_fp_reg = af.blocks.iter()
+        let has_fp_reg = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
             .any(|r| r.class == RegClass::SimdFp);
@@ -1315,7 +1480,9 @@ fn test_wasm32_fp_conversion() {
     // first check the opcode strings and then fall back to disassembling the
     // encoded bytes (which yields mnemonics like "f64.convert_i64_s" and
     // "i64.trunc_f64_s").
-    let all_opcodes: Vec<String> = af.blocks.iter()
+    let all_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1330,8 +1497,7 @@ fn test_wasm32_fp_conversion() {
         if let Ok(bytes) = backend.encode_function(&af) {
             let lines = backend.disassemble(&bytes, 0x400000);
             let disasm_text = lines.join("\n").to_lowercase();
-            has_conv = disasm_text.contains("convert")
-                || disasm_text.contains("trunc");
+            has_conv = disasm_text.contains("convert") || disasm_text.contains("trunc");
         }
     }
 
@@ -1384,12 +1550,16 @@ fn test_all_backends_float_to_int_not_just_move() {
         // The critical check: the function must involve both GPR and FP/SIMD
         // registers, proving that it crosses register banks (which is what
         // a conversion instruction does). A simple move would stay in one bank.
-        let has_gpr = af.blocks.iter()
+        let has_gpr = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
             .any(|r| r.class == RegClass::Gpr);
 
-        let has_simd_fp = af.blocks.iter()
+        let has_simd_fp = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .flat_map(|i| i.reads.iter().chain(i.writes.iter()))
             .any(|r| r.class == RegClass::SimdFp);
@@ -1401,7 +1571,8 @@ fn test_all_backends_float_to_int_not_just_move() {
             kind.isa_name(),
             has_gpr,
             has_simd_fp,
-            af.blocks.iter()
+            af.blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.opcode.as_str())
                 .collect::<Vec<_>>()
@@ -1464,7 +1635,9 @@ fn test_aarch64_ror_uses_extr() {
     let func = make_ror_func("a64_ror");
     let af = backend.allocate_registers(&func).unwrap();
 
-    let all_opcodes: Vec<String> = af.blocks.iter()
+    let all_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1473,7 +1646,8 @@ fn test_aarch64_ror_uses_extr() {
     // AArch64 ROR by immediate should emit EXTR (which is the encoding for ROR)
     // It should NOT emit ASR (arithmetic shift right)
     let has_extr = all_opcodes_str.contains("extr") || all_opcodes_str.contains("ror");
-    let has_asr = all_opcodes_str.contains("asr") && !all_opcodes_str.contains("extr")
+    let has_asr = all_opcodes_str.contains("asr")
+        && !all_opcodes_str.contains("extr")
         && !all_opcodes_str.contains("ror");
 
     // If opcodes don't contain the patterns, try disassembly
@@ -1508,7 +1682,9 @@ fn test_aarch64_rol_uses_extr() {
     let func = make_rol_func("a64_rol");
     let af = backend.allocate_registers(&func).unwrap();
 
-    let all_opcodes: Vec<String> = af.blocks.iter()
+    let all_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1567,7 +1743,9 @@ fn test_aarch64_ror_reg_uses_rorv() {
     let backend = create_backend(BackendKind::AArch64).unwrap();
     let af = backend.allocate_registers(&func).unwrap();
 
-    let all_opcodes: Vec<String> = af.blocks.iter()
+    let all_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1633,7 +1811,9 @@ fn test_mips64_ror_5_instruction_sequence() {
     let af = backend.allocate_registers(&func).unwrap();
 
     // Collect all opcodes from the body (skip prologue/epilogue)
-    let body_opcodes: Vec<String> = af.blocks.iter()
+    let body_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1688,7 +1868,9 @@ fn test_mips64_rol_5_instruction_sequence() {
     let backend = create_backend(BackendKind::Mips64).unwrap();
     let af = backend.allocate_registers(&func).unwrap();
 
-    let body_opcodes: Vec<String> = af.blocks.iter()
+    let body_opcodes: Vec<String> = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .map(|i| i.opcode.to_lowercase())
         .collect();
@@ -1744,7 +1926,9 @@ fn test_mips64_ror_instruction_count() {
 
     // Count the rotation-related instructions
     let rotation_opcodes = ["dsrlv", "dsllv", "daddiu", "dsubu", "or"];
-    let rotation_count: usize = af.blocks.iter()
+    let rotation_count: usize = af
+        .blocks
+        .iter()
         .flat_map(|b| b.instructions.iter())
         .filter(|i| rotation_opcodes.contains(&i.opcode.as_str()))
         .count();
@@ -1754,7 +1938,8 @@ fn test_mips64_ror_instruction_count() {
         "MIPS64: ROR should produce at least 5 rotation-related instructions, \
          got {}. Opcodes: {:?}",
         rotation_count,
-        af.blocks.iter()
+        af.blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .map(|i| i.opcode.as_str())
             .collect::<Vec<_>>()
@@ -1850,7 +2035,9 @@ fn test_all_backends_ror_produces_nontrivial_code() {
 
         // A ROR function must have more than just prologue+epilogue instructions.
         // At minimum, it should contain a shift/rotate instruction.
-        let total_bytes: usize = af.blocks.iter()
+        let total_bytes: usize = af
+            .blocks
+            .iter()
             .flat_map(|b| b.instructions.iter())
             .map(|i| i.encoded.len())
             .sum();

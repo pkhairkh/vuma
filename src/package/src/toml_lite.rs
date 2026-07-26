@@ -108,7 +108,11 @@ pub struct ParseError {
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "toml parse error at line {}: {}", self.line, self.message)
+        write!(
+            f,
+            "toml parse error at line {}: {}",
+            self.line, self.message
+        )
     }
 }
 
@@ -259,10 +263,7 @@ impl<'a> Parser<'a> {
                 let key_path = self.parse_key_path()?;
                 self.skip_inline_ws();
                 if self.peek() != '=' {
-                    return self.err(format!(
-                        "expected '=' after key, found {:?}",
-                        self.peek()
-                    ));
+                    return self.err(format!("expected '=' after key, found {:?}", self.peek()));
                 }
                 self.advance();
                 let value = self.parse_value()?;
@@ -467,7 +468,12 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break;
                 }
-                _ => return self.err(format!("expected ',' or ']' in array, found {:?}", self.peek())),
+                _ => {
+                    return self.err(format!(
+                        "expected ',' or ']' in array, found {:?}",
+                        self.peek()
+                    ))
+                }
             }
         }
         Ok(Value::Array(arr))
@@ -504,10 +510,12 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break;
                 }
-                _ => return self.err(format!(
-                    "expected ',' or '}}' in inline table, found {:?}",
-                    self.peek()
-                )),
+                _ => {
+                    return self.err(format!(
+                        "expected ',' or '}}' in inline table, found {:?}",
+                        self.peek()
+                    ))
+                }
             }
         }
         Ok(Value::Table(table))
@@ -529,9 +537,7 @@ fn navigate_mut<'a>(
 ) -> Result<&'a mut BTreeMap<String, Value>, ParseError> {
     let mut current = root;
     for key in path {
-        let entry = current
-            .entry(key.clone())
-            .or_insert_with(Value::table);
+        let entry = current.entry(key.clone()).or_insert_with(Value::table);
         match entry {
             Value::Table(t) => current = t,
             Value::Array(arr) => match arr.last_mut() {
@@ -580,9 +586,7 @@ fn push_array_table<'a>(
     }
     let (last, parents) = path.split_last().unwrap();
     let parent = navigate_mut(root, parents, line)?;
-    let entry = parent
-        .entry(last.clone())
-        .or_insert_with(Value::array);
+    let entry = parent.entry(last.clone()).or_insert_with(Value::array);
     match entry {
         Value::Array(arr) => {
             arr.push(Value::table());
@@ -628,9 +632,7 @@ fn insert_into_table(
         return Ok(());
     }
     let (first, rest) = key_path.split_first().unwrap();
-    let entry = table
-        .entry(first.clone())
-        .or_insert_with(Value::table);
+    let entry = table.entry(first.clone()).or_insert_with(Value::table);
     match entry {
         Value::Table(t) => insert_into_table(t, rest, value, line),
         _ => Err(ParseError {
@@ -735,7 +737,10 @@ fn serialize_table_contents(
 /// Format a key as a bare key if it matches `[A-Za-z0-9_-]+`, otherwise as
 /// a quoted basic string.
 fn format_key(k: &str) -> String {
-    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !k.is_empty()
+        && k.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         k.to_string()
     } else {
         format_string(k)
@@ -799,11 +804,7 @@ name = "b"
 kind = "lib"
 "#;
         let v = parse(input).unwrap();
-        let arr = v
-            .get("target")
-            .unwrap()
-            .as_array()
-            .unwrap();
+        let arr = v.get("target").unwrap().as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0].get("name").unwrap().as_str(), Some("a"));
         assert_eq!(arr[1].get("name").unwrap().as_str(), Some("b"));
@@ -879,10 +880,7 @@ key = 'literal\nvalue'
 key = "tab\there\nnewline"
 "#;
         let v = parse(input).unwrap();
-        assert_eq!(
-            v.get("key").unwrap().as_str(),
-            Some("tab\there\nnewline")
-        );
+        assert_eq!(v.get("key").unwrap().as_str(), Some("tab\there\nnewline"));
     }
 
     #[test]
@@ -946,16 +944,10 @@ key = { version = "0.2", registry = "custom" }
     fn test_roundtrip_with_nested_table() {
         let mut root: BTreeMap<String, Value> = BTreeMap::new();
         let mut deps: BTreeMap<String, Value> = BTreeMap::new();
-        deps.insert(
-            "vuma-std".to_string(),
-            Value::String("0.1".to_string()),
-        );
+        deps.insert("vuma-std".to_string(), Value::String("0.1".to_string()));
         let mut inner: BTreeMap<String, Value> = BTreeMap::new();
         inner.insert("version".to_string(), Value::String("0.2".to_string()));
-        inner.insert(
-            "registry".to_string(),
-            Value::String("custom".to_string()),
-        );
+        inner.insert("registry".to_string(), Value::String("custom".to_string()));
         deps.insert("vuma-crypto".to_string(), Value::Table(inner));
         root.insert("dependencies".to_string(), Value::Table(deps));
         let v = Value::Table(root);

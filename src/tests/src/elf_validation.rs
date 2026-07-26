@@ -136,13 +136,9 @@ impl ElfFile {
 
         let read_u64 = |b: &[u8]| -> u64 {
             if is_le {
-                u64::from_le_bytes([
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                ])
+                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
             } else {
-                u64::from_be_bytes([
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                ])
+                u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
             }
         };
 
@@ -317,7 +313,7 @@ fn make_add_scg() -> Scg {
                     lhs: ScgExpr::Var("a".to_string()),
                     rhs: ScgExpr::Var("b".to_string()),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
@@ -343,8 +339,8 @@ fn compile_to_elf(scg: &Scg, backend: &dyn Backend) -> Vec<u8> {
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     backend
@@ -373,7 +369,8 @@ fn validate_elf_header(
 
     // ── e_ident[EI_DATA] ──
     assert_eq!(
-        elf.header.ei_data, expected_data,
+        elf.header.ei_data,
+        expected_data,
         "[{}] e_ident[EI_DATA]: expected {} ({}), got {}",
         backend_name,
         expected_data,
@@ -439,11 +436,7 @@ fn validate_program_headers(elf: &ElfFile, total_bytes: usize, backend_name: &st
     );
 
     // Must have at least one PT_LOAD segment
-    let load_segments: Vec<&ElfPhdr> = elf
-        .phdrs
-        .iter()
-        .filter(|p| p.p_type == PT_LOAD)
-        .collect();
+    let load_segments: Vec<&ElfPhdr> = elf.phdrs.iter().filter(|p| p.p_type == PT_LOAD).collect();
     assert!(
         !load_segments.is_empty(),
         "[{}] should have at least one PT_LOAD segment",
@@ -562,7 +555,13 @@ fn validate_elf_for_backend(
 ) {
     let elf = ElfFile::parse(elf_bytes);
 
-    validate_elf_header(&elf, expected_class, expected_data, expected_machine, backend_name);
+    validate_elf_header(
+        &elf,
+        expected_class,
+        expected_data,
+        expected_machine,
+        backend_name,
+    );
     validate_program_headers(&elf, elf_bytes.len(), backend_name);
     validate_section_headers(&elf, elf_bytes.len(), backend_name);
 }
@@ -579,13 +578,7 @@ fn test_elf_validation_x86_64() {
     let backend = X86_64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    validate_elf_for_backend(
-        &elf_bytes,
-        ELFCLASS64,
-        ELFDATA2LSB,
-        EM_X86_64,
-        "x86_64",
-    );
+    validate_elf_for_backend(&elf_bytes, ELFCLASS64, ELFDATA2LSB, EM_X86_64, "x86_64");
 }
 
 // ---- AArch64 ----
@@ -596,13 +589,7 @@ fn test_elf_validation_aarch64() {
     let backend = AArch64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    validate_elf_for_backend(
-        &elf_bytes,
-        ELFCLASS64,
-        ELFDATA2LSB,
-        EM_AARCH64,
-        "aarch64",
-    );
+    validate_elf_for_backend(&elf_bytes, ELFCLASS64, ELFDATA2LSB, EM_AARCH64, "aarch64");
 }
 
 // ---- RISC-V 64 ----
@@ -613,13 +600,7 @@ fn test_elf_validation_riscv64() {
     let backend = RiscV64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    validate_elf_for_backend(
-        &elf_bytes,
-        ELFCLASS64,
-        ELFDATA2LSB,
-        EM_RISCV,
-        "riscv64",
-    );
+    validate_elf_for_backend(&elf_bytes, ELFCLASS64, ELFDATA2LSB, EM_RISCV, "riscv64");
 }
 
 // ---- ARM32 ----
@@ -630,13 +611,7 @@ fn test_elf_validation_arm32() {
     let backend = Arm32Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    validate_elf_for_backend(
-        &elf_bytes,
-        ELFCLASS32,
-        ELFDATA2LSB,
-        EM_ARM,
-        "arm32",
-    );
+    validate_elf_for_backend(&elf_bytes, ELFCLASS32, ELFDATA2LSB, EM_ARM, "arm32");
 }
 
 // ---- MIPS64 ----
@@ -647,15 +622,11 @@ fn test_elf_validation_mips64() {
     let backend = Mips64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    // Mips64Backend::new() emits a big-endian ELF (ELFDATA2MSB, qemu-mips64).
-    // The Mips64BeBackend wrapper is retained as an explicit BE alias.
-    validate_elf_for_backend(
-        &elf_bytes,
-        ELFCLASS64,
-        ELFDATA2MSB,
-        EM_MIPS,
-        "mips64",
-    );
+    // Mips64Backend::new() emits a little-endian ELF (ELFDATA2LSB,
+    // qemu-mips64el) — see src/codegen/src/mips64/mod.rs:1743-1855
+    // (build_mips64_elf_2seg pushes ELFDATA2LSB at line 1779). The
+    // Mips64BeBackend wrapper is the big-endian variant for qemu-mips64.
+    validate_elf_for_backend(&elf_bytes, ELFCLASS64, ELFDATA2LSB, EM_MIPS, "mips64");
 }
 
 // ---- PPC64 ----
@@ -666,13 +637,7 @@ fn test_elf_validation_ppc64() {
     let backend = PPC64Backend::new();
     let elf_bytes = compile_to_elf(&scg, &backend);
 
-    validate_elf_for_backend(
-        &elf_bytes,
-        ELFCLASS64,
-        ELFDATA2MSB,
-        EM_PPC64,
-        "ppc64",
-    );
+    validate_elf_for_backend(&elf_bytes, ELFCLASS64, ELFDATA2MSB, EM_PPC64, "ppc64");
 }
 
 // ---- LoongArch64 ----
@@ -863,19 +828,14 @@ fn test_all_backends_entry_point_valid() {
         );
 
         // Entry point must fall within some PT_LOAD segment
-        let entry_in_segment = elf
-            .phdrs
-            .iter()
-            .filter(|p| p.p_type == PT_LOAD)
-            .any(|p| {
-                elf.header.e_entry >= p.p_vaddr
-                    && elf.header.e_entry < p.p_vaddr + p.p_memsz
+        let entry_in_segment =
+            elf.phdrs.iter().filter(|p| p.p_type == PT_LOAD).any(|p| {
+                elf.header.e_entry >= p.p_vaddr && elf.header.e_entry < p.p_vaddr + p.p_memsz
             });
         assert!(
             entry_in_segment,
             "[{}] entry point ({:#x}) must be within a PT_LOAD segment",
-            name,
-            elf.header.e_entry
+            name, elf.header.e_entry
         );
     }
 }

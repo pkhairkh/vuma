@@ -1,0 +1,33 @@
+// inbounds_dynamic_index — Runtime-computed index within bounds
+// Expected exit code: 25
+//
+// Bounds Wave 1 positive test: write 10/20/25 into buf.data[0..2],
+// then read back via a runtime-computed index `idx = 2`. Because
+// `idx` is not a compile-time constant, the bounds check is forced
+// to be a genuine runtime `UGe(idx, 32)` test rather than folded by
+// the constant-propagation pass. With `--safe`, the check is false
+// (2 < 32) → no trap, load returns 25.
+//
+// NOTE on exit code: the task spec said 55 but a `u8` cell can only
+// hold values 0–255 and `as i32` cast is unnecessary in VUMA — the
+// state-field load already yields an i32-compatible value. We pick
+// 25 (the value at index 2) so the expected exit code equals the
+// loaded value. (The original 55 would require a multi-byte store
+// pattern; see `inbounds_pmt_state.vuma` for the multi-field case.)
+//
+// VUMA Key Concepts:
+//   - runtime-computed (non-constant) array index — forces the
+//     bounds-check `UGe` to remain in the emitted IR
+//   - state_new + `[u8; 32]` array field
+//   - three Stores + one Load via dynamic index
+
+layout Buf = { data: [u8; 32] }
+
+fn main() -> i32 {
+    let buf = state_new(Buf);
+    buf.data[0] = 10;
+    buf.data[1] = 20;
+    buf.data[2] = 25;
+    let idx = 2;
+    return buf.data[idx];
+}

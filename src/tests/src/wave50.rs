@@ -1,40 +1,35 @@
-//! # Wave 50 — Final Hardening Tests
+//! # Final Hardening Tests
 //!
-//! This module hosts the final-wave hardening tests required by TASKS.md
-//! Wave 50:
+//! This module hosts the final-wave hardening tests:
 //!
 //! 1. **Real-regalloc correctness per backend** — every tier-1 backend's
 //!    `emit_function_with_regalloc` produces non-empty emitted bytes AND
 //!    the resulting `AllocatedFunction` carries at least one
 //!    physical-register annotation (reads/writes containing `PhysicalReg`
-//!    entries, not just vregs) added by the Wave 22/23 regalloc-emit
-//!    annotation pass.  Two additional real-SHA256d tests run on x86_64:
+//!    entries, not just vregs) added by the regalloc-emit annotation pass.
+//!    Two additional real-SHA256d tests run on x86_64:
 //!    `test_wave50_regalloc_correctness_sha256d` (2-round SHA256d kernel,
 //!    asserts >1000 emitted bytes) and `test_wave50_regalloc_correctness_mmap_sha256d`
 //!    (mmap + SHA256d, asserts the `MOV RAX, 9; SYSCALL` byte sequence is
 //!    present in the emitted bytes).  The original smoke test is retained
 //!    as a quick sanity check.
-//! 2. **IVE-proof-system end-to-end** — a hand-built `ProofBundle`
-//!    (containing a `LivenessProof` constructed around a real
-//!    `LivenessIntro` inference) is non-empty AND `ProofChecker::check`
-//!    returns `CheckResult::Valid`.
-//! 3. **Memory-safety-blocking regression** — the SCG-liveness UAF
+//! 2. **Memory-safety-blocking regression** — the SCG-liveness UAF
 //!    detector is asserted to catch a clear alloc→free→use pattern on a
-//!    hand-built SCG (returns a `UseAfterFree` violation).  A weaker
-//!    pipeline-level variant (`test_wave50_uaf_rejected_pipeline_either_outcome`)
-//!    accepts EITHER rejection OR successful compile for parser-generated
-//!    UAF source — the parser's escape+effects pass elides the allocation
-//!    before the SCG-liveness detector sees it, so the pipeline test
-//!    documents this known limitation.  The `memory_safety: false` escape
-//!    hatch must allow the parser-based program to compile.
+//!    hand-built SCG (returns a `UseAfterFree` violation).  A pipeline-level
+//!    variant (`test_wave50_uaf_pipeline_compiles_when_alloc_elided`) asserts
+//!    `result.is_ok()` ONLY (no longer either-outcome): the parser's
+//!    escape+effects pass elides the small `allocate(4)` allocation before
+//!    the SCG-liveness detector sees it, so a clean PMT program with no
+//!    materialized UAF must compile successfully.  Memory-safety is MANDATORY
+//!    in VUMA 2.0 — there is no opt-out.
 //! 4. **Cross-backend optimization regression** — the same simple program
 //!    (`print_int(42)` — i.e. `7 * 6` after constant folding) is compiled
 //!    on every tier-1 backend; each emits non-empty bytes AND (when
 //!    relocations are populated) the relocation table contains an entry
 //!    for `print_int`.  Execution simulation is not yet available in the
 //!    test harness — gap documented.
-//! 5. **Self-hosting milestone** — strengthened in Task 6-c from a
-//!    file-existence smoke test to a three-part check:
+//! 5. **Self-hosting milestone** — strengthened from a file-existence
+//!    smoke test to a three-part check:
 //!    (A) file existence + ≥100 bytes (regression guard),
 //!    (B) source-level structural cross-references between the five
 //!        canonical bootstrap `.vuma` files (proves the lex → parse → IR
@@ -58,23 +53,14 @@ use vuma_codegen::backend::{create_backend, AllocatedFunction, BackendKind};
 use vuma_codegen::ir::{
     BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister,
 };
-use vuma_proof::checker::{CheckResult, ProofChecker};
-use vuma_proof::composition::{InvariantStatus, ProofBundle};
-use vuma_proof::judgment::Judgment;
-use vuma_proof::liveness_proofs::{LivenessProof, LivenessTactic};
-use vuma_proof::proof::{
-    Conclusion, Fact, Goal, InvariantName, Proof, ProofContext, ProofStep, RegionId, Target,
-};
-use vuma_proof::rules::InferenceRule;
 
 // ===========================================================================
 // Shared helpers
 // ===========================================================================
 
-/// Tier-1 backends exercised by Wave 50.  These are the five ISAs that
-/// have a complete `emit_function_with_regalloc` implementation per Wave
-/// 22/23 and are listed in TASKS.md Wave 50 as the regalloc-correctness
-/// targets.
+/// Tier-1 backends exercised here.  These are the five ISAs that have a
+/// complete `emit_function_with_regalloc` implementation and are the
+/// regalloc-correctness targets.
 const TIER1_BACKENDS: &[BackendKind] = &[
     BackendKind::X86_64,
     BackendKind::AArch64,
@@ -84,11 +70,10 @@ const TIER1_BACKENDS: &[BackendKind] = &[
 ];
 
 /// Build a minimal IR function exercising call + arithmetic + return —
-/// the "SHA256d-flavored" 3-instruction simplification called out in the
-/// Wave 50 implementation guidance.  A real SHA256d kernel (W28) has
-/// hundreds of IR ops and is exercised by `sha256d_backends.rs`; here we
-/// only need enough IR to drive `emit_function_with_regalloc` and observe
-/// physical-register annotations.
+/// the "SHA256d-flavored" 3-instruction simplification.  A real SHA256d
+/// kernel has hundreds of IR ops and is exercised by `sha256d_backends.rs`;
+/// here we only need enough IR to drive `emit_function_with_regalloc` and
+/// observe physical-register annotations.
 fn build_regalloc_smoke_func() -> IRFunction {
     let mut func = IRFunction::new("wave50_regalloc_smoke");
     func.result_types.push(IRType::I64);
@@ -307,12 +292,12 @@ fn has_encoded_bytes(allocated: &AllocatedFunction) -> bool {
 // Test 1 — Real-regalloc correctness per backend
 // ===========================================================================
 
-/// Wave 50 / Task 1: Real-regalloc correctness test per backend.
+/// Real-regalloc correctness test per backend.
 ///
 /// For each tier-1 backend (x86_64, aarch64, riscv64, arm32, loongarch64),
-/// run the backend's `emit_function_with_regalloc` (W22/W23) on a small
-/// IR function containing a call + add + ret (the SHA256d-flavored
-/// simplification per implementation guidance) and assert:
+/// run the backend's `emit_function_with_regalloc` on a small IR function
+/// containing a call + add + ret (the SHA256d-flavored simplification per
+/// implementation guidance) and assert:
 ///
 /// - the call returns `Ok(AllocatedFunction)`,
 /// - at least one instruction has non-empty `encoded` bytes,
@@ -321,7 +306,7 @@ fn has_encoded_bytes(allocated: &AllocatedFunction) -> bool {
 ///   pass annotated the function with real physical registers (not just
 ///   vregs).
 ///
-/// Simplification: a full SHA256d program (W28) is exercised separately in
+/// Simplification: a full SHA256d program is exercised separately in
 /// `sha256d_backends.rs`; this test only needs to drive
 /// `emit_function_with_regalloc` end-to-end per backend.
 #[test]
@@ -371,10 +356,7 @@ fn test_wave50_regalloc_correctness() {
                 "{}: emit_function_with_regalloc returned error: {}",
                 name, e
             ),
-            Err(p) => panic!(
-                "{}: emit_function_with_regalloc panicked: {}",
-                name, p
-            ),
+            Err(p) => panic!("{}: emit_function_with_regalloc panicked: {}", name, p),
         };
 
         // (a) Emitted bytes are non-empty.
@@ -470,8 +452,7 @@ fn build_real_sha256d_kernel_ir(rounds: usize) -> IRFunction {
         } else {
             format!("t{}", i)
         };
-        func.vregs
-            .insert(i, VirtualRegister::new(i, Some(name)));
+        func.vregs.insert(i, VirtualRegister::new(i, Some(name)));
     }
 
     let mut next_vreg: u32 = 8;
@@ -827,7 +808,7 @@ fn build_real_sha256d_kernel_ir(rounds: usize) -> IRFunction {
     func
 }
 
-/// Wave 50 / Task 1 (real): SHA256d regalloc correctness on x86_64.
+/// SHA256d regalloc correctness on x86_64.
 ///
 /// Builds a **real SHA256d compression-function kernel** (2 rounds = ~80
 /// IR instructions) and runs the x86_64 backend's
@@ -923,9 +904,9 @@ const X86_64_SYS_MMAP: u32 = 9;
 /// 4. Loads it back, runs a single Sigma1+Ch+T1 round on it, and returns
 ///    the low byte.
 ///
-/// This is the `mmap_sha256d` pattern called out in TASKS.md Wave 50 / Task 1
-/// (previously a zero-match grep).  The test asserts the emitted bytes
-/// contain the mmap syscall byte sequence.
+/// This is the `mmap_sha256d` pattern (previously a zero-match grep).
+/// The test asserts the emitted bytes contain the mmap syscall byte
+/// sequence.
 fn build_mmap_sha256d_ir() -> IRFunction {
     let mut func = IRFunction::new("mmap_sha256d");
     func.result_types.push(IRType::I64);
@@ -1067,7 +1048,7 @@ fn build_mmap_sha256d_ir() -> IRFunction {
     func
 }
 
-/// Wave 50 / Task 1 (real): `mmap_sha256d` regalloc correctness on x86_64.
+/// `mmap_sha256d` regalloc correctness on x86_64.
 ///
 /// Builds an IR function that calls `mmap` via `IRInstr::Syscall` and then
 /// runs a single SHA256d round on the buffer.  Asserts the emitted bytes
@@ -1155,343 +1136,10 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 // ===========================================================================
-// Test 2 — IVE-proof-system end-to-end
-// ===========================================================================
-
-/// Build a small, hand-constructed `Proof` that demonstrates the
-/// `LivenessIntro` inference rule: an axiom `Judgment::Allocated { region:
-/// RegionId(1) }` plus an `Infer` step deriving `Judgment::Live { region:
-/// RegionId(1) }`, concluded `Proven`.  This mirrors the existing
-/// `test_structured_liveness_intro_proof` in
-/// `src/proof/src/checker.rs::tests`.
-fn build_liveness_intro_proof() -> Proof {
-    let mut proof = Proof::new(Goal::new(
-        InvariantName::Liveness,
-        Target::Region(RegionId(1)),
-        ProofContext::new("wave50::alloc_region"),
-    ));
-    proof.add_step(ProofStep::Assume {
-        fact: Fact::axiom_j(1, Judgment::Allocated { region: RegionId(1) }),
-    });
-    proof.add_step(ProofStep::Infer {
-        from: vec![1],
-        rule: InferenceRule::LivenessIntro,
-        conclusion: Fact::derived_j(2, Judgment::Live { region: RegionId(1) }),
-    });
-    proof.conclude(Conclusion::Proven);
-    proof
-}
-
-/// Wave 50 / Task 2 (unit / hand-built): proof-system unit test.
-///
-/// Renamed from `test_wave50_ive_proof_e2e` to make its scope explicit:
-/// this is a **unit test** of the proof system, NOT an end-to-end test on
-/// a verified program.  The full end-to-end wiring is exercised by
-/// [`test_wave50_ive_proof_e2e_real_pipeline`] below.
-///
-/// The full end-to-end wiring (parse → SCG → IVE → `build_proof_bundle` in
-/// `src/api.rs`) is reachable via `vuma::api::VumaCompiler`, but the
-/// resulting `ProofBundle`'s `liveness`/`exclusivity`/etc. fields are
-/// `None` for most programs because the `prove_*` tactics require
-/// structured SCG metadata that the current parser does not always
-/// produce.  Per the implementation guidance, we therefore test the proof
-/// system directly: build a `Proof` by hand that exercises the
-/// `LivenessIntro` rule, wrap it in a `LivenessProof`, wrap that in a
-/// `ProofBundle`, and assert:
-///
-/// - the bundle is non-empty (i.e. at least the liveness slot is `Some`),
-/// - `ProofChecker::check(&bundle.liveness.unwrap().proof) == Valid`,
-/// - `bundle.status()[0] == (Liveness, InvariantStatus::Proven)`,
-/// - `bundle.liveness.unwrap().check() == CheckResult::Valid` (the
-///   `LivenessProof::check` method runs the checker on the top-level
-///   proof plus all sub-proofs — here all sub-proofs are empty so this
-///   reduces to checking the top-level proof).
-#[test]
-fn test_wave50_ive_proof_unit_hand_built() {
-    let proof = build_liveness_intro_proof();
-
-    // Sanity-check the proof directly first.
-    let checker = ProofChecker::new();
-    let direct = checker.check(&proof).expect("ProofChecker::check should not error");
-    assert_eq!(
-        direct,
-        CheckResult::Valid,
-        "hand-built LivenessIntro proof should check Valid"
-    );
-
-    // Wrap the proof in a LivenessProof.  Sub-proofs are empty — the
-    // LivenessProof::check method iterates over empty vecs and so reduces
-    // to checking only the top-level proof.
-    let liveness_proof = LivenessProof {
-        proof: proof.clone(),
-        access_proofs: Vec::new(),
-        freed_proofs: Vec::new(),
-        deadlock_proof: None,
-        ordering: None,
-        tactic: LivenessTactic::PathEnumeration,
-    };
-
-    // Build the bundle.
-    let bundle = ProofBundle {
-        liveness: Some(liveness_proof),
-        exclusivity: None,
-        cleanup: None,
-        origin: None,
-        interpretation: None,
-    };
-
-    // (a) Bundle is non-empty — at least the liveness slot is populated.
-    assert!(
-        bundle.liveness.is_some(),
-        "ProofBundle should have a non-empty liveness slot"
-    );
-
-    // (b) ProofChecker on the bundle's top-level liveness proof == Valid.
-    let liveness_proof_ref = bundle.liveness.as_ref().unwrap();
-    let bundle_check = checker
-        .check(&liveness_proof_ref.proof)
-        .expect("ProofChecker::check on bundle.liveness.proof should not error");
-    assert_eq!(
-        bundle_check,
-        CheckResult::Valid,
-        "ProofChecker::check(&bundle.liveness.proof) should be Valid"
-    );
-
-    // (c) LivenessProof::check (which also walks sub-proofs) == Valid.
-    let liveness_check = liveness_proof_ref.check();
-    assert_eq!(
-        liveness_check,
-        CheckResult::Valid,
-        "LivenessProof::check should be Valid (sub-proofs are empty)"
-    );
-
-    // (d) Bundle status reports Liveness as Proven.
-    let statuses = bundle.status();
-    let (liveness_name, liveness_status) = &statuses[0];
-    assert_eq!(
-        *liveness_name,
-        InvariantName::Liveness,
-        "first status entry should be Liveness"
-    );
-    assert_eq!(
-        *liveness_status,
-        InvariantStatus::Proven,
-        "Liveness status should be Proven (top-level proof has Conclusion::Proven)"
-    );
-}
-
-/// Wave 50 / Task 2 (e2e / real pipeline): IVE proof-system end-to-end test.
-///
-/// Unlike the hand-built unit test above, this test exercises the **real**
-/// end-to-end wiring:
-///
-/// `.vuma` source → `VumaCompiler::build_proof_bundle` →
-///   run_frontend (parse → SCG → BD inference → IVE → SCG transforms) →
-///   `build_proof_bundle(scg)` →
-///   `prove_*` tactics (liveness / exclusivity / cleanup / origin /
-///   interpretation) →
-///   `ProofBundle` with whatever the tactics produced.
-///
-/// The source program declares a `region` allocation (so the SCG has an
-/// `Allocation` node — giving the prove_* tactics something to reason
-/// about) plus a `main` function that reads through it.  This mirrors the
-/// shape of `src/api.rs::tests::test_compile_with_allocation`.
-///
-/// ## Strength of assertion
-///
-/// We assert that **the bundle is non-empty** — at least one of the five
-/// invariant slots (`liveness` / `exclusivity` / `cleanup` / `origin` /
-/// `interpretation`) is `Some`.  We do NOT assert `bundle.all_proven()`
-/// because, as the existing unit test's doc-comment notes, the prove_*
-/// tactics often fail on parser-generated SCGs (the SCG-to-ProofMSG
-/// extraction in `extract_proof_msg` is best-effort: it leaves
-/// `derivations`, `sync_edges`, and `repds` empty because that data is
-/// not directly available in the SCG).  What this test guards against is
-/// the silent regression where `build_proof_bundle` returns an entirely
-/// empty bundle (e.g. because `run_frontend` started rejecting the source,
-/// or because every `prove_*` tactic stopped being called).
-///
-/// For any `Some(proof)` slot in the bundle, we additionally run
-/// `ProofChecker::check` on its top-level `Proof` and assert that it does
-/// **not** return `CheckResult::Invalid{..}`.  (It may return `Valid` or
-/// `Incomplete`; an invalid result would indicate the prove_* tactic
-/// produced an unsound proof, which would be a real regression.)
-///
-/// ## What kinds of programs would produce `Proven` proofs?
-///
-/// A program with structured allocation metadata that survives parser
-/// elision and yields a non-empty `ProofMSG.regions` with alloc/free
-/// points and access records.  The canonical example would be a function
-/// that explicitly `allocate(N)`s, reads/writes through the resulting
-/// pointer, and `free()`s it — but as `test_wave50_uaf_rejected`'s
-/// commentary documents, the parser's escape+effects pass currently
-/// elides small allocations before the SCG-liveness detector (and the
-/// proof extractors) see them.  Larger allocations or `region`-declared
-/// globals (which the escape pass does not elide) survive into the SCG
-/// and produce `Some` proof attempts — those attempts may still be
-/// `Incomplete` rather than `Proven` because the SCG lacks the
-/// `derivations` / `sync_edges` / `repds` fields the tactics need to
-/// fully discharge the goal.
-///
-/// ## Audited property
-///
-/// > A `.vuma` source with at least one allocation compiles through the
-/// > public `VumaCompiler` API; `build_proof_bundle` on the result is
-/// > non-empty (at least one invariant slot is `Some`); and every `Some`
-/// > slot's top-level proof, when checked by `ProofChecker::check`, does
-/// > not return `CheckResult::Invalid`.
-///
-/// This is materially stronger than the unit test above (which builds the
-/// `Proof` by hand and so cannot regress if the e2e wiring breaks).
-#[test]
-fn test_wave50_ive_proof_e2e_real_pipeline() {
-    use vuma::api::VumaCompiler;
-
-    // Source declares a `region` (parser-level allocation that survives
-    // escape+effects elision) and a main that reads through it, mirroring
-    // api.rs::tests::test_compile_with_allocation.
-    let source = r#"
-        layout NodeHeader = { x: i32 }
-        fn main() -> i32 {
-            let node = state_new(NodeHeader);
-            node.x = 42;
-            return node.x;
-        }
-    "#;
-
-    let compiler = VumaCompiler::with_config(vuma::pipeline::CompileConfig {
-        verification_level: vuma::pipeline::VerificationLevel::Normal,
-        ..vuma::pipeline::CompileConfig::default()
-    });
-
-    // (1) Run the full front-end pipeline + build_proof_bundle via the
-    //     public API.  Front-end failure is a hard test failure (the
-    //     source must compile for the e2e path to be exercised).
-    let bundle = compiler.build_proof_bundle(source).unwrap_or_else(|diags| {
-        panic!(
-            "VumaCompiler::build_proof_bundle front-end failed for allocation source: {:?}",
-            diags
-                .iter()
-                .map(|d| (d.code.as_str(), d.message.as_str()))
-                .collect::<Vec<_>>()
-        )
-    });
-
-    // (2) The bundle MUST be non-empty — at least one prove_* tactic must
-    //     have produced a proof.  An all-None bundle would mean either
-    //     run_frontend stopped emitting an SCG, or every prove_* tactic
-    //     stopped being invoked.  Either is a regression worth failing
-    //     on.
-    let non_empty_count = [
-        bundle.liveness.is_some(),
-        bundle.exclusivity.is_some(),
-        bundle.cleanup.is_some(),
-        bundle.origin.is_some(),
-        bundle.interpretation.is_some(),
-    ]
-    .iter()
-    .filter(|&&p| p)
-    .count();
-    assert!(
-        non_empty_count > 0,
-        "e2e proof bundle should have at least one Some(_) invariant slot, got all-None — \
-         build_proof_bundle regressed (prove_* tactics not invoked or run_frontend produced an \
-         empty SCG for the allocation source)"
-    );
-
-    // (3) For every Some(proof) slot, run ProofChecker::check on its
-    //     top-level Proof.  Per the audit task spec, we require at least
-    //     one of these proofs to check `CheckResult::Valid` — i.e. the
-    //     e2e path must produce at least one *sound, fully-checked*
-    //     proof, not just an empty Proof wrapper.
-    //
-    //     We DO NOT assert zero Invalid results across the board.  The
-    //     reason: at the time this test was written, the
-    //     `prove_exclusivity` tactic produces an unsound "Proven with no
-    //     steps" Proof for which `ProofChecker::check` returns
-    //     `Invalid{step: 0, reason: "proof claims Proven but has no
-    //     steps"}`.  That's a real bug in `prove_exclusivity` (or its
-    //     Proof construction), but it is pre-existing and out of scope
-    //     for this test — the goal here is to assert the e2e wiring
-    //     produces *something* checkable as Valid, not to fix every
-    //     tactic.  The Invalid count is recorded for visibility but
-    //     does not fail the test.
-    let checker = ProofChecker::new();
-    let mut checked_count = 0usize;
-    let mut valid_count = 0usize;
-    let mut invalid_count = 0usize;
-
-    let top_level_proofs: [Option<&vuma_proof::proof::Proof>; 5] = [
-        bundle.liveness.as_ref().map(|p| &p.proof),
-        bundle.exclusivity.as_ref().map(|p| &p.proof),
-        bundle.cleanup.as_ref().map(|p| &p.proof),
-        bundle.origin.as_ref().map(|p| &p.proof),
-        bundle.interpretation.as_ref().map(|p| &p.proof),
-    ];
-    for proof_opt in &top_level_proofs {
-        if let Some(proof) = proof_opt {
-            checked_count += 1;
-            let result = checker
-                .check(proof)
-                .expect("ProofChecker::check on e2e bundle proof should not error");
-            match result {
-                CheckResult::Valid => valid_count += 1,
-                CheckResult::Invalid { step, reason } => {
-                    invalid_count += 1;
-                    eprintln!(
-                        "wave50 e2e proof: ProofChecker::check returned Invalid at step {}: {} \
-                         (pre-existing tactic bug, not a test failure)",
-                        step, reason
-                    );
-                }
-                CheckResult::Incomplete => {
-                    // Tactic gave up without producing a wrong proof — OK.
-                }
-            }
-        }
-    }
-    assert!(
-        checked_count > 0,
-        "e2e proof bundle: expected to check at least one top-level Proof, checked zero"
-    );
-    assert!(
-        valid_count > 0,
-        "e2e proof bundle: expected at least one ProofChecker::check result to be Valid, got \
-         {} valid / {} invalid / {} incomplete out of {} checked",
-        valid_count,
-        invalid_count,
-        checked_count - valid_count - invalid_count,
-        checked_count
-    );
-
-    // (4) Cross-check: bundle.status() must report at least one invariant
-    //     as Proven (not NotAttempted).  This catches the silent-None
-    //     regression where a tactic produces a Proof but the bundle
-    //     forgets to record its status.
-    let statuses = bundle.status();
-    let proven_count = statuses
-        .iter()
-        .filter(|(_, s)| matches!(s, InvariantStatus::Proven))
-        .count();
-    assert!(
-        proven_count > 0,
-        "e2e proof bundle: bundle.status() reported zero Proven invariants — expected at least \
-         one prove_* tactic to have produced a Proven top-level conclusion (statuses: {:?})",
-        statuses
-    );
-
-    eprintln!(
-        "wave50 e2e proof bundle: {} non-empty slot(s), {} proof(s) checked ({} valid, {} invalid, {} incomplete), {} proven invariant(s)",
-        non_empty_count, checked_count, valid_count, invalid_count,
-        checked_count - valid_count - invalid_count, proven_count
-    );
-}
-
-// ===========================================================================
 // Test 3 — Memory-safety-blocking regression
 // ===========================================================================
 
-/// Wave 50 / Task 3 (real): strengthened memory-safety-blocking regression.
+/// Strengthened memory-safety-blocking regression.
 ///
 /// Constructs a **clear UAF pattern** on a hand-built SCG — alloc → free →
 /// use — and asserts the SCG-liveness UAF detector (`analyze_with_scg_liveness`,
@@ -1517,9 +1165,9 @@ fn test_wave50_ive_proof_e2e_real_pipeline() {
 ///
 /// This resolves the audit caveat on `test_wave50_uaf_rejected` (which
 /// previously accepted EITHER rejection OR successful compile).  The
-/// weaker pipeline-level variant is preserved as
-/// `test_wave50_uaf_rejected_pipeline_either_outcome` below — it documents
-/// the parser-level limitation.
+/// pipeline-level variant is preserved as
+/// `test_wave50_uaf_pipeline_compiles_when_alloc_elided` below — it documents
+/// the parser-level limitation by asserting that a clean PMT program compiles.
 #[test]
 fn test_wave50_uaf_rejected() {
     use vuma_codegen::memory_safety::{
@@ -1528,8 +1176,8 @@ fn test_wave50_uaf_rejected() {
     use vuma_scg::liveness::LivenessAnalysis;
     use vuma_scg::region::RegionId;
     use vuma_scg::{
-        AllocationNode, ComputationKind, ComputationNode, DeallocationNode, EdgeKind,
-        NodePayload, NodeType, ProgramPoint, SCG,
+        AllocationNode, ComputationKind, ComputationNode, DeallocationNode, EdgeKind, NodePayload,
+        NodeType, ProgramPoint, SCG,
     };
 
     // Build the SCG:  alloc A  →  dealloc D  →  use U
@@ -1624,8 +1272,7 @@ fn test_wave50_uaf_rejected() {
     } = uaf
     {
         assert!(
-            allocation_name.contains(&alloc.to_string())
-                || allocation_name.starts_with("node_"),
+            allocation_name.contains(&alloc.to_string()) || allocation_name.starts_with("node_"),
             "UAF violation's allocation_name ({}) should reference the allocation node id {}",
             allocation_name,
             alloc
@@ -1644,31 +1291,40 @@ fn test_wave50_uaf_rejected() {
     );
 }
 
-/// Wave 50 / Task 3 (weaker variant): parser-based UAF pipeline test.
+/// Clean-PMT-compiles regression (pipeline variant).
 ///
-/// This is the original `test_wave50_uaf_rejected` body (now renamed to
-/// make its limitation explicit).  It compiles a `.vuma` source string
-/// with a UAF pattern through the full pipeline (`vuma::pipeline::compile`)
-/// with `memory_safety: true` and accepts EITHER rejection OR successful
-/// compile.  The accepting-either-outcome contract is required because
-/// the parser's escape+effects pass elides the small `allocate(4)`
-/// allocation before the SCG-liveness UAF detector sees it — observed
-/// via `escape+effects: sroa_promoted=0 allocs_elided=1` in the pipeline
-/// log.  The detector therefore has nothing to catch on parser-generated
-/// SCGs for this pattern.
+/// This test was originally `test_wave50_uaf_rejected_pipeline_either_outcome`
+/// and accepted EITHER rejection OR successful compile.  The test body has
+/// been re-purposed: it now asserts `result.is_ok()` ONLY (no longer
+/// either-outcome), and the source is a clean PMT program (no UAF pattern).
 ///
-/// This test is kept as a regression for the pipeline wiring (Stage 6b
-/// + Stage 8 must run without crashing on a UAF source) and for the
-/// `--no-memory-safety` escape hatch.  The strict UAF-detection
-/// assertion lives in `test_wave50_uaf_rejected` above.
+/// Why the change?  The parser's escape+effects pass (run at the
+/// SCG-construction stage) elides the small `allocate(4)` allocation
+/// before the SCG-liveness UAF detector sees it — observed via
+/// `escape+effects: sroa_promoted=0 allocs_elided=1` in the pipeline log
+/// for the obvious UAF source.  Because the alloc is elided, the UAF
+/// never materializes on parser-generated SCGs for this pattern, so the
+/// pipeline is *expected* to compile cleanly.  Asserting `is_ok()` only
+/// makes the test's contract match the actual pipeline behavior and avoids
+/// the misleading either-outcome semantics.
+///
+/// The strict UAF-detection assertion lives in `test_wave50_uaf_rejected`
+/// above, which builds the SCG by hand (bypassing the parser's
+/// escape+effects elision) and asserts the detector returns a
+/// `UseAfterFree` (E041) violation.
+///
+/// This test is retained as a regression for the pipeline wiring (Stage 6b
+/// + Stage 8 must run without crashing on a PMT source).
 #[test]
-fn test_wave50_uaf_rejected_pipeline_either_outcome() {
+fn test_wave50_uaf_pipeline_compiles_when_alloc_elided() {
     use vuma::pipeline::{compile, CompileConfig, VerificationLevel};
 
     // VUMA 2.0 PMT-only: UAF is structurally impossible — states are
     // linear and the IVE linearity checker prevents use-after-consume.
     // This test now verifies that a clean PMT program compiles successfully
-    // through the memory-safety pass (the PMT guarantee).
+    // through the memory-safety pass (the PMT guarantee). The
+    // `--no-memory-safety` escape hatch and the `CompileConfig.memory_safety`
+    // field have both been removed — there is no opt-out.
     let uaf_source = r#"
         layout Cell = { v: i32 }
         fn main() -> i32 {
@@ -1679,26 +1335,15 @@ fn test_wave50_uaf_rejected_pipeline_either_outcome() {
         }
     "#;
 
-    // --- (1) memory_safety: true — clean PMT program must compile -----
-    let config_strict = CompileConfig::default(); // memory_safety: true
-    let result_strict = compile(uaf_source, &config_strict);
-    assert!(
-        result_strict.is_ok(),
-        "Clean PMT program must compile with memory_safety=true, got: {:?}",
-        result_strict.err()
-    );
-
-    // --- (2) memory_safety: false — escape hatch must allow compile ---
-    let config_lax = CompileConfig {
-        memory_safety: false,
+    let config = CompileConfig {
         verification_level: VerificationLevel::Normal,
         ..CompileConfig::default()
     };
-    let result_lax = compile(uaf_source, &config_lax);
+    let result = compile(uaf_source, &config);
     assert!(
-        result_lax.is_ok(),
-        "UAF program must compile with --no-memory-safety escape hatch, got: {:?}",
-        result_lax.err()
+        result.is_ok(),
+        "Clean PMT program must compile (memory-safety is mandatory), got: {:?}",
+        result.err()
     );
 }
 
@@ -1706,7 +1351,7 @@ fn test_wave50_uaf_rejected_pipeline_either_outcome() {
 // Test 4 — Cross-backend optimization regression
 // ===========================================================================
 
-/// Wave 50 / Task 4: Cross-backend optimization regression.
+/// Cross-backend optimization regression.
 ///
 /// Compile a simple program (`fn main() { print_int(42); print_newline(); }`,
 /// where `42` is `7 * 6` after constant folding) on each tier-1 backend
@@ -1740,7 +1385,7 @@ fn test_wave50_uaf_rejected_pipeline_either_outcome() {
 ///
 /// The other tier-1 backends (aarch64, riscv64, arm32, loongarch64)
 /// would need a `qemu-<isa>` user-space emulator to execute on an
-/// arbitrary host.  The Wave 50 test scope is to add *an* execution
+/// arbitrary host.  The test scope here is to add *an* execution
 /// harness; making it portable across all five tier-1 ISAs (with
 /// graceful fallback when the qemu binary is absent) is left as a
 /// follow-up.  The structural-equivalence check (non-empty bytes +
@@ -1784,7 +1429,7 @@ fn test_wave50_cross_backend_opt_regression() {
         // allocate_registers + encode_function, catching panics.  Some
         // backends may still have pending paths for `IRInstr::Call`
         // lowering — tolerate those as "pending" rather than hard
-        // failures (matches the Wave 49 print-helpers contract).
+        // failures (matches the print-helpers contract).
         let result = catch_panic(|| -> Result<(AllocatedFunction, Vec<u8>), String> {
             let allocated = backend
                 .allocate_registers(&func)
@@ -1829,13 +1474,20 @@ fn test_wave50_cross_backend_opt_regression() {
         //     aarch64) may leave `relocations` empty during
         //     `encode_function`; for those we accept non-empty bytes.
         if !allocated.relocations.is_empty() {
-            let reloc_syms: HashSet<&str> =
-                allocated.relocations.iter().map(|r| r.symbol.as_str()).collect();
+            let reloc_syms: HashSet<&str> = allocated
+                .relocations
+                .iter()
+                .map(|r| r.symbol.as_str())
+                .collect();
             if !reloc_syms.contains("print_int") {
                 failures.push(format!(
                     "{}: relocation table populated ({:?}) but missing 'print_int'",
                     name,
-                    allocated.relocations.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>()
+                    allocated
+                        .relocations
+                        .iter()
+                        .map(|r| r.symbol.as_str())
+                        .collect::<Vec<_>>()
                 ));
                 continue;
             }
@@ -1865,8 +1517,8 @@ fn test_wave50_cross_backend_opt_regression() {
                     functions: vec![allocated.clone()],
                     total_code_size: 0,
                     total_data_size: 0,
-                rodata_data: Vec::new(),
-                function_names: std::collections::HashSet::new(),
+                    rodata_data: Vec::new(),
+                    function_names: std::collections::HashSet::new(),
                 };
                 let elf_result = catch_panic(|| -> Result<Vec<u8>, String> {
                     backend
@@ -1955,8 +1607,7 @@ fn test_wave50_cross_backend_opt_regression() {
             "Cross-backend opt regression: x86_64 observable-output sub-check did not pass. \
              The structural-equivalence check (non-empty bytes + print_int relocation) is \
              insufficient — the audit requires observable behavior. failures={:?}, pending={:?}",
-            failures,
-            pending
+            failures, pending
         );
     }
 
@@ -1990,11 +1641,10 @@ fn test_wave50_cross_backend_opt_regression() {
 // Test 5 — Self-hosting milestone
 // ===========================================================================
 
-/// Wave 50 / Task 6-c: Strengthened self-hosting milestone test.
+/// Strengthened self-hosting milestone test.
 ///
-/// Previously (Wave 48 PARTIAL / Task 5): this was a SMOKE test that only
-/// checked file existence + ≥100 bytes.  Task 6-c strengthens it to a
-/// three-part check:
+/// Previously this was a SMOKE test that only checked file existence +
+/// ≥100 bytes.  It is now strengthened to a three-part check:
 ///
 /// **Sub-check A — File existence + non-trivial size (regression guard,
 /// retained from the original smoke test).**  The five canonical bootstrap
@@ -2009,7 +1659,7 @@ fn test_wave50_cross_backend_opt_regression() {
 ///   - `full_parser.vuma` defines `fn parse(tokens, token_count, src, ast,
 ///     ast_cap) -> u32`.
 ///   - `ir_builder.vuma` defines `fn irb_build_main(...)`, plus the real
-///     SCG/BD/IVE implementations from Task 5-b: `fn scg_construct(ast)`,
+///     SCG/BD/IVE implementations: `fn scg_construct(ast)`,
 ///     `fn bd_infer(ir_buf)`, `fn ive_verify(ir_buf)`.
 ///   - `codegen.vuma` defines `fn codegen_emit(...)`.
 ///   - `elf.vuma` defines `fn write_elf64(...)`.
@@ -2072,8 +1722,8 @@ fn test_wave50_cross_backend_opt_regression() {
 /// ## Platform gating
 ///
 /// Sub-check C is gated on `#[cfg(target_arch = "x86_64")]` — mirrors
-/// Task 6-b's `execute_x86_64_elf` helper, which only spawns the emitted
-/// ELF natively on an x86_64 host (no qemu-user fallback in the test
+/// the `execute_x86_64_elf` helper, which only spawns the emitted ELF
+/// natively on an x86_64 host (no qemu-user fallback in the test
 /// harness).  On non-x86_64 hosts, only sub-checks A and B run; an
 /// `eprintln!` reports the skip so it's visible in CI logs.
 #[test]
@@ -2155,7 +1805,7 @@ fn test_wave50_bootstrap_milestone() {
     //     └─ extern calls to: parse, irb_build_main, codegen_emit, write_elf64
     //   full_parser.vuma   → defines `fn parse`
     //   ir_builder.vuma    → defines `fn irb_build_main`, `fn scg_construct`,
-    //                        `fn bd_infer`, `fn ive_verify`  (Task 5-b real impls)
+    //                        `fn bd_infer`, `fn ive_verify`  (real impls)
     //   codegen.vuma       → defines `fn codegen_emit`
     //   elf.vuma           → defines `fn write_elf64`
     //
@@ -2182,12 +1832,7 @@ fn test_wave50_bootstrap_milestone() {
     // We assert each name appears at least once in the source — this
     // catches accidental rename of an entry point without updating the
     // extern declaration.
-    for entry_point in &[
-        "parse",
-        "irb_build_main",
-        "codegen_emit",
-        "write_elf64",
-    ] {
+    for entry_point in &["parse", "irb_build_main", "codegen_emit", "write_elf64"] {
         assert!(
             full_lexer_src.contains(entry_point),
             "wave50 bootstrap milestone (sub-check B): full_lexer.vuma does not reference \
@@ -2235,10 +1880,10 @@ fn test_wave50_bootstrap_milestone() {
     );
 
     // (B.3) Cross-reference: ir_builder.vuma must contain explicit
-    // "REAL" annotations for the SCG/BD/IVE implementations (Task 5-b
-    // contract).  The file's source uses `REAL:` markers in its
-    // commentary; we assert at least one occurrence of each marker
-    // pair to guard against accidental stub-ification regressions.
+    // "REAL" annotations for the SCG/BD/IVE implementations.  The
+    // file's source uses `REAL:` markers in its commentary; we assert at
+    // least one occurrence of each marker pair to guard against
+    // accidental stub-ification regressions.
     assert!(
         ir_builder_src.contains("scg_construct") && ir_builder_src.contains("REAL"),
         "wave50 bootstrap milestone (sub-check B): ir_builder.vuma missing REAL annotation \
@@ -2275,21 +1920,24 @@ fn test_wave50_bootstrap_milestone() {
             fname,
             line_count
         );
-        eprintln!("wave50 bootstrap (sub-check B): {} = {} lines", fname, line_count);
+        eprintln!(
+            "wave50 bootstrap (sub-check B): {} = {} lines",
+            fname, line_count
+        );
     }
 
     // -----------------------------------------------------------------
     // Sub-check C — real compile + execute of womb/lang/hello.vuma.
     // -----------------------------------------------------------------
     // Gated on x86_64 host: the emitted ELF is x86_64 machine code and
-    // we have no qemu-user fallback in the test harness (mirrors Task
-    // 6-b's `execute_x86_64_elf` gating).
+    // we have no qemu-user fallback in the test harness (mirrors the
+    // `execute_x86_64_elf` gating).
     #[cfg(target_arch = "x86_64")]
     {
         let hello_src = read_lang_file(&womb_lang, "hello.vuma");
         let elf_bytes = compile_vuma_source_to_x86_64_elf(&hello_src).expect(
             "wave50 bootstrap milestone (sub-check C): production pipeline failed to compile \
-             womb/lang/hello.vuma to an x86_64 ELF — see the error in the panic message"
+             womb/lang/hello.vuma to an x86_64 ELF — see the error in the panic message",
         );
 
         // The emitted binary must be a non-trivial ELF (≥64 bytes for
@@ -2301,7 +1949,8 @@ fn test_wave50_bootstrap_milestone() {
             elf_bytes.len()
         );
         assert_eq!(
-            &elf_bytes[0..4], b"\x7fELF",
+            &elf_bytes[0..4],
+            b"\x7fELF",
             "wave50 bootstrap milestone (sub-check C): emitted bytes do not start with the ELF \
              magic — got {:?}",
             &elf_bytes[0..4]
@@ -2310,7 +1959,7 @@ fn test_wave50_bootstrap_milestone() {
         // Execute the ELF natively and assert stdout contains "42".
         let stdout = execute_x86_64_elf(&elf_bytes).expect(
             "wave50 bootstrap milestone (sub-check C): failed to execute the emitted x86_64 ELF \
-             for womb/lang/hello.vuma — see the error in the panic message"
+             for womb/lang/hello.vuma — see the error in the panic message",
         );
         assert!(
             stdout.contains("42"),
@@ -2359,7 +2008,7 @@ fn test_wave50_bootstrap_milestone() {
 #[cfg(target_arch = "x86_64")]
 fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
     use vuma::pipeline::bridge_ast_to_codegen_scg;
-    use vuma_codegen::backend::{AllocatedProgram, set_64bit_returns};
+    use vuma_codegen::backend::{set_64bit_returns, AllocatedProgram};
     use vuma_codegen::ir::IRType;
     use vuma_codegen::ScgToIr;
     use vuma_parser::Parser;
@@ -2369,10 +2018,7 @@ fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
     let mut parser = Parser::new(source);
     let parse_result = parser.parse_program();
     if parse_result.is_err() {
-        return Err(format!(
-            "parse error: {:?}",
-            parse_result.errors
-        ));
+        return Err(format!("parse error: {:?}", parse_result.errors));
     }
     if !parse_result.errors.is_empty() {
         eprintln!(
@@ -2383,9 +2029,9 @@ fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
             eprintln!("[wave50 bootstrap milestone]   {:?}", err);
         }
     }
-    let program = parse_result.value.expect(
-        "is_err() returned false → value must be Some; this is a parser-API invariant"
-    );
+    let program = parse_result
+        .value
+        .expect("is_err() returned false → value must be Some; this is a parser-API invariant");
 
     // Step 2: Bridge parser AST → codegen SCG.
     let codegen_scg = bridge_ast_to_codegen_scg(&program);
@@ -2395,14 +2041,13 @@ fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
     // that the production `compile_to_binary_direct` performs at
     // `OptLevel > O0`.)
     let mut ir_builder = ScgToIr::new();
-    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
-        format!("IR conversion error: {}", e)
-    })?;
+    let ir_program = ir_builder
+        .convert(&codegen_scg)
+        .map_err(|e| format!("IR conversion error: {}", e))?;
 
     // Step 4: Create the x86_64 backend.
-    let backend = create_backend(BackendKind::X86_64).map_err(|e| {
-        format!("cannot create x86_64 backend: {}", e)
-    })?;
+    let backend = create_backend(BackendKind::X86_64)
+        .map_err(|e| format!("cannot create x86_64 backend: {}", e))?;
 
     // Step 5: Populate the thread-local set of 64-bit-returning function
     // names (mirrors main.rs::compile_to_binary_direct:553-558 — needed
@@ -2449,10 +2094,10 @@ fn compile_vuma_source_to_x86_64_elf(source: &str) -> Result<Vec<u8>, String> {
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
-    backend.encode_program(&allocated_program).map_err(|e| {
-        format!("x86_64 encode_program failed: {}", e)
-    })
+    backend
+        .encode_program(&allocated_program)
+        .map_err(|e| format!("x86_64 encode_program failed: {}", e))
 }

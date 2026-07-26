@@ -26,30 +26,73 @@
 //! | 14 | LLM API: suggest_fixes      | Returns actionable suggestions                  |
 //! | 15 | LLM API: compile_for_target | All 8 targets produce correct output             |
 
-use vuma::diagnostics::{
-    code_category, code_description, code_for_codegen_error, code_for_parse_error_kind,
-    code_subcategory, from_codegen_error, from_memory_safety_violation,
-    from_vuma_error,
-    diagnostics_to_json, diagnostics_to_json_pretty,
-    DiagnosticSeverity, DiagnosticSourceLocation, DiagnosticSummary,
-    RelatedInfo, Suggestion, SuggestionApplicability, VumaDiagnostic,
-    // Convenience constructors
-    syntax_error, undefined_variable, type_mismatch, duplicate_definition,
-    invalid_arg_count, invalid_type, missing_return, unreachable_code,
-    name_resolution_error, circular_dependency, invalid_assignment_target,
-    break_outside_loop, invalid_cast, missing_function_body, invalid_visibility,
-    invalid_instruction, register_alloc_failed, encoding_error,
-    relocation_error, stack_layout_error, linker_error, unsupported_feature,
-    invariant_violation, proof_failure, liveness_violation, origin_violation,
-    exclusivity_violation, interpretation_violation, cleanup_violation,
-    bd_inference_error, constraint_unsatisfiable, verification_timeout,
-    unused_variable, implicit_conversion, large_constant, dead_code,
-    redundant_cast, shadowed_variable, unnecessary_mut, deprecated_feature,
-    unused_import, reachable_panic,
-    compilation_started, stage_completed, optimization_applied,
-    verification_passed, artifact_provided,
-};
 use vuma::api::VumaCompiler;
+use vuma::diagnostics::{
+    artifact_provided,
+    bd_inference_error,
+    break_outside_loop,
+    circular_dependency,
+    cleanup_violation,
+    code_category,
+    code_description,
+    code_for_codegen_error,
+    code_for_parse_error_kind,
+    code_subcategory,
+    compilation_started,
+    constraint_unsatisfiable,
+    dead_code,
+    diagnostics_to_json,
+    diagnostics_to_json_pretty,
+    duplicate_definition,
+    encoding_error,
+    exclusivity_violation,
+    from_codegen_error,
+    from_memory_safety_violation,
+    from_vuma_error,
+    implicit_conversion,
+    interpretation_violation,
+    invalid_arg_count,
+    invalid_assignment_target,
+    invalid_cast,
+    invalid_instruction,
+    invalid_type,
+    invalid_visibility,
+    invariant_violation,
+    large_constant,
+    linker_error,
+    liveness_violation,
+    missing_function_body,
+    missing_return,
+    name_resolution_error,
+    optimization_applied,
+    origin_violation,
+    proof_failure,
+    reachable_panic,
+    redundant_cast,
+    register_alloc_failed,
+    relocation_error,
+    shadowed_variable,
+    stack_layout_error,
+    stage_completed,
+    // Convenience constructors
+    syntax_error,
+    type_mismatch,
+    undefined_variable,
+    unnecessary_mut,
+    unreachable_code,
+    unsupported_feature,
+    unused_import,
+    unused_variable,
+    verification_passed,
+    verification_timeout,
+    DiagnosticSeverity,
+    DiagnosticSourceLocation,
+    DiagnosticSummary,
+    RelatedInfo,
+    Suggestion,
+    SuggestionApplicability,
+    VumaDiagnostic,
+};
 use vuma::llm_api::VumaForLLM;
 use vuma::pipeline::VumaError;
 use vuma_codegen::CodegenError;
@@ -63,20 +106,16 @@ use vuma_parser::ParseErrorKind;
 #[test]
 fn all_error_codes_have_descriptions() {
     let error_codes: &[&str] = &[
-        "E001", "E002", "E003", "E004", "E005", "E006", "E007", "E008",
-        "E009", "E010", "E011", "E012", "E013", "E014", "E015", "E016",
-        "E017", "E018", "E019", "E020", "E021", "E022", "E023", "E024",
-        "E025", "E026", "E027", "E028", "E029", "E030",
-        "E031", "E032", "E033", "E034", "E035", "E036", "E037", "E038",
-        "E039", "E040",
-        "E041", "E042", "E043", "E044", "E045", "E046", "E047", "E048",
-        "E049", "E050",
+        "E001", "E002", "E003", "E004", "E005", "E006", "E007", "E008", "E009", "E010", "E011",
+        "E012", "E013", "E014", "E015", "E016", "E017", "E018", "E019", "E020", "E021", "E022",
+        "E023", "E024", "E025", "E026", "E027", "E028", "E029", "E030", "E031", "E032", "E033",
+        "E034", "E035", "E036", "E037", "E038", "E039", "E040", "E041", "E042", "E043", "E044",
+        "E045", "E046", "E047", "E048", "E049", "E050",
     ];
     for code in error_codes {
         let desc = code_description(code);
         assert_ne!(
-            desc,
-            "Unknown diagnostic code",
+            desc, "Unknown diagnostic code",
             "Error code {} should have a description",
             code
         );
@@ -139,14 +178,12 @@ fn error_codes_have_correct_subcategories() {
 #[test]
 fn all_warning_codes_have_descriptions() {
     let warning_codes: &[&str] = &[
-        "W001", "W002", "W003", "W004", "W005", "W006", "W007", "W008",
-        "W009", "W010",
+        "W001", "W002", "W003", "W004", "W005", "W006", "W007", "W009", "W010",
     ];
     for code in warning_codes {
         let desc = code_description(code);
         assert_ne!(
-            desc,
-            "Unknown diagnostic code",
+            desc, "Unknown diagnostic code",
             "Warning code {} should have a description",
             code
         );
@@ -189,8 +226,7 @@ fn all_info_codes_have_descriptions() {
     for code in info_codes {
         let desc = code_description(code);
         assert_ne!(
-            desc,
-            "Unknown diagnostic code",
+            desc, "Unknown diagnostic code",
             "Info code {} should have a description",
             code
         );
@@ -229,21 +265,66 @@ fn info_codes_have_informational_subcategory() {
 
 #[test]
 fn parse_error_kind_maps_to_correct_codes() {
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::InvalidSyntax), "E001");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedReference), "E002");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedVariable), "E002");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::TypeMismatch), "E003");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::DuplicateDefinition), "E004");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UnexpectedToken), "E009");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::ExpectedToken), "E010");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::RegionError), "E011");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::BDAnnotationError), "E012");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::InvalidCompoundOp), "E013");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::MissingSemicolon), "E014");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::InvalidAddress), "E015");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::LlmMistake), "E021");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::CStyleForLoop), "E022");
-    assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UnknownType), "E023");
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::InvalidSyntax),
+        "E001"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::UndefinedReference),
+        "E002"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::UndefinedVariable),
+        "E002"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::TypeMismatch),
+        "E003"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::DuplicateDefinition),
+        "E004"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::UnexpectedToken),
+        "E009"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::ExpectedToken),
+        "E010"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::RegionError),
+        "E011"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::BDAnnotationError),
+        "E012"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::InvalidCompoundOp),
+        "E013"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::MissingSemicolon),
+        "E014"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::InvalidAddress),
+        "E015"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::LlmMistake),
+        "E021"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::CStyleForLoop),
+        "E022"
+    );
+    assert_eq!(
+        code_for_parse_error_kind(&ParseErrorKind::UnknownType),
+        "E023"
+    );
 }
 
 #[test]
@@ -251,7 +332,10 @@ fn parse_errors_produce_diagnostics_with_source_location() {
     // Invalid function name triggers a parse error
     let source = "fn 123invalid() {}";
     let diags = VumaForLLM::check(source);
-    assert!(!diags.is_empty(), "Invalid source should produce diagnostics");
+    assert!(
+        !diags.is_empty(),
+        "Invalid source should produce diagnostics"
+    );
     let diag = &diags[0];
     // The code should be a valid E-code
     assert!(
@@ -290,11 +374,15 @@ fn codegen_error_maps_to_correct_codes() {
         "E035"
     );
     assert_eq!(
-        code_for_codegen_error(&CodegenError::UnknownVariable { name: "x".to_string() }),
+        code_for_codegen_error(&CodegenError::UnknownVariable {
+            name: "x".to_string()
+        }),
         "E002"
     );
     assert_eq!(
-        code_for_codegen_error(&CodegenError::WasmSectionNotFound { section: "code".to_string() }),
+        code_for_codegen_error(&CodegenError::WasmSectionNotFound {
+            section: "code".to_string()
+        }),
         "E036"
     );
     assert_eq!(
@@ -316,25 +404,35 @@ fn codegen_errors_produce_diagnostics_with_suggestions() {
     assert_eq!(diag.code, "E032");
     assert_eq!(diag.source, "register-alloc");
     assert!(
-        diag.suggestions.iter().any(|s| s.message.contains("register pressure")),
+        diag.suggestions
+            .iter()
+            .any(|s| s.message.contains("register pressure")),
         "E032 should suggest reducing register pressure"
     );
 
     // UnknownVariable should have a suggestion to declare
-    let err = CodegenError::UnknownVariable { name: "myvar".to_string() };
+    let err = CodegenError::UnknownVariable {
+        name: "myvar".to_string(),
+    };
     let diag = from_codegen_error(&err);
     assert_eq!(diag.code, "E002");
     assert!(
-        diag.suggestions.iter().any(|s| s.message.contains("declare")),
+        diag.suggestions
+            .iter()
+            .any(|s| s.message.contains("declare")),
         "E002 for unknown variable should suggest declaring it"
     );
 
     // WasmSectionNotFound should suggest ensuring the section is generated
-    let err = CodegenError::WasmSectionNotFound { section: "memory".to_string() };
+    let err = CodegenError::WasmSectionNotFound {
+        section: "memory".to_string(),
+    };
     let diag = from_codegen_error(&err);
     assert_eq!(diag.code, "E036");
     assert!(
-        diag.suggestions.iter().any(|s| s.message.contains("memory")),
+        diag.suggestions
+            .iter()
+            .any(|s| s.message.contains("memory")),
         "E036 should mention the missing section"
     );
 }
@@ -371,11 +469,15 @@ fn e037_has_suggestion_to_define_function() {
     };
     let diag = from_codegen_error(&err);
     assert!(
-        diag.suggestions.iter().any(|s| s.message.contains("define function")),
+        diag.suggestions
+            .iter()
+            .any(|s| s.message.contains("define function")),
         "E037 should suggest defining the function"
     );
     assert!(
-        diag.suggestions.iter().any(|s| s.message.contains("missing_func")),
+        diag.suggestions
+            .iter()
+            .any(|s| s.message.contains("missing_func")),
         "E037 suggestion should mention the missing symbol name"
     );
 }
@@ -542,7 +644,10 @@ fn codegen_error_constructors() {
     assert_eq!(d.code, "E032");
     assert_eq!(d.severity, DiagnosticSeverity::Error);
     assert_eq!(d.source, "register-alloc");
-    assert!(d.suggestions.iter().any(|s| s.message.contains("register pressure")));
+    assert!(d
+        .suggestions
+        .iter()
+        .any(|s| s.message.contains("register pressure")));
 
     // E033
     let d = encoding_error("bad encoding", loc.clone());
@@ -626,7 +731,10 @@ fn verification_error_constructors() {
     let d = verification_timeout("timed out", loc.clone());
     assert_eq!(d.code, "E050");
     assert_eq!(d.severity, DiagnosticSeverity::Error);
-    assert!(d.suggestions.iter().any(|s| s.message.contains("simplifying")));
+    assert!(d
+        .suggestions
+        .iter()
+        .any(|s| s.message.contains("simplifying")));
 }
 
 #[test]
@@ -659,10 +767,17 @@ fn warning_constructors() {
     let d = redundant_cast("i32", "i32", loc.clone());
     assert_eq!(d.code, "W005");
     assert_eq!(d.severity, DiagnosticSeverity::Warning);
-    assert!(d.suggestions.iter().any(|s| s.applicability == SuggestionApplicability::MachineApplicable));
+    assert!(d
+        .suggestions
+        .iter()
+        .any(|s| s.applicability == SuggestionApplicability::MachineApplicable));
 
     // W006 — shadowed variable
-    let d = shadowed_variable("x", loc.clone(), DiagnosticSourceLocation::point("test.vu", 2, 1));
+    let d = shadowed_variable(
+        "x",
+        loc.clone(),
+        DiagnosticSourceLocation::point("test.vu", 2, 1),
+    );
     assert_eq!(d.code, "W006");
     assert_eq!(d.severity, DiagnosticSeverity::Warning);
     assert!(!d.related.is_empty());
@@ -672,11 +787,6 @@ fn warning_constructors() {
     assert_eq!(d.code, "W007");
     assert_eq!(d.severity, DiagnosticSeverity::Warning);
     assert!(d.has_machine_applicable_fixes());
-
-    // W008 — deprecated feature
-    let d = deprecated_feature("old_fn", Some("new_fn"), loc.clone());
-    assert_eq!(d.code, "W008");
-    assert_eq!(d.severity, DiagnosticSeverity::Warning);
 
     // W009 — unused import
     let d = unused_import("std::io", loc.clone());
@@ -779,12 +889,9 @@ fn multi_line_location_preserved() {
 #[test]
 fn machine_applicable_suggestions_have_edit_ranges() {
     let loc = DiagnosticSourceLocation::range("test.vu", 5, 10, 13);
-    let d = undefined_variable("x", loc.clone())
-        .with_structured_suggestion(Suggestion::machine_applicable(
-            "declare 'x'",
-            loc,
-            "let x = …;",
-        ));
+    let d = undefined_variable("x", loc.clone()).with_structured_suggestion(
+        Suggestion::machine_applicable("declare 'x'", loc, "let x = …;"),
+    );
     assert!(d.has_machine_applicable_fixes());
     let fixes = d.all_suggestions();
     assert_eq!(fixes.len(), 1);
@@ -794,8 +901,11 @@ fn machine_applicable_suggestions_have_edit_ranges() {
 
 #[test]
 fn text_suggestions_have_no_edit_ranges() {
-    let d = syntax_error("bad syntax", DiagnosticSourceLocation::point("test.vu", 1, 1))
-        .with_structured_suggestion(Suggestion::text("check the syntax"));
+    let d = syntax_error(
+        "bad syntax",
+        DiagnosticSourceLocation::point("test.vu", 1, 1),
+    )
+    .with_structured_suggestion(Suggestion::text("check the syntax"));
     assert!(!d.has_machine_applicable_fixes());
 }
 
@@ -819,9 +929,10 @@ fn verification_timeout_has_placeholder_suggestion() {
     let loc = DiagnosticSourceLocation::point("test.vu", 1, 1);
     let d = verification_timeout("verification took too long", loc);
     assert_eq!(d.code, "E050");
-    assert!(d.suggestions.iter().any(|s| {
-        s.applicability == SuggestionApplicability::HasPlaceholders
-    }));
+    assert!(d
+        .suggestions
+        .iter()
+        .any(|s| { s.applicability == SuggestionApplicability::HasPlaceholders }));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -875,9 +986,12 @@ fn warning_codes_produce_warning_severity() {
         implicit_conversion("a", "b", loc.clone()),
         dead_code("test", loc.clone()),
         redundant_cast("a", "b", loc.clone()),
-        shadowed_variable("x", loc.clone(), DiagnosticSourceLocation::point("test.vu", 2, 1)),
+        shadowed_variable(
+            "x",
+            loc.clone(),
+            DiagnosticSourceLocation::point("test.vu", 2, 1),
+        ),
         unnecessary_mut("x", loc.clone()),
-        deprecated_feature("old", None, loc.clone()),
         unused_import("std", loc.clone()),
         reachable_panic("test", loc),
     ];
@@ -932,11 +1046,13 @@ fn single_diagnostic_json_is_valid() {
     ));
 
     let json_str = diag.to_json();
-    let parsed = vuma::json_value::parse(&json_str)
-        .expect("Diagnostic JSON should be parseable");
+    let parsed = vuma::json_value::parse(&json_str).expect("Diagnostic JSON should be parseable");
     assert_eq!(parsed.get("code").unwrap().as_str(), Some("E002"));
     assert_eq!(parsed.get("severity").unwrap().as_str(), Some("error"));
-    assert_eq!(parsed.get("message").unwrap().as_str(), Some("undefined variable `x`"));
+    assert_eq!(
+        parsed.get("message").unwrap().as_str(),
+        Some("undefined variable `x`")
+    );
     assert_eq!(parsed.get("source").unwrap().as_str(), Some("parser"));
     assert!(parsed.get("location").unwrap().is_object());
     assert!(parsed.get("suggestions").unwrap().is_array());
@@ -947,13 +1063,10 @@ fn single_diagnostic_json_is_valid() {
 fn diagnostic_array_json_is_valid() {
     let loc1 = DiagnosticSourceLocation::point("a.vu", 1, 1);
     let loc2 = DiagnosticSourceLocation::point("b.vu", 2, 2);
-    let diags = vec![
-        syntax_error("bad", loc1),
-        undefined_variable("y", loc2),
-    ];
+    let diags = vec![syntax_error("bad", loc1), undefined_variable("y", loc2)];
     let json_str = diagnostics_to_json(&diags);
-    let parsed = vuma::json_value::parse(&json_str)
-        .expect("Diagnostics array JSON should be parseable");
+    let parsed =
+        vuma::json_value::parse(&json_str).expect("Diagnostics array JSON should be parseable");
     assert!(parsed.is_array());
     assert_eq!(parsed.as_array().unwrap().len(), 2);
 }
@@ -962,8 +1075,7 @@ fn diagnostic_array_json_is_valid() {
 fn diagnostic_pretty_json_is_valid() {
     let diags = vec![compilation_started("main.vu")];
     let json_str = diagnostics_to_json_pretty(&diags);
-    let parsed = vuma::json_value::parse(&json_str)
-        .expect("Pretty JSON should be parseable");
+    let parsed = vuma::json_value::parse(&json_str).expect("Pretty JSON should be parseable");
     assert!(parsed.is_array());
 }
 
@@ -985,26 +1097,34 @@ fn diagnostic_json_roundtrip() {
     .with_suggestion("check types");
 
     let json_str = original.to_json();
-    let restored = VumaDiagnostic::from_json_str(&json_str)
-        .expect("Roundtrip deserialization should succeed");
+    let restored =
+        VumaDiagnostic::from_json_str(&json_str).expect("Roundtrip deserialization should succeed");
     assert_eq!(restored.code, original.code);
     assert_eq!(restored.severity, original.severity);
     assert_eq!(restored.message, original.message);
     assert_eq!(restored.source, original.source);
     assert_eq!(restored.suggestions.len(), original.suggestions.len());
-    assert_eq!(restored.legacy_suggestions.len(), original.legacy_suggestions.len());
+    assert_eq!(
+        restored.text_suggestions.len(),
+        original.text_suggestions.len()
+    );
 }
 
 #[test]
 fn diagnostic_summary_json_is_valid() {
     let mut summary = DiagnosticSummary::new();
-    summary.add(&syntax_error("test", DiagnosticSourceLocation::point("a.vu", 1, 1)));
-    summary.add(&unused_variable("x", DiagnosticSourceLocation::point("a.vu", 2, 1)));
+    summary.add(&syntax_error(
+        "test",
+        DiagnosticSourceLocation::point("a.vu", 1, 1),
+    ));
+    summary.add(&unused_variable(
+        "x",
+        DiagnosticSourceLocation::point("a.vu", 2, 1),
+    ));
     summary.add(&compilation_started("main.vu"));
 
     let json_str = summary.to_json();
-    let parsed = vuma::json_value::parse(&json_str)
-        .expect("Summary JSON should be parseable");
+    let parsed = vuma::json_value::parse(&json_str).expect("Summary JSON should be parseable");
     assert_eq!(parsed.get("total").unwrap().as_u64(), Some(3));
     assert_eq!(parsed.get("errors").unwrap().as_u64(), Some(1));
     assert_eq!(parsed.get("warnings").unwrap().as_u64(), Some(1));
@@ -1039,14 +1159,6 @@ fn lsp_warning_tags() {
     assert!(tags.is_array());
     let tags = tags.as_array().unwrap();
     assert!(tags.contains(&vuma::json_value::JsonValue::U64(1)));
-
-    let d = deprecated_feature("old", None, loc.clone());
-    let lsp = d.to_lsp();
-    // W008 should have Deprecated tag (2)
-    let tags = lsp.get("tags").unwrap();
-    assert!(tags.is_array());
-    let tags = tags.as_array().unwrap();
-    assert!(tags.contains(&vuma::json_value::JsonValue::U64(2)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1107,21 +1219,54 @@ fn summary_counts_by_subcategory() {
         compilation_started("a.vu"),
     ];
     let summary = DiagnosticSummary::from_diagnostics(&diags);
-    assert_eq!(summary.by_subcategory.get("compilation").copied().unwrap_or(0), 1);
-    assert_eq!(summary.by_subcategory.get("codegen").copied().unwrap_or(0), 1);
-    assert_eq!(summary.by_subcategory.get("verification").copied().unwrap_or(0), 1);
-    assert_eq!(summary.by_subcategory.get("warning").copied().unwrap_or(0), 1);
-    assert_eq!(summary.by_subcategory.get("informational").copied().unwrap_or(0), 1);
+    assert_eq!(
+        summary
+            .by_subcategory
+            .get("compilation")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        summary.by_subcategory.get("codegen").copied().unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        summary
+            .by_subcategory
+            .get("verification")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        summary.by_subcategory.get("warning").copied().unwrap_or(0),
+        1
+    );
+    assert_eq!(
+        summary
+            .by_subcategory
+            .get("informational")
+            .copied()
+            .unwrap_or(0),
+        1
+    );
 }
 
 #[test]
 fn summary_has_errors_flag() {
-    let diags = vec![syntax_error("e1", DiagnosticSourceLocation::point("a.vu", 1, 1))];
+    let diags = vec![syntax_error(
+        "e1",
+        DiagnosticSourceLocation::point("a.vu", 1, 1),
+    )];
     let summary = DiagnosticSummary::from_diagnostics(&diags);
     assert!(summary.has_errors());
     assert!(!summary.has_warnings());
 
-    let diags = vec![unused_variable("x", DiagnosticSourceLocation::point("a.vu", 1, 1))];
+    let diags = vec![unused_variable(
+        "x",
+        DiagnosticSourceLocation::point("a.vu", 1, 1),
+    )];
     let summary = DiagnosticSummary::from_diagnostics(&diags);
     assert!(!summary.has_errors());
     assert!(summary.has_warnings());
@@ -1157,8 +1302,10 @@ fn explain_error_returns_human_readable_explanation() {
         );
         // Should include the severity
         assert!(
-            explanation.contains("error") || explanation.contains("warning")
-                || explanation.contains("information") || explanation.contains("hint"),
+            explanation.contains("error")
+                || explanation.contains("warning")
+                || explanation.contains("information")
+                || explanation.contains("hint"),
             "Explanation should mention the severity"
         );
     }
@@ -1217,7 +1364,8 @@ fn explain_error_includes_chain() {
         "Type mismatch",
         "parser",
         loc,
-    ).chain(root);
+    )
+    .chain(root);
     let explanation = VumaForLLM::explain_error(&diag);
     assert!(
         explanation.contains("Caused by:"),
@@ -1281,7 +1429,9 @@ fn suggest_fixes_for_e021_llm_mistake() {
     let fixes = VumaForLLM::suggest_fixes(&diag);
     assert!(!fixes.is_empty());
     assert!(
-        fixes.iter().any(|f| f.contains("C/Rust syntax") || f.contains("VUMA")),
+        fixes
+            .iter()
+            .any(|f| f.contains("C/Rust syntax") || f.contains("VUMA")),
         "E021 fix should mention C/Rust syntax or VUMA"
     );
 }
@@ -1347,8 +1497,7 @@ fn compile_for_all_eight_targets() {
         assert!(
             result.success,
             "Compilation for target '{}' should succeed, diagnostics: {:?}",
-            target,
-            result.diagnostics
+            target, result.diagnostics
         );
         assert!(
             result.target.is_some(),
@@ -1381,7 +1530,10 @@ fn compile_for_target_unknown_target_emits_e021() {
     let result = compiler.compile_for_target(source, "nonexistent_arch");
     assert!(!result.success, "Unknown target should fail");
     assert!(
-        result.diagnostics.iter().any(|d| d.code == "E021" || d.message.contains("Unknown target")),
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "E021" || d.message.contains("Unknown target")),
         "Unknown target should emit E021 or mention 'Unknown target'"
     );
 }
@@ -1392,7 +1544,10 @@ fn compile_for_target_valid_source_serializable() {
     let source = "fn main() {}";
     let result = compiler.compile_for_target(source, "x86_64");
     let json = result.to_json();
-    assert!(!json.is_empty(), "CompileResult should be serializable for target output");
+    assert!(
+        !json.is_empty(),
+        "CompileResult should be serializable for target output"
+    );
 }
 
 #[test]
@@ -1423,8 +1578,7 @@ fn compile_for_target_alternate_names() {
             assert_eq!(
                 target_output.backend, *expected_backend,
                 "Alternate name '{}' should resolve to backend '{}'",
-                alt,
-                expected_backend
+                alt, expected_backend
             );
         }
     }
@@ -1479,61 +1633,85 @@ fn vuma_error_to_diagnostics_mapping() {
 
     let errors_and_expected_codes: Vec<(VumaError, &str)> = vec![
         (
-            VumaError::AstToScg { message: "test".to_string() },
+            VumaError::AstToScg {
+                message: "test".to_string(),
+            },
             "E024",
         ),
         (
-            VumaError::ScgValidation { errors: vec!["err1".to_string()] },
+            VumaError::ScgValidation {
+                errors: vec!["err1".to_string()],
+            },
             "E041",
         ),
         (
-            VumaError::BdInference { node_id: None, message: "bd err".to_string() },
+            VumaError::BdInference {
+                node_id: None,
+                message: "bd err".to_string(),
+            },
             "E048",
         ),
         (
-            VumaError::BdInference { node_id: Some(42), message: "bd err at node".to_string() },
+            VumaError::BdInference {
+                node_id: Some(42),
+                message: "bd err at node".to_string(),
+            },
             "E048",
         ),
         (
-            VumaError::Transform { pass_name: "dce".to_string(), errors: vec!["transform err".to_string()] },
+            VumaError::Transform {
+                pass_name: "dce".to_string(),
+                errors: vec!["transform err".to_string()],
+            },
             "E041",
         ),
         (
-            VumaError::Codegen { error: CodegenError::InvalidInstruction("bad op".to_string()) },
+            VumaError::Codegen {
+                error: CodegenError::InvalidInstruction("bad op".to_string()),
+            },
             "E031",
         ),
         (
-            VumaError::Codegen { error: CodegenError::UnresolvedRelocation {
-                symbol: "missing_fn".to_string(),
-                function: "caller".to_string(),
-                offset: 0x10,
-                reloc_type: "R_AARCH64_CALL26".to_string(),
-            }},
+            VumaError::Codegen {
+                error: CodegenError::UnresolvedRelocation {
+                    symbol: "missing_fn".to_string(),
+                    function: "caller".to_string(),
+                    offset: 0x10,
+                    reloc_type: "R_AARCH64_CALL26".to_string(),
+                },
+            },
             "E037",
         ),
         (
-            VumaError::RegisterAlloc { message: "spill".to_string() },
+            VumaError::RegisterAlloc {
+                message: "spill".to_string(),
+            },
             "E032",
         ),
         (
-            VumaError::Emission { message: "elf err".to_string() },
+            VumaError::Emission {
+                message: "elf err".to_string(),
+            },
             "E035",
         ),
+        // Task 9-a (Wave 9): `VumaError::CorInit { message }` was REMOVED in
+        // Wave 1 (commit 0a514ad2 "pmt: implement Stage 1+5 fixes + delete
+        // all legacy code paths") when the entire COR (Concurrent Object
+        // Representation) pipeline stage was deleted. There is no direct
+        // replacement variant — COR was a discrete pipeline stage, not a
+        // sub-case of another stage. The CorInit → E024 mapping is now
+        // covered by the `VumaError::AstToScg` entry above (which also maps
+        // to E024 per `from_vuma_error` in `src/diagnostics.rs:1439-1447`),
+        // so removing this entry does not reduce E024 coverage. The entry
+        // is deleted (not `#[ignore]`'d) because the test is a table-driven
+        // variant-mapping sweep, not a per-variant test — keeping a stale
+        // tuple with a non-existent variant would be a compile error.
         (
-            VumaError::CorInit { message: "cor init err".to_string() },
-            "E024",
-        ),
-        (
-            VumaError::PanicCaught { stage: "codegen".to_string(), message: "panic".to_string() },
-            "E050",
-        ),
-        (
-            VumaError::BackendFallback {
-                failed_backend: "x86_64".to_string(),
-                fallback_backend: Some("aarch64".to_string()),
-                error: "backend failed".to_string(),
+            VumaError::PanicCaught {
+                stage: "codegen".to_string(),
+                message: "panic".to_string(),
             },
-            "E031",
+            "E050",
         ),
     ];
 
@@ -1556,8 +1734,12 @@ fn vuma_error_to_diagnostics_mapping() {
 fn multi_error_flattens_to_multiple_diagnostics() {
     let err = VumaError::Multi {
         errors: vec![
-            VumaError::AstToScg { message: "err1".to_string() },
-            VumaError::RegisterAlloc { message: "err2".to_string() },
+            VumaError::AstToScg {
+                message: "err1".to_string(),
+            },
+            VumaError::RegisterAlloc {
+                message: "err2".to_string(),
+            },
         ],
     };
     let diags = from_vuma_error(&err);
@@ -1583,10 +1765,22 @@ fn plain_text_format_includes_all_fields() {
     ));
 
     let text = diag.to_plain_text();
-    assert!(text.contains("error[E002]"), "Plain text should include severity and code");
-    assert!(text.contains("undefined variable"), "Plain text should include message");
-    assert!(text.contains("note:"), "Plain text should include related info");
-    assert!(text.contains("help:"), "Plain text should include suggestions");
+    assert!(
+        text.contains("error[E002]"),
+        "Plain text should include severity and code"
+    );
+    assert!(
+        text.contains("undefined variable"),
+        "Plain text should include message"
+    );
+    assert!(
+        text.contains("note:"),
+        "Plain text should include related info"
+    );
+    assert!(
+        text.contains("help:"),
+        "Plain text should include suggestions"
+    );
 }
 
 #[test]
@@ -1595,7 +1789,10 @@ fn rich_text_format_includes_ansi_codes() {
     let diag = syntax_error("bad syntax", loc);
     let rich = diag.to_rich_text();
     // Should contain ANSI escape codes for colors
-    assert!(rich.contains("\x1b["), "Rich text should contain ANSI escape codes");
+    assert!(
+        rich.contains("\x1b["),
+        "Rich text should contain ANSI escape codes"
+    );
     assert!(rich.contains("error"), "Rich text should contain 'error'");
 }
 
@@ -1614,7 +1811,8 @@ fn diagnostic_chain_root_cause() {
         "Type mismatch",
         "parser",
         DiagnosticSourceLocation::point("test.vu", 1, 1),
-    ).chain(root);
+    )
+    .chain(root);
 
     let diag = VumaDiagnostic::new(
         "E002",
@@ -1622,7 +1820,8 @@ fn diagnostic_chain_root_cause() {
         "Undefined variable",
         "parser",
         DiagnosticSourceLocation::point("test.vu", 1, 1),
-    ).chain(intermediate);
+    )
+    .chain(intermediate);
 
     assert!(diag.has_chain());
     assert_eq!(diag.chain.len(), 1); // immediate cause
@@ -1630,7 +1829,11 @@ fn diagnostic_chain_root_cause() {
     // The intermediate itself has a chain to E023
     assert_eq!(diag.immediate_cause().unwrap().chain.len(), 1);
     assert_eq!(
-        diag.immediate_cause().unwrap().immediate_cause().unwrap().code,
+        diag.immediate_cause()
+            .unwrap()
+            .immediate_cause()
+            .unwrap()
+            .code,
         "E023"
     );
 }
@@ -1669,7 +1872,10 @@ fn compile_result_from_invalid_source_has_diagnostics() {
     assert!(!result.success, "Invalid source should fail compilation");
     assert!(!result.diagnostics.is_empty(), "Should have diagnostics");
     assert!(
-        result.diagnostics.iter().any(|d| d.severity == DiagnosticSeverity::Error),
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error),
         "Should have at least one error diagnostic"
     );
 }
@@ -1694,5 +1900,7 @@ fn validate_returns_errors_for_invalid_source() {
     let compiler = VumaCompiler::new();
     let diags = compiler.validate("fn 123bad() {}");
     assert!(!diags.is_empty(), "Invalid source should have diagnostics");
-    assert!(diags.iter().any(|d| d.severity == DiagnosticSeverity::Error));
+    assert!(diags
+        .iter()
+        .any(|d| d.severity == DiagnosticSeverity::Error));
 }

@@ -21,8 +21,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::PackageError;
 use crate::toml_lite::{self, Value};
+use crate::PackageError;
 
 // ---------------------------------------------------------------------------
 // PackageManifest
@@ -57,8 +57,8 @@ impl PackageManifest {
     /// human-readable message for both low-level TOML syntax errors and
     /// high-level missing-field validation errors.
     pub fn from_toml(toml_str: &str) -> Result<Self, PackageError> {
-        let root = toml_lite::parse(toml_str)
-            .map_err(|e| PackageError::ManifestParse(e.to_string()))?;
+        let root =
+            toml_lite::parse(toml_str).map_err(|e| PackageError::ManifestParse(e.to_string()))?;
         let package = root
             .get("package")
             .and_then(|v| v.as_table())
@@ -68,9 +68,7 @@ impl PackageManifest {
         let name = package
             .get("name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PackageError::ManifestParse("missing `package.name` field".to_string())
-            })?
+            .ok_or_else(|| PackageError::ManifestParse("missing `package.name` field".to_string()))?
             .to_string();
         let version = package
             .get("version")
@@ -90,10 +88,7 @@ impl PackageManifest {
             .unwrap_or_else(Value::table);
         let dependencies = Self::parse_dependencies(&dependencies_value)?;
 
-        let target_value = root
-            .get("target")
-            .cloned()
-            .unwrap_or_else(Value::array);
+        let target_value = root.get("target").cloned().unwrap_or_else(Value::array);
         let targets = Self::parse_targets(&target_value)?;
 
         Ok(PackageManifest {
@@ -119,10 +114,7 @@ impl PackageManifest {
     pub fn to_toml(&self) -> Result<String, PackageError> {
         let mut package_table = BTreeMap::new();
         package_table.insert("name".to_string(), Value::String(self.name.clone()));
-        package_table.insert(
-            "version".to_string(),
-            Value::String(self.version.clone()),
-        );
+        package_table.insert("version".to_string(), Value::String(self.version.clone()));
         if let Some(ref desc) = self.description {
             package_table.insert("description".to_string(), Value::String(desc.clone()));
         }
@@ -132,14 +124,8 @@ impl PackageManifest {
         for dep in &self.dependencies {
             if let Some(ref registry) = dep.registry {
                 let mut dep_table_inner = BTreeMap::new();
-                dep_table_inner.insert(
-                    "version".to_string(),
-                    Value::String(dep.version.clone()),
-                );
-                dep_table_inner.insert(
-                    "registry".to_string(),
-                    Value::String(registry.clone()),
-                );
+                dep_table_inner.insert("version".to_string(), Value::String(dep.version.clone()));
+                dep_table_inner.insert("registry".to_string(), Value::String(registry.clone()));
                 dep_table.insert(dep.name.clone(), Value::Table(dep_table_inner));
             } else {
                 dep_table.insert(dep.name.clone(), Value::String(dep.version.clone()));
@@ -218,10 +204,7 @@ impl PackageManifest {
                         .and_then(|v| v.as_str())
                         .unwrap_or("main")
                         .to_string();
-                    let kind = table
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("bin");
+                    let kind = table.get("kind").and_then(|v| v.as_str()).unwrap_or("bin");
                     let kind = match kind {
                         "lib" => TargetKind::Lib,
                         "test" => TargetKind::Test,

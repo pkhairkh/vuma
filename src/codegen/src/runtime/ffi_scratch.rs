@@ -27,7 +27,7 @@ struct ScratchFrame {
 }
 
 thread_local! {
-    static SCRATCH_STACK: RefCell<Vec<ScratchFrame>> = RefCell::new(Vec::new());
+    static SCRATCH_STACK: RefCell<Vec<ScratchFrame>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Default initial capacity for a new frame.
@@ -58,7 +58,9 @@ pub fn pop_frame() {
     SCRATCH_STACK.with(|s| {
         if let Some(frame) = s.borrow_mut().pop() {
             let layout = std::alloc::Layout::from_size_align(frame.capacity, 8).unwrap();
-            unsafe { std::alloc::dealloc(frame.base, layout); }
+            unsafe {
+                std::alloc::dealloc(frame.base, layout);
+            }
         }
     });
 }
@@ -70,7 +72,9 @@ pub fn pop_frame() {
 pub fn alloc(bytes: usize) -> u64 {
     SCRATCH_STACK.with(|s| {
         let mut stack = s.borrow_mut();
-        let frame = stack.last_mut().expect("ffi_scratch::alloc called with no frame pushed");
+        let frame = stack
+            .last_mut()
+            .expect("ffi_scratch::alloc called with no frame pushed");
         // Align to 8 bytes.
         let aligned_offset = (frame.offset + 7) & !7;
         let new_offset = aligned_offset + bytes;
@@ -99,9 +103,7 @@ pub fn alloc(bytes: usize) -> u64 {
 /// Returns the base address of the top scratchpad frame (for codegen to
 /// load into a vreg if needed). Returns 0 if no frame is pushed.
 pub fn current_base() -> u64 {
-    SCRATCH_STACK.with(|s| {
-        s.borrow().last().map(|f| f.base as u64).unwrap_or(0)
-    })
+    SCRATCH_STACK.with(|s| s.borrow().last().map(|f| f.base as u64).unwrap_or(0))
 }
 
 /// Returns the number of frames currently on the stack (for testing).
@@ -137,8 +139,8 @@ mod tests {
     #[test]
     fn test_alloc_alignment() {
         push_frame();
-        let a1 = alloc(1);  // 1 byte
-        let a2 = alloc(1);  // should be 8-byte aligned
+        let a1 = alloc(1); // 1 byte
+        let a2 = alloc(1); // should be 8-byte aligned
         assert_eq!(a2 - a1, 8); // gap due to 8-byte alignment
         pop_frame();
     }
@@ -159,22 +161,22 @@ mod tests {
     fn test_nested_frames() {
         push_frame();
         let a1 = alloc(16);
-        push_frame();  // nested frame
+        push_frame(); // nested frame
         let a2 = alloc(16);
-        assert_ne!(a1, a2);  // different frames, different addresses
+        assert_ne!(a1, a2); // different frames, different addresses
         pop_frame();
         pop_frame();
     }
 
     #[test]
     fn test_pop_empty_is_noop() {
-        pop_frame();  // should not panic
+        pop_frame(); // should not panic
         assert_eq!(frame_count(), 0);
     }
 
     #[test]
     fn test_current_base() {
-        assert_eq!(current_base(), 0);  // no frame
+        assert_eq!(current_base(), 0); // no frame
         push_frame();
         assert!(current_base() > 0);
         pop_frame();

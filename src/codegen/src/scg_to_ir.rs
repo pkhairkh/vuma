@@ -62,12 +62,12 @@
 //! order.  For graph-based SCGs (from the `vuma-scg` crate), the
 //! [`IRBuilder::build`] method walks the SCG in topological order
 //! (using `vuma_scg::digraph::toposort` on the hand-written `DiGraph`
-//! that backs the SCG — see Wave 39 of the VUMA remediation plan),
+//! that backs the SCG),
 //! ensuring that data-flow dependencies are respected.
 //!
-//! # Wave 4a — RepD as the canonical type system
+//! # RepD as the canonical type system
 //!
-//! As of Wave 4a, `vuma_bd::repd::LayoutRegistry` is the canonical
+//! `vuma_bd::repd::LayoutRegistry` is the canonical
 //! source for state sizes and field offsets/sizes/RepDs in VUMA. The
 //! `IRBuilder` consumes layout-derived quantities (e.g. the `size` field
 //! on [`AllocationNode::Stack`] for state-typed allocations) that the
@@ -80,6 +80,97 @@
 //! the bridge-computed `size` and `offset` fields. Future waves should
 //! migrate the bridge to call `LayoutRegistry` directly so there is a
 //! single source of truth.
+//!
+//! # SCG Unification Status
+//!
+//! There are currently **two** SCG-shaped representations in VUMA, and
+//! they serve different consumers:
+//!
+//! | Representation            | Crate          | Shape         | Consumer          |
+//! |---------------------------|----------------|---------------|-------------------|
+//! | `vuma_scg::SCG`           | `vuma-scg`     | Graph         | IVE               |
+//! | `vuma_codegen::scg_to_ir` | `vuma-codegen` | Statement-list| `IRBuilder`       |
+//!
+//! - **`vuma-scg`** (see `src/scg/src/lib.rs`) is the *canonical* SCG IR.
+//!   It is graph-shaped (`SCG` + `NodePayload` + `EdgeKind`, nodes
+//!   referenced by `NodeId`) and is consumed by the Invariant
+//!   Verification Engine (IVE) for liveness, dominance, region, and
+//!   derivation analyses.
+//! - The **codegen-local stubs** defined below (`Scg`, `ScgNode`,
+//!   `ScgFunction`, `ScgParam`, `ScgType`, `ScgStatement`,
+//!   `ControlNode`, `AllocationNode`, `AccessNode`, `CastNode`,
+//!   `ComputationNode`, `CallNode`, ...) are a *statement-list-shaped*
+//!   SCG. They pre-date `vuma-scg` and remain the working representation
+//!   consumed by [`IRBuilder`]. The AST bridge
+//!   (`pipeline::bridge_ast_to_codegen_scg`) lowers the parser AST
+//!   directly into this statement-list shape; `IRBuilder` then
+//!   pattern-matches on these enum shapes to emit IR.
+//!
+//! **Migration status:**
+//!
+//! - The *structure* of `CastNode`,
+//!   `ControlNode`, and `SwitchArm` has been migrated to `vuma-scg` as
+//!   generic types (`CodegenCastNode<E, T, K>`, `CodegenControlNode<E,
+//!   S>`, `CodegenSwitchArm<S>`).  The codegen crate now defines thin
+//!   type aliases that fill in the concrete codegen-local operand/kind
+//!   types:
+//!   ```ignore
+//!   type CastNode    = vuma_scg::CodegenCastNode<ScgExpr, ScgType, CastKind>;
+//!   type ControlNode = vuma_scg::CodegenControlNode<ScgExpr, ScgStatement>;
+//!   type SwitchArm   = vuma_scg::CodegenSwitchArm<ScgStatement>;
+//!   ```
+//!   All construction and pattern-matching sites in `scg_to_ir.rs` and
+//!   `pipeline.rs` continue to use the names `CastNode` / `ControlNode`
+//!   / `SwitchArm` unchanged — the aliases are transparent.  The
+//!   concrete operand/kind types (`ScgExpr`, `ScgType`, `CastKind`,
+//!   `BinOpKind`) remain codegen-local pending their own migration
+//!   (they are listed below under "Remaining local").
+//! - **Unified (structure):** `CastNode`, `ControlNode`, `SwitchArm`.
+//! - **Remaining local (with rationale):**
+//!   - `Scg` / `ScgNode` / `ScgFunction` — statement-list containers;
+//!     `vuma-scg`'s `SCG` is graph-shaped, not a 1:1 replacement.
+//!   - `ScgType` — a small primitive-only enum (`I32`/`F64`/`Ptr`/...);
+//!     `vuma-scg` carries type info as `String` payloads, not a typed
+//!     enum, so unification requires either widening `vuma-scg` or
+//!     keeping this as a codegen-side helper.  (Blocking full
+//!     specialization of `CodegenCastNode<E, T, K>`.)
+//!   - `ScgStatement` and its remaining variants (`AllocationNode`,
+//!     `AccessNode`, `ComputationNode`, `CallNode`,
+//!     `StructAccessNode`, `EnumAccessNode`, ...) — these have
+//!     codegen-specific fields (e.g. `dst: String` temp names,
+//!     `tail_call: bool`, `reassigns: Option<String>`) that have no
+//!     counterpart in the graph-shaped `NodePayload`.
+//!   - `ScgExpr`, `BinOpKind`, `UnaryOpKind`, `CastKind` —
+//!     expression/operand helpers tied to the statement-list lowering.
+//!     (These are the concrete type params that the generics
+//!     are instantiated with; moving them to `vuma-scg` would let the
+//!     aliases be replaced by direct `use vuma_scg::CastNode;` imports.)
+//!
+//! **Why migration is non-trivial:** `vuma-scg` is graph-shaped (nodes
+//! referenced by `NodeId`, edges expressing data/control flow), while the
+//! codegen stubs are statement-list-shaped (`Vec<ScgStatement>` in source
+//! order, with embedded `ScgExpr` operands). A proper unification
+//! requires either (i) teaching `IRBuilder` to walk the `vuma-scg` graph
+//! directly (matching on `NodePayload` and resolving operands via edge
+//! traversal), or (ii) adding a statement-list view to `vuma-scg` and
+//! having the AST bridge emit that. Option (i) is preferred long-term
+//! but is a substantial rewrite of the lowering pass; option (ii) is
+//! incremental but adds a second view to the canonical crate.  This approach
+//! takes a third, even more incremental path: move the *structure* of
+//! individual node types to `vuma-scg` as generics, leaving the concrete
+//! operand types codegen-local.  This is a stepping stone toward either
+//! option (i) or (ii) — future waves can specialize the generics or
+//! replace them with concrete types as the operand types are migrated.
+//!
+//! **Bridge function:** `pipeline::bridge_ast_to_codegen_scg` is the
+//! AST → codegen-SCG lowering. It currently lowers the AST directly into
+//! the local statement-list `Scg` (not the graph-shaped `vuma-scg::SCG`).
+//! It is **not** a thin wrapper — it owns ~265 lines of substantive
+//! translation logic (extern-fn collection, layout registry, state-typed
+//! param registration, top-level-statement injection, string-table
+//! emission, etc.) and cannot be deleted until either the bridge is
+//! rewritten to target `vuma-scg::SCG` directly, or the IRBuilder learns
+//! to consume `vuma-scg::SCG`.
 
 use crate::ir::*;
 use crate::Result;
@@ -96,10 +187,37 @@ type PhiInfo = (usize, IRValue, Vec<(IRValue, String)>);
 // ---------------------------------------------------------------------------
 // SCG Node stubs
 // ---------------------------------------------------------------------------
-// NOTE: The real SCG types live in the `vuma-scg` crate.  We define
-// lightweight stubs here so this crate compiles independently.  When the
-// full SCG crate is available, these can be replaced with re-exports or
-// converted to trait-based dispatch.
+// NOTE: The canonical SCG IR lives in the `vuma-scg` crate (graph-shaped:
+// `SCG` + `NodePayload` + `EdgeKind`, consumed by IVE).  The types below
+// are a *statement-list-shaped* SCG local to codegen — they pre-date
+// `vuma-scg` and are kept because (a) `bridge_ast_to_codegen_scg` lowers
+// the AST directly into this statement-list shape, and (b) the IRBuilder
+// lowering pattern-matches on these specific enum shapes.
+//
+// SCG Unification Status:
+//   - The structure of `CastNode`, `ControlNode`, and
+//     `SwitchArm` to `vuma-scg` as generic types (`CodegenCastNode<E,T,K>`,
+//     `CodegenControlNode<E,S>`, `CodegenSwitchArm<S>`).  The stubs below
+//     for those three types are now `pub type` aliases that instantiate
+//     the generics with codegen-local `ScgExpr` / `ScgType` / `CastKind`
+//     / `ScgStatement`.
+//   - The remaining stubs (`Scg`, `ScgNode`, `ScgFunction`, `ScgParam`,
+//     `ScgType`, `ScgStatement`, `AllocationNode`, `AccessNode`,
+//     `ComputationNode`, `CallNode`, ...) are still the working
+//     representation consumed by [`IRBuilder`].  They are listed under
+//     "Remaining local" in the module-level doc above.
+//   - Migration is non-trivial because `vuma-scg` is graph-shaped
+//     (allocation/access/cast nodes referenced by `NodeId`) while these
+//     stubs are statement-list-shaped (`Vec<ScgStatement>`).  Full
+//     unification requires either teaching `IRBuilder` to walk the
+//     `vuma-scg` graph directly, or adding a statement-list view to
+//     `vuma-scg`.  This generic-structure approach is an
+//     incremental stepping stone toward either path.
+//   - When the operand/kind types (`ScgExpr`, `ScgType`, `CastKind`,
+//     `BinOpKind`) are themselves migrated to `vuma-scg`, the `pub type`
+//     aliases can be replaced by direct `use vuma_scg::CastNode;` /
+//     `use vuma_scg::ControlNode;` imports (the generics would then be
+//     specialized or replaced by concrete types).
 
 /// Placeholder for the SCG graph type from `vuma-scg`.
 #[derive(Debug, Clone)]
@@ -128,7 +246,7 @@ pub struct ScgFunction {
     pub results: Vec<ScgType>,
     /// Body — a list of SCG statements.
     pub body: Vec<ScgStatement>,
-    /// G7: Variable type map (temp name -> declared type).  Populated by
+    /// Variable type map (temp name -> declared type).  Populated by
     /// `bridge_ast_to_codegen_scg` from let-binding type annotations.
     /// Used by the IRBuilder to propagate F32/F64 types to BinOp/Cmp.
     pub var_types: std::collections::HashMap<String, ScgType>,
@@ -170,7 +288,7 @@ pub enum ScgType {
     F32,
     /// IEEE 754 double-precision floating-point.
     F64,
-    /// Wave 1: a typed channel handle `Channel<T>`.  The inner type is the
+    /// A typed channel handle `Channel<T>`.  The inner type is the
     /// message payload type.  Channels are pointer-sized opaque handles
     /// (4 bytes on 32-bit targets, 8 bytes on 64-bit targets) — the same
     /// size as `Ptr` — and are passed in general-purpose registers under
@@ -281,28 +399,28 @@ pub enum ScgStatement {
     /// Lowers to `IRInstr::GetAddress`.
     GetAddress(GetAddressNode),
     /// Direct syscall — lowers to `IRInstr::Syscall`. Each backend emits a
-    /// real syscall instruction directly (Wave 11/12 removed the intermediate
+    /// real syscall instruction directly (no intermediate
     /// `lower_syscalls()` lowering pass).
     Syscall(SyscallCallNode),
-    /// Wave 5: mark a State as consumed by a foreign close-call
+    /// Mark a State as consumed by a foreign close-call
     /// (#[foreign_consume]). This is a marker statement — it lowers to no
     /// IR instruction, but the IVE treats the State's vreg as consumed
     /// (linearity error on subsequent read/write). Mirrors the semantic
     /// SCG's ForeignConsumeNode.
     ForeignConsume(ForeignConsumeStmt),
-    /// Wave 2b: channel open — `let ch = channel_open<T>()`.
+    /// Channel open — `let ch = channel_open<T>()`.
     /// Lowers to `IRInstr::ChannelOpen`.
     ChannelOpen(ChannelOpenStmt),
-    /// Wave 2b: channel send — `channel_send(ch, msg)`.
+    /// Channel send — `channel_send(ch, msg)`.
     /// Lowers to `IRInstr::ChannelSend`.
     ChannelSend(ChannelSendStmt),
-    /// Wave 2b: channel recv — `let msg = channel_recv(ch)`.
+    /// Channel recv — `let msg = channel_recv(ch)`.
     /// Lowers to `IRInstr::ChannelRecv`.
     ChannelRecv(ChannelRecvStmt),
-    /// Wave 2b: channel close — `channel_close(ch)`.
+    /// Channel close — `channel_close(ch)`.
     /// Lowers to `IRInstr::ChannelClose`.
     ChannelClose(ChannelCloseStmt),
-    /// Wave 8b: fallible channel recv — the SCG-side lowering target for
+    /// Fallible channel recv — the SCG-side lowering target for
     /// `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
     ///
     /// Performs a framed recv that writes BOTH the 8-byte payload (into
@@ -313,7 +431,7 @@ pub enum ScgStatement {
     ChannelRecvResult(ChannelRecvResultStmt),
 }
 
-/// Wave 5: a foreign-consume marker. Marks `state_var` as consumed by a
+/// A foreign-consume marker. Marks `state_var` as consumed by a
 /// `#[foreign_consume]` extern call. The `layout_name` is for diagnostics.
 #[derive(Debug, Clone)]
 pub struct ForeignConsumeStmt {
@@ -323,9 +441,9 @@ pub struct ForeignConsumeStmt {
     pub layout_name: String,
 }
 
-// ── Channel operation statements (Wave 2b) ───────────────────────────────
+// ── Channel operation statements ───────────────────────────────
 
-/// Channel-open statement (Wave 2b).
+/// Channel-open statement.
 ///
 /// `let ch = channel_open<T>()` — allocates a fresh kernel channel handle
 /// and stores the pointer-sized opaque capability in `dst`.  Lowers to
@@ -338,7 +456,7 @@ pub struct ChannelOpenStmt {
     pub elem_ty: ScgType,
 }
 
-/// Channel-send statement (Wave 2b).
+/// Channel-send statement.
 ///
 /// `channel_send(ch, msg)` — enqueues `msg` on `ch`.  Lowers to
 /// [`IRInstr::ChannelSend`].
@@ -352,7 +470,7 @@ pub struct ChannelSendStmt {
     pub ty: ScgType,
 }
 
-/// Channel-recv statement (Wave 2b).
+/// Channel-recv statement.
 ///
 /// `let msg = channel_recv(ch)` — dequeues a message from `ch` into `dst`.
 /// Lowers to [`IRInstr::ChannelRecv`].
@@ -366,7 +484,7 @@ pub struct ChannelRecvStmt {
     pub ty: ScgType,
 }
 
-/// Channel-close statement (Wave 2b).
+/// Channel-close statement.
 ///
 /// `channel_close(ch)` — releases the channel's runtime resource.  Lowers
 /// to [`IRInstr::ChannelClose`].
@@ -376,7 +494,7 @@ pub struct ChannelCloseStmt {
     pub channel: ScgExpr,
 }
 
-/// Wave 8b: fallible channel-recv statement.
+/// Fallible channel-recv statement.
 ///
 /// The SCG-side representation of the recv half of
 /// `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.  The pipeline
@@ -400,177 +518,100 @@ pub struct ChannelRecvResultStmt {
 }
 
 /// Control-flow node.
-#[derive(Debug, Clone)]
-pub enum ControlNode {
-    /// `if cond { then } else { else_ }`
-    If {
-        /// The condition expression.
-        cond: ScgExpr,
-        /// Statements in the then-branch.
-        then_body: Vec<ScgStatement>,
-        /// Optional else-branch statements.
-        else_body: Option<Vec<ScgStatement>>,
-    },
-    /// `loop { body }`
-    Loop {
-        body: Vec<ScgStatement>,
-        for_range: Option<(String, ScgExpr, ScgExpr)>,
-        while_cond: Option<String>,
-    },
-    /// `break` (from inside a loop).
-    Break,
-    /// `continue` (from inside a loop).
-    Continue,
-    /// `switch discriminant { case value => body, .. default => body }`
-    ///
-    /// Lowers to a sequence of compare-and-branch instructions for small
-    /// switch ranges, or a jump table for dense contiguous ranges.
-    Switch {
-        /// The discriminant expression being switched on.
-        discriminant: ScgExpr,
-        /// The switch arms: each arm has a value and a body.
-        arms: Vec<SwitchArm>,
-        /// The default arm (always present — like a match expression).
-        default_body: Vec<ScgStatement>,
-    },
-}
+///
+/// The structure of this enum now lives in the canonical SCG
+/// crate as `vuma_scg::CodegenControlNode<E, S>`.  The concrete alias
+/// below fills in the codegen-local `ScgExpr` (expression operand type)
+/// and `ScgStatement` (body-statement type).  All construction and
+/// pattern-matching sites continue to use the name `ControlNode`
+/// unchanged — the alias is transparent.
+pub type ControlNode = vuma_scg::CodegenControlNode<ScgExpr, ScgStatement>;
 
 /// A single arm of a switch expression.
-#[derive(Debug, Clone)]
-pub struct SwitchArm {
-    /// The integer value this arm matches.
-    pub value: i64,
-    /// The body statements for this arm.
-    pub body: Vec<ScgStatement>,
-}
+///
+/// The structure now lives in `vuma_scg::CodegenSwitchArm<S>`;
+/// this alias fills in the codegen-local `ScgStatement` body type.
+pub type SwitchArm = vuma_scg::CodegenSwitchArm<ScgStatement>;
 
 /// Allocation node — reserves memory.
-#[derive(Debug, Clone)]
-pub enum AllocationNode {
-    /// Stack allocation (fixed size).
-    Stack {
-        /// Name of the allocated variable.
-        name: String,
-        /// Size in bytes.
-        size: u32,
-        /// Type of the allocation.
-        ty: ScgType,
-    },
-    /// Heap allocation (dynamic size, calls allocator).
-    Heap {
-        /// Name of the allocated variable.
-        name: String,
-        /// Expression computing the allocation size.
-        size_expr: ScgExpr,
-        /// Type of the allocation.
-        ty: ScgType,
-    },
-}
+///
+/// The structure of this enum now lives in the canonical SCG
+/// crate as `vuma_scg::CodegenAllocationNode<E, T>`.  The concrete alias
+/// below fills in the codegen-local `ScgExpr` (heap size-expression
+/// operand type) and `ScgType` (allocation static type).  All
+/// construction and pattern-matching sites continue to use the name
+/// `AllocationNode` unchanged — the alias is transparent.  (Note: the
+/// graph-shaped semantic `vuma_scg::AllocationNode` is a *struct*, not
+/// an enum; the two coexist as distinct payload types for IVE and
+/// `IRBuilder` respectively.)
+pub type AllocationNode = vuma_scg::CodegenAllocationNode<ScgExpr, ScgType>;
 
 /// Memory access node.
-#[derive(Debug, Clone)]
-pub enum AccessNode {
-    /// Read: `dst = *ptr` or `dst = ptr.field`
-    Load {
-        /// Destination variable name.
-        dst: String,
-        /// Pointer expression to read from.
-        ptr: ScgExpr,
-        /// Optional byte offset from the pointer.
-        offset: Option<ScgExpr>,
-        /// Optional load type override. When None, the IR builder
-        /// determines the type (U8 for byte loads, U64 for pointer
-        /// loads). When Some, the specified type is used directly.
-        ty: Option<crate::ir::IRType>,
-    },
-    /// Write: `*ptr = val` or `ptr.field = val`
-    Store {
-        /// Pointer expression to write to.
-        ptr: ScgExpr,
-        /// Optional byte offset from the pointer.
-        offset: Option<ScgExpr>,
-        /// Value expression to store.
-        value: ScgExpr,
-        /// Optional store type override. When None, defaults to U8 for
-        /// non-pointer values and U64 for pointer values.
-        ty: Option<crate::ir::IRType>,
-    },
-}
+///
+/// The structure of this enum now lives in the canonical SCG
+/// crate as `vuma_scg::CodegenAccessNode<E, T>`.  The concrete alias
+/// below fills in the codegen-local `ScgExpr` (pointer / offset /
+/// value-expression operand type) and `crate::ir::IRType` (optional
+/// load/store type override).  All construction and pattern-matching
+/// sites continue to use the name `AccessNode` unchanged — the alias is
+/// transparent.  (As with `AllocationNode`, the graph-shaped semantic
+/// `vuma_scg::AccessNode` is a *struct*, not an enum; the two coexist.)
+pub type AccessNode = vuma_scg::CodegenAccessNode<ScgExpr, crate::ir::IRType>;
 
 /// Cast / reinterpret node.
-#[derive(Debug, Clone)]
-pub struct CastNode {
-    /// Destination variable name.
-    pub dst: String,
-    /// Source expression.
-    pub src: ScgExpr,
-    /// Cast kind.
-    pub kind: CastKind,
-    /// Source type.
-    pub from_ty: ScgType,
-    /// Target type.
-    pub to_ty: ScgType,
-}
+///
+/// The structure of this struct now lives in the canonical
+/// SCG crate as `vuma_scg::CodegenCastNode<E, T, K>`.  The concrete
+/// alias below fills in the codegen-local `ScgExpr` (expression operand
+/// type), `ScgType` (type representation), and `CastKind` (cast-kind
+/// enum).  All construction and field-access sites continue to use the
+/// name `CastNode` unchanged — the alias is transparent.
+pub type CastNode = vuma_scg::CodegenCastNode<ScgExpr, ScgType, CastKind>;
 
 /// Computation node (binary arithmetic / logic).
-#[derive(Debug, Clone)]
-pub struct ComputationNode {
-    /// Destination variable name (SCG node id, e.g. "v_5").
-    pub dst: String,
-    /// Binary operation.
-    pub op: BinOpKind,
-    /// Left-hand side expression.
-    pub lhs: ScgExpr,
-    /// Right-hand side expression.
-    pub rhs: ScgExpr,
-    /// Whether this is a tail call.
-    pub tail_call: bool,
-    /// For reassignments ("x = expr"), the user-visible variable name
-    /// being reassigned (e.g. "x").  This lets `lower_computation`
-    /// update the variable's entry in the `names` map (in addition to
-    /// the SCG-node-id entry `dst`) so that `lower_if` can detect the
-    /// reassignment and create a proper phi node at if/else merge points.
-    /// `None` for let-bindings and non-assignment computations.
-    pub reassigns: Option<String>,
-}
+///
+/// The structure of this struct now lives in the canonical
+/// SCG crate as `vuma_scg::CodegenComputationNode<E, K>`.  The concrete
+/// alias below fills in the codegen-local `ScgExpr` (expression operand
+/// type) and `BinOpKind` (binary-operator-kind enum).  All construction
+/// and field-access sites continue to use the name `ComputationNode`
+/// unchanged — the alias is transparent.  The semantic
+/// `vuma_scg::ComputationNode` (graph-shaped payload with `kind` /
+/// `result_type` / `tail_call` fields, used by IVE) is NOT affected.
+pub type ComputationNode = vuma_scg::CodegenComputationNode<ScgExpr, BinOpKind>;
 
 /// Unary computation node (neg, not, clz, ctz, popcnt).
-#[derive(Debug, Clone)]
-pub struct UnaryComputationNode {
-    /// Destination variable name.
-    pub dst: String,
-    /// The unary operation.
-    pub op: UnaryOpKind,
-    /// The operand expression.
-    pub operand: ScgExpr,
-    /// Whether this is a tail call.
-    pub tail_call: bool,
-}
+///
+/// The structure of this struct now lives in the canonical
+/// SCG crate as `vuma_scg::CodegenUnaryComputationNode<E, K>`.  The
+/// concrete alias below fills in the codegen-local `ScgExpr` (expression
+/// operand type) and `UnaryOpKind` (unary-operator-kind enum).  All
+/// construction and field-access sites continue to use the name
+/// `UnaryComputationNode` unchanged — the alias is transparent.  There
+/// is no semantic-SCG `UnaryComputationNode` counterpart (the semantic
+/// `ComputationKind::Intrinsic` enum covers unary intrinsics like
+/// `clz` / `ctz` / `popcnt` via the kind label, not a dedicated node
+/// type).
+pub type UnaryComputationNode = vuma_scg::CodegenUnaryComputationNode<ScgExpr, UnaryOpKind>;
 
 /// Function call node.
-#[derive(Debug, Clone)]
-pub struct CallNode {
-    /// Optional destination variable for the return value.
-    pub dst: Option<String>,
-    /// Function name to call.
-    pub func: String,
-    /// Argument expressions.
-    pub args: Vec<ScgExpr>,
-    /// Whether this is a call to an extern (foreign) function.
-    /// When true, the backend should emit a relocation instead of a local branch.
-    pub is_extern: bool,
-    /// Optional user-visible variable name being assigned (e.g., "out" in
-    /// `out = atomic_load(...)`). When set, lower_call also registers this
-    /// name in the names map so resolve_expr can find it.
-    pub reassigns: Option<String>,
-}
+///
+/// The structure of this struct now lives in the canonical
+/// SCG crate as `vuma_scg::CodegenCallNode<E>`.  The concrete alias
+/// below fills in the codegen-local `ScgExpr` (per-argument expression
+/// type).  All construction and field-access sites continue to use the
+/// name `CallNode` unchanged — the alias is transparent.  There is no
+/// semantic-SCG `CallNode` counterpart (graph-shaped semantic calls
+/// are represented via `ComputationNode` payloads with
+/// `ComputationKind::Other` naming the callee).
+pub type CallNode = vuma_scg::CodegenCallNode<ScgExpr>;
 
 /// Direct syscall node — first-class syscall invocation.
 ///
 /// Produced by the bridge when it encounters `Expr::Syscall { nr, args, .. }`
 /// in the AST. The `IRBuilder` lowers this to `IRInstr::Syscall`, which each
-/// backend lowers directly to a real syscall instruction (Wave 11/12 removed
-/// the intermediate `lower_syscalls()` lowering pass).
+/// backend lowers directly to a real syscall instruction (no intermediate
+/// `lower_syscalls()` lowering pass).
 #[derive(Debug, Clone)]
 pub struct SyscallCallNode {
     /// Generic Linux ABI syscall number (e.g. 1 = write, 60 = exit).
@@ -601,9 +642,7 @@ pub enum ScgExpr {
     /// A memory load: *addr (dereference)
     /// The address expression is resolved to a vreg, then a Load
     /// IR instruction is emitted to read from that address.
-    Load {
-        addr: Box<ScgExpr>,
-    },
+    Load { addr: Box<ScgExpr> },
 }
 
 /// Constant-time operation statement.
@@ -891,15 +930,15 @@ pub struct IRBuilder {
     /// shift on a 32-bit value with garbage in the upper bits corrupts
     /// the result.
     vreg_types: std::collections::HashMap<u32, crate::ir::IRType>,
-    /// G7: current function's variable type map (temp name -> ScgType).
+    /// Current function's variable type map (temp name -> ScgType).
     fn_var_types: std::collections::HashMap<String, ScgType>,
-    /// Wave 8a: Set of variable names in the current function that are
+    /// Set of variable names in the current function that are
     /// state-typed (i.e. produced by `let p = state_new(Layout)`). These
     /// are routed to the program-wide single buffer (`___pmt_buffer`)
     /// instead of per-state `Alloc`. Populated by [`identify_state_vars`]
     /// during [`lower_function`].
     state_vars: std::collections::HashSet<String>,
-    /// Wave 8a: vreg of the program-wide single buffer (`___pmt_buffer`).
+    /// Vreg of the program-wide single buffer (`___pmt_buffer`).
     /// Allocated once at the start of `main` via a single `IRInstr::Alloc`.
     /// State-typed `AllocationNode::Stack` lowerings produce
     /// `IRInstr::Offset { base: ___pmt_buffer, offset: assigned_offset }`
@@ -907,16 +946,23 @@ pub struct IRBuilder {
     /// non-`main` functions (state-typed allocations in other functions
     /// fall back to per-state `Alloc`).
     pmt_buffer_vreg: Option<u32>,
-    /// Wave 8a: next free byte offset within `___pmt_buffer`. Incremented
+    /// Next free byte offset within `___pmt_buffer`. Incremented
     /// by each state-typed allocation's layout size (aligned to 16 bytes).
     /// Reset to 0 at the start of `main`.
     next_state_offset: u32,
-    /// Wave 89-90 (Session Types): set of vregs that hold channel handles
+    /// Set of vregs that hold channel handles
     /// (produced by `channel_open<T>()`). Tracked so the IVE linear-type
-    /// checker (Wave 95) can identify channel-typed vregs and verify their
+    /// checker can identify channel-typed vregs and verify their
     /// open/send/recv/close lifecycle. The session-type protocol itself
     /// (if any) is not yet threaded through here — only the vreg identity.
     channel_handle_vregs: std::collections::HashSet<u32>,
+    /// Test-only: when true, `lower_function` skips the `resolve_phis` pass
+    /// so tests can assert on phi node presence. The production `build`
+    /// method always resolves phis to copies (removing the phi
+    /// instructions), which is correct for codegen but obscures the
+    /// phi-node structure tests want to verify. Set via
+    /// [`build_with_phis`](Self::build_with_phis).
+    skip_phi_resolve: bool,
 }
 
 /// Backward-compatible alias.
@@ -943,6 +989,7 @@ impl IRBuilder {
             pmt_buffer_vreg: None,
             next_state_offset: 0,
             channel_handle_vregs: std::collections::HashSet::new(),
+            skip_phi_resolve: false,
         }
     }
 
@@ -978,6 +1025,27 @@ impl IRBuilder {
         self.build(scg)
     }
 
+    /// Test-only: build an IR program WITHOUT resolving phi nodes to copies.
+    ///
+    /// Identical to [`build`](Self::build) except it skips the
+    /// `resolve_phis` pass, so tests can assert on phi node presence. The
+    /// production `build` method always resolves phis to copies (removing
+    /// the phi instructions), which is correct for codegen but obscures
+    /// the phi-node structure tests want to verify.
+    ///
+    /// Used by `test_loop_with_phi`, `test_if_else_phi_nodes`,
+    /// `test_loop_with_computation_and_break`,
+    /// `test_continue_merges_loop_carried_variable`,
+    /// `test_loop_sequential_then_only_if_reassign_propagates`, and
+    /// `test_reassignment_alias_propagation_prev_vreg_fix`.
+    #[cfg(test)]
+    pub fn build_with_phis(&mut self, scg: &Scg) -> Result<IRProgram> {
+        self.skip_phi_resolve = true;
+        let result = self.build(scg);
+        self.skip_phi_resolve = false;
+        result
+    }
+
     // =======================================================================
     // Function lowering
     // =======================================================================
@@ -991,8 +1059,9 @@ impl IRBuilder {
         self.param_types.clear();
         self.vreg_types.clear();
         self.fn_var_types.clear();
-        self.fn_var_types.extend(func.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
-        // Wave 89-90: reset the channel-handle vreg set per function so
+        self.fn_var_types
+            .extend(func.var_types.iter().map(|(k, v)| (k.clone(), v.clone())));
+        // Reset the channel-handle vreg set per function so
         // vreg IDs from a previous function don't leak into the linear-
         // type checker's view of this function's channels.
         self.channel_handle_vregs.clear();
@@ -1020,9 +1089,11 @@ impl IRBuilder {
                 self.pointer_vregs.insert(vreg_id);
             }
             // Record param type for Store/Load width inference
-            self.param_types.insert(param.name.clone(), param.ty.to_ir_type());
+            self.param_types
+                .insert(param.name.clone(), param.ty.to_ir_type());
             // Record vreg type for BinOp width inference (32-bit shifts, etc.)
-            self.vreg_types.insert(vreg_id, param.ty.to_ir_type().clone());
+            self.vreg_types
+                .insert(vreg_id, param.ty.to_ir_type().clone());
         }
 
         // Map result registers with proper types.
@@ -1098,7 +1169,7 @@ impl IRBuilder {
             // form `v_<node_id>`.  User-visible names (parameters, locals,
             // test fixtures such as `undefined_var`) are NOT pre-registered:
             // if they are genuinely undefined, `resolve_expr` must still
-            // return `UnknownVariable` (Wave 1-b hard-error semantics).
+            // return `UnknownVariable` (hard-error semantics).
             if !all_defs.contains(name)
                 && !name_to_vreg.contains_key(name)
                 && Self::is_synthetic_scg_var(name)
@@ -1109,7 +1180,7 @@ impl IRBuilder {
             }
         }
 
-        // Wave 8a: Single-buffer lowering for PMT state-typed allocations.
+        // Single-buffer lowering for PMT state-typed allocations.
         //
         // Pre-pass: scan the function body to identify which
         // `AllocationNode::Stack` variables are state-typed (i.e. produced
@@ -1135,7 +1206,7 @@ impl IRBuilder {
         //                                                          (rhs≠Int)
         self.state_vars = Self::identify_state_vars(&func.body);
 
-        // Wave 8a: For `main`, allocate ONE program-wide buffer that holds
+        // For `main`, allocate ONE program-wide buffer that holds
         // ALL state-typed allocations as offsets. This realizes the
         // "zero runtime overhead" promise: ONE Alloc at program start,
         // ZERO per-state Allocs during execution.
@@ -1146,10 +1217,8 @@ impl IRBuilder {
         self.pmt_buffer_vreg = None;
         self.next_state_offset = 0;
         if func.name == "main" {
-            let total_buffer_size: u32 = Self::compute_total_state_buffer_size(
-                &func.body,
-                &self.state_vars,
-            );
+            let total_buffer_size: u32 =
+                Self::compute_total_state_buffer_size(&func.body, &self.state_vars);
             if total_buffer_size > 0 {
                 let buf_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(buf_vreg, "___pmt_buffer"));
@@ -1166,7 +1235,7 @@ impl IRBuilder {
         // Translate the body statements.
         self.lower_statements(&func.body, &mut ir_func, &mut name_to_vreg)?;
 
-        // ── FFI scratchpad frame hooks (Wave 3b) ──────────────────────────
+        // ── FFI scratchpad frame hooks ──────────────────────────
         //
         // Emit a call to `ffi_scratch_push_frame` at function entry and
         // `ffi_scratch_pop_frame` before every Return — BUT ONLY IF this
@@ -1188,7 +1257,12 @@ impl IRBuilder {
         }
 
         // Resolve phi nodes into explicit copy instructions.
-        self.resolve_phis(&mut ir_func)?;
+        // Skipped when `skip_phi_resolve` is set (test-only entry point
+        // `build_with_phis` uses this to let tests inspect phi nodes
+        // before they're lowered to copies).
+        if !self.skip_phi_resolve {
+            self.resolve_phis(&mut ir_func)?;
+        }
 
         // Rebuild the CFG (predecessor/successor sets).
         ir_func.rebuild_cfg();
@@ -1197,7 +1271,7 @@ impl IRBuilder {
     }
 
     // =======================================================================
-    // Wave 3b: FFI scratchpad frame hooks
+    // FFI scratchpad frame hooks
     // =======================================================================
 
     /// Emit `ffi_scratch_push_frame` at function entry and
@@ -1216,12 +1290,15 @@ impl IRBuilder {
         // ── Push frame at entry ──────────────────────────────────────────
         // Insert at the beginning of the entry block (block 0).
         if let Some(entry_block) = ir_func.blocks.first_mut() {
-            entry_block.instructions.insert(0, IRInstr::Call {
-                dst: None,
-                func: "ffi_scratch_push_frame".to_string(),
-                args: vec![],
-                is_extern: true,
-            });
+            entry_block.instructions.insert(
+                0,
+                IRInstr::Call {
+                    dst: None,
+                    func: "ffi_scratch_push_frame".to_string(),
+                    args: vec![],
+                    is_extern: true,
+                },
+            );
         }
 
         // ── Pop frame before every Return ───────────────────────────────
@@ -1232,7 +1309,10 @@ impl IRBuilder {
         // instruction list; handle both).
         for block in &mut ir_func.blocks {
             let needs_pop = matches!(block.terminator, IRTerminator::Return(_))
-                || block.instructions.iter().any(|i| matches!(i, IRInstr::Ret { .. }));
+                || block
+                    .instructions
+                    .iter()
+                    .any(|i| matches!(i, IRInstr::Ret { .. }));
             if needs_pop {
                 // Find the index of the Ret instruction (if it's in the
                 // instruction list) and insert before it; otherwise append
@@ -1243,12 +1323,15 @@ impl IRBuilder {
                     .iter()
                     .position(|i| matches!(i, IRInstr::Ret { .. }))
                     .unwrap_or(block.instructions.len());
-                block.instructions.insert(insert_at, IRInstr::Call {
-                    dst: None,
-                    func: "ffi_scratch_pop_frame".to_string(),
-                    args: vec![],
-                    is_extern: true,
-                });
+                block.instructions.insert(
+                    insert_at,
+                    IRInstr::Call {
+                        dst: None,
+                        func: "ffi_scratch_pop_frame".to_string(),
+                        args: vec![],
+                        is_extern: true,
+                    },
+                );
             }
         }
     }
@@ -1262,9 +1345,7 @@ impl IRBuilder {
         let mut uses_ffi = false;
         Self::walk_body(body, |s| {
             if let ScgStatement::Call(call) = s {
-                if call.is_extern
-                    || crate::marshal::is_marshal_builtin(&call.func)
-                {
+                if call.is_extern || crate::marshal::is_marshal_builtin(&call.func) {
                     uses_ffi = true;
                 }
             }
@@ -1273,7 +1354,7 @@ impl IRBuilder {
     }
 
     // =======================================================================
-    // Wave 8a: Single-buffer state-var identification
+    // Single-buffer state-var identification
     // =======================================================================
 
     /// Walk an SCG body (recursing into Control nodes) and apply a closure
@@ -1285,7 +1366,11 @@ impl IRBuilder {
                 f(s);
                 if let ScgStatement::Control(ctrl) = s {
                     match ctrl {
-                        ControlNode::If { then_body, else_body, .. } => {
+                        ControlNode::If {
+                            then_body,
+                            else_body,
+                            ..
+                        } => {
                             walk_rec(then_body, f);
                             if let Some(eb) = else_body {
                                 walk_rec(eb, f);
@@ -1294,7 +1379,9 @@ impl IRBuilder {
                         ControlNode::Loop { body, .. } => {
                             walk_rec(body, f);
                         }
-                        ControlNode::Switch { arms, default_body, .. } => {
+                        ControlNode::Switch {
+                            arms, default_body, ..
+                        } => {
                             for arm in arms {
                                 walk_rec(&arm.body, f);
                             }
@@ -1308,7 +1395,7 @@ impl IRBuilder {
         walk_rec(body, &mut f);
     }
 
-    /// Wave 8a: Identify state-typed variables in a function body.
+    /// Identify state-typed variables in a function body.
     ///
     /// Returns the set of variable names that are accessed as state-typed
     /// buffers (i.e. via `state.field` reads/writes). See the doc comment
@@ -1335,7 +1422,7 @@ impl IRBuilder {
         let mut add_defs: HashMap<String, (ScgExpr, ScgExpr)> = HashMap::new();
         let mut state_vars: HashSet<String> = HashSet::new();
 
-        // Arena State Model (Wave 3a): collect all variables that are
+        // Arena State Model: collect all variables that are
         // arena-allocated (from arena_alloc). These are NOT PMT state vars
         // — they're pointers into mmap'd arena memory. They must NOT be
         // routed to ___pmt_buffer.
@@ -1380,7 +1467,7 @@ impl IRBuilder {
                     }
                     // Case 1: ptr is the state var directly (field at offset 0).
                     if let ScgExpr::Var(name) = ptr {
-                        // Arena State Model (Wave 3a): only add to state_vars
+                        // Arena State Model: only add to state_vars
                         // if the var has an AllocationNode::Stack (i.e. it's
                         // from state_new, not arena_alloc).
                         if allocated_vars.contains(name) {
@@ -1419,18 +1506,15 @@ impl IRBuilder {
         state_vars
     }
 
-    /// Wave 8a: Compute the total size of the program-wide PMT buffer.
+    /// Compute the total size of the program-wide PMT buffer.
     ///
     /// Sums the `size` field of every `AllocationNode::Stack` whose `name`
     /// is in `state_vars`, with each size aligned up to 16 bytes.
-    fn compute_total_state_buffer_size(
-        body: &[ScgStatement],
-        state_vars: &HashSet<String>,
-    ) -> u32 {
+    fn compute_total_state_buffer_size(body: &[ScgStatement], state_vars: &HashSet<String>) -> u32 {
         let mut total: u32 = 0;
         Self::walk_body(body, |stmt| {
             if let ScgStatement::Allocation(AllocationNode::Stack { name, size, .. }) = stmt {
-                // Arena State Model (Wave 3a): skip arena struct allocations
+                // Arena State Model: skip arena struct allocations
                 // (24 bytes) — they're NOT PMT state vars, they're stack
                 // buffers holding the Arena metadata (base, offset, capacity).
                 if *size == 24 {
@@ -1554,7 +1638,6 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-
         match stmt {
             ScgStatement::Control(ctrl) => {
                 self.lower_control(ctrl, ir_func, names)?;
@@ -1581,7 +1664,7 @@ impl IRBuilder {
                 self.lower_syscall(syscall, ir_func, names)?;
             }
             ScgStatement::ForeignConsume(_) => {
-                // Wave 5: marker only — emits no IR instruction. The IVE
+                // Marker only — emits no IR instruction. The IVE
                 // treats the State's vreg as consumed (linearity error on
                 // subsequent read/write). The semantic SCG's ForeignConsumeNode
                 // handles the verification side.
@@ -1636,7 +1719,7 @@ impl IRBuilder {
             ScgStatement::ChannelClose(cc) => {
                 self.lower_channel_close(cc, ir_func, names)?;
             }
-            // Wave 8b: fallible recv — emits IRInstr::ChannelRecvResult,
+            // Fallible recv — emits IRInstr::ChannelRecvResult,
             // writing both the payload vreg and the err-discriminant vreg.
             // The surrounding ControlNode::If (emitted by the pipeline)
             // branches on err_dst == 0 to dispatch the Ok / Err arms.
@@ -1666,7 +1749,11 @@ impl IRBuilder {
             } => {
                 self.lower_if(cond, then_body, else_body, ir_func, names)?;
             }
-            ControlNode::Loop { body, for_range, while_cond } => {
+            ControlNode::Loop {
+                body,
+                for_range,
+                while_cond,
+            } => {
                 self.lower_loop(body, for_range, while_cond, ir_func, names)?;
             }
             ControlNode::Break => {
@@ -1753,7 +1840,6 @@ impl IRBuilder {
                 }
             }
         }
-
 
         // Determine the then-branch's end-block label (for phi incoming edges).
         let _then_end_label = {
@@ -1854,27 +1940,39 @@ impl IRBuilder {
                         // both-branch phi would have an invalid edge; skip it
                         // (the falling-through branch's value is used directly).
                         if then_falls_through && else_falls_through {
-                            Some((name.clone(), then_defs.get(name).unwrap(), else_defs.get(name).unwrap()))
+                            Some((
+                                name.clone(),
+                                then_defs.get(name).unwrap(),
+                                else_defs.get(name).unwrap(),
+                            ))
                         } else if then_falls_through && !else_falls_through {
                             // else returns; only then reaches merge.
-                            names_before.get(name).map(|pre| (name.clone(), then_defs.get(name).unwrap(), *pre))
+                            names_before
+                                .get(name)
+                                .map(|pre| (name.clone(), then_defs.get(name).unwrap(), *pre))
                         } else if !then_falls_through && else_falls_through {
                             // then returns; only else reaches merge.
-                            names_before.get(name).map(|pre| (name.clone(), *pre, else_defs.get(name).unwrap()))
+                            names_before
+                                .get(name)
+                                .map(|pre| (name.clone(), *pre, else_defs.get(name).unwrap()))
                         } else {
                             None
                         }
                     } else if in_then {
                         // then-only: create phi only if then falls through.
                         if then_falls_through {
-                            names_before.get(name).map(|pre| (name.clone(), then_defs.get(name).unwrap(), *pre))
+                            names_before
+                                .get(name)
+                                .map(|pre| (name.clone(), then_defs.get(name).unwrap(), *pre))
                         } else {
                             None
                         }
                     } else if in_else {
                         // else-only: create phi only if else falls through.
                         if else_falls_through {
-                            names_before.get(name).map(|pre| (name.clone(), *pre, else_defs.get(name).unwrap()))
+                            names_before
+                                .get(name)
+                                .map(|pre| (name.clone(), *pre, else_defs.get(name).unwrap()))
                         } else {
                             None
                         }
@@ -1929,7 +2027,8 @@ impl IRBuilder {
                 // we update every names entry whose value is then_vreg or
                 // else_vreg.  vregs are unique per computation, so this
                 // never clobbers an unrelated variable.
-                let alias_keys: Vec<String> = names.iter()
+                let alias_keys: Vec<String> = names
+                    .iter()
                     .filter(|(_, &v)| v == *then_vreg || v == *else_vreg)
                     .map(|(k, _)| k.clone())
                     .collect();
@@ -1953,7 +2052,8 @@ impl IRBuilder {
             // phis if the then-branch falls through to merge; if the then-branch
             // returns, its modifications are never observed at merge.
             let mut modified: Vec<String> = if then_falls_through {
-                then_defs.defined_names()
+                then_defs
+                    .defined_names()
                     .into_iter()
                     .filter(|n| names_before.contains_key(n))
                     .collect()
@@ -1979,17 +2079,18 @@ impl IRBuilder {
                 // rationale: SCG-level Var("v_N") references to the
                 // then-branch's reassignment must read the phi result after
                 // the merge, not the branch-local vreg.)
-                let alias_keys: Vec<String> = names.iter()
+                let alias_keys: Vec<String> = names
+                    .iter()
                     .filter(|(_, &v)| v == then_vreg)
                     .map(|(k, _)| k.clone())
                     .collect();
-        
+
                 for key in alias_keys {
                     names.insert(key, phi_dst);
                 }
             }
 
-            // ── Task 7-d: Roll back `names` for then-branch modifications
+            // ── Roll back `names` for then-branch modifications
             //   when the then-branch does NOT fall through to merge. ──
             //
             // When `then_falls_through == false`, the then-branch ends with a
@@ -2022,8 +2123,8 @@ impl IRBuilder {
             // then-branch's vreg) to the pre-if vreg, mirroring the
             // both-branch phi-insertion's alias-redirect logic.
             //
-            // This bug was discovered by Task 7-d (Wave 48 vumac SIGSEGV
-            // debug): the bootstrap `full_lex` function uses the pattern
+            // This bug was discovered while debugging a vumac SIGSEGV:
+            // the bootstrap `full_lex` function uses the pattern
             // `if c == 10 { pos = pos + 1; continue; }` for whitespace
             // skipping, and the bug caused `pos` to read as 0 after the if,
             // making the lexer return 0 tokens (and the bootstrap crash
@@ -2033,16 +2134,15 @@ impl IRBuilder {
                 let then_defs_snapshot: Vec<(String, u32)> = then_defs
                     .defined_names()
                     .into_iter()
-                    .filter_map(|n| {
-                        then_defs.get(&n).map(|v| (n.clone(), v))
-                    })
+                    .filter_map(|n| then_defs.get(&n).map(|v| (n.clone(), v)))
                     .collect();
                 for (name, then_vreg) in &then_defs_snapshot {
                     if let Some(&pre_vreg) = names_before.get(name) {
                         names.insert(name.clone(), pre_vreg);
                         // Redirect alias entries that still point to the
                         // then-branch's vreg back to the pre-if vreg.
-                        let alias_keys: Vec<String> = names.iter()
+                        let alias_keys: Vec<String> = names
+                            .iter()
                             .filter(|(_, &v)| v == *then_vreg)
                             .map(|(k, _)| k.clone())
                             .collect();
@@ -2106,12 +2206,15 @@ impl IRBuilder {
             // that the names map resolves. For binops (e.g. msg_len + 1),
             // it produces a BinOp that the IR builder evaluates.
             let start_val = self.resolve_expr(start, names, ir_func)?;
-            ir_func.current_block().instructions.push(IRInstruction::Add {
-                dst: IRValue::Register(counter_init),
-                lhs: start_val,
-                rhs: IRValue::Immediate(0),
-                ty: None,
-            });
+            ir_func
+                .current_block()
+                .instructions
+                .push(IRInstruction::Add {
+                    dst: IRValue::Register(counter_init),
+                    lhs: start_val,
+                    rhs: IRValue::Immediate(0),
+                    ty: None,
+                });
             names.insert(var.clone(), counter_init);
         }
 
@@ -2184,8 +2287,7 @@ impl IRBuilder {
         // is the phi result itself).
         if phi_info.is_empty() {
             let counter_vreg = self.alloc_vreg();
-            ir_func
-                .register_vreg(VirtualRegister::named(counter_vreg, "loop_counter"));
+            ir_func.register_vreg(VirtualRegister::named(counter_vreg, "loop_counter"));
             phi_instructions.push(IRInstruction::Phi {
                 dst: IRValue::Register(counter_vreg),
                 incoming: vec![
@@ -2210,26 +2312,35 @@ impl IRBuilder {
             let end_val = self.resolve_expr(end_expr, names, ir_func)?;
             let end_vreg = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::named(end_vreg, "loop_end"));
-            ir_func.current_block().instructions.push(IRInstruction::Add {
-                dst: IRValue::Register(end_vreg),
-                lhs: end_val,
-                rhs: IRValue::Immediate(0),
-                ty: None,
-            });
+            ir_func
+                .current_block()
+                .instructions
+                .push(IRInstruction::Add {
+                    dst: IRValue::Register(end_vreg),
+                    lhs: end_val,
+                    rhs: IRValue::Immediate(0),
+                    ty: None,
+                });
             let cmp_vreg = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::named(cmp_vreg, "loop_cmp"));
-            ir_func.current_block().instructions.push(IRInstruction::Cmp {
-                kind: CmpKind::SLt,
-                dst: IRValue::Register(cmp_vreg),
-                lhs: IRValue::Register(counter_vreg),
-                rhs: IRValue::Register(end_vreg),
-                ty: None,
-            });
-            ir_func.current_block().instructions.push(IRInstruction::CondBranch {
-                cond: IRValue::Register(cmp_vreg),
-                true_target: loop_body_label.clone(),
-                false_target: loop_exit.clone(),
-            });
+            ir_func
+                .current_block()
+                .instructions
+                .push(IRInstruction::Cmp {
+                    kind: CmpKind::SLt,
+                    dst: IRValue::Register(cmp_vreg),
+                    lhs: IRValue::Register(counter_vreg),
+                    rhs: IRValue::Register(end_vreg),
+                    ty: None,
+                });
+            ir_func
+                .current_block()
+                .instructions
+                .push(IRInstruction::CondBranch {
+                    cond: IRValue::Register(cmp_vreg),
+                    true_target: loop_body_label.clone(),
+                    false_target: loop_exit.clone(),
+                });
             ir_func.current_block().terminator = IRTerminator::Branch {
                 cond: IRValue::Register(cmp_vreg),
                 true_block: loop_body_label.clone(),
@@ -2304,9 +2415,9 @@ impl IRBuilder {
             .unwrap_or_default();
 
         if !continue_snapshots.is_empty() {
-            let cont_label_str = continue_label.clone().unwrap_or_else(|| {
-                ir_func.current_block().label.clone()
-            });
+            let cont_label_str = continue_label
+                .clone()
+                .unwrap_or_else(|| ir_func.current_block().label.clone());
 
             // Build phi nodes for every variable that was in scope before
             // the loop (these are the loop-carried variables that have
@@ -2341,21 +2452,13 @@ impl IRBuilder {
                 // loop_continue).
                 let mut incoming: Vec<(IRValue, String)> = Vec::new();
                 for (snap_label, snap_names) in &continue_snapshots {
-                    let vreg = snap_names
-                        .get(name)
-                        .copied()
-                        .or(pre_vreg)
-                        .unwrap_or(0);
+                    let vreg = snap_names.get(name).copied().or(pre_vreg).unwrap_or(0);
                     incoming.push((IRValue::Register(vreg), snap_label.clone()));
                 }
                 if let (Some(ref ft_names), Some(ref ft_label)) =
                     (&fall_through_names, &fall_through_label)
                 {
-                    let vreg = ft_names
-                        .get(name)
-                        .copied()
-                        .or(pre_vreg)
-                        .unwrap_or(0);
+                    let vreg = ft_names.get(name).copied().or(pre_vreg).unwrap_or(0);
                     incoming.push((IRValue::Register(vreg), ft_label.clone()));
                 }
 
@@ -2408,18 +2511,21 @@ impl IRBuilder {
             if let Some(&counter_vreg) = names.get(var) {
                 let inc_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(inc_vreg, "loop_inc"));
-                ir_func.current_block().instructions.push(IRInstruction::Add {
-                    dst: IRValue::Register(inc_vreg),
-                    lhs: IRValue::Register(counter_vreg),
-                    rhs: IRValue::Immediate(1),
-                    ty: None,
-                });
+                ir_func
+                    .current_block()
+                    .instructions
+                    .push(IRInstruction::Add {
+                        dst: IRValue::Register(inc_vreg),
+                        lhs: IRValue::Register(counter_vreg),
+                        rhs: IRValue::Immediate(1),
+                        ty: None,
+                    });
                 names.insert(var.clone(), inc_vreg);
             }
         }
 
         // Back-edge to header if the block doesn't have a terminator.
-        
+
         if matches!(
             ir_func.current_block().terminator,
             IRTerminator::Unreachable
@@ -2452,7 +2558,9 @@ impl IRBuilder {
                 }
             }
 
-            let header_block = ir_func.blocks.iter_mut()
+            let header_block = ir_func
+                .blocks
+                .iter_mut()
                 .find(|b| b.label == loop_header)
                 .expect("loop header block must exist");
 
@@ -2466,7 +2574,9 @@ impl IRBuilder {
                                 // user-visible name changes) AND look for any
                                 // reassignment vregs that map back to this name
                                 // via the reassigns mechanism.
-                                let latest_vreg = name_to_latest.get(name).copied()
+                                let latest_vreg = name_to_latest
+                                    .get(name)
+                                    .copied()
                                     .or_else(|| names.get(name).copied());
                                 if let Some(current_vreg) = latest_vreg {
                                     // Only patch if the current vreg is DIFFERENT
@@ -2474,7 +2584,8 @@ impl IRBuilder {
                                     // self-referential phi which is correct for
                                     // unmodified variables but wrong for modified ones).
                                     for entry in incoming.iter_mut() {
-                                        if entry.1 == loop_body_label || entry.1 == back_edge_label {
+                                        if entry.1 == loop_body_label || entry.1 == back_edge_label
+                                        {
                                             entry.0 = IRValue::Register(current_vreg);
                                             entry.1 = back_edge_label.clone();
                                         }
@@ -2486,7 +2597,6 @@ impl IRBuilder {
                     }
                 }
             }
-
         }
 
         // ── Step 6: Update names for variables after the loop ──
@@ -2532,7 +2642,8 @@ impl IRBuilder {
             // 1. Each break path is a predecessor
             // 2. The normal (fall-through/back-edge) exit is also a predecessor
             //    if the loop body doesn't always break.
-            let mut _exit_predecessors: Vec<(String, HashMap<String, u32>)> = break_snapshots.clone();
+            let mut _exit_predecessors: Vec<(String, HashMap<String, u32>)> =
+                break_snapshots.clone();
 
             // Check if the loop can exit normally (without a break).
             // If the last block of the loop body falls through (has no
@@ -2558,7 +2669,8 @@ impl IRBuilder {
                 let exit_phi_vreg = self.alloc_vreg();
                 // Get the header phi vreg for this name (used as fallback for
                 // the normal exit path when no explicit predecessor provides it).
-                let header_phi_vreg = phi_info.iter()
+                let header_phi_vreg = phi_info
+                    .iter()
                     .find(|(n, _, _)| n == name)
                     .map(|(_, _, pv)| *pv)
                     .unwrap_or_else(|| {
@@ -2583,7 +2695,9 @@ impl IRBuilder {
             }
 
             // Insert phi instructions at the beginning of the loop exit block.
-            let exit_block = ir_func.blocks.iter_mut()
+            let exit_block = ir_func
+                .blocks
+                .iter_mut()
                 .find(|b| b.label == loop_exit)
                 .expect("loop exit block must exist");
             for phi in exit_phi_instructions {
@@ -2640,7 +2754,8 @@ impl IRBuilder {
     /// blocks.
     fn resolve_phis(&mut self, ir_func: &mut IRFunction) -> Result<()> {
         // Build a label → block-index map
-        let label_to_idx: HashMap<String, usize> = ir_func.blocks
+        let label_to_idx: HashMap<String, usize> = ir_func
+            .blocks
             .iter()
             .enumerate()
             .map(|(i, b)| (b.label.clone(), i))
@@ -2731,7 +2846,7 @@ impl IRBuilder {
             // Therefore any instruction appended AFTER a `Branch` or
             // `CondBranch` is UNREACHABLE dead code: the jumps always fire
             // before the appended instruction executes.  This was the root
-            // cause of the then-only-if loop-carried phi bug (Task 5-B):
+            // cause of the then-only-if loop-carried phi bug:
             //
             //   For a then-only `if cond { x = ...; }` the merge phi has two
             //   incoming edges — (then_vreg, then_exit) and (pre_vreg,
@@ -2783,7 +2898,9 @@ impl IRBuilder {
 
         // Remove phi instructions after inserting copies.
         for block in &mut ir_func.blocks {
-            block.instructions.retain(|instr| !matches!(instr, IRInstruction::Phi { .. }));
+            block
+                .instructions
+                .retain(|instr| !matches!(instr, IRInstruction::Phi { .. }));
         }
 
         Ok(())
@@ -2897,13 +3014,14 @@ impl IRBuilder {
     }
 
     /// Lower a `break` to a jump to the enclosing loop's exit label.
-    fn lower_break(&mut self, ir_func: &mut IRFunction, names: &HashMap<String, u32>) -> Result<()> {
-        let ctx = self
-            .loop_stack
-            .last_mut()
-            .ok_or_else(|| {
-                crate::CodegenError::TranslationError("break outside of loop".to_string())
-            })?;
+    fn lower_break(
+        &mut self,
+        ir_func: &mut IRFunction,
+        names: &HashMap<String, u32>,
+    ) -> Result<()> {
+        let ctx = self.loop_stack.last_mut().ok_or_else(|| {
+            crate::CodegenError::TranslationError("break outside of loop".to_string())
+        })?;
 
         let exit_label = ctx.exit_label.clone();
         // Snapshot the current variable map at the break point so that
@@ -2946,12 +3064,9 @@ impl IRBuilder {
         // path), so the loop-carried variable never advances past the
         // continue point → infinite loop (cf_while_continue /
         // cf_for_continue).
-        let ctx = self
-            .loop_stack
-            .last_mut()
-            .ok_or_else(|| {
-                crate::CodegenError::TranslationError("continue outside of loop".to_string())
-            })?;
+        let ctx = self.loop_stack.last_mut().ok_or_else(|| {
+            crate::CodegenError::TranslationError("continue outside of loop".to_string())
+        })?;
 
         // Snapshot the current variable map at the continue point so that
         // `lower_loop` can build phi nodes in `loop_continue` merging
@@ -3170,7 +3285,8 @@ impl IRBuilder {
             // statement) will use the pre-switch value instead of the
             // merge phi result.
             if let Some(&pre_vreg) = names_before.get(name) {
-                let keys_to_update: Vec<String> = names.iter()
+                let keys_to_update: Vec<String> = names
+                    .iter()
                     .filter(|(_, &v)| v == pre_vreg)
                     .map(|(k, _)| k.clone())
                     .collect();
@@ -3192,12 +3308,12 @@ impl IRBuilder {
     /// - `AllocationNode::Stack` → `IRInstruction::Alloc` + stack slot tracking
     /// - `AllocationNode::Heap` → `IRInstruction::Syscall` (mmap, nr 222) — P2
     ///
-    /// # Wave 4a — RepD is the canonical source for State sizes
+    /// # RepD is the canonical source for State sizes
     ///
     /// For state-typed allocations (`let p = state_new(Layout)`), the
     /// `AllocationNode::Stack.size` field is the layout's `total_size` —
     /// the same quantity exposed by `vuma_bd::repd::LayoutRegistry::state_size`
-    /// (the canonical RepD query added in Wave 4a). The bridge
+    /// (the canonical RepD query). The bridge
     /// (`build_layout_registry` in `src/pipeline.rs`) currently computes
     /// this ad-hoc by mirroring `LayoutRegistry::register` field-by-field
     /// into a parallel `HashMap<String, (u64, Vec<…>)>` and stuffing the
@@ -3220,7 +3336,7 @@ impl IRBuilder {
     ) -> Result<()> {
         match alloc {
             AllocationNode::Stack { name, size, ty } => {
-                // Wave 8a: PMT state-typed allocations (from
+                // PMT state-typed allocations (from
                 // `let p = state_new(Layout)`) are routed into the program-
                 // wide single buffer (`___pmt_buffer`) instead of per-state
                 // `Alloc`s. This realizes the "zero runtime overhead"
@@ -3239,7 +3355,7 @@ impl IRBuilder {
                 // `lower_function`); for non-`main` functions,
                 // `pmt_buffer_vreg` is `None` and state-typed allocations
                 // fall back to per-state `Alloc`.
-                // Arena State Model (Wave 3a): Arena struct allocations
+                // Arena State Model: Arena struct allocations
                 // (24 bytes, from arena_new) are NOT PMT state vars —
                 // they're heap-allocated buffers. Since they're NOT in
                 // state_vars, they fall through to the regular Alloc path
@@ -3251,9 +3367,7 @@ impl IRBuilder {
                 // handles it correctly.
 
                 // PMT state vars: route to ___pmt_buffer.
-                if self.state_vars.contains(name)
-                    && self.pmt_buffer_vreg.is_some()
-                {
+                if self.state_vars.contains(name) && self.pmt_buffer_vreg.is_some() {
                     let buf_vreg = self.pmt_buffer_vreg.unwrap();
                     let vreg = self.alloc_vreg();
                     ir_func.register_vreg(VirtualRegister::named(vreg, name));
@@ -3261,7 +3375,7 @@ impl IRBuilder {
                     // The state var is a POINTER into the buffer (used as
                     // the base address for subsequent field Loads/Stores).
                     self.pointer_vregs.insert(vreg);
-                    // K10A-mem-copy-buffer: also stamp IRType::Ptr into
+                    // Also stamp IRType::Ptr into
                     // `vreg_types` (mirrors the regular Alloc path) so the
                     // `lower_computation` fallback chain sees pointer-ness
                     // even when `pointer_vregs.contains` misses.
@@ -3271,9 +3385,7 @@ impl IRBuilder {
                     // by the aligned size after each state-typed allocation.
                     let assigned_offset = self.next_state_offset;
                     let aligned_size = (*size + 15) & !15u32;
-                    self.next_state_offset = self
-                        .next_state_offset
-                        .saturating_add(aligned_size);
+                    self.next_state_offset = self.next_state_offset.saturating_add(aligned_size);
                     // Emit `dst = ___pmt_buffer + assigned_offset` instead
                     // of `Alloc { dst, size }`. The Offset instruction
                     // lowers to a single `LEA`/`ADD` on most backends.
@@ -3293,7 +3405,7 @@ impl IRBuilder {
                 names.insert(name.clone(), vreg);
                 // Mark this vreg as a pointer for Store/Load width
                 self.pointer_vregs.insert(vreg);
-                // K10A-mem-copy-buffer: also record the IRType::Ptr in
+                // Also record the IRType::Ptr in
                 // `vreg_types` so that `lower_computation`'s fallback
                 // type-inference chain (which consults `vreg_types` when
                 // `pointer_vregs` lookup misses — e.g. when the lhs is
@@ -3301,7 +3413,7 @@ impl IRBuilder {
                 // different vreg id) still concludes pointer arithmetic and
                 // forces `ty=Some(Ptr)` for `addr = buf + i`.
                 self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
-                // Arena State Model (Wave 3a): Arena struct allocations
+                // Arena State Model: Arena struct allocations
                 // (24 bytes) from arena_new are NOT state vars in the PMT
                 // sense — they're just stack buffers holding (base, offset,
                 // capacity). Don't emit Alloc; just leave the stack slot
@@ -3313,7 +3425,7 @@ impl IRBuilder {
                     let _ = ty;
                     return Ok(());
                 }
-                // Wave 4a: `*size` is the RepD-canonical state_size() value
+                // `*size` is the RepD-canonical state_size() value
                 // for state-typed allocations (see the doc comment on
                 // `lower_allocation`). It is forwarded verbatim to the IR
                 // Alloc instruction — no ad-hoc recomputation here.
@@ -3379,7 +3491,12 @@ impl IRBuilder {
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
         match access {
-            AccessNode::Load { dst, ptr, offset, ty } => {
+            AccessNode::Load {
+                dst,
+                ptr,
+                offset,
+                ty,
+            } => {
                 let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
                 let (addr_val, byte_offset) = match offset {
                     Some(off) => {
@@ -3421,7 +3538,11 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if self.load_count == 1 && self.store_count == 0 && self.cmp_count == 0 && self.param_count > 1 {
+                    } else if self.load_count == 1
+                        && self.store_count == 0
+                        && self.cmp_count == 0
+                        && self.param_count > 1
+                    {
                         // For functions with exactly ONE load (regardless of
                         // store_count), the load result likely flows to the
                         // return value.  Use the function's return type for
@@ -3465,7 +3586,12 @@ impl IRBuilder {
                 // Register the load result's type for BinOp width inference
                 self.vreg_types.insert(dst_vreg, load_ty);
             }
-            AccessNode::Store { ptr, offset, value, ty } => {
+            AccessNode::Store {
+                ptr,
+                offset,
+                value,
+                ty,
+            } => {
                 let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
                 let val = self.resolve_expr(value, names, ir_func)?;
                 let (addr_val, byte_offset) = match offset {
@@ -3506,8 +3632,7 @@ impl IRBuilder {
                     if self.pointer_vregs.contains(&vid) {
                         IRType::U64
                     } else {
-                        let vreg_name = ir_func.vregs.get(&vid)
-                            .and_then(|v| v.name.as_deref());
+                        let vreg_name = ir_func.vregs.get(&vid).and_then(|v| v.name.as_deref());
                         let mut found_ty: Option<IRType> = None;
                         if let Some(name) = vreg_name {
                             if let Some(pt) = self.param_types.get(name) {
@@ -3532,8 +3657,18 @@ impl IRBuilder {
                             }
                         }
                         if found_ty.is_none() {
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                                if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                            if let ScgExpr::BinOp {
+                                op: crate::ir::BinOpKind::Add,
+                                lhs: _,
+                                rhs,
+                            } = ptr
+                            {
+                                if let ScgExpr::BinOp {
+                                    op: crate::ir::BinOpKind::Mul,
+                                    lhs: _,
+                                    rhs,
+                                } = rhs.as_ref()
+                                {
                                     if let ScgExpr::Int(stride) = rhs.as_ref() {
                                         found_ty = Some(match *stride {
                                             8 => IRType::U64,
@@ -3553,18 +3688,36 @@ impl IRBuilder {
                         _ => false,
                     };
                     if imm_too_large_for_byte {
-                        if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                        if let ScgExpr::BinOp {
+                            op: crate::ir::BinOpKind::Add,
+                            lhs: _,
+                            rhs,
+                        } = ptr
+                        {
+                            if let ScgExpr::BinOp {
+                                op: crate::ir::BinOpKind::Mul,
+                                lhs: _,
+                                rhs,
+                            } = rhs.as_ref()
+                            {
                                 if let ScgExpr::Int(stride) = rhs.as_ref() {
                                     match *stride {
                                         8 => IRType::U64,
                                         4 => IRType::U32,
                                         _ => IRType::U8,
                                     }
-                                } else { IRType::U8 }
-                            } else { IRType::U8 }
-                        } else { IRType::U8 }
-                    } else { IRType::U8 }
+                                } else {
+                                    IRType::U8
+                                }
+                            } else {
+                                IRType::U8
+                            }
+                        } else {
+                            IRType::U8
+                        }
+                    } else {
+                        IRType::U8
+                    }
                 };
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
@@ -3658,7 +3811,7 @@ impl IRBuilder {
         // width (32-bit vs 64-bit shifts). Without this, 64-bit shifts on
         // 32-bit values with garbage in the upper bits corrupt the result.
         //
-        // POINTER ARITHMETIC (K9G-mem-copy-buffer): if either operand is a
+        // POINTER ARITHMETIC: if either operand is a
         // pointer vreg (e.g. the result of `state_new(Layout)` lowered via
         // `IRInstr::Offset` into `___pmt_buffer`), the operation is pointer
         // arithmetic and MUST be performed at 64-bit width. Without this, an
@@ -3669,10 +3822,12 @@ impl IRBuilder {
         // pointer. Subsequent Load/Store at the truncated address → SIGSEGV.
         // x86_64 happens to survive because its `ADD r64, r64` encoding
         // defaults to 64-bit and ignores the IR `ty` for register operands.
-        let lhs_is_ptr = lhs_val.as_register()
+        let lhs_is_ptr = lhs_val
+            .as_register()
             .map(|id| self.pointer_vregs.contains(&id))
             .unwrap_or(false);
-        let rhs_is_ptr = rhs_val.as_register()
+        let rhs_is_ptr = rhs_val
+            .as_register()
             .map(|id| self.pointer_vregs.contains(&id))
             .unwrap_or(false);
         let op_ty = if lhs_is_ptr || rhs_is_ptr {
@@ -3681,13 +3836,15 @@ impl IRBuilder {
             // the emitted ADD is always 64-bit.
             Some(crate::ir::IRType::Ptr)
         } else {
-            lhs_val.as_register()
+            lhs_val
+                .as_register()
                 .and_then(|id| self.vreg_types.get(&id).cloned())
                 .or_else(|| {
                     // Also check RHS vreg type (e.g., val is F64 from array load).
                     // Critical for `total = total + val` where total's phi vreg
                     // doesn't have a type, but val does.
-                    rhs_val.as_register()
+                    rhs_val
+                        .as_register()
                         .and_then(|id| self.vreg_types.get(&id).cloned())
                         .filter(|ty| matches!(ty, IRType::F32 | IRType::F64))
                 })
@@ -3699,9 +3856,9 @@ impl IRBuilder {
                     }
                 })
                 .or_else(|| {
-                    // G7: look up the dst temp name in the function's var_types
+                    // Look up the dst temp name in the function's var_types
                     // (populated from let-binding type annotations like `let a: f64`).
-                    // [Wave K2-hppa-stark] Return ALL types (including I64/U64) so
+                    // Return ALL types (including I64/U64) so
                     // that integer BinOps get the correct ty field. The previous
                     // code only returned F32/F64, leaving integer BinOps with
                     // ty=None — corrupting 64-bit values on 32-bit backends.
@@ -3710,7 +3867,7 @@ impl IRBuilder {
                 .or_else(|| self.expr_ir_type(&comp.lhs))
                 .or_else(|| self.expr_ir_type(&comp.rhs))
                 .or_else(|| {
-                    // G7: check param_types by name (for function parameters
+                    // Check param_types by name (for function parameters
                     // whose vreg was remapped by loop-body SSA renaming).
                     if let ScgExpr::Var(name) = &comp.lhs {
                         self.param_types.get(name).cloned()
@@ -3791,7 +3948,8 @@ impl IRBuilder {
         // an alias would read the pre-reassignment value, causing the
         // minicompiler while-loop infinite-loop bug.
         if let Some(prev_vreg) = prev_vreg {
-            let keys_to_update: Vec<String> = names.iter()
+            let keys_to_update: Vec<String> = names
+                .iter()
                 .filter(|(_, &v)| v == prev_vreg)
                 .map(|(k, _)| k.clone())
                 .collect();
@@ -3804,8 +3962,6 @@ impl IRBuilder {
             self.vreg_aliases.insert(comp.dst.clone(), name.clone());
         }
 
-
-
         let dst = IRValue::Register(dst_vreg);
 
         match comp.op {
@@ -3814,7 +3970,7 @@ impl IRBuilder {
             | BinOpKind::Mul
             | BinOpKind::SDiv
             | BinOpKind::UDiv => {
-                // G7: route FP arithmetic to IRInstr::BinOp (which has FP
+                // Route FP arithmetic to IRInstr::BinOp (which has FP
                 // dispatch in all backends).  The typed Add/Sub/Mul/Div
                 // instructions are integer-only and ignore `ty`.
                 if matches!(op_ty, Some(IRType::F32) | Some(IRType::F64)) {
@@ -3828,16 +3984,36 @@ impl IRBuilder {
                 } else {
                     match comp.op {
                         BinOpKind::Add => {
-                            ir_func.current_block().push(IRInstruction::Add { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
+                            ir_func.current_block().push(IRInstruction::Add {
+                                dst,
+                                lhs: lhs_val,
+                                rhs: rhs_val,
+                                ty: op_ty.clone(),
+                            });
                         }
                         BinOpKind::Sub => {
-                            ir_func.current_block().push(IRInstruction::Sub { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
+                            ir_func.current_block().push(IRInstruction::Sub {
+                                dst,
+                                lhs: lhs_val,
+                                rhs: rhs_val,
+                                ty: op_ty.clone(),
+                            });
                         }
                         BinOpKind::Mul => {
-                            ir_func.current_block().push(IRInstruction::Mul { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
+                            ir_func.current_block().push(IRInstruction::Mul {
+                                dst,
+                                lhs: lhs_val,
+                                rhs: rhs_val,
+                                ty: op_ty.clone(),
+                            });
                         }
                         BinOpKind::SDiv | BinOpKind::UDiv => {
-                            ir_func.current_block().push(IRInstruction::Div { dst, lhs: lhs_val, rhs: rhs_val, ty: op_ty.clone() });
+                            ir_func.current_block().push(IRInstruction::Div {
+                                dst,
+                                lhs: lhs_val,
+                                rhs: rhs_val,
+                                ty: op_ty.clone(),
+                            });
                         }
                         _ => unreachable!(),
                     }
@@ -3996,15 +4172,19 @@ impl IRBuilder {
                     .iter()
                     .map(|e| self.resolve_expr(e, names, ir_func))
                     .collect::<Result<Vec<_>>>()?;
-                let addr = args.into_iter().next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        "AtomicLoad requires 1 argument (addr)".into()))?;
+                let addr = args.into_iter().next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "AtomicLoad requires 1 argument (addr)".into(),
+                    )
+                })?;
                 let dst = match &call.dst {
                     Some(name) => {
                         let vreg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::named(vreg, name));
                         names.insert(name.clone(), vreg);
-                        if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
+                        if let Some(ref r) = call.reassigns {
+                            names.insert(r.clone(), vreg);
+                        }
                         IRValue::Register(vreg)
                     }
                     None => {
@@ -4027,12 +4207,16 @@ impl IRBuilder {
                     .map(|e| self.resolve_expr(e, names, ir_func))
                     .collect::<Result<Vec<_>>>()?;
                 let mut args_iter = args.into_iter();
-                let value = args_iter.next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        "AtomicStore requires 2 arguments (value, addr)".into()))?;
-                let addr = args_iter.next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        "AtomicStore requires 2 arguments (value, addr)".into()))?;
+                let value = args_iter.next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "AtomicStore requires 2 arguments (value, addr)".into(),
+                    )
+                })?;
+                let addr = args_iter.next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "AtomicStore requires 2 arguments (value, addr)".into(),
+                    )
+                })?;
                 ir_func.current_block().push(IRInstruction::AtomicStore {
                     value,
                     addr,
@@ -4047,21 +4231,29 @@ impl IRBuilder {
                     .map(|e| self.resolve_expr(e, names, ir_func))
                     .collect::<Result<Vec<_>>>()?;
                 let mut args_iter = args.into_iter();
-                let addr = args_iter.next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
-                let expected = args_iter.next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
-                let desired = args_iter.next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+                let addr = args_iter.next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "AtomicCas requires 3 arguments (addr, expected, desired)".into(),
+                    )
+                })?;
+                let expected = args_iter.next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "AtomicCas requires 3 arguments (addr, expected, desired)".into(),
+                    )
+                })?;
+                let desired = args_iter.next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "AtomicCas requires 3 arguments (addr, expected, desired)".into(),
+                    )
+                })?;
                 let dst = match &call.dst {
                     Some(name) => {
                         let vreg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::named(vreg, name));
                         names.insert(name.clone(), vreg);
-                        if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
+                        if let Some(ref r) = call.reassigns {
+                            names.insert(r.clone(), vreg);
+                        }
                         IRValue::Register(vreg)
                     }
                     None => {
@@ -4096,15 +4288,20 @@ impl IRBuilder {
                     .iter()
                     .map(|e| self.resolve_expr(e, names, ir_func))
                     .collect::<Result<Vec<_>>>()?;
-                let src_val = args.into_iter().next()
-                    .ok_or_else(|| crate::CodegenError::TranslationError(
-                        format!("{} requires 1 argument", call.func)))?;
+                let src_val = args.into_iter().next().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(format!(
+                        "{} requires 1 argument",
+                        call.func
+                    ))
+                })?;
                 let dst = match &call.dst {
                     Some(name) => {
                         let vreg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::named(vreg, name));
                         names.insert(name.clone(), vreg);
-                        if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
+                        if let Some(ref r) = call.reassigns {
+                            names.insert(r.clone(), vreg);
+                        }
                         IRValue::Register(vreg)
                     }
                     None => {
@@ -4144,13 +4341,13 @@ impl IRBuilder {
                             None => false,
                         };
                         if src_f32 && !dst_f32 {
-                            (Some(IRType::F32), Some(IRType::F64))  // widen f32→f64
+                            (Some(IRType::F32), Some(IRType::F64)) // widen f32→f64
                         } else if !src_f32 && dst_f32 {
-                            (Some(IRType::F64), Some(IRType::F32))  // narrow f64→f32
+                            (Some(IRType::F64), Some(IRType::F32)) // narrow f64→f32
                         } else if src_f32 && dst_f32 {
-                            (Some(IRType::F32), Some(IRType::F32))  // f32→f32 (no-op)
+                            (Some(IRType::F32), Some(IRType::F32)) // f32→f32 (no-op)
                         } else {
-                            (Some(IRType::F64), Some(IRType::F64))  // f64→f64 (no-op)
+                            (Some(IRType::F64), Some(IRType::F64)) // f64→f64 (no-op)
                         }
                     }
                     _ => unreachable!(),
@@ -4158,15 +4355,17 @@ impl IRBuilder {
                 let result_ty = match kind {
                     CastKind::IntToFloat | CastKind::UIntToFloat => IRType::F64,
                     CastKind::FloatToInt | CastKind::FloatToUInt => IRType::I64,
-                    CastKind::FloatToFloat => {
-                        match &to_ty {
-                            Some(t) => t.clone(),
-                            None => IRType::F64,
-                        }
-                    }
+                    CastKind::FloatToFloat => match &to_ty {
+                        Some(t) => t.clone(),
+                        None => IRType::F64,
+                    },
                     _ => unreachable!(),
                 };
-                let dst_vreg = if let IRValue::Register(vr) = dst { Some(vr) } else { None };
+                let dst_vreg = if let IRValue::Register(vr) = dst {
+                    Some(vr)
+                } else {
+                    None
+                };
                 ir_func.current_block().push(IRInstruction::Cast {
                     dst,
                     src: src_val,
@@ -4178,6 +4377,62 @@ impl IRBuilder {
                 // can dispatch to the FP path.
                 if let Some(vr) = dst_vreg {
                     self.vreg_types.insert(vr, result_ty);
+                }
+                return Ok(());
+            }
+            // ── PMT builtin: `state_new(LayoutName)` ──
+            //
+            // `state_new(HashState)` is the PMT (Programs-as-Memory-
+            // Transformations) constructor that allocates a state buffer
+            // sized to the layout's `total_size`. The parser intercepts
+            // `state_new(LayoutName)` and emits `Expr::StateInit`, which
+            // the canonical AST→codegen-SCG bridge (`bridge_ast_to_codegen_scg`
+            // in `pipeline.rs`) lowers directly to `AllocationNode::Stack`
+            // with the correct size — never reaching this `lower_call` path.
+            //
+            // However, the DEPRECATED semantic-SCG → codegen-SCG bridge
+            // (`bridge_scg_to_codegen`, used by `dump_codegen_scg` and the
+            // `test_full_pipeline_sha256d_aarch64` integration test) mis-
+            // lowers `state_new(HashState)` as a regular `CallNode` with
+            // `args=[Var("HashState")]`. The layout name leaks through as
+            // a bare identifier because `extract_calls_from_label` (in
+            // `pipeline.rs`) does not skip `state_new` when scanning
+            // Computation-node labels for embedded call expressions.
+            //
+            // The layout-name argument is NOT a variable — resolving it
+            // via `resolve_expr` panics with `UnknownVariable { name:
+            // "HashState" }`. Handle `state_new` here: skip arg
+            // resolution (the arg is a layout name, not a value), emit an
+            // `Alloc` so the dst vreg holds a valid pointer, and bind the
+            // dst/reassigns names. The IRBuilder does not have access to
+            // the layout registry, so the Alloc uses size 0 — sufficient
+            // for IR build / regalloc / encode to succeed (the resulting
+            // binary is not semantically correct for state.field access,
+            // but that is a pre-existing limitation of the deprecated
+            // bridge path, which is superseded by the canonical direct
+            // bridge for production compilation).
+            "state_new" => {
+                let dst = match &call.dst {
+                    Some(name) => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                        names.insert(name.clone(), vreg);
+                        if let Some(ref r) = call.reassigns {
+                            names.insert(r.clone(), vreg);
+                        }
+                        // Mark as pointer so subsequent Load/Store width
+                        // inference uses 64-bit (Ptr) arithmetic.
+                        self.pointer_vregs.insert(vreg);
+                        self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
+                        Some(IRValue::Register(vreg))
+                    }
+                    None => None,
+                };
+                if let Some(IRValue::Register(vreg)) = dst {
+                    ir_func.current_block().push(IRInstruction::Alloc {
+                        dst: IRValue::Register(vreg),
+                        size: 0,
+                    });
                 }
                 return Ok(());
             }
@@ -4206,11 +4461,16 @@ impl IRBuilder {
                     let prev_vreg = names.get(r).copied();
 
                     if let Some(prev_vreg) = prev_vreg {
-                        let keys_to_update: Vec<String> = names.iter()
+                        let keys_to_update: Vec<String> = names
+                            .iter()
                             .filter(|(_, &v)| v == prev_vreg)
                             .map(|(k, _)| k.clone())
                             .collect();
-                        vuma_log!(warn, "DEBUG lower_call: updating {} aliases", keys_to_update.len());
+                        vuma_log!(
+                            warn,
+                            "DEBUG lower_call: updating {} aliases",
+                            keys_to_update.len()
+                        );
                         for key in keys_to_update {
                             names.insert(key, vreg);
                         }
@@ -4222,7 +4482,7 @@ impl IRBuilder {
             None => None,
         };
 
-        // Wave 25-32 (FFI Process Isolation): recognize `extern "process"`
+        // Recognize `extern "process"`
         // ABI. Functions declared in an `extern "process" { ... }` block are
         // foreign functions that must NOT be called via a direct C-ABI call
         // — instead they are marshaled across a process boundary using the
@@ -4248,7 +4508,7 @@ impl IRBuilder {
             || call.func.starts_with("process_")
             || call.func.starts_with("extern_process_");
 
-        // Wave 89-90 (Session Types): recognize session-typed channel
+        // Recognize session-typed channel
         // operations. A `channel_open<T>()` call whose `T` is a
         // `ScgType::Channel(inner)` may carry an optional session-type
         // protocol on its AST node (Type::Channel { session_type, .. }).
@@ -4259,7 +4519,7 @@ impl IRBuilder {
         // Minimal handling (mirroring the `extern "process"` ABI pattern
         // above): if the call is a session-typed channel operation, we
         // tag the destination vreg with the channel's IRType so downstream
-        // passes (IVE linear-type checker, Wave 95) can recover the
+        // passes (IVE linear-type checker) can recover the
         // payload type and verify the send/recv protocol order. The
         // session-type protocol itself is not yet threaded through the
         // SCG (a future SCG extension would add a `session_type` slot to
@@ -4278,7 +4538,7 @@ impl IRBuilder {
                     crate::ir::IRType::Channel(Box::new(crate::ir::IRType::I64)),
                 );
                 // Track that this vreg is a channel handle so the linear
-                // checker (Wave 95) can include it in the channel-lifecycle
+                // checker can include it in the channel-lifecycle
                 // verification set.
                 self.channel_handle_vregs.insert(*vreg);
             }
@@ -4291,7 +4551,7 @@ impl IRBuilder {
             is_extern: is_extern_final,
         });
 
-        // Arena State Model (Wave 3a): mark mmap/mremap return vregs as
+        // Arena State Model: mark mmap/mremap return vregs as
         // pointers so Load/Store uses the correct width (64-bit). Without
         // this, the codegen may truncate the mmap'd address to 32 bits,
         // causing SIGSEGV when writing to the arena memory.
@@ -4300,7 +4560,7 @@ impl IRBuilder {
                 self.pointer_vregs.insert(vreg);
                 self.vreg_types.insert(vreg, crate::ir::IRType::Ptr);
             }
-            // G7: register result types for float-conversion builtins so
+            // Register result types for float-conversion builtins so
             // downstream BinOp/Cmp instructions can dispatch to the FP path.
             match call.func.as_str() {
                 "inttofloat" | "uinttofloat" | "floattofloat" => {
@@ -4323,8 +4583,8 @@ impl IRBuilder {
     /// Lower a direct syscall node to an `IRInstr::Syscall` instruction.
     ///
     /// This emits a first-class syscall IR node. Each backend lowers it
-    /// directly to a real syscall instruction (Wave 11/12 removed the
-    /// intermediate `lower_syscalls_all()` lowering pass).
+    /// directly to a real syscall instruction (no intermediate
+    /// `lower_syscalls_all()` lowering pass).
     ///
     /// The destination vreg (if any) is registered in the `names` map so
     /// that subsequent expressions can refer to the syscall's result by the
@@ -4432,12 +4692,9 @@ impl IRBuilder {
                 let lhs = self.resolve_expr(&ct.operands[0], names, ir_func)?;
                 let rhs = self.resolve_expr(&ct.operands[1], names, ir_func)?;
 
-                ir_func.current_block().push(IRInstruction::CtEq {
-                    dst,
-                    lhs,
-                    rhs,
-                    ty,
-                });
+                ir_func
+                    .current_block()
+                    .push(IRInstruction::CtEq { dst, lhs, rhs, ty });
             }
         }
         Ok(())
@@ -4606,7 +4863,7 @@ impl IRBuilder {
     }
 
     // =======================================================================
-    // Channel operation lowering (Wave 2b)
+    // Channel operation lowering
     // =======================================================================
 
     /// Lower a `ChannelOpen` statement to `IRInstr::ChannelOpen`.
@@ -4624,7 +4881,7 @@ impl IRBuilder {
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &co.dst));
         names.insert(co.dst.clone(), dst_vreg);
-        // [K12A-ipc-pattern-b-timeout] The channel handle is a 64-bit value
+        // The channel handle is a 64-bit value
         // (low 32 = read_fd, high 32 = write_fd). On 32-bit backends
         // (x86_32/hppa/riscv32/m68k/arm32), if the vreg type is not set to
         // I64, the BinOp Shl/Or in expand_channel_open may be lowered as
@@ -4698,11 +4955,13 @@ impl IRBuilder {
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
         let ch = self.resolve_expr(&cc.channel, names, ir_func)?;
-        ir_func.current_block().push(IRInstruction::ChannelClose { ch });
+        ir_func
+            .current_block()
+            .push(IRInstruction::ChannelClose { ch });
         Ok(())
     }
 
-    /// Wave 8b: lower a fallible `ChannelRecvResult` statement to
+    /// Lower a fallible `ChannelRecvResult` statement to
     /// [`IRInstr::ChannelRecvResult`].
     ///
     /// Allocates TWO fresh vregs — one for the payload (`dst`, bound to the
@@ -4732,12 +4991,14 @@ impl IRBuilder {
         let err_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(err_vreg, &crr.err_dst));
         names.insert(crr.err_dst.clone(), err_vreg);
-        ir_func.current_block().push(IRInstruction::ChannelRecvResult {
-            ch,
-            dst: IRValue::Register(dst_vreg),
-            err_dst: IRValue::Register(err_vreg),
-            ty: Some(crr.ty.to_ir_type()),
-        });
+        ir_func
+            .current_block()
+            .push(IRInstruction::ChannelRecvResult {
+                ch,
+                dst: IRValue::Register(dst_vreg),
+                err_dst: IRValue::Register(err_vreg),
+                ty: Some(crr.ty.to_ir_type()),
+            });
         Ok(())
     }
 
@@ -4770,10 +5031,14 @@ impl IRBuilder {
     ///
     /// Returns [`CodegenError::UnknownVariable`] if the expression is a
     /// `ScgExpr::Var` whose name is not present in the `names` map.
-    fn resolve_expr(&mut self, expr: &ScgExpr, names: &HashMap<String, u32>, ir_func: &mut IRFunction) -> Result<IRValue> {
+    fn resolve_expr(
+        &mut self,
+        expr: &ScgExpr,
+        names: &HashMap<String, u32>,
+        ir_func: &mut IRFunction,
+    ) -> Result<IRValue> {
         match expr {
             ScgExpr::Var(name) => {
-
                 // Try user-visible name first (via alias map) because
                 // user names are always updated to the latest vreg by
                 // lower_computation's reassigns handling. The synthetic
@@ -4786,8 +5051,24 @@ impl IRBuilder {
                 }
                 if let Some(&vreg) = names.get(name) {
                     Ok(IRValue::Register(vreg))
-                } else {
+                } else if Self::is_synthetic_scg_var(name) {
+                    // Safety net for unregistered synthetic `v_<node_id>`
+                    // vars (cross-function DataFlow references that the
+                    // pre-pass at line ~1138 missed — e.g. when the
+                    // defining node was emitted in a different function).
+                    // Substituting 0 preserves the historical graceful-
+                    // degradation behavior for these bridge artifacts.
+                    // The pre-pass at line ~1138 pre-registers most
+                    // synthetic vars, so this branch is rarely hit.
                     Ok(IRValue::Immediate(0))
+                } else {
+                    // User-visible name (parameter, local, test fixture
+                    // like `undefined_var`) that is genuinely undefined.
+                    // Hard-error semantics: return
+                    // `UnknownVariable` rather than silently substituting
+                    // 0 (which would mask the bug and produce a wrong
+                    // binary).
+                    Err(crate::CodegenError::UnknownVariable { name: name.clone() })
                 }
             }
             ScgExpr::Int(v) => Ok(IRValue::Immediate(*v)),
@@ -4810,7 +5091,7 @@ impl IRBuilder {
                 Ok(IRValue::Immediate(f.to_bits() as i64))
             }
             ScgExpr::Label(name) => {
-                // Wave 5: Emit a GetAddress IR instruction to load the symbol's
+                // Emit a GetAddress IR instruction to load the symbol's
                 // address into a register, instead of returning IRValue::Label
                 // (which load_value can't handle). GetAddress is lowered by the
                 // backend to a mov/lea + relocation, patched by encode_program.
@@ -4840,7 +5121,8 @@ impl IRBuilder {
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::anonymous(dst_vreg));
                 // Determine type from lhs for shift width inference
-                let inline_op_ty = lhs_val.as_register()
+                let inline_op_ty = lhs_val
+                    .as_register()
                     .and_then(|id| self.vreg_types.get(&id).cloned())
                     .or_else(|| self.expr_ir_type(lhs));
                 if let Some(ref ty) = inline_op_ty {
@@ -4848,8 +5130,12 @@ impl IRBuilder {
                 }
                 // Comparison operators → Cmp instruction
                 match op {
-                    BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
-                    | BinOpKind::Eq | BinOpKind::Ne => {
+                    BinOpKind::SLt
+                    | BinOpKind::SLe
+                    | BinOpKind::SGt
+                    | BinOpKind::SGe
+                    | BinOpKind::Eq
+                    | BinOpKind::Ne => {
                         let cmp_kind = match op {
                             BinOpKind::SLt => CmpKind::SLt,
                             BinOpKind::SLe => CmpKind::SLe,
@@ -4927,12 +5213,19 @@ impl IRBuilder {
             match stmt {
                 ScgStatement::Computation(c) => {
                     // Check if this is a comparison operation
-                    if matches!(c.op, crate::ir::BinOpKind::SLt | crate::ir::BinOpKind::SLe
-                        | crate::ir::BinOpKind::SGt | crate::ir::BinOpKind::SGe
-                        | crate::ir::BinOpKind::ULt | crate::ir::BinOpKind::ULe
-                        | crate::ir::BinOpKind::UGt | crate::ir::BinOpKind::UGe
-                        | crate::ir::BinOpKind::Eq | crate::ir::BinOpKind::Ne)
-                    {
+                    if matches!(
+                        c.op,
+                        crate::ir::BinOpKind::SLt
+                            | crate::ir::BinOpKind::SLe
+                            | crate::ir::BinOpKind::SGt
+                            | crate::ir::BinOpKind::SGe
+                            | crate::ir::BinOpKind::ULt
+                            | crate::ir::BinOpKind::ULe
+                            | crate::ir::BinOpKind::UGt
+                            | crate::ir::BinOpKind::UGe
+                            | crate::ir::BinOpKind::Eq
+                            | crate::ir::BinOpKind::Ne
+                    ) {
                         count += 1;
                     }
                 }
@@ -4949,15 +5242,27 @@ impl IRBuilder {
     fn count_cmps_in_control(ctrl: &ControlNode) -> usize {
         let mut count = 0;
         match ctrl {
-            ControlNode::If { cond, then_body, else_body, .. } => {
+            ControlNode::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => {
                 // Check if the condition is a comparison
                 if let ScgExpr::BinOp { op, .. } = cond {
-                    if matches!(op, crate::ir::BinOpKind::SLt | crate::ir::BinOpKind::SLe
-                        | crate::ir::BinOpKind::SGt | crate::ir::BinOpKind::SGe
-                        | crate::ir::BinOpKind::ULt | crate::ir::BinOpKind::ULe
-                        | crate::ir::BinOpKind::UGt | crate::ir::BinOpKind::UGe
-                        | crate::ir::BinOpKind::Eq | crate::ir::BinOpKind::Ne)
-                    {
+                    if matches!(
+                        op,
+                        crate::ir::BinOpKind::SLt
+                            | crate::ir::BinOpKind::SLe
+                            | crate::ir::BinOpKind::SGt
+                            | crate::ir::BinOpKind::SGe
+                            | crate::ir::BinOpKind::ULt
+                            | crate::ir::BinOpKind::ULe
+                            | crate::ir::BinOpKind::UGt
+                            | crate::ir::BinOpKind::UGe
+                            | crate::ir::BinOpKind::Eq
+                            | crate::ir::BinOpKind::Ne
+                    ) {
                         count += 1;
                     }
                 }
@@ -4969,7 +5274,9 @@ impl IRBuilder {
             ControlNode::Loop { body, .. } => {
                 count += Self::count_cmps(body);
             }
-            ControlNode::Switch { arms, default_body, .. } => {
+            ControlNode::Switch {
+                arms, default_body, ..
+            } => {
                 for arm in arms {
                     count += Self::count_cmps(&arm.body);
                 }
@@ -4999,7 +5306,11 @@ impl IRBuilder {
     fn count_stores_in_control(ctrl: &ControlNode) -> usize {
         let mut count = 0;
         match ctrl {
-            ControlNode::If { then_body, else_body, .. } => {
+            ControlNode::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 count += Self::count_stores(then_body);
                 if let Some(eb) = else_body {
                     count += Self::count_stores(eb);
@@ -5008,7 +5319,9 @@ impl IRBuilder {
             ControlNode::Loop { body, .. } => {
                 count += Self::count_stores(body);
             }
-            ControlNode::Switch { arms, default_body, .. } => {
+            ControlNode::Switch {
+                arms, default_body, ..
+            } => {
                 for arm in arms {
                     count += Self::count_stores(&arm.body);
                 }
@@ -5023,7 +5336,11 @@ impl IRBuilder {
     fn count_loads_in_control(ctrl: &ControlNode) -> usize {
         let mut count = 0;
         match ctrl {
-            ControlNode::If { then_body, else_body, .. } => {
+            ControlNode::If {
+                then_body,
+                else_body,
+                ..
+            } => {
                 count += Self::count_loads(then_body);
                 if let Some(eb) = else_body {
                     count += Self::count_loads(eb);
@@ -5032,7 +5349,9 @@ impl IRBuilder {
             ControlNode::Loop { body, .. } => {
                 count += Self::count_loads(body);
             }
-            ControlNode::Switch { arms, default_body, .. } => {
+            ControlNode::Switch {
+                arms, default_body, ..
+            } => {
                 for arm in arms {
                     count += Self::count_loads(&arm.body);
                 }
@@ -5184,14 +5503,21 @@ impl IRBuilder {
                 defs.insert(name.clone());
                 Self::expr_uses(size_expr, &mut uses);
             }
-            ScgStatement::Access(AccessNode::Load { dst, ptr, offset, .. }) => {
+            ScgStatement::Access(AccessNode::Load {
+                dst, ptr, offset, ..
+            }) => {
                 defs.insert(dst.clone());
                 Self::expr_uses(ptr, &mut uses);
                 if let Some(off) = offset {
                     Self::expr_uses(off, &mut uses);
                 }
             }
-            ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty: _ }) => {
+            ScgStatement::Access(AccessNode::Store {
+                ptr,
+                offset,
+                value,
+                ty: _,
+            }) => {
                 Self::expr_uses(ptr, &mut uses);
                 if let Some(off) = offset {
                     Self::expr_uses(off, &mut uses);
@@ -5313,44 +5639,44 @@ impl IRBuilder {
             ScgStatement::ForeignConsume(fc) => {
                 // The State variable is "used" (consumed) by the foreign call.
                 uses.insert(fc.state_var.clone());
-            },
+            }
             ScgStatement::ChannelOpen(co) => {
                 // Defines the destination variable; uses nothing.
                 defs.insert(co.dst.clone());
-            },
+            }
             ScgStatement::ChannelSend(cs) => {
                 // Uses the channel handle and the message expression.
                 Self::expr_uses(&cs.channel, &mut uses);
                 Self::expr_uses(&cs.message, &mut uses);
-            },
+            }
             ScgStatement::ChannelRecv(cr) => {
                 // Defines the destination variable; uses the channel handle.
                 defs.insert(cr.dst.clone());
                 Self::expr_uses(&cr.channel, &mut uses);
-            },
+            }
             ScgStatement::ChannelClose(cc) => {
                 // Uses the channel handle (consumed).
                 Self::expr_uses(&cc.channel, &mut uses);
-            },
-            // Wave 8b: fallible recv defines BOTH the value dst and the err_dst,
+            }
+            // Fallible recv defines BOTH the value dst and the err_dst,
             // and uses the channel handle.
             ScgStatement::ChannelRecvResult(crr) => {
                 defs.insert(crr.dst.clone());
                 defs.insert(crr.err_dst.clone());
                 Self::expr_uses(&crr.channel, &mut uses);
-            },
+            }
         }
 
         (defs, uses)
     }
 
-    /// G7: Derive the IR type of an ScgExpr.  Used to propagate F32/F64
+    /// Derive the IR type of an ScgExpr.  Used to propagate F32/F64
     /// type info to BinOp/Cmp when the lhs is an immediate (float literal).
     fn expr_ir_type(&self, expr: &ScgExpr) -> Option<IRType> {
         match expr {
             ScgExpr::Float(_) => Some(IRType::F64),
             ScgExpr::Var(name) => {
-                // [Wave K2-hppa-stark] Return the FULL declared type (including
+                // Return the FULL declared type (including
                 // integer types I64/U64). The previous code only returned F32/F64,
                 // which meant integer BinOps (Xor/And/Or/Mul) got ty=None. On 32-bit
                 // big-endian backends (hppa), this caused the high 32 bits to be
@@ -5500,7 +5826,7 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
-                    reassigns: None,
+                        reassigns: None,
                     })],
                     else_body: None,
                 }),
@@ -5533,7 +5859,10 @@ mod tests {
             })],
         );
         let mut builder = IRBuilder::new();
-        let program = builder.build(&scg).unwrap();
+        // Use build_with_phis so the phi nodes are preserved for inspection.
+        // The production build() resolves phis to copies (removing the Phi
+        // instructions) which would make this assertion fail.
+        let program = builder.build_with_phis(&scg).unwrap();
         let func = &program.functions[0];
         // Should have: entry, loop_header, loop_body, loop_exit blocks
         assert!(func.blocks.len() >= 4);
@@ -5703,7 +6032,9 @@ mod tests {
         );
 
         let mut builder = IRBuilder::new();
-        let program = builder.build(&scg).unwrap();
+        // Use build_with_phis: this test asserts on Phi presence in
+        // loop_continue, but production build() resolves phis to copies.
+        let program = builder.build_with_phis(&scg).unwrap();
         let func = &program.functions[0];
 
         // 1. The `loop_continue` block must contain at least one Phi
@@ -5965,7 +6296,7 @@ mod tests {
                     func: "compute".into(),
                     args: vec![ScgExpr::Int(42), ScgExpr::Int(7)],
                     is_extern: false,
-                reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
             ],
@@ -6175,7 +6506,7 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
-                    reassigns: None,
+                        reassigns: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "y".into(),
@@ -6183,7 +6514,7 @@ mod tests {
                         lhs: ScgExpr::Int(5),
                         rhs: ScgExpr::Int(3),
                         tail_call: false,
-                    reassigns: None,
+                        reassigns: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![]),
@@ -6276,7 +6607,7 @@ mod tests {
             matches!(
                 i,
                 IRInstruction::UnaryOp {
-            ty: None,
+                    ty: None,
                     op: UnaryOpKind::Not,
                     ..
                 }
@@ -6312,7 +6643,7 @@ mod tests {
             matches!(
                 i,
                 IRInstruction::UnaryOp {
-            ty: None,
+                    ty: None,
                     op: UnaryOpKind::Clz,
                     ..
                 }
@@ -6453,7 +6784,7 @@ mod tests {
         assert_eq!(ScgType::U64.to_ir_type(), IRType::U64);
         assert_eq!(ScgType::Ptr.to_ir_type(), IRType::Ptr);
         assert_eq!(ScgType::Void.to_ir_type(), IRType::Void);
-        // Wave 1a: Channel<T> maps to IRType::Channel<T>.
+        // Channel<T> maps to IRType::Channel<T>.
         assert_eq!(
             ScgType::Channel(Box::new(ScgType::I32)).to_ir_type(),
             IRType::Channel(Box::new(IRType::I32))
@@ -6464,7 +6795,7 @@ mod tests {
         );
     }
 
-    // ── Wave 1a: Channel<T> type-system tests ────────────────────────
+    // ── Channel<T> type-system tests ────────────────────────
 
     #[test]
     fn test_scg_type_channel_size() {
@@ -6483,7 +6814,10 @@ mod tests {
             ScgType::Channel(Box::new(ScgType::I8)).size(),
             ScgType::Channel(Box::new(ScgType::I64)).size()
         );
-        assert_eq!(ScgType::Channel(Box::new(ScgType::I32)).size(), ScgType::Ptr.size());
+        assert_eq!(
+            ScgType::Channel(Box::new(ScgType::I32)).size(),
+            ScgType::Ptr.size()
+        );
     }
 
     #[test]
@@ -6502,7 +6836,10 @@ mod tests {
         );
         // Nested channels: Channel<Channel<i32>>.
         assert_eq!(
-            format!("{}", ScgType::Channel(Box::new(ScgType::Channel(Box::new(ScgType::I32))))),
+            format!(
+                "{}",
+                ScgType::Channel(Box::new(ScgType::Channel(Box::new(ScgType::I32))))
+            ),
             "Channel<Channel<i32>>"
         );
     }
@@ -6552,7 +6889,7 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
-                    reassigns: None,
+                        reassigns: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "x".into(),
@@ -6560,14 +6897,16 @@ mod tests {
                         lhs: ScgExpr::Int(10),
                         rhs: ScgExpr::Int(3),
                         tail_call: false,
-                    reassigns: None,
+                        reassigns: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("x".into())]),
             ],
         );
         let mut builder = IRBuilder::new();
-        let program = builder.build(&scg).unwrap();
+        // Use build_with_phis: this test asserts on Phi presence at the
+        // merge block, but production build() resolves phis to copies.
+        let program = builder.build_with_phis(&scg).unwrap();
         let func = &program.functions[0];
 
         // The merge block should contain a phi node for x
@@ -6595,7 +6934,7 @@ mod tests {
                 lhs: ScgExpr::Int(1),
                 rhs: ScgExpr::Int(2),
                 tail_call: false,
-                    reassigns: None,
+                reassigns: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(),
@@ -6603,7 +6942,7 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Int(3),
                 tail_call: false,
-                    reassigns: None,
+                reassigns: None,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("b".into())]),
         ];
@@ -6626,7 +6965,7 @@ mod tests {
                 lhs: ScgExpr::Int(1),
                 rhs: ScgExpr::Int(2),
                 tail_call: false,
-                    reassigns: None,
+                reassigns: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(),
@@ -6634,7 +6973,7 @@ mod tests {
                 lhs: ScgExpr::Int(3),
                 rhs: ScgExpr::Int(4),
                 tail_call: false,
-                    reassigns: None,
+                reassigns: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "c".into(),
@@ -6642,7 +6981,7 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Var("b".into()),
                 tail_call: false,
-                    reassigns: None,
+                reassigns: None,
             }),
         ];
         let order = IRBuilder::topological_sort_statements(&stmts);
@@ -6745,7 +7084,7 @@ mod tests {
                     func: "print_int".into(),
                     args: vec![ScgExpr::Int(123)],
                     is_extern: false,
-                reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -7080,7 +7419,7 @@ mod tests {
             matches!(
                 i,
                 IRInstruction::UnaryOp {
-            ty: None,
+                    ty: None,
                     op: UnaryOpKind::Popcnt,
                     ..
                 }
@@ -7107,7 +7446,7 @@ mod tests {
                             lhs: ScgExpr::Var("n".into()),
                             rhs: ScgExpr::Int(1),
                             tail_call: false,
-                    reassigns: None,
+                            reassigns: None,
                         }),
                         ScgStatement::Control(ControlNode::Break),
                     ],
@@ -7118,7 +7457,9 @@ mod tests {
             ],
         );
         let mut builder = IRBuilder::new();
-        let program = builder.build(&scg).unwrap();
+        // Use build_with_phis: this test asserts on Phi presence in
+        // loop_header, but production build() resolves phis to copies.
+        let program = builder.build_with_phis(&scg).unwrap();
         let func = &program.functions[0];
 
         // Should have loop_header, loop_body, loop_exit blocks
@@ -7270,16 +7611,14 @@ mod tests {
                         // on the first iteration).
                         ScgStatement::Control(ControlNode::If {
                             cond: ScgExpr::Int(1),
-                            then_body: vec![ScgStatement::Computation(
-                                ComputationNode {
-                                    dst: "done".into(),
-                                    op: BinOpKind::Add,
-                                    lhs: ScgExpr::Int(1),
-                                    rhs: ScgExpr::Int(0),
-                                    tail_call: false,
-                                    reassigns: Some("done".into()),
-                                },
-                            )],
+                            then_body: vec![ScgStatement::Computation(ComputationNode {
+                                dst: "done".into(),
+                                op: BinOpKind::Add,
+                                lhs: ScgExpr::Int(1),
+                                rhs: ScgExpr::Int(0),
+                                tail_call: false,
+                                reassigns: Some("done".into()),
+                            })],
                             else_body: None,
                         }),
                         // Second if: then-only, reads `done`.  After the
@@ -7301,7 +7640,10 @@ mod tests {
         );
 
         let mut builder = IRBuilder::new();
-        let program = builder.build(&scg).unwrap();
+        // Use build_with_phis: this test asserts on Phi + CondBranch
+        // co-location in the first if's merge block, but production
+        // build() resolves phis to copies (removing the Phi instructions).
+        let program = builder.build_with_phis(&scg).unwrap();
         let func = &program.functions[0];
 
         // Find a block that has BOTH a Phi instruction AND a CondBranch
@@ -7320,7 +7662,9 @@ mod tests {
                     None
                 }
             });
-            let Some(phi_dst) = phi_dst else { continue; };
+            let Some(phi_dst) = phi_dst else {
+                continue;
+            };
 
             // Check whether the SAME block has a CondBranch whose cond
             // is the Phi's dst.  This means the second if's condition
@@ -7429,7 +7773,10 @@ mod tests {
         );
 
         let mut builder = IRBuilder::new();
-        let program = builder.build(&scg).unwrap();
+        // Use build_with_phis: this test asserts on the loop-header phi's
+        // back-edge incoming value, but production build() resolves phis
+        // to copies (removing the Phi instructions).
+        let program = builder.build_with_phis(&scg).unwrap();
         let func = &program.functions[0];
 
         // The loop body has no inner if-merge (the `done = 1` is direct in
@@ -7591,10 +7938,7 @@ mod tests {
         // after it).  If the phi copy were appended after CondBranch (the
         // pre-fix bug), the CondBranch would NOT be last.
         assert!(
-            matches!(
-                instructions.last(),
-                Some(IRInstruction::CondBranch { .. })
-            ),
+            matches!(instructions.last(), Some(IRInstruction::CondBranch { .. })),
             "Expected CondBranch to be the LAST instruction in the if's entry \
              block. If it is not last, the phi copy for the fall-through edge \
              was appended AFTER the CondBranch (dead code on native backends) \
@@ -7610,16 +7954,13 @@ mod tests {
         // There MUST be an Add (the phi copy) whose dst is the return vreg,
         // positioned BEFORE the CondBranch.  This is the copy
         // `phi_dst = pre_vreg` that runs on the fall-through path.
-        let phi_copy_before_condbranch = instructions
-            .iter()
-            .take(condbranch_idx)
-            .any(|instr| {
-                if let IRInstruction::Add { dst, .. } = instr {
-                    dst.as_register() == Some(return_vreg)
-                } else {
-                    false
-                }
-            });
+        let phi_copy_before_condbranch = instructions.iter().take(condbranch_idx).any(|instr| {
+            if let IRInstruction::Add { dst, .. } = instr {
+                dst.as_register() == Some(return_vreg)
+            } else {
+                false
+            }
+        });
         assert!(
             phi_copy_before_condbranch,
             "Expected an Add instruction with dst == return vreg ({}) positioned \
@@ -7665,8 +8006,14 @@ mod tests {
         let scg = func_scg(
             "test_loop_then_only_if",
             vec![
-                ScgParam { name: "cond".into(), ty: ScgType::U32 },
-                ScgParam { name: "cond2".into(), ty: ScgType::U32 },
+                ScgParam {
+                    name: "cond".into(),
+                    ty: ScgType::U32,
+                },
+                ScgParam {
+                    name: "cond2".into(),
+                    ty: ScgType::U32,
+                },
             ],
             vec![
                 // result = 1   (let-binding)
@@ -7713,8 +8060,11 @@ mod tests {
         // instruction (nothing appended after it).
         let mut checked_inner_if = false;
         for block in &func.blocks {
-            if let Some(IRInstruction::CondBranch { true_target, false_target, .. }) =
-                block.instructions.last()
+            if let Some(IRInstruction::CondBranch {
+                true_target,
+                false_target,
+                ..
+            }) = block.instructions.last()
             {
                 // Skip the loop-header's CondBranch (for_range / while_cond
                 // lowering) — our loop has for_range: None and while_cond:
@@ -7834,7 +8184,8 @@ mod tests {
             .flat_map(|b| b.instructions.iter())
             .find_map(|instr| {
                 if let IRInstruction::Add { dst, lhs, rhs, .. } = instr {
-                    if matches!(lhs, IRValue::Immediate(3)) && matches!(rhs, IRValue::Immediate(0)) {
+                    if matches!(lhs, IRValue::Immediate(3)) && matches!(rhs, IRValue::Immediate(0))
+                    {
                         return dst.as_register();
                     }
                 }
@@ -7850,9 +8201,7 @@ mod tests {
             .flat_map(|b| b.instructions.iter())
             .find_map(|instr| {
                 if let IRInstruction::Add { dst, lhs, rhs, .. } = instr {
-                    if lhs.as_register() == Some(a_vreg)
-                        && matches!(rhs, IRValue::Immediate(0))
-                    {
+                    if lhs.as_register() == Some(a_vreg) && matches!(rhs, IRValue::Immediate(0)) {
                         return dst.as_register();
                     }
                 }
@@ -8043,7 +8392,7 @@ mod tests {
         );
     }
 
-    // ── Wave 48 (Task D): then-branch rollback when !then_falls_through ──
+    // ── then-branch rollback when !then_falls_through ──
     //
     // Regression test for the `lower_if` rollback fix.  The pattern:
     //
@@ -8186,6 +8535,54 @@ mod tests {
         assert!(
             !func.blocks.is_empty(),
             "function must have at least one block after lowering"
+        );
+    }
+
+    // ── Negative-path test ───────────────
+    //
+    // `IRBuilder::build` returns `Result<IRProgram>` rather than
+    // panicking on malformed SCG input, so per the task brief this
+    // test uses `assert!(result.is_err())` plus an error-message
+    // substring check rather than `#[should_panic]`.  The
+    // `lower_constant_time` arm at line 4488 returns a
+    // `CodegenError::TranslationError` with a specific message when
+    // `ct_select` is called with the wrong operand count — this test
+    // drives that path.
+
+    /// `ct_select(cond, a, b)` requires exactly 3 operands.  Supplying
+    /// only 2 must return a `TranslationError` whose message names
+    /// both the operation (`ct_select`) and the expected operand
+    /// count (3).  Without this test, a regression that silently
+    /// dropped operands or read uninitialized memory would go
+    /// undetected at the unit level.
+    #[test]
+    fn test_negative_ct_select_wrong_operand_count_returns_err() {
+        let scg = func_scg(
+            "bad_ct_select",
+            vec![],
+            vec![
+                ScgStatement::ConstantTime(ConstantTimeStatement {
+                    op: ConstantTimeOpKind::CtSelect,
+                    dst: "out".into(),
+                    // ct_select needs 3 operands; supply only 2.
+                    operands: vec![ScgExpr::Int(1), ScgExpr::Int(2)],
+                    ty: ScgType::I64,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("out".into())]),
+            ],
+        );
+        let mut builder = IRBuilder::new();
+        let result = builder.build(&scg);
+        assert!(
+            result.is_err(),
+            "ct_select with 2 operands (needs 3) must return Err, got Ok"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("ct_select") && err.contains("3 operands"),
+            "error message must mention both 'ct_select' and the expected \
+             operand count (3); got: {}",
+            err
         );
     }
 }

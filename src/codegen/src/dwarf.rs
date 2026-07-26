@@ -383,25 +383,25 @@ impl DwarfBuilder {
     pub fn for_backend(backend: crate::backend::BackendKind) -> Self {
         use crate::backend::BackendKind;
         let (addr_size, min_inst) = match backend {
-            BackendKind::X86_64       => (8, 1),
-            BackendKind::AArch64      => (8, 4),
-            BackendKind::RiscV64      => (8, 2),
-            BackendKind::RiscV32      => (4, 2),
-            BackendKind::X86_32       => (4, 1),
-            BackendKind::Arm32        => (4, 2),
-            BackendKind::Mips64       => (8, 4),
-            BackendKind::PowerPC64    => (8, 4),
-            BackendKind::PowerPC64LE  => (8, 4),
-            BackendKind::LoongArch64  => (8, 4),
-            BackendKind::Wasm32       => (4, 1),
-            BackendKind::Sparc64      => (8, 4),
-            BackendKind::S390X        => (8, 2), // 64-bit addresses, 2-byte min inst (RR format)
-            BackendKind::Mips64Be     => (8, 4),
-            BackendKind::ArmEb        => (4, 2),
-            BackendKind::AArch64Be    => (8, 4),
-            BackendKind::M68k         => (4, 2),
-            BackendKind::Alpha        => (8, 4),
-            BackendKind::Hppa         => (4, 4),
+            BackendKind::X86_64 => (8, 1),
+            BackendKind::AArch64 => (8, 4),
+            BackendKind::RiscV64 => (8, 2),
+            BackendKind::RiscV32 => (4, 2),
+            BackendKind::X86_32 => (4, 1),
+            BackendKind::Arm32 => (4, 2),
+            BackendKind::Mips64 => (8, 4),
+            BackendKind::PowerPC64 => (8, 4),
+            BackendKind::PowerPC64LE => (8, 4),
+            BackendKind::LoongArch64 => (8, 4),
+            BackendKind::Wasm32 => (4, 1),
+            BackendKind::Sparc64 => (8, 4),
+            BackendKind::S390X => (8, 2), // 64-bit addresses, 2-byte min inst (RR format)
+            BackendKind::Mips64Be => (8, 4),
+            BackendKind::ArmEb => (4, 2),
+            BackendKind::AArch64Be => (8, 4),
+            BackendKind::M68k => (4, 2),
+            BackendKind::Alpha => (8, 4),
+            BackendKind::Hppa => (4, 4),
         };
         Self::with_config(addr_size, min_inst)
     }
@@ -476,15 +476,21 @@ impl DwarfBuilder {
     /// FP is register 29.  The prologue saves LR and FP on the stack.
     pub fn set_cie_aarch64(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 31,       // SP (x31)
-            cfa_offset: 0,    // CFA = SP at function entry
+            cfa_reg: 31,   // SP (x31)
+            cfa_offset: 0, // CFA = SP at function entry
             saved_regs: vec![
-                SavedRegister { reg: 29, cfa_offset: -16 }, // FP (x29) at CFA-16
-                SavedRegister { reg: 30, cfa_offset: -8 },  // LR (x30) at CFA-8
+                SavedRegister {
+                    reg: 29,
+                    cfa_offset: -16,
+                }, // FP (x29) at CFA-16
+                SavedRegister {
+                    reg: 30,
+                    cfa_offset: -8,
+                }, // LR (x30) at CFA-8
             ],
-            code_alignment_factor: 4, // 4-byte instructions
+            code_alignment_factor: 4,  // 4-byte instructions
             data_alignment_factor: -8, // 8-byte stack slots, negative for grows-down
-            return_address_reg: 30,   // LR (x30)
+            return_address_reg: 30,    // LR (x30)
         });
     }
 
@@ -494,14 +500,17 @@ impl DwarfBuilder {
     /// The prologue pushes RBP and saves RSP-based CFA.
     pub fn set_cie_x86_64(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 7,        // RSP
-            cfa_offset: 8,    // CFA = RSP + 8 (return address on stack)
+            cfa_reg: 7,    // RSP
+            cfa_offset: 8, // CFA = RSP + 8 (return address on stack)
             saved_regs: vec![
-                SavedRegister { reg: 6, cfa_offset: -16 }, // RBP at CFA-16
+                SavedRegister {
+                    reg: 6,
+                    cfa_offset: -16,
+                }, // RBP at CFA-16
             ],
             code_alignment_factor: 1, // variable-length instructions
             data_alignment_factor: -8,
-            return_address_reg: 16,   // RIP (return address)
+            return_address_reg: 16, // RIP (return address)
         });
     }
 
@@ -511,15 +520,21 @@ impl DwarfBuilder {
     /// FP (s0) is register 8.  The prologue saves RA and s0 on the stack.
     pub fn set_cie_riscv64(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 2,        // SP (x2)
-            cfa_offset: 0,    // CFA = SP at function entry
+            cfa_reg: 2,    // SP (x2)
+            cfa_offset: 0, // CFA = SP at function entry
             saved_regs: vec![
-                SavedRegister { reg: 1, cfa_offset: -8 },  // RA (x1) at CFA-8
-                SavedRegister { reg: 8, cfa_offset: -16 }, // s0/fp (x8) at CFA-16
+                SavedRegister {
+                    reg: 1,
+                    cfa_offset: -8,
+                }, // RA (x1) at CFA-8
+                SavedRegister {
+                    reg: 8,
+                    cfa_offset: -16,
+                }, // s0/fp (x8) at CFA-16
             ],
             code_alignment_factor: 2, // 2-byte minimum instruction length
             data_alignment_factor: -8,
-            return_address_reg: 1,    // RA (x1)
+            return_address_reg: 1, // RA (x1)
         });
     }
 
@@ -529,11 +544,17 @@ impl DwarfBuilder {
     /// FP is register 11.  The prologue pushes LR and FP.
     pub fn set_cie_arm32(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 13,       // SP (r13)
-            cfa_offset: 0,    // CFA = SP at function entry
+            cfa_reg: 13,   // SP (r13)
+            cfa_offset: 0, // CFA = SP at function entry
             saved_regs: vec![
-                SavedRegister { reg: 11, cfa_offset: -8 }, // FP (r11) at CFA-8
-                SavedRegister { reg: 14, cfa_offset: -4 }, // LR (r14) at CFA-4
+                SavedRegister {
+                    reg: 11,
+                    cfa_offset: -8,
+                }, // FP (r11) at CFA-8
+                SavedRegister {
+                    reg: 14,
+                    cfa_offset: -4,
+                }, // LR (r14) at CFA-4
             ],
             code_alignment_factor: 2, // 2-byte instructions (Thumb) or 4 (ARM)
             data_alignment_factor: -4, // 4-byte stack slots
@@ -544,11 +565,17 @@ impl DwarfBuilder {
     /// Set the CIE for MIPS64 targets.
     pub fn set_cie_mips64(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 29,       // SP ($sp)
+            cfa_reg: 29, // SP ($sp)
             cfa_offset: 0,
             saved_regs: vec![
-                SavedRegister { reg: 31, cfa_offset: -8 }, // RA ($ra) at CFA-8
-                SavedRegister { reg: 30, cfa_offset: -16 }, // FP ($fp) at CFA-16
+                SavedRegister {
+                    reg: 31,
+                    cfa_offset: -8,
+                }, // RA ($ra) at CFA-8
+                SavedRegister {
+                    reg: 30,
+                    cfa_offset: -16,
+                }, // FP ($fp) at CFA-16
             ],
             code_alignment_factor: 4,
             data_alignment_factor: -8,
@@ -559,10 +586,13 @@ impl DwarfBuilder {
     /// Set the CIE for PPC64 targets.
     pub fn set_cie_ppc64(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 1,        // R1 (SP)
+            cfa_reg: 1, // R1 (SP)
             cfa_offset: 0,
             saved_regs: vec![
-                SavedRegister { reg: 65, cfa_offset: -8 }, // LR (saved in LR save word)
+                SavedRegister {
+                    reg: 65,
+                    cfa_offset: -8,
+                }, // LR (saved in LR save word)
             ],
             code_alignment_factor: 4,
             data_alignment_factor: -8,
@@ -573,11 +603,17 @@ impl DwarfBuilder {
     /// Set the CIE for LoongArch64 targets.
     pub fn set_cie_loongarch64(&mut self) {
         self.cie = Some(CommonInformationEntry {
-            cfa_reg: 3,        // $sp (r3)
+            cfa_reg: 3, // $sp (r3)
             cfa_offset: 0,
             saved_regs: vec![
-                SavedRegister { reg: 1, cfa_offset: -8 },  // $ra (r1) at CFA-8
-                SavedRegister { reg: 22, cfa_offset: -16 }, // $fp (r22) at CFA-16
+                SavedRegister {
+                    reg: 1,
+                    cfa_offset: -8,
+                }, // $ra (r1) at CFA-8
+                SavedRegister {
+                    reg: 22,
+                    cfa_offset: -16,
+                }, // $fp (r22) at CFA-16
             ],
             code_alignment_factor: 4,
             data_alignment_factor: -8,
@@ -617,27 +653,45 @@ impl DwarfBuilder {
             BackendKind::Sparc64 => {
                 // SPARC V9: %sp = O6 (reg 14), %i7 = return address (reg 31).
                 self.cie = Some(CommonInformationEntry {
-                    cfa_reg: 14,       // %sp (O6)
+                    cfa_reg: 14, // %sp (O6)
                     cfa_offset: 0,
                     saved_regs: vec![
-                        SavedRegister { reg: 31, cfa_offset: -8 }, // %i7 (return address)
-                        SavedRegister { reg: 30, cfa_offset: -16 }, // %fp (I6)
+                        SavedRegister {
+                            reg: 31,
+                            cfa_offset: -8,
+                        }, // %i7 (return address)
+                        SavedRegister {
+                            reg: 30,
+                            cfa_offset: -16,
+                        }, // %fp (I6)
                     ],
                     code_alignment_factor: 4,
                     data_alignment_factor: -8,
                     return_address_reg: 31, // %i7
                 });
             }
-            BackendKind::S390X | BackendKind::Mips64Be | BackendKind::ArmEb | BackendKind::AArch64Be | BackendKind::M68k | BackendKind::Alpha | BackendKind::Hppa => {
+            BackendKind::S390X
+            | BackendKind::Mips64Be
+            | BackendKind::ArmEb
+            | BackendKind::AArch64Be
+            | BackendKind::M68k
+            | BackendKind::Alpha
+            | BackendKind::Hppa => {
                 // s390x: %r15 = SP (reg 15), %r14 = return address (reg 14),
                 // %r11 = frame pointer (reg 11).  Instructions are 2-byte aligned
                 // (the shortest format, RR, is 2 bytes).
                 self.cie = Some(CommonInformationEntry {
-                    cfa_reg: 15,       // %r15 (SP)
+                    cfa_reg: 15, // %r15 (SP)
                     cfa_offset: 0,
                     saved_regs: vec![
-                        SavedRegister { reg: 14, cfa_offset: -8 }, // %r14 (return address)
-                        SavedRegister { reg: 11, cfa_offset: -16 }, // %r11 (FP)
+                        SavedRegister {
+                            reg: 14,
+                            cfa_offset: -8,
+                        }, // %r14 (return address)
+                        SavedRegister {
+                            reg: 11,
+                            cfa_offset: -16,
+                        }, // %r11 (FP)
                     ],
                     code_alignment_factor: 2,
                     data_alignment_factor: -8,
@@ -1867,11 +1921,11 @@ mod tests {
         db32.add_subprogram("main", 0, 32);
         let sections32 = db32.emit_debug_sections();
         let info32 = &sections32.debug_info;
-        assert!(info32.len() > 11, "32-bit debug_info must have at least 11 bytes");
-        assert_eq!(
-            info32[10], 4,
-            "address size should be 4 for 32-bit builder"
+        assert!(
+            info32.len() > 11,
+            "32-bit debug_info must have at least 11 bytes"
         );
+        assert_eq!(info32[10], 4, "address size should be 4 for 32-bit builder");
     }
 
     // -- Test 14: Line program contains DW_LNS_ADVANCE_LINE --
@@ -1918,8 +1972,10 @@ mod tests {
         ] {
             let db = DwarfBuilder::for_backend(kind);
             assert_eq!(
-                db.address_size(), 8,
-                "{:?}: 64-bit backend should have address_size=8", kind
+                db.address_size(),
+                8,
+                "{:?}: 64-bit backend should have address_size=8",
+                kind
             );
         }
 
@@ -1927,8 +1983,10 @@ mod tests {
         for kind in [BackendKind::Arm32, BackendKind::Wasm32] {
             let db = DwarfBuilder::for_backend(kind);
             assert_eq!(
-                db.address_size(), 4,
-                "{:?}: 32-bit backend should have address_size=4", kind
+                db.address_size(),
+                4,
+                "{:?}: 32-bit backend should have address_size=4",
+                kind
             );
         }
     }
@@ -1938,14 +1996,38 @@ mod tests {
     fn test_for_backend_min_inst_length() {
         use crate::backend::BackendKind;
 
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::X86_64).min_inst_length(), 1);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::AArch64).min_inst_length(), 4);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::RiscV64).min_inst_length(), 2);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::Arm32).min_inst_length(), 2);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::Mips64).min_inst_length(), 4);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::PowerPC64).min_inst_length(), 4);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::LoongArch64).min_inst_length(), 4);
-        assert_eq!(DwarfBuilder::for_backend(BackendKind::Wasm32).min_inst_length(), 1);
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::X86_64).min_inst_length(),
+            1
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::AArch64).min_inst_length(),
+            4
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::RiscV64).min_inst_length(),
+            2
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::Arm32).min_inst_length(),
+            2
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::Mips64).min_inst_length(),
+            4
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::PowerPC64).min_inst_length(),
+            4
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::LoongArch64).min_inst_length(),
+            4
+        );
+        assert_eq!(
+            DwarfBuilder::for_backend(BackendKind::Wasm32).min_inst_length(),
+            1
+        );
     }
 
     // -- Test 18: DWARF v4 debug_line section has correct version --
@@ -1973,7 +2055,10 @@ mod tests {
         let info32 = &sections32.debug_info;
 
         // DWARF v4 header is 11 bytes
-        assert!(info32.len() > 11, "32-bit debug_info must have DIEs after header");
+        assert!(
+            info32.len() > 11,
+            "32-bit debug_info must have DIEs after header"
+        );
         let (abbrev_code, _) = decode_uleb128(info32, 11);
         assert_eq!(abbrev_code, 1, "first DIE should be compile unit");
 
@@ -2013,7 +2098,10 @@ mod tests {
         let sections = db.emit_debug_sections();
         let frame = &sections.debug_frame;
 
-        assert!(!frame.is_empty(), "debug_frame should not be empty when CIE is set");
+        assert!(
+            !frame.is_empty(),
+            "debug_frame should not be empty when CIE is set"
+        );
 
         // First 4 bytes: CIE length
         let cie_length = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
@@ -2045,7 +2133,10 @@ mod tests {
         assert!(db.cie.is_some(), "AArch64 CIE should be set");
         let cie = db.cie.as_ref().unwrap();
         assert_eq!(cie.cfa_reg, 31, "AArch64 CFA register should be SP (31)");
-        assert_eq!(cie.return_address_reg, 30, "AArch64 return address should be LR (30)");
+        assert_eq!(
+            cie.return_address_reg, 30,
+            "AArch64 return address should be LR (30)"
+        );
 
         let mut db2 = DwarfBuilder::for_backend(BackendKind::X86_64);
         db2.set_cie_for_backend(BackendKind::X86_64);
@@ -2069,14 +2160,23 @@ mod tests {
         // CIE length + CIE_id + CIE body + FDE1 length + FDE1 body + FDE2 length + FDE2 body
         let cie_length = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
         let cie_total = 4 + cie_length; // 4 bytes for the length field itself
-        assert!(frame.len() > cie_total, "debug_frame should have FDEs after CIE");
+        assert!(
+            frame.len() > cie_total,
+            "debug_frame should have FDEs after CIE"
+        );
 
         // First FDE starts after CIE
         let fde_offset = cie_total;
-        let fde_length = u32::from_le_bytes(
-            [frame[fde_offset], frame[fde_offset + 1], frame[fde_offset + 2], frame[fde_offset + 3]]
-        ) as usize;
+        let fde_length = u32::from_le_bytes([
+            frame[fde_offset],
+            frame[fde_offset + 1],
+            frame[fde_offset + 2],
+            frame[fde_offset + 3],
+        ]) as usize;
         // FDE should contain: CIE_pointer(4) + initial_location(8) + address_range(8) = 20 bytes
-        assert!(fde_length >= 20, "FDE should contain at least 20 bytes for 64-bit");
+        assert!(
+            fde_length >= 20,
+            "FDE should contain at least 20 bytes for 64-bit"
+        );
     }
 }

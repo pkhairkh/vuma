@@ -16,10 +16,8 @@ members = [
     "src/ive",
     "src/vuma",
     "src/bd",
-    "src/cor",
     "src/parser",
     "src/codegen",
-    "src/proof",
     "src/tests",
     "src/package",
 ]
@@ -43,8 +41,6 @@ vuma-core = { path = "src/vuma" }
 vuma-bd = { path = "src/bd" }
 vuma-codegen = { path = "src/codegen" }
 vuma-parser = { path = "src/parser" }
-vuma-cor = { path = "src/cor" }
-vuma-proof = { path = "src/proof" }
 vuma-package = { path = "src/package" }
 
 [workspace.metadata]
@@ -65,9 +61,8 @@ vuma-core.workspace = true
 vuma-bd.workspace = true
 vuma-codegen.workspace = true
 vuma-parser.workspace = true
-vuma-cor.workspace = true
-vuma-proof.workspace = true
 vuma-package.workspace = true
+bitflags = "2"
 
 [build-dependencies]
 
@@ -93,4 +88,7 @@ codegen-units = 16
 debug = false
 strip = true
 
-bitflags = "2"
+# Forward the pmt-runtime-check feature to the codegen crate so
+# `cargo build --features pmt-runtime-check` works from the repo root.
+[features]
+pmt-runtime-check = ["vuma-codegen/pmt-runtime-check"]

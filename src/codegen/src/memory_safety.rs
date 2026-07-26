@@ -30,12 +30,13 @@ use std::fmt;
 // The SCG liveness analysis provides the foundation for use-after-free and
 // dead-allocation detection. We depend on it through the codegen SCG bridge.
 
-use crate::scg_to_ir::{
-    AccessNode, AllocationNode, ControlNode, Scg, ScgExpr, ScgFunction, ScgNode,
-    ScgStatement,
-};
+use crate::ir::BinOpKind;
 #[cfg(test)]
 use crate::scg_to_ir::ScgType;
+use crate::scg_to_ir::{
+    AccessNode, AllocationNode, CallNode, ComputationNode, ControlNode, Scg, ScgExpr, ScgFunction,
+    ScgNode, ScgStatement,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Error codes for memory safety diagnostics
@@ -191,7 +192,10 @@ impl MemorySafetyViolation {
                 pointer_name, scope_name
             ),
             MemorySafetyViolation::UninitializedRead { variable_name } => {
-                format!("uninitialized read: variable '{}' has no reaching write", variable_name)
+                format!(
+                    "uninitialized read: variable '{}' has no reaching write",
+                    variable_name
+                )
             }
             MemorySafetyViolation::BufferOverflow {
                 buffer_name,
@@ -211,10 +215,7 @@ impl MemorySafetyViolation {
             MemorySafetyViolation::InvalidFree {
                 pointer_name,
                 reason,
-            } => format!(
-                "invalid free: pointer '{}' — {}",
-                pointer_name, reason
-            ),
+            } => format!("invalid free: pointer '{}' — {}", pointer_name, reason),
         }
     }
 }
@@ -316,9 +317,6 @@ pub struct MemorySafetyReport {
     /// Number of access sites analyzed.
     pub access_sites_analyzed: usize,
 
-    /// Whether runtime bounds checks were instrumented.
-    pub runtime_bounds_instrumented: bool,
-
     /// Total analysis time in microseconds.
     pub analysis_time_us: u64,
 }
@@ -332,7 +330,6 @@ impl MemorySafetyReport {
             stack_allocations_analyzed: 0,
             deallocations_analyzed: 0,
             access_sites_analyzed: 0,
-            runtime_bounds_instrumented: false,
             analysis_time_us: 0,
         }
     }
@@ -472,7 +469,6 @@ impl MemorySafetyAnalyzer {
             self.check_memory_leaks(&all_allocations, &mut report);
         }
 
-        report.runtime_bounds_instrumented = self.config.runtime_bounds_checks;
         report.analysis_time_us = start.elapsed().as_micros() as u64;
         report
     }
@@ -528,26 +524,20 @@ impl MemorySafetyAnalyzer {
                         }
                     }
                 }
-                ScgStatement::Access(access) => {
-                    match access {
-                        AccessNode::Load { ptr, .. } => {
-                            let ptr_name = expr_to_name(ptr);
-                            if let Some(info) = allocations.get_mut(&ptr_name) {
-                                info.accesses.push(AccessInfo {
-                                    is_read: true,
-                                });
-                            }
-                        }
-                        AccessNode::Store { ptr, .. } => {
-                            let ptr_name = expr_to_name(ptr);
-                            if let Some(info) = allocations.get_mut(&ptr_name) {
-                                info.accesses.push(AccessInfo {
-                                    is_read: false,
-                                });
-                            }
+                ScgStatement::Access(access) => match access {
+                    AccessNode::Load { ptr, .. } => {
+                        let ptr_name = expr_to_name(ptr);
+                        if let Some(info) = allocations.get_mut(&ptr_name) {
+                            info.accesses.push(AccessInfo { is_read: true });
                         }
                     }
-                }
+                    AccessNode::Store { ptr, .. } => {
+                        let ptr_name = expr_to_name(ptr);
+                        if let Some(info) = allocations.get_mut(&ptr_name) {
+                            info.accesses.push(AccessInfo { is_read: false });
+                        }
+                    }
+                },
                 ScgStatement::Call(call) => {
                     // Check for deallocation calls (free, __vuma_free, etc.)
                     let func_name = &call.func;
@@ -555,9 +545,7 @@ impl MemorySafetyAnalyzer {
                         for arg in &call.args {
                             let arg_name = expr_to_name(arg);
                             if let Some(info) = allocations.get_mut(&arg_name) {
-                                info.frees.push(FreeInfo {
-                                    line: None,
-                                });
+                                info.frees.push(FreeInfo { line: None });
                             }
                         }
                     }
@@ -568,32 +556,30 @@ impl MemorySafetyAnalyzer {
                     // VUMA-tracked allocations, so there is nothing to
                     // record here. Treated like a non-deallocating Call.
                 }
-                ScgStatement::Control(ctrl) => {
-                    match ctrl {
-                        ControlNode::If {
-                            then_body,
-                            else_body,
-                            ..
-                        } => {
-                            self.walk_statements(then_body, allocations);
-                            if let Some(else_body) = else_body {
-                                self.walk_statements(else_body, allocations);
-                            }
+                ScgStatement::Control(ctrl) => match ctrl {
+                    ControlNode::If {
+                        then_body,
+                        else_body,
+                        ..
+                    } => {
+                        self.walk_statements(then_body, allocations);
+                        if let Some(else_body) = else_body {
+                            self.walk_statements(else_body, allocations);
                         }
-                        ControlNode::Loop { body, .. } => {
-                            self.walk_statements(body, allocations);
-                        }
-                        ControlNode::Switch {
-                            arms, default_body, ..
-                        } => {
-                            for arm in arms {
-                                self.walk_statements(&arm.body, allocations);
-                            }
-                            self.walk_statements(default_body, allocations);
-                        }
-                        ControlNode::Break | ControlNode::Continue => {}
                     }
-                }
+                    ControlNode::Loop { body, .. } => {
+                        self.walk_statements(body, allocations);
+                    }
+                    ControlNode::Switch {
+                        arms, default_body, ..
+                    } => {
+                        for arm in arms {
+                            self.walk_statements(&arm.body, allocations);
+                        }
+                        self.walk_statements(default_body, allocations);
+                    }
+                    ControlNode::Break | ControlNode::Continue => {}
+                },
                 ScgStatement::Return(values) => {
                     // Mark any returned allocations as escaping
                     for val in values {
@@ -611,14 +597,14 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::EnumAccess(_) => {}
                 ScgStatement::GetAddress(_) => {}
                 ScgStatement::ForeignConsume(_) => {}
-                // Wave 2b: channel operations don't deallocate VUMA-tracked
+                // Channel operations don't deallocate VUMA-tracked
                 // allocations, so there is nothing to record here. Treated
                 // like Syscall/ForeignConsume (no-op for memory-safety).
                 ScgStatement::ChannelOpen(_) => {}
                 ScgStatement::ChannelSend(_) => {}
                 ScgStatement::ChannelRecv(_) => {}
                 ScgStatement::ChannelClose(_) => {}
-                // Wave 8b: fallible recv — no heap/stack allocation to track.
+                // Fallible recv — no heap/stack allocation to track.
                 ScgStatement::ChannelRecvResult(_) => {}
             }
         }
@@ -711,24 +697,22 @@ impl MemorySafetyAnalyzer {
     ) {
         for stmt in stmts {
             match stmt {
-                ScgStatement::Call(call)
-                    if is_deallocation_call(&call.func) => {
-                        for arg in &call.args {
-                            if expr_to_name(arg) == alloc_name {
-                                *freed = true;
-                            }
+                ScgStatement::Call(call) if is_deallocation_call(&call.func) => {
+                    for arg in &call.args {
+                        if expr_to_name(arg) == alloc_name {
+                            *freed = true;
                         }
                     }
-                ScgStatement::Access(access)
-                    if *freed => {
-                        let ptr_name = match access {
-                            AccessNode::Load { ptr, .. } => expr_to_name(ptr),
-                            AccessNode::Store { ptr, .. } => expr_to_name(ptr),
-                        };
-                        if ptr_name == alloc_name {
-                            *count += 1;
-                        }
+                }
+                ScgStatement::Access(access) if *freed => {
+                    let ptr_name = match access {
+                        AccessNode::Load { ptr, .. } => expr_to_name(ptr),
+                        AccessNode::Store { ptr, .. } => expr_to_name(ptr),
+                    };
+                    if ptr_name == alloc_name {
+                        *count += 1;
                     }
+                }
                 ScgStatement::Control(ctrl) => {
                     match ctrl {
                         ControlNode::If {
@@ -761,22 +745,14 @@ impl MemorySafetyAnalyzer {
                         }
                         ControlNode::Loop { body, .. } => {
                             // In a loop, a free in the body may free on every iteration
-                            self.count_accesses_after_free_stmts(
-                                body,
-                                alloc_name,
-                                freed,
-                                count,
-                            );
+                            self.count_accesses_after_free_stmts(body, alloc_name, freed, count);
                         }
                         ControlNode::Switch {
                             arms, default_body, ..
                         } => {
                             for arm in arms {
                                 self.count_accesses_after_free_stmts(
-                                    &arm.body,
-                                    alloc_name,
-                                    freed,
-                                    count,
+                                    &arm.body, alloc_name, freed, count,
                                 );
                             }
                             self.count_accesses_after_free_stmts(
@@ -831,16 +807,35 @@ pub struct BoundsCheckSite {
     pub line: Option<u32>,
 }
 
-/// Scan a codegen SCG for array access sites that need bounds checking.
+/// Scan a codegen SCG for array access sites, resolving `length_expr`
+/// against a pre-built `alloc_sizes` table mapping variable names to
+/// allocation sizes (bytes).
 ///
-/// When `--safe` is enabled, every array load/store gets a bounds check
-/// that traps if the index is out of range.
-pub fn find_bounds_check_sites(scg: &Scg) -> Vec<BoundsCheckSite> {
+/// The table is built in the pipeline by walking `AllocationNode::Stack`
+/// statements (state-typed buffers, stack arrays) — see
+/// `pipeline::build_alloc_sizes`. PMT layout `total_size` is embedded in
+/// `AllocationNode::Stack.size` at AST→SCG time, so a single table covers
+/// both stack arrays and state-typed buffers.
+///
+/// For accesses whose `ptr` does not resolve to a name present in
+/// `alloc_sizes` (e.g. pointer arithmetic, extern pointers), `length_expr`
+/// remains `None` and the site is skipped at IR emission time.
+pub fn find_bounds_check_sites_with_bounds(
+    scg: &Scg,
+    alloc_sizes: &HashMap<String, u64>,
+) -> Vec<BoundsCheckSite> {
+    find_bounds_check_sites_inner(scg, alloc_sizes)
+}
+
+fn find_bounds_check_sites_inner(
+    scg: &Scg,
+    alloc_sizes: &HashMap<String, u64>,
+) -> Vec<BoundsCheckSite> {
     let mut sites = Vec::new();
 
     for node in &scg.nodes {
         if let ScgNode::Function(func) = node {
-            find_bounds_check_sites_in_stmts(&func.name, &func.body, &mut sites);
+            find_bounds_check_sites_in_stmts(&func.name, &func.body, alloc_sizes, &mut sites);
         }
     }
 
@@ -850,38 +845,613 @@ pub fn find_bounds_check_sites(scg: &Scg) -> Vec<BoundsCheckSite> {
 fn find_bounds_check_sites_in_stmts(
     func_name: &str,
     stmts: &[ScgStatement],
+    alloc_sizes: &HashMap<String, u64>,
     sites: &mut Vec<BoundsCheckSite>,
 ) {
     for stmt in stmts {
         match stmt {
-            ScgStatement::Access(access) => {
-                match access {
-                    AccessNode::Load { ptr, offset, .. } => {
-                        if offset.is_some() {
-                            sites.push(BoundsCheckSite {
-                                function_name: func_name.to_string(),
-                                array_name: expr_to_name(ptr),
-                                index_expr: offset
-                                    .as_ref()
-                                    .map(|e| format!("{:?}", e))
-                                    .unwrap_or_default(),
-                                length_expr: None,
-                                line: None,
-                            });
-                        }
+            ScgStatement::Access(access) => match access {
+                AccessNode::Load { ptr, offset, .. } => {
+                    if offset.is_some() {
+                        let array_name = expr_to_name(ptr);
+                        let length_expr = alloc_sizes.get(&array_name).map(|sz| format!("{}", sz));
+                        sites.push(BoundsCheckSite {
+                            function_name: func_name.to_string(),
+                            array_name,
+                            index_expr: offset
+                                .as_ref()
+                                .map(|e| format!("{:?}", e))
+                                .unwrap_or_default(),
+                            length_expr,
+                            line: None,
+                        });
                     }
-                    AccessNode::Store { ptr, offset, .. } => {
-                        if offset.is_some() {
-                            sites.push(BoundsCheckSite {
-                                function_name: func_name.to_string(),
-                                array_name: expr_to_name(ptr),
-                                index_expr: offset
-                                    .as_ref()
-                                    .map(|e| format!("{:?}", e))
-                                    .unwrap_or_default(),
-                                length_expr: None,
-                                line: None,
-                            });
+                }
+                AccessNode::Store { ptr, offset, .. } => {
+                    if offset.is_some() {
+                        let array_name = expr_to_name(ptr);
+                        let length_expr = alloc_sizes.get(&array_name).map(|sz| format!("{}", sz));
+                        sites.push(BoundsCheckSite {
+                            function_name: func_name.to_string(),
+                            array_name,
+                            index_expr: offset
+                                .as_ref()
+                                .map(|e| format!("{:?}", e))
+                                .unwrap_or_default(),
+                            length_expr,
+                            line: None,
+                        });
+                    }
+                }
+            },
+            ScgStatement::Control(ctrl) => match ctrl {
+                ControlNode::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    find_bounds_check_sites_in_stmts(func_name, then_body, alloc_sizes, sites);
+                    if let Some(else_body) = else_body {
+                        find_bounds_check_sites_in_stmts(func_name, else_body, alloc_sizes, sites);
+                    }
+                }
+                ControlNode::Loop { body, .. } => {
+                    find_bounds_check_sites_in_stmts(func_name, body, alloc_sizes, sites);
+                }
+                ControlNode::Switch {
+                    arms, default_body, ..
+                } => {
+                    for arm in arms {
+                        find_bounds_check_sites_in_stmts(func_name, &arm.body, alloc_sizes, sites);
+                    }
+                    find_bounds_check_sites_in_stmts(func_name, default_body, alloc_sizes, sites);
+                }
+                ControlNode::Break | ControlNode::Continue => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IR emission: inject `__oob_trap` checks at SCG level (Stage 2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// CCured-style pointer classification for selective bounds checking.
+///
+/// Mirrors the CCured pointer-kind taxonomy (Necula et al., CCured 2002):
+///
+/// * `Safe` — state-typed, no arithmetic, no FFI. The pointer's target is
+///   statically known and cannot escape; no bounds check is needed.
+/// * `Seq`  — array or named allocation with a known size plus a runtime
+///   offset. A `UGe offset, size` check is emitted before each access.
+/// * `Wild` — FFI-derived, cast-derived, or otherwise unknown pointer with
+///   an offset but no resolvable allocation. No check is emitted yet; a
+///   diagnostic is logged and full checking is deferred to SoftBound fat
+///   pointers (Phase 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerKind {
+    /// State-typed, no arithmetic, no FFI. No bounds check needed.
+    Safe,
+    /// Array/allocation with known size. Bounds check emitted.
+    Seq,
+    /// FFI/cast/unknown. No bounds check (deferred to SoftBound Phase 3).
+    Wild,
+}
+
+/// Per-injection counters for `PointerKind` classification.
+#[derive(Debug, Default, Clone, Copy)]
+struct PointerStats {
+    safe: u64,
+    seq: u64,
+    wild: u64,
+}
+
+/// Classify a pointer expression for bounds-check purposes.
+///
+/// * SAFE — no offset (direct state access) → no check.
+/// * SEQ  — named allocation with known size and an offset → check.
+/// * WILD — FFI/cast/unknown with an offset but no resolvable allocation
+///   → diagnostic only (deferred to SoftBound Phase 3).
+///
+/// `has_offset` corresponds to whether the access node carries a runtime
+/// `offset` (i.e. `AccessNode::{Load,Store}::offset.is_some()`).
+pub fn classify_pointer(
+    ptr_expr: &ScgExpr,
+    has_offset: bool,
+    alloc_sizes: &HashMap<String, u64>,
+) -> PointerKind {
+    if !has_offset {
+        return PointerKind::Safe;
+    }
+    if let Some(name) = pointer_alloc_name(ptr_expr) {
+        if alloc_sizes.contains_key(&name) {
+            return PointerKind::Seq;
+        }
+    }
+    PointerKind::Wild
+}
+
+/// Best-effort extraction of an allocation name from a pointer expression,
+/// reusing the same logic as [`expr_to_name`] but exposed publicly for the
+/// `classify_pointer` helper.
+fn pointer_alloc_name(ptr_expr: &ScgExpr) -> Option<String> {
+    match ptr_expr {
+        ScgExpr::Var(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// Inject per-access bounds-check IR into the codegen SCG in place.
+///
+/// For every `AccessNode::Load`/`Store` whose `ptr` resolves (via
+/// [`expr_to_name`]) to a name present in `alloc_sizes`, the following
+/// two SCG statements are inserted **immediately before** the access:
+///
+/// ```text
+/// __bc_tmp_N = (offset UGe alloc_size);
+/// if __bc_tmp_N { call __oob_trap(); }
+/// ```
+///
+/// This mirrors the proven `__arena_overflow` lowering pattern
+/// (pipeline.rs ~10210): a `ComputationNode(UGe)` producing a boolean
+/// vreg, followed by a `ControlNode::If` whose `then_body` is a single
+/// `CallNode { func: "__oob_trap", is_extern: true }`. The
+/// `__oob_trap` stubs (exit code 134) exist on all 19 backends.
+///
+/// Accesses are classified CCured-style via [`classify_pointer`]:
+///
+/// * `Safe` (no offset) and `Wild` (offset but unknown allocation) are
+///   left uninstrumented. `Wild` accesses additionally emit a `warn`
+///   diagnostic so the user can see deferred SoftBound Phase-3 sites.
+/// * `Seq` accesses receive the `__oob_trap` pair above.
+///
+/// **Semantics of the bound:** `alloc_sizes[name]` is the allocation's
+/// total size in bytes (from `AllocationNode::Stack.size`, which for
+/// state-typed buffers holds `PmtLayoutSpec.total_size`). The check
+/// `offset UGe size` traps when the byte offset is at or past the
+/// allocation boundary. This is the SoftBound base/bound semantic.
+pub fn inject_bounds_check_ir(scg: &mut Scg, alloc_sizes: &HashMap<String, u64>) {
+    let mut counter: u64 = 0;
+    let mut stats = PointerStats::default();
+    for node in &mut scg.nodes {
+        if let ScgNode::Function(func) = node {
+            inject_bounds_check_ir_in_stmts(&mut func.body, alloc_sizes, &mut counter, &mut stats);
+        }
+    }
+    vuma_log!(
+        info,
+        "Pointer classification: {} SAFE, {} SEQ (checked), {} WILD (deferred)",
+        stats.safe,
+        stats.seq,
+        stats.wild
+    );
+}
+
+fn inject_bounds_check_ir_in_stmts(
+    stmts: &mut Vec<ScgStatement>,
+    alloc_sizes: &HashMap<String, u64>,
+    counter: &mut u64,
+    stats: &mut PointerStats,
+) {
+    let mut i = 0;
+    while i < stmts.len() {
+        // First, recurse into any control-flow body in stmts[i].
+        inject_bounds_check_ir_in_place(&mut stmts[i], alloc_sizes, counter, stats);
+
+        // Then check if stmts[i] is an Access that needs a bounds check
+        // prepended. We extract (offset, ptr) by clone so we can borrow
+        // stmts mutably for `splice` afterwards.
+        let maybe_pair: Option<(ScgStatement, ScgStatement)> = match &stmts[i] {
+            ScgStatement::Access(AccessNode::Load { ptr, offset, .. }) => {
+                bounds_check_pair_for(ptr, offset, alloc_sizes, counter, stats)
+            }
+            ScgStatement::Access(AccessNode::Store { ptr, offset, .. }) => {
+                bounds_check_pair_for(ptr, offset, alloc_sizes, counter, stats)
+            }
+            _ => None,
+        };
+
+        if let Some((cond_stmt, if_stmt)) = maybe_pair {
+            // Insert the two check statements before the Access.
+            stmts.splice(i..i, [cond_stmt, if_stmt]);
+            i += 2; // skip the inserted pair; the original Access is now at i+2
+        }
+        i += 1;
+    }
+}
+
+/// If `ptr` classifies as [`PointerKind::Seq`] (named allocation present
+/// in `alloc_sizes` with a runtime `offset`), build a `ComputationNode(UGe)`
+/// + `ControlNode::If { __oob_trap }` pair, mirroring the
+///   `__arena_overflow` lowering pattern.
+///
+/// * `Safe` (no offset) — increment `stats.safe`, no check.
+/// * `Seq` (offset + known allocation) — increment `stats.seq`, emit check.
+/// * `Wild` (offset but unknown allocation) — increment `stats.wild`, log
+///   a `warn` diagnostic, emit no check (deferred to SoftBound Phase 3).
+fn bounds_check_pair_for(
+    ptr: &ScgExpr,
+    offset: &Option<ScgExpr>,
+    alloc_sizes: &HashMap<String, u64>,
+    counter: &mut u64,
+    stats: &mut PointerStats,
+) -> Option<(ScgStatement, ScgStatement)> {
+    let kind = classify_pointer(ptr, offset.is_some(), alloc_sizes);
+    match kind {
+        PointerKind::Safe => {
+            stats.safe += 1;
+            None
+        }
+        PointerKind::Seq => {
+            stats.seq += 1;
+            let off_expr = offset.as_ref()?;
+            let name = expr_to_name(ptr);
+            let size = *alloc_sizes.get(&name)?;
+            if size == 0 {
+                // Zero-sized allocation: skip (no meaningful bound; the
+                // access itself will segfault, separate diagnostic path).
+                return None;
+            }
+            // [UAF liveness] Skip the LIVE-flag Store itself: it writes the
+            // tombstone byte at [ptr + total_size], which is at the boundary
+            // of the allocation. The bounds check UGe(total_size, total_size)
+            // would be true (OOB), but this is the liveness flag, not a user
+            // access. The flag Store has value=1, ty=U8, offset=alloc_size.
+            if let ScgExpr::Int(off_val) = off_expr {
+                if *off_val as u64 == size {
+                    // This is the LIVE-flag Store — skip bounds check
+                    return None;
+                }
+            }
+            let tmp = format!("__bc_tmp_{}", *counter);
+            *counter += 1;
+            let cond_stmt = ScgStatement::Computation(ComputationNode {
+                dst: tmp.clone(),
+                op: BinOpKind::UGe,
+                lhs: off_expr.clone(),
+                rhs: ScgExpr::Int(size as i64),
+                tail_call: false,
+                reassigns: None,
+            });
+            let if_stmt = ScgStatement::Control(ControlNode::If {
+                cond: ScgExpr::Var(tmp),
+                then_body: vec![ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "__oob_trap".to_string(),
+                    args: vec![],
+                    is_extern: true,
+                    reassigns: None,
+                })],
+                else_body: None,
+            });
+            Some((cond_stmt, if_stmt))
+        }
+        PointerKind::Wild => {
+            stats.wild += 1;
+            vuma_log!(
+                warn,
+                "WILD pointer access at '{}' (offset={:?}) — bounds check deferred to SoftBound Phase 3",
+                expr_to_name(ptr),
+                offset
+            );
+            None
+        }
+    }
+}
+
+fn inject_bounds_check_ir_in_place(
+    stmt: &mut ScgStatement,
+    alloc_sizes: &HashMap<String, u64>,
+    counter: &mut u64,
+    stats: &mut PointerStats,
+) {
+    if let ScgStatement::Control(ctrl) = stmt {
+        match ctrl {
+            ControlNode::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                inject_bounds_check_ir_in_stmts(then_body, alloc_sizes, counter, stats);
+                if let Some(eb) = else_body {
+                    inject_bounds_check_ir_in_stmts(eb, alloc_sizes, counter, stats);
+                }
+            }
+            ControlNode::Loop { body, .. } => {
+                inject_bounds_check_ir_in_stmts(body, alloc_sizes, counter, stats);
+            }
+            ControlNode::Switch {
+                arms, default_body, ..
+            } => {
+                for arm in arms.iter_mut() {
+                    inject_bounds_check_ir_in_stmts(&mut arm.body, alloc_sizes, counter, stats);
+                }
+                inject_bounds_check_ir_in_stmts(default_body, alloc_sizes, counter, stats);
+            }
+            ControlNode::Break | ControlNode::Continue => {}
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-access bounds checks for arena-allocated state pointers
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Background: `arena_alloc(arena, Layout)` (lowered at
+// `pipeline.rs:10411-10513`) returns a fresh `state_ptr = arena_ptr + offset`
+// where `offset` is the arena's current bump cursor (loaded from
+// `[arena_ptr + 8]`). The lowering already emits a single `__arena_overflow`
+// trap at allocation time comparing `new_offset = offset + layout_size`
+// against `arena.capacity` (at `[arena_ptr + 16]`).
+//
+// What is NOT checked: every SUBSEQUENT access through `state_ptr` with a
+// runtime `offset` (e.g. `state_ptr + field_offset`). Because `state_ptr`
+// is a fresh temp not present in `alloc_sizes` (the table built from
+// `AllocationNode::Stack`), `classify_pointer` returns `PointerKind::Wild`
+// and `inject_bounds_check_ir` skips the access — only a `warn` diagnostic
+// is logged. This leaves arena-allocated state buffers unbounded at
+// per-access granularity under `--safe`, which is the gap closed here.
+//
+// Approach: scan the codegen SCG for the deterministic IR sequence emitted
+// by `arena_alloc` lowering and build a `state_ptr_name → layout_size`
+// table. The pipeline merges this table into `alloc_sizes` before
+// `inject_bounds_check_ir` runs, so accesses through `state_ptr` classify
+// as `PointerKind::Seq` and receive the standard `__oob_trap` pair.
+//
+// The sequence is anchored on the `__arena_overflow` runtime trap call
+// (uniquely emitted by `arena_alloc` lowering — `pipeline.rs:10479` is the
+// sole producer). The anchor guarantees we only register state pointers
+// from actual `arena_alloc` sites, avoiding false positives from other
+// `Add(Var, Var)` computations.
+//
+// **Bound semantics:** the bound is the state's `layout_size` (the size of
+// the layout passed to `arena_alloc`), NOT the arena's capacity. The
+// arena's capacity is already checked at `arena_alloc` time via
+// `__arena_overflow`; the per-access check catches out-of-layout field
+// accesses (e.g. `*(state_ptr + layout_size)` would trap, since
+// `layout_size UGe layout_size` is true). This mirrors the SEQ bound for
+// stack allocations, where `alloc_sizes[name]` is the allocation's total
+// size in bytes.
+
+/// Build a `state_ptr_name → layout_size_in_bytes` table by scanning the
+/// codegen SCG for the deterministic IR sequence emitted by `arena_alloc`
+/// lowering.
+///
+/// The scan is anchored on `__arena_overflow` trap calls (uniquely emitted
+/// by `Expr::ArenaAlloc` lowering at `pipeline.rs:10479`). For each anchor,
+/// the surrounding `Computation` statements are pattern-matched to extract:
+///
+/// * `offset_val` — the variable holding the arena's current bump cursor
+///   (loaded from `[arena_ptr + 8]`)
+/// * `layout_size` — the static layout size of the allocated state (from
+///   `new_offset = offset_val + layout_size`)
+/// * `state_ptr` — the variable holding the returned state pointer
+///   (`state_ptr = arena_ptr + offset_val`)
+///
+/// The returned table is merged into `alloc_sizes` by the pipeline before
+/// `inject_bounds_check_ir` runs, so that per-access `__oob_trap` checks
+/// are emitted for accesses through arena-allocated state pointers (which
+/// would otherwise classify as `PointerKind::Wild` because `state_ptr` is
+/// a fresh temp not present in `alloc_sizes`).
+///
+/// Returns an empty table if no `arena_alloc` sites are present.
+pub fn build_arena_state_sizes(scg: &Scg) -> HashMap<String, u64> {
+    let mut table = HashMap::new();
+    for node in &scg.nodes {
+        if let ScgNode::Function(func) = node {
+            collect_arena_state_sizes_in_stmts(&func.body, &mut table);
+        }
+    }
+    table
+}
+
+fn collect_arena_state_sizes_in_stmts(stmts: &[ScgStatement], table: &mut HashMap<String, u64>) {
+    // Pass 1: pattern-match arena_alloc IR sequences anchored on
+    // `__arena_overflow` calls. The arena_alloc lowering emits the
+    // sequence as a flat run of statements within the parent `stmts` vec
+    // (no intervening control flow except for the overflow If itself), so
+    // a backward/forward scan within `stmts` is sufficient.
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let ScgStatement::Control(ControlNode::If { then_body, .. }) = stmt {
+            // Verify this is the arena_alloc overflow check: then_body is
+            // exactly `[Call { func: "__arena_overflow", is_extern: true }]`.
+            let is_arena_overflow = then_body.len() == 1
+                && matches!(
+                    &then_body[0],
+                    ScgStatement::Call(c) if c.func == "__arena_overflow" && c.is_extern
+                );
+            if is_arena_overflow {
+                if let Some((state_ptr, layout_size)) = resolve_arena_alloc_pattern(stmts, i) {
+                    if layout_size > 0 {
+                        table.insert(state_ptr, layout_size as u64);
+                    }
+                }
+            }
+        }
+    }
+    // Pass 2: recurse into all control-flow bodies (the arena_alloc IR
+    // sequence may be nested inside `if`/`loop`/`switch` bodies).
+    for stmt in stmts {
+        if let ScgStatement::Control(ctrl) = stmt {
+            match ctrl {
+                ControlNode::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    collect_arena_state_sizes_in_stmts(then_body, table);
+                    if let Some(eb) = else_body {
+                        collect_arena_state_sizes_in_stmts(eb, table);
+                    }
+                }
+                ControlNode::Loop { body, .. } => {
+                    collect_arena_state_sizes_in_stmts(body, table);
+                }
+                ControlNode::Switch {
+                    arms, default_body, ..
+                } => {
+                    for arm in arms {
+                        collect_arena_state_sizes_in_stmts(&arm.body, table);
+                    }
+                    collect_arena_state_sizes_in_stmts(default_body, table);
+                }
+                ControlNode::Break | ControlNode::Continue => {}
+            }
+        }
+    }
+}
+
+/// Resolve a single `arena_alloc` IR sequence anchored at `stmts[if_idx]`
+/// (the `__arena_overflow` If) into a `(state_ptr, layout_size)` pair.
+///
+/// Returns `None` if the surrounding pattern does not match (e.g. the If
+/// is not actually an `arena_alloc` overflow check, or the IR has been
+/// mutated in a way that breaks the pattern).
+fn resolve_arena_alloc_pattern(stmts: &[ScgStatement], if_idx: usize) -> Option<(String, i64)> {
+    let (cond, then_body) = match &stmts[if_idx] {
+        ScgStatement::Control(ControlNode::If {
+            cond, then_body, ..
+        }) => (cond, then_body),
+        _ => return None,
+    };
+    // Re-verify the anchor (defensive — caller already checked).
+    let is_arena_overflow = then_body.len() == 1
+        && matches!(
+            &then_body[0],
+            ScgStatement::Call(c) if c.func == "__arena_overflow" && c.is_extern
+        );
+    if !is_arena_overflow {
+        return None;
+    }
+    // Step 1: find `overflow_cond = new_offset UGt cap_val` by scanning
+    // backward from the If. `overflow_cond` is the If's cond variable.
+    let cond_var = match cond {
+        ScgExpr::Var(v) => v.as_str(),
+        _ => return None,
+    };
+    let mut new_offset_var: Option<String> = None;
+    for prev in stmts[..if_idx].iter().rev() {
+        if let ScgStatement::Computation(c) = prev {
+            if c.dst == cond_var && c.op == BinOpKind::UGt {
+                if let ScgExpr::Var(lhs) = &c.lhs {
+                    new_offset_var = Some(lhs.clone());
+                    break;
+                }
+            }
+        }
+    }
+    let new_offset_var = new_offset_var?;
+    // Step 2: find `new_offset = offset_val + layout_size` by scanning
+    // backward. This gives us `offset_val` and `layout_size`.
+    let mut offset_val_and_layout: Option<(String, i64)> = None;
+    for prev in stmts[..if_idx].iter().rev() {
+        if let ScgStatement::Computation(c) = prev {
+            if c.dst == new_offset_var && c.op == BinOpKind::Add {
+                if let (ScgExpr::Var(off), ScgExpr::Int(layout)) = (&c.lhs, &c.rhs) {
+                    offset_val_and_layout = Some((off.clone(), *layout));
+                    break;
+                }
+            }
+        }
+    }
+    let (offset_val, layout_size) = offset_val_and_layout?;
+    // Step 3: find `state_ptr = arena_ptr + offset_val` by scanning forward
+    // from the If. The `state_ptr` is the dst of the first `Add(Var, Var)`
+    // computation whose `rhs` matches `offset_val`.
+    for next in stmts[if_idx + 1..].iter() {
+        if let ScgStatement::Computation(c) = next {
+            if c.op == BinOpKind::Add {
+                if let (ScgExpr::Var(_), ScgExpr::Var(rhs)) = (&c.lhs, &c.rhs) {
+                    if rhs == &offset_val {
+                        return Some((c.dst.clone(), layout_size));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Runtime UAF detection via tombstone flag
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Each state allocation (`let p = state_new(Layout)`) is grown by +1 byte
+// at AST→codegen-SCG bridge time (see `pipeline.rs:bridge_stmt_to_scg`),
+// and a LIVE flag (=1) is stored at `[ptr + total_size]`. This module
+// scans the codegen SCG for that (Allocation + LIVE-flag Store) pattern,
+// builds a `name → flag_offset` table, and injects a runtime check before
+// every SEQ access through that pointer:
+//
+// ```text
+// __lc_flag_N = *(u8*)(ptr + flag_offset);
+// __lc_dead_N = (__lc_flag_N == 0);
+// if __lc_dead_N { call __uaf_trap(); }   // exit 135
+// ```
+//
+// `__uaf_trap` stubs already exist on all 19 backends (added in INV-UAF-1).
+// The check is a no-op for live states (flag == 1 → eq 0 → false → no
+// trap). If a future `state_consume`/drop pass flips the flag to 0, the
+// next access traps with exit code 135.
+
+/// Build a `var_name → flag_offset` table by scanning the codegen SCG for
+/// the LIVE-flag-store pattern emitted at `state_new` lowering time:
+///
+/// ```text
+/// AccessNode::Store { ptr: Var(name), offset: Some(Int(N)),
+///                     value: Int(1), ty: Some(U8) }
+/// ```
+///
+/// with `N + 1 == alloc_sizes[name]` (i.e. the Store writes the very last
+/// byte of the allocation — the tombstone). Returns `name → N` so callers
+/// can compute the flag address as `ptr + N`.
+///
+/// We do NOT require the LIVE-flag Store to be immediately adjacent to the
+/// `AllocationNode::Stack`: `inject_bounds_check_ir` runs first and may
+/// insert `ComputationNode(UGe)` + `ControlNode::If { __oob_trap }`
+/// between the allocation and the flag Store. Pattern-matching on the
+/// Store signature alone (with the `N + 1 == alloc_sizes[name]` cross-
+/// check) is robust against this interleaving.
+///
+/// Non-state `AllocationNode::Stack` entries (raw `allocate(N)`) do not
+/// emit the LIVE-flag Store, so they are absent from the returned table —
+/// `inject_liveness_check_ir` will skip them, preserving existing
+/// behaviour for raw stack arrays.
+pub fn build_state_liveness_offsets(
+    scg: &Scg,
+    alloc_sizes: &HashMap<String, u64>,
+) -> HashMap<String, u64> {
+    let mut table = HashMap::new();
+    for node in &scg.nodes {
+        if let ScgNode::Function(func) = node {
+            collect_state_liveness_in_stmts(&func.body, alloc_sizes, &mut table);
+        }
+    }
+    table
+}
+
+fn collect_state_liveness_in_stmts(
+    stmts: &[ScgStatement],
+    alloc_sizes: &HashMap<String, u64>,
+    table: &mut HashMap<String, u64>,
+) {
+    for stmt in stmts {
+        match stmt {
+            ScgStatement::Access(AccessNode::Store {
+                ptr,
+                offset,
+                value,
+                ty,
+            }) => {
+                if let (ScgExpr::Var(name), Some(ScgExpr::Int(off)), ScgExpr::Int(1)) =
+                    (ptr, offset, value)
+                {
+                    if matches!(ty, Some(crate::ir::IRType::U8)) {
+                        if let Some(&alloc_sz) = alloc_sizes.get(name) {
+                            if (*off as u64) + 1 == alloc_sz {
+                                table.insert(name.clone(), *off as u64);
+                            }
                         }
                     }
                 }
@@ -892,27 +1462,268 @@ fn find_bounds_check_sites_in_stmts(
                     else_body,
                     ..
                 } => {
-                    find_bounds_check_sites_in_stmts(func_name, then_body, sites);
-                    if let Some(else_body) = else_body {
-                        find_bounds_check_sites_in_stmts(func_name, else_body, sites);
+                    collect_state_liveness_in_stmts(then_body, alloc_sizes, table);
+                    if let Some(eb) = else_body {
+                        collect_state_liveness_in_stmts(eb, alloc_sizes, table);
                     }
                 }
                 ControlNode::Loop { body, .. } => {
-                    find_bounds_check_sites_in_stmts(func_name, body, sites);
+                    collect_state_liveness_in_stmts(body, alloc_sizes, table);
                 }
                 ControlNode::Switch {
                     arms, default_body, ..
                 } => {
-                    for arm in arms {
-                        find_bounds_check_sites_in_stmts(func_name, &arm.body, sites);
+                    for arm in arms.iter() {
+                        collect_state_liveness_in_stmts(&arm.body, alloc_sizes, table);
                     }
-                    find_bounds_check_sites_in_stmts(func_name, default_body, sites);
+                    collect_state_liveness_in_stmts(default_body, alloc_sizes, table);
                 }
                 ControlNode::Break | ControlNode::Continue => {}
             },
             _ => {}
         }
     }
+}
+
+/// Inject runtime liveness (UAF) checks into the codegen SCG in place.
+///
+/// For every `AccessNode::Load`/`Store` whose `ptr` resolves to a name
+/// present in [`build_state_liveness_offsets`] (i.e. a `state_new`
+/// allocation with a tombstone flag), the following three SCG statements
+/// are inserted **immediately before** the access:
+///
+/// ```text
+/// __lc_flag_N = *(u8*)(ptr + flag_offset);   // Load tombstone
+/// __lc_dead_N = (__lc_flag_N == 0);          // Compare DEAD
+/// if __lc_dead_N { call __uaf_trap(); }      // Trap (exit 135)
+/// ```
+///
+/// Mirrors the proven `__oob_trap` lowering pattern (see
+/// [`inject_bounds_check_ir`]). The `__uaf_trap` stubs (exit 135) exist
+/// on all 19 backends. The LIVE-flag Store emitted at allocation time is
+/// skipped (otherwise the check would read uninitialised memory before
+/// the flag is set). Accesses classified as `Safe` (no offset) are also
+/// skipped — they correspond to direct state-typed reads where the
+/// liveness invariant is enforced at compile time by the IVE.
+pub fn inject_liveness_check_ir(scg: &mut Scg, alloc_sizes: &HashMap<String, u64>) {
+    let state_offsets = build_state_liveness_offsets(scg, alloc_sizes);
+    if state_offsets.is_empty() {
+        // No state_new allocations — nothing to instrument.
+        return;
+    }
+    let mut counter: u64 = 0;
+    let mut stats = LivenessStats::default();
+    for node in &mut scg.nodes {
+        if let ScgNode::Function(func) = node {
+            inject_liveness_check_ir_in_stmts(
+                &mut func.body,
+                &state_offsets,
+                alloc_sizes,
+                &mut counter,
+                &mut stats,
+            );
+        }
+    }
+    vuma_log!(
+        info,
+        "Liveness check injection: {} state allocs, {} checks inserted, {} skipped (LIVE-flag store / non-seq)",
+        state_offsets.len(),
+        stats.inserted,
+        stats.skipped
+    );
+}
+
+#[derive(Default)]
+struct LivenessStats {
+    inserted: usize,
+    skipped: usize,
+}
+
+fn inject_liveness_check_ir_in_stmts(
+    stmts: &mut Vec<ScgStatement>,
+    state_offsets: &HashMap<String, u64>,
+    alloc_sizes: &HashMap<String, u64>,
+    counter: &mut u64,
+    stats: &mut LivenessStats,
+) {
+    let mut i = 0;
+    while i < stmts.len() {
+        // Recurse into control-flow bodies first.
+        inject_liveness_check_ir_in_place(stmts, i, state_offsets, alloc_sizes, counter, stats);
+
+        // Determine whether stmts[i] is an Access that needs a liveness
+        // check prepended. We clone the relevant fields to avoid holding
+        // an immutable borrow across the `splice` below.
+        let maybe_check: Option<Vec<ScgStatement>> = match &stmts[i] {
+            ScgStatement::Access(AccessNode::Load { ptr, offset, .. }) => {
+                liveness_check_for(ptr, offset, state_offsets, alloc_sizes, counter, stats)
+            }
+            ScgStatement::Access(AccessNode::Store {
+                ptr,
+                offset,
+                value,
+                ty,
+                ..
+            }) => {
+                // Skip the LIVE-flag Store itself: it writes the tombstone
+                // at the flag offset with value 1 and ty U8. Injecting a
+                // check before it would read uninitialised memory.
+                if is_live_flag_store(ptr, offset, value, ty, state_offsets) {
+                    stats.skipped += 1;
+                    None
+                } else {
+                    liveness_check_for(ptr, offset, state_offsets, alloc_sizes, counter, stats)
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(check) = maybe_check {
+            let n = check.len();
+            stmts.splice(i..i, check);
+            i += n;
+        }
+        i += 1;
+    }
+}
+
+fn inject_liveness_check_ir_in_place(
+    stmts: &mut [ScgStatement],
+    i: usize,
+    state_offsets: &HashMap<String, u64>,
+    alloc_sizes: &HashMap<String, u64>,
+    counter: &mut u64,
+    stats: &mut LivenessStats,
+) {
+    if let ScgStatement::Control(ctrl) = &mut stmts[i] {
+        match ctrl {
+            ControlNode::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                inject_liveness_check_ir_in_stmts(
+                    then_body,
+                    state_offsets,
+                    alloc_sizes,
+                    counter,
+                    stats,
+                );
+                if let Some(eb) = else_body {
+                    inject_liveness_check_ir_in_stmts(
+                        eb,
+                        state_offsets,
+                        alloc_sizes,
+                        counter,
+                        stats,
+                    );
+                }
+            }
+            ControlNode::Loop { body, .. } => {
+                inject_liveness_check_ir_in_stmts(body, state_offsets, alloc_sizes, counter, stats);
+            }
+            ControlNode::Switch {
+                arms, default_body, ..
+            } => {
+                for arm in arms.iter_mut() {
+                    inject_liveness_check_ir_in_stmts(
+                        &mut arm.body,
+                        state_offsets,
+                        alloc_sizes,
+                        counter,
+                        stats,
+                    );
+                }
+                inject_liveness_check_ir_in_stmts(
+                    default_body,
+                    state_offsets,
+                    alloc_sizes,
+                    counter,
+                    stats,
+                );
+            }
+            ControlNode::Break | ControlNode::Continue => {}
+        }
+    }
+}
+
+/// Detect the LIVE-flag Store emitted by the AST→SCG bridge at
+/// `state_new` lowering time. Such a Store writes Int(1) at the flag
+/// offset with type U8 — we must NOT inject a liveness check before it
+/// (the flag is not yet set).
+fn is_live_flag_store(
+    ptr: &ScgExpr,
+    offset: &Option<ScgExpr>,
+    value: &ScgExpr,
+    ty: &Option<crate::ir::IRType>,
+    state_offsets: &HashMap<String, u64>,
+) -> bool {
+    if !matches!(value, ScgExpr::Int(1)) {
+        return false;
+    }
+    if !matches!(ty, Some(crate::ir::IRType::U8)) {
+        return false;
+    }
+    let (ScgExpr::Var(name), Some(ScgExpr::Int(off))) = (ptr, offset) else {
+        return false;
+    };
+    state_offsets.get(name) == Some(&(*off as u64))
+}
+
+/// Build the three-statement liveness check sequence for a single Access,
+/// mirroring the `ComputationNode + ControlNode::If { __oob_trap }` pair
+/// used by [`inject_bounds_check_ir`]. Returns `None` if the access does
+/// not need a check (Safe / WILD / non-state allocation).
+fn liveness_check_for(
+    ptr: &ScgExpr,
+    offset: &Option<ScgExpr>,
+    state_offsets: &HashMap<String, u64>,
+    _alloc_sizes: &HashMap<String, u64>,
+    counter: &mut u64,
+    stats: &mut LivenessStats,
+) -> Option<Vec<ScgStatement>> {
+    // Only SEQ accesses (named allocation + runtime offset) need a
+    // runtime liveness check. Direct `*p` reads (no offset) are enforced
+    // at compile time by the IVE.
+    let name = pointer_alloc_name(ptr)?;
+    if !offset.is_some() {
+        return None;
+    }
+    let flag_offset = state_offsets.get(&name)?;
+    let flag_var = format!("__lc_flag_{}", *counter);
+    let dead_var = format!("__lc_dead_{}", *counter);
+    *counter += 1;
+    stats.inserted += 1;
+    Some(vec![
+        // 1. Load liveness flag (1 byte at [ptr + flag_offset]).
+        ScgStatement::Access(AccessNode::Load {
+            dst: flag_var.clone(),
+            ptr: ptr.clone(),
+            offset: Some(ScgExpr::Int(*flag_offset as i64)),
+            ty: Some(crate::ir::IRType::U8),
+        }),
+        // 2. Compare flag == 0 (DEAD).
+        ScgStatement::Computation(ComputationNode {
+            dst: dead_var.clone(),
+            op: BinOpKind::Eq,
+            lhs: ScgExpr::Var(flag_var),
+            rhs: ScgExpr::Int(0),
+            tail_call: false,
+            reassigns: None,
+        }),
+        // 3. If dead, trap.
+        ScgStatement::Control(ControlNode::If {
+            cond: ScgExpr::Var(dead_var),
+            then_body: vec![ScgStatement::Call(CallNode {
+                dst: None,
+                func: "__uaf_trap".to_string(),
+                args: vec![],
+                is_extern: true,
+                reassigns: None,
+            })],
+            else_body: None,
+        }),
+    ])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -923,12 +1734,7 @@ fn find_bounds_check_sites_in_stmts(
 fn is_deallocation_call(name: &str) -> bool {
     matches!(
         name,
-        "free"
-            | "__vuma_free"
-            | "dealloc"
-            | "deallocate"
-            | "drop"
-            | "__builtin_free"
+        "free" | "__vuma_free" | "dealloc" | "deallocate" | "drop" | "__builtin_free"
     )
 }
 
@@ -975,7 +1781,7 @@ pub fn analyze_with_scg_liveness(
         }
     }
 
-    // Double-free detection (Wave 20).
+    // Double-free detection.
     //
     // Audit caveat (now resolved): previously the `check_double_free` config
     // flag was silently ignored here — double-free was detected only by the
@@ -1025,10 +1831,7 @@ pub fn analyze_with_scg_liveness(
                             .and_then(|nid| scg.get_node(nid))
                             .and_then(|nd| nd.program_point.line)
                             .map(|l| l as u32);
-                        let second_free_line = node
-                            .program_point
-                            .line
-                            .map(|l| l as u32);
+                        let second_free_line = node.program_point.line.map(|l| l as u32);
                         violations.push(MemorySafetyViolation::DoubleFree {
                             allocation_name: format!("region_{}", dealloc.region_id.as_u64()),
                             first_free_line,
@@ -1047,7 +1850,8 @@ pub fn analyze_with_scg_liveness(
 
     // Uninitialized read detection
     if config.check_uninitialized_reads {
-        let uninit_reads = vuma_scg::liveness::find_uninitialized_reads(scg, &scg_liveness.liveness);
+        let uninit_reads =
+            vuma_scg::liveness::find_uninitialized_reads(scg, &scg_liveness.liveness);
         for node_id in &uninit_reads {
             violations.push(MemorySafetyViolation::UninitializedRead {
                 variable_name: format!("node_{}", node_id),
@@ -1327,10 +2131,14 @@ mod tests {
     }
 
     #[test]
-    fn test_bounds_check_site_detection() {
+    fn test_bounds_check_site_with_bounds_populates_length_expr() {
+        // Stage 2: when an `alloc_sizes` table is
+        // supplied, `find_bounds_check_sites_with_bounds` populates
+        // `length_expr` for accesses whose `ptr` resolves to a known
+        // allocation name.
         let scg = Scg {
             nodes: vec![ScgNode::Function(ScgFunction {
-                name: "test_bounds".to_string(),
+                name: "test_bounds_with_table".to_string(),
                 params: vec![],
                 results: vec![],
                 body: vec![
@@ -1345,14 +2153,86 @@ mod tests {
                         offset: Some(ScgExpr::Var("i".to_string())),
                         ty: None,
                     }),
+                    // Access to an unknown pointer — length_expr must
+                    // remain None (the fallback for raw pointer
+                    // arithmetic / extern pointers).
+                    ScgStatement::Access(AccessNode::Store {
+                        ptr: ScgExpr::Var("ext_ptr".to_string()),
+                        offset: Some(ScgExpr::Int(8)),
+                        value: ScgExpr::Int(0),
+                        ty: None,
+                    }),
                 ],
                 var_types: std::collections::HashMap::new(),
             })],
         };
 
-        let sites = find_bounds_check_sites(&scg);
-        assert_eq!(sites.len(), 1);
-        assert_eq!(sites[0].array_name, "arr");
+        // Backward-compat: empty table → all length_expr None.
+        let empty_table: HashMap<String, u64> = HashMap::new();
+        let sites_empty = find_bounds_check_sites_with_bounds(&scg, &empty_table);
+        assert_eq!(sites_empty.len(), 2);
+        assert!(sites_empty.iter().all(|s| s.length_expr.is_none()));
+
+        // Populated table: known alloc → Some("100"); unknown → None.
+        let mut table: HashMap<String, u64> = HashMap::new();
+        table.insert("arr".to_string(), 100);
+        let sites = find_bounds_check_sites_with_bounds(&scg, &table);
+        assert_eq!(sites.len(), 2);
+        let arr_site = sites.iter().find(|s| s.array_name == "arr").unwrap();
+        assert_eq!(arr_site.length_expr.as_deref(), Some("100"));
+        let ext_site = sites.iter().find(|s| s.array_name == "ext_ptr").unwrap();
+        assert!(ext_site.length_expr.is_none());
+    }
+
+    #[test]
+    fn test_inject_bounds_check_ir_inserts_oob_trap() {
+        // Stage 2: `inject_bounds_check_ir` mutates
+        // the codegen SCG in place, inserting a `ComputationNode(UGe)` +
+        // `ControlNode::If { __oob_trap }` pair BEFORE every Access whose
+        // `ptr` resolves to a known allocation name.
+        let mut scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_inject".to_string(),
+                params: vec![],
+                results: vec![],
+                body: vec![
+                    ScgStatement::Allocation(AllocationNode::Stack {
+                        name: "arr".to_string(),
+                        size: 64,
+                        ty: ScgType::U32,
+                    }),
+                    ScgStatement::Access(AccessNode::Load {
+                        dst: "val".to_string(),
+                        ptr: ScgExpr::Var("arr".to_string()),
+                        offset: Some(ScgExpr::Var("i".to_string())),
+                        ty: None,
+                    }),
+                ],
+                var_types: std::collections::HashMap::new(),
+            })],
+        };
+
+        let mut table: HashMap<String, u64> = HashMap::new();
+        table.insert("arr".to_string(), 64);
+        inject_bounds_check_ir(&mut scg, &table);
+
+        let func = match &scg.nodes[0] {
+            ScgNode::Function(f) => f,
+            _ => panic!("expected Function node"),
+        };
+        // Body should now be: [Allocation, Computation(UGe), Control(If), Access]
+        assert_eq!(func.body.len(), 4);
+        assert!(matches!(&func.body[1], ScgStatement::Computation(c) if c.op == BinOpKind::UGe));
+        if let ScgStatement::Control(ControlNode::If { then_body, .. }) = &func.body[2] {
+            assert_eq!(then_body.len(), 1);
+            assert!(matches!(
+                &then_body[0],
+                ScgStatement::Call(c) if c.func == "__oob_trap" && c.is_extern
+            ));
+        } else {
+            panic!("expected ControlNode::If with __oob_trap call");
+        }
+        assert!(matches!(&func.body[3], ScgStatement::Access(_)));
     }
 
     #[test]
@@ -1387,19 +2267,21 @@ mod tests {
         assert!(dirty_display.contains("violation"));
     }
 
-    // ── Wave 20 SCG-level double-free regression tests ──────────────────────
+    // ── SCG-level double-free regression tests ─────────────────────────────
     //
     // The codegen-level `MemorySafetyAnalyzer::analyze` has always detected
     // double-free, but the SCG-liveness variant `analyze_with_scg_liveness`
-    // silently ignored `check_double_free` until Wave 20 audit remediation.
-    // These tests exercise the new SCG-level check directly.
+    // previously silently ignored `check_double_free`.
+    // These tests exercise the SCG-level check directly.
 
     /// Helper: build an SCG with one allocation in `region` and `n_frees`
     /// deallocations of that region.  Returns the SCG.
-    fn build_scg_with_region_frees(region: vuma_scg::region::RegionId, n_frees: usize) -> vuma_scg::graph::SCG {
+    fn build_scg_with_region_frees(
+        region: vuma_scg::region::RegionId,
+        n_frees: usize,
+    ) -> vuma_scg::graph::SCG {
         use vuma_scg::{
-            AllocationNode, DeallocationNode, NodeId, NodePayload, NodeType,
-            ProgramPoint, SCG,
+            AllocationNode, DeallocationNode, NodeId, NodePayload, NodeType, ProgramPoint, SCG,
         };
 
         let mut scg = SCG::new();
@@ -1439,7 +2321,7 @@ mod tests {
         scg
     }
 
-    /// Wave 20: a single region freed twice → one DoubleFree (E042) violation.
+    /// A single region freed twice → one DoubleFree (E042) violation.
     #[test]
     fn test_wave20_double_free_detected() {
         let region = vuma_scg::region::RegionId::new(42);
@@ -1457,10 +2339,7 @@ mod tests {
         };
 
         let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
-        let double_frees: Vec<_> = violations
-            .iter()
-            .filter(|v| v.code() == "E042")
-            .collect();
+        let double_frees: Vec<_> = violations.iter().filter(|v| v.code() == "E042").collect();
         assert_eq!(
             double_frees.len(),
             1,
@@ -1483,7 +2362,7 @@ mod tests {
         }
     }
 
-    /// Wave 20: a single region freed once → no DoubleFree violation.
+    /// A single region freed once → no DoubleFree violation.
     #[test]
     fn test_wave20_single_free_no_double_free() {
         let region = vuma_scg::region::RegionId::new(7);
@@ -1501,10 +2380,7 @@ mod tests {
         };
 
         let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
-        let double_frees: Vec<_> = violations
-            .iter()
-            .filter(|v| v.code() == "E042")
-            .collect();
+        let double_frees: Vec<_> = violations.iter().filter(|v| v.code() == "E042").collect();
         assert!(
             double_frees.is_empty(),
             "single free should not produce a DoubleFree violation; got {:?}",
@@ -1512,7 +2388,7 @@ mod tests {
         );
     }
 
-    /// Wave 20: `check_double_free: false` suppresses the check entirely,
+    /// `check_double_free: false` suppresses the check entirely,
     /// even when the SCG has an obvious double-free pattern.
     #[test]
     fn test_wave20_double_free_flag_disabled() {
@@ -1532,15 +2408,13 @@ mod tests {
 
         let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
         assert!(
-            violations
-                .iter()
-                .all(|v| v.code() != "E042"),
+            violations.iter().all(|v| v.code() != "E042"),
             "check_double_free=false must suppress DoubleFree; got {:?}",
             violations
         );
     }
 
-    /// Wave 20: an intervening allocation clears the region's deallocated
+    /// An intervening allocation clears the region's deallocated
     /// state, so free → alloc → free is NOT a double-free.
     #[test]
     fn test_wave20_intervening_alloc_clears_state() {
@@ -1610,14 +2484,544 @@ mod tests {
         };
 
         let violations = analyze_with_scg_liveness(&liveness, &scg, &config);
-        let double_frees: Vec<_> = violations
-            .iter()
-            .filter(|v| v.code() == "E042")
-            .collect();
+        let double_frees: Vec<_> = violations.iter().filter(|v| v.code() == "E042").collect();
         assert!(
             double_frees.is_empty(),
             "free → alloc → free is NOT a double-free; got {:?}",
             double_frees
+        );
+    }
+
+    // ─── CCured PointerKind classification tests ──────────────────────────
+
+    #[test]
+    fn test_classify_pointer_safe_no_offset() {
+        let mut sizes = HashMap::new();
+        sizes.insert("buf".to_string(), 64u64);
+        // No offset → SAFE regardless of allocation table.
+        let kind = classify_pointer(&ScgExpr::Var("buf".to_string()), false, &sizes);
+        assert_eq!(kind, PointerKind::Safe);
+    }
+
+    #[test]
+    fn test_classify_pointer_seq_named_allocation() {
+        let mut sizes = HashMap::new();
+        sizes.insert("buf".to_string(), 64u64);
+        // Named allocation with offset → SEQ.
+        let kind = classify_pointer(&ScgExpr::Var("buf".to_string()), true, &sizes);
+        assert_eq!(kind, PointerKind::Seq);
+    }
+
+    #[test]
+    fn test_classify_pointer_wild_unknown_allocation() {
+        let sizes = HashMap::new(); // empty
+                                    // Offset present but no allocation entry → WILD.
+        let kind = classify_pointer(&ScgExpr::Var("ffi_ptr".to_string()), true, &sizes);
+        assert_eq!(kind, PointerKind::Wild);
+    }
+
+    #[test]
+    fn test_classify_pointer_wild_binop_ptr() {
+        let mut sizes = HashMap::new();
+        sizes.insert("buf".to_string(), 64u64);
+        // Pointer arithmetic (`<binop>`) cannot resolve to a name → WILD.
+        let binop = ScgExpr::BinOp {
+            op: BinOpKind::Add,
+            lhs: Box::new(ScgExpr::Var("buf".to_string())),
+            rhs: Box::new(ScgExpr::Int(8)),
+        };
+        let kind = classify_pointer(&binop, true, &sizes);
+        assert_eq!(kind, PointerKind::Wild);
+    }
+
+    #[test]
+    fn test_inject_bounds_check_ir_emits_summary_and_classifies() {
+        // Build an SCG with:
+        //   1. a SEQ access (named allocation with offset)
+        //   2. a SAFE access (no offset)
+        //   3. a WILD access (offset, no allocation entry)
+        let mut sizes = HashMap::new();
+        sizes.insert("arr".to_string(), 16u64);
+
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_classify".to_string(),
+                params: vec![],
+                results: vec![],
+                body: vec![
+                    // SEQ: load arr + offset (named, known size)
+                    ScgStatement::Access(AccessNode::Load {
+                        dst: "v1".to_string(),
+                        ptr: ScgExpr::Var("arr".to_string()),
+                        offset: Some(ScgExpr::Int(4)),
+                        ty: None,
+                    }),
+                    // SAFE: load arr with no offset
+                    ScgStatement::Access(AccessNode::Load {
+                        dst: "v2".to_string(),
+                        ptr: ScgExpr::Var("arr".to_string()),
+                        offset: None,
+                        ty: None,
+                    }),
+                    // WILD: load ffi_ptr + offset (no alloc_sizes entry)
+                    ScgStatement::Access(AccessNode::Load {
+                        dst: "v3".to_string(),
+                        ptr: ScgExpr::Var("ffi_ptr".to_string()),
+                        offset: Some(ScgExpr::Int(8)),
+                        ty: None,
+                    }),
+                ],
+                var_types: HashMap::new(),
+            })],
+        };
+
+        let mut scg = scg;
+        inject_bounds_check_ir(&mut scg, &sizes);
+
+        // The SEQ access should have gained two prepended statements
+        // (Computation + Control::If) before it.
+        let func = match &scg.nodes[0] {
+            ScgNode::Function(f) => f,
+            _ => panic!("expected function node"),
+        };
+        // Original body had 3 statements; SEQ injection adds 2 → total 5.
+        assert_eq!(
+            func.body.len(),
+            5,
+            "SEQ access should be preceded by 2 check stmts; body = {:?}",
+            func.body
+        );
+
+        // The first two statements should be the bounds-check pair.
+        assert!(matches!(
+            &func.body[0],
+            ScgStatement::Computation(ComputationNode {
+                op: BinOpKind::UGe,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &func.body[1],
+            ScgStatement::Control(ControlNode::If { .. })
+        ));
+        // The original SEQ Load should be at index 2.
+        assert!(matches!(
+            &func.body[2],
+            ScgStatement::Access(AccessNode::Load { .. })
+        ));
+    }
+
+    // ─── Arena state-size recovery tests ────────────────────────
+    //
+    // These tests verify that `build_arena_state_sizes` correctly pattern-
+    // matches the deterministic IR sequence emitted by `arena_alloc`
+    // lowering (pipeline.rs:10411-10513) and that, when the recovered
+    // `state_ptr → layout_size` pairs are merged into `alloc_sizes`,
+    // `inject_bounds_check_ir` emits `__oob_trap` checks for accesses
+    // through the arena-allocated state pointer.
+
+    /// Helper: build a codegen SCG whose `main` body mirrors the exact IR
+    /// sequence emitted by `Expr::ArenaAlloc` lowering. Returns the SCG
+    /// and the names of the key temp variables (state_ptr, etc.) so tests
+    /// can assert against them.
+    fn build_arena_alloc_scg(layout_size: i64) -> Scg {
+        // The sequence below mirrors pipeline.rs:10412-10512 exactly:
+        //   1. off_addr   = arena_ptr + 8
+        //   2. offset_val = *[off_addr]            (Load arena.offset)
+        //   3. new_offset = offset_val + L         (L = layout_size)
+        //   4. cap_addr   = arena_ptr + 16
+        //   5. cap_val    = *[cap_addr]            (Load arena.capacity)
+        //   6. overflow_cond = new_offset UGt cap_val
+        //   7. if overflow_cond { call __arena_overflow() }
+        //   8. state_ptr  = arena_ptr + offset_val
+        //   9. off_addr2  = arena_ptr + 8
+        //  10. *[off_addr2] = new_offset           (Store bumped offset)
+        //
+        // After the arena_alloc sequence, we emit one subsequent access
+        // through `state_ptr` with an offset, which is the access that
+        // `inject_bounds_check_ir` should bound with `__oob_trap`.
+        let body = vec![
+            // 1. off_addr = arena_ptr + 8
+            ScgStatement::Computation(ComputationNode {
+                dst: "off_addr".to_string(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("arena_ptr".to_string()),
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }),
+            // 2. offset_val = *[off_addr]
+            ScgStatement::Access(AccessNode::Load {
+                dst: "offset_val".to_string(),
+                ptr: ScgExpr::Var("off_addr".to_string()),
+                offset: None,
+                ty: Some(crate::ir::IRType::U64),
+            }),
+            // 3. new_offset = offset_val + layout_size
+            ScgStatement::Computation(ComputationNode {
+                dst: "new_offset".to_string(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("offset_val".to_string()),
+                rhs: ScgExpr::Int(layout_size),
+                tail_call: false,
+                reassigns: None,
+            }),
+            // 4. cap_addr = arena_ptr + 16
+            ScgStatement::Computation(ComputationNode {
+                dst: "cap_addr".to_string(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("arena_ptr".to_string()),
+                rhs: ScgExpr::Int(16),
+                tail_call: false,
+                reassigns: None,
+            }),
+            // 5. cap_val = *[cap_addr]
+            ScgStatement::Access(AccessNode::Load {
+                dst: "cap_val".to_string(),
+                ptr: ScgExpr::Var("cap_addr".to_string()),
+                offset: None,
+                ty: Some(crate::ir::IRType::U64),
+            }),
+            // 6. overflow_cond = new_offset UGt cap_val
+            ScgStatement::Computation(ComputationNode {
+                dst: "overflow_cond".to_string(),
+                op: BinOpKind::UGt,
+                lhs: ScgExpr::Var("new_offset".to_string()),
+                rhs: ScgExpr::Var("cap_val".to_string()),
+                tail_call: false,
+                reassigns: None,
+            }),
+            // 7. if overflow_cond { call __arena_overflow() }
+            ScgStatement::Control(ControlNode::If {
+                cond: ScgExpr::Var("overflow_cond".to_string()),
+                then_body: vec![ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "__arena_overflow".to_string(),
+                    args: vec![],
+                    is_extern: true,
+                    reassigns: None,
+                })],
+                else_body: None,
+            }),
+            // 8. state_ptr = arena_ptr + offset_val
+            ScgStatement::Computation(ComputationNode {
+                dst: "state_ptr".to_string(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("arena_ptr".to_string()),
+                rhs: ScgExpr::Var("offset_val".to_string()),
+                tail_call: false,
+                reassigns: None,
+            }),
+            // 9. off_addr2 = arena_ptr + 8
+            ScgStatement::Computation(ComputationNode {
+                dst: "off_addr2".to_string(),
+                op: BinOpKind::Add,
+                lhs: ScgExpr::Var("arena_ptr".to_string()),
+                rhs: ScgExpr::Int(8),
+                tail_call: false,
+                reassigns: None,
+            }),
+            // 10. *[off_addr2] = new_offset
+            ScgStatement::Access(AccessNode::Store {
+                ptr: ScgExpr::Var("off_addr2".to_string()),
+                offset: None,
+                value: ScgExpr::Var("new_offset".to_string()),
+                ty: Some(crate::ir::IRType::U64),
+            }),
+            // 11. Subsequent access through state_ptr with an offset — this
+            //     is the access that should be bounded by __oob_trap once
+            //     the state_ptr → layout_size mapping is in alloc_sizes.
+            ScgStatement::Access(AccessNode::Load {
+                dst: "field_val".to_string(),
+                ptr: ScgExpr::Var("state_ptr".to_string()),
+                offset: Some(ScgExpr::Int(8)),
+                ty: None,
+            }),
+        ];
+        Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_arena_alloc".to_string(),
+                params: vec![],
+                results: vec![],
+                body,
+                var_types: HashMap::new(),
+            })],
+        }
+    }
+
+    #[test]
+    fn test_build_arena_state_sizes_recovers_layout_size() {
+        // The arena_alloc IR pattern with layout_size = 64 should produce
+        // a single `state_ptr → 64` entry.
+        let scg = build_arena_alloc_scg(64);
+        let table = build_arena_state_sizes(&scg);
+        assert_eq!(
+            table.len(),
+            1,
+            "expected exactly 1 arena state_ptr entry, got {:?}",
+            table
+        );
+        assert_eq!(table.get("state_ptr"), Some(&64u64));
+    }
+
+    #[test]
+    fn test_build_arena_state_sizes_empty_without_arena_overflow() {
+        // An SCG without `__arena_overflow` should produce an empty table.
+        // This guards against false positives from unrelated `Add(Var, Var)`
+        // computations.
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "no_arena".to_string(),
+                params: vec![],
+                results: vec![],
+                body: vec![
+                    // Mimics the `state_ptr = arena_ptr + offset_val`
+                    // computation but WITHOUT the preceding overflow check
+                    // anchor — `build_arena_state_sizes` must NOT register
+                    // this as an arena state pointer.
+                    ScgStatement::Computation(ComputationNode {
+                        dst: "state_ptr".to_string(),
+                        op: BinOpKind::Add,
+                        lhs: ScgExpr::Var("arena_ptr".to_string()),
+                        rhs: ScgExpr::Var("offset_val".to_string()),
+                        tail_call: false,
+                        reassigns: None,
+                    }),
+                    ScgStatement::Access(AccessNode::Load {
+                        dst: "v".to_string(),
+                        ptr: ScgExpr::Var("state_ptr".to_string()),
+                        offset: Some(ScgExpr::Int(8)),
+                        ty: None,
+                    }),
+                ],
+                var_types: HashMap::new(),
+            })],
+        };
+        let table = build_arena_state_sizes(&scg);
+        assert!(
+            table.is_empty(),
+            "expected empty table (no __arena_overflow anchor), got {:?}",
+            table
+        );
+    }
+
+    #[test]
+    fn test_build_arena_state_sizes_skips_zero_layout() {
+        // A zero layout_size is degenerate (no meaningful bound). The
+        // recovery function should skip such entries to avoid emitting
+        // `0 UGe 0` checks (which would always trap).
+        let scg = build_arena_alloc_scg(0);
+        let table = build_arena_state_sizes(&scg);
+        assert!(
+            table.is_empty(),
+            "expected empty table for zero layout_size, got {:?}",
+            table
+        );
+    }
+
+    #[test]
+    fn test_inject_bounds_check_ir_emits_oob_trap_for_arena_state_ptr() {
+        // End-to-end: when the `state_ptr → layout_size` mapping recovered
+        // by `build_arena_state_sizes` is merged into `alloc_sizes`,
+        // `inject_bounds_check_ir` must emit an `__oob_trap` check before
+        // the subsequent access through `state_ptr`.
+        let mut scg = build_arena_alloc_scg(64);
+
+        // Step 1: recover arena state sizes (mirrors what pipeline.rs does).
+        let arena_state_sizes = build_arena_state_sizes(&scg);
+        assert_eq!(arena_state_sizes.get("state_ptr"), Some(&64u64));
+
+        // Step 2: merge into alloc_sizes (mirrors pipeline.rs).
+        let mut alloc_sizes: HashMap<String, u64> = HashMap::new();
+        for (k, v) in &arena_state_sizes {
+            alloc_sizes.insert(k.clone(), *v);
+        }
+
+        // Step 3: inject bounds checks.
+        inject_bounds_check_ir(&mut scg, &alloc_sizes);
+
+        let func = match &scg.nodes[0] {
+            ScgNode::Function(f) => f,
+            _ => panic!("expected Function node"),
+        };
+
+        // The original body had 11 statements. The single SEQ access
+        // (statement 11, the `field_val` load through `state_ptr`) should
+        // gain 2 prepended check statements → total 13.
+        assert_eq!(
+            func.body.len(),
+            13,
+            "expected 13 statements (11 original + 2 check pair), got {}: {:?}",
+            func.body.len(),
+            func.body
+                .iter()
+                .map(|s| format!("{:?}", s))
+                .collect::<Vec<_>>()
+        );
+
+        // Find the __oob_trap If in the body and verify it precedes the
+        // `field_val` Load (the access through `state_ptr`).
+        let mut oob_trap_idx: Option<usize> = None;
+        let mut field_load_idx: Option<usize> = None;
+        for (i, stmt) in func.body.iter().enumerate() {
+            if let ScgStatement::Control(ControlNode::If { then_body, .. }) = stmt {
+                if then_body.len() == 1
+                    && matches!(
+                        &then_body[0],
+                        ScgStatement::Call(c) if c.func == "__oob_trap" && c.is_extern
+                    )
+                {
+                    oob_trap_idx = Some(i);
+                }
+            }
+            if let ScgStatement::Access(AccessNode::Load { dst, .. }) = stmt {
+                if dst == "field_val" {
+                    field_load_idx = Some(i);
+                }
+            }
+        }
+        let oob_trap_idx = oob_trap_idx.expect("expected an __oob_trap If in the body");
+        let field_load_idx = field_load_idx.expect("expected the field_val Load in the body");
+        // The __oob_trap If should be immediately before the field_val Load.
+        assert_eq!(
+            field_load_idx,
+            oob_trap_idx + 1,
+            "field_val Load should immediately follow the __oob_trap If"
+        );
+        // And the UGe computation should immediately precede the If.
+        assert!(matches!(
+            &func.body[oob_trap_idx - 1],
+            ScgStatement::Computation(ComputationNode {
+                op: BinOpKind::UGe,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_inject_bounds_check_ir_skips_arena_state_ptr_without_mapping() {
+        // Negative control: when `alloc_sizes` does NOT contain the
+        // `state_ptr → layout_size` mapping (i.e. `build_arena_state_sizes`
+        // was not called or returned empty), `inject_bounds_check_ir` must
+        // NOT emit an `__oob_trap` check for the access through
+        // `state_ptr` — it classifies as `PointerKind::Wild` and is skipped
+        // (legacy behaviour, retained as the fallback path).
+        let mut scg = build_arena_alloc_scg(64);
+        let empty_alloc_sizes: HashMap<String, u64> = HashMap::new();
+        inject_bounds_check_ir(&mut scg, &empty_alloc_sizes);
+        let func = match &scg.nodes[0] {
+            ScgNode::Function(f) => f,
+            _ => panic!("expected Function node"),
+        };
+        // No __oob_trap should be present (the only `__arena_overflow` If
+        // is the arena_alloc overflow check, not a per-access OOB trap).
+        let has_oob_trap = func.body.iter().any(|s| {
+            if let ScgStatement::Control(ControlNode::If { then_body, .. }) = s {
+                then_body.len() == 1
+                    && matches!(
+                        &then_body[0],
+                        ScgStatement::Call(c) if c.func == "__oob_trap" && c.is_extern
+                    )
+            } else {
+                false
+            }
+        });
+        assert!(
+            !has_oob_trap,
+            "expected NO __oob_trap injection without the arena state-size mapping"
+        );
+    }
+
+    // ── Negative-path test ───────────────────────────────────────────
+    //
+    // Memory-safety negative path with `--safe` (always on per PMT):
+    // an out-of-bounds WRITE (Store with offset) on a known-named
+    // allocation must trigger `inject_bounds_check_ir` to insert the
+    // `Computation(UGe) + Control(If { __oob_trap })` pair BEFORE the
+    // Store.  The existing `test_inject_bounds_check_ir_inserts_oob_trap`
+    // covers the Load (read) path; this test covers the Store (write)
+    // path so a regression that bounds-checked only reads would be
+    // caught.  `inject_bounds_check_ir` does not panic — it mutates
+    // the SCG in place — so per the task brief this test uses
+    // structural assertions on the mutated body rather than
+    // `#[should_panic]`.
+
+    /// An OOB Store (write with offset) on a known-named allocation
+    /// must trigger `__oob_trap` injection — the `--safe` runtime
+    /// trap contract.  Body should grow from
+    /// `[Allocation, Access(Store)]` (2 stmts) to
+    /// `[Allocation, Computation(UGe), Control(If), Access(Store)]`
+    /// (4 stmts), and the `If`'s `then_body` must contain exactly
+    /// one `Call(__oob_trap, is_extern=true)`.
+    #[test]
+    fn test_negative_oob_store_triggers_oob_trap_injection() {
+        let mut scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_oob_store".to_string(),
+                params: vec![],
+                results: vec![],
+                body: vec![
+                    ScgStatement::Allocation(AllocationNode::Stack {
+                        name: "buf".to_string(),
+                        size: 32,
+                        ty: ScgType::U8,
+                    }),
+                    // Store with a runtime-variable offset on a known
+                    // allocation → classified as `PointerKind::Seq` →
+                    // bounds check + __oob_trap pair inserted before.
+                    ScgStatement::Access(AccessNode::Store {
+                        ptr: ScgExpr::Var("buf".to_string()),
+                        offset: Some(ScgExpr::Var("i".to_string())),
+                        value: ScgExpr::Int(99),
+                        ty: None,
+                    }),
+                ],
+                var_types: std::collections::HashMap::new(),
+            })],
+        };
+
+        let mut table: HashMap<String, u64> = HashMap::new();
+        table.insert("buf".to_string(), 32);
+        inject_bounds_check_ir(&mut scg, &table);
+
+        let func = match &scg.nodes[0] {
+            ScgNode::Function(f) => f,
+            _ => panic!("expected Function node"),
+        };
+        // Body should now be:
+        // [Allocation, Computation(UGe), Control(If), Access(Store)]
+        assert_eq!(
+            func.body.len(),
+            4,
+            "OOB Store must trigger insertion of 2 stmts (UGe + If) before the Store"
+        );
+        assert!(
+            matches!(&func.body[1], ScgStatement::Computation(c) if c.op == BinOpKind::UGe),
+            "stmt[1] must be the UGe bounds-check computation"
+        );
+        match &func.body[2] {
+            ScgStatement::Control(ControlNode::If { then_body, .. }) => {
+                assert_eq!(
+                    then_body.len(),
+                    1,
+                    "If then_body must contain exactly one statement"
+                );
+                assert!(
+                    matches!(
+                        &then_body[0],
+                        ScgStatement::Call(c) if c.func == "__oob_trap" && c.is_extern
+                    ),
+                    "If then_body must be a Call to __oob_trap (is_extern=true)"
+                );
+            }
+            other => panic!(
+                "stmt[2] must be ControlNode::If with __oob_trap; got {:?}",
+                other
+            ),
+        }
+        assert!(
+            matches!(&func.body[3], ScgStatement::Access(_)),
+            "stmt[3] must be the original Access(Store)"
         );
     }
 }

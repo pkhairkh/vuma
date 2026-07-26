@@ -906,9 +906,7 @@ impl MsgBuilder {
                 | ScgEdgeKind::Return { .. } => {
                     self.process_sync_edge(&edge)?;
                 }
-                ScgEdgeKind::DataFlow
-                | ScgEdgeKind::Derivation
-                | ScgEdgeKind::SyscallArg => {
+                ScgEdgeKind::DataFlow | ScgEdgeKind::Derivation | ScgEdgeKind::SyscallArg => {
                     // These edge types are handled during node processing
                     // (they establish derivation chains / data flow into
                     // syscalls) and do not produce MSG SyncEdges here.

@@ -163,12 +163,7 @@ impl DependencyResolver {
 
             // Recursively resolve this dependency's dependencies
             if let Some(ref manifest) = dep_manifest {
-                self.resolve_recursive(
-                    &dep.name,
-                    &resolved_version,
-                    &manifest.dependencies,
-                    ctx,
-                )?;
+                self.resolve_recursive(&dep.name, &resolved_version, &manifest.dependencies, ctx)?;
             }
         }
 
@@ -180,10 +175,7 @@ impl DependencyResolver {
     }
 
     /// Topological sort of the dependency graph using Kahn's algorithm.
-    fn topological_sort(
-        &self,
-        graph: &HashMap<String, Vec<String>>,
-    ) -> PackageResult<Vec<String>> {
+    fn topological_sort(&self, graph: &HashMap<String, Vec<String>>) -> PackageResult<Vec<String>> {
         // Compute in-degrees
         let mut in_degree: HashMap<&String, usize> = HashMap::new();
         for node in graph.keys() {
@@ -288,7 +280,10 @@ mod tests {
     #[test]
     fn test_topological_sort_simple() {
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
-        graph.insert("app".to_string(), vec!["lib-a".to_string(), "lib-b".to_string()]);
+        graph.insert(
+            "app".to_string(),
+            vec!["lib-a".to_string(), "lib-b".to_string()],
+        );
         graph.insert("lib-a".to_string(), vec!["lib-c".to_string()]);
         graph.insert("lib-b".to_string(), vec!["lib-c".to_string()]);
         graph.insert("lib-c".to_string(), vec![]);
@@ -298,7 +293,10 @@ mod tests {
         let sorted = resolver.topological_sort(&graph).unwrap();
 
         // lib-c should come before lib-a and lib-b, which should come before app
-        let pos: HashMap<&str, usize> = sorted.iter().map(|s| (s.as_str(), sorted.iter().position(|x| x == s).unwrap())).collect();
+        let pos: HashMap<&str, usize> = sorted
+            .iter()
+            .map(|s| (s.as_str(), sorted.iter().position(|x| x == s).unwrap()))
+            .collect();
         assert!(pos["lib-c"] < pos["lib-a"]);
         assert!(pos["lib-c"] < pos["lib-b"]);
         assert!(pos["lib-a"] < pos["app"]);
