@@ -27,6 +27,25 @@ The flattening is structural:
     `AtomicOrdering` tag is preserved for forward-compatibility but never
     inspected by `to_steps`. A full concurrent-execution semantics is
     out of scope for PMT-1-C.
+  - The 10 channel/special `PmtInstr` variants added in PMT-1-D
+    (`vector_op`, `channel_open`, `channel_send`, `channel_recv`,
+    `channel_close`, `channel_recv_timeout`, `channel_recv_result`,
+    `stark_proof`, `call_indirect`, `syscall`) flatten to `[]` for 9
+    of the 10 (their effects are either pure SIMD computation, out-of-band
+    IVE capability effects, opaque proof verification, or out-of-scope
+    syscalls — none of which interact with PMT's arena state). The 10th,
+    `call_indirect`, flattens to `args.map (fun v => ⟨v, v, ⟨1, []⟩,
+    .transform⟩)` — exactly mirroring `.call` (placeholder self-loop
+    steps per argument vreg). The 9 `[]`-flattening variants contribute
+    no `Step`s to `IRFunction.flat_steps` and therefore do not perturb
+    the name-uniqueness conjuncts of `WellTyped`; the `call_indirect`
+    variant contributes one placeholder `Step` per argument vreg
+    (carrying the `⟨1, []⟩` layout, well-formed by `WF_Layout_empty`),
+    and its name-uniqueness obligation is discharged by the existing
+    `IRFunction.in_vars_unique` / `out_vars_unique` conjuncts in
+    `IRFunction.well_typed`, exactly as for `.call`. The
+    `pmt_soundness` argument — which operates over the flattened
+    `Program = List Step` — is therefore preserved sorry-free.
 
 All theorems in this file close without `sorry`, including the
 previously-`sorry`-backed `to_program_preserves_well_typed_full` (§5.1),
@@ -250,6 +269,98 @@ theorem PmtInstr.to_steps_atomic_cas (dst addr expected desired : IRValue)
       (.atomic_cas dst addr expected desired ty success_order failure_order) = [] := by
   rfl
 
+/-! ## §1.7d. Reflection lemmas for the 10 channel/special variants (PMT-1-D)
+
+Each of the 10 channel/special `PmtInstr` variants flattens as follows:
+9 of the 10 (`vector_op`, `channel_open`, `channel_send`, `channel_recv`,
+`channel_close`, `channel_recv_timeout`, `channel_recv_result`,
+`stark_proof`, `syscall`) flatten to the empty `List Step` — their effects
+are either pure SIMD computation, out-of-band IVE capability effects,
+opaque proof verification, or out-of-scope syscalls, none of which
+interact with PMT's arena state. The 10th, `call_indirect`, flattens to
+`args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)` — exactly mirroring
+`.call` (placeholder self-loop steps per argument vreg).
+
+The 10 lemmas below are each provable by `rfl` (the `PmtInstr.to_steps`
+definition maps each channel/special constructor literally). They feed
+the `cases i with` block of `PmtInstr.to_steps_preserves_WF_Layout`
+(§1.8) so that the per-instruction `WF_Layout` preservation proof
+remains exhaustive over the enlarged `PmtInstr` inductive (35
+constructors: 7 memory + 12 arithmetic + 3 control-flow + 3 atomic +
+10 channel/special). -/
+
+/-- §1.7d.1: `vector_op` flattens to `[]` (pure SIMD computation; the
+underlying packed arithmetic is modeled at the IVE-from-IR layer). -/
+theorem PmtInstr.to_steps_vector_op (op : VectorOpKind) (lanes elem_size : Nat)
+    (dst lhs rhs : IRValue) :
+    PmtInstr.to_steps (.vector_op op lanes elem_size dst lhs rhs) = [] := by
+  rfl
+
+/-- §1.7d.2: `channel_open` flattens to `[]` (out-of-band capability
+effect; channel state is modeled by IVE's capability system, not by
+PMT's arena state). -/
+theorem PmtInstr.to_steps_channel_open (dst : IRValue) (elem_ty : IRType) :
+    PmtInstr.to_steps (.channel_open dst elem_ty) = [] := by
+  rfl
+
+/-- §1.7d.3: `channel_send` flattens to `[]` (out-of-band capability
+effect). -/
+theorem PmtInstr.to_steps_channel_send (ch msg : IRValue) (ty : Option IRType) :
+    PmtInstr.to_steps (.channel_send ch msg ty) = [] := by
+  rfl
+
+/-- §1.7d.4: `channel_recv` flattens to `[]` (out-of-band capability
+effect). -/
+theorem PmtInstr.to_steps_channel_recv (ch dst : IRValue) (ty : Option IRType) :
+    PmtInstr.to_steps (.channel_recv ch dst ty) = [] := by
+  rfl
+
+/-- §1.7d.5: `channel_close` flattens to `[]` (out-of-band capability
+effect). -/
+theorem PmtInstr.to_steps_channel_close (ch : IRValue) :
+    PmtInstr.to_steps (.channel_close ch) = [] := by
+  rfl
+
+/-- §1.7d.6: `channel_recv_timeout` flattens to `[]` (out-of-band
+capability effect; the timeout is a runtime scheduling concern, not a
+PMT `Step`). -/
+theorem PmtInstr.to_steps_channel_recv_timeout (ch dst : IRValue)
+    (ty : Option IRType) (timeout_ms : Nat) :
+    PmtInstr.to_steps (.channel_recv_timeout ch dst ty timeout_ms) = [] := by
+  rfl
+
+/-- §1.7d.7: `channel_recv_result` flattens to `[]` (out-of-band
+capability effect; both the value-result and error-code-result are
+runtime channel effects, not PMT `Step`s). -/
+theorem PmtInstr.to_steps_channel_recv_result (ch dst err_dst : IRValue)
+    (ty : Option IRType) :
+    PmtInstr.to_steps (.channel_recv_result ch dst err_dst ty) = [] := by
+  rfl
+
+/-- §1.7d.8: `stark_proof` flattens to `[]` (proof verification is an
+opaque effect delegated to the verifier; the proof buffer is allocated
+and tracked at the IPC / runtime layer, not as a PMT arena region). -/
+theorem PmtInstr.to_steps_stark_proof (input dst : IRValue)
+    (constraints : List Nat) :
+    PmtInstr.to_steps (.stark_proof input dst constraints) = [] := by
+  rfl
+
+/-- §1.7d.9: `call_indirect` flattens to one self-loop step per argument
+vreg — exactly mirroring `.call` (placeholder self-loops until call
+semantics are modeled). -/
+theorem PmtInstr.to_steps_call_indirect (func_ptr : String) (args : List String) :
+    PmtInstr.to_steps (.call_indirect func_ptr args)
+      = args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩) := by
+  rfl
+
+/-- §1.7d.10: `syscall` flattens to `[]` (opaque effect; syscalls are
+out-of-scope for PMT — no arena state interaction; the syscall ABI is a
+runtime concern). -/
+theorem PmtInstr.to_steps_syscall (nr : Nat) (args : List IRValue)
+    (dst : Option IRValue) :
+    PmtInstr.to_steps (.syscall nr args dst) = [] := by
+  rfl
+
 /-- §1.8: Every `Step` produced by `PmtInstr.to_steps` carries a
 `WF_Layout` when the instruction is well-typed under `env`.
 
@@ -367,6 +478,49 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     simp at hs
   | atomic_cas dst addr expected desired ty success_order failure_order =>
     rw [PmtInstr.to_steps_atomic_cas] at hs
+    simp at hs
+  -- 10 channel/special variants (PMT-1-D):
+  --  * 9 of the 10 (`vector_op`, `channel_*`, `stark_proof`, `syscall`)
+  --    flatten to `[]`, so the membership hypothesis `hs : s ∈ []` is
+  --    vacuous. The per-instruction `well_typed` predicate is `True` for
+  --    all 9 variants, so `hi` is `trivial` and not consulted. Their
+  --    effects are pure SIMD computation, out-of-band IVE capability
+  --    effects, opaque proof verification, or out-of-scope syscalls —
+  --    none of which interact with PMT's arena state.
+  --  * `call_indirect` mirrors `.call`: `to_steps` produces
+  --    `args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)`, each element
+  --    of which carries the well-formed placeholder layout `⟨1, []⟩`
+  --    (by `WF_Layout_empty`).
+  | vector_op op lanes elem_size dst lhs rhs =>
+    rw [PmtInstr.to_steps_vector_op] at hs
+    simp at hs
+  | channel_open dst elem_ty =>
+    rw [PmtInstr.to_steps_channel_open] at hs
+    simp at hs
+  | channel_send ch msg ty =>
+    rw [PmtInstr.to_steps_channel_send] at hs
+    simp at hs
+  | channel_recv ch dst ty =>
+    rw [PmtInstr.to_steps_channel_recv] at hs
+    simp at hs
+  | channel_close ch =>
+    rw [PmtInstr.to_steps_channel_close] at hs
+    simp at hs
+  | channel_recv_timeout ch dst ty timeout_ms =>
+    rw [PmtInstr.to_steps_channel_recv_timeout] at hs
+    simp at hs
+  | channel_recv_result ch dst err_dst ty =>
+    rw [PmtInstr.to_steps_channel_recv_result] at hs
+    simp at hs
+  | stark_proof input dst constraints =>
+    rw [PmtInstr.to_steps_stark_proof] at hs
+    simp at hs
+  | call_indirect func_ptr args =>
+    rw [PmtInstr.to_steps_call_indirect, List.mem_map] at hs
+    obtain ⟨v, _, rfl⟩ := hs
+    exact WF_Layout_empty
+  | syscall nr args dst =>
+    rw [PmtInstr.to_steps_syscall] at hs
     simp at hs
 
 /-! ## §2. Per-block flattening: `IRBlock.to_steps` -/

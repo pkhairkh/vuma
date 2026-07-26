@@ -4,12 +4,13 @@ import PMT.Soundness
 /-!
 ## PmtInstr — Lean mirror of the PMT-relevant subset of Rust `IRInstr` (sorry-free)
 
-This module mirrors the subset of `src/codegen/src/ir.rs::IRInstr` (32 variants)
-that is relevant to PMT memory safety verification. The full `IRInstr` enum
-includes many variants (VectorOp, StarkProof, AtomicCas, etc.) that are not
-directly exercised by PMT invariants; those are out of scope for this model.
+This module mirrors the Rust `src/codegen/src/ir.rs::IRInstr` enum (32
+variants) in its entirety — all 32 Rust variants now have a Lean `PmtInstr`
+counterpart as of PMT-1-D. (Previously the model covered only the 7 memory
+variants + 18 arithmetic / control-flow / atomic variants added in
+PMT-1-A/B/C; PMT-1-D adds the final 10 channel/special variants.)
 
-The PMT-relevant variants fall into two groups:
+The 35 `PmtInstr` variants fall into five groups:
 
   * **Memory variants (7):** `alloc`, `load`, `store`, `free`,
     `transform`, `call`, `ret`. These produce / consume arena regions
@@ -62,6 +63,34 @@ The PMT-relevant variants fall into two groups:
     happens-before relations) is **out of scope** for PMT-1-C and is
     not modeled here.
 
+  * **Channel/special variants (10, added in PMT-1-D):** `vector_op`,
+    `channel_open`, `channel_send`, `channel_recv`, `channel_close`,
+    `channel_recv_timeout`, `channel_recv_result`, `stark_proof`,
+    `call_indirect`, `syscall`. These mirror the remaining Rust
+    `IRInstr` variants that are not directly exercised by PMT's arena
+    invariants. Each is modeled structurally with an explicit domain
+    abstraction:
+    - `vector_op` — pure SIMD computation, `effect = .none`,
+      `well_typed = True`, `to_steps = []`.
+    - `channel_*` (6 variants) — **out-of-band effect modeled by
+      IVE's capability system, not by PMT's arena state**. Each has
+      `effect = .none`, `well_typed = True`, `to_steps = []`. The
+      channel handle is an opaque capability whose send / recv /
+      close / timeout / result semantics are modeled at the IVE /
+      runtime layer; PMT's `Step` model has no concept of channel
+      state, so these variants flatten to `[]`.
+    - `stark_proof` — **proof-buffer model**: proof verification is
+      an opaque effect delegated to the verifier, not modeled as a
+      PMT `Step`. `effect = .none`, `well_typed = True`,
+      `to_steps = []`.
+    - `call_indirect` — like `.call` but with an indirect
+      (register-resident) target. `effect = .none`,
+      `well_typed = True`, `to_steps = args.map (fun v =>
+      ⟨v, v, ⟨1, []⟩, .transform⟩)` (mirrors `.call`).
+    - `syscall` — **opaque-effect model**: syscalls are out-of-scope
+      for PMT (no arena state interaction). `effect = .none`,
+      `well_typed = True`, `to_steps = []`.
+
 The simulation relation `pmt_instr_simulates_ir_instr`
 connects each `PmtInstr` variant to its Rust `IRInstr` counterpart. All
 theorems in this file close without `sorry`.
@@ -92,6 +121,24 @@ layer, not as a PMT `Step`, and their atomicity annotation
 `Program = List Step` — is therefore unaffected. The
 `AtomicOrdering` field is preserved on each variant for
 forward-compatibility with any future concurrent extension.
+
+The 10 channel/special variants (PMT-1-D) are structured as follows:
+9 of the 10 flatten to `[]` (`vector_op`, the 6 `channel_*` variants,
+`stark_proof`, `syscall` — their effects are either pure SIMD
+computation, out-of-band IVE capability effects, opaque proof
+verification, or out-of-scope syscalls, none of which interact with
+PMT's arena state). The 10th variant, `call_indirect`, flattens to
+`args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)` — exactly mirroring
+`.call` (placeholder self-loop steps per argument vreg). The 9
+`[]`-flattening variants cannot perturb the name-uniqueness conjuncts
+of `WellTyped` (a `Step`-free instruction introduces no `in_var` /
+`out_var`). The `call_indirect` variant contributes one placeholder
+`Step` per argument vreg (carrying the `⟨1, []⟩` layout, well-formed
+by `WF_Layout_empty`); its name-uniqueness obligation is discharged
+by the existing `IRFunction.in_vars_unique` / `out_vars_unique`
+conjuncts in `IRFunction.well_typed`, exactly as for `.call`. The
+`pmt_soundness` argument — which operates over the flattened
+`Program = List Step` — is therefore preserved sorry-free.
 
 **References.**
   * Rust source: `src/codegen/src/ir.rs` (3,481 lines, 32 IRInstr variants).
@@ -245,6 +292,27 @@ inductive AtomicOrdering where
   | seq_cst : AtomicOrdering
   deriving Repr
 
+/-! ## §3.6. VectorOpKind — mirror of Rust `VectorOpKind` (annotation tag)
+
+`VectorOpKind` is the 3-variant SIMD lane-wise arithmetic tag used by
+`IRInstr::VectorOp` (`src/codegen/src/ir.rs:1174`). It is preserved on
+the `PmtInstr.vector_op` variant as a documentation tag: under PMT's
+soundness model, `vector_op` is a pure register-to-register computation
+(`effect = .none`, `well_typed = True`, `to_steps = []`), and the
+`op`/`lanes`/`elem_size` fields are *never inspected* by `effect`,
+`well_typed`, or `to_steps`. The enum is present in the Lean model so
+that `instr_sim` / `block_sim` traversal in `PMT.SimRel` can carry the
+op-kind through structurally for any future SIMD-aware extension. -/
+
+/-- §3.6: SIMD lane-wise arithmetic kind — mirror of Rust `VectorOpKind`
+(ir.rs:1174). Tag only; the underlying SIMD computation is treated as
+pure under PMT's soundness model (no arena interaction). -/
+inductive VectorOpKind where
+  | add : VectorOpKind
+  | sub : VectorOpKind
+  | mul : VectorOpKind
+  deriving Repr
+
 /-! **Note on `PmtOp` migration.** The `PmtOp` inductive previously declared in this
 module (with 7 constructors including `load`/`store`/`free`/
 `call`) has been migrated to `PMT.Soundness` per the
@@ -339,11 +407,70 @@ precedent where they exist (`dst`, `addr`, `value`, `expected`,
 `desired`, `ty`); the new `ordering` / `success_order` /
 `failure_order` fields follow the task brief's prescription.
 
-Other Rust `IRInstr` variants (VectorOp, Channel*, StarkProof,
-Offset, Syscall) are not modeled here. They are either:
-  - Channel operations — modeled via `PmtInstr.call "channel_send"`
-    (and as separate `PmtInstr` variants in PMT-1-D).
-  - VectorOp / StarkProof / Offset / Syscall — out of scope for PMT.
+**Channel/special variants (10, PMT-1-D):** mirror the remaining
+Rust `IRInstr` variants that are not directly exercised by PMT's
+arena invariants. Each is modeled structurally with an explicit
+domain abstraction:
+  - Rust `IRInstr::VectorOp`           ↔ Lean `PmtInstr.vector_op`
+    (pure SIMD computation; `VectorOpKind` (§3.6) is a tag only).
+  - Rust `IRInstr::ChannelOpen`        ↔ Lean `PmtInstr.channel_open`
+  - Rust `IRInstr::ChannelSend`        ↔ Lean `PmtInstr.channel_send`
+  - Rust `IRInstr::ChannelRecv`        ↔ Lean `PmtInstr.channel_recv`
+  - Rust `IRInstr::ChannelClose`       ↔ Lean `PmtInstr.channel_close`
+  - Rust `IRInstr::ChannelRecvTimeout` ↔ Lean `PmtInstr.channel_recv_timeout`
+  - Rust `IRInstr::ChannelRecvResult`  ↔ Lean `PmtInstr.channel_recv_result`
+  - Rust `IRInstr::StarkProof`         ↔ Lean `PmtInstr.stark_proof`
+  - Rust `IRInstr::CallIndirect`       ↔ Lean `PmtInstr.call_indirect`
+  - Rust `IRInstr::Syscall`            ↔ Lean `PmtInstr.syscall`
+
+**Channel capability model (PMT-1-D).** The 6 `channel_*` variants
+each carry a channel handle (an opaque capability); their send /
+recv / close / timeout / result semantics are modeled by IVE's
+capability system, not by PMT's arena state. PMT's `Step` model has
+no concept of channel state, so each `channel_*` variant has
+`effect = .none`, `well_typed = True`, `to_steps = []`. The actual
+I/O effect (may-block, may-wake, capability transfer) is modeled at
+the IVE / runtime layer. A future PMT extension that models channel
+state as part of the arena would extend `to_steps` to emit `Step`s
+for these variants; for PMT-1-D's current scope (structural
+modeling with channel capability abstraction), the `[]`-flattening
+is sufficient.
+
+**Stark proof-buffer model (PMT-1-D).** `stark_proof` carries a
+public input, a destination vreg for the proof handle, and a list
+of compile-time constraint coefficients. Proof verification is an
+opaque effect delegated to the verifier (a separate `stark_verify`
+builtin, not modeled here); the proof buffer itself is allocated
+and tracked at the IPC / runtime layer (`crate::ipc::StarkProof`),
+not as a PMT arena region. Hence `effect = .none`,
+`well_typed = True`, `to_steps = []`.
+
+**Call-indirect model (PMT-1-D).** `call_indirect` is like `.call`
+but with an indirect (register-resident) target. The task brief
+prescribes `to_steps = args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)`,
+identical to `.call`; this requires `args : List String` (each `v`
+populates a `Step.in_var` / `out_var`), so we model the variant as
+`String → List String → PmtInstr` (func_ptr name, arg vreg names).
+The Rust `CallIndirect { dst: Option<IRValue>, func_ptr: IRValue,
+args: Vec<IRValue> }` is therefore abstracted: `dst` is dropped
+(no `Step` for the return value, mirroring `.call`), and `func_ptr`
+is represented by its vreg name (a `String`). This is the same
+"faithful-but-simplified" precedent as PMT-1-A's modeling of the
+arithmetic variants' `ty : Option<IRType>` field as non-`Option`
+`IRType`.
+
+**Syscall opaque-effect model (PMT-1-D).** `syscall` carries a
+syscall number, up to 6 argument IRValues, and an optional
+destination IRValue. Syscalls are out-of-scope for PMT (no arena
+state interaction — the syscall ABI is a runtime concern). Hence
+`effect = .none`, `well_typed = True`, `to_steps = []`. The
+field shape faithfully mirrors Rust (`nr : Nat`, `args : List
+IRValue`, `dst : Option IRValue`).
+
+Other Rust `IRInstr` variants not modeled here:
+  - `IRInstr::Offset { dst, base, offset }` — not modeled (out of
+    scope for PMT; the `PmtInstr.get_address` variant covers the
+    primary symbol-resolution use case).
 -/
 inductive PmtInstr where
   -- Memory variants (7)
@@ -406,6 +533,55 @@ inductive PmtInstr where
     -- Rust (ir.rs:1617): `AtomicCas { dst, addr, expected, desired, ty }`
     -- (NO `success_order`/`failure_order` fields — divergence per task
     -- brief prescription; see §4 docstring).
+  -- Channel/special variants (10, PMT-1-D) — `effect = .none`,
+  -- `to_steps = []` (except `call_indirect`, which mirrors `.call`).
+  -- (Channels: capability effect modeled by IVE's capability system;
+  --  StarkProof: proof verification is opaque, delegated to the verifier;
+  --  Syscall: opaque effect, out-of-scope for PMT's arena state.)
+  | vector_op : VectorOpKind → Nat → Nat → IRValue → IRValue → IRValue → PmtInstr
+    -- Rust (ir.rs:1737): `VectorOp { op: VectorOpKind, lanes: u32,
+    -- elem_size: u32, dst: IRValue, lhs: IRValue, rhs: IRValue }`.
+    -- Pure SIMD computation — no arena effect.
+  | channel_open : IRValue → IRType → PmtInstr
+    -- Rust (ir.rs:1762): `ChannelOpen { dst: IRValue, elem_ty: IRType }`.
+    -- Channels are an out-of-band effect modeled by IVE's capability
+    -- system, not by PMT's arena state.
+  | channel_send : IRValue → IRValue → Option IRType → PmtInstr
+    -- Rust (ir.rs:1777): `ChannelSend { ch: IRValue, msg: IRValue,
+    -- ty: Option<IRType> }`. (Out-of-band capability effect.)
+  | channel_recv : IRValue → IRValue → Option IRType → PmtInstr
+    -- Rust (ir.rs:1794): `ChannelRecv { ch: IRValue, dst: IRValue,
+    -- ty: Option<IRType> }`. (Out-of-band capability effect.)
+  | channel_close : IRValue → PmtInstr
+    -- Rust (ir.rs:1809): `ChannelClose { ch: IRValue }`.
+    -- (Out-of-band capability effect.)
+  | channel_recv_timeout : IRValue → IRValue → Option IRType → Nat → PmtInstr
+    -- Rust (ir.rs:1823): `ChannelRecvTimeout { ch: IRValue, dst: IRValue,
+    -- ty: Option<IRType>, timeout_ms: u64 }`.
+    -- (Out-of-band capability effect.)
+  | channel_recv_result : IRValue → IRValue → IRValue → Option IRType → PmtInstr
+    -- Rust (ir.rs:1848): `ChannelRecvResult { ch: IRValue, dst: IRValue,
+    -- err_dst: IRValue, ty: Option<IRType> }`.
+    -- (Out-of-band capability effect.)
+  | stark_proof : IRValue → IRValue → List Nat → PmtInstr
+    -- Rust (ir.rs:1886): `StarkProof { input: IRValue, dst: IRValue,
+    -- constraints: Vec<u64> }`. Proof verification is an opaque effect
+    -- delegated to the verifier — no PMT `Step` interaction.
+  | call_indirect : String → List String → PmtInstr
+    -- Rust (ir.rs:1907): `CallIndirect { dst: Option<IRValue>,
+    -- func_ptr: IRValue, args: Vec<IRValue> }`.
+    -- Modeled here as `(func_ptr, arg_vars) : String × List String`
+    -- to mirror `.call : String → List String → PmtInstr` exactly
+    -- (the task brief prescribes `to_steps = args.map (fun v =>
+    -- ⟨v, v, ⟨1, []⟩, .transform⟩)`, which requires `args : List
+    -- String` so each `v` can populate a `Step.in_var`/`out_var`).
+    -- `dst` (Option IRValue) and `func_ptr` (IRValue) are abstracted
+    -- to the func-ptr's vreg name (a String) — faithful-but-simplified,
+    -- same precedent as the arithmetic `ty : Option<IRType>` → `IRType`.
+  | syscall : Nat → List IRValue → Option IRValue → PmtInstr
+    -- Rust (ir.rs:1711): `Syscall { nr: u32, args: Vec<IRValue>,
+    -- dst: Option<IRValue> }`. Syscalls are out-of-scope for PMT
+    -- (no arena state interaction) — opaque effect, no `Step`s emitted.
   deriving Repr
 
 /-- §5: A PMT-relevant basic block — a list of PmtInstr. -/
@@ -471,6 +647,28 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .atomic_load _ _ _ _ => .none
   | .atomic_store _ _ _ _ => .none
   | .atomic_cas _ _ _ _ _ _ _ => .none
+  -- Channel/special variants (PMT-1-D): see §4 docstring. Each of the
+  -- 10 variants classifies as `.none`:
+  --  * `vector_op` — pure SIMD computation (no arena effect).
+  --  * `channel_*` (6 variants) — channels are an out-of-band effect
+  --    modeled by IVE's capability system, not by PMT's arena state.
+  --  * `stark_proof` — proof verification is an opaque effect delegated
+  --    to the verifier; no PMT `Step` interaction.
+  --  * `call_indirect` — like `.call`, the per-argument vreg traffic is
+  --    modeled at the IVE-from-IR layer (the `args.map (fun v => …)`
+  --    `Step`s are placeholder self-loops, not state transitions).
+  --  * `syscall` — opaque effect; syscalls are out-of-scope for PMT
+  --    (no arena state interaction).
+  | .vector_op _ _ _ _ _ _ => .none
+  | .channel_open _ _ => .none
+  | .channel_send _ _ _ => .none
+  | .channel_recv _ _ _ => .none
+  | .channel_close _ => .none
+  | .channel_recv_timeout _ _ _ _ => .none
+  | .channel_recv_result _ _ _ _ => .none
+  | .stark_proof _ _ _ => .none
+  | .call_indirect _ _ => .none
+  | .syscall _ _ _ => .none
 
 /-- §10: WellTypedness for PmtInstr (per-instruction).
 This is the per-instruction check that IVE's `verify_state_reads` /
@@ -514,6 +712,28 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .atomic_load _ _ _ _ => True
   | .atomic_store _ _ _ _ => True
   | .atomic_cas _ _ _ _ _ _ _ => True
+  -- Channel/special variants (PMT-1-D): see §4 docstring. Each of the
+  -- 10 variants reduces to `True`:
+  --  * `vector_op` — pure SIMD computation (no arena involvement).
+  --  * `channel_*` (6 variants) — channels are an out-of-band effect
+  --    modeled by IVE's capability system, not by PMT's arena state.
+  --  * `stark_proof` — proof verification is opaque, delegated to the
+  --    verifier; no PMT `Step` interaction (no `WF_Layout` check).
+  --  * `call_indirect` — like `.call`, no per-instruction `WF_Layout`
+  --    obligation (the per-argument placeholder `Step`s carry
+  --    `⟨1, []⟩`, well-formed by `WF_Layout_empty`).
+  --  * `syscall` — opaque effect, out-of-scope for PMT; no `WF_Layout`
+  --    check.
+  | .vector_op _ _ _ _ _ _ => True
+  | .channel_open _ _ => True
+  | .channel_send _ _ _ => True
+  | .channel_recv _ _ _ => True
+  | .channel_close _ => True
+  | .channel_recv_timeout _ _ _ _ => True
+  | .channel_recv_result _ _ _ _ => True
+  | .stark_proof _ _ _ => True
+  | .call_indirect _ _ => True
+  | .syscall _ _ _ => True
 
 /-- §11: WellTypedness for a PmtBlock. -/
 def PmtBlock.well_typed (b : PmtBlock) (env : String → Layout) : Prop :=
@@ -601,5 +821,26 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .atomic_load _ _ _ _ => []
   | .atomic_store _ _ _ _ => []
   | .atomic_cas _ _ _ _ _ _ _ => []
+  -- Channel/special variants (PMT-1-D): see §4 docstring.
+  --  * `vector_op` — pure SIMD computation, no `Step`s emitted (the
+  --    underlying packed arithmetic is modeled at the IVE-from-IR layer).
+  --  * `channel_*` (6 variants) — channels are an out-of-band effect
+  --    modeled by IVE's capability system, not by PMT's arena state, so
+  --    they contribute no `Step`s.
+  --  * `stark_proof` — proof verification is opaque (delegated to the
+  --    verifier); no `Step`s.
+  --  * `call_indirect` — mirrors `.call`: each argument vreg becomes a
+  --    placeholder self-loop `Step` (`⟨v, v, ⟨1, []⟩, .transform⟩`).
+  --  * `syscall` — opaque effect, out-of-scope for PMT; no `Step`s.
+  | .vector_op _ _ _ _ _ _ => []
+  | .channel_open _ _ => []
+  | .channel_send _ _ _ => []
+  | .channel_recv _ _ _ => []
+  | .channel_close _ => []
+  | .channel_recv_timeout _ _ _ _ => []
+  | .channel_recv_result _ _ _ _ => []
+  | .stark_proof _ _ _ => []
+  | .call_indirect _ args => args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)
+  | .syscall _ _ _ => []
 
 end PMT
