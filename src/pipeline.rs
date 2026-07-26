@@ -5384,9 +5384,14 @@ pub fn run_ir_pipeline(
         // CRC, cap, protocol) and reports how many fold into compile-time
         // invariants (L3).
         // MANDATORY: hard-fail when L1 checks cannot be folded
-        // to compile-time L3 invariants. INV-2 found zero violations across
-        // all 1574 gold-standard tests, so promoting this from advisory to
-        // mandatory is safe.
+        // to compile-time L3 invariants. The gate is real (it inspects
+        // `IRInstr::Call` argument shapes and fires when any L1 check
+        // has a non-`Immediate` argument), but the current gold-standard
+        // suite does not exercise any L1-checked operation with a
+        // non-compile-time argument, so the gate has not fired in CI.
+        // Promotion to mandatory is forward-looking: it WILL fire on
+        // real violations once such programs appear. See
+        // docs/caveats.md §0.7.
         let collapse = vuma_ive::verification::l1l3_collapse_from_ir(&ir_program);
         if collapse.folded_checks > 0 {
             vuma_log!(
@@ -5419,8 +5424,18 @@ pub fn run_ir_pipeline(
     // Wire session_type_check and information_flow_check
     // into the pipeline.
     // MANDATORY: both checks now hard-fail on any violation.
-    // INV-2 found zero violations across all 1574 gold-standard tests for
-    // both verifiers, so promoting them from advisory to mandatory is safe.
+    // IMPORTANT — structural, not empirical: the IR-level wrappers
+    // `verify_session_types_from_ir` and `verify_information_flow_from_ir`
+    // currently hardcode their inputs (session_type=`End`, `vreg=0` for
+    // every channel op; security labels=`Public` for every flow). By
+    // construction these wrappers cannot produce violations, so "zero
+    // violations" is structural, NOT empirically validated against the
+    // gold-standard suite. The underlying verifiers
+    // (`verify_session_types` / `verify_information_flow`) DO real work
+    // on real inputs; the gap is in the wrappers' input-shaping, which
+    // awaits AST→IR label / session-type annotation propagation
+    // (deferred to IVE Wave 2). See docs/caveats.md §0.7 for the
+    // per-verifier RESTORE/DEFER decision table.
     {
         let tct = Instant::now();
         // Session type verification — MANDATORY.
