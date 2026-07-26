@@ -316,3 +316,33 @@ carve-out).
 - [Testing](testing.md) — test infrastructure
 - [Building](building.md) — build prerequisites, quick start, troubleshooting
 - Lean proof reports under `proof/` — Lean proof and build reports
+
+---
+
+## 0.5. IVE IR Divergence Plan — Wave 0
+
+**Sub-paragraph appended by IVE-0-A (Wave 0, planning task).** The "Two parallel
+SCG IRs — OPEN" row above (in §1) documents that the semantic SCG (`src/scg/src/node.rs`,
+consumed by IVE) and the codegen SCG (`src/codegen/src/scg_to_ir.rs`, consumed by
+the binary producer) are **separate types with duplicated logic**, and that the
+old semantic-SCG → codegen-SCG bridge was abandoned in favour of two independent
+AST bridges (`vuma_parser::AstToScg` for the semantic SCG;
+`vuma::pipeline::bridge_ast_to_codegen_scg` at `src/pipeline.rs:9539` for the
+codegen SCG — see the `NOTE: The canonical pipeline now uses the DIRECT AST→codegen
+SCG bridge` comments at `src/pipeline.rs:6084-6090`, `:7596-7602`, and `:8032-8037`).
+
+A concrete plan for resolving this gap has been written and lives at
+**[`PLAN_IVE_IR_DIVERGENCE.md`](../PLAN_IVE_IR_DIVERGENCE.md)** (repo root). The
+plan recommends **option (c) — document as known gap with workaround**: defer
+re-establishing the bridge (option (a), which was abandoned for cause — segfaults
++ infinite loops) and defer moving IVE to the codegen SCG (option (b), which
+would lose the typed-state payloads `StateInit`/`StateRead`/`StateWrite`/
+`StateTransform`/`ForeignConsume` that are IVE's value-add) to post-Wave-3. The
+Wave-1 workaround is a differential conformance test (`tests/ive_scg_conformance_test.rs`,
+~250 LOC, `cargo test`-only) that builds both SCGs from the same AST and asserts
+agreement on the IVE-relevant subset (layout names + total sizes; transform
+callees; state-var declarations; foreign-consume markers). Effort estimate:
+~3 engineer-days to mitigation (Wave 0 + Wave 1). No source code (`src/**`) or
+Lean proof (`proof/**`) files were modified by IVE-0-A — only this `docs/caveats.md`
+§0.5 sub-paragraph and the new `PLAN_IVE_IR_DIVERGENCE.md` plan file. This entry
+is APPEND-ONLY: no pre-existing line in this file was edited to add it.
