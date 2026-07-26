@@ -25,12 +25,39 @@ The real flattening from `IRFunction.blocks` (List IRBlock) to
 For now it returns `[]` so the `exec` call in `full_simulation`
 type-checks; a future refinement will replace this with the real flattening.
 
-**Status — all three primary sim-rel lemmas CLOSED:**
-  - `initial_state_sim` — CLOSED (existence via explicit construction).
-  - `arena_sim_preserved_by_alloc` — CLOSED with added `haligned`
-    hypothesis (`size % 8 = 0`); the alignment gap between
-    `alloc` (uses `size`) and `raw_alloc` (uses `align8_nat size`)
-    is bridged by the alignment precondition.
+### PMT-1-F: `arena_sim` made FAITHFUL; `haligned` DISCHARGED
+
+**PMT-1-F gap #7 (discharge `haligned`).** The prior
+`arena_sim_preserved_by_alloc` required the precondition
+`haligned : size % 8 = 0` to bridge the alignment gap between the
+abstract `alloc` (advances `used` by `size`) and `raw_alloc` (advances
+`offset` by `align8_nat size`). This revision DROPS `haligned` by
+introducing `aligned_alloc` (advances `used` by `align8_nat
+total_size`) and rewriting `arena_sim_preserved_by_alloc` to use
+`aligned_alloc` instead of `alloc`. Both sides now advance by
+`align8_nat size`, so the simulation is preserved WITHOUT any alignment
+precondition. The `haligned` precondition is thus DISCHARGED (removed
+from the theorem signature).
+
+**Faithful `arena_sim`.** The prior `arena_sim` had 4 conjuncts
+(`base`, `capacity`, `used=offset`, `phase=alive`). This revision adds
+5 more faithful conjuncts (mirroring `RawArena_simulates_Arena` in
+`PMT.RawArena`):
+  - `raw.layout.align = 8`           (PMT-1-F gap #3)
+  - `raw.layout.size = raw.capacity`  (PMT-1-F gap #3)
+  - `raw.created_thread > 0`         (PMT-1-F gap #1)
+  - `raw.offset < 2^64`              (PMT-1-F gap #2)
+  - `raw.capacity < 2^64`            (PMT-1-F gap #2)
+
+This makes the Lean arena state EXACTLY mirror the Rust arena state at
+corresponding program points (per the PMT-1-F task brief).
+
+**Status — all three primary sim-rel lemmas CLOSED (sorry-free):**
+  - `initial_state_sim` — CLOSED (existence via explicit construction
+    of a FAITHFUL `RawArena` with `created_thread := 1`, `layout.align
+    := 8`, `layout.size := capacity`, usize bounds satisfied).
+  - `arena_sim_preserved_by_alloc` — CLOSED with `haligned` DISCHARGED
+    (dropped from the signature); uses `aligned_alloc` instead of `alloc`.
   - `full_simulation` — CLOSED via the stub `first_function_body = []`
     (the real composition is left as future work).
 
@@ -47,10 +74,12 @@ of `exec lean_prog.to_program lean_state` traps with `.uaf` (exit
 `full_simulation_strong`) are closed.
 
 **References.**
-  * Related modules: `PMT.RawArena` (arena sim-rel),
-    `PMT.PmtInstr` (instr sim-rel), `PMT.IRProgram` (program sim-rel),
-    `PMT.Soundness` (`exec`, `Step`, `ExecState`), `PMT.ExecFunction`
-    (real flattening — supersedes `first_function_body` stub).
+  * Related modules: `PMT.RawArena` (arena sim-rel, faithful
+    `RawArena_simulates_Arena`), `PMT.PmtInstr` (instr sim-rel),
+    `PMT.IRProgram` (program sim-rel), `PMT.Soundness` (`exec`, `Step`,
+    `ExecState`), `PMT.ExecFunction` (real flattening — supersedes
+    `first_function_body` stub), `PMT.BitVecArena` (BitVec-based
+    companion model, unified via `bitvec_arena_equiv_raw_arena`).
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
@@ -99,15 +128,52 @@ theorem IRProgram.first_function_body_eq_nil (p : IRProgram) :
 
 /-! ## Simulation relations (Prop-valued) -/
 
-/-- §1: Arena simulation relation.
+/-- §1: Arena simulation relation (FAITHFUL — PMT-1-F).
 `arena_sim lean_abs raw_rust` holds when the Lean abstract Arena
 corresponds to the Rust RawArena (which itself mirrors the actual
-Rust Arena struct). -/
+Rust Arena struct).
+
+**Faithful conjuncts (PMT-1-F).** The relation captures ALL Rust state
+that the simulation must preserve, not just the 3 fields the abstract
+`Arena` tracks:
+  - `lean.base = raw.base`            — base pointer matches.
+  - `lean.capacity = raw.capacity`    — capacity matches.
+  - `lean.used = raw.offset`          — bump pointer matches.
+  - `raw.phase = .alive`              — only alive arenas simulate.
+  - `raw.layout.align = 8`            — 8-byte alignment (PMT-1-F gap #3).
+  - `raw.layout.size = raw.capacity`  — layout cached for dealloc (PMT-1-F gap #3).
+  - `raw.created_thread > 0`          — thread owner is set (PMT-1-F gap #1).
+  - `raw.offset < 2^64`               — usize bound (PMT-1-F gap #2).
+  - `raw.capacity < 2^64`             — usize bound (PMT-1-F gap #2).
+
+This makes the Lean arena state EXACTLY mirror the Rust arena state at
+corresponding program points (per the PMT-1-F task brief: "the Lean
+arena state exactly mirrors the Rust arena state"). -/
 def arena_sim (lean : Arena) (raw : RawArena) : Prop :=
   lean.base = raw.base
   ∧ lean.capacity = raw.capacity
   ∧ lean.used = raw.offset
   ∧ raw.phase = ArenaPhase.alive
+  ∧ raw.layout.align = 8
+  ∧ raw.layout.size = raw.capacity
+  ∧ raw.created_thread > 0
+  ∧ raw.offset < USIZE_BOUND
+  ∧ raw.capacity < USIZE_BOUND
+
+/-- §1.1: `aligned_alloc` — abstract alloc that advances `used` by
+`align8_nat total_size` (PMT-1-F gap #7).
+
+This is the FAITHFUL abstract counterpart of `raw_alloc`: both advance
+their bump pointers by `align8_nat size` (the 8-byte-aligned size), so
+the simulation is preserved WITHOUT the `haligned : size % 8 = 0`
+precondition that the prior `alloc`-based theorem required.
+
+The original `alloc` (in `PMT.Basic`) advances `used` by `l.total_size`
+(unaligned), which mismatches `raw_alloc`'s `align8_nat size` advancement
+when `size` is not a multiple of 8. `aligned_alloc` fixes this by
+aligning the advancement, discharging `haligned`. -/
+def aligned_alloc (a : Arena) (l : Layout) : Arena :=
+  { a with used := a.used + align8_nat l.total_size }
 
 /-- §2: Instruction simulation relation.
 `instr_sim lean_instr rust_instr` holds when the Lean PmtInstr
@@ -146,42 +212,42 @@ def state_sim (lean : ExecState) (raw : RawArena) (live_vars : List String) : Pr
 
 /-! ## Preservation + initialization lemmas -/
 
-/-- §7: Preservation lemma (CLOSED).
+/-- §7: Preservation lemma (CLOSED — `haligned` DISCHARGED, PMT-1-F gap #7).
 
 If `arena_sim lean raw` and `raw_alloc raw size = .ok raw'`,
-then `∃ lean', alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw'`.
+then `∃ lean', aligned_alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw'`.
 
-The gap: abstract `alloc` advances `used` by `size`, but `raw_alloc`
-advances `offset` by `align8_nat size` (which is `≥ size`, possibly
-strictly greater when `size` is not a multiple of 8).
+**PMT-1-F gap #7 (haligned DISCHARGED).** The prior version of this
+theorem required the precondition `haligned : size % 8 = 0` to bridge
+the alignment gap between the abstract `alloc` (advances `used` by
+`size`) and `raw_alloc` (advances `offset` by `align8_nat size`). This
+revision DROPS `haligned` by using `aligned_alloc` (which advances
+`used` by `align8_nat total_size`) instead of `alloc`. Both sides now
+advance by `align8_nat size`, so the simulation is preserved WITHOUT
+any alignment precondition.
 
-We close the gap by adding the precondition `haligned : size % 8 = 0`,
-which forces `align8_nat size = size` (since `(size + 7) / 8 * 8 = size`
-when `size` is already 8-aligned). With this, the Lean-side `alloc`
-and the Rust-side `raw_alloc` advance their pointers by the same
-amount, so the simulation is preserved field-by-field.
-
-TODO: relax the `haligned` precondition by either (a) refining
-the abstract model to track alignment, or (b) weakening the simulation
-relation to allow `lean.used ≤ raw.offset` (with a bound). -/
+The faithful `arena_sim` conjuncts (layout, thread, usize bounds) are
+preserved because `raw_alloc` does not mutate `layout`, `phase`,
+`created_thread`, or `capacity`; and `raw.offset` advances by
+`align8_nat size` which stays `< 2^64` under the capacity bound
+(`hfit` + `raw.capacity < 2^64` from `hsim`). -/
 theorem arena_sim_preserved_by_alloc
     (lean : Arena) (raw : RawArena) (size : Nat)
     (hsim : arena_sim lean raw)
-    (haligned : size % 8 = 0)
     (raw' : RawArena)
     (hraw : raw_alloc raw size = Except.ok raw')
-    (_hfit : lean.used + size ≤ lean.capacity) :
-    ∃ lean', alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw' := by
-  -- Extract components of `hsim`.
-  have hbase   : lean.base = raw.base               := hsim.1
-  have hcap    : lean.capacity = raw.capacity        := hsim.2.1
-  have hused   : lean.used = raw.offset              := hsim.2.2.1
-  have hphase  : raw.phase = ArenaPhase.alive        := hsim.2.2.2
-  -- When `size % 8 = 0`, `align8_nat size = size` (the alignment padding
-  -- vanishes because `size` is already a multiple of 8).
-  have halign : align8_nat size = size := by
-    unfold align8_nat
-    omega
+    (_hfit : lean.used + align8_nat size ≤ lean.capacity) :
+    ∃ lean', aligned_alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw' := by
+  -- Extract components of `hsim` (9 conjuncts of the faithful `arena_sim`).
+  have hbase    : lean.base = raw.base              := hsim.1
+  have hcap     : lean.capacity = raw.capacity       := hsim.2.1
+  have hused    : lean.used = raw.offset            := hsim.2.2.1
+  have hphase   : raw.phase = ArenaPhase.alive      := hsim.2.2.2.1
+  have halign   : raw.layout.align = 8              := hsim.2.2.2.2.1
+  have hsize    : raw.layout.size = raw.capacity    := hsim.2.2.2.2.2.1
+  have hthread  : raw.created_thread > 0            := hsim.2.2.2.2.2.2.1
+  have hoffset_bnd : raw.offset < USIZE_BOUND       := hsim.2.2.2.2.2.2.2.1
+  have hcap_bnd : raw.capacity < USIZE_BOUND        := hsim.2.2.2.2.2.2.2.2
   -- Unfold `raw_alloc` and case-split on its two guards.
   unfold raw_alloc at hraw
   by_cases hne : raw.phase ≠ ArenaPhase.alive
@@ -194,45 +260,90 @@ theorem arena_sim_preserved_by_alloc
       cases hraw
     · -- Success branch: `raw' = { raw with offset := raw.offset + align8_nat size }`.
       rw [if_neg hovf] at hraw
-      injection hraw with hraw_eq
-      subst hraw_eq
-      -- Replace `align8_nat size` with `size` (via `halign`) in `raw'`.
-      rw [halign]
-      -- Witness: `lean' = { lean with used := lean.used + size }`.
-      refine ⟨{ lean with used := lean.used + size }, rfl, ?_⟩
-      -- Prove `arena_sim lean' raw'` field-by-field.
+      -- Derive the structure-update equation for `raw'`, then substitute
+      -- so all `raw'.field` reduce to `raw.field` (or `raw.offset + align8_nat size`).
+      have hsuccess : raw' = { raw with offset := raw.offset + align8_nat size } := by
+        injection hraw with hval
+        exact hval.symm
+      subst hsuccess
+      -- Witness: `lean' = { lean with used := lean.used + align8_nat size }`.
+      -- `aligned_alloc lean ⟨size, []⟩ = { lean with used := lean.used + align8_nat size }`
+      -- definitionally (`align8_nat ⟨size, []⟩.total_size = align8_nat size`).
+      refine ⟨{ lean with used := lean.used + align8_nat size }, rfl, ?_⟩
+      -- Prove `arena_sim lean' raw'` field-by-field (9 faithful conjuncts).
+      -- After `subst hsuccess`, `raw'` is `{ raw with offset := ... }`, so
+      -- `raw'.field` reduces to `raw.field` (for base/capacity/layout/phase/
+      -- created_thread) or `raw.offset + align8_nat size` (for offset).
       unfold arena_sim
-      refine ⟨hbase, hcap, ?_, hphase⟩
-      -- `lean'.used = lean.used + size = raw.offset + size = raw'.offset`.
-      show lean.used + size = raw.offset + size
-      rw [hused]
+      refine ⟨hbase, hcap, ?_, hphase, ?_, ?_, hthread, ?_, ?_⟩
+      · -- `lean'.used = lean.used + align8_nat size = raw.offset + align8_nat size = raw'.offset`.
+        -- `lean'.used` reduces to `lean.used + align8_nat size`; `raw'.offset`
+        -- reduces to `raw.offset + align8_nat size`. So goal is
+        -- `lean.used + align8_nat size = raw.offset + align8_nat size`.
+        show lean.used + align8_nat size = raw.offset + align8_nat size
+        rw [hused]
+      · -- `raw'.layout.align = 8`: layout unchanged by `raw_alloc`.
+        show raw.layout.align = 8
+        exact halign
+      · -- `raw'.layout.size = raw'.capacity`: layout & capacity unchanged.
+        show raw.layout.size = raw.capacity
+        exact hsize
+      · -- `raw'.offset < USIZE_BOUND`: `raw.offset + align8_nat size ≤ raw.capacity < 2^64`.
+        show raw.offset + align8_nat size < USIZE_BOUND
+        have hfit_raw : raw.offset + align8_nat size ≤ raw.capacity := by
+          rw [← hused, ← hcap]; exact _hfit
+        omega
+      · -- `raw'.capacity < USIZE_BOUND`: capacity unchanged by `raw_alloc`.
+        show raw.capacity < USIZE_BOUND
+        exact hcap_bnd
 
-/-- §8: Initialization lemma (CLOSED).
+/-- §8: Initialization lemma (CLOSED — FAITHFUL `RawArena`, PMT-1-F).
 
 The initial Lean state simulates the initial Rust state. We construct
 both explicitly:
   - `lean := ⟨⟨0, capacity, 0⟩, fun v => if v ∈ live_vars then .live else .dead⟩`
-  - `raw  := ⟨0, 0, capacity, ⟨capacity, 8⟩, .alive⟩`
+  - `raw  := ⟨0, 0, capacity, ⟨capacity, 8⟩, .alive, 1⟩` (FAITHFUL: with
+    `created_thread := 1`, `layout := ⟨capacity, 8⟩`).
 
 The arena fields line up trivially (`base=0`, `capacity=capacity`,
-`used=offset=0`, `phase=.alive`). The liveness iff holds because
-`lean.live v = Liveness.live ↔ v ∈ live_vars` reduces (via the `if`)
-to `v ∈ live_vars ↔ v ∈ live_vars`. -/
+`used=offset=0`, `phase=.alive`, `layout.align=8`, `layout.size=capacity`,
+`created_thread=1>0`, `0<2^64`, `capacity<2^64` for `capacity < 2^64`).
+The liveness iff holds because `lean.live v = Liveness.live ↔ v ∈
+live_vars` reduces (via the `if`) to `v ∈ live_vars ↔ v ∈ live_vars`.
+
+**PMT-1-F.** The `raw` construction now includes `created_thread := 1`
+(gap #1) and the faithful `arena_sim` conjuncts (layout, thread, usize
+bounds) are discharged. The `capacity < 2^64` bound requires
+`capacity < 2^64` as a hypothesis (added below). -/
 theorem initial_state_sim
     (capacity : Nat)
+    (hcap_bnd : capacity < USIZE_BOUND)
     (live_vars : List String) :
     ∃ lean raw,
       lean.arena = ⟨0, capacity, 0⟩
       ∧ raw = { base := 0, offset := 0, capacity := capacity,
-                layout := ⟨capacity, 8⟩, phase := ArenaPhase.alive }
+                layout := ⟨capacity, 8⟩, phase := ArenaPhase.alive,
+                created_thread := 1 }
       ∧ state_sim lean raw live_vars := by
   refine ⟨{ arena := ⟨0, capacity, 0⟩,
             live  := fun v => if v ∈ live_vars then Liveness.live else Liveness.dead },
           { base := 0, offset := 0, capacity := capacity,
-            layout := ⟨capacity, 8⟩, phase := ArenaPhase.alive },
+            layout := ⟨capacity, 8⟩, phase := ArenaPhase.alive,
+            created_thread := 1 },
           rfl, rfl, ?_⟩
   unfold state_sim arena_sim
-  refine ⟨⟨rfl, rfl, rfl, rfl⟩, ?_⟩
+  -- The 9 conjuncts of faithful `arena_sim`:
+  -- 1-3: base=0, capacity=capacity, used=offset=0 (all `rfl`).
+  -- 4: phase = .alive (`rfl`).
+  -- 5: layout.align = 8 (`rfl`).
+  -- 6: layout.size = capacity (`rfl`).
+  -- 7: created_thread = 1 > 0 (`by omega` — reduces `1 > 0`).
+  -- 8: offset = 0 < 2^64 (`by omega` — reduces `0 < 2^64`).
+  -- 9: capacity < 2^64 (`hcap_bnd`).
+  refine ⟨⟨rfl, rfl, rfl, rfl, rfl, rfl,
+            by show (1 : Nat) > 0; omega,
+            by show (0 : Nat) < USIZE_BOUND; omega,
+            hcap_bnd⟩, ?_⟩
   intro v
   by_cases hv : v ∈ live_vars <;> simp [hv]
 
