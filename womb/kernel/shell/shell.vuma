@@ -117,7 +117,7 @@
 // (buf_len == name_len). PMT-pure: we cannot dereference `name` (no
 // `*ptr` syntax), so the function compares `name` to the .rodata addresses
 // of the known command-name literals — each string literal "echo" / "exit"
-// / ... lowers to a compile-time i64 address (Wave 1 .rodata feature), and
+// / ... lowers to a compile-time i64 address ( .rodata feature), and
 // string-literal deduplication guarantees that the same literal text
 // produces the same address program-wide (see src/pipeline.rs:8733 — the
 // string_table dedups by byte content). When `name` matches a known
@@ -146,7 +146,7 @@
 // ── Layouts (Shell + ShellOut) ──────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares every
 // layout it uses. The two layouts are NEW (K6f introduces them — no prior
-// wave declares Shell or ShellOut):
+// effort declares Shell or ShellOut):
 //
 //   Shell (W27S4: +68 bytes for cwd/cwd_len; W27S3: +4 bytes for
 //          line_count — now ~604 bytes total):
@@ -253,7 +253,7 @@
 // for parity with womb/kernel/kernel.vuma's extern block (which also
 // declares both `write` and `exit`), but K6f doesn't call `exit` from
 // VUMA source — the shell's `exit` command just sets `s.running = 0` and
-// lets the host's main() return naturally. (A future K7+ wave that
+// lets the host's main() return naturally. (A future K7+ effort that
 // implements the shell's main loop in VUMA — instead of in main() — will
 // call the `exit` extern when running transitions to 0.)
 //
@@ -387,7 +387,7 @@ fn shell_init(s: State<Shell>) {
 // is printed between the colon and the "> " so the prompt looks like
 // "vwk:/> " at root or "vwk:/bin> " after a future `cd /bin`.
 //
-// PMT-pure: the "vwk:" and "> " parts use Wave 1 string literals lowered to
+// PMT-pure: the "vwk:" and "> " parts use string literals lowered to
 // .rodata addresses (same pattern as W25S1). The cwd part is read from the
 // Shell state (s.cwd[0..cwd_len]) — we cannot pass s.cwd directly to write
 // (no `s.cwd as Address` on a struct field), so we copy the bytes into a
@@ -480,7 +480,7 @@ fn shell_receive(s: State<Shell>, c: u8) {
 //  (12) "false"   (5 bytes) → call shell_do_false, return.
 //  (13) otherwise          → print "?\n" (unknown command marker).
 //
-// Each shell_match_cmd call passes a Wave 1 string literal ("echo",
+// Each shell_match_cmd call passes a string literal ("echo",
 // "exit", ...) which the compiler lowers to a .rodata address. The
 // tokenizer compares buf's bytes against the named command's bytes AND
 // verifies a word boundary at buf[name_len] — so "echofoo" no longer
@@ -490,7 +490,7 @@ fn shell_receive(s: State<Shell>, c: u8) {
 // `exit` moves the cursor to the next line before the shell terminates).
 fn shell_execute(s: State<Shell>) {
     // Echo a newline first — terminates the user's input line on the
-    // terminal. W25S1: uses a Wave 1 string literal ("\n") instead of
+    // terminal. W25S1: uses a string literal ("\n") instead of
     // a fresh ShellOut + byte store.
     write(1, "\n", 1);
 
@@ -631,7 +631,7 @@ fn shell_puts(s: State<Shell>, addr: Address, len: i64) {
 // Each call writes the `len` bytes starting at .rodata address `addr` to
 // stdout (via the `write` extern — same PMT "Borrowed read" pattern as
 // shell_puts), then bumps `s.line_count` by 1. When `s.line_count` reaches
-// 24, the function emits "--More--\n" (9 bytes — Wave 1 string literal)
+// 24, the function emits "--More--\n" (9 bytes — string literal)
 // and resets `s.line_count` to 0, mimicking the standard Unix `more` /
 // `less` "press SPACE to continue" prompt.
 //
@@ -653,7 +653,7 @@ fn shell_puts(s: State<Shell>, addr: Address, len: i64) {
 // implementation here does NOT pause at all — it emits "--More--\n" and
 // immediately continues. This matches the spec's "just continue after a
 // brief pause" guidance (the brief pause being effectively zero in this
-// implementation; a K8+ wave that wires up raw-mode TTY input could add
+// implementation; a K8+ effort that wires up raw-mode TTY input could add
 // a real blocking read here). The "--More--\n" marker is still emitted
 // so the user sees where the page boundary would be on a real terminal.
 //
@@ -669,7 +669,7 @@ fn shell_puts(s: State<Shell>, addr: Address, len: i64) {
 // means if a command emits 20 lines and the next emits 10, the
 // "--More--\n" marker fires 4 lines into the second command (20 + 4 =
 // 24). This is a known simplification (real `more` resets per
-// invocation); a K7+ wave could reset `s.line_count = 0` at the top of
+// invocation); a K7+ effort could reset `s.line_count = 0` at the top of
 // shell_execute if per-command pagination is desired.
 fn shell_print_paged(s: State<Shell>, text: Address, len: u32) {
     // W26S5-S6 redirect suppression — same as shell_puts.
@@ -843,7 +843,7 @@ fn shell_handle_redir_in(s: State<Shell>, redir_pos: u32) {
 // known command-name literals — each string literal "echo" / "exit" /
 // "help" / "ls" / "cat" / "pwd" / "ver" / "ps" / "memstat" / "clear" /
 // "true" / "false" lowers to a compile-time i64
-// address (Wave 1 .rodata feature, see src/pipeline.rs:8733), and
+// address ( .rodata feature, see src/pipeline.rs:8733), and
 // string-literal deduplication guarantees that two occurrences of the
 // same literal text produce the SAME address program-wide. So `name ==
 // "echo"` is a compile-time-resolvable equality between two i64
@@ -1082,7 +1082,7 @@ fn shell_do_echo(s: State<Shell>) {
 // ────────────────────────────────────────────────────────────────────────────
 // W25S1: New built-in command stubs (help / ls / cat / pwd / ver).
 // ────────────────────────────────────────────────────────────────────────────
-// Each stub prints a fixed string via a Wave 1 string literal. The
+// Each stub prints a fixed string via a string literal. The
 // string-literal .rodata address is passed directly to `write` as the
 // `buf: Address` argument — same PMT "Borrowed read" pattern as the
 // pre-W25S1 `out as Address` cast, but zero-copy from .rodata instead
@@ -1128,14 +1128,14 @@ fn shell_do_echo(s: State<Shell>) {
 // marker would fire mid-help (the counter is persistent across commands;
 // see shell_print_paged's "Persistence" note).
 //
-// PMT-pure: each line is a Wave 1 string literal lowered to a .rodata
+// PMT-pure: each line is a string literal lowered to a .rodata
 // address, passed to shell_print_paged as the `text: Address` argument
 // (same "Borrowed read" pattern as shell_puts / shell_do_ver / etc.).
 // The byte counts passed to shell_print_paged are pre-computed at
 // authoring time (verified via Python `len()` — see the W27S2 worklog
 // entry); the compiler does NOT compute string-literal lengths
 // automatically in VUMA, so each `shell_print_paged(s, "...", N)` call
-// has a hand-verified N. A future wave could add a `strlen` extern or a
+// has a hand-verified N. A future effort could add a `strlen` extern or a
 // compiler intrinsic to avoid the manual count.
 //
 // K7+ will extend this to per-command help (`help echo` → echo docs).
@@ -1306,7 +1306,7 @@ fn shell_do_ver(s: State<Shell>) {
 // false).
 // ────────────────────────────────────────────────────────────────────────────
 // Each new built-in follows the same PMT discipline as the W25S1 stubs:
-// output text is a Wave 1 string literal lowered to a .rodata address,
+// output text is a string literal lowered to a .rodata address,
 // passed directly to `write` as the `buf: Address` argument (zero-copy
 // from .rodata — same "Borrowed read" pattern as shell_do_help /
 // shell_do_ls / shell_do_cat / shell_do_pwd / shell_do_ver). The `true`
@@ -1328,7 +1328,7 @@ fn shell_do_ver(s: State<Shell>) {
 // once the scheduler exposes a process-list iterator. Two write calls —
 // one per line — so each line is a distinct semantic unit (header vs.
 // data row), matching how the task spec frames the output ("header" +
-// "row"). Both strings are Wave 1 literals.
+// "row"). Both strings are literals.
 fn shell_do_ps(s: State<Shell>) {
     // W26S5-S6: shell_puts suppresses output when redirect_mode == 1.
     shell_puts(s, "PID  PPID  STATE\n", 17);
@@ -1350,7 +1350,7 @@ fn shell_do_memstat(s: State<Shell>) {
 // `clear` — clear the screen and home the cursor.
 // Emits the VT100 "erase entire display" (ESC[2J) + "cursor home" (ESC[H)
 // sequence — 7 bytes total: ESC(27) [(91) 2(50) J(74) ESC(27) [(91) H(72).
-// The 7-byte sequence is a single Wave 1 string literal; the lexer's
+// The 7-byte sequence is a single string literal; the lexer's
 // `\x1b` hex escape produces ESC (byte 27), and the rest is literal
 // ASCII. Same `write(1, "\x1b...", n)` pattern as console.vuma's
 // console_set_bold / console_reset_color (W23S5). This is the REAL
@@ -1407,7 +1407,7 @@ fn shell_do_false(s: State<Shell>) {
 // syntax), so — exactly like shell_match_cmd — we dispatch on the .rodata
 // ADDRESS of the `name` parameter (each `name == "echo"` / `name == "exit"`
 // / ... comparison is a compile-time-resolvable equality between two i64
-// constants, thanks to Wave 1 .rodata + string-literal deduplication). Once
+// constants, thanks to .rodata + string-literal deduplication). Once
 // we've identified which command `name` refers to, we compare / append the
 // known ASCII bytes for that command.
 //
@@ -1687,7 +1687,7 @@ fn shell_complete_name(s: State<Shell>, name: Address, name_len: u32) {
 // ensures we don't fall through to the next check.
 //
 // The count > 1 branch uses separate write() calls per match (one for the
-// name + space). Each write uses a Wave 1 string literal lowered to a
+// name + space). Each write uses a string literal lowered to a
 // .rodata address — same PMT "Borrowed read" pattern as shell_do_help /
 // shell_do_ls / etc. The matches are printed in the same canonical order
 // as the dispatch in shell_execute (echo, exit, help, ls, cat, pwd, ver,

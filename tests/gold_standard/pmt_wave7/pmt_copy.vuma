@@ -1,4 +1,4 @@
-// pmt_copy.vuma — PMT Wave 7: copy state fields
+// pmt_copy.vuma — copy state fields
 // Expected exit code: 0
 //
 // PMT migration of memory/mem_copy_buffer.vuma: instead of two

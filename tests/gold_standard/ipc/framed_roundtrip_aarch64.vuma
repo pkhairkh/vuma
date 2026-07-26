@@ -1,4 +1,4 @@
-// framed_roundtrip_aarch64 — Wave 10d: verify L1 framed channel round-trip
+// framed_roundtrip_aarch64 — verify L1 framed channel round-trip
 // on the aarch64 backend.
 //
 // Sends 42 as i64 through a framed channel (44-byte header + 8-byte payload

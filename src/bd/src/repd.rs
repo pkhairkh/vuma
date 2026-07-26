@@ -266,7 +266,7 @@ pub enum RepD {
     /// The type system proves offset + (count * elem_size) ≤ buffer_size using
     /// linear arithmetic (which is decidable — Presburger arithmetic).
     ///
-    /// # Wave 9 — Dependent state types
+    /// # — Dependent state types
     ///
     /// This variant captures the type-level shape of a dynamic data structure
     /// (linked list, dynamic array, stack). The actual element count is held
@@ -382,13 +382,13 @@ impl RepD {
     // -----------------------------------------------------------------------
     // Size & alignment queries
     //
-    // Wave 4a: RepD is the **primary type system** for VUMA. The methods on
+    // RepD is the **primary type system** for VUMA. The methods on
     // this impl block (and on `LayoutRegistry` below) are the canonical
     // queries every other crate should use — ad-hoc size/offset computation
     // (e.g. the bridge-side `build_layout_registry` in `src/pipeline.rs`,
     // which mirrors `LayoutRegistry::register` field-by-field) should be
     // migrated to call into RepD/LayoutRegistry directly. See
-    // `src/bd/src/repd.rs` and the Wave 4a worklog entry for details.
+    // `src/bd/src/repd.rs` and the worklog entry for details.
     // -----------------------------------------------------------------------
 
     /// Returns the size in bytes of this representation.
@@ -396,7 +396,7 @@ impl RepD {
     /// For compound types this is the *padded* total size so that arrays of
     /// the type are correctly laid out.
     ///
-    /// # Wave 4a — Canonical name
+    /// # — Canonical name
     ///
     /// This is the historical name; **[`RepD::size_of`] is the canonical
     /// name going forward.** Both methods delegate to the same logic and
@@ -440,7 +440,7 @@ impl RepD {
         }
     }
 
-    /// **Canonical (Wave 4a):** Returns the size in bytes of this
+    /// **Canonical:** Returns the size in bytes of this
     /// representation.
     ///
     /// This is the canonical size-query method for VUMA going forward.
@@ -678,7 +678,7 @@ impl RepD {
         }
     }
 
-    /// **Wave 9 — Dependent state types:** Compute the size of a dependent
+    /// ** — Dependent state types:** Compute the size of a dependent
     /// array given the runtime count value.
     ///
     /// The element size is the static, compile-time-known size of the array's
@@ -884,9 +884,9 @@ pub struct LayoutField {
 /// the resolved [`LayoutDef`]; subsequent `get` / `field_offset` / `field_size`
 /// queries are O(field-count) lookups against the cached layout.
 ///
-/// # Wave 4a — Canonical PMT type system
+/// # — Canonical PMT type system
 ///
-/// As of Wave 4a, `LayoutRegistry` is the **canonical** source for state
+/// As of , `LayoutRegistry` is the **canonical** source for state
 /// sizes and field offsets/size/RepD in VUMA. The methods
 /// [`state_size`](Self::state_size), [`field_offset`](Self::field_offset),
 /// [`field_size`](Self::field_size), and [`field_repd`](Self::field_repd)
@@ -907,7 +907,7 @@ pub struct LayoutField {
 ///     ("x".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
 ///     ("y".to_string(), RepD::Byte(ByteRep { size: 4, align: 4 })),
 /// ]);
-/// // Wave 4a canonical queries:
+/// // canonical queries:
 /// assert_eq!(registry.state_size(id), 8);           // total size of the state
 /// assert_eq!(registry.field_offset(id, "y"), Some(4));  // y's byte offset
 /// assert_eq!(registry.field_size(id, "x"), Some(4));    // x's byte size
@@ -1003,7 +1003,7 @@ impl LayoutRegistry {
     }
 
     // -----------------------------------------------------------------------
-    // Wave 4a — Canonical PMT queries
+    //  — Canonical PMT queries
     //
     // These are the canonical RepD/LayoutRegistry queries for the PMT
     // (Programs as Memory Transformations) type system. Code elsewhere in
@@ -1013,7 +1013,7 @@ impl LayoutRegistry {
     // call these methods directly so there is a single source of truth.
     // -----------------------------------------------------------------------
 
-    /// **Canonical (Wave 4a):** Get a state's total size in bytes.
+    /// **Canonical:** Get a state's total size in bytes.
     ///
     /// Returns the layout's `total_size` (including tail padding so arrays
     /// of the layout are correctly strided), or `0` if the layout id is
@@ -1021,7 +1021,7 @@ impl LayoutRegistry {
     /// the historical bridge behavior (`build_layout_registry` in
     /// `src/pipeline.rs` falls back to a 0-byte allocation when a layout
     /// name isn't found) and avoids panicking on a missing layout — the
-    /// IVE StateRead/StateWrite/StateTransform verifiers (Wave 3a/3b/3c)
+    /// IVE StateRead/StateWrite/StateTransform verifiers ()
     /// surface the missing-layout error separately as a verification
     /// failure.
     ///
@@ -1032,7 +1032,7 @@ impl LayoutRegistry {
         self.get(layout_id).map(|l| l.total_size).unwrap_or(0)
     }
 
-    /// **Canonical (Wave 4a):** Get a field's byte offset within a layout.
+    /// **Canonical:** Get a field's byte offset within a layout.
     ///
     /// Returns `None` if the layout id is unknown or the field name is not
     /// present in the layout. This is the canonical field-offset query —
@@ -1047,7 +1047,7 @@ impl LayoutRegistry {
             .map(|f| f.offset)
     }
 
-    /// **Canonical (Wave 4a):** Get a field's byte size.
+    /// **Canonical:** Get a field's byte size.
     ///
     /// Returns `None` if the layout id is unknown or the field name is not
     /// present in the layout. This is the canonical field-size query —
@@ -1062,7 +1062,7 @@ impl LayoutRegistry {
             .map(|f| f.size)
     }
 
-    /// **Canonical (Wave 4a):** Get a field's `RepD` type.
+    /// **Canonical:** Get a field's `RepD` type.
     ///
     /// Returns `None` if the layout id is unknown or the field name is not
     /// present in the layout. Use this to descend into nested layouts
@@ -1381,7 +1381,7 @@ mod tests {
         assert_eq!(l3.alignment(), 1);
     }
 
-    // -- RepD binary round-trip (Wave 43: migrated from serde_json) --
+    // -- RepD binary round-trip (migrated from serde_json) --
 
     #[test]
     fn byte_binary_roundtrip() {
@@ -1758,7 +1758,7 @@ mod tests {
     }
 
     // =======================================================================
-    // Wave 4a — RepD as primary type system
+    //  — RepD as primary type system
     // (canonical state_size / field_offset / field_size / field_repd /
     //  RepD::size_of queries on LayoutRegistry)
     // =======================================================================
@@ -1964,7 +1964,7 @@ mod tests {
     }
 
     // =======================================================================
-    // Wave 9 — Dependent state types (RepD::DependentArray)
+    //  — Dependent state types (RepD::DependentArray)
     // =======================================================================
 
     #[test]
@@ -2040,7 +2040,7 @@ mod tests {
     #[test]
     fn wave9_dependent_array_byte_round_trip() {
         // RepD::DependentArray serialises and deserialises through the
-        // binary protocol (Wave 43 serde replacement).
+        // binary protocol ( serde replacement).
         let dep = RepD::DependentArray {
             elem: Box::new(RepD::Byte(ByteRep { size: 4, align: 4 })),
             count_var: "n".to_string(),

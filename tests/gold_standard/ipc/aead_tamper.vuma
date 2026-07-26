@@ -1,4 +1,4 @@
-// aead_tamper — Wave D (L8): verify that aead_open DETECTS ciphertext
+// aead_tamper — (L8): verify that aead_open DETECTS ciphertext
 // tampering via the CRC32 tag and refuses to decrypt.
 //
 // The parent seals an 8-byte plaintext, then corrupts one ciphertext

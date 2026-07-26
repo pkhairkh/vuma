@@ -240,7 +240,7 @@ fn kdf_pipeline(kin: Address, kin_len: u32,
 
 // ===========================================================================
 // 4. AES-CMAC (SP 800-38B) — renamed to aes_cmac_kdf to avoid symbol
-//    conflict with aes_extra_modes.vuma (Wave 1.1).
+//    conflict with aes_extra_modes.vuma (.1).
 //    Subkey gen: L = AES_key(0^128); K1 = L<<1 (XOR 0x87 if MSB(L)=1);
 //                K2 = K1<<1 (XOR 0x87 if MSB(K1)=1).
 //    Final block: XOR with K1 if complete, or (M_n || 10..0) XOR K2 if not.

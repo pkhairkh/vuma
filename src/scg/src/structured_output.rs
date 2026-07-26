@@ -392,7 +392,7 @@ impl SCG {
 
 // ── Hand-written JSON serialization / deserialization ──────────────────
 //
-// Wave 43 serde-migration: these methods replace the `Serialize, Deserialize`
+//  serde-migration: these methods replace the `Serialize, Deserialize`
 // derives that were previously on every LLM-DTO type. The on-disk JSON shape
 // is byte-identical to what `serde_json::to_string_pretty` produced for the
 // same input — struct fields are emitted in declaration order, 2-space
@@ -1044,7 +1044,7 @@ fn node_operation(node: &NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
-        // PMT (Wave 1b → resolved by Task 10-a): full descriptions for
+        // PMT ( → resolved by Task 10-a): full descriptions for
         // the PMT / Arena / Channel node payloads. Each description
         // inlines the virtual registers and layout/type names an LLM
         // needs to reason about data flow through the node, mirroring

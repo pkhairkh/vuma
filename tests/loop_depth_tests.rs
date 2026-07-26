@@ -1,4 +1,4 @@
-//! Loop-depth-aware spill weight tests (Wave 6).
+//! Loop-depth-aware spill weight tests.
 //!
 //! These tests prove that the production register allocator now computes
 //! loop-nesting depth for each vreg and uses it in spill decisions —

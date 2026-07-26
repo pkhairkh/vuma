@@ -1,7 +1,7 @@
 //! Minimal JSON value type, parser, and pretty-printer for the root `vuma`
 //! crate.
 //!
-//! Wave 45 serde-migration: this module replaces `serde_json::Value` /
+//! serde-migration: this module replaces `serde_json::Value` /
 //! `serde_json::to_string` / `serde_json::to_string_pretty` /
 //! `serde_json::from_str` usage in `src/diagnostics.rs`, `src/telemetry.rs`,
 //! `src/lsp/mod.rs`, `src/llm_api.rs`, `src/api.rs`, `src/pipeline.rs`,
@@ -15,7 +15,7 @@
 //!
 //! The crate previously derived `Serialize, Deserialize` on every JSON-facing
 //! type and used `serde_json::to_string(&t)` / `serde_json::to_string_pretty`
-//! / `serde_json::from_str::<T>(&s)`. Wave 45 strips serde from the root
+//! / `serde_json::from_str::<T>(&s)`. strips serde from the root
 //! crate (the last crate in the workspace still using proc macros). To keep
 //! the on-disk JSON shape (consumed by external LLMs and LSP clients)
 //! unchanged, this module produces byte-identical JSON to what

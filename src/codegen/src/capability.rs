@@ -1,8 +1,8 @@
-//! Capability tokens (Wave 11 — L2 Runtime Encapsulation).
+//! Capability tokens.
 //!
 //! This module is the canonical home for capability-token types and
 //! operations. The implementations live in [`crate::ipc::capability`]
-//! (added in a prior wave); this file re-exports them so that the
+//! (added in a prior effort); this file re-exports them so that the
 //! compiler pipeline can `use crate::capability::*` without reaching
 //! into the `ipc` module's internals.
 //!
@@ -65,11 +65,11 @@ pub use crate::ipc::capability::{
     MAX_DELEGATION_DEPTH, MAX_RESOURCE_STRING, RESOURCE_FIELD_SIZE, RESOURCE_OFFSET,
 };
 
-// Re-export the grant/verify/delegate functions (Wave 11b/11c/11d) and
-// the delegation-chain verifier (Wave 33+) for pipeline consumers.
+// Re-export the grant/verify/delegate functions () and
+// the delegation-chain verifier (+) for pipeline consumers.
 pub use crate::ipc::capability::{grant_capability, verify_capability, verify_delegation_chain};
 
-// ── Wave 33-40: Capability Delegation ───────────────────────────────────
+// ── Capability Delegation ───────────────────────────────────
 //
 // `delegate_capability` is a real, self-contained function (not a re-export)
 // that mints a delegated child capability token. It calls
@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn test_capability_module_re_exports_compile() {
         // Smoke test: the re-exported symbols are reachable and have the
-        // expected types. This is the acceptance test for Wave 11a —
+        // expected types. This is the acceptance test —
         // "Capability module exists" and "CapabilityToken struct defined".
         let _ = MemoryPermissions::default();
         let _ = MAX_DELEGATION_DEPTH;
@@ -228,7 +228,7 @@ mod tests {
         );
     }
 
-    /// Wave 33-40: delegate_capability produces a non-zero child id that
+    /// delegate_capability produces a non-zero child id that
     /// is distinguishable from the parent (high bit set + increment).
     #[test]
     fn test_delegate_capability_produces_nonzero_child_id() {

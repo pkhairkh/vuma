@@ -426,7 +426,7 @@ impl Instruction {
             // Alpha branch opcodes (Alpha ARM §C.2):
             //   0x38 BLBC, 0x39 BEQ, 0x3A BLT, 0x3B BLE,
             //   0x3C BLBS, 0x3D BNE, 0x3E BGE, 0x3F BGT.
-            // (Wave-6 fix: Blt and Bgt were previously swapped — Blt used
+            // ( fix: Blt and Bgt were previously swapped — Blt used
             // 0x3F=BGT and Bgt used 0x3A=BLT, which caused print_int to treat
             // positive values as negative on QEMU-alpha.)
             Instruction::Blt { ra, disp } => op_br(0x3A, *ra, *disp),
@@ -3139,13 +3139,13 @@ impl Backend for AlphaBackend {
         //     __NR_exit = 1, __NR_read = 3, __NR_write = 4, __NR_open = 5,
         //     __NR_close = 6, __NR_mmap = 113, __NR_munmap = 111, __NR_brk = 17,
         //     __NR_mprotect = 50, etc.
-        //   [wave 6 — mmap ABI normalization, verified] alpha's __NR_mmap (71) is
+        //   [— mmap ABI normalization, verified] alpha's __NR_mmap (71) is
         //   the DIRECT 6-arg form: (addr, len, prot, flags, fd, offset) all passed
         //   in R16-R21, with `offset` in BYTES (alpha has no mmap2; the generic
         //   sys_mmap handles byte→page conversion in-kernel). Both __vuma_alloc
         //   (which sets R21=0) and the custom `mmap` stub pass the caller's
         //   R16-R21 straight through with the SAME offset unit (bytes, via R21),
-        //   satisfying the wave-6 "same offset-unit handling as __vuma_alloc"
+        //   satisfying the effort-6 "same offset-unit handling as __vuma_alloc"
         //   requirement. Alpha passes 6 args in R16-R21, so no stack-arg plumbing
         //   is needed.
         //
@@ -3303,7 +3303,7 @@ impl Backend for AlphaBackend {
                 ("recvfrom", 102),
                 ("clone", 220),
                 ("fork", 2),
-                // [wave 9 fix] epoll numbers corrected from kernel alpha syscall.tbl:
+                // [fix] epoll numbers corrected from kernel alpha syscall.tbl:
                 //   old (wrong): 449/424/425 (those are migrate_pages/tgkill/stat64)
                 //   correct:      486/408/409
                 ("epoll_create1", 486),
@@ -3796,7 +3796,7 @@ impl Backend for AlphaBackend {
         // Algorithm: negate if negative (emit '-'), divmod-10 loop backwards,
         // then write the digit string.  Handles n=0 by emitting a single '0'.
         //
-        // Wave-6 fix: QEMU-alpha user-mode (10.x) does NOT implement DIVQ /
+        //  fix: QEMU-alpha user-mode (10.x) does NOT implement DIVQ /
         // DIVQU / CMPULE (they raise SIGILL).  The previous stub used DIVQ +
         // MULQ to extract each decimal digit; this rewrite uses the same
         // 64-bit shift-and-subtract division algorithm the main codegen uses
@@ -3830,7 +3830,7 @@ impl Backend for AlphaBackend {
                 }
                 .encode(),
             );
-            // BLT R2, .neg  (placeholder)  [encoder fixed in Wave-6: 0x3A=BLT]
+            // BLT R2, .neg (placeholder) [encoder fixed in 0x3A=BLT]
             code.extend(
                 Instruction::Blt {
                     ra: Gpr::R2,
@@ -4114,7 +4114,7 @@ impl Backend for AlphaBackend {
             // BLT at blt_pos → .neg at br_start_pos+4
             let blt_target = br_start_pos + 4;
             let blt_disp = ((blt_target as i64) - (blt_pos as i64) - 4) / 4;
-            patch_alpha_branch(&mut code, blt_pos, 0x3A, Gpr::R2, blt_disp as i32); // 0x3A = BLT (Wave-6 fix)
+            patch_alpha_branch(&mut code, blt_pos, 0x3A, Gpr::R2, blt_disp as i32); // 0x3A = BLT ( fix)
                                                                                     // BR at br_start_pos → .start at start_offset
             let br_disp = ((start_offset as i64) - (br_start_pos as i64) - 4) / 4;
             patch_alpha_branch(&mut code, br_start_pos, 0x30, Gpr::R31, br_disp as i32);
@@ -4145,7 +4145,7 @@ impl Backend for AlphaBackend {
         // ── print_hex(n) → void — hex conversion + write(1, buf, len)
         // Alpha: a0=R16=n.  Prints up to 16 hex digits + newline.
         //
-        // Wave-6 fix: replaced CMPULE (opcode 0x10 fn 0x3F) with CMPULT
+        //  fix: replaced CMPULE (opcode 0x10 fn 0x3F) with CMPULT
         // (opcode 0x10 fn 0x1D) — QEMU-alpha does not implement CMPULE.
         // The test "R3 <= 9" becomes "R3 < 10" (R9 now holds 10, not 9);
         // the BEQ R8, .alpha branch logic is unchanged.
@@ -4182,7 +4182,7 @@ impl Backend for AlphaBackend {
                     rc: Gpr::R9,
                 }
                 .encode(),
-            ); // R9 = 10 (Wave-6: was 9)
+            ); // R9 = 10 (was 9)
             code.extend(
                 Instruction::AddqLi {
                     ra: Gpr::R31,
@@ -4241,7 +4241,7 @@ impl Backend for AlphaBackend {
                 }
                 .encode(),
             ); // R7 = R3 + '0'
-               // R8 = (R3 < R9) i.e. (R3 < 10)  — CMPULT (Wave-6: was CMPULE <= 9)
+               // R8 = (R3 < R9) i.e. (R3 < 10) — CMPULT (was CMPULE <= 9)
             code.extend_from_slice(&op_reg(0x10, Gpr::R3, Gpr::R9, Gpr::R8, 0x1D).to_le_bytes());
             code.extend(
                 Instruction::Beq {

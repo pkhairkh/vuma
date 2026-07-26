@@ -99,7 +99,7 @@
 //   - procfs_init stores read_fn = 0 for all 4 entries (the same "hosted
 //     stub" convention K6d's char.vuma uses for its 5 cdev fn pointers).
 //   - procfs_read checks `read_fn != 0`; if true, it invokes
-//     __call_indirect1(read_fn, buf as u64) (the Wave 5 indirect-call
+//     __call_indirect1(read_fn, buf as u64) (the indirect-call
 //     trampoline — same stub declared in dispatch.vuma / irq.vuma /
 //     char.vuma). This path is NEVER taken in hosted mode (read_fn stays
 //     0), so the binary never executes `jmp rax` with rax=0 (which would
@@ -116,11 +116,11 @@
 // once read_fn is provably non-zero) but stays in source as the
 // hosted-mode self-test path.
 //
-// ── Wave 1 string literals for file content ────────────────────────────────
+// ── string literals for file content ────────────────────────────────
 // The 4 read functions (procfs_read_meminfo / cpuinfo / version / uptime)
-// produce their content as Wave 1 string literals — `"MemTotal: 16384
+// produce their content as string literals — `"MemTotal: 16384
 // kB\nMemFree: 8192 kB\n"` etc. — passed directly to `write(1, lit, n)`
-// as `buf: Address`. Wave 1 lowers a string literal to a .rodata address
+// as `buf: Address`. lowers a string literal to a .rodata address
 // (see src/pipeline.rs:8733 — Lit::String → ScgExpr::Int(rodata_vaddr +
 // offset)), and `write` accepts the Address directly (same PMT "Borrowed
 // read" pattern as shell.vuma's `write(1, "vwk: ", 5)` and trap.vuma's
@@ -167,7 +167,7 @@
 // The two externs (`write` + `__call_indirect1`) are declared in ONE
 // extern block — same category as K1a's trampoline.vuma, K3f's io.vuma,
 // K12a's panic.vuma, and W24S1's char.vuma. `write` is a hosted syscall
-// stub (nr 1 on x86_64); `__call_indirect1` is the Wave 5 indirect-call
+// stub (nr 1 on x86_64); `__call_indirect1` is the indirect-call
 // trampoline (`mov rax,rdi; mov rdi,rsi; jmp rax`).
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
@@ -256,7 +256,7 @@
 // pointer handed to the syscall. Same declaration as io.vuma:167,
 // trap.vuma:216, panic.vuma:98.
 //
-// `__call_indirect1` is the Wave 5 indirect-call trampoline (same stub
+// `__call_indirect1` is the indirect-call trampoline (same stub
 // as dispatch.vuma:226, irq.vuma:276, char.vuma:239). Lowers to
 // `mov rax,rdi; mov rdi,rsi; jmp rax` — a tail call that invokes the
 // function at `ptr` with `arg` in RDI (SysV AMD64 first-argument
@@ -270,11 +270,11 @@
 extern "C" {
     // sys_write (nr 1): write `count` bytes from `buf` to fd `fd`. Used
     // by the 4 procfs_read_<name> functions to emit their file content
-    // via Wave 1 string literals. The `buf: Address` accepts a .rodata
+    // via string literals. The `buf: Address` accepts a .rodata
     // literal address directly (no State<T> marshal).
     fn write(fd: i64, buf: Address, count: i64) -> i64;
 
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by procfs_read to
     // invoke the per-entry read_fn on the K11+ path. Same stub category
     // as write — NOT a C library function. Real asm body registered in
@@ -740,7 +740,7 @@ fn procfs_init(data: State<ProcfsData>) {
 // reasoning). `buf` and `count` are passed through to the read_fn
 // (hosted-mode path) or forwarded as `buf as u64` (K11+ path). The
 // hosted-mode read_fns ignore `buf` and `count` in their bodies — they
-// use Wave 1 string literals for content (see procfs_read_meminfo below).
+// use string literals for content (see procfs_read_meminfo below).
 
 fn procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i64 {
     // Look up the entry by ino. procfs_find_by_ino returns 16 if no
@@ -768,7 +768,7 @@ fn procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i
 
     // Hosted-mode fallback: direct dispatch on `ino`. The 4 canonical
     // /proc entries each have a dedicated procfs_read_<name> function
-    // that emits the file content via a Wave 1 string literal + write.
+    // that emits the file content via a string literal + write.
     // The switch returns -ENOSYS for any ino without a handler —
     // defensive (procfs_init wires all 4, so this branch is unreachable
     // for ino in {1, 2, 3, 4}, but a future caller might register an
@@ -784,7 +784,7 @@ fn procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i
 // Per-file read handlers.
 // ────────────────────────────────────────────────────────────────────────────
 // Each handler writes its file content via `write(1, "content", n)` —
-// a Wave 1 string literal passed directly as `buf: Address` to the
+// a string literal passed directly as `buf: Address` to the
 // `write` extern. The literal lowers to a .rodata address (see
 // src/pipeline.rs:8733 — Lit::String → ScgExpr::Int(rodata_vaddr +
 // offset)), and `write` accepts the Address directly (same PMT

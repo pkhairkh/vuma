@@ -3,7 +3,7 @@
 //! Every foreign call is classified into an argument mode per argument, a
 //! return mode, and optionally a callback mode. This module provides the
 //! classification helpers and the marshal-result types that the codegen
-//! bridge (scg_to_ir.rs, Wave 5) consumes.
+//! bridge (scg_to_ir.rs, ) consumes.
 //!
 //! # Argument modes
 //! - `Borrow` (`#[borrow]`): C reads the State's buffer directly (zero-copy),

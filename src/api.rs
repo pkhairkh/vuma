@@ -1793,13 +1793,13 @@ mod tests {
         assert!(result.diagnostics.is_empty(), "No diagnostics expected");
     }
 
-    /// (Wave 19) The cleanup-extractor false positive on top-level `region`
+    /// The cleanup-extractor false positive on top-level `region`
     /// declarations has been fixed: `extract_cleanup_graph` now marks
     /// allocations with no incoming `ControlFlow` edge as static-lifetime
     /// (spec §5.4), and both `CleanupVerifier::dfs_verify` and
     /// `LivenessVerifier::check_resource_leaks` filter out leak reports
     /// for static-lifetime resources. This test now runs with full
-    /// `Normal` verification to guard against regressions. (Wave 20's
+    /// `Normal` verification to guard against regressions. (the
     /// memory-safety blocking pass is also kept enabled via the default
     /// `memory_safety: true`.)
     #[test]

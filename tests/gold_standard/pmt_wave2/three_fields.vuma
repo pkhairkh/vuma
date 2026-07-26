@@ -1,4 +1,4 @@
-// three_fields — PMT Wave 2: three u32 fields, sum all
+// three_fields — three u32 fields, sum all
 // Expected exit code: 6
 //
 // Declares `Triple = { a: u32, b: u32, c: u32 }` (12 bytes total).

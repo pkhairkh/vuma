@@ -1,7 +1,7 @@
 // inbounds_array_read — Array read within bounds
 // Expected exit code: 42
 //
-// Bounds Wave 1 positive test: allocate a 16-byte buffer (via PMT
+// Bounds positive test: allocate a 16-byte buffer (via PMT
 // state_new of a layout containing a `[u8; 16]` array field), write
 // the value 42 to index 0, then read it back. With `--safe`, the
 // index 0 is within `[0, 16)` so no `__oob_trap` fires and execution

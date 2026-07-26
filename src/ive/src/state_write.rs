@@ -21,7 +21,7 @@ pub struct StateWriteVerification {
 }
 
 /// Layout info (same structure as state_read.rs — duplicated to keep modules
-/// independent for parallel development; will be unified in Wave 3d).
+/// independent for parallel development; will be unified in ).
 #[derive(Debug, Clone)]
 pub struct LayoutInfo {
     pub name: String,

@@ -1,4 +1,4 @@
-// modify_state — PMT Wave 2: callee modifies state, caller reads
+// modify_state — callee modifies state, caller reads
 // Expected exit code: 55
 //
 // `fn set_x(p: State<Point>, v: u32)` modifies p.x in the callee. main

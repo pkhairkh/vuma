@@ -14,11 +14,11 @@
 //! - **LoopOptimizer** — Identifies natural loops, checks unroll eligibility,
 //!   and performs loop unrolling.
 //!
-//! ## Wave 35 decision: DELETE exception & coroutine lowerers
+//! ## decision: DELETE exception & coroutine lowerers
 //!
 //! The previous `ExceptionLowerer` (lowers `IRTerminator::Invoke`) and
 //! `CoroutineLowerer` (transforms coroutine functions into state-machine IR)
-//! were removed in Wave 35 because the `.vuma` language has **no syntax** that
+//! were removed because the `.vuma` language has **no syntax** that
 //! can feed them:
 //!
 //! - **Exceptions**: The lexer (`src/parser/src/lexer.rs`) has no `try`,
@@ -39,7 +39,7 @@
 //! The `IRTerminator::Invoke` and `IRTerminator::Resume` enum variants still
 //! exist in `src/codegen/src/ir.rs` (outside this file's ownership) and are
 //! handled defensively by `successor_indices` for IR-walking safety; they are
-//! simply never produced. Removing the enum variants is out of scope for Wave 35.
+//! simply never produced. Removing the enum variants is out of scope for .
 //!
 //! Adding speculative language syntax is risky and explicitly out of scope, so
 //! the decision is to DELETE both lowerers rather than wire them.
@@ -838,7 +838,7 @@ pub struct LoopInfo {
 /// Identifies natural loops, checks unroll eligibility, and performs loop
 /// unrolling on IR functions.
 ///
-/// **Wave 34 — production-vs-helper split.** Production loop *unrolling*
+/// ** — production-vs-helper split.** Production loop *unrolling*
 /// uses [`crate::loop_unroll`] (W30), which has SCEV-based trip-count
 /// analysis, a code-size budget, and multi-block unrolling support. This
 /// `LoopOptimizer` is kept as a **structural loop-normalization helper**:
@@ -1215,7 +1215,7 @@ impl LoopOptimizer {
 }
 
 // ===========================================================================
-// Pipeline entry points (Wave 34)
+// Pipeline entry points
 // ===========================================================================
 //
 // The free functions below are the pipeline integration surface for this
@@ -2185,11 +2185,11 @@ mod tests {
         assert_eq!(LoopOptimizer::choose_unroll_factor(&odd_trip, 4), 1);
     }
 
-    /// Wave 35 regression / decision test.
+    /// regression / decision test.
     ///
-    /// `ExceptionLowerer` and `CoroutineLowerer` were deleted in Wave 35
+    /// `ExceptionLowerer` and `CoroutineLowerer` were deleted in
     /// because `.vuma` has no syntax that feeds them (see the module-level
-    /// "Wave 35 decision" doc comment for the full audit). This test
+    /// " decision" doc comment for the full audit). This test
     /// verifies that the surviving lowerers — `SwitchLowerer`,
     /// `TailCallLowerer`, and `LoopOptimizer` — still work end-to-end on a
     /// hand-built IR after the deletion, and that the file still compiles
@@ -2285,7 +2285,7 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────────────────────────
-    // Wave 34 — pipeline entry-point tests
+    //  — pipeline entry-point tests
     // ───────────────────────────────────────────────────────────────────
 
     /// Helper: build an `IRProgram` containing a single function with a
@@ -2324,7 +2324,7 @@ mod tests {
         prog
     }
 
-    /// Wave 34: `lower_switches` rewrites an 8-case `Switch` terminator
+    /// `lower_switches` rewrites an 8-case `Switch` terminator
     /// into a lowered block sequence (jump table for dense ranges) and
     /// leaves no `IRTerminator::Switch` in the function.
     #[test]
@@ -2377,7 +2377,7 @@ mod tests {
         );
     }
 
-    /// Wave 34: `lower_switches` is a no-op on functions with no Switch
+    /// `lower_switches` is a no-op on functions with no Switch
     /// terminators (preserves block count).
     #[test]
     fn test_lower_switches_noop_without_switch() {
@@ -2396,7 +2396,7 @@ mod tests {
         );
     }
 
-    /// Wave 34: `lower_tail_calls` detects a self-recursive tail call
+    /// `lower_tail_calls` detects a self-recursive tail call
     /// `fn f(n) { if n>0 { return f(n-1); } else { return 0; } }` and
     /// rewrites the tail-position Call+Return pair into a single
     /// `IRTerminator::TailCall`.
@@ -2500,7 +2500,7 @@ mod tests {
         );
     }
 
-    /// Wave 34: `lower_tail_calls` does NOT convert a Call whose result
+    /// `lower_tail_calls` does NOT convert a Call whose result
     /// is used by something other than the Return (non-tail position).
     #[test]
     fn test_lower_tail_calls_skips_non_tail() {
@@ -2546,7 +2546,7 @@ mod tests {
         );
     }
 
-    /// Wave 34: `normalize_loops` inserts a preheader block so that every
+    /// `normalize_loops` inserts a preheader block so that every
     /// loop header has exactly one *outside* predecessor. We build a
     /// function where the loop header has TWO outside predecessors
     /// (`entry` and `side_entry` both reach `header`); after
@@ -2659,7 +2659,7 @@ mod tests {
         );
     }
 
-    /// Wave 34: `normalize_loops` is idempotent — running it on
+    /// `normalize_loops` is idempotent — running it on
     /// already-normalized IR (header has only one outside predecessor)
     /// is a no-op (no new preheader is inserted).
     #[test]

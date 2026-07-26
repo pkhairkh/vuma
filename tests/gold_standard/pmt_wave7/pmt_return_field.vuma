@@ -1,4 +1,4 @@
-// pmt_return_field.vuma — PMT Wave 7: return a field from a state param
+// pmt_return_field.vuma — return a field from a state param
 // Expected exit code: 42
 //
 // `fn get_y(p: State<Point>) -> u32 { return p.y; }` — the callee reads

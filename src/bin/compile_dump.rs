@@ -120,7 +120,7 @@ fn compile_for_backend_with_path(
         result.unwrap()
     };
 
-    // (Wave A / PMT-only) Build the PMT layout registry up-front from
+    // (MT-only) Build the PMT layout registry up-front from
     // the AST's `Item::LayoutDef` items so the IVE's
     // `VerificationLevel::Pmt` can run the 3 state verifiers
     // (state_read / state_write / state_transform) with full layout info.
@@ -139,7 +139,7 @@ fn compile_for_backend_with_path(
     use vuma_scg::SCGPass;
     let _ = vuma_scg::InterproceduralAllocFlow::new().run(&mut scg);
 
-    // Wave 2: Run SCG-level O3 transforms BEFORE IVE verification and IR
+    // Run SCG-level O3 transforms BEFORE IVE verification and IR
     // building, mirroring `compile_with_path` Stage 7. In VUMA 2.0 O3 is
     // mandatory, so `run_scg_transforms` always runs the full O3 SCG pass
     // set (DCE, const-fold, CSE, inlining, LICM, strength reduction,
@@ -162,7 +162,7 @@ fn compile_for_backend_with_path(
         // on `compile_dump` (the canonical `vuma build` / `vuma compile` path
         // in `pipeline.rs` was the only one that honored it).
         runtime_bounds_checks: safe,
-        // Wave 5: Disable inlining so functions referenced via GetAddress
+        // Disable inlining so functions referenced via GetAddress
         // (function pointers) survive the O3 pipeline. Without this, simple
         // functions like `fn my_handler(x: u64) -> u64 { return x + 1; }`
         // get inlined into their callers, and GetAddress can't find them.
@@ -179,13 +179,13 @@ fn compile_for_backend_with_path(
     // `NoChecks` are non-blocking (matching `compile_with_path`'s default
     // non-strict behaviour).
     //
-    // Wave 2: IVE now verifies the O3-optimized SCG (run_scg_transforms
+    // IVE now verifies the O3-optimized SCG (run_scg_transforms
     // was already applied above at O3). The previous local O0 config +
     // redundant O0 run_scg_transforms call have been removed so there is
-    // a single consistent SCG state. Wave 7 double-checks IVE
+    // a single consistent SCG state. double-checks IVE
     // correctness on the optimized SCG.
     //
-    // Wave 7 / Wave A: the IVE ALWAYS runs ONLY the 3 state verifiers
+    // the IVE ALWAYS runs ONLY the 3 state verifiers
     // (state_read / state_write / state_transform) via
     // `VerificationLevel::Pmt`. Memory safety for PMT programs is a
     // type-checking property (layouts + state ops), not a verification
@@ -227,9 +227,9 @@ fn compile_for_backend_with_path(
                 result.summary.failed
             ));
         }
-        // (Gap 1 full flip, Wave 3-e relaxation) Inconclusive is a HARD
+        // (Gap 1 full flip, -e relaxation) Inconclusive is a HARD
         // failure by default in `compile_dump`. The new `--allow-inconclusive`
-        // flag (Wave 3-e) downgrades it to a stderr warning so users no
+        // flag (-e) downgrades it to a stderr warning so users no
         // longer have to drop down to `vuma compile --allow-inconclusive`
         // (canonical pipeline, `pipeline.rs:5186`) to soft-pass with a logged
         // soundness waiver. `Fail` remains a hard error regardless of the
@@ -299,10 +299,10 @@ fn compile_for_backend_with_path(
 
     for _ds in &ir_program.data_sections {}
 
-    // Wave 2: Run the full post-IR-build O3 pipeline via the shared
+    // Run the full post-IR-build O3 pipeline via the shared
     // `run_ir_pipeline` helper (same path as `compile_with_path`). This
-    // runs Wave 34 lowering (monomorphize, closures, switches, tail-calls,
-    // loop-normalize), Wave 36 bv_verify, the Wave 10 syscall allowlist,
+    // runs lowering (monomorphize, closures, switches, tail-calls,
+    // loop-normalize), bv_verify, the syscall allowlist,
     // Stage 8b codegen-opt with the REAL backend latency table, and Wave
     // 32 escape+effects/SROA. Previously compile_dump only ran
     // `run_optimizations` (IR-level opts, default latency table) — skipping
@@ -390,7 +390,7 @@ fn compile_for_backend_with_path(
     })
     .map_err(|e| format!("regalloc: {}", e))?;
     let total_code: usize = allocated.iter().map(|f| f.code_size).sum();
-    // Wave 1: Collect all ReadOnly data sections (string literals) into a
+    // Collect all ReadOnly data sections (string literals) into a
     // single rodata byte vector for the backend to emit in .rodata.
     let rodata_data: Vec<u8> = ir_program
         .data_sections
@@ -398,7 +398,7 @@ fn compile_for_backend_with_path(
         .filter(|ds| ds.kind == vuma_codegen::ir::DataSectionKind::ReadOnly)
         .flat_map(|ds| ds.data.iter().copied())
         .collect();
-    // Wave 5: Collect all function names from the AST so the backend can
+    // Collect all function names from the AST so the backend can
     // distinguish function symbols (text) from data symbols (bss).
     // Functions removed by the O3 optimizer but still referenced via
     // GetAddress must not be classified as data symbols.
@@ -581,15 +581,15 @@ fn main() {
     // `VerificationLevel::Pmt` and the PMT layout registry is always
     // built (cheap — empty map if no `layout` items). There is no
     // `// ive_skip` source marker. IVE verification CAN now be skipped
-    // via the `--no-verify` flag (see below) — added in Wave 3-e as a
+    // via the `--no-verify` flag (see below) — added in -e as a
     // debugging escape hatch; not recommended for production builds.
     //
-    // IVE verification flags (Wave 3-e):
+    // IVE verification flags (-e):
     //   --verify              explicitly enable IVE (the default; accepted
     //                          for backwards compat — previously a no-op
     //                          that silently fell through to the positional
     //                          vector and was mis-parsed as a backend name).
-    //   --no-verify           skip IVE entirely. NEW in Wave 3-e — intended
+    //   --no-verify skip IVE entirely. NEW in -e — intended
     //                          for debugging the codegen pipeline when IVE
     //                          is known to fail spuriously. NOT recommended
     //                          for production builds: PMT soundness is
@@ -628,7 +628,7 @@ fn main() {
                 verify = true;
                 false
             } else if *a == "--no-verify" {
-                // NEW (Wave 3-e): skip IVE entirely. Debugging escape hatch.
+                // NEW (-e): skip IVE entirely. Debugging escape hatch.
                 verify = false;
                 eprintln!(
                     "warning: --no-verify skips IVE PMT verification; \
@@ -636,7 +636,7 @@ fn main() {
                 );
                 false
             } else if *a == "--allow-inconclusive" {
-                // NEW (Wave 3-e): downgrade Inconclusive from hard error to
+                // NEW (-e): downgrade Inconclusive from hard error to
                 // warning. Parity with `vuma compile --allow-inconclusive`.
                 allow_inconclusive = true;
                 false
@@ -681,7 +681,7 @@ fn main() {
     ) {
         Ok(v) => v,
         Err(e) => {
-            // Wave A (PMT-only): print a clean compile-error message to
+            //  (PMT-only): print a clean compile-error message to
             // stderr and exit non-zero instead of panicking via
             // `.unwrap()`. The iso_test driver treats any non-zero exit as
             // `CE` (compile error), which is the desired outcome for

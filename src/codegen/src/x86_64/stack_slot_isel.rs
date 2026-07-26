@@ -25,7 +25,7 @@ use crate::backend::{
 use crate::ir::{
     BinOpKind, CastKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind, VectorOpKind,
 };
-// Wave 12b: capability tokens are verified on receive by checking the
+// capability tokens are verified on receive by checking the
 // cap_count field in the L1 frame header. The CapabilityToken type
 // (crate::capability::CapabilityToken) defines the wire format that the
 // cap_count field counts; full HMAC-SHA256 signature verification
@@ -113,7 +113,7 @@ use super::{
     encode_shr_reg_cl,
     encode_sqrtsd_xmm_xmm,
     encode_sqrtss_xmm_xmm,
-    // ── SSE/AVX SIMD encoders (Wave 29 ISel wiring) ──
+    // ── SSE/AVX SIMD encoders ( ISel wiring) ──
     encode_sse_paddq,
     encode_sse_pmulld,
     encode_sse_psubd,
@@ -166,7 +166,7 @@ use super::{
 /// so it jumps to `target_off`.  `patch_off` is the byte offset of the Jcc
 /// instruction inside `code`; the rel32 field lives at `patch_off + 2`.
 ///
-/// Used by the `ChannelRecvResult` codegen (Wave 8b) to back-patch the
+/// Used by the `ChannelRecvResult` codegen to back-patch the
 /// magic / cap / proto / closed fall-through branches once the fail-path
 /// offsets are known.
 fn patch_rel32_jcc(code: &mut [u8], patch_off: usize, target_off: usize) {
@@ -190,7 +190,7 @@ fn patch_rel32_jmp(code: &mut [u8], patch_off: usize, target_off: usize) {
     code[patch_off + 4] = bd[3];
 }
 
-/// Wave 10b: emit an inline CRC32 loop over the 52 bytes at `[rsp+0..52]`
+/// emit an inline CRC32 loop over the 52 bytes at `[rsp+0..52]`
 /// (the L1 frame header + payload, excluding the trailing 4-byte CRC field)
 /// and leave the result in **R8** (64-bit, with the meaningful CRC in the
 /// low 32 bits = R8D).
@@ -227,7 +227,7 @@ fn emit_crc32_frame_loop() -> Vec<u8> {
 ///
 /// This is the same algorithm as the framed-channel `emit_crc32_frame_loop`
 /// but parameterized over the base register, offset, and byte count so it
-/// can be reused by the L6 checkpoint integrity hash (Wave 19-21) and any
+/// can be reused by the L6 checkpoint integrity hash and any
 /// other caller that needs a CRC32 over an arbitrary memory range.
 fn emit_crc32_range(base: Gpr, offset: i32, byte_count: u32) -> Vec<u8> {
     let mut code = Vec::with_capacity(90);
@@ -452,7 +452,7 @@ fn emit_crc32_range_dynamic(base_reg: Gpr, offset_reg: Gpr, len_reg: Gpr) -> Vec
     code
 }
 
-/// Wave C (L2 cap signatures): emit a real FNV-1a 64-bit hash loop over
+/// (L2 cap signatures): emit a real FNV-1a 64-bit hash loop over
 /// `byte_count` bytes starting at `[base + offset]`, prefixed with a 1-byte
 /// `salt`. The u64 result is left in **R8** (upper 32 bits may be non-zero —
 /// callers must compare with a 64-bit load, not a zero-extended 32-bit load).
@@ -524,7 +524,7 @@ fn emit_fnv1a_64_loop(base: Gpr, offset: i32, byte_count: u32, salt: u8) -> Vec<
     code
 }
 
-/// Wave I (zk-STARK): emit a real FNV-1a 64-bit hash loop over `byte_count`
+/// (zk-STARK): emit a real FNV-1a 64-bit hash loop over `byte_count`
 /// bytes starting at `[base + offset]`, with NO salt prefix. The u64 result
 /// is left in **R8**. This matches the library `StarkProof::commitment()`
 /// (ipc.rs:4017) byte-for-byte: init = 0xcbf29ce484222325 (FNV-1a 64-bit
@@ -589,7 +589,7 @@ fn emit_fnv1a_64_loop_nosalt(base: Gpr, offset: i32, byte_count: u32) -> Vec<u8>
     code
 }
 
-/// Wave D (L8 AEAD): emit the XOR stream-cipher loop shared by `aead_seal`
+/// (L8 AEAD): emit the XOR stream-cipher loop shared by `aead_seal`
 /// and `aead_open`.  XORs `rcx` bytes starting at `[rax]` in-place with
 ///   key_stream[i] = KEY[i % 32] ^ NONCE[i % 8]
 /// where KEY is the 32-byte key at `[r8]` and NONCE is the 8-byte nonce at
@@ -902,7 +902,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // the SSE path. See `infer_fp_vregs` above for the full rule set.
     let (fp_vregs, fp_vregs_f32) = infer_fp_vregs(func);
 
-    // ── Phase 0.5: Scan for capability_grant calls (Wave C: L2 cap sigs) ──
+    // ── Phase 0.5: Scan for capability_grant calls (L2 cap sigs) ──
     //
     // The recv side must recompute the FNV-1a×4 capability signature over
     // the same `signature_input` byte vector the grant used.  Since the
@@ -973,7 +973,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         }
     }
 
-    // ── Phase 0.7: Count folded L1/L2 checks for formal_verify() (Wave J) ──
+    // ── Phase 0.7: Count folded L1/L2 checks for formal_verify() ──
     //
     // formal_verify() returns the per-function count of L1/L2 runtime
     // checks folded into L3 compile-time invariants.  Each
@@ -1100,14 +1100,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         vreg_stack_slots.insert(id, -(current_offset));
     }
 
-    // Wave 10a: reserve an 8-byte stack slot for the per-function channel
+    // reserve an 8-byte stack slot for the per-function channel
     // sequence counter.  Zeroed in the prologue so the first ChannelSend
     // emits sequence=0, the second sequence=1, etc.  This replaces the
     // previous hardcoded `[rsp+16] = sequence = 0`.
     current_offset += 8;
     let seq_counter_off: i32 = -(current_offset);
 
-    // Wave 14b: reserve an 8-byte stack slot for the per-function protocol
+    // reserve an 8-byte stack slot for the per-function protocol
     // state machine counter.  Zeroed in the prologue (state = 0 = Idle).
     // channel_recv_proto(ch, expected_state) verifies proto_state == expected
     // before recv'ing, and advances proto_state on success.  A mismatch
@@ -1115,7 +1115,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let proto_state_off: i32 = -(current_offset);
 
-    // Wave 22/65-72: reserve 8 bytes for the per-function circuit-breaker
+    // reserve 8 bytes for the per-function circuit-breaker
     // state machine. Layout: [state:u32 at +0, failure_count:u32 at +4].
     // state: 0=Closed, 1=Open, 2=HalfOpen (matches the CircuitState enum
     // in ipc.rs). failure_count: number of consecutive failures recorded
@@ -1124,7 +1124,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let cb_state_off: i32 = -(current_offset);
 
-    // Wave C (L2 cap signatures): reserve per-function stack slots for the
+    //  (L2 cap signatures): reserve per-function stack slots for the
     // compile-time capability signature and signature_input.  These are
     // populated in the prologue (so both parent and child after fork see
     // them) from the first capability_grant call's compile-time params.
@@ -1145,7 +1145,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let cap_siginput_len_off: i32 = -(current_offset);
 
-    // Wave F (Driver Isolation — IRQ routing): per-function IRQ routing
+    //  (Driver Isolation — IRQ routing): per-function IRQ routing
     // table + entry-count slot.  driver_register(irq, handler_ptr) writes
     // (irq, handler_ptr) pairs into the next free slot; irq_dispatch(vector)
     // linear-scans the table for a matching irq and calls the handler via
@@ -1165,7 +1165,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let irq_table_count_off: i32 = -(current_offset);
 
-    // Wave G (Hot Reload — real hot-swap state machine): per-function module
+    //  (Hot Reload — real hot-swap state machine): per-function module
     // version table + entry-count slot.  This is the codegen-side analogue of
     // the library HotSwapManager (ipc.rs:3569), which tracks
     // `active_versions: HashMap<String,u32>` and validates:
@@ -1192,7 +1192,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let hotswap_table_count_off: i32 = -(current_offset);
 
-    // Wave I (zk-STARK): per-function STARK proof table.  stark_prove
+    //  (zk-STARK): per-function STARK proof table. stark_prove
     // writes a real proof entry (proof_data + verifier_key commitment +
     // validity_window) into the next free slot; stark_verify recomputes
     // the FNV-1a verifier-key commitment over the stored proof_data and
@@ -1225,7 +1225,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     current_offset += 8;
     let stark_table_count_off: i32 = -(current_offset);
 
-    // Wave J (Formal Verification — L1→L3 collapse proof witness):
+    //  (Formal Verification — L1→L3 collapse proof witness):
     // per-function counter of how many L1/L2 runtime checks were
     // folded into L3 compile-time invariants by the codegen.  Each
     // channel_send / channel_recv / capability_grant /
@@ -1286,7 +1286,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         encode_mov_mem_reg(Gpr::Rbp, off, scratch)
     };
 
-    // Wave J: increment the per-function formal-verify folded-check
+    // increment the per-function formal-verify folded-check
     // counter (`[rbp + formal_verify_count_off]`).  Emitted at the
     // start of each channel_send / channel_recv / capability_grant /
     // capability_delegate / stark_prove / stark_verify builtin so
@@ -1393,7 +1393,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         emit(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32), "sub_rsp");
     }
 
-    // Wave 10a: zero the per-function channel sequence counter slot so the
+    // zero the per-function channel sequence counter slot so the
     // first ChannelSend starts at sequence=0.  Uses RAX (caller-saved, free
     // at this point) as a scratch.
     emit(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax), "xor_rax_zero");
@@ -1401,19 +1401,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         encode_mov_mem_reg(Gpr::Rbp, seq_counter_off, Gpr::Rax),
         "zero_seq_counter",
     );
-    // Wave 14b: zero the protocol-state slot (state = 0 = Idle).
+    // zero the protocol-state slot (state = 0 = Idle).
     emit(
         encode_mov_mem_reg(Gpr::Rbp, proto_state_off, Gpr::Rax),
         "zero_proto_state",
     );
-    // Wave 22/65-72: zero the circuit-breaker state slot (state=Closed=0,
+    // zero the circuit-breaker state slot (state=Closed=0,
     // count=0). RAX is already zero from the xor above.
     emit(
         encode_mov_mem_reg(Gpr::Rbp, cb_state_off, Gpr::Rax),
         "zero_cb_state",
     );
 
-    // Wave C (L2 cap signatures): populate the per-function cap sig slots
+    //  (L2 cap signatures): populate the per-function cap sig slots
     // from the first capability_grant call's compile-time params.  This runs
     // in the prologue (not at the grant site) so that BOTH the parent (which
     // calls grant + send_cap) and the child (which only calls recv, after
@@ -1472,11 +1472,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         );
     }
 
-    // Wave F (IRQ routing): zero the per-function IRQ table count slot
+    //  (IRQ routing): zero the per-function IRQ table count slot
     // so each function starts with an empty routing table (count = 0).
     // The 128-byte table data itself is uninitialized, but irq_dispatch
     // only reads slots [0..count), so uninitialized data past count is
-    // never observed.  RAX may have been clobbered by the Wave C block
+    // never observed. RAX may have been clobbered by the block
     // above, so re-zero it here.  Also zero the first entry's irq field
     // as a defensive sentinel (irq=0 cannot match any real vector >= 1).
     emit(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax), "xor_rax_zero_irq");
@@ -1485,7 +1485,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         "zero_irq_table_count",
     );
 
-    // Wave G (Hot Reload): zero the per-function hot-swap version-table count
+    //  (Hot Reload): zero the per-function hot-swap version-table count
     // slot so each function starts with an empty module-version table
     // (count = 0).  The 128-byte table data itself is left uninitialized —
     // hot_swap_register / hot_swap_trigger / hot_swap_rollback only touch
@@ -1496,7 +1496,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         "zero_hotswap_table_count",
     );
 
-    // Wave I (zk-STARK): zero the per-function STARK proof-table count so
+    //  (zk-STARK): zero the per-function STARK proof-table count so
     // each function starts with an empty proof table (count = 0).  The
     // 224-byte table data itself is left uninitialized — stark_prove only
     // writes slots [0..count) and stark_verify only reads slots
@@ -1507,7 +1507,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         "zero_stark_table_count",
     );
 
-    // Wave J (Formal Verification): initialise the per-function
+    //  (Formal Verification): initialise the per-function
     // formal-verify folded-check counter to the COMPILE-TIME count of
     // folded L1/L2 checks (computed in Phase 0.7 above).  This is the
     // base count — each channel_send / channel_recv / capability_grant
@@ -3285,9 +3285,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                     }
 
-                    // ── Channel builtins (Wave 3 / Task 3) ──
+                    // ── Channel builtins (ask 3) ──
                     // `channel_open`/`send`/`recv`/`close` are parsed as
-                    // ordinary `Expr::Call` (Wave 2c — the parser cannot add
+                    // ordinary `Expr::Call` ( — the parser cannot add
                     // dedicated AST variants), so they reach the backend as
                     // `IRInstr::Call { func: "channel_open", .. }`.  Intercept
                     // them here and inline the corresponding Linux
@@ -3342,7 +3342,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         // Load register args (after stack setup to avoid clobbering)
                         for (i, arg) in args.iter().take(num_reg_args).enumerate() {
-                            // Wave 5: Handle IRValue::Label (function address) by
+                            // Handle IRValue::Label (function address) by
                             // emitting a RIP-relative LEA + R_X86_64_PC32 relocation.
                             if let crate::ir::IRValue::Label(name) = arg {
                                 code.extend(encode_lea_rip_rel(call_arg_regs[i], 0));
@@ -3441,7 +3441,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ── Syscall (Wave 11) ──────────────────────────────────────
+                // ── Syscall ──────────────────────────────────────
                 // dst = syscall(nr, args…) — raw Linux syscall.
                 // x86_64 syscall ABI: args in RDI/RSI/RDX/R10/R8/R9, nr in
                 // EAX, result in RAX. Note arg4 → R10 (NOT RCX as in SysV —
@@ -3472,7 +3472,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ── VectorOp (Wave 29) ────────────────────────────────────
+                // ── VectorOp ────────────────────────────────────
                 // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
                 // We invoke the existing SSE/AVX encoders with fixed physical
                 // XMM0/XMM1/XMM2 operands. Full vector-vreg → physical-XMM
@@ -3480,7 +3480,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // tracked for dataflow (defined_regs/used_regs) but the bytes
                 // come straight from the encoder.
                 //
-                // Selection rules (matching the Wave 29 encoder suite):
+                // Selection rules (matching the encoder suite):
                 //   - Add + elem_size=8 → SSE2 `paddq xmm0, xmm1` (66 0F D4 C1)
                 //   - Add + elem_size=4 → AVX `vpaddq xmm0, xmm1, xmm2`
                 //                          (C5 F1 D4 D0 — VEX prefix present)
@@ -3525,7 +3525,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
                     code
                 }
-                // ── Channel operations (Wave 3 / Task 3) ─────────────────────
+                // ── Channel operations (ask 3) ─────────────────────
                 // VUMA channels are lowered to Linux pipes.  The opaque
                 // channel handle is an 8-byte value laid out as:
                 //
@@ -3571,7 +3571,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ChannelSend { ch, msg, ty } — Wave 10a: framed write.
+                // ChannelSend { ch, msg, ty } — framed write.
                 // Builds a 56-byte framed message on the stack:
                 //   [0..44)   MessageHeader (MAGIC + version + flags + channel_id
                 //             + sequence + type_hash + payload_len + cap_count)
@@ -3591,7 +3591,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         .unwrap_or_else(|| "i64".to_string());
                     let th = crate::ipc::type_hash(&type_name);
 
-                    // Wave J: increment the formal-verify folded-check
+                    // increment the formal-verify folded-check
                     // counter (one L1 channel-framing check folded).
                     code.extend(inc_formal_verify_count());
 
@@ -3662,7 +3662,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ChannelRecv { ch, dst, ty } — Wave 10b: framed read.
+                // ChannelRecv { ch, dst, ty } — framed read.
                 // Reads a 56-byte framed message from the pipe, verifies the
                 // MAGIC header, and extracts the 8-byte payload into dst.
                 // On magic mismatch, stores -1 (error sentinel) in dst.
@@ -3674,14 +3674,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = slot_offset(dst_id);
-                    // Wave 14b: compute expected type_hash at compile time
+                    // compute expected type_hash at compile time
                     // for protocol state machine verification.
                     let expected_th = ty
                         .as_ref()
                         .map(|t| crate::ipc::type_hash(&t.to_string()))
                         .unwrap_or_else(|| crate::ipc::type_hash("i64"));
 
-                    // Wave J: increment the formal-verify folded-check
+                    // increment the formal-verify folded-check
                     // counter (one L1 channel-framing check folded).
                     code.extend(inc_formal_verify_count());
 
@@ -3716,7 +3716,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_magic_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
-                    // Step 3b (Wave 12b): capability verification.
+                    // Step 3b: capability verification.
                     // Read cap_count from [rsp+40] (4 bytes). If nonzero,
                     // the message carries capability tokens that would
                     // require HMAC-SHA256 signature verification (not
@@ -3726,7 +3726,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // as a potential privilege-escalation attempt.
                     //
                     // Messages with cap_count == 0 (the default for all
-                    // .vuma channel programs compiled by Wave 10a's
+                    // .vuma channel programs compiled by the
                     // ChannelSend codegen) pass through normally.
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
                     code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
@@ -3754,7 +3754,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let cap_skip_off = code.len();
                     patch_rel32_jcc(&mut code, je_cap_skip_patch, cap_skip_off);
 
-                    // Step 3c (Wave 14b): protocol state machine check.
+                    // Step 3c: protocol state machine check.
                     // Verify the type_hash in the received frame matches the
                     // expected type_hash for this recv site. A mismatch
                     // indicates a protocol violation (wrong message type
@@ -3804,7 +3804,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jmp_cleanup_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
-                    // cap_fail (Wave 12b): store -4 (PERMISSION_DENIED) in dst.
+                    // cap_fail: store -4 (PERMISSION_DENIED) in dst.
                     let cap_fail_off = code.len();
                     let cap_delta = cap_fail_off as i64 - (jne_cap_patch as i64 + 6);
                     let bd = (cap_delta as i32).to_le_bytes();
@@ -3818,7 +3818,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jmp_cleanup_from_cap_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
-                    // proto_fail (Wave 14b): store -5 (PROTOCOL_VIOLATION) in dst.
+                    // proto_fail: store -5 (PROTOCOL_VIOLATION) in dst.
                     // Reached when the received type_hash doesn't match the
                     // expected type_hash for this recv site.
                     let proto_fail_off = code.len();
@@ -3928,7 +3928,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ChannelRecvTimeout { ch, dst, ty, timeout_ms } —
-                // Wave 8c: poll(read_fd, timeout_ms) then read() if ready.
+                // poll(read_fd, timeout_ms) then read() if ready.
                 //
                 // poll() syscall (x86_64 sys_poll=7):
                 //   rdi = &pollfd { fd, events, revents } (8 bytes: 4+2+2)
@@ -3941,7 +3941,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // On MAGIC mismatch: write -1 (Closed/Invalid) to dst slot.
                 // On CRC32 mismatch:  write -6 (CRC_MISMATCH) to dst slot.
                 //
-                // Wave L1 (Phase 2f): the read path now does a full 56-byte
+                //  (Phase 2f): the read path now does a full 56-byte
                 // framed read with MAGIC + CRC32 verification (previously a
                 // raw 8-byte read bypassed the L1 wire format — the only
                 // remaining L1 bypass flagged in the L0-L8 audit). This
@@ -4133,7 +4133,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ChannelRecvResult { ch, dst, err_dst, ty } — Wave 8b.
+                // ChannelRecvResult { ch, dst, err_dst, ty } — .
                 // Fallible framed recv: produces (value, err) where err is a
                 // ChannelError discriminant (0 = Ok).  This is the codegen
                 // target for `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
@@ -4193,13 +4193,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_magic_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
-                    // Step 3b: cap_count == 0 check (Wave 12b structural).
+                    // Step 3b: cap_count == 0 check ( structural).
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 40));
                     code.extend(encode_cmp_reg_imm32(Gpr::Rax, 0));
                     let jne_cap_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
-                    // Step 3b2 (Wave 10b): CRC32 verification — compute CRC32 over
+                    // Step 3b2: CRC32 verification — compute CRC32 over
                     // [rsp+0..52] and compare with the stored CRC at [rsp+52].
                     // On mismatch, err_dst <- 5 (CrcMismatch), dst <- 0.
                     code.extend(emit_crc32_frame_loop());
@@ -4208,7 +4208,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jne_crc_patch = code.len();
                     code.extend(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00]); // jne rel32
 
-                    // Step 3c: type_hash check (Wave 14b structural).
+                    // Step 3c: type_hash check ( structural).
                     code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rsp, 24));
                     code.extend(encode_mov_reg_imm32(
                         Gpr::Rcx,
@@ -4246,7 +4246,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let jmp_cap_cleanup_patch = code.len();
                     code.extend(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32
 
-                    // crc_fail (Wave 10b): err_dst <- 5 (CrcMismatch), dst <- 0.
+                    // crc_fail: err_dst <- 5 (CrcMismatch), dst <- 0.
                     let crc_fail_off = code.len();
                     patch_rel32_jcc(&mut code, jne_crc_patch, crc_fail_off);
                     code.extend(encode_mov_reg_imm64(Gpr::Rax, 5));
@@ -4295,7 +4295,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // StarkProof { input, dst, constraints } — Wave 93-94.
+                // StarkProof { input, dst, constraints } — .
                 // IR-level zk-STARK proof generation. The dedicated IRInstr
                 // arm is a stub (currently unreachable from surface syntax,
                 // like the other IRInstr::Channel* arms — the Call-form
@@ -4303,7 +4303,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // function is the active path). Emits nothing here; if this
                 // arm is ever reached, the backend will fall through with
                 // an empty `encoded` Vec (which the outer loop skips, just
-                // like Phi/VectorOp). A future wave can lower this to a
+                // like Phi/VectorOp). A future effort can lower this to a
                 // real proof-table allocation.
                 IRInstr::StarkProof {
                     input,
@@ -4315,7 +4315,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     Vec::new()
                 }
 
-                // Wave 49: CallIndirect — indirect call through a function
+                // CallIndirect — indirect call through a function
                 // pointer stored in a vreg.  Used by irq_dispatch to call
                 // handler functions whose address was loaded from the driver
                 // table via GetAddress + Store + Load.

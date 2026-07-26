@@ -1,9 +1,9 @@
 # ============================================================================
-# VUMA Wave 36 — Proof-Verify CI
+# VUMA — Proof-Verify CI
 # ============================================================================
-# Dedicated CI job for the Wave 36 proof-logging / `bv_verify` gate pipeline.
+# Dedicated CI job for the proof-logging / `bv_verify` gate pipeline.
 #
-# This workflow exists to satisfy Wave 36's CI requirement (referenced in the
+# This workflow exists to satisfy the CI requirement (referenced in the
 # test comment at `src/codegen/src/bv_verify.rs:429` — `test_wave36_unsound_rule_rejected`).
 # It runs the full set of proof-related unit tests across the workspace so a
 # regression in:
@@ -65,13 +65,13 @@ jobs:
         with:
           key: proof-verify-${{ runner.os }}
 
-      # Wave 36 gate smoke-check: build the workspace so any compile-level
+      # Gate smoke-check: build the workspace so any compile-level
       # regression in the proof/bv_verify modules is caught here rather than
       # only at test time.
       - name: Build workspace
         run: cargo build --workspace
 
-      # Wave 36 proof tests. The trailing positional args are test-name
+      # Proof tests. The trailing positional args are test-name
       # substrings — cargo runs any test whose full path contains at least
       # one of them. `--no-fail-fast` keeps the run going after a single
       # failure so all regressions are surfaced in one log.
@@ -92,7 +92,7 @@ jobs:
   # mirrored below in the `lean-version` input to `elan-action` so the
   # installed toolchain matches the project pin exactly.
   #
-  # Strict by default: the PMT proof library is sorry-free as of Wave 15.
+  # Strict by default: the PMT proof library is sorry-free.
   # `PROOF_CHECK_STRICT=1` causes `scripts/check-lean.sh` to fail CI on any
   # `sorry` token surfaced by `lake build`.
   # ==========================================================================
@@ -116,7 +116,7 @@ jobs:
 
       - name: Check for sorry (strict)
         env:
-          # Strict mode (fail on any sorry) is enabled as of Wave 15 — the
+          # Strict mode (fail on any sorry) is enabled — the
           # PMT proof library is sorry-free.
           PROOF_CHECK_STRICT: "1"
         run: ./scripts/check-lean.sh

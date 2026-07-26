@@ -3457,7 +3457,7 @@ impl Arm32Backend {
         }
     }
 
-    /// Wave 22: Emit a function using real register allocation.
+    /// Emit a function using real register allocation.
     ///
     /// Consumes a `RegAllocResult` and produces an `AllocatedFunction`
     /// with `reads`/`writes` annotated with the physical registers
@@ -3472,7 +3472,7 @@ impl Arm32Backend {
         Ok(allocated)
     }
 
-    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    /// Convenience method — run regalloc + emit in one step.
     pub fn emit_function_with_regalloc(
         &self,
         func: &IRFunction,
@@ -7339,9 +7339,9 @@ impl Backend for Arm32Backend {
                     // ── Call ──
                     crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern } => {
                         let mut code = Vec::new();
-                        // ── Channel builtins (Wave 4 / Task 4cd) ──
+                        // ── Channel builtins (ask 4cd) ──
                         // `channel_open`/`send`/`recv`/`close` are parsed as
-                        // ordinary `Expr::Call` (Wave 2c), so they reach the
+                        // ordinary `Expr::Call`, so they reach the
                         // backend as `IRInstr::Call { func: "channel_open", .. }`.
                         // Intercept them here and inline the corresponding
                         // Linux pipe2/read/write/close syscalls.
@@ -7384,7 +7384,7 @@ impl Backend for Arm32Backend {
                                 true
                             }
                             "channel_send" if args.len() == 2 => {
-                                // Wave 15b: framed L1 write — builds a 56-byte
+                                // framed L1 write — builds a 56-byte
                                 // frame (44-byte header + 8-byte payload + 4-byte
                                 // CRC32) and writes it to the pipe. This is the
                                 // arm32 port of the x86_64 codegen in
@@ -7404,7 +7404,7 @@ impl Backend for Arm32Backend {
                                 let msg = &args[1];
                                 let th = crate::ipc::type_hash("i64");
 
-                                // Wave J: increment the formal-verify folded-check
+                                // increment the formal-verify folded-check
                                 // counter (one L1 channel-framing check folded by
                                 // this channel_send).  formal_verify() returns this
                                 // count as the L1→L3 invariant-collapse witness.
@@ -7531,7 +7531,7 @@ impl Backend for Arm32Backend {
                                 true
                             }
                             "channel_recv" if args.len() == 1 && dst.is_some() => {
-                                // Wave 15b: framed L1 read — reads a 56-byte
+                                // framed L1 read — reads a 56-byte
                                 // frame, verifies MAGIC, type_hash, and CRC32,
                                 // then extracts the 8-byte payload into dst.
                                 // This is the arm32 port of the x86_64 codegen.
@@ -7545,7 +7545,7 @@ impl Backend for Arm32Backend {
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                                 let expected_th = crate::ipc::type_hash("i64");
 
-                                // Wave J: increment the formal-verify folded-check
+                                // increment the formal-verify folded-check
                                 // counter (one L1 channel-framing check folded by
                                 // this channel_recv).
                                 code.extend(ss_load_from_slot(Gpr::R0, formal_verify_count_off));
@@ -7764,7 +7764,7 @@ impl Backend for Arm32Backend {
                                 true
                             }
                             "spawn_worker" if args.is_empty() && dst.is_some() => {
-                                // Wave 15b: fork() via sys_clone (ARM EABI nr=120).
+                                // fork() via sys_clone (ARM EABI nr=120).
                                 // clone(flags=SIGCHLD=17, newsp=0, parent_tidptr=0,
                                 //       child_tidptr=0, tls=0) — R0-R4 args, R7=nr.
                                 // Parent: R0 = child PID (>0). Child: R0 = 0.
@@ -7799,7 +7799,7 @@ impl Backend for Arm32Backend {
                                 true
                             }
                             "wait_worker" if args.len() == 1 && dst.is_some() => {
-                                // Wave 15b: wait4(pid, &status, 0, NULL).
+                                // wait4(pid, &status, 0, NULL).
                                 // ARM EABI sys_wait4 nr=114. R0=pid, R1=&status,
                                 // R2=options=0, R3=rusage=NULL. Returns WEXITSTATUS.
                                 let dst_id = dst.as_ref().and_then(|d| d.as_register()).unwrap_or(0);
@@ -9499,7 +9499,7 @@ impl Backend for Arm32Backend {
                         code
                     }
 
-                    // ── Syscall (Wave 11) ──────────────────────────────────
+                    // ── Syscall ──────────────────────────────────
                     // dst = syscall(nr, args…) — raw Linux syscall.
                     // ARM EABI: args in R0-R3 + [SP]/[SP+4] for args 5-6, nr in
                     // R7, SVC #0, result (32-bit, sign-extended) in R0.
@@ -9554,18 +9554,18 @@ impl Backend for Arm32Backend {
                         }
                         code
                     }
-                    // ── VectorOp (Wave 29) ──
-                    // arm32 (ARMv7 NEON) has no SIMD encoder in the Wave 29
+                    // ── VectorOp ──
+                    // arm32 (ARMv7 NEON) has no SIMD encoder in the
                     // suite (only x86_64 and aarch64 do); emit nothing.
                     crate::ir::IRInstr::VectorOp { .. } => Vec::new(),
-                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // ── Channel operations (ask 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     crate::ir::IRInstr::ChannelOpen { .. } | crate::ir::IRInstr::ChannelSend { .. }
                     | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::ChannelClose { .. }
-                // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                // StarkProof — stub (Call-form builtin is the active path).
                 | crate::ir::IRInstr::StarkProof { .. } => Vec::new(),
 
-                // Wave 49: CallIndirect — indirect call through func_ptr.
+                // CallIndirect — indirect call through func_ptr.
                 // arm32 codegen: load args into r0-r3, load func_ptr into
                 // ip (r12), BLX IP. Store r0 to dst.
                 crate::ir::IRInstr::CallIndirect { dst, func_ptr, args } => {
@@ -10155,7 +10155,7 @@ impl Backend for Arm32Backend {
                 ("wait4", 114),
                 ("clone", 120),
                 ("socket", 281),
-                // [wave 9 fix] epoll_create1 corrected 356→357 (356 is eventfd2 on arm).
+                // [fix] epoll_create1 corrected 356→357 (356 is eventfd2 on arm).
                 ("epoll_create1", 357),
                 ("epoll_ctl", 251),
                 ("epoll_wait", 252),
@@ -10202,7 +10202,7 @@ impl Backend for Arm32Backend {
                 // NOTE: lstat/dup3/recvfrom/sendto were previously listed
                 // again here (duplicate of the entries at lines ~7236). The
                 // duplicates emitted ~56 bytes of dead code; removed.
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (arm unistd.h) ──
+                // ── POSIX file-metadata & I/O syscalls (arm unistd.h) ──
                 // ARM EABI has 4 reg args (R0-R3); all these take ≤4 args →
                 // simple_stub. chown=212/fchown=207 are the modern 32-bit-uid
                 // chown32/fchown32 (arm's chown=182 is the 16-bit sys_chown16,
@@ -10240,7 +10240,7 @@ impl Backend for Arm32Backend {
                 ("pwritev", 362),
                 ("fchdir", 133),
                 ("chroot", 61),
-                // ── Wave 9: POSIX system & advanced syscalls (arm unistd.h) ──
+                // ── POSIX system & advanced syscalls (arm unistd.h) ──
                 // ARM EABI has 4 reg args (R0-R3); all these take ≤4 args →
                 // simple_stub. eventfd→eventfd2(356), signalfd→signalfd4(355).
                 // mremap (5 args) is registered below via six_arg_stub.
@@ -10266,10 +10266,10 @@ impl Backend for Arm32Backend {
                 ("inotify_add_watch", 317),
                 ("inotify_rm_watch", 318),
                 ("ptrace", 26),
-                // ── Wave 8: POSIX process & identity syscalls (arm32 syscall.tbl) ──
+                // ── POSIX process & identity syscalls (arm32 syscall.tbl) ──
                 // ≤4-arg syscalls use simple_stub (ARM EABI: 4 reg args r0-r3).
                 // 5-arg syscalls (waitid/execveat/prctl) use six_arg_stub below.
-                // Identity uses the modern *32 variants (199-214) per Wave 7 precedent.
+                // Identity uses the modern *32 variants (199-214) per precedent.
                 // Family 1: identity
                 ("getuid", 199),
                 ("geteuid", 201),
@@ -10306,7 +10306,7 @@ impl Backend for Arm32Backend {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
-            // ── Wave 7: 5-arg *at syscalls (linkat, fchownat) ──
+            // ── 5-arg *at syscalls (linkat, fchownat) ──
             // ARM EABI passes args 5+ on the caller's stack; six_arg_stub
             // loads arg5 (and arg6) into R4/R5 before SVC. For these 5-arg
             // syscalls the kernel ignores R5 (arg6), so reusing six_arg_stub
@@ -10314,11 +10314,11 @@ impl Backend for Arm32Backend {
             stubs.push(("linkat".to_string(), six_arg_stub(330)));
             stubs.push(("fchownat".to_string(), six_arg_stub(325)));
 
-            // ── Wave 9: mremap (5 args: old_addr, old_size, new_size, flags, new_addr) ──
+            // ── mremap (5 args: old_addr, old_size, new_size, flags, new_addr) ──
             // Uses six_arg_stub to load arg5 (new_address) from the caller's
             // stack into R4; R5 (arg6) is garbage and ignored by the 5-arg syscall.
             stubs.push(("mremap".to_string(), six_arg_stub(163)));
-            // ── Wave 8: 5-arg syscalls (waitid/execveat/prctl) ──
+            // ── 5-arg syscalls (waitid/execveat/prctl) ──
             // ARM EABI passes args 5+ on the caller's stack; six_arg_stub
             // loads arg5 from [SP] (arg6 is ignored by these 5-arg syscalls).
             stubs.push(("waitid".to_string(), six_arg_stub(280)));
@@ -10463,7 +10463,7 @@ impl Backend for Arm32Backend {
             //
             // This matches __vuma_alloc (same struct-pointer sys_old_mmap=90
             // path with offset=0): both use the SAME offset unit (bytes, via
-            // the struct's `offset` field), satisfying the wave-6 "same
+            // the struct's `offset` field), satisfying the effort-6 "same
             // offset-unit handling as __vuma_alloc" requirement.
             //
             // K9A-arm32-arena-regression: K6 had rewritten this stub to assume
@@ -10643,7 +10643,7 @@ impl Backend for Arm32Backend {
                 stubs.push(("mmap".to_string(), code));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: REAL mmap syscall (arm32 sys_mmap2=192).
             // Args: R0=0(NULL), R1=4096, R2=3(PROT), R3=0x22(MAP), R4=-1(fd), R5=0(pgoff).
             // R4/R5 are callee-saved, so we use the six_arg_stub pattern.

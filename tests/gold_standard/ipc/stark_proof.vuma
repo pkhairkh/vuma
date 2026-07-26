@@ -1,4 +1,4 @@
-// stark_proof — Wave I / 93-94: real zk-STARK proof generation + verification.
+// stark_proof — real zk-STARK proof generation + verification.
 //
 // stark_prove(input) generates a real STARK proof attesting that the prover
 // knows a witness satisfying the arithmetic constraints over `input`. The

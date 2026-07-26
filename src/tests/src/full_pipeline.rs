@@ -564,8 +564,8 @@ fn test_full_pipeline_complex_program() {
     assert!(detailed.verification.is_some());
 
     // Phase 5: Verify at different verification levels
-    // Task 9-a (Wave 9): `vuma_ive::VerificationLevel` was collapsed to a
-    // single `Pmt` variant in Wave 5-f (commit 0a514ad2). The original list
+    // Task 9-a: `vuma_ive::VerificationLevel` was collapsed to a
+    // single `Pmt` variant in -f (commit 0a514ad2). The original list
     // `[Quick, Normal, Exhaustive]` referenced removed variants; replaced
     // with `[Pmt]` so the loop still iterates once and the no-violation
     // assertion still holds for the (now sole) PMT level. The test's overall

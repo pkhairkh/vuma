@@ -1,4 +1,4 @@
-// stack — PMT Wave 9: stack using State with push/pop helpers
+// stack — stack using State with push/pop helpers
 // Expected exit code: 60
 //
 // A `Stack` layout: a `count` field (the stack pointer, runtime count of
@@ -6,7 +6,7 @@
 // push(s, v) writes `s.data[s.count] = v` and increments `s.count`; pop(s)
 // decrements `s.count` and returns `s.data[s.count]`.
 //
-// Under the Wave 9 dependent-state-types model, this would be typed
+// Under the dependent-state-types model, this would be typed
 // `State<Stack<N>>` where N is the runtime count of pushed elements. The
 // State Transform verifier proves `offset + (count * elem_size) ≤
 // buffer_size` (i.e. `0 + count * 4 ≤ 32`) using linear arithmetic.

@@ -74,7 +74,7 @@
 //       in ProcessTable.nexts). That's a K8+ scheduler-coupling concern
 //       — K8b stays self-contained, manipulating only the Mutex state.
 //   (3) The full WaitQueue is re-declared here as documentation so a
-//       future wave that adds a `waitq: WaitQueue` field can do so
+//       future effort that adds a `waitq: WaitQueue` field can do so
 //       without cross-referencing K7e.
 //
 // ── Why _pad0? (AtomicCas is hardcoded to U64) ─────────────────────────────
@@ -310,7 +310,7 @@
 // See "WaitQueue (re-declared from K7e)" in the file header for the rationale.
 // This layout is declared for documentation only — the Mutex itself uses a
 // simplified `waitq_count: u32` counter (see Mutex layout below). A future
-// wave that wants a real wait queue inside the Mutex can swap
+// effort that wants a real wait queue inside the Mutex can swap
 // `waitq_count: u32` for `waitq: WaitQueue` and use K7e's waitq_add /
 // waitq_wake_one helpers from the mutex slow paths.
 //

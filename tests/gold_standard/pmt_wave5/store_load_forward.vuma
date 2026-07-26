@@ -1,4 +1,4 @@
-// store_load_forward — PMT Wave 5: store-load forwarding
+// store_load_forward — store-load forwarding
 // Expected exit code: 42
 //
 // Writes 42 to p.x, then immediately reads p.x back. The store-load
@@ -11,7 +11,7 @@
 // Under the *current* optimizer, both the Store and Load are emitted
 // — but the program's observable behaviour is unchanged (exit 42),
 // so this test passes either way. The file serves as a forward-looking
-// test case for the wave that wires state ops into
+// test case for the effort that wires state ops into
 // `equality_saturation_with_cost`.
 //
 // VUMA Key Concepts:

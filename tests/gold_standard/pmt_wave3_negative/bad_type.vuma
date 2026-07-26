@@ -1,4 +1,4 @@
-// bad_type — PMT Wave 3 negative: read a field with the wrong type
+// bad_type — PMT negative: read a field with the wrong type
 // Expected: IVE rejects at verification (VerificationLevel::Pmt).
 //
 // Pattern:
@@ -8,10 +8,10 @@
 //
 // The state_read verifier compares the read's `expected_type` against
 // the field's declared `type_name`.  In the SCG, `StateReadNode` does
-// not currently carry an expected_type field (Wave 1b/1c left this for
-// a later wave), so the IVE's `verify_pmt` synthesizes expected_type
+// not currently carry an expected_type field (left this for
+// a later effort), so the IVE's `verify_pmt` synthesizes expected_type
 // FROM the layout — which means the type-mismatch path is only
-// reachable when a future wave extends `StateReadNode` with an explicit
+// reachable when a future effort extends `StateReadNode` with an explicit
 // expected_type, OR when the AST-level type-checker compares the
 // read-site annotation against the layout field declaration.
 //
@@ -22,7 +22,7 @@
 //   ~ partial: the state_read verifier's type-mismatch branch is
 //     implemented and unit-tested (`state_read::tests::test_type_mismatch`),
 //     but the SCG→verifier bridge does not yet propagate the read-site
-//     expected_type.  See Wave 3d worklog note for the deferred wiring.
+//     expected_type. See the worklog note for the deferred wiring.
 //
 // This file is NOT expected to compile or run — it documents a PMT
 // violation pattern that the verifier API is designed to catch once

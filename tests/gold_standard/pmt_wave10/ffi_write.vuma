@@ -1,4 +1,4 @@
-// ffi_write — PMT Wave 10: FFI marshal pass — state invalidation
+// ffi_write — FFI marshal pass — state invalidation
 // Expected exit code: 0
 //
 // Demonstrates the FFI marshal pattern: when an `extern "C"` function is

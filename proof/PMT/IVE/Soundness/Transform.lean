@@ -11,7 +11,7 @@ layouts are well-formed and compatible.
 The Lean model mirrors the Rust function's specification. The actual
 Rust function lives at `src/ive/src/state_transform.rs:57`.
 
-Per W2-D deep-read (`docs/verification-reports/W2-D-ive-deep.md`):
+Per the IVE deep-read:
   - The Rust `verify_transform` (`src/ive/src/state_transform.rs:57`)
     takes `&HashMap<String, LayoutInfo>` + a transform op, returns
     `StateTransformVerification`.
@@ -23,16 +23,16 @@ Per W2-D deep-read (`docs/verification-reports/W2-D-ive-deep.md`):
     into `consumed_vars`. There is no "produce new state" — the
     output side of `StateTransform` is recorded only as the
     `(input_layout, output_layout)` pair; the new state's vreg/name
-    is untracked. Wave 13–17 simulation must model the kill on input
+    is untracked. The simulation relation must model the kill on input
     vregs only.
 
-This module is part of Wave 11 (subagent W11-D). The `verify_transform`
-model uses `Classical.propDecidable` to obtain `Decidable` instances
+This module provides the `verify_transform` model. It
+uses `Classical.propDecidable` to obtain `Decidable` instances
 for `WF_Layout` and `Layout =` (both are `Prop`s over universally
 quantified `Field`s, which `PMT.Basic` does not derive `DecidableEq`
 for). This avoids introducing a second `DecidableEq Field` instance
 that would conflict with the one defined in
-`PMT.IVE.Soundness.StateReads` (W11-A) when the whole `PMT` library is
+`PMT.IVE.Soundness.StateReads` when the whole `PMT` library is
 linked together. The actual theorems close without `sorry` — the
 `decide P = true ↔ P` bridge via `decide_eq_true_eq` discharges
 both soundness goals directly.

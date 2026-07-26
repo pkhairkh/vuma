@@ -510,7 +510,7 @@ impl MsgBuilder {
             | ScgNodeType::EnumDef
             | ScgNodeType::Match
             | ScgNodeType::ConstantTime => ScgNodeMapping::None,
-            // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+            // PMT ( TODO): StateInit/StateRead/StateWrite/StateTransform
             // nodes need proper MSG mapping — for now, map to None so the
             // build passes and the SCG→MSG bridge skips them gracefully.
             ScgNodeType::StateInit
@@ -522,7 +522,7 @@ impl MsgBuilder {
             | ScgNodeType::ArenaAlloc
             | ScgNodeType::ArenaGrow
             | ScgNodeType::ArenaFree
-            // Wave 2b: channel operations produce no MSG constructs of
+            // channel operations produce no MSG constructs of
             // their own — skip them (same as StructDef/EnumDef/etc.).
             | ScgNodeType::ChannelOpen
             | ScgNodeType::ChannelSend

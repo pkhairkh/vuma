@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# VUMA — QEMU smoke-test script (Waves 13-14 backends)
+# VUMA — QEMU smoke-test script (smoke-tested backends)
 # ============================================================================
 # Builds the compiler once, then for every supported QEMU/wasmtime backend
 # compiles a small set of gold-standard .vuma programs and runs them under
@@ -11,7 +11,7 @@
 #   aarch64  x86_64  riscv64  s390x  arm32  ppc64  m68k  sparc64
 #   hppa     alpha   loongarch64  mips64   +  wasm32 (wasmtime)
 #
-# All backends were individually smoke-tested in Waves 13-14; this script
+# All backends were individually smoke-tested previously; this script
 # consolidates them into a single CI-friendly invocation.
 #
 # Usage:
@@ -43,7 +43,7 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 # Most are qemu-<isa>-static; the two mismatches are:
 #   * arm32    -> qemu-arm-static     (qemu-user naming convention)
 #   * mips64   -> qemu-mips64el-static (vuma emits little-endian MIPS64 ELF
-#                                       — see Wave 14-d finding)
+#                                       — see mips64el endianness finding)
 # wasm32 is handled separately via wasmtime.
 # ---------------------------------------------------------------------------
 declare -A QEMU_BIN=(
@@ -69,12 +69,12 @@ declare -A QEMU_BIN=(
 # to use `compile_to_binary_direct` for all ISAs, so we route AArch64
 # through `vuma emit` (which produces a proper statically-linked ELF with
 # a real `_start` stub + exit syscall). All other ISAs go through
-# `vuma build` (the path Waves 13-14 smoke-tested).
+# `vuma build` (the path previously smoke-tested).
 declare -A VUMA_CMD=(
   [aarch64]="emit"
 )
 
-# Default QEMU ISA set (12 backends, all Waves 13-14 working) + wasm32
+# Default QEMU ISA set (12 backends, all currently working) + wasm32
 # (run under wasmtime). Order: fast/canonical backends first so failures
 # surface early; wasm32 last (uses a different runner + test subset).
 DEFAULT_QEMU_ISAS=(
@@ -86,7 +86,7 @@ DEFAULT_QEMU_ISAS=(
 
 # ---------------------------------------------------------------------------
 # Test programs (relative to tests/gold_standard/) with expected exit codes.
-# These are the same 4 integer-only programs used across the Wave 13-14
+# These are the same 4 integer-only programs used across the prior
 # smoke tasks; all carry an `// Expected exit code:` header which we also
 # parse at runtime as a sanity check.
 # ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ DEFAULT_TESTS=(
   "control_flow/for_count.vuma:23"
 )
 
-# wasm32 uses a different test subset (per Wave 14-e — these were the
+# wasm32 uses a different test subset (these were the
 # programs verified to exit cleanly under wasmtime 47.0.2).
 WASM_TESTS=(
   "edge_cases/edge_zero_plus_one.vuma:1"
@@ -198,8 +198,8 @@ run_one() {
 
   # Compile. Use `vuma emit <isa>` for AArch64 (Task 13-a fix path that
   # produces a proper _start stub); use `vuma build --isa <isa>` for
-  # everything else (the direct AST→codegen path that Waves 13-14
-  # smoke-tested). Note: `emit` takes the ISA as a positional argument,
+  # everything else (the direct AST→codegen path that was
+  # smoke-tested previously). Note: `emit` takes the ISA as a positional argument,
   # `build` takes it via `--isa <isa>`.
   local subcmd="${VUMA_CMD[${isa}]:-build}"
   local build_log

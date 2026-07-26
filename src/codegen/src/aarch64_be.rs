@@ -1,6 +1,6 @@
 //! # AArch64 Big-Endian Backend (aarch64_be)
 //!
-//! **Wave 49 — wrapper pattern documentation.**  **Wave 13 — Wrapper Summary
+//! ** — wrapper pattern documentation.** ** — Wrapper Summary
 //! added** (Task 7-d).
 //!
 //! ## Wrapper Summary
@@ -9,7 +9,7 @@
 //! |-------|-------|
 //! | **Wraps** | `AArch64Backend` (`crate::backend`), constructed via `AArch64Backend::new()` |
 //! | **Byte-swap policy** | **No instruction byte-swap** — AArch64 instruction fetches are always LE per ARM ARM DDI 0487 §D6.1.3, regardless of `PSTATE.E` or ELF `EI_DATA`. Only the ELF header / PHDR / SHDR fields are flipped via `swap_le_elf_to_be`. |
-//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:120-122`), instruction selection (LinearScan via `Emitter`), `encode_function`, `return_stub`, `trampoline`, `disassemble` (all forwarded verbatim), `IRInstr::Syscall` (Wave 11) |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:120-122`), instruction selection (LinearScan via `Emitter`), `encode_function`, `return_stub`, `trampoline`, `disassemble` (all forwarded verbatim), `IRInstr::Syscall` |
 //! | **Overridden** | `encode_program` — runs the ELF header swap; everything else returns the parent's bytes unchanged |
 //! | **Known gaps** | None for Syscall — `IRInstr::Syscall` works via inheritance (parent's `MOVZ X8, nr; SVC #0` at `arm64.rs:4538`). Float-op verifier `verify_function_float_ops` was previously called by `AArch64Backend::allocate_registers` (`backend.rs:2748`) — Task 7-a removed that AArch64-specific call site and moved the verifier **centrally into all 5 compilation drivers** (`src/main.rs`, `src/pipeline.rs`, `src/api.rs`, `src/bin/compile_dump.rs`), so coverage now applies to all 19 backends including this wrapper. See caveat §4 row 3. |
 //!
@@ -32,13 +32,13 @@
 //! simply forwards them — no swap. Only the ELF header / PHDR fields (the
 //! data ABI) are flipped in `encode_program` via `swap_le_elf_to_be`.
 //!
-//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//! ## `IRInstr::Syscall` inheritance
 //!
 //! `IRInstr::Syscall` emission is **automatically inherited** from the
 //! parent `AArch64Backend`. This backend delegates `allocate_registers`
 //! to `self.inner.allocate_registers(func)`, which calls the parent's
 //! instruction selector (`arm64::InstructionSelector::select_from_ir`).
-//! The parent's `IRInstr::Syscall { nr, args, dst }` arm (added in Wave 11,
+//! The parent's `IRInstr::Syscall { nr, args, dst }` arm (added in ,
 //! `arm64.rs:4538`) emits `MOVZ X8, nr; SVC #0` with arg moves into X0-X5.
 //! Because AArch64 instructions are always LE-encoded (even on BE data
 //! systems per ARM ARM D6.1.3), `encode_function` returns the parent's
@@ -178,7 +178,7 @@ impl Backend for AArch64BeBackend {
 }
 
 // ===========================================================================
-// Tests — IRInstr::Syscall inheritance (Wave 13)
+// Tests — IRInstr::Syscall inheritance
 // ===========================================================================
 
 #[cfg(test)]
@@ -187,7 +187,7 @@ mod tests {
     use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRValue};
     use std::collections::HashSet;
 
-    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }` is
+    /// conformance: verify that `IRInstr::Syscall { nr: 1, .. }` is
     /// inherited from the parent `AArch64Backend` and produces non-empty
     /// encoded instruction bytes.  Because AArch64 instructions are always
     /// LE-encoded (even on BE data systems), the wrapper returns the parent's

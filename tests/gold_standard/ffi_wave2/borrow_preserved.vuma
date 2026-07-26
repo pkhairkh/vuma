@@ -1,7 +1,7 @@
 // ffi_wave2/borrow_preserved — #[borrow] preserves state after the call
 // Expected exit code: 0
 //
-// Wave 4 test: a foreign function declared with #[borrow] on its State
+// Test: a foreign function declared with #[borrow] on its State
 // argument promises not to mutate it. After the call, the state is
 // PRESERVED — subsequent reads are still valid (no re-initialization
 // required). The borrow_region verifier confirms no StateWrite occurs

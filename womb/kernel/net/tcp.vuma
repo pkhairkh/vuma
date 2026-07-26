@@ -158,7 +158,7 @@
 // State<TcpTable>` would produce broken field-access code in callers).
 // No externs are declared (pure-PM — no syscalls, no IRQ, no allocation).
 // The actual "send bytes over the wire" path is deferred to the NIC
-// driver (K9b's virtio-net) + IP layer (future wave); K9d only models
+// driver (K9b's virtio-net) + IP layer (future effort); K9d only models
 // the per-connection state transitions.
 //
 // State<T> params: 1 per function (tbl), except tcp_connect (tbl + idx +

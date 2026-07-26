@@ -4,8 +4,8 @@ import PMT.Soundness  -- for TrapCode
 /-!
 ## RawArena — Faithful model of the Rust `Arena` struct (sorry-free)
 
-This module mirrors `src/codegen/src/runtime/arena.rs` (236 lines, per W1-B
-audit, file `docs/verification-reports/W1-B-arena-rust.md`). Unlike the toy
+This module mirrors `src/codegen/src/runtime/arena.rs` (236 lines, per the
+Rust arena audit). Unlike the toy
 `Arena` in `PMT.Basic` (which is just `Nat × Nat × Nat`), `RawArena` captures:
 
   - Pointer types (modeled as `Nat` addresses, but typed distinctly from
@@ -16,25 +16,22 @@ audit, file `docs/verification-reports/W1-B-arena-rust.md`). Unlike the toy
   - `Drop` / `dealloc` and the `destroy` + `mem::forget` pattern.
   - `grow` / `realloc` that mutate `base`, `capacity`, `layout`.
 
-The simulation relation `RawArena_simulates_Arena` (defined in Wave 13,
-proven in Wave 14) connects this faithful model to the abstract `Arena`
+The simulation relation `RawArena_simulates_Arena`
+connects this faithful model to the abstract `Arena`
 from `PMT.Basic`. The companion Lean-side sim-rel preservation lemmas
 (`initial_state_sim`, `arena_sim_preserved_by_alloc`, `full_simulation`)
 live in `PMT.SimRel`.
 
-**Status (Wave 14).** `lake build PMT.RawArena` produces no errors and no
-`sorry` warnings. The `raw_alloc_simulates_alloc` theorem (Wave 14,
-mirroring W13-E's approach to the sibling `arena_sim_preserved_by_alloc`
+**Status.** `lake build PMT.RawArena` produces no errors and no
+`sorry` warnings. The `raw_alloc_simulates_alloc` theorem
+(mirroring the approach to the sibling `arena_sim_preserved_by_alloc`
 lemma in `SimRel.lean`) is closed via an added `haligned : size % 8 = 0`
 precondition that bridges the alignment-padding gap between `alloc`
 (advances `used` by `size`) and `raw_alloc` (advances `offset` by
-`align8_nat size`). Wave 17 will relax this precondition via a refined
-simulation relation.
+`align8_nat size`). A future refinement to the simulation relation may
+relax this precondition.
 
 **References.**
-  * `docs/verification-reports/W1-B-arena-rust.md` — Rust arena audit.
-  * `docs/verification-reports/W8-faithful-ir.md` — faithful IR model.
-  * `docs/verification-reports/W9-strengthened-types.md` — Wave 9 status.
   * Related modules: `PMT.Basic` (abstract `Arena`), `PMT.SimRel`
     (Lean↔Rust simulation), `PMT.Soundness` (`TrapCode`).
 
@@ -76,8 +73,7 @@ inductive ArenaPhase where
 
 /-- §1 (faithful): `RawArena` mirrors the Rust `Arena` struct.
 
-Fields correspond 1:1 to `src/codegen/src/runtime/arena.rs` (lines 26–36,
-per W1-B audit):
+Fields correspond 1:1 to `src/codegen/src/runtime/arena.rs` (lines 26–36):
   - `base`     ↔ `*mut u8`         (modeled as `Ptr`)
   - `offset`   ↔ `usize`           (bump pointer)
   - `capacity` ↔ `usize`           (total capacity)
@@ -238,7 +234,7 @@ theorem raw_alloc_preserves_wf
         show a.layout.size = a.capacity
         exact hwf.2.2.2
 
-/-! ## §3. Simulation relation to abstract `Arena` (Wave 13) -/
+/-! ## §3. Simulation relation to abstract `Arena` -/
 
 /-- Simulation relation: `RawArena` faithfully implements abstract `Arena`.
 
@@ -261,7 +257,7 @@ This is the key simulation theorem: if `raw` simulates `abs`, then after a
 successful `raw_alloc raw (align8_nat size)`, there exists an `abs'` such that
 `alloc abs ⟨size, []⟩ = abs'` and `raw'` simulates `abs'`.
 
-**Closing strategy (Wave 14, mirroring W13-E's approach to the sibling
+**Closing strategy (mirroring the approach to the sibling
 `arena_sim_preserved_by_alloc` lemma in `SimRel.lean`)**: the abstract
 `alloc` advances `used` by `size`, but `raw_alloc` advances `offset` by
 `align8_nat (align8_nat size) = align8_nat size` (which is `≥ size`, possibly
@@ -271,7 +267,7 @@ adding the precondition `haligned : size % 8 = 0`, which forces
 already 8-aligned). With this, both sides advance their pointers by the same
 amount, and the simulation is preserved field-by-field.
 
-TODO Wave 17: relax the `haligned` precondition by either (a) refining the
+TODO: relax the `haligned` precondition by either (a) refining the
 abstract model to track alignment, or (b) weakening the simulation relation
 to allow `raw.offset ≥ abs.used` (with a bound). -/
 theorem raw_alloc_simulates_alloc

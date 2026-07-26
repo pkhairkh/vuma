@@ -1,7 +1,7 @@
-// driver_isolation — Wave 49-64 / Wave F: driver isolation via
+// driver_isolation — driver isolation via
 // driver_register + driver_call + irq_dispatch.
 //
-// Wave F replaces the previous compile-time AtomicU64 counter in
+// This replaces the previous compile-time AtomicU64 counter in
 // driver_register with a REAL per-function IRQ routing table on the
 // stack: 8 slots × 16 bytes each = 128 bytes, each slot holding a
 // (irq:u64, handler_ptr:u64) pair.  driver_register(irq, handler_ptr)

@@ -148,7 +148,7 @@ layout PmmState = {
 // ────────────────────────────────────────────────────────────────────────────
 // Extern — VUMA intrinsic for the pmm_zero_page stub (W7S1).
 // ────────────────────────────────────────────────────────────────────────────
-// `__vuma_store_u32` is a Wave 7 VUMA intrinsic registered in the x86_64
+// `__vuma_store_u32` is a VUMA intrinsic registered in the x86_64
 // codegen as a 3-byte stub (`mov [rdi], esi; ret`). It stores a u32 value
 // to an arbitrary memory address. Used by `pmm_zero_page` (below) to zero
 // the first 4 bytes of a freshly allocated page as a stub — a full zero

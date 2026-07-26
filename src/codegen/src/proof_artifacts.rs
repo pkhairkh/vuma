@@ -1,4 +1,4 @@
-//! # Proof Artifacts for E-Graph Rewrites (Wave 15)
+//! # Proof Artifacts for E-Graph Rewrites
 //!
 //! Each rewrite rule application generates a proof artifact that can be
 //! checked by the proof checker (`src/proof/src/checker.rs`). This enables
@@ -107,17 +107,17 @@ pub struct ProofSummary {
     pub by_rule: Vec<(String, usize, usize)>,
 }
 
-/// Check a proof log against the bitvector verifier (Wave 15).
+/// Check a proof log against the bitvector verifier.
 ///
-/// **Wave 36 — call after saturate.** The orchestrator (pipeline.rs) wires
+/// ** — call after saturate.** The orchestrator (pipeline.rs) wires
 /// this as a compile-time check immediately after `EGraph::saturate_with_proof`
 /// populates the log. A failed check rolls back / fails the build: every
 /// recorded rewrite must be backed by a verified-sound rule.
 ///
 /// Replaces the old string-whitelist approach with a real check: each
 /// artifact's `rule_name` must correspond to a rule that has been verified
-/// sound by the Wave 7 bitvector verification framework
-/// (`bv_verify::verify_all_rules()`) OR be one of the Wave 31 standard
+/// sound by the bitvector verification framework
+/// (`bv_verify::verify_all_rules()`) OR be one of the standard
 /// e-graph rules (`egraph::standard_rules()`) — commutativity, associativity,
 /// distributivity, constant-folding-across-ops — which are tautologies
 /// sound by construction (they have no explicit bv_verify entry because
@@ -131,7 +131,7 @@ pub struct ProofSummary {
 pub fn check_proof_log(log: &ProofLog) -> Result<ProofSummary, String> {
     let summary = log.summary();
 
-    // Build the set of verified rule names from the Wave 7 verifier.
+    // Build the set of verified rule names from the verifier.
     let mut verified_rules: std::collections::HashSet<&'static str> =
         crate::bv_verify::verify_all_rules()
             .into_iter()
@@ -139,7 +139,7 @@ pub fn check_proof_log(log: &ProofLog) -> Result<ProofSummary, String> {
             .map(|r| r.rule_name)
             .collect();
 
-    // Wave 36: also accept the Wave 31 standard e-graph rules (commutativity,
+    // also accept the standard e-graph rules (commutativity,
     // associativity, distributivity, constant-folding-across-ops). These are
     // sound by construction (tautologies) but have no explicit bv_verify
     // entry. Without this, `check_proof_log` would reject artifacts recorded
@@ -258,11 +258,11 @@ mod tests {
     }
 
     // ========================================================================
-    // Wave 36 — proof-log checks accept the W31 standard e-graph rules.
+    //  — proof-log checks accept the W31 standard e-graph rules.
     // ========================================================================
 
-    /// Wave 36: `check_proof_log` must accept artifacts whose `rule_name`
-    /// is a Wave 31 standard e-graph rule (commutativity, associativity,
+    /// `check_proof_log` must accept artifacts whose `rule_name`
+    /// is a standard e-graph rule (commutativity, associativity,
     /// distributivity, constant-folding-across-ops). These rules have no
     /// explicit bv_verify entry but are tautologies sound by construction.
     /// Without this acceptance, the orchestrator's post-saturate
@@ -301,7 +301,7 @@ mod tests {
         );
     }
 
-    /// Wave 36 end-to-end: `EGraph::saturate_with_proof` populates a
+    /// end-to-end: `EGraph::saturate_with_proof` populates a
     /// `ProofLog`, and `check_proof_log` accepts it. This is the wiring
     /// the orchestrator (pipeline.rs) relies on: saturate → record → check.
     #[test]

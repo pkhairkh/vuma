@@ -4,7 +4,7 @@
 // dispatcher's riscv_map_page / riscv_translate entry points.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Wave R3f. Implements the riscv64 half of the R3b HAL boundary:
+//  Implements the riscv64 half of the R3b HAL boundary:
 //   - riscv_map_page(root, vaddr, paddr, flags, levels) — walk PGD→PMD→PTE
 //     (Sv39 3-level), write the leaf PTE.
 //   - riscv_translate(root, vaddr) — walk to leaf, return the mapped paddr.

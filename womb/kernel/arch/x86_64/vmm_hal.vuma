@@ -4,7 +4,7 @@
 // dispatcher's x86_map_page / x86_translate entry points.
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Wave R3d. Implements the x86_64 half of the R3b HAL boundary:
+//  Implements the x86_64 half of the R3b HAL boundary:
 //   - x86_map_page(root, vaddr, paddr, flags, levels) — walk PML4→PDPT→PD→PT,
 //     write the leaf PTE.
 //   - x86_translate(root, vaddr) — walk to leaf, return the mapped paddr.
@@ -14,7 +14,7 @@
 // paging). Pre-W34 the only externs declared here were `pte_read` /
 // `pte_write` — raw 8-byte MMIO load/store stubs that resolved to
 // __ffi_fallback_stub in hosted mode (returns 0 / no-op), making the
-// walker's bit-math correct but useless. W34 swaps them for the Wave 7
+// walker's bit-math correct but useless. W34 swaps them for the
 // VUMA intrinsics `__vuma_load_u64` / `__vuma_store_u64` (4-byte runtime
 // stubs `mov rax,[rdi]; ret` and `mov [rdi],rsi; ret`) — REAL loads and
 // stores, so the walker actually walks the page table now.
@@ -54,7 +54,7 @@
 // manipulates plain u64 scalars (root, vaddr, paddr, flags, level, idx,
 // pte_addr, pte) — no State<T> buffer is needed because the page-table
 // pages live in physical memory reached via `__vuma_load_u64` /
-// `__vuma_store_u64` (Wave 7 VUMA intrinsics — real `mov` instructions,
+// `__vuma_store_u64` ( VUMA intrinsics — real `mov` instructions,
 // PMT-pure: no pointer dereference syntax in VUMA source), not in the
 // ___pmt_buffer arena. VmmNode + VmmSpace are re-declared here only so a
 // future kmain.vuma that #includes this file's declarations by re-typing
@@ -160,7 +160,7 @@ layout PageTableBuf = {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" — VUMA intrinsic 8-byte load/store stubs (Wave 7).
+// Extern "C" — VUMA intrinsic 8-byte load/store stubs.
 // ────────────────────────────────────────────────────────────────────────────
 // W34: the walker previously declared `pte_read` / `pte_write` as externs,
 // which in hosted mode resolved to `__ffi_fallback_stub` (pte_read returns
@@ -168,7 +168,7 @@ layout PageTableBuf = {
 // useless — every PTE read returned 0, so x86_translate always returned 0
 // and x86_map_page bailed out at the first intermediate level.
 //
-// W34 swaps the broken externs for the Wave 7 VUMA intrinsics
+// W34 swaps the broken externs for the VUMA intrinsics
 // `__vuma_load_u64` / `__vuma_store_u64` — 4-byte runtime stubs registered
 // in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs:
 //   __vuma_load_u64(addr)  -> u64  = `mov rax, [rdi]; ret`  (48 8B 07 C3)
@@ -322,7 +322,7 @@ fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
 //
 // W34: previously this called `pte_read` (an extern that resolved to
 // __ffi_fallback_stub returning 0 in hosted mode), so x86_translate
-// always returned 0. Now it calls `__vuma_load_u64` (the Wave 7 runtime
+// always returned 0. Now it calls `__vuma_load_u64` (the runtime
 // stub `mov rax,[rdi]; ret`) — a REAL load. Combined with the new self-
 // test that sets up a real 4-level page table in ___pmt_buffer (via
 // state_new(VmmNode) + __vuma_store_u64 to link PML4→PDPT→PD→PT and

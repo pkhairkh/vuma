@@ -1,13 +1,13 @@
 //! Proof artifacts + provenance tests (Waves 15, 16).
 //!
-//! Wave 15: proof artifacts use the real bitvector verifier (not a string whitelist).
-//! Wave 16: e-graph provenance records rewrite history for debug-info fidelity.
+//! proof artifacts use the real bitvector verifier (not a string whitelist).
+//! e-graph provenance records rewrite history for debug-info fidelity.
 
 use vuma_codegen::egraph::{default_cost, standard_rules, EGraph, ENode, RewriteRule};
 use vuma_codegen::ir::BinOpKind;
 use vuma_codegen::proof_artifacts::{check_proof_log, ProofArtifact, ProofLog};
 
-// ── Wave 15: Proof artifacts with real verification ──
+// ── Proof artifacts with real verification ──
 
 #[test]
 fn wave15_check_proof_log_accepts_verified_rules() {
@@ -93,7 +93,7 @@ fn wave15_check_proof_log_accepts_multiple_verified_rules() {
     assert!(result.is_ok(), "multiple verified rules should pass");
 }
 
-// ── Wave 16: E-graph provenance ──
+// ── E-graph provenance ──
 
 #[test]
 fn wave16_provenance_records_rewrites() {

@@ -1,4 +1,4 @@
-// supervisor — Wave 41-48: kernel/user split with capability-gated dispatch.
+// supervisor — kernel/user split with capability-gated dispatch.
 //
 // supervisor_call(nr, arg) is a real kernel/user trap — NOT a raw syscall.
 // Before executing the `syscall` instruction, it checks `nr` against the

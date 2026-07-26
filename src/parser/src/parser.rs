@@ -265,7 +265,7 @@ impl<'src> Parser<'src> {
             err.resolve_location(source, None);
         }
 
-        // Wave A (PMT-only): pointer syntax (`allocate`, `free`, `*ptr`,
+        //  (PMT-only): pointer syntax (`allocate`, `free`, `*ptr`,
         // `&x`, `*T`) is ALWAYS a hard parse error in VUMA 2.0 — there is no
         // "no PMT mode". Any such site is pushed onto `self.errors` by
         // `check_pointer_syntax` (which returns `Err` unconditionally) and
@@ -307,7 +307,7 @@ impl<'src> Parser<'src> {
         &self.errors
     }
 
-    /// **Wave A (PMT-only)**: pointer syntax (`allocate`, `free`, `*ptr`,
+    /// ** (PMT-only)**: pointer syntax (`allocate`, `free`, `*ptr`,
     /// `&x`, `*T`) is ALWAYS a hard parse error in VUMA 2.0. There is no
     /// "no PMT mode" — every program is PMT.  Returns `Err(ParseError)`
     /// unconditionally; the error propagates up through `parse_statement`
@@ -819,7 +819,7 @@ impl<'src> Parser<'src> {
         let name = self.expect_name()?;
 
         self.expect(TokenKind::Assign)?;
-        // Wave A (PMT-only): `region X = allocate(N);` uses pointer syntax —
+        //  (PMT-only): `region X = allocate(N);` uses pointer syntax —
         // always a hard parse error in VUMA 2.0.  Checked BEFORE consuming
         // the `allocate` token so the error span points at `allocate`.
         self.check_pointer_syntax("allocate (region)", self.current.span)?;
@@ -1772,7 +1772,7 @@ impl<'src> Parser<'src> {
     /// `free` `(` <expr> `)` `;`
     fn parse_free_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
-        // Wave A (PMT-only): `free(ptr)` is pointer syntax — always a hard
+        //  (PMT-only): `free(ptr)` is pointer syntax — always a hard
         // parse error in VUMA 2.0.  Checked BEFORE consuming the `free`
         // token so the error span points at `free`.
         self.check_pointer_syntax("free", self.current.span)?;
@@ -1790,7 +1790,7 @@ impl<'src> Parser<'src> {
     /// `allocate` `(` <expr> `)` `;` — as a statement.
     fn parse_allocate_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
-        // Wave A (PMT-only): `allocate(size)` is pointer syntax — always a
+        //  (PMT-only): `allocate(size)` is pointer syntax — always a
         // hard parse error in VUMA 2.0.  Checked BEFORE consuming the
         // `allocate` token so the error span points at `allocate`.
         self.check_pointer_syntax("allocate", self.current.span)?;
@@ -2594,7 +2594,7 @@ impl<'src> Parser<'src> {
                 })
             }
             TokenKind::Star => {
-                // Wave A (PMT-only): `*ptr` (deref) is pointer syntax —
+                //  (PMT-only): `*ptr` (deref) is pointer syntax —
                 // always a hard parse error in VUMA 2.0.  Checked BEFORE
                 // consuming the `*` token so the error span points at `*`.
                 self.check_pointer_syntax("*ptr (deref)", self.current.span)?;
@@ -2608,7 +2608,7 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Ampersand => {
                 // Borrow / address-of: `&expr`
-                // Wave A (PMT-only): `&x` (address-of) is pointer syntax —
+                //  (PMT-only): `&x` (address-of) is pointer syntax —
                 // always a hard parse error in VUMA 2.0.  Checked BEFORE
                 // consuming the `&` token so the error span points at `&`.
                 self.check_pointer_syntax("&x (address-of)", self.current.span)?;
@@ -2622,7 +2622,7 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Ampersat => {
                 // Address-of: `@expr` (VUMA-specific)
-                // Wave A (PMT-only): `@x` (address-of) is pointer syntax —
+                //  (PMT-only): `@x` (address-of) is pointer syntax —
                 // always a hard parse error in VUMA 2.0.  Checked BEFORE
                 // consuming the `@` token so the error span points at `@`.
                 self.check_pointer_syntax("@x (address-of)", self.current.span)?;
@@ -3211,7 +3211,7 @@ impl<'src> Parser<'src> {
             // ---- VUMA-specific expression forms ----
             TokenKind::Allocate => {
                 // `allocate(expr)` as an expression
-                // Wave A (PMT-only): `allocate(N)` is pointer syntax —
+                //  (PMT-only): `allocate(N)` is pointer syntax —
                 // always a hard parse error in VUMA 2.0.  Checked BEFORE
                 // consuming the `allocate` token so the error span points
                 // at `allocate`.
@@ -3658,7 +3658,7 @@ impl<'src> Parser<'src> {
         // Detect Rust-style reference: `&T` or `&mut T`
         // VUMA doesn't use `&` for references — use pointer types `*T` instead.
         //
-        // Wave A (PMT-only): `&T` / `&mut T` are pointer syntax — always a
+        //  (PMT-only): `&T` / `&mut T` are pointer syntax — always a
         // hard parse error in VUMA 2.0.  Previously these forms pushed an
         // `LlmMistake` error to `self.errors`; the unified
         // `check_pointer_syntax` path now returns a clean ParseError that
@@ -3688,7 +3688,7 @@ impl<'src> Parser<'src> {
 
         // Pointer type: `*T` or `*T @ region`
         //
-        // Wave A (PMT-only): `*T` and `*T @ region` are pointer syntax —
+        //  (PMT-only): `*T` and `*T @ region` are pointer syntax —
         // always a hard parse error in VUMA 2.0.  Checked BEFORE consuming
         // the `*` token so the error span points at `*`.
         if self.at(TokenKind::Star) {

@@ -1,9 +1,9 @@
-// transform_decl — PMT Wave 1a: transform declaration
+// transform_decl — transform declaration
 // Expected exit code: 0
 //
-// Wave 1a parse-only smoke test: declares a `transform` that takes a
+// Parse-only smoke test: declares a `transform` that takes a
 // `State<Request>` and returns a `State<Response>`. The body is a single
-// `return;` — Wave 1c will require the body to produce a return state. The
+// `return;` — A future pass will require the body to produce a return state. The
 // key assertion is that the parser accepts the new `transform` keyword form
 // with a `State<T>` parameter and return type without error.
 //

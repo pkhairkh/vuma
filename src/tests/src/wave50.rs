@@ -1,6 +1,6 @@
 //! # Final Hardening Tests
 //!
-//! This module hosts the final-wave hardening tests:
+//! This module hosts the final hardening tests:
 //!
 //! 1. **Real-regalloc correctness per backend** — every tier-1 backend's
 //!    `emit_function_with_regalloc` produces non-empty emitted bytes AND
@@ -1687,7 +1687,7 @@ fn test_wave50_cross_backend_opt_regression() {
 /// actually compiles AND runs a non-trivial `.vuma` file from
 /// `womb/lang/`.  The compile path mirrors `main.rs::cmd_run`'s
 /// `compile_to_binary_direct` helper (parse → AST → codegen SCG → IR →
-/// backend.encode_program) — that's the same path a future wave will use
+/// backend.encode_program) — that's the same path a future effort will use
 /// to compile the bootstrap itself once its blockers (see below) are
 /// resolved.
 ///
@@ -1695,7 +1695,7 @@ fn test_wave50_cross_backend_opt_regression() {
 ///
 /// The bootstrap compiler (`full_lexer.vuma` + 4 sibling files) is NOT
 /// yet compilable end-to-end by the production Rust compiler for two
-/// reasons documented here so a future wave can pick up the work:
+/// reasons documented here so a future effort can pick up the work:
 ///
 /// 1. **Multi-module linking.**  `full_lexer.vuma::main` declares
 ///    `extern` calls to `parse`, `irb_build_main`, `codegen_emit`,
@@ -1714,7 +1714,7 @@ fn test_wave50_cross_backend_opt_regression() {
 ///
 /// Compiling `hello.vuma` — the bootstrap's canonical INPUT — exercises
 /// the same Rust pipeline (parse → SCG → IR → codegen → ELF → exec) that
-/// a future wave will use to compile `full_lexer.vuma` once multi-module
+/// a future effort will use to compile `full_lexer.vuma` once multi-module
 /// linking and parser coverage land.  This is the strongest milestone
 /// test currently feasible: it proves the production compiler can host
 /// the input contract that the bootstrap is supposed to host.

@@ -22,7 +22,7 @@
 //                    fields from X86TrapFrame into the superset.
 //
 // In hosted mode every extern resolves to `__ffi_fallback_stub` (returns 0,
-// void calls no-op). In bare-metal mode (Wave K11) the same names link
+// void calls no-op). In bare-metal mode the same names link
 // against REAL asm stubs in womb/kernel/arch/x86_64/trap.S.
 //
 // ── X86TrapFrame register-save order ────────────────────────────────────────
@@ -72,7 +72,7 @@
 //     sup.sp         ← old.rsp          (CPU-pushed inner-level RSP)
 //   NOT migrated (left 0 by tf_init):
 //     sup.fpu[0..255]   — x86_64 saves XMM state separately (not in the
-//                         X86TrapFrame); a future wave may extend the
+//                         X86TrapFrame); a future effort may extend the
 //                         save area and copy xmm0..xmm15 here.
 //
 // ── Extern "C" trampolines (IDT + IRQ + CR2) ────────────────────────────────
@@ -367,7 +367,7 @@ fn trap_page_fault_addr(tf: State<X86TrapFrame>) -> u64 {
 //                  x86-specific; the dispatcher can read old.cs/old.ss
 //                  directly from X86TrapFrame if it needs them), and fpu
 //                  (the X86TrapFrame doesn't save XMM state — a future
-//                  wave may extend the save area).
+//                  effort may extend the save area).
 //
 // State<T> params: 2 (old: State<X86TrapFrame>, sup: State<TrapFrame>).
 // Pure reads of `old.*` + pure writes to `sup.*` via tf_set_gpr +

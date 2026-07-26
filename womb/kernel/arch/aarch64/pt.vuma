@@ -198,7 +198,7 @@ fn pte_user(pte: u64) -> u8 {
 // and the long-mode OS convention where pte_make is used to construct
 // next-level table descriptors (block descriptors, which use type=0b01
 // in stage-1 / type=0b10 in stage-2, are constructed by a separate
-// helper in a future wave if needed). The Access Flag (bit 9 = 512)
+// helper in a future effort if needed). The Access Flag (bit 9 = 512)
 // is ALWAYS ORed in — an AF fault would otherwise trap on the first
 // access, which is rarely what an OS wants (Linux, FreeBSD, and seL4
 // all set AF=1 at PTE-construction time for kernel mappings).

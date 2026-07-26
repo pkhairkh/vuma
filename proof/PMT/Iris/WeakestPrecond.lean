@@ -25,7 +25,7 @@ triple `{{ P }} e {{ v, Q }}` is a derived form `P -∗ wp e {Q}`.
 
 This is a SIMPLIFIED Iris encoding, following the pattern established by
 `PMT.Iris.CapBndInvariant` (the `[cap_bnd]` named invariant, formalised
-in Wave 3). Real Iris `wp` is a fixpoint over step indices in a fancy-
+earlier). Real Iris `wp` is a fixpoint over step indices in a fancy-
 update monad; here we collapse the recursion because the underlying
 `PMT.Soundness.step` is structurally recursive and total. Each
 `Expr` constructor dispatches to a one-shot `Prop` predicate that
@@ -58,14 +58,14 @@ encodes its safety precondition and postcondition obligation:
 
 **Sorries.** The `wp` DEFINITION is sorry-free. Of the five derived
 lemmas (`wp_monotone`, `wp_frame`, `wp_bind`, `wp_value`,
-`wp_soundness`), `wp_soundness` is closed (Wave 4) by direct induction
+`wp_soundness`), `wp_soundness` is closed by direct induction
 on `prog`, mirroring `pmt_soundness`'s case-split on `step s i`'s
 outcome — `hwp` is vacuous (it reduces to `True` for every step), so
 the conclusion's canonical-trap-code guarantee holds unconditionally.
 The remaining four lemmas (`wp_monotone`, `wp_frame`, `wp_bind`,
 `wp_value`) are stated with their full Iris shape but their proofs are
 `sorry`-stubbed; closing them requires the full Iris heap model and a
-step-indexed fixpoint, which are out of scope for Wave 3. The theorem
+step-indexed fixpoint, which are out of scope here. The theorem
 *statements* are the contribution: they pin down the Iris proof rules
 the VUMA project must eventually discharge. This matches the posture of
 `pmt-iris-spec.md` §7 (statements given; proofs deferred to the Iris

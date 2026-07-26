@@ -4154,7 +4154,7 @@ impl RiscV64Backend {
         }
     }
 
-    /// Wave 22: Emit a function using real register allocation.
+    /// Emit a function using real register allocation.
     ///
     /// Consumes a `RegAllocResult` and produces an `AllocatedFunction`
     /// with `reads`/`writes` annotated with the physical registers
@@ -4173,7 +4173,7 @@ impl RiscV64Backend {
         Ok(allocated)
     }
 
-    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    /// Convenience method — run regalloc + emit in one step.
     pub fn emit_function_with_regalloc(
         &self,
         func: &IRFunction,
@@ -6648,7 +6648,7 @@ impl Backend for RiscV64Backend {
         current_offset += 8;
         let formal_verify_count_off: i32 = current_offset;
 
-        // Wave J: scan the function IR for compile-time folded L1/L2
+        // scan the function IR for compile-time folded L1/L2
         // checks (matches the x86_64 backend's formal_verify_folded_count).
         // Each channel_send / channel_recv / capability_grant /
         // capability_delegate / stark_prove / stark_verify folds one
@@ -6679,7 +6679,7 @@ impl Backend for RiscV64Backend {
             }
         }
 
-        // Wave C: scan the function for the first capability_grant call
+        // scan the function for the first capability_grant call
         // to extract compile-time signature data (mirrors x86_64's
         // cap_grant_sig / cap_grant_sig_input population in Phase 0.5).
         // The sig + sig_input are stored into per-function slots in the
@@ -6961,7 +6961,7 @@ impl Backend for RiscV64Backend {
             prologue_extra.extend(ss_store_to_slot(Gpr::T0, hotswap_table_count_off));
             prologue_extra.extend(ss_store_to_slot(Gpr::T0, stark_table_count_off));
 
-            // Wave C: populate cap sig + sig_input + sig_input_len from
+            // populate cap sig + sig_input + sig_input_len from
             // compile-time grant data (only if the function has a grant).
             if let (Some(sig), Some(sig_input)) =
                 (cap_grant_sig.as_ref(), cap_grant_sig_input.as_ref())
@@ -7000,7 +7000,7 @@ impl Backend for RiscV64Backend {
                 prologue_extra.extend(ss_store_to_slot(Gpr::T1, cap_siginput_len_off));
             }
 
-            // Wave J: initialize formal_verify_count_off to the compile-time
+            // initialize formal_verify_count_off to the compile-time
             // folded-check count.  Each channel_send / channel_recv / etc.
             // builtin then increments this at runtime, so formal_verify()
             // returns (compile_time_folded + runtime_executed).
@@ -7712,7 +7712,7 @@ impl Backend for RiscV64Backend {
                     IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
 
-                        // ── Channel builtins (Wave 4ab / Task 4ab) ──
+                        // ── Channel builtins (ask 4ab) ──
                         // `channel_open`/`send`/`recv`/`close` are parsed as
                         // ordinary `Expr::Call` and reach the backend as
                         // `IRInstr::Call { func: "channel_open", .. }`.
@@ -7751,7 +7751,7 @@ impl Backend for RiscV64Backend {
                                 true
                             }
                             ("channel_send", 2, _) => {
-                                // Wave 15a: framed L1 write — builds a 56-byte
+                                // framed L1 write — builds a 56-byte
                                 // frame (44-byte header + 8-byte payload + 4-byte
                                 // CRC32) and writes it to the pipe.  This is the
                                 // riscv64 port of the x86_64 codegen in
@@ -7844,7 +7844,7 @@ impl Backend for RiscV64Backend {
                                 true
                             }
                             ("channel_recv", 1, true) => {
-                                // Wave 15a: framed L1 read — reads a 56-byte
+                                // framed L1 read — reads a 56-byte
                                 // frame, verifies MAGIC, type_hash, and CRC32,
                                 // then extracts the 8-byte payload into dst.
                                 // This is the riscv64 port of the x86_64 codegen.
@@ -9889,7 +9889,7 @@ impl Backend for RiscV64Backend {
                         code
                     }
 
-                    // ── Syscall (Wave 11) ──────────────────────────────────
+                    // ── Syscall ──────────────────────────────────
                     // dst = syscall(nr, args…) — raw Linux syscall.
                     // RISC-V ABI: args in a0-a5, nr in a7, ECALL, result in a0.
                     IRInstr::Syscall { nr, args, dst } => {
@@ -9921,18 +9921,18 @@ impl Backend for RiscV64Backend {
                         }
                         code
                     }
-                    // ── VectorOp (Wave 29) ──
-                    // riscv64 (RVV) has no SIMD encoder in the Wave 29 suite;
+                    // ── VectorOp ──
+                    // riscv64 (RVV) has no SIMD encoder in the suite;
                     // emit nothing.
                     IRInstr::VectorOp { .. } => Vec::new(),
-                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // ── Channel operations (ask 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-                    // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                    // StarkProof — stub (Call-form builtin is the active path).
                     | IRInstr::StarkProof { .. } => Vec::new(),
 
-                    // Wave 49: CallIndirect — indirect call through func_ptr.
+                    // CallIndirect — indirect call through func_ptr.
                     // riscv64 codegen: load args into a0-a5, load func_ptr
                     // into t0, JALR ra, t0, 0. Store a0 to dst.
                     IRInstr::CallIndirect { dst, func_ptr, args } => {
@@ -10063,7 +10063,7 @@ impl Backend for RiscV64Backend {
                         | IRInstr::ChannelRecv { .. }
                         | IRInstr::ChannelRecvResult { .. } => "channel_recv",
                         IRInstr::ChannelClose { .. } => "channel_close",
-                        // Wave 93-94: zk-STARK proof generation.
+                        // zk-STARK proof generation.
                         IRInstr::StarkProof { .. } => "stark_prove",
                         IRInstr::CallIndirect { .. } => "call_indirect",
                     };
@@ -10108,7 +10108,7 @@ impl Backend for RiscV64Backend {
         }
 
         // ── Phase 4: Apply branch fixups ──
-        // [Wave I-riscv64-bne-range] For out-of-range BNE (±4KB limit),
+        // [riscv64-bne-range] For out-of-range BNE (±4KB limit),
         // emit a trampoline (JAL to true_target) at the end of the function
         // and patch the BNE to branch to the trampoline instead.
         let mut trampolines: Vec<(usize, String)> = Vec::new(); // (bne_fixup_idx, true_target_label)
@@ -10491,7 +10491,7 @@ impl Backend for RiscV64Backend {
                 ("sendto", 206),
                 // NOTE: stat/lstat/poll/alarm do not exist on the generic ABI.
                 // They are provided as newfstatat/ppoll/setitimer shims below.
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (asm-generic) ──
+                // ── POSIX file-metadata & I/O syscalls (asm-generic) ──
                 // RV64 has 8 reg args (a0-a7); all take ≤5 args → simple_stub.
                 // Plain mkdir/rmdir/rename/link/symlink/readlink/chmod/chown do
                 // NOT exist on the generic ABI — provided as *at wrappers below.
@@ -10520,7 +10520,7 @@ impl Backend for RiscV64Backend {
                 ("pwritev", 70),
                 ("fchdir", 50),
                 ("chroot", 51),
-                // ── Wave 9: POSIX system & advanced syscalls (asm-generic) ──
+                // ── POSIX system & advanced syscalls (asm-generic) ──
                 // RV64 has 8 reg args; all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(19), signalfd→signalfd4(74) = modern variants.
                 ("mlock", 228),
@@ -10546,7 +10546,7 @@ impl Backend for RiscV64Backend {
                 ("inotify_add_watch", 27),
                 ("inotify_rm_watch", 28),
                 ("ptrace", 117),
-                // ── Wave 8: POSIX process & identity syscalls (asm-generic/unistd.h) ──
+                // ── POSIX process & identity syscalls (asm-generic/unistd.h) ──
                 // All present directly in asm-generic (no *at wrapping). All take
                 // ≤5 args; RV64 has 8 reg args (a0-a7) → simple_stub for all.
                 // Family 1: identity
@@ -11193,7 +11193,7 @@ impl Backend for RiscV64Backend {
                 stubs.push(("strcmp".to_string(), code));
             }
 
-            // ── Wave 7 wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
+            // ── wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
             // RV64 (asm-generic) lacks the legacy mkdir/rmdir/rename/link/
             // symlink/readlink/chmod/chown syscalls; expose the plain names by
             // inserting AT_FDCWD=-100 (fits ADDI imm12) and shifting args.
@@ -11505,7 +11505,7 @@ impl Backend for RiscV64Backend {
                 stubs.push(("chown".to_string(), code));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: REAL mmap syscall (riscv64 sys_mmap=222).
             // Args: a0=0(NULL), a1=4096, a2=3(PROT), a3=0x22(MAP), a4=-1(fd), a5=0(off), a7=222.
             {

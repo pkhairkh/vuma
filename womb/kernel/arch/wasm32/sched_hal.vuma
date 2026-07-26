@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/arch/wasm32/sched_hal.vuma
 // VWK Wasm32 Cooperative Scheduling HAL (PMT-pure).
-// Wave R4d.
+// 
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Wasm32 uses cooperative scheduling (no preemption). The host event loop

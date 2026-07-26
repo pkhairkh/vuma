@@ -30,8 +30,7 @@ in `pmt_soundness`. All theorems close without `sorry`.
 `just proof`); the `lean-proofs` CI job in
 `.github/workflows/proof-verify.yml` runs the same command. The
 legacy single-file `lean PMT/Liveness.lean` invocation does not work
-since the multi-module split in Wave 6
-(`docs/verification-reports/W6-multi-module-test.md`).
+since the multi-module split.
 -/
 
 namespace PMT

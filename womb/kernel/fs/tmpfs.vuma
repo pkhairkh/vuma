@@ -52,7 +52,7 @@
 // by `pos / PAGE_SIZE`). This simplified version gives each file ONE page
 // (256 bytes max), stored as the page index in the File's `private` field.
 // The 64-page pool thus supports 64 simultaneously-open files (more than
-// enough for the K5c self-test). K5d (or a later wave) can extend this to
+// enough for the K5c self-test). K5d (or a later effort) can extend this to
 // a per-inode page list when the codegen supports the needed indexing
 // patterns. The contract explicitly calls this out: "TmpfsData uses
 // [u8; 16384] for 64 pages × 256 bytes. Each file gets one page
@@ -1012,7 +1012,7 @@ fn tmpfs_mount(inodes: State<InodeTable>, dentries: State<DentryTable>, data: St
 // takes no `data` parameter, so it can't allocate a page. The inode's
 // `private` field is left at 0 (zero-init default) — K5c's tmpfs_open will
 // allocate the page and store it in the inode's `private` (so subsequent
-// opens can share the same page), but this K5c wave doesn't implement
+// opens can share the same page), but this K5c effort doesn't implement
 // tmpfs_open (the self-test does the allocation manually).
 fn tmpfs_create(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
     // Allocate the new inode. Set its mode to S_IFREG | 0o644 = 33188
@@ -1182,7 +1182,7 @@ fn tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, c
 // ────────────────────────────────────────────────────────────────────────────
 // Tmpfs operations (W20S2-S4 additions: unlink / readdir / open).
 // ────────────────────────────────────────────────────────────────────────────
-// Three operations added by the W20S2-S4 contract wave to close the
+// Three operations added by the W20S2-S4 contract effort to close the
 // gaps called out in the W20 stage-2 critical review:
 //   - tmpfs_unlink  — delete a file (free its page, mark inode free,
 //     mark dentry free, unlink from parent's child list).

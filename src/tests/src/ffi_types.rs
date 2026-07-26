@@ -33,7 +33,7 @@
 //! | `MAP_ANONYMOUS`  | `0x20`    | Mapping not backed by any file           |
 //! | `MAP_FAILED`     | `!0u64`   | Sentinel returned by `mmap` on failure   |
 //!
-//! These match the values used by vuma-cor's Wave 45 raw-syscall FFI
+//! These match the values used by vuma-cor's raw-syscall FFI
 //! (`src/cor/src/runtime.rs`), so the test harness exercises the same
 //! calling convention as production code.
 

@@ -1,7 +1,7 @@
 // ffi_wave3/foreign_return_wrap — #[foreign_return(raw)] wraps C pointer into State
 // Expected exit code: 0
 //
-// Wave 5 test: an extern fn with #[foreign_return(raw)] wraps its C return
+// Test: an extern fn with #[foreign_return(raw)] wraps its C return
 // value (a raw pointer) into a State<ForeignLayout> whose `raw` field holds
 // the pointer. The pointer lives in ___pmt_buffer (as a u64 payload) —
 // single-buffer invariant preserved.

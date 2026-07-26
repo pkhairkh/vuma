@@ -22,7 +22,7 @@
 // fstat, close, read, write, lseek, getcwd, chdir, pipe, execve, kill, exit
 // exist natively in asm-generic and are passed through with their literal nr.
 //
-// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers in
+// PMT migration: the local `allocate(N)` scratch buffers in
 // `file_size` / `file_exists` (struct stat, 144 bytes) and `proc_wait`
 // (wait status, 4 bytes) are replaced by typed `State<StatBuf>` and
 // `State<WaitStatus>`. The `mem_load_i64` byte-stitched loader is
@@ -66,7 +66,7 @@ const AT_REMOVEDIR: i64 = 512;
 // ===========================================================================
 // Internal helpers
 // ===========================================================================
-// (Wave 8c: the previous byte-stitched `mem_load_i64(ptr: Address)` helper
+// (the previous byte-stitched `mem_load_i64(ptr: Address)` helper
 // is eliminated — `StatBuf.st_size` is now accessed directly as a typed
 // `i64` field.)
 

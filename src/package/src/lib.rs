@@ -45,7 +45,7 @@ pub use manifest::{parse_manifest, Dependency, PackageManifest, PackageTarget, T
 pub use registry::PackageRegistry;
 pub use resolver::{resolve_dependencies, DependencyResolver, ResolveResult};
 
-// Wave 41: `thiserror` removed in favor of hand-written `Display` +
+// `thiserror` removed in favor of hand-written `Display` +
 // `std::error::Error` impls (matches the pattern established in
 // `src/scg/src/graph.rs:SCGError`).
 

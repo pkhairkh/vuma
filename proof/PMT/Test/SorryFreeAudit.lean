@@ -24,7 +24,7 @@ audit's guarantee against `sorry` comes from the absence of `sorry`
 warnings in the build log, *not* from `#check` alone). What `#check`
 *does* guarantee is that every named theorem exists with its expected
 type, which locks the public API of the proof library against silent
-renames or signature drift in later waves.
+renames or signature drift in later refinements.
 
 Run: `lake build PMT.Test.SorryFreeAudit`
 -/
@@ -73,10 +73,10 @@ namespace PMT.Test.SorryFreeAudit
 #check @PMT.initial_state_sim
 
 -- `full_simulation` is the top-level simulation theorem (closed via the
--- `first_function_body = []` stub in Wave 13).
+-- `first_function_body = []` stub).
 #check @PMT.full_simulation
 
--- `full_simulation_strong` is the strengthened version (Wave 14),
+-- `full_simulation_strong` is the strengthened version,
 -- taking a non-empty program body.
 #check @PMT.full_simulation_strong
 

@@ -6681,7 +6681,7 @@ impl Backend for RiscV32Backend {
                                     }
                                     code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
                                 } else if is_64bit && matches!(op, BinOpKind::Mul) {
-                                    // [Wave 93-94-ext] I64 Mul: 64-bit multiply on RV32.
+                                    // [ext] I64 Mul: 64-bit multiply on RV32.
                                     // 64-bit result = a_lo * b_lo + (a_lo * b_hi + a_hi * b_lo) << 32
                                     // Use: MUL (low 32), MULHU (high 32 of unsigned mul)
                                     // Register plan:
@@ -7171,7 +7171,7 @@ impl Backend for RiscV32Backend {
 
                     IRInstr::Store { value, addr, offset, ty } => {
                         let mut code = Vec::new();
-                        // [Wave K-rv32] Load addr into T2 (NOT T3), and use T3
+                        // [rv32] Load addr into T2 (NOT T3), and use T3
                         // as the offset scratch. ss_load_from_slot (called by
                         // ss_load_value / ss_load_value_64 / ss_load_fpr_*_from_slot)
                         // and ss_store_to_slot use T3 as an internal scratch when
@@ -7181,7 +7181,7 @@ impl Backend for RiscV32Backend {
                         // driver_isolation hang when the stack frame is large).
                         // This mirrors the riscv64 backend's IRInstr::Store.
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T2));
-                        // [Wave D-riscv32-label] Handle IRValue::Label (function
+                        // [riscv32-label] Handle IRValue::Label (function
                         // pointer) by emitting LUI+ADDI with R_RISCV_HI20/
                         // R_RISCV_LO12_I relocations, same as GetAddress.
                         // Without this, driver_register(irq, my_handler) stores 0
@@ -7234,7 +7234,7 @@ impl Backend for RiscV32Backend {
                                 // 4-byte FP store: load value bits into F0 (via
                                 // FLW from value's slot if Register, or FMV.W.X
                                 // from T0 if immediate), then FSW to [addr+off].
-                                // [Wave K-rv32] ss_load_fpr_s_from_slot may
+                                // [rv32] ss_load_fpr_s_from_slot may
                                 // clobber T3 (its internal scratch for large slot
                                 // offsets) — safe here because addr lives in T2.
                                 if let IRValue::Register(id) = value {
@@ -7255,7 +7255,7 @@ impl Backend for RiscV32Backend {
                             IRType::F64 | IRType::I64 | IRType::U64 => {
                                 // 8-byte store. For F64: FLD value into F0, then FSD.
                                 // For I64/U64: load lo/hi into T0/T1, then two Sw's.
-                                // [Wave K-rv32] ss_load_value_64 and ss_load_fpr_d_from_slot
+                                // [rv32] ss_load_value_64 and ss_load_fpr_d_from_slot
                                 // may clobber T3 (internal scratch for large slot
                                 // offsets) — safe here because addr lives in T2.
                                 if matches!(ty, IRType::F64) {
@@ -7278,7 +7278,7 @@ impl Backend for RiscV32Backend {
                                     }
                                 } else {
                                     // I64/U64: load lo (T0) and hi (T1), then two Sw's.
-                                    // [Wave D-riscv32-label] For Label values, T0
+                                    // [riscv32-label] For Label values, T0
                                     // already holds the function address (loaded
                                     // above via LUI+ADDI). Set T1=0 (high word —
                                     // function addresses are 32-bit on RV32).
@@ -7585,7 +7585,7 @@ impl Backend for RiscV32Backend {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        // [Wave 7-ext-tryrecv-returnval] The previous
+                        // [ext-tryrecv-returnval] The previous
                         // implementation used 32-bit ss_load_value /
                         // ss_store_to_slot, which silently dropped the high
                         // 32 bits of I64 values. For try_recv/recv_timeout
@@ -8221,7 +8221,7 @@ impl Backend for RiscV32Backend {
                         code
                     }
 
-                    // ── Syscall (Wave 11) ──────────────────────────────────
+                    // ── Syscall ──────────────────────────────────
                     // dst = syscall(nr, args…) — raw Linux syscall.
                     // RISC-V ABI: args in a0-a5, nr in a7, ECALL, result in a0.
                     IRInstr::Syscall { nr, args, dst } => {
@@ -8292,7 +8292,7 @@ impl Backend for RiscV32Backend {
                             // semantics (dst is overwritten by the subsequent
                             // IR Load, but we write it for IR fidelity).
                             //
-                            // [Wave 7-ext-tryrecv-returnval] Sign-extend the
+                            // [ext-tryrecv-returnval] Sign-extend the
                             // 32-bit A0 return value to 64 bits so downstream
                             // 64-bit IR (Cmp SLe, Select) sees the correct
                             // value (matches the normal syscall path).
@@ -8327,7 +8327,7 @@ impl Backend for RiscV32Backend {
                             code.extend(Instruction::Ecall.encode());
                             // Store return value (a0) to dst's stack slot
                             //
-                            // [Wave 7-ext-tryrecv-returnval] RV32 syscalls
+                            // [ext-tryrecv-returnval] RV32 syscalls
                             // return a 32-bit value in A0 (positive on
                             // success, -errno on failure). The dst vreg slot
                             // is 8 bytes and downstream IR (Cmp SLe, Select)
@@ -8350,11 +8350,11 @@ impl Backend for RiscV32Backend {
                             code
                         }
                     }
-                    // ── VectorOp (Wave 29) ──
-                    // riscv32 (RVV) has no SIMD encoder in the Wave 29 suite;
+                    // ── VectorOp ──
+                    // riscv32 (RVV) has no SIMD encoder in the suite;
                     // emit nothing.
                     IRInstr::VectorOp { .. } => Vec::new(),
-                    // ── CallIndirect (Wave 49 / Wave D) ──
+                    // ── CallIndirect () ──
                     // Indirect call through a function pointer vreg.
                     // Used by irq_dispatch to call driver handler functions.
                     // Loads func_ptr into t0, args into a0-a7, JALR ra, t0.
@@ -8383,11 +8383,11 @@ impl Backend for RiscV32Backend {
                         }
                         code
                     }
-                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // ── Channel operations (ask 2a) ──
                     // Backend lowering not yet implemented; emit no bytes.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-                    // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+                    // StarkProof — stub (Call-form builtin is the active path).
                     | IRInstr::StarkProof { .. } => Vec::new(),
                 };
 
@@ -8497,7 +8497,7 @@ impl Backend for RiscV32Backend {
                         | IRInstr::ChannelRecv { .. }
                         | IRInstr::ChannelRecvResult { .. } => "channel_recv",
                         IRInstr::ChannelClose { .. } => "channel_close",
-                        // Wave 93-94: zk-STARK proof generation.
+                        // zk-STARK proof generation.
                         IRInstr::StarkProof { .. } => "stark_prove",
                         IRInstr::CallIndirect { .. } => "call_indirect",
                     };
@@ -8542,7 +8542,7 @@ impl Backend for RiscV32Backend {
         }
 
         // ── Phase 4: Apply branch fixups ──
-        // [Wave I-riscv32-bne-range] Same trampoline fix as riscv64.
+        // [riscv32-bne-range] Same trampoline fix as riscv64.
         let mut trampolines: Vec<(usize, String)> = Vec::new();
         for (i, fixup) in branch_fixups.iter().enumerate() {
             if let Some(&target_offset) = label_offsets.get(&fixup.target_label) {
@@ -8567,7 +8567,7 @@ impl Backend for RiscV32Backend {
                         instr.encoded[fixup.offset_in_encoded..fixup.offset_in_encoded + 4]
                             .copy_from_slice(&encoded);
                     } else {
-                        // [Wave K-rv32] Out of range: record for trampoline
+                        // [rv32] Out of range: record for trampoline
                         // emission. The previous code had an empty `else`
                         // branch here, leaving the BNE with its placeholder
                         // offset of 0 (branch-to-self), causing an infinite
@@ -8873,14 +8873,14 @@ impl Backend for RiscV32Backend {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
 
             // Simple stubs (args already in correct registers a0-a5):
-            // [wave 6 — mmap ABI normalization, verified] RV32 uses the generic
+            // [— mmap ABI normalization, verified] RV32 uses the generic
             // sys_mmap (222) — the DIRECT 6-arg form, with `offset` in BYTES
             // (rv32 has NO mmap2; the generic sys_mmap does byte→page
             // conversion in-kernel). The simple_stub passes the caller's
             // a0-a5 straight through (no rearrangement, no >>12), exactly
             // like __vuma_alloc (which sets a5=0 then `LI a7,222; ECALL`).
             // Both use the SAME offset unit (bytes, via a5), satisfying the
-            // wave-6 "same offset-unit handling as __vuma_alloc" requirement.
+            //  "same offset-unit handling as __vuma_alloc" requirement.
             // RV32 passes 8 args in a0-a7 (see Gpr::arg_register), so all 6
             // mmap args fit in registers — no stack-arg plumbing needed.
             for (name, num) in [
@@ -9185,13 +9185,13 @@ impl Backend for RiscV32Backend {
                 // concern on RV32.  Both are safe as simple stubs.
                 ("alarm", 37),
                 ("poll", 73),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (asm-generic) ──
+                // ── POSIX file-metadata & I/O syscalls (asm-generic) ──
                 // RV32 has 8 reg args (a0-a7); all take ≤5 args → simple_stub.
                 // NOTE: pread/pwrite/preadv/pwritev pass a 64-bit `off_t` which
                 // on RV32 strictly needs an a3:a4 register pair; the simple_stub
                 // passes a0-a3 only (low 32 bits of offset). Full 64-bit offset
                 // support on RV32 is deferred — registering the name provides
-                // coverage and matches the wave-7 "every backend" requirement.
+                // coverage and matches the effort-7 "every backend" requirement.
                 ("umask", 166),
                 ("fchmod", 52),
                 ("fchown", 55),
@@ -9217,7 +9217,7 @@ impl Backend for RiscV32Backend {
                 ("pwritev", 70),
                 ("fchdir", 50),
                 ("chroot", 51),
-                // ── Wave 9: POSIX system & advanced syscalls (asm-generic) ──
+                // ── POSIX system & advanced syscalls (asm-generic) ──
                 // RV32 has 8 reg args; all take ≤5 args → simple_stub.
                 // eventfd→eventfd2(19), signalfd→signalfd4(74) = modern variants.
                 ("mlock", 228),
@@ -9243,7 +9243,7 @@ impl Backend for RiscV32Backend {
                 ("inotify_add_watch", 27),
                 ("inotify_rm_watch", 28),
                 ("ptrace", 117),
-                // ── Wave 8: POSIX process & identity syscalls (asm-generic/unistd.h) ──
+                // ── POSIX process & identity syscalls (asm-generic/unistd.h) ──
                 // All present directly in asm-generic (no *at wrapping). All take
                 // ≤5 args; RV32 has 8 reg args (a0-a7) → simple_stub for all.
                 // Family 1: identity
@@ -9497,7 +9497,7 @@ impl Backend for RiscV32Backend {
                 stubs.push(("strcmp".to_string(), code));
             }
 
-            // ── Wave 7 wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
+            // ── wrappers: plain POSIX names → *at(AT_FDCWD=-100, ...) ──
             // RV32 (asm-generic) lacks the legacy mkdir/rmdir/rename/link/
             // symlink/readlink/chmod/chown syscalls; expose the plain names by
             // inserting AT_FDCWD=-100 (fits ADDI imm12) and shifting args.
@@ -9809,7 +9809,7 @@ impl Backend for RiscV32Backend {
                 stubs.push(("chown".to_string(), code));
             }
 
-            // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+            // ── FFI scratchpad frame stubs (/fix) ──────────────────
             // ffi_scratch_push_frame: REAL mmap syscall (riscv32 sys_mmap=222).
             {
                 let mut code = Vec::new();
@@ -10199,7 +10199,7 @@ impl Backend for RiscV32Backend {
                             .copied()
                     });
                     if let Some(target_offset) = target_offset {
-                        // [Wave D-riscv32-reloc] Include ELF text_offset (116
+                        // [riscv32-reloc] Include ELF text_offset (116
                         // bytes = 52-byte ELF header + 2×32-byte program headers)
                         // in the absolute address. Without this, GetAddress /
                         // Label stores produce an address 116 bytes too low,
@@ -10216,7 +10216,7 @@ impl Backend for RiscV32Backend {
                             all_code[abs_offset + 3],
                         ]);
                         let rd = (existing >> 7) & 0x1F;
-                        // [Wave D-riscv32-reloc] Fix LUI encoding: U-type format is
+                        // [riscv32-reloc] Fix LUI encoding: U-type format is
                         //   imm[31:12] | rd[11:7] | opcode[6:0]
                         // OP_LUI = 0x37 = 0b0110111. The previous code used
                         // (0x537 << 20) which put garbage in bits [31:20] and
@@ -10237,7 +10237,7 @@ impl Backend for RiscV32Backend {
                             .copied()
                     });
                     if let Some(target_offset) = target_offset {
-                        // [Wave D-riscv32-reloc] Include ELF text_offset (see HI20 above).
+                        // [riscv32-reloc] Include ELF text_offset (see HI20 above).
                         const ELF_TEXT_OFFSET: u32 = 52 + 2 * 32; // = 116
                         let abs_addr: u32 =
                             (0x100000u64 + ELF_TEXT_OFFSET as u64 + target_offset as u64) as u32;
@@ -10250,7 +10250,7 @@ impl Backend for RiscV32Backend {
                         ]);
                         let rd = (existing >> 7) & 0x1F;
                         let rs1 = (existing >> 15) & 0x1F;
-                        // [Wave D-riscv32-reloc] Fix ADDI encoding: I-type format is
+                        // [riscv32-reloc] Fix ADDI encoding: I-type format is
                         //   imm[31:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
                         // ADDI: funct3=0b000, opcode=0x13=0b0010011 (OP_IMM).
                         // The previous code used (0x04 << 2) = 0x10 as the opcode

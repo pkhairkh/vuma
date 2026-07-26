@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/kernel/arch/riscv64/switch.vuma
-// riscv64 context switch on the superset TrapFrame (Wave R4a+b).
+// riscv64 context switch on the superset TrapFrame.
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // This file is the R4a+b rewrite of K4c's riscv64 switch.vuma, the direct

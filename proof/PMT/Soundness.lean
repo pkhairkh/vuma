@@ -14,8 +14,7 @@ brings in `PMT.Field` and `PMT.Basic`):
 
 This file contains §7: the small-step operational semantics (`step` +
 `exec`), the trap-code taxonomy, and the **`pmt_soundness`** theorem.
-The proof is **sorry-free** (eliminated in Wave 3, see
-`docs/verification-reports/W3-sorry-fix.md`) and proceeds by induction
+The proof is **sorry-free** and proceeds by induction
 on the program list, using `hstep : ∀ s ∈ prog, s.live st.in_var = .live`
 to discharge the liveness precondition step-by-step and concluding
 `CapacityInvariant st.arena` for the final state. Together with the
@@ -23,23 +22,21 @@ to discharge the liveness precondition step-by-step and concluding
 `#eval` regression checks, this is the executable specification that
 the VUMA compiler's runtime must respect.
 
-**Wave 9 (W9-A) strengthening.** This file now defines the `PmtOp`
-inductive (`alloc | field_access Field | transform`) per the W4-C
-design (`docs/verification-reports/W4-oob-design.md`). `Step` carries
+**Strengthened `PmtOp` dispatch.** This file now defines the `PmtOp`
+inductive (`alloc | field_access Field | transform`). `Step` carries
 an `op : PmtOp` field (default `PmtOp.transform` for backward
 compatibility), and `step` dispatches on `op`. The `field_access`
 branch emits `TrapCode.oob` (exit 134) when a field's byte range
 exceeds the layout's `total_size` — mirroring the runtime
 `__oob_trap` injection at `codegen/memory_safety.rs:965`
 (`inject_bounds_check_ir`). This makes `TrapCode.oob` reachable in
-the Lean model, closing W3 gap 1.4.
+the Lean model.
 
-**Wave 4 strengthening.** The `pmt_soundness` hypothesis was tightened
+**Strengthened hypothesis.** The `pmt_soundness` hypothesis was tightened
 from the original name-uniqueness `WellTyped` to the stronger
 `WellTypedStrong` predicate (defined in `PMT.WellTypedStrong`), which
 adds (a) static dataflow coverage (`DataflowOk`) and (b) per-step
-`FieldBounds`. This closes gap 1.2 from
-`docs/verification-reports/W3-remaining-gaps.md`. See
+`FieldBounds`. See
 `PMT.WellTypedStrong` for the predicate and
 `no_oob_trap_for_well_typed_strong` for the strengthened
 non-trapping corollary.
@@ -47,24 +44,17 @@ non-trapping corollary.
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
 `just proof` from the repo root) — the legacy `lean PMT/Soundness.lean`
-invocation does not work since the multi-module split in Wave 6
-(`docs/verification-reports/W6-multi-module-test.md`). The `lean-proofs`
+invocation does not work since the multi-module split.
+The `lean-proofs`
 CI job in `.github/workflows/proof-verify.yml` runs the same `lake build`.
-
-**Verification reports.**
-  * `docs/verification-reports/W3-sorry-fix.md` — sorry elimination.
-  * `docs/verification-reports/W3-remaining-gaps.md` — gaps 1.2/1.4.
-  * `docs/verification-reports/W4-oob-design.md` — `PmtOp.field_access`.
-  * `docs/verification-reports/W9-strengthened-types.md` — Wave 9 status.
-  * `docs/verification-reports/W11-build-test.md` — build green.
 -/
 
 namespace PMT
 
 /-! ## §7. Execution Model & Soundness Theorem (sorry-free) -/
 
-/-- §7.0: The kind of operation a `Step` performs. Per the W4-C design
-(`docs/verification-reports/W4-oob-design.md`), this is the dispatch
+/-- §7.0: The kind of operation a `Step` performs.
+This is the dispatch
 tag for `step`:
 
   * `alloc`         — bump-allocate a layout-sized region (UAF + overflow
@@ -76,11 +66,12 @@ tag for `step`:
     field access).
   * `transform`     — consume `in_var`, produce `out_var` (UAF + overflow
     check + bump `arena.used` + liveness flip). This is the default and
-    preserves the pre-W9 combined `step` semantics.
+    preserves the pre-strengthening combined `step` semantics.
 
 The `PmtOp.transform` default ensures backward compatibility: every
-existing `Step` literal `⟨in_var, out_var, layout⟩` (constructed before
-W9) continues to type-check via the structure's default field, and its
+existing `Step` literal `⟨in_var, out_var, layout⟩` constructed before
+the `op` field was added continues to type-check via the structure's
+default field, and its
 execution behavior is unchanged. -/
 inductive PmtOp where
   | alloc         : PmtOp
@@ -190,7 +181,7 @@ canonical exit code (1, 134, or 135). No undefined behavior.
 Proof: by induction on the program. `exec` is structurally recursive
 and total (every `step` returns `Except TrapCode ExecState`).
 
-**Wave 9 (W9-A) note.** The `cons` case now case-splits on `i.op`:
+**Note on the `cons` case.** The `cons` case now case-splits on `i.op`:
   * `PmtOp.field_access f` — on success, `s' = s` (no state change), so
     `hstep_rest` and `h_facts` reduce to the original `hstep` / `hcap`.
   * `PmtOp.alloc` / `PmtOp.transform` — the original combined-semantics
@@ -477,11 +468,10 @@ theorem pmt_soundness
         | trap code =>
           exact hvalid
 
-/-! ## W2-A strengthening: non-tautological soundness statements.
+/-! ## Strengthened soundness statements: non-tautological.
 
 The original `pmt_soundness` (above) has a partially tautological
-conclusion (per W1-E audit,
-`docs/verification-reports/S2-W1-E-soundness-conclusion.md`):
+conclusion:
 
   * `∃ r, exec prog s = r` holds for any total function (`exec : Program →
     ExecState → Result` is structurally recursive), so it is discharged by
@@ -494,10 +484,9 @@ conclusion (per W1-E audit,
 
 The following two theorems replace those tautologies with non-trivial
 correctness properties. Both statements are non-tautological; their
-proofs are admitted with `sorry` (with `-- TODO:` documentation) per the
-W2-A iteration protocol, because they require strengthening the
-inductive hypothesis along the lines of the W1-E audit's "meaningful
-soundness theorem" sketch (filtered sums / runtime-vs-symbolic
+proofs are admitted with `sorry` (with `-- TODO:` documentation),
+because they require strengthening the
+inductive hypothesis (filtered sums / runtime-vs-symbolic
 `prior_used` invariants / `exec`-trap-injectivity lemmas). -/
 
 /-- Soundness upper bound: `exec` is deterministic AND the final `used`
@@ -524,7 +513,7 @@ case-split on `i.op`:
 In both cases, the inductive hypothesis (instantiated at `s'`) gives
 `fu ≤ s'.arena.used + rest.sum`, which combines with the per-step
 `s'.arena.used ≤ s.arena.used + i.layout.total_size` to close the goal
-via `omega`. Closed in Wave 32 (W7-32 batch). -/
+via `omega`. -/
 theorem pmt_soundness_correct
     (prog : Program) (hwf : WellTyped prog) (s : ExecState)
     (hstep : ∀ st ∈ prog, WF_Layout st.layout ∧ s.live st.in_var = Liveness.live)
@@ -802,8 +791,7 @@ This is a deliberately weak converse to the `arena_overflow` guard in
 where a trap is blamed on `exec []`. The full converse (relating trap
 code 1 to a *specific* overflowing step, with symbolic-vs-runtime
 `prior_used` invariant and `exec`-trap-injectivity lemmas) is tracked
-as future work — see `docs/verification-reports/S2-W1-E-soundness-conclusion.md`
-§3 "Trap justification". -/
+as future work. -/
 theorem trap_implies_nonempty
     (prog : Program) (s : ExecState)
     (htrap : exec prog s = Result.trap 1) :

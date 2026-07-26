@@ -1,4 +1,4 @@
-// protocol_invalid — Wave 14b: protocol state machine, invalid transition
+// protocol_invalid — protocol state machine, invalid transition
 //
 // Exercises the REJECTION path of channel_recv_proto(ch, expected_state).
 // The child sends one message.  The parent calls recv_proto(ch, 0) which

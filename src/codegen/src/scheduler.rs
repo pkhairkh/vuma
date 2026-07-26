@@ -1,4 +1,4 @@
-//! # Instruction Scheduler (Wave 5 / re-enabled Wave 27)
+//! # Instruction Scheduler ( / re-enabled )
 //!
 //! List-scheduling algorithm that reorders instructions within a basic block
 //! to minimize pipeline stalls. Uses `LatencyTable` from `target_desc.rs`
@@ -12,7 +12,7 @@
 //!    prioritized by critical-path length (longest path to a leaf).
 //! 4. Emit instructions in scheduled order.
 //!
-//! ## Wave 27 changes
+//! ## changes
 //!
 //! - Removed the "skip any block with memory ops" bail-out at the old
 //!   `schedule_block` and `schedule_function` sites. The DDG now models
@@ -32,9 +32,9 @@ use crate::target_desc::{FunctionalUnit, LatencyTable};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-// ── Wave 27: per-backend latency model hook ────────────────────────────
+// ── per-backend latency model hook ────────────────────────────
 
-/// Trait implemented by per-backend latency tables (Wave 27).
+/// Trait implemented by per-backend latency tables.
 ///
 /// The existing `LatencyTable` struct already implements this via a
 /// blanket impl below. Backends that want finer-grained control can
@@ -56,7 +56,7 @@ impl BackendLatencyTable for LatencyTable {
 }
 
 /// Uniform latency table — every instruction has latency 1, throughput 1,
-/// on the ALU functional unit (Wave 27). Use this as a fallback for
+/// on the ALU functional unit. Use this as a fallback for
 /// backends that don't yet provide a real latency table, or as a
 /// "scheduling is a no-op" baseline in tests.
 #[derive(Debug, Clone, Copy, Default)]
@@ -88,7 +88,7 @@ struct DDGNode {
 }
 
 /// Priority queue entry: higher critical_path = higher priority.
-/// (Wave 27) `pressure_delta` is a tiebreaker — prefer instructions that
+/// `pressure_delta` is a tiebreaker — prefer instructions that
 /// reduce live-register pressure (negative delta = uses > defs).
 #[derive(Debug, Clone, Eq)]
 struct ReadyEntry {
@@ -159,7 +159,7 @@ fn used_regs(instr: &IRInstr) -> Vec<u32> {
 /// Returns a permutation of instruction indices in scheduled order.
 /// If scheduling fails or is not beneficial, returns the identity permutation.
 ///
-/// (Wave 27) The old "skip any block with memory ops" bail-out is GONE.
+/// The old "skip any block with memory ops" bail-out is GONE.
 /// Memory dependencies are now modeled by `schedule_block_inner` using
 /// `codegen::alias_analysis::AliasAnalysis`: a Load may be reordered
 /// past a prior Store only when the analyzer proves no alias. Stores,
@@ -167,7 +167,7 @@ fn used_regs(instr: &IRInstr) -> Vec<u32> {
 /// (conservative — preserves correctness for all post-CSE/LICM/inline
 /// IR shapes).
 ///
-/// (Wave 51) This single-block entry point computes alias info from
+/// This single-block entry point computes alias info from
 /// ONLY the instructions in this block. If an `Alloc` or `Cast` that
 /// derived an address's alias class lives in a DIFFERENT block (very
 /// common after LICM hoists invariants and the inliner merges
@@ -180,7 +180,7 @@ pub fn schedule_block(instructions: &[IRInstr], latency_table: &LatencyTable) ->
     schedule_block_with_alias(instructions, latency_table, None)
 }
 
-/// (Wave 51) Schedule a single basic block using a pre-computed
+/// Schedule a single basic block using a pre-computed
 /// `AliasAnalysis` for the enclosing function. Passing the function-wide
 /// alias info (instead of recomputing per block) is essential when an
 /// `Alloc`/`Cast`/`Offset` that establishes an address's `AliasClass`
@@ -201,7 +201,7 @@ pub fn schedule_block_with_alias(
         return (0..n).collect();
     }
 
-    // ── Phi-node handling (Wave 5 SSA fix) ─────────────────────────────
+    // ── Phi-node handling ( SSA fix) ─────────────────────────────
     //
     // SSA semantics require:
     //   1. All Phi nodes appear at the TOP of their block, before any
@@ -275,16 +275,16 @@ pub fn schedule_block_with_alias(
 /// Inner scheduler: schedules a slice of instructions that contains NO Phi
 /// nodes. This is the original list-scheduling algorithm.
 ///
-/// (Wave 27) Memory dependencies now use
+/// Memory dependencies now use
 /// `codegen::alias_analysis::AliasAnalysis` to permit Load-after-Load and
 /// Load-after-non-aliasing-Store reordering. Stores, Allocs, Frees, and
 /// Calls stay serialised against each other (conservative — preserves
 /// correctness for all post-CSE/LICM/inline IR shapes).
 ///
-/// (Wave 51) Accepts a pre-computed function-wide `AliasAnalysis`. If
+/// Accepts a pre-computed function-wide `AliasAnalysis`. If
 /// `alias_info` is `Some`, it is used directly; otherwise we fall back
 /// to building a synthetic single-block `IRFunction` from `instructions`
-/// (the legacy Wave 27 behaviour — sound but imprecise when
+/// (the legacy behaviour — sound but imprecise when
 /// alias-class-establishing instructions (`Alloc`/`Cast`/`Offset`/
 /// `BinOp`/`Phi`) live in other blocks).
 fn schedule_block_inner_with_alias(
@@ -304,7 +304,7 @@ fn schedule_block_inner_with_alias(
         return (0..n).collect();
     }
 
-    // (Wave 27/51) Use the provided function-wide alias info if available;
+    //  Use the provided function-wide alias info if available;
     // otherwise fall back to building a synthetic single-block wrapper.
     // The function-wide path is essential when an `Alloc`/`Cast`/
     // `Offset`/`BinOp`/`Phi` that establishes an address's `AliasClass`
@@ -337,7 +337,7 @@ fn schedule_block_inner_with_alias(
             }
         }
 
-        // (Wave 27) Memory dependencies using alias analysis.
+        //  Memory dependencies using alias analysis.
         //
         // Rules (per LLVM's MDDR / MemorySSA-style model):
         //   - Load → Load (same/non-alias addr): NO edge (Loads are read-only).
@@ -476,7 +476,7 @@ fn schedule_block_inner_with_alias(
         compute_critical_path(&mut nodes, i, &mut visited);
     }
 
-    // (Wave 27) Register-pressure-aware list scheduling.
+    //  Register-pressure-aware list scheduling.
     //
     // At each step, among the ready instructions with equal critical-path
     // length, prefer the one that REDUCES live-register count (uses > defs).
@@ -580,14 +580,14 @@ fn schedule_block_inner_with_alias(
     scheduled
 }
 
-/// (Wave 27) Build a synthetic IRFunction wrapper around a single block of
+/// Build a synthetic IRFunction wrapper around a single block of
 /// instructions so the alias analyzer can compute AliasClasses for the
 /// address vregs. The wrapper has no params — the analyzer treats all
 /// vregs as `AliasClass::Any` by default, then refines based on Alloc/
 /// BinOp/Offset/Phi patterns. This is sufficient for the scheduler's
 /// Load-after-Store may-alias check.
 ///
-/// (Wave 51) This per-block wrapper is now only the FALLBACK path used
+/// This per-block wrapper is now only the FALLBACK path used
 /// by `schedule_block` (legacy single-block entry point) and by tests.
 /// Production code goes through `schedule_function` →
 /// `schedule_block_with_alias`, which builds ONE `AliasAnalysis` from
@@ -606,12 +606,12 @@ fn build_alias_info(instructions: &[IRInstr]) -> crate::alias_analysis::AliasAna
 /// Reorders instructions within each block to minimize stalls.
 /// The terminator is always kept last.
 ///
-/// (Wave 27) The old "skip any block with memory ops" bail-out is GONE.
+/// The old "skip any block with memory ops" bail-out is GONE.
 /// `schedule_block_inner` now models Load/Store dependencies using
 /// `codegen::alias_analysis::AliasAnalysis`. All blocks (with >2
 /// instructions) get scheduled.
 ///
-/// (Wave 51) Builds ONE `AliasAnalysis` for the whole function and
+/// Builds ONE `AliasAnalysis` for the whole function and
 /// shares it across all blocks. This is essential for correctness when
 /// an `Alloc` (or a `Cast`/`Offset` deriving a typed pointer from a
 /// `Unique` allocation) lives in a different block than the
@@ -714,7 +714,7 @@ mod tests {
         assert_eq!(order, vec![0, 1]); // a before b
     }
 
-    // ---- Wave 27 Tests ----
+    // ---- Tests ----
 
     #[test]
     fn wave27_schedule_preserves_semantics_with_memory() {

@@ -18,8 +18,8 @@
 // All pointer-typed arguments are `Address` (a u64-sized raw address) — there
 // is no `*T` / `&x` syntax anywhere in this file (PMT-only).
 //
-// ── Wave K11 (bare-metal parity) ───────────────────────────────────────────
-// Wave K11 will add a BARE-METAL trampoline alongside this one. The bare-metal
+// ── (bare-metal parity) ───────────────────────────────────────────
+// A future pass will add a BARE-METAL trampoline alongside this one. The bare-metal
 // variant will declare externs for direct MMIO (UART write at fixed physical
 // addresses) and inline `syscall`-instruction stubs for trap-gated kernel
 // services. The two trampolines will share a common interface contract so

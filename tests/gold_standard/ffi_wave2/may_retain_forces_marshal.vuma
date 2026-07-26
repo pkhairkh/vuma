@@ -1,7 +1,7 @@
 // ffi_wave2/may_retain_forces_marshal — #[may_retain] routes through scratchpad
 // Expected exit code: 0
 //
-// Wave 6 test: #[may_retain] declares that C may stash the pointer past
+// Test: #[may_retain] declares that C may stash the pointer past
 // the call return (e.g. epoll_ctl, sigaction). The marshal module's
 // classify_arg_mode() returns MayRetain, which forces the scratchpad
 // routing path (the arg is copied to ___ffi_scratch, not passed directly

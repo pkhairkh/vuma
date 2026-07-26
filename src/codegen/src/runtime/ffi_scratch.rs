@@ -35,7 +35,7 @@ const DEFAULT_FRAME_CAPACITY: usize = 4096;
 
 /// Push a new scratchpad frame onto the thread-local stack.
 /// Allocates a malloc'd block of DEFAULT_FRAME_CAPACITY bytes.
-/// Called on transform entry (Wave 3b will wire this into codegen).
+/// Called on transform entry (A future pass will wire this into codegen).
 pub fn push_frame() {
     let layout = std::alloc::Layout::from_size_align(DEFAULT_FRAME_CAPACITY, 8).unwrap();
     let base = unsafe { std::alloc::alloc(layout) };
@@ -52,7 +52,7 @@ pub fn push_frame() {
 }
 
 /// Pop the top scratchpad frame and free its malloc'd block.
-/// Called on transform exit (Wave 3b will wire this into codegen).
+/// Called on transform exit (A future pass will wire this into codegen).
 /// If the stack is empty, this is a no-op (safe to call defensively).
 pub fn pop_frame() {
     SCRATCH_STACK.with(|s| {

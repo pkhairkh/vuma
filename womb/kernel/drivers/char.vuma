@@ -168,14 +168,14 @@
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
 // This file is self-contained. It declares only CharDevice + CharDevTable
-// + DevName (all new in K6d — no prior wave's layouts need re-declaring
+// + DevName (all new in K6d — no prior effort's layouts need re-declaring
 // here, since K6d's only I/O is via State<CharDevTable> and State<DevName>).
 // K7+ (syscall layer) will re-declare CharDevTable byte-identically when
 // it wires sys_open → chardev_lookup_name → cdev_open dispatch.
 //
 // ── Extern: __call_indirect1 (W24S1 dispatch trampoline) ───────────────────
 // Unlike K6b (line_discipline) and K6c (vt100), char.vuma now has ONE
-// extern declaration: the Wave 5 runtime stub `__call_indirect1(ptr: u64,
+// extern declaration: the runtime stub `__call_indirect1(ptr: u64,
 // arg: u64) -> u64`. It lowers to `mov rax, rdi; mov rdi, rsi; jmp rax` —
 // a tail call that invokes the function at `ptr` with `arg` in RDI (SysV
 // AMD64 first-argument register). This is the VUMA-pure way to perform an
@@ -227,10 +227,10 @@
 //   (8) chardev_write(tbl, 1, 3, 0, 0) → returns -38 (-ENOSYS, write_fn==0).
 
 // ────────────────────────────────────────────────────────────────────────────
-// Extern "C" trampoline — indirect call (Wave 5, used by W24S1 dispatch).
+// Extern "C" trampoline — indirect call (, used by W24S1 dispatch).
 // ────────────────────────────────────────────────────────────────────────────
 extern "C" {
-    // Wave 5: indirect function call trampoline. Tail-calls the function
+    // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by chardev_read /
     // chardev_write to invoke the per-slot read_fn / write_fn. Same stub
     // category as write/read/exit — NOT a C library function. Real asm
@@ -727,7 +727,7 @@ fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
 // (sys_read → fdtable lookup → chardev_lookup → chardev_read). The
 // dispatch mirrors R5e's syscall_dispatch_from_trap pattern: look up the
 // slot, fetch the fn pointer, guard against 0 (no handler registered —
-// hosted-mode stub), and invoke the Wave 5 __call_indirect1 trampoline.
+// hosted-mode stub), and invoke the __call_indirect1 trampoline.
 //
 // The single SysV AMD64 argument passed to the handler is `minor as u64`.
 // This matches the Linux convention: the cdev's read/write op receives
@@ -766,7 +766,7 @@ fn chardev_read(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, coun
     if read_fn == 0 {
         return 0 - 38;  // -ENOSYS: no read handler registered (hosted stub)
     }
-    // Wave 5: invoke the per-slot read handler via the indirect-call
+    // invoke the per-slot read handler via the indirect-call
     // trampoline. The handler receives `minor as u64` as its first SysV
     // AMD64 argument (RDI) and is expected to read buf/count from the
     // canonical syscall context (TrapFrame GPR slots — K7 concern). The
@@ -787,7 +787,7 @@ fn chardev_write(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, cou
     if write_fn == 0 {
         return 0 - 38;  // -ENOSYS: no write handler registered (hosted stub)
     }
-    // Wave 5: invoke the per-slot write handler via the indirect-call
+    // invoke the per-slot write handler via the indirect-call
     // trampoline (same trampoline as chardev_read — the handler decides
     // read vs write semantics from its own slot identity, not from the
     // trampoline). u64 return cast to i64 (bytes written or negative

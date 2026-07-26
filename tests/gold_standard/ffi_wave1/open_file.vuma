@@ -1,12 +1,12 @@
 // ffi_wave1/open_file — open() with marshalled path (aarch64)
 // Expected exit code: 0
 //
-// Wave 6 test: declares open() and demonstrates the NUL-terminated string
+// Test: declares open() and demonstrates the NUL-terminated string
 // marshalling pattern. Today's VUMA layouts are not NUL-terminated, so a
 // real call would use marshal_cstr() to copy the path to the scratchpad
 // with a trailing '\0'. This test declares the extern and the layout;
 // the actual marshal_cstr call is shown in comments (the builtin is
-// recognized by the marshal module but full codegen lowering is Wave 5+).
+// recognized by the marshal module but full codegen lowering is +).
 
 layout Path = { bytes: [u8; 256], len: u64 }
 

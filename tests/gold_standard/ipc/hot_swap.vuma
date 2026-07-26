@@ -1,4 +1,4 @@
-// hot_swap — Wave 73-80 / Wave G: real hot-swap state machine.
+// hot_swap — real hot-swap state machine.
 //
 // Replaces the previous stub that wrote an 8-byte module_id to
 // /tmp/vuma_hotswap.bin with no version checking and no rollback.

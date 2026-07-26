@@ -526,7 +526,7 @@ fn vfs_close(ft: State<FileTable>, fd: u32) -> i64 {
 //     caller hands over State<FileTable> and gets back a NEW State<File-
 //     Table> whose slot is FREE. This is the same linear-ownership pattern
 //     Fix 6 applied to sys_exit / sys_fork / sys_exec / sys_mmap.
-//   - In a future wave, the StateTransform verifier can check that no
+//   - In a future effort, the StateTransform verifier can check that no
 //     State<FileTable> read of slot `fd` happens after vfs_close_transform
 //     without an intervening vfs_open (which would re-allocate the slot).
 //     Today the verifier treats transforms as regular state-mutating fns

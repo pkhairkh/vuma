@@ -1,4 +1,4 @@
-//! IVE→codegen loop closure tests (Wave 8 — proper, no thread-local).
+//! IVE→codegen loop closure tests.
 //!
 //! These tests prove that `mark_ive_proven_nonaliasing` computes Alloc-region
 //! provenance and returns it explicitly, and that `dead_store_eliminate`
@@ -135,7 +135,7 @@ fn wave8_binop_add_propagates_provenance() {
 
 #[test]
 fn wave8_ive_overrides_tbaa_for_same_type_ptrs() {
-    // THE Wave 8 test: two same-type (u32) pointers from different Allocs.
+    // THE Test: two same-type (u32) pointers from different Allocs.
     // TBAA says they may alias (same type). IVE says they don't (different regions).
     let mut func = IRFunction::new("test_ive_overrides_tbaa");
     func.blocks[0].label = "entry".to_string();

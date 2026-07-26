@@ -136,7 +136,7 @@ fn encode_nop() -> [u8; 4] {
 
 /// Encode BL (Branch and Link) — `BL,n target, R1`.
 ///
-/// Wave-6 fix: completely rewritten to match QEMU's `%assemble_17` decoder
+/// fix: completely rewritten to match QEMU's `%assemble_17` decoder
 /// (target/hppa/insns.decode).  The previous encoder had multiple bugs:
 ///   - nullify bit was at bit 31 instead of bit 1 (a no-op since 0xE8
 ///     already sets bit 31),
@@ -276,7 +276,7 @@ fn encode_cmpb(r1: Reg, r2: Reg, cond: u32, inverted: bool, f: bool, disp_bytes:
 /// The LDIL instruction loads imm21 into bits 31:11 of the target register.
 fn encode_ldil(reg: Reg, imm: u32) -> [u8; 4] {
     let imm21 = imm & 0x1FFFFF;
-    // [Wave H-hppa-ldil] PA-RISC 1.1 LDIL L,s: major opcode 0x0A (001010).
+    // [hppa-ldil] PA-RISC 1.1 LDIL L,s: major opcode 0x0A (001010).
     // LDIL: s = im21 << 11, where s is the register at bits 25:21.
     // Previous code used 0x20000000 (major 0x08 = ADDIL), which stores
     // the result in R1 (implicit), NOT in the specified register. This
@@ -971,7 +971,7 @@ fn ss_load_value_64(
 /// Load only the high 32 bits of a 64-bit IRValue into `dst`.
 /// For Register: load from `[offset - 4]` (the standard 64-bit stack-slot
 /// layout: low at [off], high at [off-4]). For Immediate: load `v >> 32`.
-/// [Wave K-hppa-stark] Used by I64 Xor/And/Or/Sub to apply the op to both
+/// [hppa-stark] Used by I64 Xor/And/Or/Sub to apply the op to both
 /// halves — without this, only the low 32 bits of the destination are
 /// written, leaving the high 32 bits as 0 and corrupting 64-bit values
 /// like the FNV-1a hash in stark_verify.
@@ -1151,7 +1151,7 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     // BL +0, R1 (link = R1, disp = 0)
     code.extend_from_slice(&0xE8200000u32.to_be_bytes());
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // [Wave I-hppa-branch-range] LDO has a 14-bit signed displacement
+                                           // [hppa-branch-range] LDO has a 14-bit signed displacement
                                            // (±8191 bytes). For large functions (>8KB code), a single LDO can't
                                            // reach the target. Use multiple LDOs to decompose the displacement.
     let mut remaining = disp;
@@ -1178,7 +1178,7 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
 /// repeated addition (O(b)), infeasible for FNV-1a's prime (~10^12).
 /// This shift-and-add runs in exactly 32 iterations.
 ///
-/// [Wave K2-hppa-stark] CORRECTNESS FIX: track S3 (shifted_a) as a 64-bit
+/// [] CORRECTNESS FIX: track S3 (shifted_a) as a 64-bit
 /// value across iterations — S3 holds the low 32 bits, S6 holds the high
 /// 32 bits. The previous code kept S3 as 32-bit only, so when S3 was
 /// shifted left past bit 31 the high bits were LOST. This made the
@@ -1212,7 +1212,7 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
 ///     the S3 shift is placed in the cmpb's delay slot so it executes
 ///     regardless of branch direction (f=false).
 fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
-    // [Wave K3-hppa-stark] Correct 32×32→64 multiply, BRANCH-FREE inner loop.
+    // [] Correct 32×32→64 multiply, BRANCH-FREE inner loop.
     //
     // Algorithm (LSB-first, shift result left):
     //   result = 0, a_shifted = a
@@ -3483,7 +3483,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
             match instr {
                     IRInstr::Add { dst, lhs, rhs, ty } => {
-                        // [Wave K2-hppa-stark] Handle I64/U64 Add correctly.
+                        // [] Handle I64/U64 Add correctly.
                         // The previous code only stored the low 32 bits for
                         // non-copy Adds, losing the high word — corrupting
                         // 64-bit values like `h: u64 = 0xcbf29ce484222325`.
@@ -3517,7 +3517,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         code.extend(ss_st(S0, dst_off));
                     }
                     IRInstr::Mul { dst, lhs, rhs, ty } => {
-                        // [Wave K2-hppa-stark] Delegate to the same I64/32-bit Mul
+                        // [] Delegate to the same I64/32-bit Mul
                         // logic as IRInstr::BinOp { op: Mul }. The previous code
                         // used a repeated-addition loop (O(rhs)) with NO 64-bit
                         // support — it only produced a 32-bit result, corrupting
@@ -3686,7 +3686,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             match op {
                                 BinOpKind::Add => {
                                     code.extend_from_slice(&encode_add(S0, S1, S0));
-                                    // [Wave K2-hppa-stark] For I64 Add, compute the
+                                    // [] For I64 Add, compute the
                                     // high 32 bits correctly for ALL operand types
                                     // (Register, Immediate, or mixed). The previous
                                     // code only propagated lhs's high word for
@@ -3706,7 +3706,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     }
                                 }
                                 BinOpKind::Sub => {
-                                    // [Wave K-hppa-stark] I64 Sub: handle the high
+                                    // [hppa-stark] I64 Sub: handle the high
                                     // word with borrow from the low subtraction.
                                     // Without this, only the low 32 bits of the
                                     // destination are written, leaving the high 32
@@ -3741,7 +3741,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     // AND = 0x08000200 | (r1<<16) | r2
                                     let w = 0x08000200u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
                                     code.extend_from_slice(&w.to_be_bytes());
-                                    // [Wave K-hppa-stark] For I64 And, also AND the
+                                    // [hppa-stark] For I64 And, also AND the
                                     // high 32 bits so the destination's high word is
                                     // lhs_hi & rhs_hi (not 0).
                                     if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
@@ -3782,7 +3782,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         // Regular 32-bit OR (low word)
                                         let w = 0x08000260u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
                                         code.extend_from_slice(&w.to_be_bytes());
-                                        // [Wave K-hppa-stark] For I64 Or (non-pack
+                                        // [hppa-stark] For I64 Or (non-pack
                                         // case), also OR the high 32 bits so the
                                         // destination's high word is lhs_hi | rhs_hi.
                                         if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
@@ -3799,7 +3799,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     // XOR = 0x08000280 | (r1<<16) | r2
                                     let w = 0x08000280u32 | ((S0 as u32) << 16) | (S0 as u32) | ((S1 as u32) << 21);
                                     code.extend_from_slice(&w.to_be_bytes());
-                                    // [Wave K-hppa-stark] For I64 Xor, also XOR the
+                                    // [hppa-stark] For I64 Xor, also XOR the
                                     // high 32 bits. Without this, the destination's
                                     // high word stays 0 (uninitialized), which
                                     // corrupts the FNV-1a hash in stark_verify: each
@@ -3820,7 +3820,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
                                     if is_64 {
                                         // 64-bit multiply via three 32×32→64 schoolbook partials.
-                                        // [Wave K2-hppa-stark] ROOT CAUSE: when `lhs` and `dst`
+                                        // [] ROOT CAUSE: when `lhs` and `dst`
                                         // are the SAME vreg (e.g. `h = h * prime`), partial 1's
                                         // `ss_st(S0, dst_off)` overwrites lhs_lo at [lhs_off].
                                         // Partial 2's `ss_load_value(lhs, ...)` then reads the
@@ -3877,7 +3877,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         // S6 = S1 & 1
                                         code.extend(ss_load_imm(S6, 1));
                                         code.extend_from_slice(&encode_and(S1, S6, S6));
-                                        // [Wave K-hppa-stark] cmpb,= S6, R0, skip_add —
+                                        // [hppa-stark] cmpb,= S6, R0, skip_add —
                                         // branch if S6 == 0 (bit is 0) to skip the add.
                                         // The previous code used inverted=true (branch
                                         // if bit is 1) — the OPPOSITE of what
@@ -4196,7 +4196,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             match kind {
                                 CmpKind::Eq => {
                                     // Eq = (hi_eq AND lo_eq). S2=1 (default).
-                                    // [Wave G-hppa-i64eq] Fix: the previous code used
+                                    // [hppa-i64eq] Fix: the previous code used
                                     // two cmpb,<> (branch if NOT equal) to ldi0, but
                                     // when BOTH halves ARE equal, neither branches and
                                     // execution falls through to ldi0, incorrectly
@@ -4226,7 +4226,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 }
                                 CmpKind::Ne => {
                                     // Ne = (hi_ne OR lo_ne). S2=0 (default).
-                                    // [Wave K10C-hppa-u64-ne] Fix: previous code
+                                    // [] Fix: previous code
                                     // used two cmpb,<> (branch if NOT equal) to
                                     // ldi1, but when BOTH halves ARE equal,
                                     // neither branch fires and execution falls
@@ -4302,7 +4302,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     //   SGt (is_gt=T,is_eq=F): opp = SLe = cond=011,inverted=false (<=)
                                     //   SGe (is_gt=T,is_eq=T): opp = SLt = cond=010,inverted=false (<)
                                     // Unsigned analogously with 100/101.
-                                    // [Wave K4-hppa-stark] Fix: hi_opp must fire ONLY
+                                    // [] Fix: hi_opp must fire ONLY
                                     // when the result is DEFINITELY false without
                                     // consulting the lo word — i.e. when hi is STRICTLY
                                     // on the losing side. The previous code used the
@@ -4329,7 +4329,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         if is_gt { (0b100, false) } // << — UGt AND UGe
                                         else     { (0b101, true) }  // >> — ULt AND ULe
                                     };
-                                    // [Wave K4-hppa-stark] Fix: lo_match must fire when
+                                    // [] Fix: lo_match must fire when
                                     // the lo word makes the result true (hi being equal).
                                     // For the less-than family that's <</<<= (inverted=false);
                                     // for the greater-than family that's >>/>>=, which
@@ -4782,7 +4782,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         let d_id = dst.as_register().unwrap_or(0);
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         let reloc_offset = code.len() as u64;
-                        // [Wave H-hppa-getaddr] Load function address using
+                        // [hppa-getaddr] Load function address using
                         // ss_load_imm instead of LDIL+LDO. QEMU's hppa LDIL
                         // (major 0x08) has non-standard semantics — the result
                         // goes to a different register than expected, producing
@@ -4805,7 +4805,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             reloc_type: "R_PARISC_DIR32".to_string(),
                         });
                         code.extend(ss_st(S0, d_off));
-                        // [Wave G-hppa-getaddr] Zero the hi word at [d_off-4].
+                        // [hppa-getaddr] Zero the hi word at [d_off-4].
                         // VUMA vreg slots are 8 bytes (64-bit). The GetAddress
                         // stores a 32-bit address to [d_off] but leaves [d_off-4]
                         // (the hi word) uninitialized. When the I64 Store reads
@@ -5291,7 +5291,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 code.extend_from_slice(&encode_stw(S0, R30, stack_off as i16));
                             }
                         }
-                        // [Wave G-hppa-callindirect] Indirect call using the SAME
+                        // [hppa-callindirect] Indirect call using the SAME
                         // 32-byte (8-instruction) pattern as direct calls, but with
                         // COPY S0,R1 instead of LDO disp(R1),R1 for the target.
                         // This ensures the return address (R2 = PC+32) and BV layout
@@ -5778,7 +5778,7 @@ impl Backend for HppaBackend {
             ("recvfrom", 350),
             ("clone", 120),
             ("fork", 2),
-            // [wave 9 fix] epoll numbers corrected from kernel parisc syscall.tbl:
+            // [fix] epoll numbers corrected from kernel parisc syscall.tbl:
             //   old (wrong): 449/424/425 (those are m68k numbers, not parisc)
             //   correct:      311/225/226
             ("epoll_create1", 311),
@@ -6285,7 +6285,7 @@ impl Backend for HppaBackend {
         // ── Build __vuma_alloc stub ──
         // __vuma_alloc(size in R26) → R28 = allocated pointer.
         // Uses brk() syscall to extend the heap.
-        // [Wave K3-hppa-stark] FIX: QEMU hppa's brk(0) returns 0 (not the
+        // [] FIX: QEMU hppa's brk(0) returns 0 (not the
         // current break). Use a two-step approach:
         //   1. brk(0) → R28 = current_brk (may be 0 on QEMU)
         //   2. brk(current_brk + size) → R28 = new_brk
@@ -6310,7 +6310,7 @@ impl Backend for HppaBackend {
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop()); // GATE delay slot
                                                    // R28 = new_brk. Compute start = new_brk - size = R28 - R25.
-                                                   // [Wave K3-hppa-stark] The previous code returned R24 (current_brk),
+                                                   // [] The previous code returned R24 (current_brk),
                                                    // but QEMU hppa's brk(0) returns 0, so R24=0 and the returned
                                                    // pointer was 0. Fix: return new_brk - size instead.
             code.extend_from_slice(&encode_sub(R28, R25, R28)); // R28 = R28 - R25 = new_brk - size
@@ -6470,7 +6470,7 @@ impl Backend for HppaBackend {
                         })
                         .unwrap_or(ffi_stub_offset);
                     let abs_addr: u32 = (0x10000u64 + 192 + target_offset as u64) as u32;
-                    // [Wave H-hppa-getaddr] Patch ss_load_imm placeholder:
+                    // [hppa-getaddr] Patch ss_load_imm placeholder:
                     //   LDO upper_shifted(R0), S0  at +0
                     //   11x ADD S0,S0,S0           at +4..+48
                     //   LDO lower(S0), S0           at +48

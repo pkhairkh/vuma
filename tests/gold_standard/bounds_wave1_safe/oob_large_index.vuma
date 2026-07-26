@@ -2,7 +2,7 @@
 // Expected exit code: 134
 // Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
 //
-// Bounds Wave 1 SAFE-ONLY negative test: allocate an 8-byte buffer
+// Bounds SAFE-ONLY negative test: allocate an 8-byte buffer
 // (`[u8; 8]`) and read at index 255 — a very large index that is far
 // out of range. With `--safe`, the injected `UGe(idx, 8)` bounds
 // check evaluates to true (255 >= 8) and dispatches to `__oob_trap`,

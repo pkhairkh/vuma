@@ -26,7 +26,7 @@
 //! into an env-alloc + store-captures + closure-value-construction
 //! sequence, while appending the corresponding `__closure_<id>(env, ...)`
 //! function definition. The orchestrator wires it from `pipeline.rs`
-//! immediately after monomorphization (Wave 34). (Pipeline.rs integration
+//! immediately after monomorphization. (Pipeline.rs integration
 //! is deferred to the orchestrator's final pass per the batch-3 strategy
 //! change.)
 
@@ -282,7 +282,7 @@ fn terminator_vregs(term: &IRTerminator) -> Vec<u32> {
 
 /// Pipeline entry point for closure lowering.
 ///
-/// Called from `pipeline.rs` immediately after monomorphization (Wave 34).
+/// Called from `pipeline.rs` immediately after monomorphization.
 /// This pass walks every function in `program` looking for closure-literal
 /// call sites (callee name `__closure_literal_<id>`, see
 /// [`CLOSURE_LITERAL_PREFIX`]) and rewrites each one into:
@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(parse_closure_literal_name("__closure_literal_abc"), None);
     }
 
-    /// Wave 34 inline test: a closure capturing `x` is lowered to a new
+    /// inline test: a closure capturing `x` is lowered to a new
     /// `__closure_N(env: Address, ...)` function plus an `Env { x }`
     /// allocation at the call site.
     ///
@@ -643,7 +643,7 @@ mod tests {
         );
     }
 
-    /// Wave 34 inline test: two call sites with the same closure id share
+    /// inline test: two call sites with the same closure id share
     /// one generated `__closure_<id>` function definition.
     #[test]
     fn test_lower_closures_dedupes_function() {

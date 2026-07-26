@@ -8,14 +8,14 @@
 //! uses a statement-list-shaped SCG) are slated to be replaced by
 //! re-exports of the types defined here. See the "SCG Unification Status
 //! (Task 4-f)" section in `src/codegen/src/scg_to_ir.rs` for the current
-//! migration state — as of Wave 4-e, the *structure* of `CastNode`,
+//! migration state — as of -e, the *structure* of `CastNode`,
 //! `ControlNode`, and `SwitchArm` has been migrated here as generic types
 //! (`CodegenCastNode`, `CodegenControlNode`, `CodegenSwitchArm`); as of
-//! Wave 4-b, the *structure* of `AllocationNode` and `AccessNode` (both
+//! -b, the *structure* of `AllocationNode` and `AccessNode` (both
 //! enums, unlike their graph-shaped struct counterparts) has been
 //! migrated here as `CodegenAllocationNode` and `CodegenAccessNode`; as
-//! of Wave 12-a, the *structure* of the binary `ComputationNode` has
-//! been migrated here as `CodegenComputationNode<E, K>`; as of Wave 13-c,
+//! of -a, the *structure* of the binary `ComputationNode` has
+//! been migrated here as `CodegenComputationNode<E, K>`; as of -c,
 //! the *structure* of the unary `UnaryComputationNode` and the function
 //! call `CallNode` (both codegen-only types with no semantic-SCG
 //! counterpart) have been migrated here as `CodegenUnaryComputationNode<E, K>`
@@ -112,7 +112,7 @@ pub use node::{
     ChannelSendNode,
     ClosureEnvNode,
     CodegenAccessNode,
-    // (Wave 4-b) Generic statement-list-shaped allocation/access node
+    // (-b) Generic statement-list-shaped allocation/access node
     // types — the structure of the codegen-side AllocationNode /
     // AccessNode (both enums, unlike their graph-shaped struct
     // counterparts above) now lives in the canonical SCG crate.
@@ -121,14 +121,14 @@ pub use node::{
     //   type AccessNode     = vuma_scg::CodegenAccessNode<ScgExpr, crate::ir::IRType>;
     CodegenAllocationNode,
     CodegenCallNode,
-    // (Wave 4-e) Generic statement-list-shaped node types — the structure
+    // (-e) Generic statement-list-shaped node types — the structure
     // of the codegen-side CastNode / ControlNode / SwitchArm now lives in
     // the canonical SCG crate.  Codegen creates concrete aliases:
     //   type CastNode    = vuma_scg::CodegenCastNode<ScgExpr, ScgType, CastKind>;
     //   type ControlNode = vuma_scg::CodegenControlNode<ScgExpr, ScgStatement>;
     //   type SwitchArm   = vuma_scg::CodegenSwitchArm<ScgStatement>;
     CodegenCastNode,
-    // (Wave 12-a) Generic statement-list-shaped binary-computation node
+    // (-a) Generic statement-list-shaped binary-computation node
     // type — the structure of the codegen-side ComputationNode (struct
     // with dst/op/lhs/rhs/tail_call/reassigns) now lives in the canonical
     // SCG crate.  Codegen creates a concrete alias:
@@ -136,7 +136,7 @@ pub use node::{
     CodegenComputationNode,
     CodegenControlNode,
     CodegenSwitchArm,
-    // (Wave 13-c) Generic statement-list-shaped unary-computation and
+    // (-c) Generic statement-list-shaped unary-computation and
     // function-call node types — both are codegen-only (no semantic-SCG
     // counterpart).  Codegen creates concrete aliases:
     //   type UnaryComputationNode = vuma_scg::CodegenUnaryComputationNode<ScgExpr, UnaryOpKind>;

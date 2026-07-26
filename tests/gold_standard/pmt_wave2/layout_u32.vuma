@@ -1,4 +1,4 @@
-// layout_u32 — PMT Wave 2: single u32 field round-trip
+// layout_u32 — single u32 field round-trip
 // Expected exit code: 57
 //
 // Declares a layout with a single u32 field, writes 12345, reads it

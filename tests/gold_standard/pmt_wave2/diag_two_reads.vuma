@@ -1,4 +1,4 @@
-// diag_two_reads — PMT Wave 2 diagnostic: two separate-let reads (not BinOp)
+// diag_two_reads — PMT Diagnostic: two separate-let reads (not BinOp)
 // Expected exit code: 30
 //
 // Separates the two reads into two `let` bindings and then sums those

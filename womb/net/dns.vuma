@@ -4,7 +4,7 @@
 // Uses the vuma-native syscall() intrinsic for socket / sendto / recvfrom /
 // close (asm-generic nrs 198 / 206 / 207 / 57).
 //
-// PMT migration (Wave 8c): the local `allocate(N)` scratch buffers in
+// PMT migration: the local `allocate(N)` scratch buffers in
 // `dns_resolve` (`query` 512 bytes, `dest_addr`/`src_addr` 16 bytes for
 // sockaddr_in, `response` 512 bytes, `addrlen` 4 bytes for socklen_t)
 // are replaced by typed `State<Dns*>` states with `data: [u8; N]` array

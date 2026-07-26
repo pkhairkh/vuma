@@ -94,7 +94,7 @@ pub enum IRType {
         /// Number of variants.
         variant_count: usize,
     },
-    /// Wave 1: a typed channel handle `Channel<T>`.  The inner type is the
+    /// a typed channel handle `Channel<T>`. The inner type is the
     /// message payload type.  Channels are pointer-sized opaque capability
     /// handles (4 bytes on 32-bit targets, 8 bytes on 64-bit targets) — the
     /// same size as `Ptr` — and are passed in general-purpose registers under
@@ -104,10 +104,10 @@ pub enum IRType {
 }
 
 // ---------------------------------------------------------------------------
-// Session Types (Wave 89-90) — IR-side mirror of `ast::SessionType`
+// Session Types — IR-side mirror of `ast::SessionType`
 // ---------------------------------------------------------------------------
 
-/// Wave 89-90: IR-side mirror of the AST `SessionType` enum.
+/// IR-side mirror of the AST `SessionType` enum.
 ///
 /// This is a codegen-local copy of [`vuma_parser::ast::SessionType`]; it
 /// exists so the codegen crate can refer to session-type protocols without
@@ -118,7 +118,7 @@ pub enum IRType {
 /// Like the AST version, this describes a linear send/recv protocol. The
 /// IR itself does not yet carry session types per-instruction — the
 /// `Option<Box<SessionType>>` lives on the `IRType::Channel` payload
-/// conceptually and is consumed by the IVE linear-type checker (Wave 95).
+/// conceptually and is consumed by the IVE linear-type checker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionType {
     /// Send a value of the given IRType, then continue with `continuation`.
@@ -143,10 +143,10 @@ impl fmt::Display for SessionType {
 }
 
 // ---------------------------------------------------------------------------
-// Information-Flow Security Labels (Wave 91-92) — IR-side mirror
+// Information-Flow Security Labels — IR-side mirror
 // ---------------------------------------------------------------------------
 
-/// Wave 91-92: IR-side mirror of the AST `SecurityLabel` enum.
+/// IR-side mirror of the AST `SecurityLabel` enum.
 ///
 /// Two-point information-flow lattice: `Low ⊑ High`. The AST
 /// `vuma_parser::ast::SecurityLabel` carries the same two variants; the
@@ -1169,7 +1169,7 @@ impl fmt::Display for BinOpKind {
 ///
 /// Each variant denotes a lane-wise arithmetic op the backends lower to a
 /// single SSE/AVX (x86_64) or NEON (aarch64) instruction.  The set is
-/// intentionally narrow — only the kinds the Wave 29 encoders cover.
+/// intentionally narrow — only the kinds the encoders cover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VectorOpKind {
     /// Lane-wise integer add.
@@ -1688,7 +1688,7 @@ pub enum IRInstr {
         ty: Option<IRType>,
     },
 
-    /// Raw syscall: `dst = syscall(nr, args…)` (Wave 10/11 — first-class
+    /// Raw syscall: `dst = syscall(nr, args…)` ( — first-class
     /// syscall IR node).
     ///
     /// Performs a Linux syscall with number `nr`, passing up to 6 integer
@@ -1702,7 +1702,7 @@ pub enum IRInstr {
     /// clobbered by the kernel, and may abort (e.g. `exit`). Backends must
     /// treat it as a full memory/control barrier.
     ///
-    /// Backend lowering (Wave 11, tier-1):
+    /// Backend lowering (, tier-1):
     /// - x86_64: `mov eax, nr; syscall` (args in RDI/RSI/RDX/R10/R8/R9)
     /// - aarch64: `mov x8, nr; svc #0` (args in X0-X5)
     /// - riscv64/32: `li a7, nr; ecall` (args in a0-a5)
@@ -1718,7 +1718,7 @@ pub enum IRInstr {
         dst: Option<IRValue>,
     },
 
-    /// SIMD packed operation: `dst = op lanes×elem_size lhs, rhs` (Wave 29).
+    /// SIMD packed operation: `dst = op lanes×elem_size lhs, rhs`.
     ///
     /// Produced by `vectorize::slp_vectorize_block` when an independent
     /// isomorphic group of scalar ops is detected. The backends lower this
@@ -1729,7 +1729,7 @@ pub enum IRInstr {
     /// `arm64::InstructionSelector::select_from_ir`.
     ///
     /// **Scope:** only `op ∈ {Add, Sub, Mul}` and `elem_size ∈ {4, 8}` are
-    /// supported — matching the encoders the Wave 29 audit identified.
+    /// supported — matching the encoders the audit identified.
     /// Full vector-vreg register allocation is deferred (the ISel arms use
     /// fixed physical XMM0/XMM1/XMM2 on x86_64 and V0/V1/V2 on aarch64);
     /// the IR-level `dst`/`lhs`/`rhs` vregs are still tracked for
@@ -1749,7 +1749,7 @@ pub enum IRInstr {
         rhs: IRValue,
     },
 
-    // ── Channel operations (Wave 1d / Task 2a) ──────────────────────
+    // ── Channel operations (ask 2a) ──────────────────────
     /// Allocate a new channel: `dst = channel_open <elem_ty>`.
     ///
     /// Allocates a channel capable of carrying messages of type `elem_ty`
@@ -1831,7 +1831,7 @@ pub enum IRInstr {
         timeout_ms: u64,
     },
 
-    /// Wave 8b: fallible channel receive that produces BOTH a value and an
+    /// fallible channel receive that produces BOTH a value and an
     /// error code, for lowering `match channel_recv(ch) { Ok(v) => ..., Err(e) => ... }`.
     ///
     /// On success `dst` receives the 8-byte message payload and `err_dst`
@@ -1856,7 +1856,7 @@ pub enum IRInstr {
         ty: Option<IRType>,
     },
 
-    /// Wave 93-94: zk-STARK proof generation.
+    /// zk-STARK proof generation.
     ///
     /// `dst = stark_prove(input, constraints)` — generates a zero-knowledge
     /// STARK proof attesting that the prover knows a witness satisfying the
@@ -1897,7 +1897,7 @@ pub enum IRInstr {
     /// Indirect call through a function pointer stored in a vreg.
     ///
     /// This is the IR-level analogue of `IRInstr::Call` for register-based
-    /// callees — used by `irq_dispatch` (Wave 49) to call a handler function
+    /// callees — used by `irq_dispatch` to call a handler function
     /// whose address was loaded from the per-function driver table via
     /// `GetAddress` + `Store` + `Load`.
     ///
@@ -1914,7 +1914,7 @@ pub enum IRInstr {
     },
 }
 
-/// Wave 8b: error discriminants returned by [`IRInstr::ChannelRecvResult`].
+/// error discriminants returned by [`IRInstr::ChannelRecvResult`].
 ///
 /// The numeric values are stable on the wire: backends emit them as `i64`
 /// into the `err_dst` slot of `ChannelRecvResult`, and the `match` arm for
@@ -1981,15 +1981,15 @@ impl IRInstr {
             IRInstr::ChannelOpen { dst, .. }
             | IRInstr::ChannelRecv { dst, .. }
             | IRInstr::ChannelRecvTimeout { dst, .. } => dst.as_register().into_iter().collect(),
-            // Wave 8b: ChannelRecvResult defines BOTH the value dst and the err_dst.
+            // ChannelRecvResult defines BOTH the value dst and the err_dst.
             IRInstr::ChannelRecvResult { dst, err_dst, .. } => {
                 let mut r = dst.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(err_dst.as_register());
                 r
             }
-            // Wave 93-94: StarkProof defines the proof-handle dst.
+            // StarkProof defines the proof-handle dst.
             IRInstr::StarkProof { dst, .. } => dst.as_register().into_iter().collect(),
-            // Wave 49: CallIndirect defines dst (return value).
+            // CallIndirect defines dst (return value).
             IRInstr::CallIndirect { dst, .. } => dst
                 .as_ref()
                 .and_then(|v| v.as_register())
@@ -2102,12 +2102,12 @@ impl IRInstr {
             }
             IRInstr::ChannelRecv { ch, .. } => ch.as_register().into_iter().collect(),
             IRInstr::ChannelRecvTimeout { ch, .. } => ch.as_register().into_iter().collect(),
-            // Wave 8b: ChannelRecvResult reads the channel handle.
+            // ChannelRecvResult reads the channel handle.
             IRInstr::ChannelRecvResult { ch, .. } => ch.as_register().into_iter().collect(),
             IRInstr::ChannelClose { ch } => ch.as_register().into_iter().collect(),
-            // Wave 93-94: StarkProof reads the public input.
+            // StarkProof reads the public input.
             IRInstr::StarkProof { input, .. } => input.as_register().into_iter().collect(),
-            // Wave 49: CallIndirect reads func_ptr + all args.
+            // CallIndirect reads func_ptr + all args.
             IRInstr::CallIndirect { func_ptr, args, .. } => {
                 let mut r = func_ptr.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(args.iter().flat_map(|a| a.as_register()));
@@ -2352,7 +2352,7 @@ impl fmt::Display for IRInstr {
                 ),
                 None => write!(f, "{} = channel_recv_timeout {}, {}", dst, ch, timeout_ms),
             },
-            // Wave 8b: fallible recv producing (value, err) pair.
+            // fallible recv producing (value, err) pair.
             IRInstr::ChannelRecvResult {
                 ch,
                 dst,
@@ -2366,7 +2366,7 @@ impl fmt::Display for IRInstr {
                 ),
                 None => write!(f, "({}, {}) = channel_recv_result {}", dst, err_dst, ch),
             },
-            // Wave 93-94: zk-STARK proof generation.
+            // zk-STARK proof generation.
             IRInstr::StarkProof {
                 input,
                 dst,
@@ -2417,7 +2417,7 @@ impl fmt::Display for IRInstr {
 ///
 /// Note: the pipeline's syscall allowlist (`pipeline.rs`) uses a simple
 /// `*nr > 600` range check rather than this table — see the AUDIT RESOLVED
-/// note in TASKS.md (Wave 10 PIPE item).
+/// note in TASKS.md ( PIPE item).
 ///
 /// The numbers are from `include/uapi/asm-generic/unistd.h` (the generic
 /// Linux ABI used by AArch64, RISC-V, LoongArch, etc.). x86_32, x86_64,
@@ -3261,7 +3261,7 @@ mod tests {
         assert_eq!(size_of_with_ptr_width(&IRType::Func, 4), 4);
         assert_eq!(size_of_with_ptr_width(&IRType::I32, 4), 4); // integers unchanged
 
-        // Wave 1a: Channel<T> is pointer-sized.
+        // Channel<T> is pointer-sized.
         assert_eq!(size_of(&IRType::Channel(Box::new(IRType::I32))), 8);
         assert_eq!(
             size_of_with_ptr_width(&IRType::Channel(Box::new(IRType::I32)), 4),

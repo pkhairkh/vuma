@@ -1,4 +1,4 @@
-//! PGO (profile-guided optimization) tests (Wave 12).
+//! PGO (profile-guided optimization) tests.
 //!
 //! These tests prove that profile data can be loaded, serialized, and that
 //! the PGO cost function biases e-graph extraction toward hot-path optimization.

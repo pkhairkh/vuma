@@ -1,4 +1,4 @@
-// swap_fields — PMT Wave 2: swap two state fields via a temp
+// swap_fields — swap two state fields via a temp
 // Expected exit code: 20
 //
 // Initializes a Point with x=10 y=20, swaps them via a temp variable,

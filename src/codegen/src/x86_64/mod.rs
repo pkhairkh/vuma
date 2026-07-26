@@ -923,7 +923,7 @@ pub fn encode_rol_reg_cl(dst: Gpr) -> Vec<u8> {
 }
 
 // ===========================================================================
-// SSE / AVX SIMD Instruction Encoders (Wave 29)
+// SSE / AVX SIMD Instruction Encoders
 // ===========================================================================
 //
 // These encoders produce the x86_64 machine-code bytes for SSE2/SSSE3/SSE4.1
@@ -2840,7 +2840,7 @@ fn build_minimal_x86_64_elf(
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    // Wave 1: Program headers now include a rodata LOAD segment when rodata_data
+    // Program headers now include a rodata LOAD segment when rodata_data
     // is non-empty. Layout: (1) rodata LOAD [if rodata], (2) text LOAD,
     // (3) BSS LOAD [if bss], (4) PT_GNU_STACK.
     // PT_GNU_STACK is always emitted so the kernel explicitly marks the stack
@@ -2853,7 +2853,7 @@ fn build_minimal_x86_64_elf(
         + if has_bss { 1 } else { 0 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
 
-    // Wave 1: .rodata is placed right after the ELF headers (before .text).
+    // .rodata is placed right after the ELF headers (before .text).
     // Its virtual address is base_addr + rodata_offset (not page-aligned,
     // but within the first page — valid for ET_EXEC with PF_R).
     let rodata_offset: u64 = phdr_end; // right after program headers
@@ -2921,7 +2921,7 @@ fn build_minimal_x86_64_elf(
     elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1 (if rodata): LOAD segment for .rodata (PF_R) ---
-    // Wave 1: read-only string data. Placed before .text at a known address
+    // read-only string data. Placed before .text at a known address
     // (base_addr + phdr_end) so string literal addresses are compile-time
     // constants computable in the SCG bridge.
     if has_rodata {
@@ -2983,7 +2983,7 @@ fn build_minimal_x86_64_elf(
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
     elf.extend_from_slice(&0x10u64.to_le_bytes()); // p_align
 
-    // --- rodata data (Wave 1) ---
+    // --- rodata data ---
     // Emit read-only string data right after the program headers (at file
     // offset rodata_offset = phdr_end). This is before the text section.
     if has_rodata {
@@ -3064,14 +3064,14 @@ fn build_minimal_x86_64_elf(
 // Runtime Syscall Stubs
 // ===========================================================================
 
-/// Wave 47: Size in bytes of the runtime argv-storage slot reserved at
+/// Size in bytes of the runtime argv-storage slot reserved at
 /// offset 0 of BSS. Holds argc (8 bytes) and argv (8 bytes) saved by the
 /// `_start` stub at process entry, so the `__vuma_argc` / `__vuma_argv`
 /// runtime stubs can retrieve them later. Unconditionally reserved by
 /// `encode_program` so the stubs are always safe to call.
 pub const RUNTIME_ARGV_STORAGE_SIZE: u64 = 16;
 
-/// Wave 47: 8-byte sentinel value used as a placeholder for the BSS
+/// 8-byte sentinel value used as a placeholder for the BSS
 /// argv-storage virtual address inside the `_start` stub and the
 /// `__vuma_argc` / `__vuma_argv` runtime stubs. The placeholder is emitted
 /// by `build_runtime_syscall_stubs` (for the two argv stubs) and by
@@ -3114,7 +3114,7 @@ pub const RUNTIME_ARGV_STORAGE_PLACEHOLDER: u64 = 0xDEAD_BEEF_CAFE_BABE;
 /// - The only difference is the 4th arg: RCX (calling) vs R10 (syscall)
 /// - For functions with ≤3 args, no register shuffling is needed
 ///
-/// # Wave 47 — Process Startup Argument Access
+/// # — Process Startup Argument Access
 ///
 /// Two non-syscall stubs (`__vuma_argc`, `__vuma_argv`) provide VUMA programs
 /// with access to argc/argv. They read from a 16-byte runtime-managed slot at
@@ -3192,7 +3192,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("dup3", 292),
         // VUMA heap-free helper -- same as munmap
         ("__vuma_free", 11),
-        // ── Wave 7: POSIX file-metadata & I/O syscalls (x86_64 syscall_64.tbl) ──
+        // ── POSIX file-metadata & I/O syscalls (x86_64 syscall_64.tbl) ──
         // All take ≤5 args; x86_64 has 6 register args (RDI/RSI/RDX/R10/R8/R9),
         // so every entry fits the simple "mov eax,#num; syscall; ret" stub.
         // Family 1: dir/link ops
@@ -3234,7 +3234,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Family 7: cwd/root (getcwd=79/chdir=80 already above)
         ("fchdir", 81),
         ("chroot", 161),
-        // ── Wave 9: POSIX system & advanced syscalls (x86_64 syscall_64.tbl) ──
+        // ── POSIX system & advanced syscalls (x86_64 syscall_64.tbl) ──
         // All take ≤5 args; x86_64 has 6 reg args → simple_stub.
         // eventfd→eventfd2(290), signalfd→signalfd4(289) = modern flag-accepting variants.
         ("mlock", 149),
@@ -3259,7 +3259,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         ("inotify_add_watch", 254),
         ("inotify_rm_watch", 255),
         ("ptrace", 101),
-        // ── Wave 8: POSIX process & identity syscalls (x86_64 syscall_64.tbl) ──
+        // ── POSIX process & identity syscalls (x86_64 syscall_64.tbl) ──
         // All take ≤5 args; x86_64 has 6 reg args (RDI/RSI/RDX/R10/R8/R9) → simple_stub.
         // Family 1: identity
         ("getuid", 102),
@@ -3308,7 +3308,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // mmap(addr, length, prot, flags, fd, offset) -> void*  [syscall 9]
     // Need to move 4th arg from RCX -> R10 before syscall
     //
-    // [wave 6 — mmap ABI normalization, verified] x86_64's sys_mmap (9) is the
+    // [— mmap ABI normalization, verified] x86_64's sys_mmap (9) is the
     // DIRECT 6-arg form: (addr, len, prot, flags, fd, offset) in
     //   RDI, RSI, RDX, R10, R8, R9   (kernel syscall ABI)
     // with `offset` in BYTES (x86_64 has no mmap2; sys_mmap does the
@@ -3316,7 +3316,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // (flags) from the SysV RCX to the syscall-ABI R10 — the other 5 args are
     // already in the correct registers. This matches __vuma_alloc (which sets
     // up RDI/RSI/RDX/R10/R8/R9 then `MOV EAX,9; syscall`): both use the SAME
-    // offset unit (bytes, via R9), satisfying the wave-6 "same offset-unit
+    // offset unit (bytes, via R9), satisfying the effort-6 "same offset-unit
     // handling as __vuma_alloc" requirement. x86_64 passes 6 args in
     // RDI/RSI/RDX/RCX/R8/R9 (see Gpr::arg_register), so all 6 mmap args fit in
     // registers — no stack-arg plumbing needed.
@@ -3692,7 +3692,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // stub table) are the live ones; the duplicate block has been removed to
     // avoid emitting ~70 bytes of dead code.
 
-    // ── Wave 47: process startup argument access ──────────────────────────
+    // ── process startup argument access ──────────────────────────
     // __vuma_argc() -> i32   and   __vuma_argv() -> Address
     //
     // These stubs read from a runtime-managed 16-byte slot at the START of
@@ -3743,7 +3743,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__vuma_argv".to_string(), code));
     }
 
-    // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────────────
+    // ── FFI scratchpad frame stubs (/fix) ──────────────────────────
     //
     // ffi_scratch_push_frame() -> void
     //   Allocates a 4096-byte scratchpad frame via mmap. The pointer is
@@ -3826,7 +3826,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__uaf_trap".to_string(), code));
     }
 
-    // Wave 5: __call_indirect1(ptr: u64, arg: u64) -> u64
+    // __call_indirect1(ptr: u64, arg: u64) -> u64
     // Indirect function call trampoline for syscall/IRQ/IPI dispatch.
     // Args: RDI = function pointer, RSI = argument to pass to the callee.
     // The callee receives arg in RDI (standard SysV calling convention).
@@ -3846,7 +3846,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__call_indirect1".to_string(), code));
     }
 
-    // Wave 7: __vuma_load_u32(addr: u64) -> u32
+    // __vuma_load_u32(addr: u64) -> u32
     // Loads a 32-bit value from an arbitrary memory address.
     // Used by futex (compare *uaddr), VFS (read inode fields), etc.
     // Encoding: mov eax, [rdi] ; ret = 8B 07 C3 (3 bytes)
@@ -3857,7 +3857,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__vuma_load_u32".to_string(), code));
     }
 
-    // Wave 7: __vuma_store_u32(addr: u64, val: u32)
+    // __vuma_store_u32(addr: u64, val: u32)
     // Stores a 32-bit value to an arbitrary memory address.
     // Encoding: mov [rdi], esi ; ret = 89 37 C3 (3 bytes)
     {
@@ -3867,7 +3867,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__vuma_store_u32".to_string(), code));
     }
 
-    // Wave 7: __vuma_load_u64(addr: u64) -> u64
+    // __vuma_load_u64(addr: u64) -> u64
     // Loads a 64-bit value from an arbitrary memory address.
     // Encoding: mov rax, [rdi] ; ret = 48 8B 07 C3 (4 bytes)
     {
@@ -3877,7 +3877,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("__vuma_load_u64".to_string(), code));
     }
 
-    // Wave 7: __vuma_store_u64(addr: u64, val: u64)
+    // __vuma_store_u64(addr: u64, val: u64)
     // Stores a 64-bit value to an arbitrary memory address.
     // Encoding: mov [rdi], rsi ; ret = 48 89 37 C3 (4 bytes)
     {
@@ -3936,7 +3936,7 @@ impl X86_64Backend {
         }
     }
 
-    /// Wave 22: Emit a function using real register allocation.
+    /// Emit a function using real register allocation.
     ///
     /// Consumes a `RegAllocResult` (from `TargetAgnosticRegAlloc`) and
     /// produces an `AllocatedFunction` where each instruction's
@@ -3972,7 +3972,7 @@ impl X86_64Backend {
         Ok(allocated)
     }
 
-    /// Wave 22: Convenience method — run regalloc + emit in one step.
+    /// Convenience method — run regalloc + emit in one step.
     ///
     /// This runs `TargetAgnosticRegAlloc::allocate_function` internally
     /// and then calls `emit_function_regalloc`.
@@ -4075,7 +4075,7 @@ impl Backend for X86_64Backend {
         //
         // The _start stub saves argc/argv into a runtime-managed 16-byte
         // slot at the start of BSS (offset 0) so that the __vuma_argc and
-        // __vuma_argv runtime stubs can retrieve them later (Wave 47).
+        // __vuma_argv runtime stubs can retrieve them later.
         // Before main is called, argc/argv are also left in RDI/RSI —
         // preserving the existing calling convention for any VUMA main()
         // that might eventually declare argc/argv parameters.
@@ -4133,7 +4133,7 @@ impl Backend for X86_64Backend {
         // lea rsi, [rsp + 8] — argv starts at RSP + 8
         start_stub.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
 
-        // ── Wave 47: save argc/argv to the runtime argv-storage BSS slot ──
+        // ── save argc/argv to the runtime argv-storage BSS slot ──
         // mov rax, <placeholder> — placeholder is patched below after BSS
         // layout is finalized. The placeholder is the same sentinel used in
         // the __vuma_argc/__vuma_argv runtime stubs, so a single scan-and-
@@ -4229,7 +4229,7 @@ impl Backend for X86_64Backend {
                 }
             }
         }
-        // Wave 47: a 16-byte runtime argv-storage slot is reserved at offset 0
+        // a 16-byte runtime argv-storage slot is reserved at offset 0
         // of BSS. The _start stub writes argc (8 bytes) and argv (8 bytes)
         // here at process entry; the __vuma_argc/__vuma_argv runtime stubs
         // read from this slot. This reservation is unconditional so the
@@ -4268,7 +4268,7 @@ impl Backend for X86_64Backend {
         };
 
         // Build a map: data symbol name → BSS virtual address.
-        // Wave 47: data symbols start at offset RUNTIME_ARGV_STORAGE_SIZE
+        // data symbols start at offset RUNTIME_ARGV_STORAGE_SIZE
         // (16) in BSS — the first 16 bytes are reserved for the runtime
         // argv-storage slot populated by _start.
         let data_symbol_addrs: HashMap<String, u64> = data_symbols
@@ -4349,7 +4349,7 @@ impl Backend for X86_64Backend {
                         }
                     }
                 } else if reloc.reloc_type == "R_X86_64_PC32" {
-                    // Wave 5: R_X86_64_PC32 — 32-bit PC-relative relocation for
+                    // R_X86_64_PC32 — 32-bit PC-relative relocation for
                     // LEA rip+disp32 (function address loading). Same formula
                     // as PLT32: disp32 = S + A - P - 4.
                     if abs_offset + 4 > all_code.len() {
@@ -4408,7 +4408,7 @@ impl Backend for X86_64Backend {
             func_code_offset += func_size;
         }
 
-        // ── Wave 47: patch the runtime argv-storage placeholder ──────────
+        // ── patch the runtime argv-storage placeholder ──────────
         // The _start stub and the __vuma_argc/__vuma_argv runtime stubs each
         // contain an 8-byte placeholder (RUNTIME_ARGV_STORAGE_PLACEHOLDER)
         // that stands in for the BSS argv-storage virtual address. Now that
@@ -5502,7 +5502,7 @@ mod tests {
         assert!(lines[1].contains("sub"), "Expected sub, got: {}", lines[1]);
     }
 
-    // ── SSE / AVX SIMD Encoder Tests (Wave 29) ──────────────────────────
+    // ── SSE / AVX SIMD Encoder Tests ──────────────────────────
 
     #[test]
     fn test_sse_paddq_xmm0_xmm1() {

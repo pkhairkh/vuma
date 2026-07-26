@@ -1,4 +1,4 @@
-// bounded_loop — PMT Wave 9: loop fills state buffer up to a runtime count
+// bounded_loop — loop fills state buffer up to a runtime count
 // Expected exit code: 45
 //
 // A `Buf` layout with `count` + `data: [u32; 8]`. A `while` loop fills
@@ -6,7 +6,7 @@
 // `3`). The State Transform verifier proves each `data[i]` access within
 // the loop is within the data field's bounds (i < N ≤ 8 → i*4 + 4 ≤ 32).
 //
-// Under the Wave 9 dependent-state-types model, this loop body's safety
+// Under the dependent-state-types model, this loop body's safety
 // would be proved by linear arithmetic: `i < N` and `N ≤ 8` imply
 // `i*4 + 4 ≤ 32`, which is the proof obligation the new
 // `verify_dependent_transform(elem_size, count, offset, buffer_size)`

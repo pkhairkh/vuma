@@ -182,7 +182,7 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
-        // PMT (Wave 1b): minimal stubs so this match stays exhaustive.
+        // PMT: minimal stubs so this match stays exhaustive.
         NodePayload::StateInit(s) => format!("state_init({})", s.layout_name),
         NodePayload::StateRead(s) => format!("state_read({}.{})", s.layout_name, s.field_name),
         NodePayload::StateWrite(s) => format!("state_write({}.{})", s.layout_name, s.field_name),
@@ -196,7 +196,7 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::ArenaAlloc(s) => format!("arena_alloc({})", s.layout_name),
         NodePayload::ArenaGrow(_) => "arena_grow".to_string(),
         NodePayload::ArenaFree(_) => "arena_free".to_string(),
-        // Wave 2b: channel operation labels.
+        // channel operation labels.
         NodePayload::ChannelOpen(c) => format!("channel_open<{}>", c.elem_type),
         NodePayload::ChannelSend(c) => {
             format!("channel_send({}, {})", c.channel, c.message)
@@ -1383,7 +1383,7 @@ Expressions:
     /// Outputs all current parse errors, verification results, and
     /// compilation warnings in JSON format for LLM consumption.
     ///
-    /// Wave 43 serde-migration: previously used `serde_json::json!({...})` to
+    /// serde-migration: previously used `serde_json::json!({...})` to
     /// build a `serde_json::Value` and `serde_json::to_string_pretty` to
     /// serialize it. Now uses `vuma_scg::llm_json::JsonValue` + the
     /// `build_object` / `build_array` helpers + `JsonValue::to_string_pretty`.

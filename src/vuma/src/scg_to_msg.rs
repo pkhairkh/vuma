@@ -372,7 +372,7 @@ fn process_node(
             // passthroughs rather than producing their own MSG entity.
             process_passthrough(scg, ctx, node)?;
         }
-        // PMT (Wave 1c TODO): StateInit/StateRead/StateWrite/StateTransform
+        // PMT ( TODO): StateInit/StateRead/StateWrite/StateTransform
         // need proper MSG handling — for now, treat them as passthroughs so
         // the build passes and the SCG→MSG bridge does not crash.
         NodeType::StateInit
@@ -384,7 +384,7 @@ fn process_node(
         | NodeType::ArenaAlloc
         | NodeType::ArenaGrow
         | NodeType::ArenaFree
-        // Wave 2b: channel operations are I/O-like side-effecting ops;
+        // channel operations are I/O-like side-effecting ops;
         // they don't produce their own MSG entity — treat as passthrough.
         | NodeType::ChannelOpen
         | NodeType::ChannelSend

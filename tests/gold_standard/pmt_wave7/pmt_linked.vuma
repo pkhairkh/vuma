@@ -1,4 +1,4 @@
-// pmt_linked.vuma — PMT Wave 7: two linked state nodes
+// pmt_linked.vuma — two linked state nodes
 // Expected exit code: 60
 //
 // A simple linked structure using State (not a full linked list — just

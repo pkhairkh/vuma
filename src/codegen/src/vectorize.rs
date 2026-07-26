@@ -1,6 +1,6 @@
-//! # Autovectorizer (Wave 29 rewrite)
+//! # Autovectorizer ( rewrite)
 //!
-//! Replaces the miscompiling Wave 13 stub that blindly 4×'d the loop body
+//! Replaces the miscompiling stub that blindly 4×'d the loop body
 //! without adjusting the IV step — turning `for i in 0..N { body }` into
 //! `for i in 0..N { body; body; body; body }` (4N work instead of N), with
 //! all four body copies operating on the *same* `i` (so three of them were
@@ -44,7 +44,7 @@
 //! - Fix the IV-step miscompilation (the core bug).
 //! - Emit a vectorization plan the backend can consume.
 //! - Provide SSE/AVX/NEON encoders (in `x86_64/mod.rs` and `arm64.rs`).
-//! - **Wave 11-e (PARTIAL):** wire `PackedOp` lowering into ISel via the new
+//! - **-e (PARTIAL):** wire `PackedOp` lowering into ISel via the new
 //!   [`lower_packed_ops_to_vectorops`] helper. For each `PackedOp` in the plan,
 //!   the helper rewrites the lane-0 scalar BinOp into an `IRInstr::VectorOp`,
 //!   which the existing `IRInstr::VectorOp` arm in
@@ -196,7 +196,7 @@ pub fn vectorize_function_with_plan(mut func: IRFunction) -> (IRFunction, Vector
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// ISel wiring (Wave 11-e, partial)
+// ISel wiring (-e, partial)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Lower `PackedOp`s from a [`VectorizationPlan`] into `IRInstr::VectorOp`
@@ -234,7 +234,7 @@ pub fn vectorize_function_with_plan(mut func: IRFunction) -> (IRFunction, Vector
 /// `test_wave11e_packed_op_lowered_to_avx_in_x86_64_isel`), but does NOT
 /// guarantee SIMD execution of lanes 1..N or correct lane-0 dst vreg
 /// propagation. Full semantic correctness requires one of the following
-/// (deferred to a future wave):
+/// (deferred to a future effort):
 ///
 /// - **(a) Per-lane dst vregs + lane-extract.** The current `IRInstr::VectorOp`
 ///   IR has a single `dst` (lane 0). Lanes 1..N have their own scalar dst
@@ -1017,7 +1017,7 @@ fn renumbered_substitute(instr: &mut IRInstr, old_vreg: u32, new_vreg: u32, next
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Public alias matching the legacy Wave 13 surface (in case any caller still
+// Public alias matching the legacy surface (in case any caller still
 // references it). The old `is_proven_non_aliasing` helper is preserved.
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -1480,11 +1480,11 @@ mod tests {
         ));
     }
 
-    // ── Wave 29 ISel integration tests ─────────────────────────────────
+    // ── ISel integration tests ─────────────────────────────────
 
-    /// Wave 29 audit resolution: verify that an `IRInstr::VectorOp` actually
+    /// audit resolution: verify that an `IRInstr::VectorOp` actually
     /// lowers to SSE/AVX machine bytes in the x86_64 backend (and to a NEON
-    /// word in the aarch64 backend).  Prior to Wave 29 ISel wiring, the
+    /// word in the aarch64 backend). Prior to ISel wiring, the
     /// encoders existed but were called only from `#[test]` functions.
     #[test]
     fn test_wave29_simd_emitted_in_x86_64_isel() {
@@ -1574,7 +1574,7 @@ mod tests {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
-    // ── Wave 11-e PackedOp → ISel wiring tests ──────────────────────────
+    // ── -e PackedOp → ISel wiring tests ──────────────────────────
 
     /// Build a function with two adjacent SLP-able i32 Adds in a single
     /// block — the simplest input that exercises both the SLP planner and
@@ -1613,7 +1613,7 @@ mod tests {
         func
     }
 
-    /// Wave 11-e wiring: verify the vectorizer's side-channel plan flows
+    /// -e wiring: verify the vectorizer's side-channel plan flows
     /// through to real SSE/AVX machine bytes in the x86_64 backend ISel.
     ///
     /// Before this wiring (per Task 1-f audit / caveats.md §8 #17):
@@ -1767,7 +1767,7 @@ mod tests {
         );
     }
 
-    /// Wave 11-e wiring: verify the wiring helper is a no-op when given an
+    /// -e wiring: verify the wiring helper is a no-op when given an
     /// empty plan (e.g. for a function with no vectorizable ops). This
     /// guards against regressions where the helper might spuriously rewrite
     /// unrelated scalar BinOps.

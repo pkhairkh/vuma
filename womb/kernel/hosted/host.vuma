@@ -11,7 +11,7 @@
 // turn call the pre-registered syscall stubs in
 // `src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs`).
 //
-// In bare-metal mode (Wave K11) the same `host_*` API will be provided by a
+// In bare-metal mode the same `host_*` API will be provided by a
 // different implementation that talks to the UART/IRQ-controller/framebuffer
 // directly — so kernel modules that call `host_console_write` etc. do not
 // need to change between hosted and bare-metal builds.
@@ -84,7 +84,7 @@ fn host_init() -> State<BootInfo> {
     b.mem_size = 16777216u64;
     // For now, treat argv[0] as the cmdline. argv points to the argv[]
     // array; argv[0] is the address of the program-name string. We
-    // approximate by storing the array base address itself; a later wave
+    // approximate by storing the array base address itself; a later effort
     // will dereference argv[0] once the kernel has a safe deref helper.
     b.cmdline = av as u64;
     return b;
@@ -127,7 +127,7 @@ fn host_alloc_pages(count: u64) -> Address {
 // ── host_free_pages ────────────────────────────────────────────────────────
 // Release a region previously allocated by host_alloc_pages. The return
 // value of munmap is ignored here (the kernel has no good way to recover
-// from a failed unmap on hosted mode; a later wave may add a panic hook).
+// from a failed unmap on hosted mode; a later effort may add a panic hook).
 
 fn host_free_pages(addr: Address, count: u64) {
     let bytes: u64 = count * HOST_PAGE_SIZE;

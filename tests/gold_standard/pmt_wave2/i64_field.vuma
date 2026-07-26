@@ -1,4 +1,4 @@
-// i64_field — PMT Wave 2: i64 field round-trip
+// i64_field — i64 field round-trip
 // Expected exit code: 64
 //
 // Declares a layout with an i64 field, writes 1000000, reads it back.
