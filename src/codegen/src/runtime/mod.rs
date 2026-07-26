@@ -8,6 +8,7 @@
 
 pub mod arena;
 pub mod arena_proof_model;
+pub mod arena_verified;
 pub mod callback;
 pub mod ffi_scratch;
 #[cfg(feature = "pmt-runtime-check")]
