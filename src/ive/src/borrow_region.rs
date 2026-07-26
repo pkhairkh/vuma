@@ -23,22 +23,32 @@
 //! HARD-FAIL (independent of `--strict-ive`). See the Stage 7c call-site
 //! comment in `pipeline.rs` for the full history.
 //!
-//! **Known pre-existing parser gap:** the parser
-//! (`parser/src/to_scg.rs:2386-2398`) currently lowers `channel_open` /
-//! `channel_send` / `channel_recv` / `channel_close` as GENERIC
-//! `ControlNode` payloads with labels `call_channel_*` — NOT as the
-//! dedicated `NodePayload::Channel*` variants that the Stage 7c call
-//! site matches on. As a result, the `events` Vec is always empty for
-//! programs compiled through the parser, the verifier returns no
-//! violations, and the gate is DORMANT at runtime. The promotion to
-//! unconditional hard-fail is correct at the gate level and
-//! forward-compatible — once a future change fixes the parser to emit
-//! the dedicated `NodePayload::Channel*` variants (or adds an SCG
-//! transform that promotes the labeled-`ControlNode` representation),
-//! the gate will immediately enforce linear discipline as the HARD-FAIL
-//! behavior specified here. The unit-level tests in this module pin the
-//! verifier's contract directly (without going through the parser) and
-//! DO pass today.
+//! **Parser gap — RESOLVED (IVE Wave 0 task C):** the parser
+//! (`src/parser/src/to_scg.rs`, `try_emit_channel_node` at line ~2508)
+//! now lowers `channel_open` / `channel_send` / `channel_recv` /
+//! `channel_close` as the DEDICATED `NodePayload::Channel{Open,Send,
+//! Recv,Close}` variants that the Stage 7c call site pattern-matches
+//! on — NOT as generic `ControlNode` payloads with `call_channel_*`
+//! labels. The `try_emit_channel_node` helper is invoked from
+//! `emit_call_nodes` BEFORE the generic FunctionEntry/FunctionReturn
+//! lowering, and returns `Ok(true)` to skip that fallback for the
+//! four channel builtins. As a result, the `events` Vec is populated
+//! for any program that uses channels, and the gate is LIVE at
+//! runtime — `VumaError::Transform { pass_name:
+//! "linear-channel", ... }` will fire on genuine use-after-close /
+//! double-close / uninitialized-use violations. The end-to-end
+//! regression tests in `tests/linear_channel_hard_fail.rs`
+//! (`linear_channel_use_after_close_fails_by_default`,
+//! `linear_channel_double_close_fails_by_default`) run without
+//! `#[ignore]` and pin this contract.
+//!
+//! **Stale docstring cleanup deferred:** the test file's header
+//! docstring (lines 16-54 of `tests/linear_channel_hard_fail.rs`)
+//! still describes the OLD parser-gap state and the `#[ignore]`
+//! attributes that have since been removed. The tests themselves
+//! are up to date (no `#[ignore]`); only the header prose is stale.
+//! Cleanup is a follow-up; it does not affect gate behaviour. See
+//! `docs/caveats.md` §0.7.
 //!
 //! The `--strict-ive` flag is RETAINED for `bv_verify` (Stage 7a),
 //! which still has the "reserved for future strict mode" advisory
