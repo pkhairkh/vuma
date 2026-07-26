@@ -40,6 +40,28 @@ The PMT-relevant variants fall into two groups:
     declared `successors` field is consistent with the control-flow
     instructions it contains.
 
+  * **Atomic variants (3, added in PMT-1-C):** `atomic_load`,
+    `atomic_store`, `atomic_cas`. These mirror the Rust
+    `IRInstr::AtomicLoad` / `IRInstr::AtomicStore` / `IRInstr::AtomicCas`
+    variants. **Single-threaded limitation.** PMT's soundness model
+    (`pmt_soundness` in `PMT.Soundness`) is single-threaded: it models
+    one `exec` pass over a flattened `Program = List Step` with no
+    concurrent interleaving. Under single-threaded execution the
+    *atomicity* of an atomic load/store/CAS is vacuous — there is no
+    other thread to race with — so each atomic variant is treated
+    exactly like a non-atomic memory access for the purposes of the
+    soundness proof: `effect = .none` (atomicity is a concurrency
+    concern, not a state-transformation concern under single-threaded
+    semantics), `well_typed = True`, `to_steps = []` (the actual memory
+    effect is modeled at the IVE/runtime layer, not as a PMT `Step`).
+    The `AtomicOrdering` enum (§3.5) is preserved as a tag on each
+    variant for forward-compatibility with any future concurrent
+    extension, but its value is unconstrained and never inspected by
+    `effect` / `well_typed` / `to_steps`. A full concurrent-execution
+    semantics (interleaved `exec`, memory-model axioms,
+    happens-before relations) is **out of scope** for PMT-1-C and is
+    not modeled here.
+
 The simulation relation `pmt_instr_simulates_ir_instr`
 connects each `PmtInstr` variant to its Rust `IRInstr` counterpart. All
 theorems in this file close without `sorry`.
@@ -60,6 +82,16 @@ modeled at the CFG level (`IRBlock.successors`, the `IRTerminator`
 of each block, and the `PmtInstr.successor_labels` helper), not as
 `Step`s. The `pmt_soundness` argument — which operates over the
 flattened `Program = List Step` — is therefore unaffected.
+
+The 3 atomic variants (PMT-1-C) likewise flatten to `[]`: their
+memory effect (load/store/CAS) is modeled at the IVE / runtime
+layer, not as a PMT `Step`, and their atomicity annotation
+(`AtomicOrdering`, §3.5) is vacuous under single-threaded execution
+(see the single-threaded limitation paragraph above). The
+`pmt_soundness` argument — which operates over the flattened
+`Program = List Step` — is therefore unaffected. The
+`AtomicOrdering` field is preserved on each variant for
+forward-compatibility with any future concurrent extension.
 
 **References.**
   * Rust source: `src/codegen/src/ir.rs` (3,481 lines, 32 IRInstr variants).
@@ -175,6 +207,44 @@ inductive CastKind where
   | floatToFloat : CastKind
   deriving Repr
 
+/-! ## §3.5. AtomicOrdering — mirror of the C++/Rust `Ordering` enum (annotation tag)
+
+`AtomicOrdering` is the standard 5-variant memory-ordering tag used by
+LLVM, C++ `std::memory_order`, and Rust `std::sync::atomic::Ordering`.
+It is preserved on each PMT-1-C atomic variant as a documentation /
+forward-compatibility annotation: under PMT's single-threaded
+soundness model, the ordering is *never inspected* by `PmtInstr.effect`,
+`PmtInstr.well_typed`, or `PmtInstr.to_steps` (all three treat the
+atomic variants identically regardless of `ordering`'s value). The
+enum is present in the Lean model so that `instr_sim` / `block_sim`
+traversal in `PMT.SimRel` can carry the ordering through structurally
+for any future concurrent extension.
+
+**Note on Rust source divergence.** The Rust `IRInstr::AtomicLoad` /
+`AtomicStore` / `AtomicCas` variants at `src/codegen/src/ir.rs:1583` /
+`1598` / `1617` do **not** carry an `ordering` field — they emit a
+fixed acquire/release sequence (LDAXR/STLXR on AArch64,
+LOCK CMPXCHG on x86_64, LR.D/SC.D on RISC-V) at codegen time without
+exposing the ordering choice in the IR. The task brief for PMT-1-C
+prescribed an enriched shape with explicit `ordering` /
+`success_order` / `failure_order` fields; we follow the task brief's
+prescription (rather than the leaner Rust shape) so that the Lean
+model can document and carry the ordering intent. This is the same
+kind of "faithful-but-simplified" modeling decision that PMT-1-A made
+for the arithmetic variants' `ty : Option<IRType>` field (modeled as
+non-`Option` `IRType`). -/
+
+/-- §3.5: Atomic memory ordering — mirror of C++ `std::memory_order` /
+Rust `std::sync::atomic::Ordering`. Tag only; vacuous under PMT's
+single-threaded soundness model. -/
+inductive AtomicOrdering where
+  | relaxed : AtomicOrdering
+  | acquire : AtomicOrdering
+  | release : AtomicOrdering
+  | acq_rel : AtomicOrdering
+  | seq_cst : AtomicOrdering
+  deriving Repr
+
 /-! **Note on `PmtOp` migration.** The `PmtOp` inductive previously declared in this
 module (with 7 constructors including `load`/`store`/`free`/
 `call`) has been migrated to `PMT.Soundness` per the
@@ -239,11 +309,41 @@ only `dst` and `incoming`); we mirror Rust faithfully (2 fields). For
 field). For `CondBranch`, the Rust `{ cond, true_target, false_target }`
 shape is mirrored faithfully (3 fields).
 
-Other Rust `IRInstr` variants (Atomic*, VectorOp, Channel*,
-StarkProof, Offset, Syscall) are not modeled here. They are either:
-  - Atomic / channel operations — out of scope for PMT-1-B (modeled
-    by PMT-1-C / PMT-1-D respectively).
-  - Channel operations — modeled via `PmtInstr.call "channel_send"`.
+**Atomic variants (3, PMT-1-C):** mirror the Rust `IRInstr::AtomicLoad`
+/ `AtomicStore` / `AtomicCas` variants. Each has `effect = .none`,
+`well_typed = True`, `to_steps = []` (atomicity is a concurrency
+concern, not a state-transformation concern under PMT's
+single-threaded semantics; the underlying load/store/CAS memory
+effect is modeled at the IVE / runtime layer, not as a PMT `Step`):
+  - Rust `IRInstr::AtomicLoad` ↔ Lean `PmtInstr.atomic_load`
+  - Rust `IRInstr::AtomicStore` ↔ Lean `PmtInstr.atomic_store`
+  - Rust `IRInstr::AtomicCas`  ↔ Lean `PmtInstr.atomic_cas`
+
+**Single-threaded limitation (PMT-1-C).** The `AtomicOrdering` enum
+(§3.5) is preserved as a tag on each atomic variant, but its value
+is never inspected by `effect` / `well_typed` / `to_steps`. Under
+PMT's single-threaded `pmt_soundness` model, the atomicity of a
+load/store/CAS is vacuous — there is no other thread to race with.
+A full concurrent-execution semantics (interleaved `exec`,
+memory-model axioms, happens-before) is out of scope for PMT-1-C.
+
+**Note on Rust source divergence.** The Rust
+`AtomicLoad`/`AtomicStore`/`AtomicCas` variants at ir.rs:1583/1598/1617
+do **not** carry an `ordering` field — they emit a fixed
+acquire/release sequence at codegen time. The task brief prescribed
+an enriched shape with explicit `ordering` / `success_order` /
+`failure_order` fields; we follow the task brief's prescription
+(rather than the leaner Rust shape) so that the Lean model can
+document and carry the ordering intent. Field names follow the Rust
+precedent where they exist (`dst`, `addr`, `value`, `expected`,
+`desired`, `ty`); the new `ordering` / `success_order` /
+`failure_order` fields follow the task brief's prescription.
+
+Other Rust `IRInstr` variants (VectorOp, Channel*, StarkProof,
+Offset, Syscall) are not modeled here. They are either:
+  - Channel operations — modeled via `PmtInstr.call "channel_send"`
+    (and as separate `PmtInstr` variants in PMT-1-D).
+  - VectorOp / StarkProof / Offset / Syscall — out of scope for PMT.
 -/
 inductive PmtInstr where
   -- Memory variants (7)
@@ -288,6 +388,24 @@ inductive PmtInstr where
     -- Rust `Branch { target: String }`
   | cond_branch  : IRValue → String → String → PmtInstr
     -- Rust `CondBranch { cond, true_target, false_target }`
+  -- Atomic variants (3, PMT-1-C) — `effect = .none`, `to_steps = []`
+  -- (single-threaded: atomicity vacuous; `AtomicOrdering` is a tag only)
+  | atomic_load  : IRValue → IRValue → IRType → AtomicOrdering → PmtInstr
+    -- Task brief: `AtomicLoad { dst, ptr, ty, ordering }`.
+    -- Rust (ir.rs:1583): `AtomicLoad { dst, addr, ty }` (NO `ordering`
+    -- field — divergence per task brief prescription; see §4 docstring).
+  | atomic_store : IRValue → IRValue → IRType → AtomicOrdering → PmtInstr
+    -- Task brief: `AtomicStore { ptr, val, ty, ordering }`.
+    -- Rust (ir.rs:1598): `AtomicStore { value, addr, ty }` (NO `ordering`
+    -- field; field order here follows Rust's `(value, addr, ty)` then
+    -- appends `ordering` per task brief).
+  | atomic_cas   : IRValue → IRValue → IRValue → IRValue → IRType
+                   → AtomicOrdering → AtomicOrdering → PmtInstr
+    -- Task brief:
+    --   `AtomicCas { dst, ptr, expected, desired, ty, success_order, failure_order }`.
+    -- Rust (ir.rs:1617): `AtomicCas { dst, addr, expected, desired, ty }`
+    -- (NO `success_order`/`failure_order` fields — divergence per task
+    -- brief prescription; see §4 docstring).
   deriving Repr
 
 /-- §5: A PMT-relevant basic block — a list of PmtInstr. -/
@@ -345,6 +463,14 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .phi _ _ => .none
   | .branch _ => .none
   | .cond_branch _ _ _ => .none
+  -- Atomic variants (PMT-1-C): atomicity is a concurrency concern, not a
+  -- state-transformation concern. Under PMT's single-threaded semantics
+  -- the atomicity is vacuous, so each variant classifies as `.none`
+  -- (the underlying load/store/CAS memory effect is modeled at the IVE /
+  -- runtime layer, not as a PMT `Step`).
+  | .atomic_load _ _ _ _ => .none
+  | .atomic_store _ _ _ _ => .none
+  | .atomic_cas _ _ _ _ _ _ _ => .none
 
 /-- §10: WellTypedness for PmtInstr (per-instruction).
 This is the per-instruction check that IVE's `verify_state_reads` /
@@ -381,6 +507,13 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .phi _ _ => True
   | .branch _ => True
   | .cond_branch _ _ _ => True
+  -- Atomic variants (PMT-1-C): atomicity is vacuous under PMT's
+  -- single-threaded semantics; the underlying load/store/CAS memory
+  -- effect is modeled at the IVE / runtime layer. The `AtomicOrdering`
+  -- tag is not inspected (any ordering is well-typed).
+  | .atomic_load _ _ _ _ => True
+  | .atomic_store _ _ _ _ => True
+  | .atomic_cas _ _ _ _ _ _ _ => True
 
 /-- §11: WellTypedness for a PmtBlock. -/
 def PmtBlock.well_typed (b : PmtBlock) (env : String → Layout) : Prop :=
@@ -461,5 +594,12 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .phi _ _ => []
   | .branch _ => []
   | .cond_branch _ _ _ => []
+  -- Atomic variants (PMT-1-C): atomicity is vacuous under PMT's
+  -- single-threaded semantics; the underlying load/store/CAS memory
+  -- effect is modeled at the IVE / runtime layer, not as a PMT `Step`.
+  -- The `AtomicOrdering` tag is not inspected.
+  | .atomic_load _ _ _ _ => []
+  | .atomic_store _ _ _ _ => []
+  | .atomic_cas _ _ _ _ _ _ _ => []
 
 end PMT
