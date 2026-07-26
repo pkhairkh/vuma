@@ -14,6 +14,11 @@ The flattening is structural:
   - Each `PmtInstr` is converted to one or more `Step`s.
   - The `IRTerminator` is currently ignored (no control flow — we flatten
     to a single straight-line program). A future refinement will add control flow.
+    The 3 control-flow `PmtInstr` variants added in PMT-1-B (`phi`, `branch`,
+    `cond_branch`) likewise flatten to `[]`: their semantics are resolved at
+    the CFG level (`PmtInstr.successor_labels` in `PMT.IRProgram` §6.5), not
+    as `Step`s. They are kept in the model so that `instr_sim` /
+    `block_sim` traversal in `PMT.SimRel` can carry them through structurally.
 
 All theorems in this file close without `sorry`, including the
 previously-`sorry`-backed `to_program_preserves_well_typed_full` (§5.1),
@@ -173,6 +178,34 @@ theorem PmtInstr.to_steps_get_address (dst : IRValue) (name : String) :
     PmtInstr.to_steps (.get_address dst name) = [] := by
   rfl
 
+/-! ## §1.7b. Reflection lemmas for the 3 control-flow variants (PMT-1-B)
+
+Each control-flow `PmtInstr` variant flattens to the empty `List Step` —
+their semantics are resolved at the CFG level (`PmtInstr.successor_labels`,
+`IRBlock.successors_from_instrs`) rather than as `Step`s. The 3 lemmas
+below are each provable by `rfl` (the `PmtInstr.to_steps` definition
+maps each control-flow constructor to `[]` literally). They feed the
+`cases i with` block of `PmtInstr.to_steps_preserves_WF_Layout` (§1.8)
+so that the per-instruction `WF_Layout` preservation proof remains
+exhaustive over the enlarged `PmtInstr` inductive (22 constructors:
+7 memory + 12 arithmetic + 3 control-flow). -/
+
+/-- §1.7b.1: `phi` flattens to `[]`. -/
+theorem PmtInstr.to_steps_phi (dst : IRValue) (incoming : List (IRValue × String)) :
+    PmtInstr.to_steps (.phi dst incoming) = [] := by
+  rfl
+
+/-- §1.7b.2: `branch` flattens to `[]`. -/
+theorem PmtInstr.to_steps_branch (target : String) :
+    PmtInstr.to_steps (.branch target) = [] := by
+  rfl
+
+/-- §1.7b.3: `cond_branch` flattens to `[]`. -/
+theorem PmtInstr.to_steps_cond_branch (cond : IRValue)
+    (true_target false_target : String) :
+    PmtInstr.to_steps (.cond_branch cond true_target false_target) = [] := by
+  rfl
+
 /-- §1.8: Every `Step` produced by `PmtInstr.to_steps` carries a
 `WF_Layout` when the instruction is well-typed under `env`.
 
@@ -258,6 +291,21 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     simp at hs
   | get_address dst name =>
     rw [PmtInstr.to_steps_get_address] at hs
+    simp at hs
+  -- 3 control-flow variants (PMT-1-B): each flattens to `[]`, so the
+  -- membership hypothesis `hs : s ∈ []` is vacuous. The per-instruction
+  -- `well_typed` predicate is `True` for all control-flow variants, so
+  -- `hi` is `trivial` and not consulted. Control-flow semantics are
+  -- resolved at the CFG level (`PmtInstr.successor_labels`, §6.5 of
+  -- `PMT.IRProgram`), not as `Step`s.
+  | phi dst incoming =>
+    rw [PmtInstr.to_steps_phi] at hs
+    simp at hs
+  | branch target =>
+    rw [PmtInstr.to_steps_branch] at hs
+    simp at hs
+  | cond_branch cond true_target false_target =>
+    rw [PmtInstr.to_steps_cond_branch] at hs
     simp at hs
 
 /-! ## §2. Per-block flattening: `IRBlock.to_steps` -/
