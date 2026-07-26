@@ -29,7 +29,7 @@ keywords = ["vuma", "pmt", "memory-safety", "formal-verification"]
 # The `test` exe is NOT a default target (it's invoked on-demand by
 # `make proof-test` / `lake exe test`) so `lake build` stays focused on
 # the proof library + check-pmt.
-defaultTargets = ["PMT", "check-pmt"]
+defaultTargets = ["PMT", "Pmt", "check-pmt"]
 
 [leanOptions]
 # Allow `sorry` in development but emit a warning (caught by check-lean.sh).
@@ -51,6 +51,13 @@ name = "PMT"
 #   PMT.Test.{ValidProgram, UafProgram, OverflowProgram,
 #             EmptyProgram, MultiStepProgram}
 # Lake will discover and build all of them transitively.
+
+[[lean_lib]]
+name = "Pmt"
+# Faithful model: USize (Fin 2^64), Ptr (provenance), Arena, Layout,
+# 3-instruction simulation relation, Iris [cap_bnd] and [guard]
+# invariants, arena overflow proof with Fin arithmetic, UAF proof
+# with pointer aliasing. All sorry-free.
 
 [[lean_exe]]
 name = "check-pmt"
