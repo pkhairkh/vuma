@@ -4,7 +4,6 @@
 //! Edges represent relationships between nodes: data flow, control flow,
 //! derivation chains, and annotations.
 
-
 use crate::node::NodeId;
 
 /// Unique identifier for an edge within the SCG.

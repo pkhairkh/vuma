@@ -27,15 +27,14 @@
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::graph::SCG;
 use crate::node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode,
-    ComputationKind, ComputationNode, ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode,
-    DeallocationNode, EffectNode, EnumDefNode, EnumVariantInfo, MatchArmInfo,
-    MatchNode, MatchPatternInfo, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
-    ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
-    ForeignConsumeNode,
-    ArenaNewNode, ArenaAllocNode, ArenaGrowNode, ArenaFreeNode,
-    ChannelOpenNode, ChannelSendNode, ChannelRecvNode, ChannelCloseNode,
-    StructDefNode, StructFieldInfo, SyscallNode, VTableNode,
+    AccessMode, AccessNode, AllocationNode, ArenaAllocNode, ArenaFreeNode, ArenaGrowNode,
+    ArenaNewNode, BDReference, CastNode, ChannelCloseNode, ChannelOpenNode, ChannelRecvNode,
+    ChannelSendNode, ClosureEnvNode, ComputationKind, ComputationNode, ConstantTimeNode,
+    ConstantTimeOp, ControlKind, ControlNode, DeallocationNode, EffectNode, EnumDefNode,
+    EnumVariantInfo, ForeignConsumeNode, IntrinsicKind, MatchArmInfo, MatchNode, MatchPatternInfo,
+    NodeData, NodeId, NodePayload, NodeType, PhantomNode, ProgramPoint, StateInitNode,
+    StateReadNode, StateTransformNode, StateWriteNode, StructDefNode, StructFieldInfo, SyscallNode,
+    VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -1139,8 +1138,17 @@ fn read_payload(
         NodeType::Computation => {
             let operation = reader.read_string(&format!("{}.kind", context))?;
             let result_type = reader.read_optional_string(&format!("{}.result_type", context))?;
+            // [Gap 7 full fix] Promote known intrinsic strings to the
+            // nominal `Intrinsic(IntrinsicKind)` variant on read. Old
+            // binary files containing `Other("capability_grant")` etc.
+            // round-trip transparently.
+            let kind = if let Some(k) = IntrinsicKind::from_label(&operation) {
+                ComputationKind::Intrinsic(k)
+            } else {
+                ComputationKind::Other(operation)
+            };
             Ok(NodePayload::Computation(ComputationNode {
-                kind: ComputationKind::Other(operation),
+                kind,
                 result_type,
                 tail_call: false,
             }))
@@ -1275,9 +1283,12 @@ fn read_payload(
             let mut variants = Vec::with_capacity(variant_count as usize);
             for i in 0..variant_count as usize {
                 let v_name = reader.read_string(&format!("{}.variant[{}].name", context, i))?;
-                let discriminant = reader.read_u64_le(&format!("{}.variant[{}].discriminant", context, i))?;
-                let payload_type = reader.read_optional_string(&format!("{}.variant[{}].payload_type", context, i))?;
-                let payload_size = reader.read_u64_le(&format!("{}.variant[{}].payload_size", context, i))?;
+                let discriminant =
+                    reader.read_u64_le(&format!("{}.variant[{}].discriminant", context, i))?;
+                let payload_type = reader
+                    .read_optional_string(&format!("{}.variant[{}].payload_type", context, i))?;
+                let payload_size =
+                    reader.read_u64_le(&format!("{}.variant[{}].payload_size", context, i))?;
                 variants.push(EnumVariantInfo {
                     name: v_name,
                     discriminant,
@@ -1306,9 +1317,12 @@ fn read_payload(
             let arm_count = reader.read_u64_le(&format!("{}.arm_count", context))?;
             let mut arms = Vec::with_capacity(arm_count as usize);
             for i in 0..arm_count as usize {
-                let pattern = read_match_pattern(reader, &format!("{}.arm[{}].pattern", context, i))?;
-                let guard = reader.read_optional_string(&format!("{}.arm[{}].guard", context, i))?;
-                let body_count = reader.read_u64_le(&format!("{}.arm[{}].body_count", context, i))?;
+                let pattern =
+                    read_match_pattern(reader, &format!("{}.arm[{}].pattern", context, i))?;
+                let guard =
+                    reader.read_optional_string(&format!("{}.arm[{}].guard", context, i))?;
+                let body_count =
+                    reader.read_u64_le(&format!("{}.arm[{}].body_count", context, i))?;
                 let mut body = Vec::with_capacity(body_count as usize);
                 for j in 0..body_count as usize {
                     body.push(reader.read_string(&format!("{}.arm[{}].body[{}]", context, i, j))?);
@@ -1330,10 +1344,12 @@ fn read_payload(
             let op = match op_tag {
                 0 => ConstantTimeOp::CtSelect,
                 1 => ConstantTimeOp::CtEq,
-                _ => return Err(DeserializeError::InvalidValue {
-                    field: format!("{}.op", context),
-                    value: format!("{}", op_tag),
-                }),
+                _ => {
+                    return Err(DeserializeError::InvalidValue {
+                        field: format!("{}.op", context),
+                        value: format!("{}", op_tag),
+                    })
+                }
             };
             let dst = reader.read_string(&format!("{}.dst", context))?;
             let operand_count = reader.read_u64_le(&format!("{}.operand_count", context))?;
@@ -1425,8 +1441,10 @@ fn read_payload(
         NodeType::ArenaAlloc => {
             let arena_vreg = reader.read_u32_le(&format!("{}.arena_vreg", context))?;
             let layout_name = reader.read_string(&format!("{}.layout_name", context))?;
-            let result_arena_vreg = reader.read_u32_le(&format!("{}.result_arena_vreg", context))?;
-            let result_state_vreg = reader.read_u32_le(&format!("{}.result_state_vreg", context))?;
+            let result_arena_vreg =
+                reader.read_u32_le(&format!("{}.result_arena_vreg", context))?;
+            let result_state_vreg =
+                reader.read_u32_le(&format!("{}.result_state_vreg", context))?;
             Ok(NodePayload::ArenaAlloc(ArenaAllocNode {
                 arena_vreg,
                 layout_name,
@@ -1436,7 +1454,8 @@ fn read_payload(
         }
         NodeType::ArenaGrow => {
             let arena_vreg = reader.read_u32_le(&format!("{}.arena_vreg", context))?;
-            let min_capacity_vreg = reader.read_u32_le(&format!("{}.min_capacity_vreg", context))?;
+            let min_capacity_vreg =
+                reader.read_u32_le(&format!("{}.min_capacity_vreg", context))?;
             let result_vreg = reader.read_u32_le(&format!("{}.result_vreg", context))?;
             Ok(NodePayload::ArenaGrow(ArenaGrowNode {
                 arena_vreg,
@@ -1446,9 +1465,7 @@ fn read_payload(
         }
         NodeType::ArenaFree => {
             let arena_vreg = reader.read_u32_le(&format!("{}.arena_vreg", context))?;
-            Ok(NodePayload::ArenaFree(ArenaFreeNode {
-                arena_vreg,
-            }))
+            Ok(NodePayload::ArenaFree(ArenaFreeNode { arena_vreg }))
         }
         NodeType::ChannelOpen => {
             let dst = reader.read_string(&format!("{}.dst", context))?;
@@ -1459,21 +1476,28 @@ fn read_payload(
             let channel = reader.read_string(&format!("{}.channel", context))?;
             let message = reader.read_string(&format!("{}.message", context))?;
             let ty = reader.read_string(&format!("{}.ty", context))?;
-            Ok(NodePayload::ChannelSend(ChannelSendNode { channel, message, ty }))
+            Ok(NodePayload::ChannelSend(ChannelSendNode {
+                channel,
+                message,
+                ty,
+            }))
         }
         NodeType::ChannelRecv => {
             let dst = reader.read_string(&format!("{}.dst", context))?;
             let channel = reader.read_string(&format!("{}.channel", context))?;
             let ty = reader.read_string(&format!("{}.ty", context))?;
-            Ok(NodePayload::ChannelRecv(ChannelRecvNode { dst, channel, ty }))
+            Ok(NodePayload::ChannelRecv(ChannelRecvNode {
+                dst,
+                channel,
+                ty,
+            }))
         }
         NodeType::ChannelClose => {
             let channel = reader.read_string(&format!("{}.channel", context))?;
             Ok(NodePayload::ChannelClose(ChannelCloseNode { channel }))
-        }
-        // Womb data model variants were removed; tags 14..=25 now fall
-        // through to the `tag_to_node_type` error path above before
-        // reaching this match.
+        } // Womb data model variants were removed; tags 14..=25 now fall
+          // through to the `tag_to_node_type` error path above before
+          // reaching this match.
     }
 }
 
@@ -1510,7 +1534,10 @@ fn read_match_pattern(
             let pattern_count = reader.read_u64_le(&format!("{}.pattern_count", context))?;
             let mut patterns = Vec::with_capacity(pattern_count as usize);
             for i in 0..pattern_count as usize {
-                patterns.push(read_match_pattern(reader, &format!("{}.pattern[{}]", context, i))?);
+                patterns.push(read_match_pattern(
+                    reader,
+                    &format!("{}.pattern[{}]", context, i),
+                )?);
             }
             Ok(MatchPatternInfo::Or(patterns))
         }
@@ -1789,33 +1816,39 @@ fn format_node_label(node: &NodeData) -> String {
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
         NodePayload::Syscall(s) => format!("syscall({})", s.nr),
-        // PMT (Wave 1b): minimal stubs so this match stays exhaustive.
-        // Wave 1b will replace these with proper labels.
-        NodePayload::StateInit(s) => format!("state_init({})", s.layout_name),
+        // PMT node labels — full field coverage (Wave 1b resolved the
+        // earlier "minimal stubs" comment that only emitted the layout
+        // name; vregs and field names are now included for diagnostics).
+        NodePayload::StateInit(s) => {
+            format!("state_init({} -> v{})", s.layout_name, s.result_vreg)
+        }
         NodePayload::StateRead(s) => {
-            format!("state_read({}.{})", s.layout_name, s.field_name)
+            format!(
+                "state_read(v{}:{}.{} -> v{})",
+                s.state_vreg, s.layout_name, s.field_name, s.result_vreg
+            )
         }
         NodePayload::StateWrite(s) => {
-            format!("state_write({}.{})", s.layout_name, s.field_name)
+            format!(
+                "state_write(v{}:{}.{} <- v{})",
+                s.state_vreg, s.layout_name, s.field_name, s.value_vreg
+            )
         }
         NodePayload::StateTransform(s) => {
-            format!("state_transform({} -> {})", s.input_layout, s.output_layout)
+            format!(
+                "state_transform(v{}: {} -> {} -> v{})",
+                s.input_vreg, s.input_layout, s.output_layout, s.result_vreg
+            )
         }
         NodePayload::ForeignConsume(s) => {
-            format!("foreign_consume({})", s.layout_name)
+            format!("foreign_consume(v{}: {})", s.input_vreg, s.layout_name)
         }
-        NodePayload::ArenaNew(_) => {
-            "arena_new".to_string()
-        }
+        NodePayload::ArenaNew(_) => "arena_new".to_string(),
         NodePayload::ArenaAlloc(s) => {
             format!("arena_alloc({})", s.layout_name)
         }
-        NodePayload::ArenaGrow(_) => {
-            "arena_grow".to_string()
-        }
-        NodePayload::ArenaFree(_) => {
-            "arena_free".to_string()
-        }
+        NodePayload::ArenaGrow(_) => "arena_grow".to_string(),
+        NodePayload::ArenaFree(_) => "arena_free".to_string(),
         NodePayload::ChannelOpen(c) => {
             format!("channel_open<{}>", c.elem_type)
         }
@@ -2312,6 +2345,263 @@ mod tests {
         assert_eq!(edge.kind, EdgeKind::DataFlow);
     }
 
+    // ── Test 16: Binary round-trip of every PMT node variant ──────────
+    //
+    // The DOT-label "minimal stubs" comment (caveats.md §8 row 2) was
+    // originally attached to `format_node_label`. The real binary codec
+    // (`write_payload` / `read_payload`) was always complete for every
+    // PMT variant, but no test exercised those arms — so a regression
+    // that broke e.g. `StateWrite.value_vreg` ordering would slip
+    // through silently. This test pins the binary round-trip behaviour
+    // for all 13 PMT node variants introduced in Wave 1b/2/2b.
+    #[test]
+    fn test_binary_roundtrip_pmt_nodes() {
+        let mut scg = SCG::new();
+
+        scg.add_node(
+            NodeType::StateInit,
+            NodePayload::StateInit(StateInitNode {
+                layout_name: "ConnHandle".to_string(),
+                result_vreg: 10,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::StateRead,
+            NodePayload::StateRead(StateReadNode {
+                state_vreg: 11,
+                layout_name: "ConnHandle".to_string(),
+                field_name: "fd".to_string(),
+                result_vreg: 12,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::StateWrite,
+            NodePayload::StateWrite(StateWriteNode {
+                state_vreg: 13,
+                layout_name: "ConnHandle".to_string(),
+                field_name: "fd".to_string(),
+                value_vreg: 14,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::StateTransform,
+            NodePayload::StateTransform(StateTransformNode {
+                input_vreg: 15,
+                input_layout: "RawBytes".to_string(),
+                output_layout: "Header".to_string(),
+                result_vreg: 16,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ForeignConsume,
+            NodePayload::ForeignConsume(ForeignConsumeNode {
+                input_vreg: 17,
+                layout_name: "Sqlite3".to_string(),
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ArenaNew,
+            NodePayload::ArenaNew(ArenaNewNode {
+                capacity_vreg: 18,
+                result_vreg: 19,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ArenaAlloc,
+            NodePayload::ArenaAlloc(ArenaAllocNode {
+                arena_vreg: 20,
+                layout_name: "Slot".to_string(),
+                result_arena_vreg: 21,
+                result_state_vreg: 22,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ArenaGrow,
+            NodePayload::ArenaGrow(ArenaGrowNode {
+                arena_vreg: 23,
+                min_capacity_vreg: 24,
+                result_vreg: 25,
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ArenaFree,
+            NodePayload::ArenaFree(ArenaFreeNode { arena_vreg: 26 }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ChannelOpen,
+            NodePayload::ChannelOpen(ChannelOpenNode {
+                dst: "ch".to_string(),
+                elem_type: "i32".to_string(),
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ChannelSend,
+            NodePayload::ChannelSend(ChannelSendNode {
+                channel: "ch".to_string(),
+                message: "msg".to_string(),
+                ty: "i32".to_string(),
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ChannelRecv,
+            NodePayload::ChannelRecv(ChannelRecvNode {
+                dst: "out".to_string(),
+                channel: "ch".to_string(),
+                ty: "i32".to_string(),
+            }),
+            pp(),
+        );
+        scg.add_node(
+            NodeType::ChannelClose,
+            NodePayload::ChannelClose(ChannelCloseNode {
+                channel: "ch".to_string(),
+            }),
+            pp(),
+        );
+
+        let bytes = serialize_scg(&scg);
+        let restored = deserialize_scg(&bytes).unwrap();
+
+        // All 13 PMT nodes survived the round-trip.
+        assert_eq!(restored.node_count(), 13);
+
+        let mut by_type: std::collections::HashMap<&NodeType, &NodePayload> = restored
+            .nodes()
+            .map(|n| (&n.node_type, &n.payload))
+            .collect();
+        assert_eq!(by_type.len(), 13);
+
+        let p = by_type.remove(&NodeType::StateInit).unwrap();
+        if let NodePayload::StateInit(s) = p {
+            assert_eq!(s.layout_name, "ConnHandle");
+            assert_eq!(s.result_vreg, 10);
+        } else {
+            panic!("expected StateInit, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::StateRead).unwrap();
+        if let NodePayload::StateRead(s) = p {
+            assert_eq!(s.state_vreg, 11);
+            assert_eq!(s.layout_name, "ConnHandle");
+            assert_eq!(s.field_name, "fd");
+            assert_eq!(s.result_vreg, 12);
+        } else {
+            panic!("expected StateRead, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::StateWrite).unwrap();
+        if let NodePayload::StateWrite(s) = p {
+            assert_eq!(s.state_vreg, 13);
+            assert_eq!(s.layout_name, "ConnHandle");
+            assert_eq!(s.field_name, "fd");
+            assert_eq!(s.value_vreg, 14);
+        } else {
+            panic!("expected StateWrite, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::StateTransform).unwrap();
+        if let NodePayload::StateTransform(s) = p {
+            assert_eq!(s.input_vreg, 15);
+            assert_eq!(s.input_layout, "RawBytes");
+            assert_eq!(s.output_layout, "Header");
+            assert_eq!(s.result_vreg, 16);
+        } else {
+            panic!("expected StateTransform, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ForeignConsume).unwrap();
+        if let NodePayload::ForeignConsume(s) = p {
+            assert_eq!(s.input_vreg, 17);
+            assert_eq!(s.layout_name, "Sqlite3");
+        } else {
+            panic!("expected ForeignConsume, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ArenaNew).unwrap();
+        if let NodePayload::ArenaNew(s) = p {
+            assert_eq!(s.capacity_vreg, 18);
+            assert_eq!(s.result_vreg, 19);
+        } else {
+            panic!("expected ArenaNew, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ArenaAlloc).unwrap();
+        if let NodePayload::ArenaAlloc(s) = p {
+            assert_eq!(s.arena_vreg, 20);
+            assert_eq!(s.layout_name, "Slot");
+            assert_eq!(s.result_arena_vreg, 21);
+            assert_eq!(s.result_state_vreg, 22);
+        } else {
+            panic!("expected ArenaAlloc, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ArenaGrow).unwrap();
+        if let NodePayload::ArenaGrow(s) = p {
+            assert_eq!(s.arena_vreg, 23);
+            assert_eq!(s.min_capacity_vreg, 24);
+            assert_eq!(s.result_vreg, 25);
+        } else {
+            panic!("expected ArenaGrow, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ArenaFree).unwrap();
+        if let NodePayload::ArenaFree(s) = p {
+            assert_eq!(s.arena_vreg, 26);
+        } else {
+            panic!("expected ArenaFree, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ChannelOpen).unwrap();
+        if let NodePayload::ChannelOpen(c) = p {
+            assert_eq!(c.dst, "ch");
+            assert_eq!(c.elem_type, "i32");
+        } else {
+            panic!("expected ChannelOpen, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ChannelSend).unwrap();
+        if let NodePayload::ChannelSend(c) = p {
+            assert_eq!(c.channel, "ch");
+            assert_eq!(c.message, "msg");
+            assert_eq!(c.ty, "i32");
+        } else {
+            panic!("expected ChannelSend, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ChannelRecv).unwrap();
+        if let NodePayload::ChannelRecv(c) = p {
+            assert_eq!(c.dst, "out");
+            assert_eq!(c.channel, "ch");
+            assert_eq!(c.ty, "i32");
+        } else {
+            panic!("expected ChannelRecv, got {:?}", p);
+        }
+
+        let p = by_type.remove(&NodeType::ChannelClose).unwrap();
+        if let NodePayload::ChannelClose(c) = p {
+            assert_eq!(c.channel, "ch");
+        } else {
+            panic!("expected ChannelClose, got {:?}", p);
+        }
+
+        assert!(
+            by_type.is_empty(),
+            "leftover payloads: {:?}",
+            by_type.keys()
+        );
+    }
+
     // ── Wave 40 conformance test ────────────────────────────────────────
     //
     // Wave 40 of the VUMA remediation plan removes the `petgraph` dependency
@@ -2334,9 +2624,7 @@ mod tests {
     // semantics, this test will fire and force a deliberate decision.
     #[test]
     fn test_wave40_digraph_matches_petgraph_semantics() {
-        use crate::digraph::{
-            has_path_connecting, tarjan_scc, toposort, DiGraph, NodeIndex,
-        };
+        use crate::digraph::{has_path_connecting, tarjan_scc, toposort, DiGraph, NodeIndex};
 
         // Graph (a 3-node cycle feeding an acyclic tail):
         //
@@ -2361,13 +2649,18 @@ mod tests {
         g.add_edge(n3, n4, ());
 
         // ── toposort: graph has a cycle → must return Err. ──
-        assert!(toposort(&g).is_err(), "graph has a cycle; toposort must err");
+        assert!(
+            toposort(&g).is_err(),
+            "graph has a cycle; toposort must err"
+        );
 
         // ── tarjan_scc: exactly one 3-node cycle + two singletons. ──
         let sccs = tarjan_scc(&g);
         assert_eq!(sccs.len(), 3, "expect 3 SCCs: {{0,1,2}}, {{3}}, {{4}}");
-        let mut sccs_sorted: Vec<Vec<usize>> =
-            sccs.iter().map(|s| s.iter().map(|n| n.0).collect()).collect();
+        let mut sccs_sorted: Vec<Vec<usize>> = sccs
+            .iter()
+            .map(|s| s.iter().map(|n| n.0).collect())
+            .collect();
         for s in sccs_sorted.iter_mut() {
             s.sort();
         }
@@ -2383,16 +2676,19 @@ mod tests {
         let cycle_pos = sccs.iter().position(|s| s.len() == 3).unwrap();
         let n4_pos = sccs.iter().position(|s| s.contains(&n4)).unwrap();
         let n3_pos = sccs.iter().position(|s| s.contains(&n3)).unwrap();
-        assert!(n4_pos < n3_pos, "{{4}} SCC precedes {{3}} SCC (reverse topo)");
-        assert!(n3_pos < cycle_pos, "{{3}} SCC precedes cycle (reverse topo)");
+        assert!(
+            n4_pos < n3_pos,
+            "{{4}} SCC precedes {{3}} SCC (reverse topo)"
+        );
+        assert!(
+            n3_pos < cycle_pos,
+            "{{3}} SCC precedes cycle (reverse topo)"
+        );
 
         // ── has_path_connecting: BFS reachability, both directions. ──
         // 0 can reach every node (cycle lets it climb to 2→3→4).
         for target in [n1, n2, n3, n4] {
-            assert!(
-                has_path_connecting(&g, n0, target),
-                "0 reaches {target:?}"
-            );
+            assert!(has_path_connecting(&g, n0, target), "0 reaches {target:?}");
         }
         // 3 cannot reach 0 (acyclic tail, no back-edges into the cycle).
         assert!(

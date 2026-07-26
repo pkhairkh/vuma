@@ -80,7 +80,9 @@ pub enum FunctionalUnit {
 impl LatencyTable {
     /// Creates a new empty latency table.
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Creates a latency table with default modern OoO core values.
@@ -88,15 +90,60 @@ impl LatencyTable {
     pub fn default_ooo() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 20,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -107,15 +154,60 @@ impl LatencyTable {
     pub fn aarch64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 20,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -126,15 +218,60 @@ impl LatencyTable {
     pub fn x86_64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 30, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 5,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 30,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -144,15 +281,60 @@ impl LatencyTable {
     pub fn riscv64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 40,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -161,15 +343,60 @@ impl LatencyTable {
     pub fn arm32() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 25, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 25,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -178,15 +405,60 @@ impl LatencyTable {
     pub fn mips64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 30, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 30,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -196,15 +468,60 @@ impl LatencyTable {
     pub fn ppc64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 5,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 40,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 6,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -213,15 +530,60 @@ impl LatencyTable {
     pub fn loongarch64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 35, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 35,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -231,15 +593,60 @@ impl LatencyTable {
     pub fn wasm32() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 20,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -287,15 +694,60 @@ impl LatencyTable {
     pub fn sparc64() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 5, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 5,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 40,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 5,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -305,15 +757,60 @@ impl LatencyTable {
     pub fn s390x() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 6,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 6,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 40,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 6,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -323,15 +820,60 @@ impl LatencyTable {
     pub fn m68k() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 40, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 6, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 20,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 40,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 6,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -340,15 +882,60 @@ impl LatencyTable {
     pub fn alpha() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 7, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 12, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 7,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 12,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -357,15 +944,60 @@ impl LatencyTable {
     pub fn hppa() -> Self {
         Self {
             entries: vec![
-                LatencyEntry { category: "arithmetic".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "logical".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "shift".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Alu },
-                LatencyEntry { category: "load".to_string(), latency: 3, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "store".to_string(), latency: 1, throughput: 1, functional_unit: FunctionalUnit::Memory },
-                LatencyEntry { category: "branch".to_string(), latency: 2, throughput: 1, functional_unit: FunctionalUnit::Branch },
-                LatencyEntry { category: "multiply".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::Multiply },
-                LatencyEntry { category: "divide".to_string(), latency: 20, throughput: 0, functional_unit: FunctionalUnit::Divide },
-                LatencyEntry { category: "fp_simd".to_string(), latency: 4, throughput: 1, functional_unit: FunctionalUnit::FpSimd },
+                LatencyEntry {
+                    category: "arithmetic".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "logical".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "shift".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Alu,
+                },
+                LatencyEntry {
+                    category: "load".to_string(),
+                    latency: 3,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "store".to_string(),
+                    latency: 1,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Memory,
+                },
+                LatencyEntry {
+                    category: "branch".to_string(),
+                    latency: 2,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Branch,
+                },
+                LatencyEntry {
+                    category: "multiply".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::Multiply,
+                },
+                LatencyEntry {
+                    category: "divide".to_string(),
+                    latency: 20,
+                    throughput: 0,
+                    functional_unit: FunctionalUnit::Divide,
+                },
+                LatencyEntry {
+                    category: "fp_simd".to_string(),
+                    latency: 4,
+                    throughput: 1,
+                    functional_unit: FunctionalUnit::FpSimd,
+                },
             ],
         }
     }
@@ -625,8 +1257,7 @@ impl TargetDesc {
                 let in_class: Vec<&RegDesc> =
                     self.registers.iter().filter(|r| r.class == class).collect();
                 let total_count = in_class.len();
-                let allocatable_count =
-                    in_class.iter().filter(|r| r.is_allocatable).count();
+                let allocatable_count = in_class.iter().filter(|r| r.is_allocatable).count();
                 let callee_saved_count = in_class
                     .iter()
                     .filter(|r| r.is_allocatable && r.is_callee_saved)

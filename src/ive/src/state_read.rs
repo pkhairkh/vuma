@@ -203,6 +203,90 @@ mod tests {
         let reads = vec![("x".to_string(), "field".to_string(), "u32".to_string())];
         let results = verify_state_reads(&var_layouts, &layouts, &reads);
         assert!(!all_valid(&results));
-        assert!(results[0].error.as_ref().unwrap().contains("not state-typed"));
+        assert!(results[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("not state-typed"));
+    }
+
+    // ── [Task 9-d / Caveats §6 row 3] Negative-path tests ──────────────
+    //
+    // These tests cover the PMT-state-read negative paths documented in
+    // `tests/gold_standard/pmt_wave3_negative/` (bad_offset.vuma,
+    // bad_type.vuma).  The verifier returns `Vec<StateReadVerification>`
+    // with `valid=false` and a specific error message rather than
+    // panicking, so per the task brief these tests use
+    // `assert!(!all_valid(...))` plus error-message substring checks
+    // instead of `#[should_panic]`.  The substring checks make the
+    // tests robust against unrelated message reformatting.
+
+    /// [PMT violation: unknown field] Reading `p.z` where `Point` has
+    /// only `{x, y}` must yield an invalid result whose error message
+    /// names BOTH the missing field AND the layout.  A regression that
+    /// silently accepted unknown fields (returning `valid=true`) would
+    /// be caught by the `!all_valid` assertion; a regression that
+    /// returned the wrong field/layout name in the message would be
+    /// caught by the substring checks.
+    #[test]
+    fn test_negative_unknown_field_error_message_is_specific() {
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32"), ("y", 4, 0, "u32")]),
+        )]);
+        let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
+        // Read `p.z` — 'z' is not a field of Point.
+        let reads = vec![("p".to_string(), "z".to_string(), "u32".to_string())];
+        let results = verify_state_reads(&var_layouts, &layouts, &reads);
+        assert!(
+            !all_valid(&results),
+            "reading an unknown field must yield an invalid verification result"
+        );
+        let err = results[0]
+            .error
+            .as_ref()
+            .expect("error message must be set on invalid result");
+        assert!(
+            err.contains("field 'z' not found in layout 'Point'"),
+            "error message must name both the missing field ('z') and the \
+             layout ('Point'); got: {}",
+            err
+        );
+    }
+
+    /// [PMT violation: type mismatch] Reading a u32-typed field as u64
+    /// must yield an invalid result whose error message names BOTH the
+    /// declared type ('u32') AND the expected type ('u64').  This
+    /// covers the negative path documented in
+    /// `pmt_wave3_negative/bad_type.vuma`.
+    #[test]
+    fn test_negative_type_mismatch_error_message_is_specific() {
+        let layouts = HashMap::from([(
+            "Point".to_string(),
+            make_layout("Point", &[("x", 4, 0, "u32")]),
+        )]);
+        let var_layouts = HashMap::from([("p".to_string(), "Point".to_string())]);
+        // Read `p.x` as u64 — but 'x' is declared u32.
+        let reads = vec![("p".to_string(), "x".to_string(), "u64".to_string())];
+        let results = verify_state_reads(&var_layouts, &layouts, &reads);
+        assert!(
+            !all_valid(&results),
+            "type-mismatched read must yield an invalid verification result"
+        );
+        let err = results[0]
+            .error
+            .as_ref()
+            .expect("error message must be set on invalid result");
+        assert!(
+            err.contains("type mismatch"),
+            "error message must mention 'type mismatch'; got: {}",
+            err
+        );
+        assert!(
+            err.contains("'u32'") && err.contains("'u64'"),
+            "error message must name both the declared ('u32') and expected \
+             ('u64') types; got: {}",
+            err
+        );
     }
 }

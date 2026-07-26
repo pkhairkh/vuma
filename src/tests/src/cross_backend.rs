@@ -41,6 +41,8 @@
 //! |14 | Regression tracking for example compilation         | Known-good baseline       |
 //! |15 | Test matrix summary print                           | ASCII art matrix output   |
 
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use vuma_codegen::backend::{
     create_backend, AllocatedProgram, Backend, BackendKind, Endianness, OutputFormat,
 };
@@ -48,8 +50,6 @@ use vuma_codegen::ir::{
     BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister,
 };
 use vuma_codegen::scg_to_ir::IRBuilder;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Backend helpers
@@ -79,20 +79,20 @@ fn backend_name(kind: BackendKind) -> &'static str {
 /// ELF machine type for a BackendKind (0 for non-ELF targets).
 fn elf_machine(kind: BackendKind) -> u16 {
     match kind {
-        BackendKind::AArch64 | BackendKind::AArch64Be => 183,   // EM_AARCH64
-        BackendKind::RiscV64 | BackendKind::RiscV32 => 243,     // EM_RISCV
-        BackendKind::Wasm32 => 0,      // Not ELF
-        BackendKind::LoongArch64 => 258, // EM_LOONGARCH
-        BackendKind::X86_64 => 62,     // EM_X86_64
-        BackendKind::Arm32 | BackendKind::ArmEb => 40,  // EM_ARM
-        BackendKind::Mips64 | BackendKind::Mips64Be => 8, // EM_MIPS
+        BackendKind::AArch64 | BackendKind::AArch64Be => 183, // EM_AARCH64
+        BackendKind::RiscV64 | BackendKind::RiscV32 => 243,   // EM_RISCV
+        BackendKind::Wasm32 => 0,                             // Not ELF
+        BackendKind::LoongArch64 => 258,                      // EM_LOONGARCH
+        BackendKind::X86_64 => 62,                            // EM_X86_64
+        BackendKind::Arm32 | BackendKind::ArmEb => 40,        // EM_ARM
+        BackendKind::Mips64 | BackendKind::Mips64Be => 8,     // EM_MIPS
         BackendKind::PowerPC64 | BackendKind::PowerPC64LE => 21, // EM_PPC64
-        BackendKind::X86_32 => 3,      // EM_386
-        BackendKind::Sparc64 => 18,    // EM_SPARCV9 (SPARC V9 64-bit)
-        BackendKind::S390X => 22,      // EM_S390 (IBM System Z)
-        BackendKind::M68k => 4,        // EM_68K (Motorola 68000)
-        BackendKind::Alpha => 0x9026,  // EM_ALPHA (0x9026, unofficial)
-        BackendKind::Hppa => 15,       // EM_PARISC (HP PA-RISC)
+        BackendKind::X86_32 => 3,                             // EM_386
+        BackendKind::Sparc64 => 18,                           // EM_SPARCV9 (SPARC V9 64-bit)
+        BackendKind::S390X => 22,                             // EM_S390 (IBM System Z)
+        BackendKind::M68k => 4,                               // EM_68K (Motorola 68000)
+        BackendKind::Alpha => 0x9026,                         // EM_ALPHA (0x9026, unofficial)
+        BackendKind::Hppa => 15,                              // EM_PARISC (HP PA-RISC)
     }
 }
 
@@ -107,50 +107,39 @@ fn expected_output_format(kind: BackendKind) -> OutputFormat {
 
 /// Run the full `allocate_registers` + `encode_program` pipeline for a
 /// multi-function program and return the final binary.
-fn compile_program(
-    backend: &dyn Backend,
-    functions: &[IRFunction],
-    label: &str,
-) -> Vec<u8> {
+fn compile_program(backend: &dyn Backend, functions: &[IRFunction], label: &str) -> Vec<u8> {
     let mut allocated_functions = Vec::new();
     for func in functions {
-        let allocated = backend
-            .allocate_registers(func)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{}: allocate_registers failed for {} / {}: {}",
-                    backend.name(),
-                    label,
-                    func.name,
-                    e
-                )
-            });
+        let allocated = backend.allocate_registers(func).unwrap_or_else(|e| {
+            panic!(
+                "{}: allocate_registers failed for {} / {}: {}",
+                backend.name(),
+                label,
+                func.name,
+                e
+            )
+        });
         allocated_functions.push(allocated);
     }
 
-    let total_code_size: usize = allocated_functions
-        .iter()
-        .map(|f| f.code_size)
-        .sum();
+    let total_code_size: usize = allocated_functions.iter().map(|f| f.code_size).sum();
 
     let program = AllocatedProgram {
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
-    backend
-        .encode_program(&program)
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}: encode_program failed for {}: {}",
-                backend.name(),
-                label,
-                e
-            )
-        })
+    backend.encode_program(&program).unwrap_or_else(|e| {
+        panic!(
+            "{}: encode_program failed for {}: {}",
+            backend.name(),
+            label,
+            e
+        )
+    })
 }
 
 /// Validate the ELF header of a compiled binary for the given backend.
@@ -192,7 +181,11 @@ fn validate_elf_header(bytes: &[u8], kind: BackendKind) {
     );
 
     // ELF version must be EV_CURRENT (1)
-    assert_eq!(bytes[6], 1, "{}: ELF version should be EV_CURRENT (1)", name);
+    assert_eq!(
+        bytes[6], 1,
+        "{}: ELF version should be EV_CURRENT (1)",
+        name
+    );
 
     // Machine type at offset 18..20 — read using the ELF's declared byte order.
     // Byte 5 (ei_data): 1 = little-endian, 2 = big-endian.
@@ -314,7 +307,8 @@ fn make_simple_function() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(0));
-    func.vregs.insert(0, VirtualRegister::new(0, Some("ret_val".to_string())));
+    func.vregs
+        .insert(0, VirtualRegister::new(0, Some("ret_val".to_string())));
 
     func.current_block().terminator = IRTerminator::Return(vec![IRValue::Immediate(42)]);
     func
@@ -334,9 +328,12 @@ fn make_arithmetic_function() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(2));
-    func.vregs.insert(0, VirtualRegister::new(0, Some("a".to_string())));
-    func.vregs.insert(1, VirtualRegister::new(1, Some("b".to_string())));
-    func.vregs.insert(2, VirtualRegister::new(2, Some("c".to_string())));
+    func.vregs
+        .insert(0, VirtualRegister::new(0, Some("a".to_string())));
+    func.vregs
+        .insert(1, VirtualRegister::new(1, Some("b".to_string())));
+    func.vregs
+        .insert(2, VirtualRegister::new(2, Some("c".to_string())));
 
     let block = func.current_block();
 
@@ -386,9 +383,12 @@ fn make_memory_function() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(2));
-    func.vregs.insert(0, VirtualRegister::new(0, Some("ptr".to_string())));
-    func.vregs.insert(1, VirtualRegister::new(1, Some("val".to_string())));
-    func.vregs.insert(2, VirtualRegister::new(2, Some("byte".to_string())));
+    func.vregs
+        .insert(0, VirtualRegister::new(0, Some("ptr".to_string())));
+    func.vregs
+        .insert(1, VirtualRegister::new(1, Some("val".to_string())));
+    func.vregs
+        .insert(2, VirtualRegister::new(2, Some("byte".to_string())));
 
     let block = func.current_block();
 
@@ -492,11 +492,7 @@ fn test_cross_backend_simple_return() {
         );
 
         // The block should contain at least one instruction
-        let total_instrs: usize = allocated
-            .blocks
-            .iter()
-            .map(|b| b.instructions.len())
-            .sum();
+        let total_instrs: usize = allocated.blocks.iter().map(|b| b.instructions.len()).sum();
         assert!(
             total_instrs > 0,
             "{}: allocated function should have instructions",
@@ -545,11 +541,7 @@ fn test_cross_backend_arithmetic() {
         // instruction count is always 1 regardless of the IR size.  For
         // Wasm32 we skip the count check and rely on the byte-size check
         // below to confirm real code was emitted.
-        let total_instrs: usize = allocated
-            .blocks
-            .iter()
-            .map(|b| b.instructions.len())
-            .sum();
+        let total_instrs: usize = allocated.blocks.iter().map(|b| b.instructions.len()).sum();
         assert!(
             total_instrs >= 3 || kind == BackendKind::Wasm32,
             "{}: arithmetic program should have at least 3 instructions (got {})",
@@ -598,11 +590,7 @@ fn test_cross_backend_memory() {
         // instruction count is always 1 regardless of the IR size.  For
         // Wasm32 we skip the count check and rely on the byte-size check
         // below to confirm real code was emitted.
-        let total_instrs: usize = allocated
-            .blocks
-            .iter()
-            .map(|b| b.instructions.len())
-            .sum();
+        let total_instrs: usize = allocated.blocks.iter().map(|b| b.instructions.len()).sum();
         assert!(
             total_instrs >= 4 || kind == BackendKind::Wasm32,
             "{}: memory program should have at least 4 instructions (got {})",
@@ -652,16 +640,12 @@ fn test_cross_backend_function_call() {
         // Allocate registers for each function independently
         let mut allocated_fns = Vec::new();
         for func in &functions {
-            let allocated = backend
-                .allocate_registers(func)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "{}: allocate_registers failed for '{}': {}",
-                        name,
-                        func.name,
-                        e
-                    )
-                });
+            let allocated = backend.allocate_registers(func).unwrap_or_else(|e| {
+                panic!(
+                    "{}: allocate_registers failed for '{}': {}",
+                    name, func.name, e
+                )
+            });
             allocated_fns.push(allocated);
         }
 
@@ -693,10 +677,7 @@ fn test_cross_backend_function_call() {
 
         // The main function should have a relocation to the helper
         let main_alloc = &allocated_fns[1]; // second function is "main"
-        let has_helper_reloc = main_alloc
-            .relocations
-            .iter()
-            .any(|r| r.symbol == "helper");
+        let has_helper_reloc = main_alloc.relocations.iter().any(|r| r.symbol == "helper");
         assert!(
             has_helper_reloc,
             "{}: main function should have a relocation to 'helper'",
@@ -728,12 +709,7 @@ fn test_cross_backend_output_format_consistency() {
         );
 
         // ISA name should match
-        assert_eq!(
-            info.isa_name(),
-            name,
-            "{}: isa_name mismatch",
-            name
-        );
+        assert_eq!(info.isa_name(), name, "{}: isa_name mismatch", name);
 
         // Pointer width consistency
         match expected_fmt {
@@ -772,11 +748,7 @@ fn test_cross_backend_output_format_consistency() {
         match expected_fmt {
             OutputFormat::Elf32 | OutputFormat::Elf64 => {
                 // Must start with ELF magic
-                assert!(
-                    program_bytes.len() >= 4,
-                    "{}: ELF output too short",
-                    name
-                );
+                assert!(program_bytes.len() >= 4, "{}: ELF output too short", name);
                 assert_eq!(
                     &program_bytes[0..4],
                     &[0x7f, b'E', b'L', b'F'],
@@ -785,11 +757,7 @@ fn test_cross_backend_output_format_consistency() {
                 );
             }
             OutputFormat::WasmBinary => {
-                assert!(
-                    program_bytes.len() >= 8,
-                    "{}: Wasm output too short",
-                    name
-                );
+                assert!(program_bytes.len() >= 8, "{}: Wasm output too short", name);
                 assert_eq!(
                     &program_bytes[0..4],
                     &[0x00, 0x61, 0x73, 0x6D],
@@ -1042,8 +1010,7 @@ fn test_cross_backend_elf_header_validation() {
             assert_eq!(
                 bytes[4], expected_class,
                 "{}/{}: ELF class mismatch",
-                name,
-                label
+                name, label
             );
 
             // Endianness
@@ -1057,16 +1024,14 @@ fn test_cross_backend_elf_header_validation() {
             assert_eq!(
                 bytes[5], expected_data,
                 "{}/{}: ELF data encoding mismatch",
-                name,
-                label
+                name, label
             );
 
             // Version
             assert_eq!(
                 bytes[6], 1,
                 "{}/{}: ELF version should be EV_CURRENT",
-                name,
-                label
+                name, label
             );
 
             // Machine type
@@ -1144,8 +1109,8 @@ struct ExampleCompileResult {
 
 /// Discover all `.vuma` files in the project's `examples/` directory.
 fn discover_examples() -> Vec<(String, String)> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR should be set during tests");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set during tests");
     let examples_dir = Path::new(&manifest_dir)
         .parent()
         .expect("tests dir has a parent")
@@ -1186,7 +1151,9 @@ fn compile_example_for_backend(
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         if result.has_errors() {
-            let err_msg: String = result.errors.iter()
+            let err_msg: String = result
+                .errors
+                .iter()
                 .map(|e| format!("{:?}", e))
                 .collect::<Vec<_>>()
                 .join("; ");
@@ -1207,9 +1174,15 @@ fn compile_example_for_backend(
 
     // Step 3: Run lightweight SCG transforms (DCE + constant folding at O1)
     {
-        use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel};
+        use vuma::pipeline::{
+            run_scg_transforms, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
+        };
         let config = CompileConfig {
-            target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
+            target: if kind == BackendKind::Wasm32 {
+                CompileTarget::Wasm32
+            } else {
+                CompileTarget::Linux
+            },
             opt_level: OptLevel::O1,
             verification_level: VerificationLevel::Normal,
             ..CompileConfig::default()
@@ -1233,20 +1206,33 @@ fn compile_example_for_backend(
     };
 
     if ir_program.functions.is_empty() {
-        return (CompileStatus::IrFailed("no functions in IR".to_string()), None);
+        return (
+            CompileStatus::IrFailed("no functions in IR".to_string()),
+            None,
+        );
     }
 
     // Step 6: For the specific backend, allocate registers + encode
     let backend = match create_backend(kind) {
         Ok(b) => b,
-        Err(e) => return (CompileStatus::RegAllocFailed(format!("create_backend: {}", e)), None),
+        Err(e) => {
+            return (
+                CompileStatus::RegAllocFailed(format!("create_backend: {}", e)),
+                None,
+            )
+        }
     };
 
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
         match backend.allocate_registers(func) {
             Ok(allocated) => allocated_functions.push(allocated),
-            Err(e) => return (CompileStatus::RegAllocFailed(format!("{}: {}", func.name, e)), None),
+            Err(e) => {
+                return (
+                    CompileStatus::RegAllocFailed(format!("{}: {}", func.name, e)),
+                    None,
+                )
+            }
         }
     }
 
@@ -1255,8 +1241,8 @@ fn compile_example_for_backend(
         functions: allocated_functions,
         total_code_size,
         total_data_size: 0,
-    rodata_data: Vec::new(),
-    function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     match backend.encode_program(&program) {
@@ -1293,8 +1279,18 @@ fn print_test_matrix(results: &[ExampleCompileResult]) {
     eprintln!("╔════════════════════════════════════════════════════════════════════════════════════════════════════╗");
     eprintln!("║                       Cross-Backend Compilation Test Matrix (39 examples × 10 backends)          ║");
     eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════════════╣");
-    eprintln!("║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
-        "Example", "aarch64", "riscv64", "wasm32", "loongarch64", "x86_64", "arm32", "mips64", "ppc64");
+    eprintln!(
+        "║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
+        "Example",
+        "aarch64",
+        "riscv64",
+        "wasm32",
+        "loongarch64",
+        "x86_64",
+        "arm32",
+        "mips64",
+        "ppc64"
+    );
     eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════════════╣");
 
     for result in results {
@@ -1313,10 +1309,10 @@ fn print_test_matrix(results: &[ExampleCompileResult]) {
             cols.push(col);
         }
 
-        eprintln!("║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
-            result.name,
-            cols[0], cols[1], cols[2], cols[3],
-            cols[4], cols[5], cols[6], cols[7]);
+        eprintln!(
+            "║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
+            result.name, cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7]
+        );
     }
 
     eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════════════╣");
@@ -1340,9 +1336,18 @@ fn print_test_matrix(results: &[ExampleCompileResult]) {
         sum_cols.push(format!("{}/{}", success, total));
     }
 
-    eprintln!("║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
-        "TOTAL", &sum_cols[0], &sum_cols[1], &sum_cols[2], &sum_cols[3],
-        &sum_cols[4], &sum_cols[5], &sum_cols[6], &sum_cols[7]);
+    eprintln!(
+        "║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
+        "TOTAL",
+        &sum_cols[0],
+        &sum_cols[1],
+        &sum_cols[2],
+        &sum_cols[3],
+        &sum_cols[4],
+        &sum_cols[5],
+        &sum_cols[6],
+        &sum_cols[7]
+    );
 
     eprintln!("╚════════════════════════════════════════════════════════════════════════════════════════════════════╝");
     eprintln!();
@@ -1370,7 +1375,8 @@ fn test_cross_backend_example_compilation() {
             if let CompileStatus::Success(_size) = status {
                 // Re-compile to get the binary for validation
                 let examples = discover_examples();
-                let source = examples.iter()
+                let source = examples
+                    .iter()
                     .find(|(name, _)| *name == result.name)
                     .map(|(_, src)| src.clone())
                     .expect("example source should exist");
@@ -1446,8 +1452,7 @@ fn test_cross_backend_elf_section_validation() {
             assert_eq!(
                 bytes[4], expected_class,
                 "{}/{}: ELF class mismatch",
-                bname,
-                name
+                bname, name
             );
 
             // Validate machine type
@@ -1482,24 +1487,48 @@ fn test_cross_backend_elf_section_validation() {
             let be = ei_data == 2; // ELFDATA2MSB (big-endian)
             let e_phoff = if is_64 {
                 let a: [u8; 8] = bytes[32..40].try_into().unwrap();
-                if be { u64::from_be_bytes(a) } else { u64::from_le_bytes(a) }
+                if be {
+                    u64::from_be_bytes(a)
+                } else {
+                    u64::from_le_bytes(a)
+                }
             } else {
                 let a: [u8; 4] = bytes[28..32].try_into().unwrap();
-                if be { u32::from_be_bytes(a) as u64 } else { u32::from_le_bytes(a) as u64 }
+                if be {
+                    u32::from_be_bytes(a) as u64
+                } else {
+                    u32::from_le_bytes(a) as u64
+                }
             };
             let e_phentsize = if is_64 {
                 let a: [u8; 2] = bytes[54..56].try_into().unwrap();
-                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
+                if be {
+                    u16::from_be_bytes(a)
+                } else {
+                    u16::from_le_bytes(a)
+                }
             } else {
                 let a: [u8; 2] = bytes[42..44].try_into().unwrap();
-                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
+                if be {
+                    u16::from_be_bytes(a)
+                } else {
+                    u16::from_le_bytes(a)
+                }
             };
             let e_phnum = if is_64 {
                 let a: [u8; 2] = bytes[56..58].try_into().unwrap();
-                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
+                if be {
+                    u16::from_be_bytes(a)
+                } else {
+                    u16::from_le_bytes(a)
+                }
             } else {
                 let a: [u8; 2] = bytes[44..46].try_into().unwrap();
-                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
+                if be {
+                    u16::from_be_bytes(a)
+                } else {
+                    u16::from_le_bytes(a)
+                }
             };
 
             let mut has_load_segment = false;
@@ -1509,7 +1538,11 @@ fn test_cross_backend_elf_section_validation() {
                     break;
                 }
                 let a: [u8; 4] = bytes[off..off + 4].try_into().unwrap();
-                let p_type = if be { u32::from_be_bytes(a) } else { u32::from_le_bytes(a) };
+                let p_type = if be {
+                    u32::from_be_bytes(a)
+                } else {
+                    u32::from_le_bytes(a)
+                };
                 if p_type == 1 {
                     // PT_LOAD
                     has_load_segment = true;
@@ -1519,8 +1552,7 @@ fn test_cross_backend_elf_section_validation() {
             assert!(
                 has_load_segment,
                 "{}/{}: ELF should have at least one PT_LOAD segment",
-                bname,
-                name
+                bname, name
             );
 
             // Check for section headers (optional — some backends omit them)
@@ -1552,11 +1584,13 @@ fn test_cross_backend_elf_section_validation() {
 
                 // Read the .shstrtab section to get section names
                 let shstrtab_off = if (e_shstrndx as usize) < e_shnum as usize {
-                    let shdr_off = e_shoff as usize + (e_shstrndx as usize) * (e_shentsize as usize);
+                    let shdr_off =
+                        e_shoff as usize + (e_shstrndx as usize) * (e_shentsize as usize);
                     if is_64 && shdr_off + 64 <= bytes.len() {
                         u64::from_le_bytes(bytes[shdr_off + 24..shdr_off + 32].try_into().unwrap())
                     } else if !is_64 && shdr_off + 40 <= bytes.len() {
-                        u32::from_le_bytes(bytes[shdr_off + 16..shdr_off + 20].try_into().unwrap()) as u64
+                        u32::from_le_bytes(bytes[shdr_off + 16..shdr_off + 20].try_into().unwrap())
+                            as u64
                     } else {
                         continue; // Can't read shstrtab offset
                     }
@@ -1565,11 +1599,13 @@ fn test_cross_backend_elf_section_validation() {
                 };
 
                 let shstrtab_size = {
-                    let shdr_off = e_shoff as usize + (e_shstrndx as usize) * (e_shentsize as usize);
+                    let shdr_off =
+                        e_shoff as usize + (e_shstrndx as usize) * (e_shentsize as usize);
                     if is_64 && shdr_off + 64 <= bytes.len() {
                         u64::from_le_bytes(bytes[shdr_off + 32..shdr_off + 40].try_into().unwrap())
                     } else if !is_64 && shdr_off + 40 <= bytes.len() {
-                        u32::from_le_bytes(bytes[shdr_off + 20..shdr_off + 24].try_into().unwrap()) as u64
+                        u32::from_le_bytes(bytes[shdr_off + 20..shdr_off + 24].try_into().unwrap())
+                            as u64
                     } else {
                         continue;
                     }
@@ -1605,9 +1641,9 @@ fn test_cross_backend_elf_section_validation() {
                             .iter()
                             .position(|&b| b == 0)
                             .unwrap_or(shstrtab.len() - name_start);
-                        let section_name = String::from_utf8_lossy(
-                            &shstrtab[name_start..name_start + name_end]
-                        ).to_string();
+                        let section_name =
+                            String::from_utf8_lossy(&shstrtab[name_start..name_start + name_end])
+                                .to_string();
                         section_names.insert(section_name);
                     }
                 }
@@ -1749,21 +1785,13 @@ fn test_cross_backend_wasm32_example_validation() {
         }
 
         // Verify required sections
-        assert!(
-            found_type,
-            "wasm32/{}: missing type section (ID 1)",
-            name
-        );
+        assert!(found_type, "wasm32/{}: missing type section (ID 1)", name);
         assert!(
             found_function,
             "wasm32/{}: missing function section (ID 3)",
             name
         );
-        assert!(
-            found_code,
-            "wasm32/{}: missing code section (ID 10)",
-            name
-        );
+        assert!(found_code, "wasm32/{}: missing code section (ID 10)", name);
     }
 }
 
@@ -1825,10 +1853,7 @@ fn test_cross_backend_regression_tracking() {
 
     // Define the core set of examples that MUST compile on all backends.
     // These are the simplest programs in the examples directory.
-    let core_examples: HashSet<&str> = [
-        "minimal",
-        "test_exit",
-    ].iter().copied().collect();
+    let core_examples: HashSet<&str> = ["minimal", "test_exit"].iter().copied().collect();
 
     // Check core examples compile on at least one backend
     for core_name in &core_examples {
@@ -1866,7 +1891,8 @@ fn test_cross_backend_regression_tracking() {
 
     // Report overall statistics
     let total_pairs: usize = examples.len() * ALL_BACKENDS.len();
-    let successful_pairs: usize = results.iter()
+    let successful_pairs: usize = results
+        .iter()
         .flat_map(|r| r.statuses.values())
         .filter(|s| s.is_success())
         .count();
@@ -1875,8 +1901,10 @@ fn test_cross_backend_regression_tracking() {
     eprintln!("  Cross-Backend Compilation Summary:");
     eprintln!("    Total (example, backend) pairs: {}", total_pairs);
     eprintln!("    Successful compilations:        {}", successful_pairs);
-    eprintln!("    Success rate:                    {:.1}%",
-        (successful_pairs as f64 / total_pairs as f64) * 100.0);
+    eprintln!(
+        "    Success rate:                    {:.1}%",
+        (successful_pairs as f64 / total_pairs as f64) * 100.0
+    );
     eprintln!();
 
     // Report per-failure-category breakdown
@@ -1909,95 +1937,47 @@ fn test_cross_backend_regression_tracking() {
     eprintln!();
 }
 
-/// Test 15: Test matrix summary print
-///
-/// This test explicitly prints the full compilation matrix for all
-/// example programs across all backends, providing a comprehensive
-/// overview of the VUMA compiler's cross-backend support.
-#[test]
-fn test_cross_backend_matrix_summary() {
-    let results = compile_all_examples();
-
-    // Print the full matrix
-    print_test_matrix(&results);
-
-    // Also print a per-backend summary
-    eprintln!("  Per-Backend Summary:");
-    eprintln!("  {:<16} {:>8} {:>8} {:>8}", "Backend", "Success", "Total", "Rate");
-    eprintln!("  {}", "-".repeat(44));
-
-    for &kind in ALL_BACKENDS {
-        let success_count = results.iter()
-            .filter(|r| r.statuses.get(&kind).map_or(false, |s| s.is_success()))
-            .count();
-        let total = results.len();
-        let rate = (success_count as f64 / total as f64) * 100.0;
-        eprintln!("  {:<16} {:>8} {:>8} {:>7.1}%",
-            backend_name(kind),
-            success_count,
-            total,
-            rate);
-    }
-    eprintln!();
-
-    // Also print a per-example summary
-    eprintln!("  Per-Example Summary:");
-    eprintln!("  {:<28} {:>8} {:>8} {:>8}", "Example", "Success", "Total", "Rate");
-    eprintln!("  {}", "-".repeat(56));
-
-    for result in &results {
-        let success_count = result.statuses.values().filter(|s| s.is_success()).count();
-        let total = ALL_BACKENDS.len();
-        let rate = (success_count as f64 / total as f64) * 100.0;
-        eprintln!("  {:<28} {:>8} {:>8} {:>7.1}%",
-            result.name,
-            success_count,
-            total,
-            rate);
-    }
-    eprintln!();
-}
-
 // ===========================================================================
-// Wave 13 — IRInstr::Syscall cross-backend conformance test
+// IRInstr::Syscall cross-backend conformance test
 // ===========================================================================
 //
 // Asserts that every backend emits a **non-empty** encoded instruction
-// sequence for `IRInstr::Syscall { nr: 1, .. }`.  Wave 11 implemented
-// Syscall on the 6 tier-1 backends (x86_64, aarch64, riscv64, riscv32,
-// arm32, x86_32).  Wave 12 is in progress for the 8 tier-2/3 backends
-// (alpha, hppa, m68k, mips64, ppc64, s390x, sparc64, loongarch64) which
-// currently `unimplemented!("… (Wave 12)")`.  The 4 big-endian / LE
-// wrapper backends (aarch64_be, armeb, mips64be, ppc64le) automatically
-// inherit from their parents.
+// sequence for `IRInstr::Syscall { nr: 1, .. }`.  Syscall is implemented
+// on the 6 tier-1 backends (x86_64, aarch64, riscv64, riscv32,
+// arm32, x86_32).  Implementation is in progress for the 8 tier-2/3
+// backends (alpha, hppa, m68k, mips64, ppc64, s390x, sparc64,
+// loongarch64) which currently `unimplemented!("… (Wave 12)")`.  The 4
+// big-endian / LE wrapper backends (aarch64_be, armeb, mips64be,
+// ppc64le) automatically inherit from their parents.
 //
 // This test iterates over **all 19** BackendKind variants and categorizes
 // each result:
 //   - **PASS**: backend emits non-empty encoded bytes for the syscall.
-//   - **PENDING**: backend panics with "Wave 12" (not yet implemented).
+//   - **PENDING**: backend panics with the literal "Wave 12" message
+//     (the tier-2/3 Syscall arm is not yet implemented).
 //   - **FAIL**: backend panics with an unexpected message, returns an
 //     error, or emits empty output.
 //
 // The test asserts zero FAILs.  PENDING backends are reported but do not
-// fail the test (they will automatically be promoted to PASS once Wave 12
-// lands and removes the `unimplemented!()` arms).
+// fail the test (they will automatically be promoted to PASS once the
+// tier-2/3 Syscall arms land and remove the `unimplemented!()` arms).
 
 /// All 19 backend kinds (including big-endian wrappers and experimental
-/// tier-2/3 backends) for the Wave 13 syscall conformance sweep.
+/// tier-2/3 backends) for the syscall conformance sweep.
 const ALL_19_BACKENDS: &[BackendKind] = &[
-    // Tier-1 (Wave 11 — Syscall implemented)
+    // Tier-1 (Syscall implemented)
     BackendKind::X86_64,
     BackendKind::AArch64,
     BackendKind::RiscV64,
     BackendKind::RiscV32,
     BackendKind::Arm32,
     BackendKind::X86_32,
-    // Big-endian / LE wrappers (Wave 13 — inherit from parent)
+    // Big-endian / LE wrappers (inherit from parent)
     BackendKind::AArch64Be,   // → aarch64  (has Syscall)
     BackendKind::ArmEb,       // → arm32    (has Syscall)
-    BackendKind::Mips64Be,    // → mips64   (pending Wave 12)
-    BackendKind::PowerPC64LE, // → ppc64    (pending Wave 12)
-    // Tier-2/3 (Wave 12 — pending)
+    BackendKind::Mips64Be,    // → mips64   (tier-2/3 Syscall pending)
+    BackendKind::PowerPC64LE, // → ppc64    (tier-2/3 Syscall pending)
+    // Tier-2/3 (Syscall pending)
     BackendKind::LoongArch64,
     BackendKind::Mips64,
     BackendKind::PowerPC64,
@@ -2006,7 +1986,7 @@ const ALL_19_BACKENDS: &[BackendKind] = &[
     BackendKind::Alpha,
     BackendKind::M68k,
     BackendKind::Hppa,
-    // wasm32 (Wave 11 — emits i32.const -ENOSYS)
+    // wasm32 (emits i32.const -ENOSYS)
     BackendKind::Wasm32,
 ];
 
@@ -2041,7 +2021,8 @@ fn build_syscall_ir_func() -> IRFunction {
 enum SyscallConformance {
     /// Backend emitted non-empty encoded bytes — conformance met.
     Pass(usize), // byte count
-    /// Backend panicked with a "Wave 12" message — not yet implemented.
+    /// Backend panicked with the literal "Wave 12" message — the
+    /// tier-2/3 Syscall arm is not yet implemented.
     Pending(String),
     /// Backend failed unexpectedly (wrong panic, error, or empty output).
     Fail(String),
@@ -2086,13 +2067,13 @@ fn check_syscall_conformance(kind: BackendKind) -> SyscallConformance {
     }
 }
 
-/// Wave 13 — Cross-backend `IRInstr::Syscall` conformance test.
+/// Cross-backend `IRInstr::Syscall` conformance test.
 ///
 /// Iterates over all 19 backends and asserts that each one EITHER emits
-/// non-empty encoded output for `Syscall { nr: 1, .. }` OR panics with a
-/// "Wave 12" message (indicating the tier-2/3 implementation is still
-/// pending).  Any other outcome (unexpected panic, error, or empty output)
-/// fails the test.
+/// non-empty encoded output for `Syscall { nr: 1, .. }` OR panics with
+/// the literal "Wave 12" message (indicating the tier-2/3 implementation
+/// is still pending).  Any other outcome (unexpected panic, error, or
+/// empty output) fails the test.
 #[test]
 fn test_syscall_conformance_all_backends() {
     let mut pass_count = 0usize;
@@ -2136,7 +2117,8 @@ fn test_syscall_conformance_all_backends() {
     // ── Assertions ────────────────────────────────────────────────────
     //
     // 1. Zero FAILs — every backend must either emit non-empty output or
-    //    panic with "Wave 12" (pending).  Any other outcome is a bug.
+    //    panic with the literal "Wave 12" message (pending).  Any other
+    //    outcome is a bug.
     assert_eq!(
         fail_count, 0,
         " {} backend(s) failed Syscall conformance unexpectedly: {:?}",
@@ -2144,8 +2126,9 @@ fn test_syscall_conformance_all_backends() {
     );
 
     // 2. All tier-1 backends + wrappers whose parents have Syscall must
-    //    PASS (not pending).  These are the backends where Wave 11 or
-    //    wrapper inheritance guarantees non-empty output.
+    //    PASS (not pending).  These are the backends where the tier-1
+    //    Syscall implementation or wrapper inheritance guarantees
+    //    non-empty output.
     let must_pass: &[BackendKind] = &[
         BackendKind::X86_64,
         BackendKind::AArch64,
@@ -2174,32 +2157,33 @@ fn test_syscall_conformance_all_backends() {
                 );
             }
             SyscallConformance::Fail(msg) => {
-                panic!(
-                    "backend {:?} must PASS but got FAIL: {}",
-                    kind, msg
-                );
+                panic!("backend {:?} must PASS but got FAIL: {}", kind, msg);
             }
         }
     }
 
     // 3. Wrapper backends whose parents are tier-2/3 (mips64be → mips64,
-    //    ppc64le → ppc64) must EITHER pass (Wave 12 landed) or be pending
-    //    (Wave 12 not yet landed).  They must NOT fail.
+    //    ppc64le → ppc64) must EITHER pass (tier-2/3 Syscall landed) or
+    //    be pending (tier-2/3 Syscall not yet landed).  They must NOT
+    //    fail.
     for kind in &[BackendKind::Mips64Be, BackendKind::PowerPC64LE] {
         match check_syscall_conformance(*kind) {
             SyscallConformance::Pass(_) | SyscallConformance::Pending(_) => { /* ok */ }
             SyscallConformance::Fail(msg) => {
-                panic!("wrapper backend {:?} must pass or be pending but failed: {}", kind, msg);
+                panic!(
+                    "wrapper backend {:?} must pass or be pending but failed: {}",
+                    kind, msg
+                );
             }
         }
     }
 }
 
 // ===========================================================================
-// Wave 49 — Wrapper-backend documentation & cross-backend conformance tests
+// Wrapper-backend documentation & cross-backend conformance tests
 // ===========================================================================
 //
-// Wave 49 has two goals:
+// This section has two goals:
 //   1. Document the byte-swap / ABI-flag wrapper pattern in the 4 wrapper
 //      backend files (`aarch64_be.rs`, `armeb.rs`, `mips64be.rs`,
 //      `ppc64le.rs`). See the top-of-file `//!` blocks in those files.
@@ -2210,9 +2194,9 @@ fn test_syscall_conformance_all_backends() {
 //          resolves `print_int` / `print_hex` / `print_newline` call sites
 //          to its own runtime stub (not an unknown-extern fallback).
 //
-// Both tests reuse the Wave 13 syscall-sweep infrastructure
+// Both tests reuse the syscall-sweep infrastructure above
 // (`ALL_19_BACKENDS`, `catch_unwind`, `SyscallConformance` categorisation)
-// so they remain green when Wave 12 (parent-backend Syscall) is still
+// so they remain green when the parent-backend Syscall arm is still
 // pending — only unexpected failures fail the test.
 
 /// Build an IR function containing a single `IRInstr::Syscall`
@@ -2287,8 +2271,8 @@ enum Wave49SyscallOutcome {
     /// (e.g. Wasm32 emits `i32.const -ENOSYS` per Syscall but the
     /// emitted bytes may not grow strictly with N).  Carries byte size.
     PassFixed(usize),
-    /// Backend panicked with a "Wave 12" message — parent Syscall
-    /// implementation still pending.
+    /// Backend panicked with the literal "Wave 12" message — parent
+    /// Syscall implementation still pending.
     Pending(String),
     /// Backend failed unexpectedly.
     Fail(String),
@@ -2356,7 +2340,7 @@ fn check_wave49_syscall_conformance(kind: BackendKind) -> Wave49SyscallOutcome {
     }
 }
 
-/// Wave 49 — Cross-backend "same set of named syscalls" conformance test.
+/// Cross-backend "same set of named syscalls" conformance test.
 ///
 /// Compiles both a 1-syscall IR function (`nr=1`, Linux `write`) and a
 /// 3-syscall IR function (`nr=0,1,60` = `read`, `write`, `exit_group`)
@@ -2365,18 +2349,18 @@ fn check_wave49_syscall_conformance(kind: BackendKind) -> Wave49SyscallOutcome {
 ///   * Every backend either **passes** (emits non-empty encoded output
 ///     for both functions, with the 3-syscall output strictly larger
 ///     than the 1-syscall output — proving no syscalls were silently
-///     dropped) OR is **pending** (panics with a "Wave 12" message
-///     because the parent backend's `IRInstr::Syscall` arm is still
-///     `unimplemented!`).
+///     dropped) OR is **pending** (panics with the literal "Wave 12"
+///     message because the parent backend's `IRInstr::Syscall` arm is
+///     still `unimplemented!`).
 ///   * No backend **fails** unexpectedly.
 ///   * The "same set of named syscalls" property: for every passing
 ///     backend, the 3-syscall encoded byte count is strictly greater
 ///     than the 1-syscall byte count (or, for fixed-shape backends
 ///     like Wasm32, both are non-empty).
 ///
-/// This complements the Wave 13 syscall conformance test, which only
-/// checks that each backend emits non-empty output for a single
-/// `Syscall { nr: 1, .. }`.  Wave 49 additionally verifies that the
+/// This complements the single-syscall conformance test above, which
+/// only checks that each backend emits non-empty output for a single
+/// `Syscall { nr: 1, .. }`.  This test additionally verifies that the
 /// IR's set of syscall numbers is preserved through codegen — i.e.
 /// the wrapper backends (aarch64_be, armeb, mips64be, ppc64le) emit
 /// code for every syscall their parent emits, with no silent drops.
@@ -2399,7 +2383,11 @@ fn test_wave49_syscall_conformance_all_backends() {
                 pass_count += 1;
                 eprintln!(
                     "  {:<16} {:<10} 1-sys={:>5}B  3-sys={:>5}B  (Δ=+{}B)",
-                    name, "PASS", s, m, m.saturating_sub(s)
+                    name,
+                    "PASS",
+                    s,
+                    m,
+                    m.saturating_sub(s)
                 );
             }
             Wave49SyscallOutcome::PassFixed(m) => {
@@ -2442,7 +2430,8 @@ fn test_wave49_syscall_conformance_all_backends() {
     );
 
     // 2. Tier-1 backends + aarch64_be / armeb wrappers (whose parents
-    //    have Syscall from Wave 11) must PASS or PASS* — not pending.
+    //    have the tier-1 Syscall implementation) must PASS or PASS* —
+    //    not pending.
     let must_pass: &[BackendKind] = &[
         BackendKind::X86_64,
         BackendKind::AArch64,
@@ -2493,8 +2482,8 @@ fn test_wave49_syscall_conformance_all_backends() {
 
 /// Build an IR function that calls `print_int(42)`, `print_hex(0xff)`,
 /// and `print_newline()` in sequence — the three runtime print helpers
-/// every backend is expected to expose (per Wave 2/3/13 print-stub
-/// restoration work).
+/// every backend is expected to expose (per the print-stub restoration
+/// work).
 ///
 /// Each call uses `is_extern: false` because `print_int` / `print_hex`
 /// / `print_newline` are LOCAL VUMA runtime stubs (resolved to local
@@ -2569,7 +2558,9 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let allocated = backend.allocate_registers(&func)?;
         let bytes = backend.encode_function(&allocated)?;
-        Ok::<(vuma_codegen::backend::AllocatedFunction, Vec<u8>), vuma_codegen::backend::BackendError>((allocated, bytes))
+        Ok::<(vuma_codegen::backend::AllocatedFunction, Vec<u8>), vuma_codegen::backend::BackendError>(
+            (allocated, bytes),
+        )
     }));
 
     match result {
@@ -2609,8 +2600,10 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
             // Pending categories we tolerate:
             //   * "Wave 12" — parent backend's Syscall arm still
             //     unimplemented (some backends route print_* through
-            //     syscall stubs).
-            //   * "Wave 13" / "Wave 49" — sibling pending work.
+            //     syscall stubs).  The string "Wave 12" is the literal
+            //     panic message the backend emits.
+            //   * "Wave 13" / "Wave 49" — sibling pending work (literal
+            //     panic-message strings).
             //   * "print_int" / "print_hex" / "print_newline" —
             //     print-stub restoration pending on this backend.
             //   * "unimplemented" / "not yet implemented" — generic
@@ -2632,8 +2625,8 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
     }
 }
 
-/// Wave 49 — `print_int` / `print_hex` / `print_newline` regression
-/// test for all 19 backends.
+/// `print_int` / `print_hex` / `print_newline` regression test for all
+/// 19 backends.
 ///
 /// Compiles an IR function that calls `print_int(42)`,
 /// `print_hex(0xff)`, and `print_newline()` on every backend in
@@ -2641,9 +2634,9 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
 ///
 ///   * Every backend either **passes** (emits non-empty encoded output
 ///     for the function) OR is **pending** (panics with a tolerable
-///     message indicating print-helpers / sibling-wave work is still
-///     in progress — e.g. "Wave 12", "print_int not yet implemented",
-///     "unimplemented").
+///     message indicating print-helpers / sibling work is still in
+///     progress — e.g. the literal "Wave 12" string, "print_int not yet
+///     implemented", "unimplemented").
 ///   * No backend **fails** unexpectedly.
 ///   * For backends that populate `AllocatedFunction.relocations` for
 ///     `IRInstr::Call` (x86_64, loongarch64, arm32, riscv32, …), the
@@ -2652,11 +2645,11 @@ fn check_wave49_print_helpers(kind: BackendKind) -> Wave49PrintHelpersOutcome {
 ///     LOCAL VUMA runtime stubs, not silently dropped as unknown-extern
 ///     fallbacks.
 ///
-/// This reuses the Wave 2/3/13 print-restoration work: backends that
-/// have already registered `func_offsets["print_int"] = runtime_offset`
-/// (etc.) will resolve the call sites at `encode_program` time; the
-/// relocations list checked here is set during `allocate_registers` and
-/// is the canonical record that the call sites were emitted.
+/// This reuses the print-restoration work: backends that have already
+/// registered `func_offsets["print_int"] = runtime_offset` (etc.) will
+/// resolve the call sites at `encode_program` time; the relocations list
+/// checked here is set during `allocate_registers` and is the canonical
+/// record that the call sites were emitted.
 #[test]
 fn test_wave49_print_helpers_all_backends() {
     let mut pass_count = 0usize;
@@ -2728,9 +2721,10 @@ fn test_wave49_print_helpers_all_backends() {
     );
 
     // 2. Tier-1 backends + aarch64_be / armeb wrappers (whose parents
-    //    have full print_* runtime stubs from Wave 2/3/13) must PASS —
-    //    not pending.  These are the backends where the print-stub
-    //    restoration work is known to be complete.
+    //    have full print_* runtime stubs from the print-stub
+    //    restoration work) must PASS — not pending.  These are the
+    //    backends where the print-stub restoration is known to be
+    //    complete.
     let must_pass: &[BackendKind] = &[
         BackendKind::X86_64,
         BackendKind::AArch64,
@@ -2767,8 +2761,8 @@ fn test_wave49_print_helpers_all_backends() {
     //    ppc64le → ppc64) must EITHER pass OR be pending — never fail.
     for kind in &[BackendKind::Mips64Be, BackendKind::PowerPC64LE] {
         match check_wave49_print_helpers(*kind) {
-            Wave49PrintHelpersOutcome::Pass { .. }
-            | Wave49PrintHelpersOutcome::Pending(_) => { /* ok */ }
+            Wave49PrintHelpersOutcome::Pass { .. } | Wave49PrintHelpersOutcome::Pending(_) => { /* ok */
+            }
             Wave49PrintHelpersOutcome::Fail(msg) => {
                 panic!(
                     "wrapper backend {:?} must pass or be pending but failed: {}",

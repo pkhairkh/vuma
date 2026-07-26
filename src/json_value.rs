@@ -498,8 +498,7 @@ impl<'a> Parser<'a> {
         if self.bytes[self.pos] != expected {
             return Err(self.err(format!(
                 "expected {:?} but found {:?}",
-                expected as char,
-                self.bytes[self.pos] as char
+                expected as char, self.bytes[self.pos] as char
             )));
         }
         self.pos += 1;
@@ -508,10 +507,7 @@ impl<'a> Parser<'a> {
 
     fn parse_value(&mut self, depth: usize) -> Result<JsonValue, JsonError> {
         if depth > MAX_DEPTH {
-            return Err(self.err(format!(
-                "maximum nesting depth ({}) exceeded",
-                MAX_DEPTH
-            )));
+            return Err(self.err(format!("maximum nesting depth ({}) exceeded", MAX_DEPTH)));
         }
         self.skip_ws();
         if self.pos >= self.bytes.len() {
@@ -532,11 +528,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_literal(
-        &mut self,
-        lit: &str,
-        value: JsonValue,
-    ) -> Result<JsonValue, JsonError> {
+    fn parse_literal(&mut self, lit: &str, value: JsonValue) -> Result<JsonValue, JsonError> {
         if self.pos + lit.len() > self.bytes.len() {
             return Err(self.err(format!(
                 "expected literal '{}' but reached end of input",
@@ -630,9 +622,8 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             match b {
                 b'"' => {
-                    return String::from_utf8(out).map_err(|e| {
-                        self.err(format!("invalid UTF-8 in JSON string: {}", e))
-                    });
+                    return String::from_utf8(out)
+                        .map_err(|e| self.err(format!("invalid UTF-8 in JSON string: {}", e)));
                 }
                 b'\\' => {
                     if self.pos >= self.bytes.len() {
@@ -663,27 +654,26 @@ impl<'a> Parser<'a> {
                                     || self.bytes[self.pos] != b'\\'
                                     || self.bytes[self.pos + 1] != b'u'
                                 {
-                                    return Err(self.err(
-                                        "expected low surrogate after high surrogate",
-                                    ));
+                                    return Err(
+                                        self.err("expected low surrogate after high surrogate")
+                                    );
                                 }
-                                let lo_hex = std::str::from_utf8(
-                                    &self.bytes[self.pos + 2..self.pos + 6],
-                                )
-                                .map_err(|_| {
-                                    self.err("invalid UTF-8 in low surrogate \\uXXXX escape")
-                                })?;
+                                let lo_hex =
+                                    std::str::from_utf8(&self.bytes[self.pos + 2..self.pos + 6])
+                                        .map_err(|_| {
+                                            self.err(
+                                                "invalid UTF-8 in low surrogate \\uXXXX escape",
+                                            )
+                                        })?;
                                 let lo = u32::from_str_radix(lo_hex, 16).map_err(|e| {
                                     self.err(format!("invalid low surrogate \\uXXXX escape: {}", e))
                                 })?;
                                 if !(0xDC00..=0xDFFF).contains(&lo) {
-                                    return Err(self.err(
-                                        "invalid low surrogate after high surrogate",
-                                    ));
+                                    return Err(
+                                        self.err("invalid low surrogate after high surrogate")
+                                    );
                                 }
-                                let combined = 0x10000
-                                    + ((code - 0xD800) << 10)
-                                    + (lo - 0xDC00);
+                                let combined = 0x10000 + ((code - 0xD800) << 10) + (lo - 0xDC00);
                                 self.pos += 6;
                                 if let Some(ch) = char::from_u32(combined) {
                                     let mut buf = [0u8; 4];
@@ -696,20 +686,21 @@ impl<'a> Parser<'a> {
                                     )));
                                 }
                             } else if (0xDC00..=0xDFFF).contains(&code) {
-                                return Err(self.err("unexpected low surrogate without high surrogate"));
+                                return Err(
+                                    self.err("unexpected low surrogate without high surrogate")
+                                );
                             } else if let Some(ch) = char::from_u32(code) {
                                 let mut buf = [0u8; 4];
                                 let s = ch.encode_utf8(&mut buf);
                                 out.extend_from_slice(s.as_bytes());
                             } else {
-                                return Err(self.err(format!("invalid Unicode codepoint U+{:04X}", code)));
+                                return Err(
+                                    self.err(format!("invalid Unicode codepoint U+{:04X}", code))
+                                );
                             }
                         }
                         _ => {
-                            return Err(self.err(format!(
-                                "invalid JSON escape '\\{}'",
-                                esc as char
-                            )))
+                            return Err(self.err(format!("invalid JSON escape '\\{}'", esc as char)))
                         }
                     }
                 }
@@ -857,7 +848,11 @@ pub fn json_string_array(arr: &[String]) -> JsonValue {
 
 /// Convert a `Vec<&str>` into a `JsonValue::Array` of `Str`s.
 pub fn json_str_array(arr: &[&str]) -> JsonValue {
-    JsonValue::Array(arr.iter().map(|s| JsonValue::Str((*s).to_string())).collect())
+    JsonValue::Array(
+        arr.iter()
+            .map(|s| JsonValue::Str((*s).to_string()))
+            .collect(),
+    )
 }
 
 /// Convert a `BTreeMap<String, usize>` into a `JsonValue::Object`.

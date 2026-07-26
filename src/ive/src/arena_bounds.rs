@@ -27,7 +27,7 @@ pub fn verify_arena_bounds(
     arena_vars: &HashSet<String>,
     accessed_vars: &HashSet<String>,
 ) -> Vec<ArenaBoundsVerification> {
-    let mut results = Vec::new();
+    let results = Vec::new();
     // For now, the bounds check is performed at runtime (the codegen emits
     // the offset + layout_size computation). The IVE-level check verifies
     // that arena variables are not accessed after arena_free (linearity).

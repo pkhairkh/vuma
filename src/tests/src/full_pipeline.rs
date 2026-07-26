@@ -199,7 +199,8 @@ fn test_full_pipeline_read_write_region() {
 /// - IVE verification produces no violations
 #[test]
 fn test_full_pipeline_nested_operations() {
-    let source = "fn compute(x: i64) -> i64 { return x + 1; } fn main() { x = compute(42); return x; }";
+    let source =
+        "fn compute(x: i64) -> i64 { return x + 1; } fn main() { x = compute(42); return x; }";
 
     let scg = build_scg_from_source(source).expect("Nested operations source should parse");
     let has_comp = scg
@@ -389,7 +390,7 @@ fn test_full_pipeline_compile_to_elf() {
                     lhs: ScgExpr::Int(10),
                     rhs: ScgExpr::Int(20),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 // Return the computed value
                 ScgStatement::Return(vec![ScgExpr::Var("value".to_string())]),
@@ -402,8 +403,13 @@ fn test_full_pipeline_compile_to_elf() {
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(&cg_scg).expect("IR building should succeed");
     let config = EmitConfig::linux_elf();
-    let elf_bytes = emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
-        .expect("ELF emission should succeed");
+    let elf_bytes = emit_elf(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        &config,
+        &[],
+    )
+    .expect("ELF emission should succeed");
 
     // Validate the ELF binary
     assert!(
@@ -558,11 +564,15 @@ fn test_full_pipeline_complex_program() {
     assert!(detailed.verification.is_some());
 
     // Phase 5: Verify at different verification levels
-    for level in &[
-        VerificationLevel::Quick,
-        VerificationLevel::Normal,
-        VerificationLevel::Exhaustive,
-    ] {
+    // Task 9-a (Wave 9): `vuma_ive::VerificationLevel` was collapsed to a
+    // single `Pmt` variant in Wave 5-f (commit 0a514ad2). The original list
+    // `[Quick, Normal, Exhaustive]` referenced removed variants; replaced
+    // with `[Pmt]` so the loop still iterates once and the no-violation
+    // assertion still holds for the (now sole) PMT level. The test's overall
+    // intent (`test_full_pipeline_complex_program` exercises the full
+    // pipeline) is preserved — Phase 5 still checks no violations at the
+    // only available level.
+    for level in &[VerificationLevel::Pmt] {
         let result = verify_program_at_level(source, *level);
         let violations: Vec<_> = result
             .per_invariant

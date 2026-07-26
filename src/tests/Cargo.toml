@@ -15,8 +15,6 @@ vuma-scg.workspace = true
 vuma-ive.workspace = true
 vuma-core.workspace = true
 vuma-bd.workspace = true
-vuma-proof.workspace = true
 vuma-parser.workspace = true
 vuma-codegen.workspace = true
-vuma-cor.workspace = true
 vuma = { path = "../.." }

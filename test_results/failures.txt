@@ -1,5 +1,4 @@
-VUMA Test Failures — 2026-07-24 22:50:14 UTC
-Total: 1 failures across 1 tests
+VUMA Test Failures — 2026-07-24 23:05:31 UTC
+Total: 0 failures across 0 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  ipc                  checkpoint.vuma                               exp=   1 [('s390x', 0, 'MM')]

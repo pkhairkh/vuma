@@ -13,8 +13,8 @@
 //! 3. The artifact is piped to the proof checker
 //! 4. If the checker rejects the proof, the optimization is rolled back
 
+use crate::egraph::{EClassId, ENode, RewriteRule};
 use std::collections::HashMap;
-use crate::egraph::{ENode, EClassId, RewriteRule};
 
 /// A proof artifact for a single rewrite application.
 #[derive(Debug, Clone)]
@@ -86,7 +86,10 @@ impl ProofLog {
             total_rewrites: self.artifacts.len(),
             verified: self.verified_count(),
             unverified: self.unverified_count(),
-            by_rule: by_rule.into_iter().map(|(k, v)| (k.to_string(), v.0, v.1)).collect(),
+            by_rule: by_rule
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.0, v.1))
+                .collect(),
         }
     }
 }
@@ -129,11 +132,12 @@ pub fn check_proof_log(log: &ProofLog) -> Result<ProofSummary, String> {
     let summary = log.summary();
 
     // Build the set of verified rule names from the Wave 7 verifier.
-    let mut verified_rules: std::collections::HashSet<&'static str> = crate::bv_verify::verify_all_rules()
-        .into_iter()
-        .filter(|r| r.sound)
-        .map(|r| r.rule_name)
-        .collect();
+    let mut verified_rules: std::collections::HashSet<&'static str> =
+        crate::bv_verify::verify_all_rules()
+            .into_iter()
+            .filter(|r| r.sound)
+            .map(|r| r.rule_name)
+            .collect();
 
     // Wave 36: also accept the Wave 31 standard e-graph rules (commutativity,
     // associativity, distributivity, constant-folding-across-ops). These are
@@ -178,39 +182,47 @@ fn structurally_validate_artifact(artifact: &ProofArtifact) -> Option<String> {
             // Source must be BinOp(Xor, x, x) where both operands are the same.
             match &artifact.source {
                 ENode::BinOp(crate::ir::BinOpKind::Xor, x, y) if x == y => None,
-                _ => Some(format!("xor_self source must be Xor(x, x), got {:?}", artifact.source)),
+                _ => Some(format!(
+                    "xor_self source must be Xor(x, x), got {:?}",
+                    artifact.source
+                )),
             }
         }
-        "sub_self" => {
-            match &artifact.source {
-                ENode::BinOp(crate::ir::BinOpKind::Sub, x, y) if x == y => None,
-                _ => Some(format!("sub_self source must be Sub(x, x), got {:?}", artifact.source)),
-            }
-        }
-        "mul_zero_left" => {
-            match &artifact.source {
-                ENode::BinOp(crate::ir::BinOpKind::Mul, lhs, _) if *lhs == 0 => None,
-                _ => Some(format!("mul_zero_left source must be Mul(0, _), got {:?}", artifact.source)),
-            }
-        }
-        "mul_zero_right" => {
-            match &artifact.source {
-                ENode::BinOp(crate::ir::BinOpKind::Mul, _, rhs) if *rhs == 0 => None,
-                _ => Some(format!("mul_zero_right source must be Mul(_, 0), got {:?}", artifact.source)),
-            }
-        }
-        "mul_one_left" => {
-            match &artifact.source {
-                ENode::BinOp(crate::ir::BinOpKind::Mul, lhs, _) if *lhs == 1 => None,
-                _ => Some(format!("mul_one_left source must be Mul(1, _), got {:?}", artifact.source)),
-            }
-        }
-        "mul_one_right" => {
-            match &artifact.source {
-                ENode::BinOp(crate::ir::BinOpKind::Mul, _, rhs) if *rhs == 1 => None,
-                _ => Some(format!("mul_one_right source must be Mul(_, 1), got {:?}", artifact.source)),
-            }
-        }
+        "sub_self" => match &artifact.source {
+            ENode::BinOp(crate::ir::BinOpKind::Sub, x, y) if x == y => None,
+            _ => Some(format!(
+                "sub_self source must be Sub(x, x), got {:?}",
+                artifact.source
+            )),
+        },
+        "mul_zero_left" => match &artifact.source {
+            ENode::BinOp(crate::ir::BinOpKind::Mul, lhs, _) if *lhs == 0 => None,
+            _ => Some(format!(
+                "mul_zero_left source must be Mul(0, _), got {:?}",
+                artifact.source
+            )),
+        },
+        "mul_zero_right" => match &artifact.source {
+            ENode::BinOp(crate::ir::BinOpKind::Mul, _, rhs) if *rhs == 0 => None,
+            _ => Some(format!(
+                "mul_zero_right source must be Mul(_, 0), got {:?}",
+                artifact.source
+            )),
+        },
+        "mul_one_left" => match &artifact.source {
+            ENode::BinOp(crate::ir::BinOpKind::Mul, lhs, _) if *lhs == 1 => None,
+            _ => Some(format!(
+                "mul_one_left source must be Mul(1, _), got {:?}",
+                artifact.source
+            )),
+        },
+        "mul_one_right" => match &artifact.source {
+            ENode::BinOp(crate::ir::BinOpKind::Mul, _, rhs) if *rhs == 1 => None,
+            _ => Some(format!(
+                "mul_one_right source must be Mul(_, 1), got {:?}",
+                artifact.source
+            )),
+        },
         // For rules that match on e-class contents (not directly on the ENode),
         // we can't structurally validate without the full e-graph. These pass
         // structural validation (the bv_verify check above is the real gate).

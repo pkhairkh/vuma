@@ -241,6 +241,19 @@ pub enum ParseErrorKind {
     /// expected (e.g. `+=`, `-=`, etc.).
     InvalidCompoundOp,
 
+    // -- VUMA 2.0 hard-error categories (PMT-only) ---------------------------
+    /// Pointer syntax (`allocate`, `free`, `*ptr`, `&x`, `*T`) was used. VUMA
+    /// 2.0 is PMT-only: there is no "no PMT mode", so any such site is a
+    /// fatal parse error that must abort compilation rather than be downgraded
+    /// to a non-fatal `ok_with_errors` recovery.
+    PointerSyntax,
+    /// A misplaced or invalid FFI attribute (`#[foreign(raw)]`, `#[callback]`,
+    /// `#[borrow]`, `#[marshal]`, `#[may_retain]`, `#[unmarshal(Layout)]`,
+    /// `#[foreign_consume(raw)]`, `#[foreign_return(raw)]`) was attached to a
+    /// declaration that does not accept it. Fatal — must not silently produce
+    /// a binary.
+    FfiAttr,
+
     // -- LLM-generated code mistakes -----------------------------------------
     /// A construct from another language (Rust/C) that doesn't exist in VUMA.
     /// For example, `int` instead of `i32`, `println!`, `&` references, etc.
@@ -274,6 +287,8 @@ impl fmt::Display for ParseErrorKind {
             ParseErrorKind::RegionError => write!(f, "region error"),
             ParseErrorKind::BDAnnotationError => write!(f, "BD annotation error"),
             ParseErrorKind::InvalidCompoundOp => write!(f, "invalid compound assignment operator"),
+            ParseErrorKind::PointerSyntax => write!(f, "pointer syntax (PMT-only)"),
+            ParseErrorKind::FfiAttr => write!(f, "FFI attribute placement error"),
             ParseErrorKind::LlmMistake => write!(f, "LLM code mismatch"),
             ParseErrorKind::CStyleForLoop => write!(f, "C-style for loop"),
             ParseErrorKind::UnknownType => write!(f, "unknown type"),
@@ -464,7 +479,10 @@ impl ParseError {
     pub fn unknown_type(name: &str, span: Span) -> Self {
         let suggestion = suggest_vuma_type(name);
         let mut err = Self::new(
-            format!("unknown type '{}' — VUMA uses sized integer types like i32, u32, i64, etc.", name),
+            format!(
+                "unknown type '{}' — VUMA uses sized integer types like i32, u32, i64, etc.",
+                name
+            ),
             span,
             ParseErrorKind::UnknownType,
         );
@@ -566,6 +584,12 @@ impl ErrorRecovery {
             ParseErrorKind::CStyleForLoop => ErrorRecovery::SkipToStatementBoundary,
             // Unknown type: skip one token (the type name) and keep going
             ParseErrorKind::UnknownType => ErrorRecovery::SkipOneToken,
+            // VUMA 2.0 PMT-only hard errors: these are fatal at the parse-result
+            // level (see `parse_program`), but if a recovery strategy is ever
+            // consulted for one of them, abort the current item — there is no
+            // meaningful local recovery.
+            ParseErrorKind::PointerSyntax => ErrorRecovery::AbortItem,
+            ParseErrorKind::FfiAttr => ErrorRecovery::AbortItem,
         }
     }
 }
@@ -1113,22 +1137,22 @@ const LLM_TYPE_ALIASES: &[(&str, &str)] = &[
     ("uintptr", "u64"),
     ("intptr_t", "i64"),
     ("uintptr_t", "u64"),
-    ("String", "string"),   // Rust String → VUMA string
-    ("str", "string"),      // Rust &str → VUMA string
-    ("Vec", "array"),       // Rust Vec → VUMA array
-    ("Box", "ptr"),         // Rust Box → VUMA ptr
-    ("Rc", "ptr"),          // Rust Rc → VUMA ptr
-    ("Arc", "ptr"),         // Rust Arc → VUMA ptr
-    ("usize", "u64"),       // Rust usize → VUMA u64
-    ("isize", "i64"),       // Rust isize → VUMA i64
-    ("void", "()"),          // C void → VUMA unit
-    ("auto", "var"),         // C++ auto
+    ("String", "string"), // Rust String → VUMA string
+    ("str", "string"),    // Rust &str → VUMA string
+    ("Vec", "array"),     // Rust Vec → VUMA array
+    ("Box", "ptr"),       // Rust Box → VUMA ptr
+    ("Rc", "ptr"),        // Rust Rc → VUMA ptr
+    ("Arc", "ptr"),       // Rust Arc → VUMA ptr
+    ("usize", "u64"),     // Rust usize → VUMA u64
+    ("isize", "i64"),     // Rust isize → VUMA i64
+    ("void", "()"),       // C void → VUMA unit
+    ("auto", "var"),      // C++ auto
 ];
 
 /// Valid VUMA type names (used for spellcheck suggestions).
 const VUMA_TYPES: &[&str] = &[
-    "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
-    "f32", "f64", "bool", "string", "ptr", "null", "var", "()",
+    "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "bool", "string", "ptr",
+    "null", "var", "()",
 ];
 
 /// Check if a type name is a known LLM alias and return the VUMA equivalent.
@@ -1163,20 +1187,47 @@ pub fn suggest_vuma_type(input: &str) -> Option<&'static str> {
 /// Known C/Rust identifiers that LLMs often produce, mapped to VUMA
 /// equivalents or error messages.
 const LLM_CONSTRUCT_MAP: &[(&str, &str)] = &[
-    ("println", "use `write` or a format string `f\"...\"` instead"),
+    (
+        "println",
+        "use `write` or a format string `f\"...\"` instead",
+    ),
     ("print", "use `write` or a format string `f\"...\"` instead"),
-    ("eprintln", "use `write` or a format string `f\"...\"` instead"),
-    ("eprint", "use `write` or a format string `f\"...\"` instead"),
-    ("printf", "use `write` or a format string `f\"...\"` instead"),
+    (
+        "eprintln",
+        "use `write` or a format string `f\"...\"` instead",
+    ),
+    (
+        "eprint",
+        "use `write` or a format string `f\"...\"` instead",
+    ),
+    (
+        "printf",
+        "use `write` or a format string `f\"...\"` instead",
+    ),
     ("fmt", "use `write` or a format string `f\"...\"` instead"),
-    ("dbg", "VUMA does not have a dbg! macro — use `write` for debugging"),
-    ("vec!", "VUMA does not have vec! — use array syntax `[a, b, c]`"),
-    ("println!", "VUMA does not have println! — use `write` or format strings"),
-    ("format!", "VUMA does not have format! — use format strings `f\"...\"`"),
+    (
+        "dbg",
+        "VUMA does not have a dbg! macro — use `write` for debugging",
+    ),
+    (
+        "vec!",
+        "VUMA does not have vec! — use array syntax `[a, b, c]`",
+    ),
+    (
+        "println!",
+        "VUMA does not have println! — use `write` or format strings",
+    ),
+    (
+        "format!",
+        "VUMA does not have format! — use format strings `f\"...\"`",
+    ),
     ("todo!", "VUMA does not have todo!"),
     ("unimplemented!", "VUMA does not have unimplemented!"),
     ("unreachable!", "VUMA does not have unreachable!"),
-    ("panic!", "VUMA does not have panic! — use `return` with an error"),
+    (
+        "panic!",
+        "VUMA does not have panic! — use `return` with an error",
+    ),
 ];
 
 /// Check if an identifier looks like a known LLM-generated construct

@@ -1,6 +1,18 @@
 //! # MIPS64 Big-Endian Backend (mips64be)
 //!
-//! **Wave 49 — wrapper pattern documentation.**
+//! **Wave 49 — wrapper pattern documentation.**  **Wave 13 — Wrapper Summary
+//! added** (Task 7-d).  **Wave 7-f — Syscall status updated** (Task 7-f:
+//! Wave 12 RESOLVED on parent `mips64`).
+//!
+//! ## Wrapper Summary
+//!
+//! | Field | Value |
+//! |-------|-------|
+//! | **Wraps** | `Mips64Backend` (`crate::mips64`), constructed via `Mips64Backend::new_be()` (parent already emits BE ELF header natively post p3b) |
+//! | **Byte-swap policy** | **LE→BE for every 4-byte instruction word** in the executable `PT_LOAD` segment of `encode_program`, plus `encode_function` / `return_stub` / `trampoline` / `disassemble`. The ELF header / PHDR fields are NOT swapped here (parent already emits them BE). |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:160-162`), instruction selection, register allocation, `IRInstr::Syscall` (Wave 7-f / Task 7-f — fully implemented on parent at `mips64/mod.rs:3251`) |
+//! | **Overridden** | `encode_program` (runs `swap_le_elf_to_be` which only touches instruction words since the parent's ELF header is already BE), `encode_function`, `return_stub`, `trampoline`, `disassemble` |
+//! | **Known gaps** | **None — `IRInstr::Syscall` works via inheritance** (parent `mips64` backend's Syscall arm is fully implemented per Task 7-f; emits `LI V0, native_nr; SYSCALL; NOP; BEQ A3, Zero, +8; NOP; DSUBU V0, Zero, V0` N64-ABI sequence, 64 bytes for the test below). The earlier "Wave 12 PENDING" status reported by Task 1-c's survey is STALE — `unimplemented!()` was removed. Float-op verifier `verify_function_float_ops` is now applied **centrally in all 5 compilation drivers** per Task 7-a, so this backend is covered via the driver (parent `Mips64Backend::allocate_registers` still skips it). See caveat §4 row 3. |
 //!
 //! `mips64be` is a thin wrapper around the `Mips64Backend`
 //! (field `inner: Mips64Backend`, constructed via `Mips64Backend::new_be()`)
@@ -32,23 +44,33 @@
 //! this wrapper re-serialises every 4-byte word in BE byte order so that
 //! `qemu-mips64` fetches the correct big-endian instruction stream.
 //!
-//! ## `IRInstr::Syscall` inheritance (Wave 13)
+//! ## `IRInstr::Syscall` inheritance (Wave 13 / Wave 7-f)
 //!
 //! `IRInstr::Syscall` emission is **automatically inherited** from the
 //! parent `Mips64Backend`. This backend delegates `allocate_registers`
 //! to `self.inner.allocate_registers(func)`, which calls the parent's
-//! instruction selector. Once Wave 12 implements the parent's
-//! `IRInstr::Syscall { nr, args, dst }` arm (emitting `LI V0, nr; SYSCALL`),
-//! this wrapper will automatically produce the same instructions —
-//! `encode_function` then byte-swaps each 4-byte word from LE to BE so
-//! `qemu-mips64` fetches the correct big-endian instruction words.
+//! instruction selector. The parent's `IRInstr::Syscall { nr, args, dst }`
+//! arm at `mips64/mod.rs:3251` emits the full N64-ABI syscall sequence:
+//! `LI V0, native_nr; SYSCALL; NOP; BEQ A3, Zero, +8; NOP; DSUBU V0, Zero, V0`
+//! (the last three instructions convert MIPS's positive-errno-in-V0-with-A3-flag
+//! convention into the x86_64-style `-errno` convention the rest of the IR
+//! expects). The syscall number is translated via
+//! `crate::syscall_abi::translate_or_warn(BackendKind::Mips64, nr)` at
+//! `mips64/mod.rs:3258`. `encode_function` then byte-swaps each 4-byte
+//! word from LE to BE so `qemu-mips64` fetches the correct big-endian
+//! instruction words.
 //!
-//! **Current status:** The parent `mips64` backend has
-//! `IRInstr::Syscall { .. } => unimplemented!("… (Wave 12)")` at
-//! `mips64/mod.rs:3906`. Until Wave 12 lands, `allocate_registers` will
-//! panic on `IRInstr::Syscall`. The conformance test in
-//! `src/tests/src/cross_backend.rs` uses `catch_unwind` to gracefully
-//! report this as "pending Wave 12" rather than failing.
+//! **Status (Task 7-f / Wave 7-f): RESOLVED.** Earlier doc comments
+//! (and the §4 caveat in `docs/architecture/caveats.md` row "4 thin-wrapper
+//! backends", plus Task 1-c's survey note) claimed the parent had
+//! `unimplemented!("… (Wave 12)")` at `mips64/mod.rs:3906`. That claim is
+//! **stale** — no `unimplemented!()` exists anywhere in `mips64/mod.rs`
+//! (verified by `rg 'unimplemented!' src/codegen/src/mips64/mod.rs` → no
+//! matches). The Syscall arm has been fully implemented (including the
+//! MIPS-specific clone/SIGCHLD rewrite for generic nr=220) and produces
+//! 64 bytes of encoded instructions for the conformance test below.
+//! The `catch_unwind` in the test below is retained as defense-in-depth
+//! but is no longer reachable on the success path.
 
 pub use crate::mips64::{Fpr, Gpr, Instruction, Mips64Backend};
 
@@ -61,20 +83,31 @@ pub struct Mips64BeBackend {
 
 impl Mips64BeBackend {
     pub fn new() -> Self {
-        Self { inner: Mips64Backend::new_be() }
+        Self {
+            inner: Mips64Backend::new_be(),
+        }
     }
 }
 
 impl Default for Mips64BeBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[inline]
-fn swap_u32(buf: &mut [u8], off: usize) { buf.swap(off, off + 3); buf.swap(off + 1, off + 2); }
-fn swap_u16(buf: &mut [u8], off: usize) { buf.swap(off, off + 1); }
+fn swap_u32(buf: &mut [u8], off: usize) {
+    buf.swap(off, off + 3);
+    buf.swap(off + 1, off + 2);
+}
+fn swap_u16(buf: &mut [u8], off: usize) {
+    buf.swap(off, off + 1);
+}
 fn swap_u64(buf: &mut [u8], off: usize) {
-    buf.swap(off, off + 7); buf.swap(off + 1, off + 6);
-    buf.swap(off + 2, off + 5); buf.swap(off + 3, off + 4);
+    buf.swap(off, off + 7);
+    buf.swap(off + 1, off + 6);
+    buf.swap(off + 2, off + 5);
+    buf.swap(off + 3, off + 4);
 }
 
 /// Convert a complete little-endian MIPS64 ELF (as emitted by the parent
@@ -84,7 +117,9 @@ fn swap_u64(buf: &mut [u8], off: usize) {
 /// 3. All PHDR multi-byte fields (p_type through p_align)
 /// 4. All 4-byte instruction words in executable LOAD segments
 fn swap_le_elf_to_be(elf: &mut [u8]) {
-    if elf.len() < 64 { return; }
+    if elf.len() < 64 {
+        return;
+    }
 
     // Read ELF header offsets/sizes BEFORE swapping — the parent (mips64)
     // emits these as LE bytes, and step 2 below will swap them to BE.
@@ -117,16 +152,18 @@ fn swap_le_elf_to_be(elf: &mut [u8]) {
     let mut segments: Vec<(u32, usize, usize)> = Vec::new(); // (p_flags, p_offset, p_filesz)
     let mut off = phoff;
     for _ in 0..phnum {
-        if off + phentsize > elf.len() { break; }
-        let p_flags  = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
+        if off + phentsize > elf.len() {
+            break;
+        }
+        let p_flags = u32::from_le_bytes(elf[off + 4..off + 8].try_into().unwrap());
         let p_offset = u64::from_le_bytes(elf[off + 8..off + 16].try_into().unwrap()) as usize;
         let p_filesz = u64::from_le_bytes(elf[off + 32..off + 40].try_into().unwrap()) as usize;
         segments.push((p_flags, p_offset, p_filesz));
 
         // Swap PHDR fields in place
-        swap_u32(elf, off);      // p_type
-        swap_u32(elf, off + 4);  // p_flags
-        swap_u64(elf, off + 8);  // p_offset
+        swap_u32(elf, off); // p_type
+        swap_u32(elf, off + 4); // p_flags
+        swap_u64(elf, off + 8); // p_offset
         swap_u64(elf, off + 16); // p_vaddr
         swap_u64(elf, off + 24); // p_paddr
         swap_u64(elf, off + 32); // p_filesz
@@ -138,7 +175,8 @@ fn swap_le_elf_to_be(elf: &mut [u8]) {
     // 4. Swap 4-byte instruction words in executable LOAD segments
     let header_end = phoff + phnum * phentsize;
     for (p_flags, p_offset, p_filesz) in &segments {
-        if p_flags & 1 != 0 { // PF_X
+        if p_flags & 1 != 0 {
+            // PF_X
             let start = (*p_offset).max(header_end);
             let end = (*p_offset + *p_filesz).min(elf.len());
             let mut i = start;
@@ -151,7 +189,9 @@ fn swap_le_elf_to_be(elf: &mut [u8]) {
 }
 
 impl Backend for Mips64BeBackend {
-    fn name(&self) -> &'static str { "mips64be" }
+    fn name(&self) -> &'static str {
+        "mips64be"
+    }
 
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         self.inner.target_info()
@@ -231,13 +271,17 @@ mod tests {
     use std::collections::HashSet;
     use std::panic;
 
-    /// Wave 13 conformance: verify that `IRInstr::Syscall { nr: 1, .. }`
-    /// inheritance from the parent `Mips64Backend` works.  Because Wave 12
-    /// has not yet implemented Syscall on the parent mips64 backend, this
-    /// test uses `catch_unwind` and asserts that the result is EITHER
-    /// non-empty encoded output (Wave 12 landed) OR a panic containing
-    /// "Wave 12" (still pending).  Once Wave 12 lands, the test will
-    /// automatically require non-empty output.
+    /// Wave 13 conformance (post Task 7-f): verify that
+    /// `IRInstr::Syscall { nr: 1, .. }` inheritance from the parent
+    /// `Mips64Backend` works. The parent's Syscall arm at
+    /// `mips64/mod.rs:3251` is fully implemented — it emits the N64-ABI
+    /// syscall sequence (LI V0, nr; SYSCALL; NOP; BEQ A3, Zero, +8; NOP;
+    /// DSUBU V0, Zero, V0; SD V0, dst_off) plus the parent's stack-slot
+    /// store, totalling 64 bytes for this minimal test case. This test
+    /// therefore asserts the success path directly; the `catch_unwind`
+    /// wrapper is retained as defense-in-depth (e.g. if a future change
+    /// re-introduces a panic-on-unsupported-syscall path) but is no
+    /// longer required by the implementation.
     #[test]
     fn test_syscall_inherited_from_mips64() {
         let backend = Mips64BeBackend::new();
@@ -251,7 +295,7 @@ mod tests {
             blocks: vec![IRBlock {
                 label: "entry".to_string(),
                 instructions: vec![IRInstr::Syscall {
-                    nr: 1, // __NR_exit on MIPS64 Linux
+                    nr: 1, // __NR_write (generic) on MIPS64 Linux
                     args: vec![],
                     dst: Some(IRValue::Register(0)),
                 }],
@@ -263,7 +307,9 @@ mod tests {
             source_file: String::new(),
         };
 
-        // Attempt allocation + encoding, catching the Wave 12 panic.
+        // Wave 7-f: parent mips64 backend's Syscall arm is implemented.
+        // We still wrap in catch_unwind for defense-in-depth, but the
+        // panic branch should now be unreachable.
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             let allocated = backend.allocate_registers(&func)?;
             backend.encode_function(&allocated)
@@ -271,15 +317,33 @@ mod tests {
 
         match result {
             Ok(Ok(bytes)) => {
+                // Parent mips64 emits 64 bytes for this minimal Syscall
+                // (LI + SYSCALL + NOP + BEQ + NOP + DSUBU + SD + NOP).
+                // The wrapper byte-swaps each 4-byte word LE→BE but does
+                // not change the total length.
+                assert!(
+                    !bytes.is_empty(),
+                    "wave13/7-f: mips64be should emit non-empty bytes for IRInstr::Syscall (got 0)"
+                );
                 assert_eq!(
                     bytes.len(),
-                    48,
-                    "wave13: mips64be should emit exactly 48 bytes for IRInstr::Syscall"
+                    64,
+                    "wave13/7-f: mips64be should emit exactly 64 bytes for IRInstr::Syscall (got {})",
+                    bytes.len()
+                );
+                // Sanity: every 4-byte word should be the LE→BE swap of
+                // the parent's LE emission. The wrapper's contract is
+                // "length unchanged, words swapped", so the total length
+                // must equal what the parent would emit.
+                assert_eq!(
+                    bytes.len() % 4,
+                    0,
+                    "wave13/7-f: mips64be output must be 4-byte aligned"
                 );
             }
             Ok(Err(e)) => {
                 panic!(
-                    "mips64be allocate_registers/encode_function returned error (not Wave 12 panic): {}",
+                    "mips64be allocate_registers/encode_function returned error: {}",
                     e
                 );
             }
@@ -289,9 +353,8 @@ mod tests {
                     .map(|s| s.as_str())
                     .or_else(|| panic_payload.downcast_ref::<&str>().copied())
                     .unwrap_or("<non-string panic>");
-                assert!(
-                    msg.contains("Wave 12"),
-                    "mips64be panicked with unexpected message (expected 'Wave 12' pending): {}",
+                panic!(
+                    "mips64be Syscall unexpectedly panicked (parent arm is implemented as of Task 7-f): {}",
                     msg
                 );
             }

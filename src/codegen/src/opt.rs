@@ -13,7 +13,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    BinOpKind, CastKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRType, IRTerminator, IRValue, UnaryOpKind,
+    BinOpKind, CastKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRTerminator, IRType,
+    IRValue, UnaryOpKind,
 };
 
 // ===========================================================================
@@ -25,8 +26,8 @@ use crate::ir::{
 /// Channel<T> values are pointer-sized opaque capability handles.  They
 /// are not represented as a separate IRValue variant - they live in
 /// ordinary virtual registers (`IRValue::Register`) - so the existing
-/// substitution logic passes them through unchanged.  (Wave 1a / Task 1a
-/// step 7: "pass through - channel values are opaque handles".)
+/// substitution logic passes them through unchanged.  (Channel values
+/// are opaque handles — passed through unchanged.)
 fn substitute_value(val: &IRValue, map: &HashMap<u32, IRValue>) -> IRValue {
     if let IRValue::Register(id) = val {
         if let Some(replacement) = map.get(id) {
@@ -40,32 +41,58 @@ fn substitute_value(val: &IRValue, map: &HashMap<u32, IRValue>) -> IRValue {
 fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
     let sv = |v: &IRValue| substitute_value(v, map);
     match instr {
-        IRInstr::Load { dst, addr, offset, ty } => IRInstr::Load {
+        IRInstr::Load {
+            dst,
+            addr,
+            offset,
+            ty,
+        } => IRInstr::Load {
             dst: sv(dst),
             addr: sv(addr),
             offset: *offset,
             ty: ty.clone(),
         },
-        IRInstr::Store { value, addr, offset, ty } => IRInstr::Store {
+        IRInstr::Store {
+            value,
+            addr,
+            offset,
+            ty,
+        } => IRInstr::Store {
             value: sv(value),
             addr: sv(addr),
             offset: *offset,
             ty: ty.clone(),
         },
-        IRInstr::BinOp { op, dst, lhs, rhs, ty } => IRInstr::BinOp {
+        IRInstr::BinOp {
+            op,
+            dst,
+            lhs,
+            rhs,
+            ty,
+        } => IRInstr::BinOp {
             op: *op,
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
             ty: ty.clone(),
         },
-        IRInstr::UnaryOp { op, dst, operand, ty } => IRInstr::UnaryOp {
+        IRInstr::UnaryOp {
+            op,
+            dst,
+            operand,
+            ty,
+        } => IRInstr::UnaryOp {
             op: *op,
             dst: sv(dst),
             operand: sv(operand),
             ty: ty.clone(),
         },
-        IRInstr::Call { dst, func, args, is_extern } => IRInstr::Call {
+        IRInstr::Call {
+            dst,
+            func,
+            args,
+            is_extern,
+        } => IRInstr::Call {
             dst: dst.as_ref().map(&sv),
             func: func.clone(),
             args: args.iter().map(sv).collect(),
@@ -76,7 +103,13 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             size: *size,
         },
         IRInstr::Free { ptr } => IRInstr::Free { ptr: sv(ptr) },
-        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => IRInstr::Cast {
+        IRInstr::Cast {
+            kind,
+            dst,
+            src,
+            from_ty,
+            to_ty,
+        } => IRInstr::Cast {
             kind: *kind,
             dst: sv(dst),
             src: sv(src),
@@ -174,12 +207,7 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             false_val: sv(false_val),
             ty: ty.clone(),
         },
-        IRInstr::CtEq {
-            dst,
-            lhs,
-            rhs,
-            ty,
-        } => IRInstr::CtEq {
+        IRInstr::CtEq { dst, lhs, rhs, ty } => IRInstr::CtEq {
             dst: sv(dst),
             lhs: sv(lhs),
             rhs: sv(rhs),
@@ -195,7 +223,13 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             addr: sv(addr),
             ty: ty.clone(),
         },
-        IRInstr::AtomicCas { dst, addr, expected, desired, ty } => IRInstr::AtomicCas {
+        IRInstr::AtomicCas {
+            dst,
+            addr,
+            expected,
+            desired,
+            ty,
+        } => IRInstr::AtomicCas {
             dst: sv(dst),
             addr: sv(addr),
             expected: sv(expected),
@@ -207,7 +241,14 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             args: args.iter().map(sv).collect(),
             dst: dst.as_ref().map(sv),
         },
-        IRInstr::VectorOp { op, lanes, elem_size, dst, lhs, rhs } => IRInstr::VectorOp {
+        IRInstr::VectorOp {
+            op,
+            lanes,
+            elem_size,
+            dst,
+            lhs,
+            rhs,
+        } => IRInstr::VectorOp {
             op: *op,
             lanes: *lanes,
             elem_size: *elem_size,
@@ -215,7 +256,7 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             lhs: sv(lhs),
             rhs: sv(rhs),
         },
-        // Wave 1d / Task 2a: channel instructions.
+        // Channel instructions.
         // Channel handles (ch) and freshly-defined destinations (dst) are
         // opaque capability tokens — they pass through substitution
         // unchanged.  The message value (msg) is a normal data value and
@@ -234,30 +275,46 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             dst: dst.clone(),
             ty: ty.clone(),
         },
-        IRInstr::ChannelRecvTimeout { ch, dst, ty, timeout_ms } => IRInstr::ChannelRecvTimeout {
+        IRInstr::ChannelRecvTimeout {
+            ch,
+            dst,
+            ty,
+            timeout_ms,
+        } => IRInstr::ChannelRecvTimeout {
             ch: ch.clone(),
             dst: dst.clone(),
             ty: ty.clone(),
             timeout_ms: *timeout_ms,
         },
-        // Wave 8b: substitute both value dst and err_dst of the fallible recv.
-        IRInstr::ChannelRecvResult { ch, dst, err_dst, ty } => IRInstr::ChannelRecvResult {
+        // Substitute both value dst and err_dst of the fallible recv.
+        IRInstr::ChannelRecvResult {
+            ch,
+            dst,
+            err_dst,
+            ty,
+        } => IRInstr::ChannelRecvResult {
             ch: ch.clone(),
             dst: dst.clone(),
             err_dst: err_dst.clone(),
             ty: ty.clone(),
         },
-        IRInstr::ChannelClose { ch } => IRInstr::ChannelClose {
-            ch: ch.clone(),
-        },
-        // Wave 93-94: substitute the public input of a STARK proof.
-        IRInstr::StarkProof { input, dst, constraints } => IRInstr::StarkProof {
+        IRInstr::ChannelClose { ch } => IRInstr::ChannelClose { ch: ch.clone() },
+        // Substitute the public input of a STARK proof.
+        IRInstr::StarkProof {
+            input,
+            dst,
+            constraints,
+        } => IRInstr::StarkProof {
             input: sv(input),
             dst: sv(dst),
             constraints: constraints.clone(),
         },
-        // Wave 49: substitute func_ptr + args of indirect call.
-        IRInstr::CallIndirect { dst, func_ptr, args } => IRInstr::CallIndirect {
+        // Substitute func_ptr + args of indirect call.
+        IRInstr::CallIndirect {
+            dst,
+            func_ptr,
+            args,
+        } => IRInstr::CallIndirect {
             dst: dst.clone(),
             func_ptr: sv(func_ptr),
             args: args.iter().map(sv).collect(),
@@ -358,7 +415,11 @@ fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64, ty: Option<&IRType>) -> Opt
             BinOpKind::Ne => return Some(if lf != rf { 1 } else { 0 }),
             _ => return try_fold_binop_int(op, lhs, rhs),
         };
-        return Some(if is_f64 { result.to_bits() as i64 } else { (result as f32).to_bits() as i64 });
+        return Some(if is_f64 {
+            result.to_bits() as i64
+        } else {
+            (result as f32).to_bits() as i64
+        });
     }
     try_fold_binop_int(op, lhs, rhs)
 }
@@ -369,19 +430,27 @@ fn try_fold_binop_int(op: BinOpKind, lhs: i64, rhs: i64) -> Option<i64> {
         BinOpKind::Sub => Some(lhs.wrapping_sub(rhs)),
         BinOpKind::Mul => Some(lhs.wrapping_mul(rhs)),
         BinOpKind::SDiv => {
-            if rhs == 0 { return None; }
+            if rhs == 0 {
+                return None;
+            }
             lhs.checked_div(rhs)
         }
         BinOpKind::UDiv => {
-            if rhs == 0 { return None; }
+            if rhs == 0 {
+                return None;
+            }
             Some((lhs as u64 / rhs as u64) as i64)
         }
         BinOpKind::SRem => {
-            if rhs == 0 { return None; }
+            if rhs == 0 {
+                return None;
+            }
             lhs.checked_rem(rhs)
         }
         BinOpKind::URem => {
-            if rhs == 0 { return None; }
+            if rhs == 0 {
+                return None;
+            }
             Some((lhs as u64 % rhs as u64) as i64)
         }
         BinOpKind::And => Some(lhs & rhs),
@@ -453,14 +522,14 @@ fn has_side_effects(instr: &IRInstr) -> bool {
         | IRInstr::ChannelRecvTimeout { .. }
         | IRInstr::ChannelRecvResult { .. }
         | IRInstr::ChannelClose { .. }
-        // Wave 93-94: StarkProof allocates a proof buffer (side-effecting).
+        // StarkProof allocates a proof buffer (side-effecting).
         | IRInstr::StarkProof { .. } => true,
         IRInstr::BinOp { op, .. } => matches!(
             op,
             BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
         ),
         IRInstr::Div { .. } => true,
-        // (Wave 2d) All 4 channel instructions (ChannelOpen/Send/Recv/
+        // All 4 channel instructions (ChannelOpen/Send/Recv/
         // Close) are listed above as side-effecting: they perform I/O
         // (allocate / block / wake / deallocate) and are observable even
         // when their dst vreg is unused.  DCE must never remove them.
@@ -489,7 +558,7 @@ fn is_safe_to_speculate(instr: &IRInstr) -> bool {
         IRInstr::Ret { .. } => false,
         IRInstr::Branch { .. } => false,
         IRInstr::CondBranch { .. } => false,
-        // (Wave 2d) Channel ops may block or wake other threads -- never
+        // Channel ops may block or wake other threads -- never
         // speculate (LICM must keep them inside the loop).
         IRInstr::ChannelOpen { .. } => false,
         IRInstr::ChannelSend { .. } => false,
@@ -518,7 +587,7 @@ fn get_defined_value(instr: &IRInstr) -> Option<&IRValue> {
         IRInstr::Mul { dst, .. } => Some(dst),
         IRInstr::Div { dst, .. } => Some(dst),
         IRInstr::Cmp { dst, .. } => Some(dst),
-        // (Wave 2d) Channel ops that produce a value (handle / received msg).
+        // Channel ops that produce a value (handle / received msg).
         // Send and Close write no vreg and fall through to `_ => None`.
         IRInstr::ChannelOpen { dst, .. } => Some(dst),
         IRInstr::ChannelRecv { dst, .. } => Some(dst),
@@ -637,11 +706,7 @@ fn materialize_f32_immediates(mut func: IRFunction) -> IRFunction {
 
     /// If `val` is an f32-bit Immediate, emit a materializing `Add` and
     /// replace `val` with the Add's dst Register.
-    fn materialize(
-        val: &mut IRValue,
-        vreg_counter: &mut u32,
-        new_instrs: &mut Vec<IRInstr>,
-    ) {
+    fn materialize(val: &mut IRValue, vreg_counter: &mut u32, new_instrs: &mut Vec<IRInstr>) {
         if let IRValue::Immediate(imm) = val {
             if is_f32_bits(*imm) {
                 let dst_vreg = *vreg_counter;
@@ -663,8 +728,7 @@ fn materialize_f32_immediates(mut func: IRFunction) -> IRFunction {
         for instr in &block.instructions {
             let mut instr = instr.clone();
             match &mut instr {
-                IRInstr::Cmp { lhs, rhs, ty, .. }
-                | IRInstr::BinOp { lhs, rhs, ty, .. } => {
+                IRInstr::Cmp { lhs, rhs, ty, .. } | IRInstr::BinOp { lhs, rhs, ty, .. } => {
                     if matches!(ty, Some(IRType::F32)) {
                         materialize(lhs, &mut vreg_counter, &mut new_instrs);
                         materialize(rhs, &mut vreg_counter, &mut new_instrs);
@@ -742,7 +806,7 @@ fn compute_expr_key(instr: &IRInstr) -> Option<ExprKey> {
         IRInstr::Cmp { kind, lhs, rhs, .. } => {
             Some(ExprKey::Compare(*kind, lhs.clone(), rhs.clone()))
         }
-        // (Wave 2d) Channel instructions have side effects -- two identical
+        // Channel instructions have side effects -- two identical
         // channel_send / channel_recv calls are NOT equivalent (each
         // transfers a distinct message), so they are not CSE candidates.
         IRInstr::ChannelOpen { .. }
@@ -909,14 +973,22 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
 /// eliminated, or `None` if it cannot be folded.
 fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
     match instr {
-        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+        IRInstr::BinOp {
+            op,
+            dst,
+            lhs,
+            rhs,
+            ty,
+        } => {
             let l = lhs.as_immediate()?;
             let r = rhs.as_immediate()?;
             let dst_id = dst.as_register()?;
             let result = try_fold_binop(*op, l, r, ty.as_ref())?;
             Some((dst_id, result))
         }
-        IRInstr::UnaryOp { op, dst, operand, .. } => {
+        IRInstr::UnaryOp {
+            op, dst, operand, ..
+        } => {
             let o = operand.as_immediate()?;
             let dst_id = dst.as_register()?;
             let result = try_fold_unaryop(*op, o)?;
@@ -949,7 +1021,13 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             let dst_id = dst.as_register()?;
             l.checked_div(r).map(|v| (dst_id, v))
         }
-        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
+        IRInstr::Cast {
+            kind,
+            dst,
+            src,
+            from_ty,
+            to_ty,
+        } => {
             let v = src.as_immediate()?;
             let dst_id = dst.as_register()?;
             // G7: fold Cast with Immediate operand. This is critical for
@@ -1045,7 +1123,7 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
             let result = try_fold_cmp(*kind, l, r)?;
             Some((dst_id, result))
         }
-        // (Wave 2d) Channel instructions cannot be constant-folded:
+        // Channel instructions cannot be constant-folded:
         //  - ChannelOpen returns a fresh opaque handle (runtime identity).
         //  - ChannelSend has no result and performs I/O.
         //  - ChannelRecv returns a value sent by another thread (unknowable
@@ -1136,24 +1214,54 @@ fn terminator_used_regs(terminator: &IRTerminator) -> Vec<u32> {
     match terminator {
         IRTerminator::Return(vals) => vals
             .iter()
-            .filter_map(|v| if let IRValue::Register(id) = v { Some(*id) } else { None })
+            .filter_map(|v| {
+                if let IRValue::Register(id) = v {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
             .collect(),
         IRTerminator::Branch { cond, .. } => {
-            if let IRValue::Register(id) = cond { vec![*id] } else { vec![] }
+            if let IRValue::Register(id) = cond {
+                vec![*id]
+            } else {
+                vec![]
+            }
         }
         IRTerminator::Switch { discr, .. } => {
-            if let IRValue::Register(id) = discr { vec![*id] } else { vec![] }
+            if let IRValue::Register(id) = discr {
+                vec![*id]
+            } else {
+                vec![]
+            }
         }
         IRTerminator::Invoke { args, .. } => args
             .iter()
-            .filter_map(|v| if let IRValue::Register(id) = v { Some(*id) } else { None })
+            .filter_map(|v| {
+                if let IRValue::Register(id) = v {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
             .collect(),
         IRTerminator::TailCall { args, .. } => args
             .iter()
-            .filter_map(|v| if let IRValue::Register(id) = v { Some(*id) } else { None })
+            .filter_map(|v| {
+                if let IRValue::Register(id) = v {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
             .collect(),
         IRTerminator::Resume { value } => {
-            if let IRValue::Register(id) = value { vec![*id] } else { vec![] }
+            if let IRValue::Register(id) = value {
+                vec![*id]
+            } else {
+                vec![]
+            }
         }
         IRTerminator::Jump(_) | IRTerminator::Unreachable => vec![],
     }
@@ -1243,7 +1351,7 @@ fn inline_cost(instr: &IRInstr) -> u32 {
         IRInstr::Div { .. } => 20,
         // Calls: don't inline functions that contain calls (unless very small)
         IRInstr::Call { .. } => 40,
-        // (Wave 2d) Channel ops lower to runtime calls (allocate / enqueue
+        // Channel ops lower to runtime calls (allocate / enqueue
         // / dequeue / deallocate).  Cost them like a Call so the inliner
         // treats functions containing channel ops conservatively.
         IRInstr::ChannelOpen { .. }
@@ -1264,7 +1372,7 @@ fn inline_cost(instr: &IRInstr) -> u32 {
 /// Compute the total inlining cost of a function, with savings for
 /// constant arguments that will be folded after inlining.
 ///
-/// (Wave 25) The cost model is **per-instruction** (using [`inline_cost`])
+/// The cost model is **per-instruction** (using [`inline_cost`])
 /// plus a **per-call-argument** overhead of `2 * args.len()`. The
 /// per-arg overhead models:
 ///   - the register-allocator pressure each argument adds at the call
@@ -1294,7 +1402,10 @@ fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
     // `add(3, 4)` becomes `3 + 4` which folds to `7` — the entire function
     // disappears. We subtract 3 per constant arg (the cost of the Add that
     // would have used it).
-    let const_args = args.iter().filter(|a| matches!(a, IRValue::Immediate(_))).count();
+    let const_args = args
+        .iter()
+        .filter(|a| matches!(a, IRValue::Immediate(_)))
+        .count();
     cost.saturating_sub(const_args as u32 * 3)
 }
 
@@ -1303,16 +1414,13 @@ fn function_inline_cost(callee: &IRFunction, args: &[IRValue]) -> u32 {
 /// but with real per-instruction costs so Div/Call are weighted higher).
 const INLINE_THRESHOLD_O2: u32 = 8;
 
-pub fn inline_small(
-    func: IRFunction,
-    program_funcs: &HashMap<String, &IRFunction>,
-) -> IRFunction {
+pub fn inline_small(func: IRFunction, program_funcs: &HashMap<String, &IRFunction>) -> IRFunction {
     inline_with_threshold(func, program_funcs, INLINE_THRESHOLD_O2)
 }
 
 /// Inlining with a caller-specified cost threshold.
 ///
-/// (Wave 25) Caps total inlines per function at `MAX_INLINES_PER_FN` to
+/// Caps total inlines per function at `MAX_INLINES_PER_FN` to
 /// prevent runaway inlining in the presence of mutual recursion (A calls
 /// B calls A) — direct self-recursion is already skipped above, but
 /// mutual recursion would otherwise loop until the block list explodes.
@@ -1326,7 +1434,7 @@ pub fn inline_with_threshold(
     let mut vreg_counter = max_vreg_id(&func) + 1;
     let mut inline_id: u32 = 0;
 
-    // (Wave 25) Visited-set + total-inline cap: prevents mutual-recursion
+    // Visited-set + total-inline cap: prevents mutual-recursion
     // explosions. We track which callees have already been inlined into
     // this caller — a callee that has been inlined once is not inlined
     // again (its second call site would just re-inline the same body,
@@ -1350,12 +1458,12 @@ pub fn inline_with_threshold(
                 if *callee_name == func.name {
                     continue;
                 }
-                // (Wave 25) Don't re-inline a callee we've already inlined
+                // Don't re-inline a callee we've already inlined
                 // — mutual-recursion / repeat-call guard.
                 if inlined_callees.contains(callee_name) {
                     continue;
                 }
-                // (Wave 25) Total-inline cap — prevents pathological
+                // Total-inline cap — prevents pathological
                 // blow-up even when the visited-set doesn't catch it.
                 if inline_id >= MAX_INLINES_PER_FN {
                     continue;
@@ -1369,7 +1477,7 @@ pub fn inline_with_threshold(
                     // are inserted inline, the Return is replaced with a Jump
                     // to the continuation, and no Phi nodes are involved.
                     //
-                    // (Wave 25 fix): the previous code hard-coded
+                    // The previous code hard-coded
                     // `instruction_count() <= 5` and silently ignored the
                     // `threshold` parameter — so callers that bumped the
                     // threshold from `CompileConfig` never actually got more
@@ -1377,7 +1485,7 @@ pub fn inline_with_threshold(
                     // in `function_inline_cost` was dead code. Use the cost
                     // model + threshold now.
                     //
-                    // (Wave 51): threshold == 0 disables inlining entirely.
+                    // Threshold == 0 disables inlining entirely.
                     // This is needed because function_inline_cost can return 0
                     // for functions with all-constant args (saturating_sub
                     // brings the cost to 0), so `cost <= 0` would still inline.
@@ -1396,7 +1504,7 @@ pub fn inline_with_threshold(
             let callee = program_funcs.get(&callee_name).unwrap();
             let prefix = format!("inl{}_{}", inline_id, func.blocks[block_idx].label);
             inline_id += 1;
-            // (Wave 25) Record that this callee has been inlined into `func`
+            // Record that this callee has been inlined into `func`
             // so we don't re-inline it at a later call site.
             inlined_callees.insert(callee_name.clone());
 
@@ -1404,7 +1512,7 @@ pub fn inline_with_threshold(
             // explicit copy instructions (param_vreg = caller_arg + 0) at the
             // start of the inlined body.
             //
-            // (Wave 54 fix): Previously, callee params were mapped directly
+            // Previously, callee params were mapped directly
             // to the caller's arg vregs. This is correct for the FIRST read
             // of the param, but if the callee reassigns the param (e.g.,
             // `pos = pos + 1` inside a loop), the reassignment's `dst` would
@@ -1476,7 +1584,7 @@ pub fn inline_with_threshold(
                 let new_label = format!("{}_{}", prefix, cblock.label);
                 let mut new_block = IRBlock::new(&new_label);
 
-                // (Wave 54) Insert param-copy instructions at the start of
+                // Insert param-copy instructions at the start of
                 // the FIRST inlined block. These copy the caller's args into
                 // fresh param vregs, so the callee body can freely reassign
                 // its params without clobbering the caller's variables.
@@ -1487,7 +1595,7 @@ pub fn inline_with_threshold(
                 }
 
                 for instr in &cblock.instructions {
-                    // (Wave 51) Strip instruction-level control-flow from
+                    // Strip instruction-level control-flow from
                     // the cloned callee body. The IR builder emits BOTH an
                     // `IRInstr::Ret { values }` *and* an `IRTerminator::Return(values)`
                     // for every return (see `scg_to_ir.rs:1048-1052`). The
@@ -1716,7 +1824,7 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
         let mut invariant_instrs: Vec<IRInstr> = Vec::new();
         let mut remove_indices: Vec<usize> = Vec::new();
 
-        // (Wave 26) For Load hoisting: collect all Stores in the loop body
+        // For Load hoisting: collect all Stores in the loop body
         // so we can check aliasing. A Load is only hoistable if NO Store
         // in the loop body may-alias its address. This is the may-alias
         // soundness check the task requires ("LICM doesn't hoist memory
@@ -1726,7 +1834,12 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
             .iter()
             .filter(|b| loop_body_labels.contains(&b.label))
             .flat_map(|b| b.instructions.iter())
-            .filter(|i| matches!(i, IRInstr::Store { .. } | IRInstr::AtomicStore { .. } | IRInstr::Call { .. }))
+            .filter(|i| {
+                matches!(
+                    i,
+                    IRInstr::Store { .. } | IRInstr::AtomicStore { .. } | IRInstr::Call { .. }
+                )
+            })
             .collect();
         let alias_info = crate::alias_analysis::AliasAnalysis::analyze(&func);
 
@@ -1736,7 +1849,7 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
                 continue;
             }
             // Skip side-effect and trapping instructions.
-            // (Wave 26) EXCEPTION: pure Loads whose address is loop-invariant
+            // EXCEPTION: pure Loads whose address is loop-invariant
             // AND that don't alias any Store in the loop body are safe to
             // hoist. The conservative `is_safe_to_speculate(Load) = false`
             // default stays for out-of-loop callers.
@@ -1751,7 +1864,10 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
                     };
                     !alias_info.values_may_alias(addr, store_addr)
                 });
-                no_alias && loop_stores.iter().all(|s| !matches!(s, IRInstr::Call { .. }))
+                no_alias
+                    && loop_stores
+                        .iter()
+                        .all(|s| !matches!(s, IRInstr::Call { .. }))
             } else {
                 false
             };
@@ -1765,9 +1881,9 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
             // outside but also modified inside (like a loop counter) is
             // NOT loop-invariant.
             let used = instr.used_regs();
-            let all_invariant = used.iter().all(|id| {
-                outside_defs.contains(id) && !loop_modified.contains(id)
-            });
+            let all_invariant = used
+                .iter()
+                .all(|id| outside_defs.contains(id) && !loop_modified.contains(id));
             if all_invariant {
                 invariant_instrs.push(instr.clone());
                 remove_indices.push(i);
@@ -1807,8 +1923,11 @@ pub fn licm(mut func: IRFunction) -> IRFunction {
                 continue;
             }
             // Check if this block's terminator jumps to the header.
-            let jumps_to_header = block.terminator.successor_labels()
-                .iter().any(|s| *s == header_label);
+            let jumps_to_header = block
+                .terminator
+                .successor_labels()
+                .iter()
+                .any(|s| *s == header_label);
             if jumps_to_header {
                 redirect_terminator(&mut block.terminator, &header_label, &preheader_label);
                 // CRITICAL: also rewrite the embodied IRInstr::Branch / CondBranch
@@ -1904,7 +2023,7 @@ pub fn run_optimizations(program: IRProgram) -> IRProgram {
 /// When profile data is available (from an instrumented run), the e-graph
 /// cost function biases extraction toward hot-path optimization: hot
 /// expressions get lower cost (prefer optimized form), cold expressions
-/// get higher cost (accept code-size reduction). This is Wave 12.
+/// get higher cost (accept code-size reduction).
 ///
 /// If the profile is empty, falls back to `run_optimizations_with_target`.
 pub fn run_optimizations_with_profile(
@@ -1922,7 +2041,7 @@ pub fn run_optimizations_with_profile(
 
 /// Run optimizations with a target-specific latency table.
 ///
-/// The latency table is used by the e-graph cost function (Wave 10) to
+/// The latency table is used by the e-graph cost function to
 /// make per-ISA extraction decisions — e.g., `x*2 → x+x` is beneficial
 /// on ISAs where multiply is expensive (hppa: 4-cycle) but may be kept
 /// as `x*2` on ISAs where LEA makes it 1-cycle (x86).
@@ -1940,14 +2059,14 @@ pub fn run_optimizations_with_target(
     )
 }
 
-/// Default inline cost threshold (Wave 25). Matches the historical
+/// Default inline cost threshold. Matches the historical
 /// `INLINE_THRESHOLD_O2` of 8 plus head-room for argument-count cost
 /// (each constant arg saves 3). The `CompileConfig.inline_threshold`
 /// default mirrors this value.
 pub const DEFAULT_INLINE_THRESHOLD: u32 = 40;
 
 /// Run optimizations with a target-specific latency table and an explicit
-/// inline cost threshold (Wave 25). The threshold is plumbed in from
+/// inline cost threshold. The threshold is plumbed in from
 /// `CompileConfig.inline_threshold` by the pipeline driver.
 pub fn run_optimizations_with_target_and_inline_threshold(
     program: IRProgram,
@@ -1975,10 +2094,10 @@ pub fn run_optimizations_with_profile_and_inline_threshold(
 }
 
 /// Inner optimization driver shared by `run_optimizations_with_target` and
-/// `run_optimizations_with_profile`. The optional profile (Wave 12) switches
+/// `run_optimizations_with_profile`. The optional profile switches
 /// the e-graph cost function from `target_cost_fn` to `pgo_cost_fn`.
 ///
-/// (Wave 25) `inline_threshold` is the per-callee cost budget — callees
+/// `inline_threshold` is the per-callee cost budget — callees
 /// whose `function_inline_cost` ≤ threshold get inlined at their call
 /// sites. Plumbed in from `CompileConfig.inline_threshold`.
 fn run_optimizations_inner(
@@ -1998,7 +2117,7 @@ fn run_optimizations_inner(
         func_map.iter().map(|(k, v)| (k.clone(), v)).collect();
 
     // Build the cost function for e-graph extraction.
-    // Wave 10: per-ISA target cost. Wave 12: PGO-augmented cost if profile available.
+    // Per-ISA target cost. PGO-augmented cost if profile available.
     let cost_fn: Box<dyn Fn(&crate::egraph::ENode) -> usize> = match profile {
         Some(prof) => crate::egraph::pgo_cost_fn(latency_table, prof),
         None => crate::egraph::target_cost_fn(latency_table),
@@ -2056,18 +2175,19 @@ fn run_optimizations_inner(
         program.functions[i] = f;
     }
 
-    // (Wave 28) Wire identical_function_merge — hash each function's
+    // Wire identical_function_merge — hash each function's
     // normalized body, merge duplicates, rewrite call sites. This is
-    // the e-graph equivalent of --icf=all. Defined since Wave 14 but
+    // the e-graph equivalent of --icf=all. Previously defined but
     // never called from the pipeline until now.
     program = identical_function_merge(program);
 
     program = whole_program_dce(program);
     for func in &mut program.functions {
-        *func = crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
+        *func =
+            crate::loop_unroll::unroll_loops(std::mem::replace(func, IRFunction::new("__tmp__")));
     }
 
-    // W1e: Materialize f32-bit immediates in FP Cmp/BinOp instructions.
+    // Materialize f32-bit immediates in FP Cmp/BinOp instructions.
     // Must run AFTER all folding/propagation passes (which produce f32-bit
     // immediates via `try_fold_binop`) and BEFORE codegen (whose
     // `load_value_f32` on x86_64 misinterprets f32-bit immediates as f64
@@ -2076,7 +2196,7 @@ fn run_optimizations_inner(
         *func = materialize_f32_immediates(std::mem::replace(func, IRFunction::new("__tmp__")));
     }
 
-    // ── Wave 8a: Deadlock detection (wait-for graph) ──
+    // ── Deadlock detection (wait-for graph) ──
     // Analyzes channel usage patterns to detect potential deadlocks.
     // Emits warnings (not errors) for circular channel waits.
     detect_deadlock(&program);
@@ -2084,7 +2204,7 @@ fn run_optimizations_inner(
     program
 }
 
-/// Wave 8a: Compile-time deadlock detection using a wait-for graph.
+/// Compile-time deadlock detection using a wait-for graph.
 ///
 /// For each function, builds a graph where:
 /// - A `ChannelRecv` on channel C adds a "waiting" edge
@@ -2118,39 +2238,35 @@ fn detect_deadlock(program: &IRProgram) {
                 match instr {
                     IRInstr::ChannelRecv { ch, .. } | IRInstr::ChannelRecvTimeout { ch, .. } => {
                         if let IRValue::Register(_) = ch {
-                            usage.recv_channels.insert(format!(
-                                "{}_ch_{:?}",
-                                func.name,
-                                ch
-                            ));
+                            usage
+                                .recv_channels
+                                .insert(format!("{}_ch_{:?}", func.name, ch));
                         }
                     }
                     IRInstr::ChannelSend { ch, .. } => {
                         if let IRValue::Register(_) = ch {
-                            usage.send_channels.insert(format!(
-                                "{}_ch_{:?}",
-                                func.name,
-                                ch
-                            ));
+                            usage
+                                .send_channels
+                                .insert(format!("{}_ch_{:?}", func.name, ch));
                         }
                     }
                     // Also detect channel builtins called as regular functions
                     // (the direct AST→codegen bridge lowers channel_recv etc.
                     // to Call instructions, not ChannelRecv IR instructions)
-                    IRInstr::Call { func: fname, args, .. } => {
+                    IRInstr::Call {
+                        func: fname, args, ..
+                    } => {
                         if fname == "channel_recv" || fname == "channel_try_recv" {
                             if let Some(ch) = args.first() {
-                                usage.recv_channels.insert(format!(
-                                    "{}_ch_{:?}",
-                                    func.name, ch
-                                ));
+                                usage
+                                    .recv_channels
+                                    .insert(format!("{}_ch_{:?}", func.name, ch));
                             }
                         } else if fname == "channel_send" {
                             if let Some(ch) = args.first() {
-                                usage.send_channels.insert(format!(
-                                    "{}_ch_{:?}",
-                                    func.name, ch
-                                ));
+                                usage
+                                    .send_channels
+                                    .insert(format!("{}_ch_{:?}", func.name, ch));
                             }
                         }
                     }
@@ -2170,26 +2286,19 @@ fn detect_deadlock(program: &IRProgram) {
 
                 for instr in &block.instructions {
                     match instr {
-                        IRInstr::ChannelRecv { ch, .. } | IRInstr::ChannelRecvTimeout { ch, .. } => {
+                        IRInstr::ChannelRecv { ch, .. }
+                        | IRInstr::ChannelRecvTimeout { ch, .. } => {
                             seen_recv = true;
-                            recv_channels_in_block.insert(format!(
-                                "{}_ch_{:?}",
-                                func.name, ch
-                            ));
+                            recv_channels_in_block.insert(format!("{}_ch_{:?}", func.name, ch));
                         }
-                        IRInstr::ChannelSend { ch, .. } => {
-                            if seen_recv {
-                                let ch_name = format!(
-                                    "{}_ch_{:?}",
-                                    func.name, ch
-                                );
-                                if recv_channels_in_block.contains(&ch_name) {
-                                    // Send to the same channel after recv in
-                                    // the same block — not a deadlock, but
-                                    // recv will block until the send executes.
-                                    // This is a potential deadlock if the send
-                                    // is conditional.
-                                }
+                        IRInstr::ChannelSend { ch, .. } if seen_recv => {
+                            let ch_name = format!("{}_ch_{:?}", func.name, ch);
+                            if recv_channels_in_block.contains(&ch_name) {
+                                // Send to the same channel after recv in
+                                // the same block — not a deadlock, but
+                                // recv will block until the send executes.
+                                // This is a potential deadlock if the send
+                                // is conditional.
                             }
                         }
                         _ => {}
@@ -2233,12 +2342,14 @@ fn detect_deadlock(program: &IRProgram) {
             let (name_a, usage_a) = (func_names[i], &usage_map[func_names[i]]);
             let (name_b, usage_b) = (func_names[j], &usage_map[func_names[j]]);
             // Check if A waits on something B signals and vice versa
-            let a_waits_b = usage_a.recv_channels.iter().any(|c| {
-                usage_b.send_channels.contains(c)
-            });
-            let b_waits_a = usage_b.recv_channels.iter().any(|c| {
-                usage_a.send_channels.contains(c)
-            });
+            let a_waits_b = usage_a
+                .recv_channels
+                .iter()
+                .any(|c| usage_b.send_channels.contains(c));
+            let b_waits_a = usage_b
+                .recv_channels
+                .iter()
+                .any(|c| usage_a.send_channels.contains(c));
             if a_waits_b && b_waits_a {
                 eprintln!(
                     "[vuma] WARNING: potential deadlock between '{}' and '{}' \
@@ -2253,9 +2364,9 @@ fn detect_deadlock(program: &IRProgram) {
 /// Removes functions that are unreachable from any entry point (main or
 /// functions marked as extern). This is the LTO equivalent of --gc-sections.
 ///
-/// (Wave 39) Reachability now also accounts for `IRInstr::GetAddress`
+/// Reachability now also accounts for `IRInstr::GetAddress`
 /// references — a function whose address is taken via `fn_name as u64`
-/// (Wave 5 FnAddr feature) but which is never directly CALLED must still
+/// but which is never directly CALLED must still
 /// survive DCE, because the address is registered in a runtime table
 /// (e.g. SyscallTable) and may be invoked indirectly through
 /// `__call_indirect1` later. Without this, the function body is removed,
@@ -2287,12 +2398,15 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
             if reachable.contains(&func.name) {
                 for block in &func.blocks {
                     for instr in &block.instructions {
-                        if let IRInstr::Call { func: call_target, .. } = instr {
+                        if let IRInstr::Call {
+                            func: call_target, ..
+                        } = instr
+                        {
                             if !reachable.contains(call_target) {
                                 // Don't mark extern functions as reachable
                                 // (they're not in program.functions).
-                                let is_internal = program.functions
-                                    .iter().any(|f| &f.name == call_target);
+                                let is_internal =
+                                    program.functions.iter().any(|f| &f.name == call_target);
                                 if is_internal {
                                     reachable.insert(call_target.clone());
                                     changed = true;
@@ -2309,8 +2423,8 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
     // Simpler approach: just keep functions that are reachable or look like runtime stubs.
     let mut keep: HashSet<String> = HashSet::new();
     for func in &program.functions {
-        if func.name == "main" || func.name.starts_with("fn_main") ||
-           f_name_is_runtime(&func.name) {
+        if func.name == "main" || func.name.starts_with("fn_main") || f_name_is_runtime(&func.name)
+        {
             keep.insert(func.name.clone());
         }
     }
@@ -2323,25 +2437,27 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
             if keep.contains(&func.name) {
                 for block in &func.blocks {
                     for instr in &block.instructions {
-                        if let IRInstr::Call { func: call_target, .. } = instr {
+                        if let IRInstr::Call {
+                            func: call_target, ..
+                        } = instr
+                        {
                             if !keep.contains(call_target) {
-                                let is_internal = program.functions
-                                    .iter().any(|f| &f.name == call_target);
+                                let is_internal =
+                                    program.functions.iter().any(|f| &f.name == call_target);
                                 if is_internal && !f_name_is_runtime(call_target) {
                                     keep.insert(call_target.clone());
                                     changed2 = true;
                                 }
                             }
                         }
-                        // Wave 39: a GetAddress reference (`fn_name as u64`)
+                        // A GetAddress reference (`fn_name as u64`)
                         // keeps the named function alive even if it is never
                         // directly called. The address may be stored in a
                         // runtime table (SyscallTable, IrqTable, ...) and
                         // invoked indirectly via __call_indirect1.
                         if let IRInstr::GetAddress { name: sym, .. } = instr {
                             if !keep.contains(sym) {
-                                let is_internal = program.functions
-                                    .iter().any(|f| &f.name == sym);
+                                let is_internal = program.functions.iter().any(|f| &f.name == sym);
                                 if is_internal && !f_name_is_runtime(sym) {
                                     keep.insert(sym.clone());
                                     changed2 = true;
@@ -2354,7 +2470,9 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
         }
     }
 
-    program.functions.retain(|f| keep.contains(&f.name) || f_name_is_runtime(&f.name));
+    program
+        .functions
+        .retain(|f| keep.contains(&f.name) || f_name_is_runtime(&f.name));
 
     program
 }
@@ -2362,12 +2480,19 @@ pub fn whole_program_dce(mut program: IRProgram) -> IRProgram {
 /// Check if a function name is a runtime stub (always kept).
 /// These are extern functions referenced by name but not defined in the IR.
 fn f_name_is_runtime(name: &str) -> bool {
-    name.starts_with("__vuma") || name.starts_with("_vuma") ||
-    name == "write" || name == "read" || name == "exit" || name == "exit_group" ||
-    name == "mmap" || name == "munmap" || name == "brk" || name == "sigaction"
+    name.starts_with("__vuma")
+        || name.starts_with("_vuma")
+        || name == "write"
+        || name == "read"
+        || name == "exit"
+        || name == "exit_group"
+        || name == "mmap"
+        || name == "munmap"
+        || name == "brk"
+        || name == "sigaction"
 }
 
-/// Cross-function constant propagation (Wave 11 LTO).
+/// Cross-function constant propagation (LTO).
 ///
 /// If a function is always called with the same constant argument in a
 /// parameter position, propagate that constant into the function body and
@@ -2385,7 +2510,7 @@ fn f_name_is_runtime(name: &str) -> bool {
 ///
 /// Then constant_fold folds 5*5 → 25, and DCE removes the now-trivial function.
 ///
-/// (Wave 2d) Channel instructions (`ChannelOpen`/`Send`/`Recv`/`Close`) are
+/// Channel instructions (`ChannelOpen`/`Send`/`Recv`/`Close`) are
 /// NOT constants: channel handles are fresh opaque capabilities allocated at
 /// runtime, and received values come from other threads.  This pass only
 /// inspects `IRInstr::Call` (it propagates constant *arguments* into callee
@@ -2405,7 +2530,10 @@ pub fn cross_function_constant_prop(mut program: IRProgram) -> IRProgram {
         for caller in &program.functions {
             for block in &caller.blocks {
                 for instr in &block.instructions {
-                    if let IRInstr::Call { func: target, args, .. } = instr {
+                    if let IRInstr::Call {
+                        func: target, args, ..
+                    } = instr
+                    {
                         if target == fname {
                             call_args.push(args.clone());
                         }
@@ -2431,16 +2559,18 @@ pub fn cross_function_constant_prop(mut program: IRProgram) -> IRProgram {
 
         for p in 0..n_params {
             // Get the argument at position p from each call site.
-            let args_at_p: Vec<&IRValue> = call_args.iter()
-                .filter_map(|args| args.get(p))
-                .collect();
+            let args_at_p: Vec<&IRValue> =
+                call_args.iter().filter_map(|args| args.get(p)).collect();
             if args_at_p.is_empty() {
                 continue;
             }
             // Check if all args at position p are the same Immediate.
             if let IRValue::Immediate(first) = args_at_p[0] {
                 let first = *first;
-                if args_at_p.iter().all(|a| matches!(a, IRValue::Immediate(v) if *v == first)) {
+                if args_at_p
+                    .iter()
+                    .all(|a| matches!(a, IRValue::Immediate(v) if *v == first))
+                {
                     // All call sites pass the same constant for this param.
                     const_params.push((p, IRValue::Immediate(first)));
                 }
@@ -2478,7 +2608,7 @@ pub fn cross_function_constant_prop(mut program: IRProgram) -> IRProgram {
 
 /// Substitute all uses of `old_vreg` with `new_val` in an instruction.
 ///
-/// (Wave 28) Previously this helper only covered BinOp/Add/Sub/Mul/Div/
+/// Previously this helper only covered BinOp/Add/Sub/Mul/Div/
 /// Cmp/Load/Store/Offset/Cast/Select/Call — missing UnaryOp, Phi,
 /// GetAddress, AtomicLoad/Store/Cas, Syscall, and Ret. The missed
 /// variants were the root cause of the "propagated constants leave
@@ -2499,8 +2629,10 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
             sub(lhs, old_vreg, &new_val);
             sub(rhs, old_vreg, &new_val);
         }
-        IRInstr::Add { lhs, rhs, .. } | IRInstr::Sub { lhs, rhs, .. }
-        | IRInstr::Mul { lhs, rhs, .. } | IRInstr::Div { lhs, rhs, .. } => {
+        IRInstr::Add { lhs, rhs, .. }
+        | IRInstr::Sub { lhs, rhs, .. }
+        | IRInstr::Mul { lhs, rhs, .. }
+        | IRInstr::Div { lhs, rhs, .. } => {
             sub(lhs, old_vreg, &new_val);
             sub(rhs, old_vreg, &new_val);
         }
@@ -2519,7 +2651,12 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
             sub(offset, old_vreg, &new_val);
         }
         IRInstr::Cast { src, .. } => sub(src, old_vreg, &new_val),
-        IRInstr::Select { cond, true_val, false_val, .. } => {
+        IRInstr::Select {
+            cond,
+            true_val,
+            false_val,
+            ..
+        } => {
             sub(cond, old_vreg, &new_val);
             sub(true_val, old_vreg, &new_val);
             sub(false_val, old_vreg, &new_val);
@@ -2529,7 +2666,7 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
                 sub(a, old_vreg, &new_val);
             }
         }
-        // (Wave 28) Previously-missing variants:
+        // Previously-missing variants:
         IRInstr::Phi { incoming, .. } => {
             for (v, _) in incoming.iter_mut() {
                 sub(v, old_vreg, &new_val);
@@ -2543,7 +2680,12 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
             sub(value, old_vreg, &new_val);
             sub(addr, old_vreg, &new_val);
         }
-        IRInstr::AtomicCas { addr, expected, desired, .. } => {
+        IRInstr::AtomicCas {
+            addr,
+            expected,
+            desired,
+            ..
+        } => {
             sub(addr, old_vreg, &new_val);
             sub(expected, old_vreg, &new_val);
             sub(desired, old_vreg, &new_val);
@@ -2553,7 +2695,12 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
                 sub(a, old_vreg, &new_val);
             }
         }
-        IRInstr::CtSelect { cond, true_val, false_val, .. } => {
+        IRInstr::CtSelect {
+            cond,
+            true_val,
+            false_val,
+            ..
+        } => {
             sub(cond, old_vreg, &new_val);
             sub(true_val, old_vreg, &new_val);
             sub(false_val, old_vreg, &new_val);
@@ -2570,7 +2717,7 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
         IRInstr::CondBranch { cond, .. } => sub(cond, old_vreg, &new_val),
         // Free, Branch, Alloc have only one vreg operand or none.
         IRInstr::Free { ptr } => sub(ptr, old_vreg, &new_val),
-        // (Wave 2d) Channel instruction operand substitution.  Channel
+        // Channel instruction operand substitution.  Channel
         // handles live in ordinary vregs, so a propagated constant must
         // be substituted into `ch`/`msg`/`dst` just like any other vreg
         // operand.  (Channel handles themselves are never constants, but
@@ -2596,7 +2743,7 @@ fn substitute_vreg_in_instr(instr: &mut IRInstr, old_vreg: u32, new_val: IRValue
     }
 }
 
-/// Identical function merging (Wave 14).
+/// Identical function merging.
 ///
 /// Detects functions with structurally identical IR and merges them into
 /// a single function. All call sites are redirected to the merged function.
@@ -2607,7 +2754,10 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
 
     for func in &program.functions {
         let hash = compute_function_hash(func);
-        hash_to_func.entry(hash).or_default().push(func.name.clone());
+        hash_to_func
+            .entry(hash)
+            .or_default()
+            .push(func.name.clone());
     }
 
     // Build merge map: for each set of identical functions, pick the first
@@ -2630,18 +2780,21 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
     for func in &mut program.functions {
         for block in &mut func.blocks {
             for instr in &mut block.instructions {
-                if let IRInstr::Call { func: call_target, .. } = instr {
+                if let IRInstr::Call {
+                    func: call_target, ..
+                } = instr
+                {
                     if let Some(canonical) = merge_map.get(call_target) {
                         *call_target = canonical.clone();
                     }
                 }
-                // Wave 39: also redirect GetAddress references. Without
+                // Also redirect GetAddress references. Without
                 // this, a `fn_name as u64` expression that names a
                 // merged-away function leaves an unresolved R_X86_64_64
                 // relocation, which the static-ELF patcher can't resolve
                 // (the symbol is no longer in `func_offsets`), so the
                 // registered handler address silently becomes 0. This
-                // breaks the W39 syscall_init contract: the SyscallTable
+                // breaks the syscall_init contract: the SyscallTable
                 // would be full of 0 entries for any handler whose body
                 // happened to be structurally identical to an earlier
                 // handler's body (a common case for stub handlers like
@@ -2657,7 +2810,9 @@ pub fn identical_function_merge(mut program: IRProgram) -> IRProgram {
 
     // Remove merged (non-canonical) functions.
     let merged_names: HashSet<String> = merge_map.keys().cloned().collect();
-    program.functions.retain(|f| !merged_names.contains(&f.name));
+    program
+        .functions
+        .retain(|f| !merged_names.contains(&f.name));
 
     program
 }
@@ -2696,15 +2851,40 @@ fn compute_function_hash(func: &IRFunction) -> String {
                 IRInstr::Sub { dst, lhs, rhs, .. } => format!("sub:{:?}:{:?}:{:?}", dst, lhs, rhs),
                 IRInstr::Mul { dst, lhs, rhs, .. } => format!("mul:{:?}:{:?}:{:?}", dst, lhs, rhs),
                 IRInstr::Div { dst, lhs, rhs, .. } => format!("div:{:?}:{:?}:{:?}", dst, lhs, rhs),
-                IRInstr::BinOp { op, dst, lhs, rhs, .. } => format!("binop:{:?}:{:?}:{:?}:{:?}", op, dst, lhs, rhs),
-                IRInstr::Cmp { kind, dst, lhs, rhs, .. } => format!("cmp:{:?}:{:?}:{:?}:{:?}", kind, dst, lhs, rhs),
-                IRInstr::Load { dst, addr, offset, ty } => format!("load:{:?}:{:?}:{:?}:{:?}", dst, addr, offset, ty),
-                IRInstr::Store { value, addr, offset, ty } => format!("store:{:?}:{:?}:{:?}:{:?}", value, addr, offset, ty),
+                IRInstr::BinOp {
+                    op, dst, lhs, rhs, ..
+                } => format!("binop:{:?}:{:?}:{:?}:{:?}", op, dst, lhs, rhs),
+                IRInstr::Cmp {
+                    kind,
+                    dst,
+                    lhs,
+                    rhs,
+                    ..
+                } => format!("cmp:{:?}:{:?}:{:?}:{:?}", kind, dst, lhs, rhs),
+                IRInstr::Load {
+                    dst,
+                    addr,
+                    offset,
+                    ty,
+                } => format!("load:{:?}:{:?}:{:?}:{:?}", dst, addr, offset, ty),
+                IRInstr::Store {
+                    value,
+                    addr,
+                    offset,
+                    ty,
+                } => format!("store:{:?}:{:?}:{:?}:{:?}", value, addr, offset, ty),
                 IRInstr::Alloc { dst, size } => format!("alloc:{:?}:{}", dst, size),
                 // CRITICAL: include call target in hash
-                IRInstr::Call { dst, func: call_target, args, .. } => format!("call:{:?}:{}:{}", dst, call_target, args.len()),
+                IRInstr::Call {
+                    dst,
+                    func: call_target,
+                    args,
+                    ..
+                } => format!("call:{:?}:{}:{}", dst, call_target, args.len()),
                 IRInstr::Cast { dst, src, .. } => format!("cast:{:?}:{:?}", dst, src),
-                IRInstr::Offset { dst, base, offset } => format!("offset:{:?}:{:?}:{:?}", dst, base, offset),
+                IRInstr::Offset { dst, base, offset } => {
+                    format!("offset:{:?}:{:?}:{:?}", dst, base, offset)
+                }
                 IRInstr::Select { dst, cond, .. } => format!("select:{:?}:{:?}", dst, cond),
                 // CRITICAL: include the returned values — `return 0` ≠ `return 1`.
                 // Previously this was just "ret", which made ICF merge `fn ok(){return 0}`
@@ -2714,12 +2894,17 @@ fn compute_function_hash(func: &IRFunction) -> String {
                 IRInstr::CondBranch { .. } => "condbranch".to_string(),
                 IRInstr::Free { .. } => "free".to_string(),
                 IRInstr::Phi { .. } => "phi".to_string(),
-                // (Wave 2d) Channel ops: include operand vregs so ICF
+                // Channel ops: include operand vregs so ICF
                 // distinguishes functions whose channel usage differs.
                 IRInstr::ChannelOpen { dst, elem_ty } => format!("chopen:{:?}:{:?}", dst, elem_ty),
                 IRInstr::ChannelSend { ch, msg, .. } => format!("chsend:{:?}:{:?}", ch, msg),
                 IRInstr::ChannelRecv { ch, dst, .. } => format!("chrecv:{:?}:{:?}", ch, dst),
-                IRInstr::ChannelRecvTimeout { ch, dst, timeout_ms, .. } => format!("chrecvto:{:?}:{:?}:{}", ch, dst, timeout_ms),
+                IRInstr::ChannelRecvTimeout {
+                    ch,
+                    dst,
+                    timeout_ms,
+                    ..
+                } => format!("chrecvto:{:?}:{:?}:{}", ch, dst, timeout_ms),
                 IRInstr::ChannelClose { ch } => format!("chclose:{:?}", ch),
                 _ => "other".to_string(),
             });
@@ -2740,7 +2925,7 @@ fn compute_function_hash(func: &IRFunction) -> String {
     parts.join("|")
 }
 
-/// Equality saturation pass (Wave 2).
+/// Equality saturation pass.
 ///
 /// Builds an e-graph from the function's IR, applies rewrite rules to
 /// discover equivalences, then extracts the cheapest form for each
@@ -2750,7 +2935,7 @@ pub fn equality_saturation(func: IRFunction) -> IRFunction {
     equality_saturation_with_cost(func, &crate::egraph::default_cost)
 }
 
-/// Equality saturation with a caller-supplied cost function (Wave 10).
+/// Equality saturation with a caller-supplied cost function.
 ///
 /// This variant allows the e-graph extraction to use a per-ISA cost
 /// function (from `target_cost_fn`) so that rewrites like `x*2 → x+x`
@@ -2759,7 +2944,7 @@ pub fn equality_saturation_with_cost(
     mut func: IRFunction,
     cost_fn: &dyn Fn(&crate::egraph::ENode) -> usize,
 ) -> IRFunction {
-    use crate::egraph::{EGraph, ENode, standard_rules};
+    use crate::egraph::{standard_rules, EGraph, ENode};
 
     let rules = standard_rules();
 
@@ -2806,11 +2991,21 @@ pub fn equality_saturation_with_cost(
         for instr in &block.instructions {
             // Extract (op, dst, lhs, rhs) from either BinOp or Add/Sub/Mul/Div.
             let (op, dst, lhs, rhs) = match instr {
-                IRInstr::BinOp { op, dst, lhs, rhs, .. } => (*op, dst.clone(), lhs.clone(), rhs.clone()),
-                IRInstr::Add { dst, lhs, rhs, .. } => (BinOpKind::Add, dst.clone(), lhs.clone(), rhs.clone()),
-                IRInstr::Sub { dst, lhs, rhs, .. } => (BinOpKind::Sub, dst.clone(), lhs.clone(), rhs.clone()),
-                IRInstr::Mul { dst, lhs, rhs, .. } => (BinOpKind::Mul, dst.clone(), lhs.clone(), rhs.clone()),
-                IRInstr::Div { dst, lhs, rhs, .. } => (BinOpKind::UDiv, dst.clone(), lhs.clone(), rhs.clone()),
+                IRInstr::BinOp {
+                    op, dst, lhs, rhs, ..
+                } => (*op, dst.clone(), lhs.clone(), rhs.clone()),
+                IRInstr::Add { dst, lhs, rhs, .. } => {
+                    (BinOpKind::Add, dst.clone(), lhs.clone(), rhs.clone())
+                }
+                IRInstr::Sub { dst, lhs, rhs, .. } => {
+                    (BinOpKind::Sub, dst.clone(), lhs.clone(), rhs.clone())
+                }
+                IRInstr::Mul { dst, lhs, rhs, .. } => {
+                    (BinOpKind::Mul, dst.clone(), lhs.clone(), rhs.clone())
+                }
+                IRInstr::Div { dst, lhs, rhs, .. } => {
+                    (BinOpKind::UDiv, dst.clone(), lhs.clone(), rhs.clone())
+                }
                 _ => continue,
             };
             let lhs_node = value_to_enode(&lhs, &vreg_to_eclass);
@@ -2836,7 +3031,9 @@ pub fn equality_saturation_with_cost(
         // the instruction in place. Handles BinOp AND Add/Sub/Mul/Div variants.
         for instr in &mut block.instructions {
             match instr {
-                IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                IRInstr::BinOp {
+                    op, dst, lhs, rhs, ..
+                } => {
                     if let Some(dst_id) = dst.as_register() {
                         if let Some(&class_id) = vreg_to_eclass.get(&dst_id) {
                             let best = eg.extract(class_id, cost_fn);
@@ -2862,7 +3059,7 @@ pub fn equality_saturation_with_cost(
                                         *rhs = new_rhs;
                                     }
                                 }
-                                // Wave 5: state-op ENodes (StateInit/StateRead/
+                                // State-op ENodes (StateInit/StateRead/
                                 // StateWrite/StateTransform) are never produced
                                 // by `eg.extract()` here because this pass only
                                 // feeds BinOp instructions to the e-graph (see
@@ -2950,7 +3147,7 @@ pub fn equality_saturation_with_cost(
     func
 }
 
-/// IVE→codegen loop closure pass (Wave 8).
+/// IVE→codegen loop closure pass.
 ///
 /// When the IVE has proven that memory regions are exclusive (via CapD::Exclusive),
 /// this pass marks load/store pairs in the IR so that downstream passes
@@ -2960,7 +3157,7 @@ pub fn equality_saturation_with_cost(
 /// have different vreg IDs, they are proven non-aliasing (since each Alloc
 /// creates a unique region). This is the simplest form of the IVE proof.
 /// Future work: integrate actual IVE verification results.
-/// IVE→codegen loop closure pass (Wave 8).
+/// IVE→codegen loop closure pass.
 ///
 /// This pass consumes the IVE's proven non-aliasing information and makes
 /// it available to downstream optimization passes (DSE, LICM, scheduler).
@@ -3000,7 +3197,7 @@ pub fn mark_ive_proven_nonaliasing(func: IRFunction) -> (IRFunction, HashMap<u32
 
     // Iterate to fixpoint (most derivations resolve in 1-2 passes).
     let mut changed = true;
-    let max_passes = 4;  // Bounded to avoid pathological loops.
+    let max_passes = 4; // Bounded to avoid pathological loops.
     let mut passes = 0;
     while changed && passes < max_passes {
         changed = false;
@@ -3028,7 +3225,13 @@ pub fn mark_ive_proven_nonaliasing(func: IRFunction) -> (IRFunction, HashMap<u32
                             }
                         }
                     }
-                    IRInstr::BinOp { op: BinOpKind::Add, dst, lhs, rhs, .. } => {
+                    IRInstr::BinOp {
+                        op: BinOpKind::Add,
+                        dst,
+                        lhs,
+                        rhs,
+                        ..
+                    } => {
                         // dst = lhs + rhs → if one operand is a pointer (has
                         // provenance) and the other is an offset (doesn't),
                         // dst inherits the pointer's region.
@@ -3038,7 +3241,10 @@ pub fn mark_ive_proven_nonaliasing(func: IRFunction) -> (IRFunction, HashMap<u32
                             let region = match (lhs_reg, rhs_reg) {
                                 (Some(l), Some(r)) => {
                                     // Both registers: prefer the one with provenance.
-                                    provenance.get(&l).copied().or_else(|| provenance.get(&r).copied())
+                                    provenance
+                                        .get(&l)
+                                        .copied()
+                                        .or_else(|| provenance.get(&r).copied())
                                 }
                                 (Some(l), None) => provenance.get(&l).copied(),
                                 (None, Some(r)) => provenance.get(&r).copied(),
@@ -3092,7 +3298,8 @@ pub fn mark_ive_proven_nonaliasing(func: IRFunction) -> (IRFunction, HashMap<u32
 
     // Log the closure (visible in -v verbose mode via the timing stage).
     if tagged_loads + tagged_stores > 0 {
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "IVE→codegen: tagged {} loads, {} stores with Alloc-region provenance",
             tagged_loads,
             tagged_stores
@@ -3128,20 +3335,17 @@ pub fn ive_values_proven_non_aliasing_with(
     }
 }
 
-/// Dead store elimination pass (Wave 3 + Wave 8 enhancement).
+/// Dead store elimination pass.
 ///
 /// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
 /// non-aliasing to identify stores that are overwritten before any load
-/// reads them. The IVE enhancement (Wave 8) allows DSE to prove
+/// reads them. The IVE enhancement allows DSE to prove
 /// non-aliasing across same-type pointers from different allocations —
 /// a case TBAA cannot handle.
 ///
 /// The provenance map is passed explicitly (no thread-local) from
 /// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
-pub fn dead_store_eliminate(
-    mut func: IRFunction,
-    provenance: &HashMap<u32, u32>,
-) -> IRFunction {
+pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>) -> IRFunction {
     use crate::alias_analysis::AliasAnalysis;
 
     let aa = AliasAnalysis::analyze(&func);
@@ -3182,9 +3386,9 @@ pub fn dead_store_eliminate(
             // later store to the SAME base vreg at a DIFFERENT offset
             // actually overwrites our bytes (see the overlap check below).
             let (store_addr_i, store_off_i, store_size_i) = match &block.instructions[i] {
-                IRInstr::Store { addr, offset, ty, .. } => {
-                    (addr, *offset as i64, crate::ir::size_of(ty) as i64)
-                }
+                IRInstr::Store {
+                    addr, offset, ty, ..
+                } => (addr, *offset as i64, crate::ir::size_of(ty) as i64),
                 _ => continue,
             };
 
@@ -3194,7 +3398,7 @@ pub fn dead_store_eliminate(
                 match &block.instructions[j] {
                     IRInstr::Load { addr: load_addr, .. }
                         // If a load may alias with our store, the store is not dead.
-                        // (Wave 8: IVE proof can override TBAA here.)
+                        // (IVE proof can override TBAA here.)
                         if may_alias_combined(&aa, provenance, store_addr_i, load_addr) => {
                             break;
                         }
@@ -3295,7 +3499,10 @@ pub fn dead_store_eliminate(
 }
 
 /// Convert an IRValue to an ENode for the e-graph.
-fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId>) -> crate::egraph::ENode {
+fn value_to_enode(
+    val: &IRValue,
+    vreg_map: &HashMap<u32, crate::egraph::EClassId>,
+) -> crate::egraph::ENode {
     use crate::egraph::ENode;
     match val {
         IRValue::Immediate(v) => ENode::Lit(*v),
@@ -3324,18 +3531,18 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 // mod tests {
 //     use super::*;
 //     use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind};
-// 
+//
 //     // ---- Helper: build a minimal function from instructions ----
-// 
+//
 //     fn make_func_with_instrs(name: &str, instrs: Vec<IRInstr>) -> IRFunction {
 //         let mut func = IRFunction::new(name);
 //         func.blocks[0].instructions = instrs;
 //         func.blocks[0].terminator = IRTerminator::Return(vec![]);
 //         func
 //     }
-// 
+//
 //     // ---- Constant Folding Tests ----
-// 
+//
 //     #[test]
 //     fn constant_fold_add() {
 //         let func = make_func_with_instrs(
@@ -3351,7 +3558,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         // Instruction should be eliminated (folded to 7).
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_sub() {
 //         let func = make_func_with_instrs(
@@ -3366,7 +3573,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = constant_fold(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_mul() {
 //         let func = make_func_with_instrs(
@@ -3381,7 +3588,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = constant_fold(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_div_by_zero() {
 //         // Division by zero must NOT be folded.
@@ -3397,7 +3604,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = constant_fold(func);
 //         assert_eq!(result.blocks[0].instructions.len(), 1);
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_chain() {
 //         // x = 3 + 4 → 7;  y = x + 5 → 12
@@ -3417,7 +3624,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             },
 //         ];
 //         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
-// 
+//
 //         let result = constant_fold(func);
 //         // Both instructions should be eliminated; Return should use Immediate(12).
 //         assert!(result.blocks[0].instructions.is_empty());
@@ -3429,7 +3636,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             _ => panic!("expected Return terminator"),
 //         }
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_dedicated_add() {
 //         let func = make_func_with_instrs(
@@ -3443,7 +3650,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = constant_fold(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_and_or_xor() {
 //         for (op, expected) in [
@@ -3466,7 +3673,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //                 "failed for {:?}",
 //                 op
 //             );
-// 
+//
 //             // Verify via return value.
 //             let mut func2 = IRFunction::new("test");
 //             func2.blocks[0].instructions = vec![IRInstr::BinOp {
@@ -3485,7 +3692,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             }
 //         }
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_shift() {
 //         let func = make_func_with_instrs(
@@ -3508,7 +3715,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = constant_fold(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_unary_neg_not() {
 //         let mut func = IRFunction::new("test");
@@ -3536,7 +3743,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             _ => panic!("expected Return"),
 //         }
 //     }
-// 
+//
 //     #[test]
 //     fn constant_fold_cmp() {
 //         let func = make_func_with_instrs(
@@ -3551,9 +3758,9 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = constant_fold(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     // ---- Dead Code Elimination Tests ----
-// 
+//
 //     #[test]
 //     fn dce_removes_dead_binop() {
 //         let mut func = IRFunction::new("test");
@@ -3570,7 +3777,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = dead_code_eliminate(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     #[test]
 //     fn dce_keeps_used_binop() {
 //         let mut func = IRFunction::new("test");
@@ -3584,7 +3791,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = dead_code_eliminate(func);
 //         assert_eq!(result.blocks[0].instructions.len(), 1);
 //     }
-// 
+//
 //     #[test]
 //     fn dce_keeps_side_effects() {
 //         let mut func = IRFunction::new("test");
@@ -3596,7 +3803,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = dead_code_eliminate(func);
 //         assert_eq!(result.blocks[0].instructions.len(), 1);
 //     }
-// 
+//
 //     #[test]
 //     fn dce_keeps_call() {
 //         let mut func = IRFunction::new("test");
@@ -3610,7 +3817,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = dead_code_eliminate(func);
 //         assert_eq!(result.blocks[0].instructions.len(), 1);
 //     }
-// 
+//
 //     #[test]
 //     fn dce_removes_dead_alloc() {
 //         let mut func = IRFunction::new("test");
@@ -3622,9 +3829,9 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         let result = dead_code_eliminate(func);
 //         assert!(result.blocks[0].instructions.is_empty());
 //     }
-// 
+//
 //     // ---- CSE Tests ----
-// 
+//
 //     #[test]
 //     fn cse_duplicate_binop() {
 //         let mut func = IRFunction::new("test");
@@ -3644,11 +3851,11 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             },
 //         ];
 //         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
-// 
+//
 //         let result = cse(func);
 //         // Second BinOp should be eliminated.
 //         assert_eq!(result.blocks[0].instructions.len(), 1);
-// 
+//
 //         // v2 should have been replaced with v1 in the return.
 //         match &result.blocks[0].terminator {
 //             IRTerminator::Return(vals) => {
@@ -3657,7 +3864,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             _ => panic!("expected Return"),
 //         }
 //     }
-// 
+//
 //     #[test]
 //     fn cse_duplicate_add() {
 //         let mut func = IRFunction::new("test");
@@ -3675,11 +3882,11 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             },
 //         ];
 //         func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
-// 
+//
 //         let result = cse(func);
 //         assert_eq!(result.blocks[0].instructions.len(), 1);
 //     }
-// 
+//
 //     #[test]
 //     fn cse_does_not_eliminate_different_ops() {
 //         let mut func = IRFunction::new("test");
@@ -3699,13 +3906,13 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             },
 //         ];
 //         func.blocks[0].terminator = IRTerminator::Return(vec![]);
-// 
+//
 //         let result = cse(func);
 //         assert_eq!(result.blocks[0].instructions.len(), 2);
 //     }
-// 
+//
 //     // ---- Inlining Tests ----
-// 
+//
 //     #[test]
 //     fn inline_small_fn() {
 //         // Callee: fn add_one(x) { v0 = x + 1; return v0 }
@@ -3720,7 +3927,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 //         callee.results = vec![IRValue::Register(1)];
 //         callee.result_types = vec![IRType::I64];
-// 
+//
 //         // Caller: v0 = call add_one(42)
 //         let mut caller = IRFunction::new("caller");
 //         caller.blocks[0].instructions = vec![IRInstr::Call {
@@ -3730,12 +3937,12 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             is_extern: false,
 //         }];
 //         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
-// 
+//
 //         let func_map: HashMap<String, &IRFunction> =
 //             [("add_one".to_string(), &callee)].into_iter().collect();
-// 
+//
 //         let result = inline_small(caller, &func_map);
-// 
+//
 //         // The call should have been replaced with inlined instructions.
 //         // There should be no Call instruction in any block.
 //         for block in &result.blocks {
@@ -3749,7 +3956,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         // There should be at least 2 blocks (prefix + continuation or inlined body).
 //         assert!(result.blocks.len() >= 2);
 //     }
-// 
+//
 //     #[test]
 //     fn inline_skips_large() {
 //         // Callee with >5 instructions.
@@ -3763,7 +3970,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             });
 //         }
 //         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(7)]);
-// 
+//
 //         let mut caller = IRFunction::new("caller");
 //         caller.blocks[0].instructions = vec![IRInstr::Call {
 //             dst: Some(IRValue::Register(0)),
@@ -3772,12 +3979,12 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             is_extern: false,
 //         }];
 //         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
-// 
+//
 //         let func_map: HashMap<String, &IRFunction> =
 //             [("big_fn".to_string(), &callee)].into_iter().collect();
-// 
+//
 //         let result = inline_small(caller, &func_map);
-// 
+//
 //         // The call should NOT have been inlined.
 //         assert_eq!(result.blocks.len(), 1);
 //         assert!(matches!(
@@ -3785,7 +3992,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             IRInstr::Call { func, .. } if func == "big_fn"
 //         ));
 //     }
-// 
+//
 //     #[test]
 //     fn inline_preserves_return_value() {
 //         // Callee: fn double(x) { return x * 2 }
@@ -3800,7 +4007,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 //         callee.results = vec![IRValue::Register(1)];
 //         callee.result_types = vec![IRType::I64];
-// 
+//
 //         // Caller: v0 = call double(21); ret v0
 //         let mut caller = IRFunction::new("caller");
 //         caller.blocks[0].instructions = vec![IRInstr::Call {
@@ -3810,21 +4017,21 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             is_extern: false,
 //         }];
 //         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
-// 
+//
 //         let func_map: HashMap<String, &IRFunction> =
 //             [("double".to_string(), &callee)].into_iter().collect();
-// 
+//
 //         let result = inline_small(caller, &func_map);
-// 
+//
 //         // The inlined body should contain the Mul instruction with args substituted.
 //         let all_instrs: Vec<&IRInstr> =
 //             result.blocks.iter().flat_map(|b| &b.instructions).collect();
 //         let has_mul = all_instrs.iter().any(|i| matches!(i, IRInstr::Mul { .. }));
 //         assert!(has_mul, "inlined body should contain the Mul instruction");
 //     }
-// 
+//
 //     // ---- LICM Tests ----
-// 
+//
 //     #[test]
 //     fn licm_moves_invariant() {
 //         // Build a loop with a loop-invariant computation in the header.
@@ -3842,7 +4049,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //         //   ret v1
 //         let mut func = IRFunction::new("test_licm");
 //         func.params = vec![IRValue::Register(0)];
-// 
+//
 //         // entry block
 //         func.blocks[0].label = "entry".to_string();
 //         func.blocks[0].instructions = vec![IRInstr::BinOp {
@@ -3852,7 +4059,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             rhs: IRValue::Immediate(1),
 //         }];
 //         func.blocks[0].terminator = IRTerminator::Jump("loop_header".to_string());
-// 
+//
 //         // loop_header block
 //         let mut loop_header = IRBlock::new("loop_header");
 //         loop_header.instructions = vec![
@@ -3875,16 +4082,16 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             true_block: "exit".to_string(),
 //             false_block: "loop_header".to_string(),
 //         };
-// 
+//
 //         // exit block
 //         let mut exit_block = IRBlock::new("exit");
 //         exit_block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
-// 
+//
 //         func.blocks = vec![func.blocks[0].clone(), loop_header, exit_block];
 //         func.rebuild_cfg();
-// 
+//
 //         let result = licm(func);
-// 
+//
 //         // The BinOp (v2 = v1 + 5) should have been moved out of the loop
 //         // header into the preheader.
 //         let preheader = result
@@ -3895,7 +4102,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             preheader.is_some(),
 //             "a preheader block should have been created"
 //         );
-// 
+//
 //         let preheader = preheader.unwrap();
 //         let has_invariant = preheader.instructions.iter().any(|i| {
 //             matches!(
@@ -3910,7 +4117,7 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 //             has_invariant,
 //             "loop-invariant BinOp should be in the preheader"
 //         );
-// 
+//
 //         // The loop header should no longer contain the invariant BinOp.
 //         let header = result.blocks.iter().find(|b| b.label == "loop_header");
 //         assert!(header.is_some());
@@ -3935,8 +4142,9 @@ fn value_to_enode(val: &IRValue, vreg_map: &HashMap<u32, crate::egraph::EClassId
 #[cfg(test)]
 mod working_tests {
     use super::*;
-    use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind};
-
+    use crate::ir::{
+        BinOpKind, CmpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind,
+    };
 
     #[test]
     fn licm_does_not_move_div() {
@@ -4165,7 +4373,7 @@ mod working_tests {
         }
     }
 
-    // ---- Wave 25 Inliner Tests ----
+    // ---- Inliner Tests ----
 
     #[test]
     fn wave25_inline_reduces_call_count() {
@@ -4207,7 +4415,10 @@ mod working_tests {
             .flat_map(|b| &b.instructions)
             .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "add_one"))
             .count();
-        assert_eq!(call_count, 0, "call to add_one should have been inlined away");
+        assert_eq!(
+            call_count, 0,
+            "call to add_one should have been inlined away"
+        );
         // The inlined body should contain an Add instruction.
         let has_add = result
             .blocks
@@ -4247,7 +4458,10 @@ mod working_tests {
             .flat_map(|b| &b.instructions)
             .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "rec"))
             .count();
-        assert_eq!(call_count, 1, "recursive call must be preserved exactly once");
+        assert_eq!(
+            call_count, 1,
+            "recursive call must be preserved exactly once"
+        );
     }
 
     #[test]
@@ -4283,8 +4497,9 @@ mod working_tests {
         };
 
         let callee_lo = callee.clone();
-        let map_lo: HashMap<String, &IRFunction> =
-            [("eight_adds".to_string(), &callee_lo)].into_iter().collect();
+        let map_lo: HashMap<String, &IRFunction> = [("eight_adds".to_string(), &callee_lo)]
+            .into_iter()
+            .collect();
         let r_lo = inline_with_threshold(make_caller(), &map_lo, 5);
         let calls_lo = r_lo
             .blocks
@@ -4292,11 +4507,15 @@ mod working_tests {
             .flat_map(|b| &b.instructions)
             .filter(|i| matches!(i, IRInstr::Call { func, .. } if func == "eight_adds"))
             .count();
-        assert_eq!(calls_lo, 1, "threshold=5 should NOT inline eight_adds (cost 7)");
+        assert_eq!(
+            calls_lo, 1,
+            "threshold=5 should NOT inline eight_adds (cost 7)"
+        );
 
         let callee_hi = callee.clone();
-        let map_hi: HashMap<String, &IRFunction> =
-            [("eight_adds".to_string(), &callee_hi)].into_iter().collect();
+        let map_hi: HashMap<String, &IRFunction> = [("eight_adds".to_string(), &callee_hi)]
+            .into_iter()
+            .collect();
         let r_hi = inline_with_threshold(make_caller(), &map_hi, 40);
         let calls_hi = r_hi
             .blocks
@@ -4307,7 +4526,7 @@ mod working_tests {
         assert_eq!(calls_hi, 0, "threshold=40 should inline eight_adds");
     }
 
-    // ---- Wave 51 Inliner Regression Tests ----
+    // ---- Inliner Regression Tests ----
 
     /// Regression for the O2 bootstrap miscompilation: the IR builder emits
     /// BOTH an `IRInstr::Ret { values }` *and* an `IRTerminator::Return(values)`
@@ -4336,7 +4555,9 @@ mod working_tests {
             },
             // The IR builder emits this instruction-level Ret alongside
             // the terminator-level Return.
-            IRInstr::Ret { values: vec![IRValue::Register(1)] },
+            IRInstr::Ret {
+                values: vec![IRValue::Register(1)],
+            },
         ];
         callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 
@@ -4361,7 +4582,9 @@ mod working_tests {
                 rhs: IRValue::Immediate(100),
                 ty: None,
             },
-            IRInstr::Ret { values: vec![IRValue::Register(2)] },
+            IRInstr::Ret {
+                values: vec![IRValue::Register(2)],
+            },
         ];
         caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
 
@@ -4394,17 +4617,16 @@ mod working_tests {
             .iter()
             .find(|b| b.label == "inl0_entry_cont")
             .expect("continuation block must exist");
-        let has_canary = cont
-            .instructions
-            .iter()
-            .any(|i| matches!(i, IRInstr::Add { dst, lhs, rhs, .. }
+        let has_canary = cont.instructions.iter().any(|i| {
+            matches!(i, IRInstr::Add { dst, lhs, rhs, .. }
                 if matches!(dst, IRValue::Register(2))
                 && matches!(lhs, IRValue::Register(0))
-                && matches!(rhs, IRValue::Immediate(100))));
+                && matches!(rhs, IRValue::Immediate(100)))
+        });
         assert!(has_canary, "continuation block must contain the canary Add");
     }
 
-    // ---- Wave 26 LICM Tests ----
+    // ---- LICM Tests ----
 
     #[test]
     fn wave26_licm_hoists_invariant_load() {
@@ -4462,10 +4684,15 @@ mod working_tests {
             .find(|b| b.label.starts_with("preheader"));
         assert!(preheader.is_some(), "LICM should create a preheader");
         let preheader = preheader.unwrap();
-        let preheader_has_load = preheader
-            .instructions
-            .iter()
-            .any(|i| matches!(i, IRInstr::Load { dst: IRValue::Register(1), .. }));
+        let preheader_has_load = preheader.instructions.iter().any(|i| {
+            matches!(
+                i,
+                IRInstr::Load {
+                    dst: IRValue::Register(1),
+                    ..
+                }
+            )
+        });
         assert!(
             preheader_has_load,
             "loop-invariant Load should be hoisted to preheader"
@@ -4477,10 +4704,15 @@ mod working_tests {
             .iter()
             .find(|b| b.label == "loop_header")
             .unwrap();
-        let header_has_load = header
-            .instructions
-            .iter()
-            .any(|i| matches!(i, IRInstr::Load { dst: IRValue::Register(1), .. }));
+        let header_has_load = header.instructions.iter().any(|i| {
+            matches!(
+                i,
+                IRInstr::Load {
+                    dst: IRValue::Register(1),
+                    ..
+                }
+            )
+        });
         assert!(
             !header_has_load,
             "loop-invariant Load should be removed from loop header"
@@ -4585,7 +4817,7 @@ mod working_tests {
         );
     }
 
-    // ---- Wave 28 Cross-Function Constant Prop + ICF Tests ----
+    // ---- Cross-Function Constant Prop + ICF Tests ----
 
     #[test]
     fn wave28_cross_function_constant_prop_propagates() {
@@ -4626,7 +4858,11 @@ mod working_tests {
 
         // The square function's body should now have the constant 5
         // substituted into the Mul's operands.
-        let square = result.functions.iter().find(|f| f.name == "square").unwrap();
+        let square = result
+            .functions
+            .iter()
+            .find(|f| f.name == "square")
+            .unwrap();
         let mul_uses_const_5 = square.blocks.iter().any(|b| {
             b.instructions.iter().any(|i| {
                 matches!(i,
@@ -4676,7 +4912,7 @@ mod working_tests {
             IRInstr::Call {
                 dst: Some(IRValue::Register(2)),
                 func: "id".to_string(),
-                args: vec![IRValue::Immediate(7)],  // different constant!
+                args: vec![IRValue::Immediate(7)], // different constant!
                 is_extern: false,
             },
         ];
@@ -4757,15 +4993,18 @@ mod working_tests {
         assert!(
             g1_present ^ g2_present,
             "exactly one of g1/g2 should remain after ICF (g1={}, g2={})",
-            g1_present, g2_present
+            g1_present,
+            g2_present
         );
 
         // All call sites should target the surviving function.
         let canonical = if g1_present { "g1" } else { "g2" };
         let main = result.functions.iter().find(|f| f.name == "main").unwrap();
-        let all_calls_canonical = main.blocks.iter().flat_map(|b| &b.instructions).all(|i| {
-            !matches!(i, IRInstr::Call { func, .. } if func != canonical)
-        });
+        let all_calls_canonical = main
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .all(|i| !matches!(i, IRInstr::Call { func, .. } if func != canonical));
         assert!(
             all_calls_canonical,
             "all call sites in main should target the canonical function `{}`",

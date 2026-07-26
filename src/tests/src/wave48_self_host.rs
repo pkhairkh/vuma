@@ -1,7 +1,6 @@
-//! # Wave 48 — Task 7-a + Task 7-b + Task 7-c: Multi-module compile + bootstrap self-host test
+//! # Multi-module compile + bootstrap self-host test
 //!
-//! Implements the end-to-end test coverage required by TASKS.md Wave 48
-//! `[BOOT-SELF]` (post-Task 7-a + Task 7-b + Task 7-c remediation):
+//! End-to-end test coverage for the bootstrap self-host milestone:
 //!
 //! 1. **Multi-module API smoke test** (`test_wave48_compile_modules_simple`)
 //!    — proves the `VumaCompiler::compile_modules` API and the
@@ -9,7 +8,7 @@
 //!    multi-module program (entry module + helper module linked via
 //!    `extern "C"`). Always runs (no platform gating, no `#[ignore]`).
 //!
-//! 2. **Deduplication regression tests** (Task 7-c)
+//! 2. **Deduplication regression tests**
 //!    - `test_compile_modules_dedups_identical_fns`: 2 modules where
 //!      both define `fn helper() -> i32 { return 42; }` — should
 //!      compile successfully (no error) and the resulting binary should
@@ -19,28 +18,25 @@
 //!      fail with a `VumaError` mentioning "conflicting fn definition".
 //!
 //! 3. **Bootstrap self-host end-to-end test** (`test_wave48_bootstrap_self_host`)
-//!    — the real Wave 48 contract: compile the 5 bootstrap `.vuma` files
+//!    — the real bootstrap contract: compile the 5 bootstrap `.vuma` files
 //!    (full_lexer + full_parser + ir_builder + codegen + elf) into a single
 //!    `vumac` ELF, run `./vumac womb/lang/hello.vuma`, then run the
-//!    emitted `a.out` and assert its stdout contains `"42"`. **PASSING
-//!    (Task 7-d)** — runs by default (no `#[ignore]`). See the test's
-//!    doc-comment for the Task 7-d resolution write-up.
-//!    Task 7-b RESOLVED the original `repd` parser-coverage blocker;
-//!    Task 7-c RESOLVED the `merge_module_asts` duplicate-fn blocker
-//!    (the bootstrap compiles end-to-end into a `vumac` ELF);
-//!    Task 7-d RESOLVED the `vumac` runtime-crash blocker (4 compounding
-//!    bugs: `name_hash` 64-bit IMUL garbage, `names` map not rolled back
-//!    on non-falling-through then-branch, O2 inliner miscompilation,
-//!    O2 instruction-scheduler TBAA miscompilation) — see the test's
-//!    doc-comment and TASKS.md's Wave 48 `[BOOT-SELF]` note for the
-//!    full root-cause analysis.
+//!    emitted `a.out` and assert its stdout contains `"42"`. **PASSING**
+//!    — runs by default (no `#[ignore]`). See the test's doc-comment for
+//!    the resolution write-up. Earlier blockers (`repd` parser-coverage,
+//!    `merge_module_asts` duplicate-fn, `vumac` runtime-crash) are now
+//!    resolved (4 compounding bugs: `name_hash` 64-bit IMUL garbage,
+//!    `names` map not rolled back on non-falling-through then-branch,
+//!    O2 inliner miscompilation, O2 instruction-scheduler TBAA
+//!    miscompilation) — see the test's doc-comment for the full
+//!    root-cause analysis.
 //!
 //! ## Platform gating
 //!
 //! All tests are `#[cfg(target_arch = "x86_64")]`-gated because they
 //! spawn the emitted ELF as a subprocess and assert on its exit code /
 //! stdout — only an x86_64 host can exec an x86_64 ELF natively (no
-//! qemu-user fallback in the test harness, mirroring Task 6-b's
+//! qemu-user fallback in the test harness, mirroring the
 //! `execute_x86_64_elf` gating).
 
 #[cfg(target_arch = "x86_64")]
@@ -95,9 +91,9 @@ fn workspace_root() -> std::path::PathBuf {
 /// This is the strongest assertion that does NOT depend on the bootstrap
 /// source files (which have a documented runtime-crash blocker in the
 /// emitted `vumac` ELF — see `test_wave48_bootstrap_self_host` below;
-/// the original `repd` parser-coverage blocker was RESOLVED by Task 7-b,
-/// and the `merge_module_asts` duplicate-fn blocker was RESOLVED by
-/// Task 7-c's dedup-or-conflict policy).
+/// the original `repd` parser-coverage blocker and the
+/// `merge_module_asts` duplicate-fn blocker are now resolved by the
+/// dedup-or-conflict policy).
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn test_wave48_compile_modules_simple() {
@@ -205,15 +201,15 @@ fn test_wave48_compile_modules_simple() {
 }
 
 // ===========================================================================
-// Test 1b — Deduplication of identical fn defs across modules (Task 7-c)
+// Test 1b — Deduplication of identical fn defs across modules
 // ===========================================================================
 
 /// Prove `merge_module_asts` **deduplicates** identical fn definitions
-/// across modules (Task 7-c) instead of rejecting them as a hard error.
+/// across modules instead of rejecting them as a hard error.
 ///
 /// Both modules define the SAME `fn helper() -> i32 { return 42; }`. The
-/// pre-Task-7-c `merge_module_asts` Pass 1 would have rejected this as a
-/// duplicate-fn hard error. The post-Task-7-c Pass 1 structurally compares
+/// previous `merge_module_asts` Pass 1 would have rejected this as a
+/// duplicate-fn hard error. The current Pass 1 structurally compares
 /// the two `FnDef`s (span-agnostically, via `fn_defs_equivalent` →
 /// `serde_json` + `strip_spans`) and silently drops the second occurrence
 /// with a `vuma_log!(debug, ...)` trace.
@@ -288,10 +284,7 @@ fn test_compile_modules_dedups_identical_fns() {
         .compile_modules(&modules)
         .unwrap_or_else(|errors| {
             for e in &errors {
-                eprintln!(
-                    "[wave48 dedup identical] error: {}",
-                    e
-                );
+                eprintln!("[wave48 dedup identical] error: {}", e);
             }
             panic!(
                 "wave48 dedup identical: compilation failed with {} error(s) (see stderr) — \
@@ -335,15 +328,15 @@ fn test_compile_modules_dedups_identical_fns() {
 }
 
 // ===========================================================================
-// Test 1c — Rejection of conflicting fn defs across modules (Task 7-c)
+// Test 1c — Rejection of conflicting fn defs across modules
 // ===========================================================================
 
 /// Prove `merge_module_asts` **rejects** conflicting fn definitions
-/// across modules (Task 7-c) with a `VumaError::AstToScg` mentioning
+/// across modules with a `VumaError::AstToScg` mentioning
 /// "conflicting fn definition".
 ///
 /// Both modules define `fn helper() -> i32` but with DIFFERENT bodies:
-/// module 1 returns `42`, module 2 returns `99`. The post-Task-7-c Pass 1
+/// module 1 returns `42`, module 2 returns `99`. The current Pass 1
 /// structurally compares the two `FnDef`s (span-agnostically) and,
 /// finding them NOT equivalent, emits a hard `VumaError::AstToScg` with a
 /// clear message naming the conflicting fn. This is the real "duplicate
@@ -442,10 +435,10 @@ fn test_compile_modules_rejects_conflicting_fns() {
 }
 
 // ===========================================================================
-// Test 2 — Bootstrap self-host end-to-end (PASSING per Task 7-d)
+// Test 2 — Bootstrap self-host end-to-end (PASSING)
 // ===========================================================================
 
-/// Wave 48 `[BOOT-SELF]` end-to-end test: the bootstrap `.vuma` files
+/// Bootstrap self-host end-to-end test: the bootstrap `.vuma` files
 /// compile together into a working `vumac` ELF, which when run on
 /// `womb/lang/hello.vuma` produces an `a.out` that prints `"42"`.
 ///
@@ -468,18 +461,18 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// 7. After the bootstrap runs, find `a.out` in the bootstrap's CWD,
 ///    `chmod 0o755`, run it, assert stdout contains `"42"`.
 ///
-/// ## Blocker history (why this test is `#[ignore]`'d)
+/// ## Blocker history (now resolved)
 ///
-/// ### RESOLVED by Task 7-b: the `repd` parser-coverage blocker
+/// ### RESOLVED: the `repd` parser-coverage blocker
 ///
-/// Task 7-a documented that `womb/lang/ir_builder.vuma:593` uses `repd`
-/// (a reserved BD-directive keyword in `src/parser/src/parser.rs:1126-1129`)
-/// as a local variable name (`repd: Address = __vuma_alloc(BD_VREG_CAP);`),
-/// and the parser failed with
+/// `womb/lang/ir_builder.vuma:593` uses `repd` (a reserved BD-directive
+/// keyword in `src/parser/src/parser.rs:1126-1129`) as a local variable
+/// name (`repd: Address = __vuma_alloc(BD_VREG_CAP);`), and the parser
+/// failed with
 /// `ParseError { message: "expected '(', found ':'", line: Some(593), column: Some(9) }`.
-/// Task 7-b fixed this via parser context-awareness: when `TokenKind::Bd` /
-/// `Repd` / `Capd` / `Reld` is followed by `:` instead of `(`, the parser
-/// now treats it as an identifier (let-statement) rather than a BD
+/// The fix added parser context-awareness: when `TokenKind::Bd` /
+/// `Repd` / `Capd` / `Reld` is followed by `:` instead of `(`, the
+/// parser treats it as an identifier (let-statement) rather than a BD
 /// directive. See `src/parser/src/parser.rs` (the `TokenKind::Bd |
 /// TokenKind::Repd | TokenKind::Capd | TokenKind::Reld` dispatch arm in
 /// `parse_stmt`) and the regression tests in `src/parser/tests/edge_cases.rs`
@@ -487,14 +480,14 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// `test_capd_as_identifier_in_let`, `test_reld_as_identifier_in_let`,
 /// `test_repd_as_bd_directive_still_works`).
 ///
-/// ### RESOLVED by Task 7-c: the `merge_module_asts` duplicate-fn blocker
+/// ### RESOLVED: the `merge_module_asts` duplicate-fn blocker
 ///
-/// After Task 7-b unblocked parsing, `compile_modules` reached the
+/// Once parsing was unblocked, `compile_modules` reached the
 /// `merge_module_asts` step (`src/pipeline.rs:5424`) and failed there on
 /// duplicate fn definitions: each of the 5 bootstrap files copy-pastes
 /// the same 4 helper fns (`store_u64`, `load_u64`, `store_u32`,
 /// `load_u32`) at the top of the file as a self-contained preamble (18
-/// occurrences total → 14 duplicate-fn errors). The pre-Task-7-c Pass 1
+/// occurrences total → 14 duplicate-fn errors). The previous Pass 1
 /// (`src/pipeline.rs:5429-5448` in the old revision) rejected every
 /// duplicate as a hard error.
 ///
@@ -521,7 +514,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// womb/lang/elf.vuma:31          fn store_u32(...)
 /// ```
 ///
-/// Task 7-c replaced the hard-reject policy with a **dedup-or-conflict**
+/// The hard-reject policy was replaced with a **dedup-or-conflict**
 /// policy in `merge_module_asts` Pass 1: identical duplicates (modulo
 /// source spans — compared via `fn_defs_equivalent` → `serde_json` +
 /// `strip_spans`) are silently dropped with a `vuma_log!(debug, ...)`
@@ -535,11 +528,10 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// links the 5 bootstrap files into a 181 KB ELF (104 IR functions, 8834
 /// IR instructions; verified end-to-end via `vuma link`).
 ///
-/// ### CURRENT blocker (Task 7-c): emitted `vumac` ELF crashes at runtime
+/// ### RESOLVED: emitted `vumac` ELF runtime crash
 ///
-/// With Task 7-c's dedup in place, `compile_modules` succeeds and emits a
-/// `vumac` ELF. But when that ELF is run on `womb/lang/hello.vuma`, it
-/// **crashes**:
+/// With dedup in place, `compile_modules` succeeds and emits a `vumac`
+/// ELF. But when that ELF was run on `womb/lang/hello.vuma`, it crashed:
 ///
 /// ```text
 /// $ vuma link womb/lang/{full_lexer,full_parser,ir_builder,codegen,elf}.vuma -o vumac
@@ -568,11 +560,10 @@ fn test_compile_modules_rejects_conflicting_fns() {
 ///   (prints `42`), so the crash is in the bootstrap's own pipeline
 ///   (lex/parse/ir/codegen/elf), NOT in the host's runtime stubs
 ///   (`__vuma_alloc` / `open` / `read` / `print_int` / etc. — all
-///   verified by `wave47_bootstrap` tests) or in the host's codegen for
+///   verified by the bootstrap argv tests) or in the host's codegen for
 ///   simple programs.
 ///
-/// Possible root causes (out of scope for Task 7-c — to be investigated
-/// in a future wave):
+/// Possible root causes that were investigated:
 ///
 /// 1. **Bootstrap pipeline bug** — one of `full_lex`, `parse`,
 ///    `irb_build_main`, `codegen_emit`, or `write_elf64` has a runtime
@@ -589,7 +580,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
 ///    `__vuma_alloc` / `__vuma_free` / `__vuma_argc` / `__vuma_argv` /
 ///    `open` / `read` / `close` / `write` with sizes / arg counts that
 ///    don't match what the host codegen's runtime stubs expect. (Less
-///    likely — wave47 tests verify the stubs work for minimal programs.)
+///    likely — argv tests verify the stubs work for minimal programs.)
 ///
 /// ## How to run this test
 ///
@@ -597,14 +588,14 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// cargo test -p vuma-tests --lib wave48_self_host::test_wave48_bootstrap_self_host
 /// ```
 ///
-/// ## Task 7-d RESOLUTION (vumac runtime-crash blocker)
+/// ## Resolution (vumac runtime-crash blocker)
 ///
-/// Task 7-c's blocker — the emitted `vumac` ELF crashing at runtime
-/// (SIGSEGV under O2, exit 1 under O0) when run on `womb/lang/hello.vuma`
-/// — was investigated and resolved by Task 7-d via `print_int` stage
-/// markers in `full_lexer.vuma::main` (100=pre-lex, 101=post-lex,
-/// 102=post-parse, 103=post-IR, 104=post-codegen, 105=post-ELF). The
-/// markers narrowed the failure to multiple compounding bugs:
+/// The emitted `vumac` ELF runtime crash (SIGSEGV under O2, exit 1
+/// under O0) when run on `womb/lang/hello.vuma` was investigated and
+/// resolved via `print_int` stage markers in `full_lexer.vuma::main`
+/// (100=pre-lex, 101=post-lex, 102=post-parse, 103=post-IR,
+/// 104=post-codegen, 105=post-ELF). The markers narrowed the failure to
+/// multiple compounding bugs:
 ///
 /// 1. **`name_hash` 64-bit IMUL garbage** (`womb/lang/full_parser.vuma`):
 ///    the host codegen emits a 64-bit IMUL for `hash * 16777619`, leaving
@@ -633,9 +624,9 @@ fn test_compile_modules_rejects_conflicting_fns() {
 ///    with bugs (1) and (2) fixed, O0 works end-to-end (markers 100-105
 ///    all print, exit 0, `a.out` prints `42`). But O2 still failed
 ///    (exit 3 after marker 101 — parse stage). The O2 inliner (`inline_with_threshold`)
-///    miscompiles some construct in the bootstrap. Minimal-risk fix for
-///    Task 7-d: skip the inliner pass at O2. A proper inliner-soundness
-///    investigation is reserved for a future wave.
+///    miscompiles some construct in the bootstrap. Minimal-risk fix:
+///    skip the inliner pass at O2. A proper inliner-soundness
+///    investigation is reserved for future work.
 ///
 /// 4. **O2 instruction scheduler miscompiles the bootstrap**
 ///    (`src/codegen/src/scheduler.rs`): with bugs (1)-(3) fixed, the
@@ -647,16 +638,15 @@ fn test_compile_modules_rejects_conflicting_fns() {
 ///    same underlying buffer. Conservative Load-after-Store
 ///    serialisation alone was insufficient — additional alias gaps
 ///    (Phi-joined `Any` classes, Load-after-Load across casted
-///    pointers) remained. Minimal-risk fix for Task 7-d: `schedule_block_inner`
+///    pointers) remained. Minimal-risk fix: `schedule_block_inner`
 ///    returns identity (no reordering) so the bootstrap self-hosts.
-///    A proper Cast-aware points-to analysis is reserved for a future
-///    wave.
+///    A proper Cast-aware points-to analysis is reserved for future
+///    work.
 ///
 /// With all four fixes in place, `vumac` runs `womb/lang/hello.vuma`
 /// end-to-end: prints `42` on stdout via the emitted `a.out`, exit 0.
 /// The `#[ignore]` attribute has been removed and the test runs by
-/// default. See TASKS.md Wave 48 [BOOT-SELF] for the Task 7-d
-/// resolution write-up.
+/// default.
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn test_wave48_bootstrap_self_host() {
@@ -690,12 +680,12 @@ fn test_wave48_bootstrap_self_host() {
     // ── Step 2 + 3: compile the merged program; capture errors for
     //    debugging if compilation fails. ──────────────────────────────
     //
-    // Wave 54: the test now runs at O2 (the production default) with the
-    // scheduler disabled via VUMA_NO_SCHED env var. Wave 54 fixed the
-    // inliner's param-clobbering bug (callee params were mapped directly
-    // to caller args, so callee reassignments overwrote caller variables).
-    // The fix maps each callee param to a fresh vreg and inserts a copy
-    // instruction at the start of the inlined body.
+    // The test runs at O2 (the production default) with the scheduler
+    // disabled via VUMA_NO_SCHED env var. The inliner's param-clobbering
+    // bug (callee params were mapped directly to caller args, so callee
+    // reassignments overwrote caller variables) is now fixed: each
+    // callee param is mapped to a fresh vreg with a copy instruction
+    // inserted at the start of the inlined body.
     //
     // With the param-copy fix, O2 works with inliner + LICM + constant
     // folding + DCE + cross-function const prop. The scheduler still has
@@ -733,10 +723,8 @@ fn test_wave48_bootstrap_self_host() {
 
     // ── Step 4 + 5: write the ELF to a temp file, chmod 0o755, spawn it
     //    with `womb/lang/hello.vuma` as argv[1]. ──────────────────────
-    let vumac_path = std::env::temp_dir().join(format!(
-        "vuma_wave48_vumac_{}.bin",
-        std::process::id()
-    ));
+    let vumac_path =
+        std::env::temp_dir().join(format!("vuma_wave48_vumac_{}.bin", std::process::id()));
     std::fs::write(&vumac_path, &output.binary).unwrap_or_else(|e| {
         panic!(
             "wave48 bootstrap self-host: cannot write temp ELF '{}': {}",
@@ -875,21 +863,11 @@ fn chmod_0o755(path: &std::path::Path) {
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(path)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "wave48 self-host: cannot stat '{}': {}",
-                    path.display(),
-                    e
-                )
-            })
+            .unwrap_or_else(|e| panic!("wave48 self-host: cannot stat '{}': {}", path.display(), e))
             .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(path, perms).unwrap_or_else(|e| {
-            panic!(
-                "wave48 self-host: cannot chmod '{}': {}",
-                path.display(),
-                e
-            )
+            panic!("wave48 self-host: cannot chmod '{}': {}", path.display(), e)
         });
     }
     #[cfg(not(unix))]
@@ -956,11 +934,26 @@ fn test_p6_bootstrap_self_host_hello2() {
     let womb_lang = workspace_root.join("womb").join("lang");
 
     let modules: Vec<(String, String)> = vec![
-        ("full_lexer.vuma".to_string(), include_str!("../../../womb/lang/full_lexer.vuma").to_string()),
-        ("full_parser.vuma".to_string(), include_str!("../../../womb/lang/full_parser.vuma").to_string()),
-        ("ir_builder.vuma".to_string(), include_str!("../../../womb/lang/ir_builder.vuma").to_string()),
-        ("codegen.vuma".to_string(), include_str!("../../../womb/lang/codegen.vuma").to_string()),
-        ("elf.vuma".to_string(), include_str!("../../../womb/lang/elf.vuma").to_string()),
+        (
+            "full_lexer.vuma".to_string(),
+            include_str!("../../../womb/lang/full_lexer.vuma").to_string(),
+        ),
+        (
+            "full_parser.vuma".to_string(),
+            include_str!("../../../womb/lang/full_parser.vuma").to_string(),
+        ),
+        (
+            "ir_builder.vuma".to_string(),
+            include_str!("../../../womb/lang/ir_builder.vuma").to_string(),
+        ),
+        (
+            "codegen.vuma".to_string(),
+            include_str!("../../../womb/lang/codegen.vuma").to_string(),
+        ),
+        (
+            "elf.vuma".to_string(),
+            include_str!("../../../womb/lang/elf.vuma").to_string(),
+        ),
     ];
 
     std::env::set_var("VUMA_NO_SCHED", "1");
@@ -972,7 +965,10 @@ fn test_p6_bootstrap_self_host_hello2() {
     let bootstrap_cwd = std::env::temp_dir().join(format!(
         "vuma_p6_hello2_{}_{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&bootstrap_cwd).unwrap();
 
@@ -991,11 +987,17 @@ fn test_p6_bootstrap_self_host_hello2() {
     let run_stderr = String::from_utf8_lossy(&run_output.stderr).into_owned();
     let run_exit = run_output.status.code().unwrap_or(-1);
 
-    eprintln!("P6 hello2: vumac exited {}, stdout={:?}, stderr={:?}", run_exit, run_stdout, run_stderr);
+    eprintln!(
+        "P6 hello2: vumac exited {}, stdout={:?}, stderr={:?}",
+        run_exit, run_stdout, run_stderr
+    );
 
     // The bootstrap should exit 0 (successful compilation).
     if run_exit != 0 {
-        eprintln!("P6 hello2: vumac failed (exit {}). stderr: {}", run_exit, run_stderr);
+        eprintln!(
+            "P6 hello2: vumac failed (exit {}). stderr: {}",
+            run_exit, run_stderr
+        );
         // Don't panic — the bootstrap may not fully support hello2 yet.
         // Report the failure but allow the test to pass so we can iterate.
         eprintln!("P6 hello2: KNOWN LIMITATION — bootstrap does not yet fully support hello2.vuma");
@@ -1012,13 +1014,19 @@ fn test_p6_bootstrap_self_host_hello2() {
             .unwrap();
         let a_out_stdout = String::from_utf8_lossy(&a_out_output.stdout).into_owned();
         let a_out_exit = a_out_output.status.code().unwrap_or(-1);
-        eprintln!("P6 hello2: a.out exited {}, stdout={:?}", a_out_exit, a_out_stdout);
+        eprintln!(
+            "P6 hello2: a.out exited {}, stdout={:?}",
+            a_out_exit, a_out_stdout
+        );
 
         // Check for "Hi" in output (the program writes bytes 72,105,10 = "Hi\n").
         if a_out_stdout.contains("Hi") {
             eprintln!("P6 hello2: SUCCESS — bootstrap compiled hello2.vuma and a.out printed 'Hi'");
         } else {
-            eprintln!("P6 hello2: a.out ran but did not print 'Hi' — got {:?}", a_out_stdout);
+            eprintln!(
+                "P6 hello2: a.out ran but did not print 'Hi' — got {:?}",
+                a_out_stdout
+            );
         }
     } else {
         eprintln!("P6 hello2: vumac exited 0 but no a.out produced");

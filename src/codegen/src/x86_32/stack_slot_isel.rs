@@ -19,71 +19,38 @@
 //! sub rsp, frame_size`) and popped in reverse order before the epilogue.
 
 use crate::backend::{
-    AllocatedBlock, AllocatedFunction, AllocatedInstruction,
-    BackendError, PhysicalReg, RegClass, RelocationEntry,
+    AllocatedBlock, AllocatedFunction, AllocatedInstruction, BackendError, PhysicalReg, RegClass,
+    RelocationEntry,
 };
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 
 #[allow(unused_imports)]
 use super::{
-    binop_cmp_to_cc, cmp_kind_to_cc, modrm,
-    Cc, Gpr, Xmm,
-    R_X86_64_64, R_X86_64_PLT32,
-    encode_add_reg_imm32, encode_add_reg_reg,
-    encode_adc_reg_reg, encode_adc_reg_imm32,
-    encode_and_reg_imm32, encode_and_reg_reg,
-    encode_call_rel32,
-    encode_cmovcc_reg_reg,
-    encode_cmp_reg_imm32, encode_cmp_reg_reg,
-    encode_cqo,
-    encode_cvtsd2si_r32_xmm, encode_cvtsd2si_r64_xmm,
-    encode_cvtsd2ss_xmm_xmm,
-    encode_cvtsi2sd_xmm_r32, encode_cvtsi2sd_xmm_r64,
-    encode_cvtsi2ss_xmm_r32, encode_cvtsi2ss_xmm_r64,
-    encode_cvtss2sd_xmm_xmm,
-    encode_cvtss2si_r32_xmm, encode_cvtss2si_r64_xmm,
-    encode_cvttsd2si_r32_xmm, encode_cvttsd2si_r64_xmm,
-    encode_cvttss2si_r32_xmm, encode_cvttss2si_r64_xmm,
-    encode_addsd_xmm_xmm, encode_addss_xmm_xmm,
-    encode_divsd_xmm_xmm, encode_divss_xmm_xmm,
-    encode_mulsd_xmm_xmm, encode_mulss_xmm_xmm,
-    encode_subsd_xmm_xmm, encode_subss_xmm_xmm,
-    encode_sqrtsd_xmm_xmm, encode_sqrtss_xmm_xmm,
-    encode_ucomisd_xmm_xmm, encode_ucomiss_xmm_xmm,
-    encode_div_reg,
-    encode_idiv_reg,
-    encode_imul_reg_reg,
-    encode_jcc_rel32, encode_jmp_rel32,
-    encode_lea_reg_mem,
-    encode_mov_mem16_reg16, encode_mov_mem32_reg32, encode_mov_mem8_reg8,
-    encode_mov_mem_reg,
-    encode_mov_reg32_mem,
-    encode_mov_reg_imm32, encode_mov_reg_imm64, encode_mov_reg_mem, encode_mov_reg_reg,
-    encode_movd_gpr_xmm, encode_movd_xmm_gpr,
-    encode_movq_gpr_xmm, encode_movq_xmm_gpr,
-    encode_movq_xmm_mem, encode_movq_mem_xmm,
-    encode_movss_xmm_mem, encode_movss_mem_xmm,
-    encode_store_imm32_mem_ebp,
-    encode_movsx_reg8,
-    encode_movsx_reg8_mem,
-    encode_movsx_reg16,
-    encode_movzx_reg8, encode_movzx_reg16,
-    encode_movzx_reg8_mem, encode_movzx_reg16_mem,
-    encode_mul_reg,
-    encode_neg_reg, encode_nop, encode_not_reg,
-    encode_or_reg_imm32, encode_or_reg_reg,
-    encode_pop, encode_push,
-    encode_ret,
-    encode_rol_reg_cl, encode_ror_reg_cl,
-    encode_syscall,
-    encode_sar_reg_cl,
-    encode_setcc,
-    encode_shl_reg_cl, encode_shr_reg_cl,
-    encode_sub_reg_imm32, encode_sub_reg_reg,
-    encode_sbb_reg_reg, encode_sbb_reg_imm32,
-    encode_test_reg_reg,
-    encode_xor_reg_imm32, encode_xor_reg_reg,
+    binop_cmp_to_cc, cmp_kind_to_cc, encode_adc_reg_imm32, encode_adc_reg_reg,
+    encode_add_reg_imm32, encode_add_reg_reg, encode_addsd_xmm_xmm, encode_addss_xmm_xmm,
+    encode_and_reg_imm32, encode_and_reg_reg, encode_call_rel32, encode_cmovcc_reg_reg,
+    encode_cmp_reg_imm32, encode_cmp_reg_reg, encode_cqo, encode_cvtsd2si_r32_xmm,
+    encode_cvtsd2si_r64_xmm, encode_cvtsd2ss_xmm_xmm, encode_cvtsi2sd_xmm_r32,
+    encode_cvtsi2sd_xmm_r64, encode_cvtsi2ss_xmm_r32, encode_cvtsi2ss_xmm_r64,
+    encode_cvtss2sd_xmm_xmm, encode_cvtss2si_r32_xmm, encode_cvtss2si_r64_xmm,
+    encode_cvttsd2si_r32_xmm, encode_cvttsd2si_r64_xmm, encode_cvttss2si_r32_xmm,
+    encode_cvttss2si_r64_xmm, encode_div_reg, encode_divsd_xmm_xmm, encode_divss_xmm_xmm,
+    encode_idiv_reg, encode_imul_reg_reg, encode_jcc_rel32, encode_jmp_rel32, encode_lea_reg_mem,
+    encode_mov_mem16_reg16, encode_mov_mem32_reg32, encode_mov_mem8_reg8, encode_mov_mem_reg,
+    encode_mov_reg32_mem, encode_mov_reg_imm32, encode_mov_reg_imm64, encode_mov_reg_mem,
+    encode_mov_reg_reg, encode_movd_gpr_xmm, encode_movd_xmm_gpr, encode_movq_gpr_xmm,
+    encode_movq_mem_xmm, encode_movq_xmm_gpr, encode_movq_xmm_mem, encode_movss_mem_xmm,
+    encode_movss_xmm_mem, encode_movsx_reg16, encode_movsx_reg8, encode_movsx_reg8_mem,
+    encode_movzx_reg16, encode_movzx_reg16_mem, encode_movzx_reg8, encode_movzx_reg8_mem,
+    encode_mul_reg, encode_mulsd_xmm_xmm, encode_mulss_xmm_xmm, encode_neg_reg, encode_nop,
+    encode_not_reg, encode_or_reg_imm32, encode_or_reg_reg, encode_pop, encode_push, encode_ret,
+    encode_rol_reg_cl, encode_ror_reg_cl, encode_sar_reg_cl, encode_sbb_reg_imm32,
+    encode_sbb_reg_reg, encode_setcc, encode_shl_reg_cl, encode_shr_reg_cl, encode_sqrtsd_xmm_xmm,
+    encode_sqrtss_xmm_xmm, encode_store_imm32_mem_ebp, encode_sub_reg_imm32, encode_sub_reg_reg,
+    encode_subsd_xmm_xmm, encode_subss_xmm_xmm, encode_syscall, encode_test_reg_reg,
+    encode_ucomisd_xmm_xmm, encode_ucomiss_xmm_xmm, encode_xor_reg_imm32, encode_xor_reg_reg,
+    modrm, Cc, Gpr, Xmm, R_X86_64_64, R_X86_64_PLT32,
 };
 
 // =============================================================================
@@ -118,12 +85,17 @@ use super::{
 /// This is a verbatim port of the x86_64 pre-pass (see
 /// `x86_64/stack_slot_isel.rs`); x86_32 needs the same inference because
 /// its `Add`/`Sub`/`Mul`/`Div` arms also see `ty: None` for FP arithmetic.
-fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
+fn infer_fp_vregs(
+    func: &IRFunction,
+) -> (
+    std::collections::HashSet<u32>,
+    std::collections::HashSet<u32>,
+) {
     use std::collections::HashSet;
     let mut fp: HashSet<u32> = HashSet::new();
-    let mut fp_f32: HashSet<u32> = HashSet::new();  // specifically f32 (not f64)
-    // Track vregs that provably hold the integer/float bit-pattern 0
-    // (used to recognise the `0.0 / 0.0` NaN pattern when `ty` is None).
+    let mut fp_f32: HashSet<u32> = HashSet::new(); // specifically f32 (not f64)
+                                                   // Track vregs that provably hold the integer/float bit-pattern 0
+                                                   // (used to recognise the `0.0 / 0.0` NaN pattern when `ty` is None).
     let mut zero: HashSet<u32> = HashSet::new();
 
     let is_zero = |v: &IRValue, zero: &HashSet<u32>| -> bool {
@@ -160,9 +132,14 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
             for instr in &block.instructions {
                 match instr {
                     IRInstr::Cast { kind, dst, src, .. } => {
-                        if matches!(kind, CastKind::IntToFloat | CastKind::UIntToFloat | CastKind::FloatToFloat) {
+                        if matches!(
+                            kind,
+                            CastKind::IntToFloat | CastKind::UIntToFloat | CastKind::FloatToFloat
+                        ) {
                             if let Some(id) = dst.as_register() {
-                                if fp.insert(id) { changed = true; }
+                                if fp.insert(id) {
+                                    changed = true;
+                                }
                             }
                         }
                         // Backward propagation: when a Cast reads an FP value
@@ -171,33 +148,46 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                         // producing instruction uses the FP path on the next
                         // fixed-point pass.  This is critical on x86_32,
                         // where the integer path truncates 64-bit f64 values.
-                        if matches!(kind, CastKind::FloatToInt | CastKind::FloatToUInt | CastKind::FloatToFloat) {
+                        if matches!(
+                            kind,
+                            CastKind::FloatToInt | CastKind::FloatToUInt | CastKind::FloatToFloat
+                        ) {
                             if let IRValue::Register(id) = src {
-                                if fp.insert(*id) { changed = true; }
+                                if fp.insert(*id) {
+                                    changed = true;
+                                }
                             }
                         }
                         // Zero propagates through int<->int casts.
-                        if matches!(kind, CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast)
-                            && is_zero(src, &zero)
+                        if matches!(
+                            kind,
+                            CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast
+                        ) && is_zero(src, &zero)
                         {
                             if let Some(id) = dst.as_register() {
-                                if zero.insert(id) { changed = true; }
+                                if zero.insert(id) {
+                                    changed = true;
+                                }
                             }
                         }
                     }
-                    IRInstr::Call { dst, func: fname, .. } => {
-                        if fname == "inttofloat" || fname == "uinttofloat" {
-                            if let Some(d) = dst {
-                                if let Some(id) = d.as_register() {
-                                    if fp.insert(id) { changed = true; }
-                                }
+                    IRInstr::Call {
+                        dst: Some(d),
+                        func: fname,
+                        ..
+                    } if (fname == "inttofloat" || fname == "uinttofloat") => {
+                        if let Some(id) = d.as_register() {
+                            if fp.insert(id) {
+                                changed = true;
                             }
                         }
                     }
                     IRInstr::Load { dst, ty, .. } => {
                         if matches!(ty, IRType::F32 | IRType::F64) {
                             if let Some(id) = dst.as_register() {
-                                if fp.insert(id) { changed = true; }
+                                if fp.insert(id) {
+                                    changed = true;
+                                }
                                 // [K7D-x86_32-fpload] Track F32-ness
                                 // explicitly so that downstream Add/Sub/Mul/
                                 // Div (whose `ty` is None or a non-FP type
@@ -206,7 +196,9 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                                 // was populated, causing f32 loads to be
                                 // mis-treated as f64 in the codegen fallback.
                                 if matches!(ty, IRType::F32) {
-                                    if fp_f32.insert(id) { changed = true; }
+                                    if fp_f32.insert(id) {
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
@@ -224,8 +216,16 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                         // explicit `ty==F32` insertion and is required for
                         // the codegen fallback (`!fp_vregs_f32.contains`)
                         // to correctly pick MOVSS for F32 sources.
-                        let lhs_f32 = if let IRValue::Register(id) = lhs { fp_f32.contains(id) } else { false };
-                        let rhs_f32 = if let IRValue::Register(id) = rhs { fp_f32.contains(id) } else { false };
+                        let lhs_f32 = if let IRValue::Register(id) = lhs {
+                            fp_f32.contains(id)
+                        } else {
+                            false
+                        };
+                        let rhs_f32 = if let IRValue::Register(id) = rhs {
+                            fp_f32.contains(id)
+                        } else {
+                            false
+                        };
                         let op_is_f32 = matches!(ty, Some(IRType::F32))
                             || (!matches!(ty, Some(IRType::F64)) && (lhs_f32 || rhs_f32));
                         // `0 / 0` with no type tag: classify as FP (NaN).
@@ -235,9 +235,13 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                             && is_zero(rhs, &zero);
                         if op_fp || zero_div_zero {
                             if let Some(id) = dst.as_register() {
-                                if fp.insert(id) { changed = true; }
+                                if fp.insert(id) {
+                                    changed = true;
+                                }
                                 if op_is_f32 {
-                                    if fp_f32.insert(id) { changed = true; }
+                                    if fp_f32.insert(id) {
+                                        changed = true;
+                                    }
                                 }
                             }
                             // Backward propagation: when ANY operand is FP
@@ -256,10 +260,14 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                             // an f64 array).
                             if op_fp {
                                 if let IRValue::Register(id) = lhs {
-                                    if fp.insert(*id) { changed = true; }
+                                    if fp.insert(*id) {
+                                        changed = true;
+                                    }
                                 }
                                 if let IRValue::Register(id) = rhs {
-                                    if fp.insert(*id) { changed = true; }
+                                    if fp.insert(*id) {
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
@@ -276,17 +284,28 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                             };
                             if result_zero {
                                 if let Some(id) = dst.as_register() {
-                                    if zero.insert(id) { changed = true; }
+                                    if zero.insert(id) {
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
                     }
-                    IRInstr::BinOp { op, dst, lhs, rhs, ty, .. } => {
+                    IRInstr::BinOp {
+                        op,
+                        dst,
+                        lhs,
+                        rhs,
+                        ty,
+                        ..
+                    } => {
                         let ty_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
                         let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
                         if op_fp {
                             if let Some(id) = dst.as_register() {
-                                if fp.insert(id) { changed = true; }
+                                if fp.insert(id) {
+                                    changed = true;
+                                }
                                 // Track f32 specifically
                                 if matches!(ty, Some(IRType::F32)) {
                                     fp_f32.insert(id);
@@ -304,10 +323,14 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                             // to 32 bits, corrupting the f64 value.
                             if op_fp {
                                 if let IRValue::Register(id) = lhs {
-                                    if fp.insert(*id) { changed = true; }
+                                    if fp.insert(*id) {
+                                        changed = true;
+                                    }
                                 }
                                 if let IRValue::Register(id) = rhs {
-                                    if fp.insert(*id) { changed = true; }
+                                    if fp.insert(*id) {
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
@@ -322,7 +345,9 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                             };
                             if result_zero {
                                 if let Some(id) = dst.as_register() {
-                                    if zero.insert(id) { changed = true; }
+                                    if zero.insert(id) {
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
@@ -344,10 +369,14 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                         let op_fp = ty_fp || is_fp(lhs, &fp) || is_fp(rhs, &fp);
                         if op_fp {
                             if let IRValue::Register(id) = lhs {
-                                if fp.insert(*id) { changed = true; }
+                                if fp.insert(*id) {
+                                    changed = true;
+                                }
                             }
                             if let IRValue::Register(id) = rhs {
-                                if fp.insert(*id) { changed = true; }
+                                if fp.insert(*id) {
+                                    changed = true;
+                                }
                             }
                         }
                     }
@@ -355,22 +384,34 @@ fn infer_fp_vregs(func: &IRFunction) -> (std::collections::HashSet<u32>, std::co
                         let op_fp = incoming.iter().any(|(v, _)| is_fp(v, &fp));
                         if op_fp {
                             if let Some(id) = dst.as_register() {
-                                if fp.insert(id) { changed = true; }
+                                if fp.insert(id) {
+                                    changed = true;
+                                }
                             }
                         }
                         if incoming.iter().all(|(v, _)| is_zero(v, &zero)) {
                             if let Some(id) = dst.as_register() {
-                                if zero.insert(id) { changed = true; }
+                                if zero.insert(id) {
+                                    changed = true;
+                                }
                             }
                         }
                     }
-                    IRInstr::Select { dst, true_val, false_val, ty, .. } => {
+                    IRInstr::Select {
+                        dst,
+                        true_val,
+                        false_val,
+                        ty,
+                        ..
+                    } => {
                         let op_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64))
                             || is_fp(true_val, &fp)
                             || is_fp(false_val, &fp);
                         if op_fp {
                             if let Some(id) = dst.as_register() {
-                                if fp.insert(id) { changed = true; }
+                                if fp.insert(id) {
+                                    changed = true;
+                                }
                             }
                         }
                     }
@@ -441,8 +482,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     }
 
     // Identify Alloc vregs and compute their stack region sizes
-    let mut stack_alloc_vregs: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut stack_alloc_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut alloc_sizes: HashMap<u32, i32> = HashMap::new(); // vreg → aligned size
     for block in &func.blocks {
         for instr in &block.instructions {
@@ -511,7 +551,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     let frame_size = if aligned % 16 == 12 {
         aligned.max(12)
     } else {
-        (aligned + 12).max(12)  // Add bytes to make frame_size ≡ 12 (mod 16)
+        (aligned + 12).max(12) // Add bytes to make frame_size ≡ 12 (mod 16)
     };
 
     // ── Helper closures for stack slot access ──
@@ -601,7 +641,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             }
             IRValue::Address(addr) => encode_mov_reg_imm64(scratch, *addr),
             IRValue::Label(name) => {
-                vuma_log!(warn, "IRValue::Label('{}') in load_value: emitting placeholder 0", name);
+                vuma_log!(
+                    warn,
+                    "IRValue::Label('{}') in load_value: emitting placeholder 0",
+                    name
+                );
                 encode_mov_reg_imm64(scratch, 0)
             }
         }
@@ -686,7 +730,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
             }
             IRValue::Label(name) => {
-                vuma_log!(warn, "IRValue::Label('{}') in load_fp_to_xmm: emitting placeholder 0", name);
+                vuma_log!(
+                    warn,
+                    "IRValue::Label('{}') in load_fp_to_xmm: emitting placeholder 0",
+                    name
+                );
                 code.extend(encode_store_imm32_mem_ebp(spill_off, 0));
                 code.extend(encode_store_imm32_mem_ebp(spill_off + 4, 0));
                 if is_f64 {
@@ -767,7 +815,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // params to registers (in order) and FP params to stack slots (in order).
     let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
     let mut reg_count = 0usize;
-    let mut fp_stack_idx = 0usize;  // number of FP params seen so far
+    let mut fp_stack_idx = 0usize; // number of FP params seen so far
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
             let is_fp = i < func.param_types.len()
@@ -1151,7 +1199,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         let n = if let IRValue::Immediate(n) = rhs { *n } else { 0 };
                         let shift = (n - 32) as u32;
                         let dst_off = slot_offset(dst_id);
-                        
+
                         if matches!(op, BinOpKind::Shl) {
                             // u64 << N: result_high = lhs_low << (N-32), result_low = 0
                             code.extend(load_value(lhs, Gpr::Rax));
@@ -3205,8 +3253,6 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut reg_assignments: Vec<(usize, Gpr)> = Vec::new();
                     let mut stack_assignments: Vec<(usize, i32)> = Vec::new(); // (arg_idx, size_bytes)
                     let mut reg_count = 0usize;
-                    let mut fp_stack_count = 0usize;
-                    let mut nonfp_overflow_count = 0usize;
                     for (i, arg) in args.iter().enumerate() {
                         let is_fp = match arg {
                             IRValue::Register(id) => fp_vregs.contains(id),
@@ -3214,13 +3260,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         };
                         if is_fp {
                             stack_assignments.push((i, 8));
-                            fp_stack_count += 1;
                         } else if reg_count < call_arg_regs.len() {
                             reg_assignments.push((i, call_arg_regs[reg_count]));
                             reg_count += 1;
                         } else {
                             stack_assignments.push((i, 4));
-                            nonfp_overflow_count += 1;
                         }
                     }
 
@@ -3260,8 +3304,6 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // After CALL + push EBP, the callee sees them at
                     // [EBP + 8 + fp_idx*8] (FP) and [EBP + 8 + fp_count*8 + overflow_idx*4] (non-FP).
                     let mut esp_off = 0i32;  // current offset from ESP
-                    let mut fp_idx = 0usize;
-                    let mut overflow_idx = 0usize;
                     for (arg_idx, size) in &stack_assignments {
                         let arg = &args[*arg_idx];
                         if *size == 8 {
@@ -3299,13 +3341,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 }
                             }
                             esp_off += 8;
-                            fp_idx += 1;
                         } else {
                             // Non-FP overflow arg (4 bytes).
                             code.extend(load_value(arg, Gpr::Rax));
                             code.extend(encode_mov_mem32_reg32(Gpr::Rsp, esp_off, Gpr::Rax));
                             esp_off += 4;
-                            overflow_idx += 1;
                         }
                     }
 
@@ -3485,7 +3525,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 | IRInstr::StarkProof { .. } => Vec::new(),
                 // ── CallIndirect (Wave 49: driver_call) ──
                 // Lower an indirect call: load args into stack (i386 ABI:
-                // args pushed right-to-left), load func_ptr into EAX, 
+                // args pushed right-to-left), load func_ptr into EAX,
                 // CALL EAX, clean up stack, store return value.
                 IRInstr::CallIndirect { dst, func_ptr, args } => {
                     let mut code = Vec::new();
@@ -3566,8 +3606,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 if *patch_offset >= start && *patch_offset + 4 <= end {
                     let within_instr = *patch_offset - start;
                     let encoded = &mut encoded_instrs[i].encoded;
-                    encoded[within_instr..within_instr + 4]
-                        .copy_from_slice(&rel32.to_le_bytes());
+                    encoded[within_instr..within_instr + 4].copy_from_slice(&rel32.to_le_bytes());
                     break;
                 }
             }

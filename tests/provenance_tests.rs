@@ -3,9 +3,9 @@
 //! Wave 15: proof artifacts use the real bitvector verifier (not a string whitelist).
 //! Wave 16: e-graph provenance records rewrite history for debug-info fidelity.
 
-use vuma_codegen::egraph::{EGraph, ENode, RewriteRule, standard_rules, default_cost};
+use vuma_codegen::egraph::{default_cost, standard_rules, EGraph, ENode, RewriteRule};
 use vuma_codegen::ir::BinOpKind;
-use vuma_codegen::proof_artifacts::{ProofArtifact, ProofLog, check_proof_log};
+use vuma_codegen::proof_artifacts::{check_proof_log, ProofArtifact, ProofLog};
 
 // ── Wave 15: Proof artifacts with real verification ──
 
@@ -22,7 +22,11 @@ fn wave15_check_proof_log_accepts_verified_rules() {
         replacement: ENode::Lit(0),
     });
     let result = check_proof_log(&log);
-    assert!(result.is_ok(), "verified rule should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "verified rule should pass: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -58,7 +62,10 @@ fn wave15_check_proof_log_validates_structure() {
         replacement: ENode::Lit(0),
     });
     let result = check_proof_log(&log);
-    assert!(result.is_err(), "structurally invalid artifact must be rejected");
+    assert!(
+        result.is_err(),
+        "structurally invalid artifact must be rejected"
+    );
     assert!(
         result.unwrap_err().contains("structurally invalid"),
         "error should mention structural invalidity"

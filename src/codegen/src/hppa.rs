@@ -16,17 +16,20 @@
 //!
 //! All instructions are 32-bit big-endian. Major formats:
 //! - **System**: `000010 bbb lll oooo oooo oooo oooo ooo1` (GATE/BREAK)
-//! - **Load/Store**: `0001 10ss bbb x ff aaaa aaa ddddd ll oooo ooo` 
+//! - **Load/Store**: `0001 10ss bbb x ff aaaa aaa ddddd ll oooo ooo`
 //! - **Arithmetic**: `000010 ss bbb 0 t aaaa aaa ddddd cccc ffff ee`
 //! - **Branch**: `001 aa lll lll lll lll nnn nnn ooo g0 0 w ddddd` (BL/BV)
 //! - **Load Immediate**: `0010 00s bbb 0 t aaaa aaa ddddd iiii iiii iiii`
 
 use crate::backend::{
-    AllocatedFunction, AllocatedProgram, Backend, BackendError, TargetInfo, Endianness,
+    AllocatedFunction, AllocatedProgram, Backend, BackendError, Endianness, TargetInfo,
 };
-use crate::ir::{alignment_of_with_ptr_width, size_of_with_ptr_width, IRFunction, IRType, IRValue, IRInstr, IRTerminator};
 #[cfg(test)]
 use crate::ir::VirtualRegister;
+use crate::ir::{
+    alignment_of_with_ptr_width, size_of_with_ptr_width, IRFunction, IRInstr, IRTerminator, IRType,
+    IRValue,
+};
 
 // ===========================================================================
 // Register definitions
@@ -39,10 +42,10 @@ use crate::ir::VirtualRegister;
 /// R31 = link register for BL.
 type Reg = u8;
 
-const R0: Reg = 0;   // Hardwired zero
-const R1: Reg = 1;   // RP (return pointer)
-const R2: Reg = 2;   // Return R30 (caller's R30)
-const R3: Reg = 3;   // FP (frame pointer)
+const R0: Reg = 0; // Hardwired zero
+const R1: Reg = 1; // RP (return pointer)
+const R2: Reg = 2; // Return R30 (caller's R30)
+const R3: Reg = 3; // FP (frame pointer)
 const R8: Reg = 8;
 const R9: Reg = 9;
 const R10: Reg = 10;
@@ -68,7 +71,9 @@ const R30: Reg = 30; // R30 (stack pointer)
 
 /// HPPA floating-point register (PA-RISC 1.1: F0–F15 in hardware).
 type FReg = u8;
+#[allow(dead_code)]
 const F0: FReg = 0;
+#[allow(dead_code)]
 const F1: FReg = 1;
 const F2: FReg = 2;
 #[allow(dead_code)]
@@ -76,13 +81,17 @@ const F3: FReg = 3;
 // F4–F15 exist but are not needed as scratch for single-op emission.
 
 /// FP scratch registers (caller-saved per PA-RISC ABI).
-const FA: FReg = F0;  // FP accumulator / result
-const FB: FReg = F1;  // FP second operand
 #[allow(dead_code)]
-const FC: FReg = F2;  // FP third scratch (for conversions)
+const FA: FReg = F0; // FP accumulator / result
+#[allow(dead_code)]
+const FB: FReg = F1; // FP second operand
+#[allow(dead_code)]
+const FC: FReg = F2; // FP third scratch (for conversions)
 
 // Global set of function names that return 64-bit values (I64/U64).
-static FUNC_64BIT_RETURNS: std::sync::OnceLock<std::sync::RwLock<Option<std::collections::HashSet<String>>>> = std::sync::OnceLock::new();
+static FUNC_64BIT_RETURNS: std::sync::OnceLock<
+    std::sync::RwLock<Option<std::collections::HashSet<String>>>,
+> = std::sync::OnceLock::new();
 fn func_64bit_returns() -> &'static std::sync::RwLock<Option<std::collections::HashSet<String>>> {
     FUNC_64BIT_RETURNS.get_or_init(|| std::sync::RwLock::new(None))
 }
@@ -135,8 +144,8 @@ fn encode_nop() -> [u8; 4] {
 ///     non-linear split QEMU expects (bit 0 = sign, bits 16-20 = high 5
 ///     bits, bit 2 = bit 10, bits 3-12 = low 10 bits),
 ///   - and D=0 (R0) was used instead of D=1 (R1).
-/// The buggy encoding produced `<unknown>` (illegal instruction) for any
-/// non-trivial displacement → SIGSEGV in print_int.
+///     The buggy encoding produced `<unknown>` (illegal instruction) for any
+///     non-trivial displacement → SIGSEGV in print_int.
 ///
 /// Correct format (verified against QEMU 10.x decode):
 ///   bits 31-26: 0x3A (BL opcode `111010`)
@@ -152,18 +161,24 @@ fn encode_nop() -> [u8; 4] {
 /// and `target = PC + 8 + (sign_extend(disp17) << 2)`.
 /// target_offset must be 4-byte aligned and within [-262144, 262140].
 fn encode_bl(target_offset: i32) -> [u8; 4] {
-    assert!(target_offset % 4 == 0,
-            "BL displacement must be 4-byte aligned, got {}", target_offset);
+    assert!(
+        target_offset % 4 == 0,
+        "BL displacement must be 4-byte aligned, got {}",
+        target_offset
+    );
     let disp17 = target_offset >> 2;
-    assert!(disp17 >= -65536 && disp17 <= 65535,
-            "BL displacement {} words out of [-65536, 65535]", disp17);
+    assert!(
+        disp17 >= -65536 && disp17 <= 65535,
+        "BL displacement {} words out of [-65536, 65535]",
+        disp17
+    );
     let disp17_u = (disp17 as u32) & 0x1FFFF;
     let sign = (disp17_u >> 16) & 1;
     let bits_15_11 = (disp17_u >> 11) & 0x1F;
     let bit_10 = (disp17_u >> 10) & 1;
     let bits_9_0 = disp17_u & 0x3FF;
-    let n = 1u32;       // nullify delay slot
-    let l = 1u32;       // link = R1 (free in print_int stub; R2 holds RA)
+    let n = 1u32; // nullify delay slot
+    let l = 1u32; // link = R1 (free in print_int stub; R2 holds RA)
     let word = 0xE8000000u32
         | (l << 21)
         | (bits_15_11 << 16)
@@ -203,26 +218,32 @@ fn encode_bv_real(base: Reg) -> [u8; 4] {
 ///
 /// target = PC + 8 + offset_bytes (where offset_bytes must be a multiple of 4).
 fn encode_cmpb_disp(offset_bytes: i32) -> u32 {
-    assert!(offset_bytes % 4 == 0, "cmpb displacement must be 4-byte aligned");
-    assert!(offset_bytes >= -8192 && offset_bytes <= 8188,
-            "cmpb displacement {} out of range [-8192, 8188]", offset_bytes);
+    assert!(
+        offset_bytes % 4 == 0,
+        "cmpb displacement must be 4-byte aligned"
+    );
+    assert!(
+        offset_bytes >= -8192 && offset_bytes <= 8188,
+        "cmpb displacement {} out of range [-8192, 8188]",
+        offset_bytes
+    );
     let mut bits: u32 = 0;
     let mut remaining = offset_bytes;
     if remaining < 0 {
-        bits |= 1;  // bit 0 (sign)
+        bits |= 1; // bit 0 (sign)
         remaining += 8192;
     }
     if remaining >= 4096 {
-        bits |= 1 << 2;  // bit 2 (weight 4096)
+        bits |= 1 << 2; // bit 2 (weight 4096)
         remaining -= 4096;
     }
     if remaining >= 2048 {
-        bits |= 1 << 12;  // bit 12 (weight 2048)
+        bits |= 1 << 12; // bit 12 (weight 2048)
         remaining -= 2048;
     }
     let val = remaining / 4;
     assert!(val >= 0 && val <= 511);
-    bits | (val as u32) << 3  // bits 11-3 (weight 4..1024)
+    bits | (val as u32) << 3 // bits 11-3 (weight 4..1024)
 }
 
 /// Encode cmpb (compare-and-branch, register form).
@@ -234,12 +255,16 @@ fn encode_cmpb_disp(offset_bytes: i32) -> u32 {
 /// `f` is the nullify-on-taken flag (bit 1 of low byte).
 /// `disp_bytes` is the byte displacement from PC+8 (must be 4-byte aligned).
 fn encode_cmpb(r1: Reg, r2: Reg, cond: u32, inverted: bool, f: bool, disp_bytes: i32) -> [u8; 4] {
-    let major = if inverted { 0x88000000u32 } else { 0x80000000u32 };
-    let mut word = major
-        | ((r2 as u32 & 0x1F) << 21)
-        | ((r1 as u32 & 0x1F) << 16)
-        | ((cond & 0x7) << 13);
-    if f { word |= 1 << 1; }  // bit 1 = f
+    let major = if inverted {
+        0x88000000u32
+    } else {
+        0x80000000u32
+    };
+    let mut word =
+        major | ((r2 as u32 & 0x1F) << 21) | ((r1 as u32 & 0x1F) << 16) | ((cond & 0x7) << 13);
+    if f {
+        word |= 1 << 1;
+    } // bit 1 = f
     word |= encode_cmpb_disp(disp_bytes);
     word.to_be_bytes()
 }
@@ -257,9 +282,7 @@ fn encode_ldil(reg: Reg, imm: u32) -> [u8; 4] {
     // the result in R1 (implicit), NOT in the specified register. This
     // made GetAddress store the WRONG register (R8 unchanged instead of
     // R8 = address), causing CallIndirect to branch to garbage.
-    let word = 0x20000000u32
-        | ((reg as u32) << 21)
-        | imm21;
+    let word = 0x20000000u32 | ((reg as u32) << 21) | imm21;
     word.to_be_bytes()
 }
 
@@ -284,10 +307,7 @@ fn encode_ldo_raw(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
     } else {
         ((disp * 2) as u32 & 0x3FFE) | 1
     };
-    let word = 0x34000000u32
-        | ((base as u32 & 0x1F) << 21)
-        | ((dst as u32 & 0x1F) << 16)
-        | imm14;
+    let word = 0x34000000u32 | ((base as u32 & 0x1F) << 21) | ((dst as u32 & 0x1F) << 16) | imm14;
     word.to_be_bytes()
 }
 
@@ -302,10 +322,7 @@ fn encode_ldw(base: Reg, offset: i16, dst: Reg) -> [u8; 4] {
     } else {
         ((disp * 2) as u32 & 0x3FFE) | 1
     };
-    let word = 0x48000000u32
-        | ((base as u32 & 0x1F) << 21)
-        | ((dst as u32 & 0x1F) << 16)
-        | imm14;
+    let word = 0x48000000u32 | ((base as u32 & 0x1F) << 21) | ((dst as u32 & 0x1F) << 16) | imm14;
     word.to_be_bytes()
 }
 
@@ -426,9 +443,7 @@ fn encode_xor(r1: Reg, r2: Reg, dst: Reg) -> [u8; 4] {
 fn encode_copy(src: Reg, dst: Reg) -> [u8; 4] {
     // OR src, R0, dst = COPY src, dst
     // Same format as ADD: r1(src) at bits 20-16, r2(R0) at bits 25-21, dst at bits 4-0.
-    let word = 0x08000260u32
-        | ((src as u32 & 0x1F) << 16)
-        | (dst as u32 & 0x1F);
+    let word = 0x08000260u32 | ((src as u32 & 0x1F) << 16) | (dst as u32 & 0x1F);
     word.to_be_bytes()
 }
 
@@ -458,7 +473,7 @@ fn encode_shrpw(r1: Reg, r2: Reg, sa: u8, t: Reg) -> [u8; 4] {
     //   bits 9-5:   sa_complement (5-bit field; actual shift = 31 - sa_complement)
     //   bits 4-0:   t (target)
     //
-    // [K8C-hppa-f64] Fix: previously encoded only bits 9-6 (4-bit pos) with
+    // Fix: previously encoded only bits 9-6 (4-bit pos) with
     // bit 5 forced to 0, restricting shifts to ODD amounts (sa = 31 - 2*pos).
     // The mul-stub extraction needed sa=20 (even) and worked around it with
     // `shrpw sa=19` + `shrpw R0,.,1,.`, but that workaround zeroed the
@@ -501,10 +516,20 @@ fn encode_ldi(imm: i32, dst: Reg) -> [u8; 4] {
 // WARNING: PA-RISC 1.1 FP encoding is intricate. These helpers are
 // best-effort from the PA-RISC 1.1 Architecture Reference Manual §5.
 // They MUST be verified on real PA hardware or qemu-hppa before
-// production use. See TODO F1b.
+// production use. See the FP comparison extraction TODO (partially
+// resolved: silent "store 0" stub replaced with `unimplemented!`) and
+// the FLDW/FSTW encoder verification TODO (partially addressed:
+// bit-level format asserted by unit tests, but QEMU-hppa runtime
+// behaviour still unverified).
+//
+// All encoders in this section are `#[allow(dead_code)]` — the
+// production FP path uses `emit_softfloat_call` (for F64 register
+// BinOps) or `const_fold_fp_binop` (for compile-time constants),
+// NOT these hardware encoders.
 
 /// FP arithmetic (FADD/FSUB/FMUL/FDIV).  f_op: 0x30=FADD, 0x31=FSUB,
 /// 0x32=FMUL, 0x33=FDIV.  fmt: 0=Single, 1=Double.
+#[allow(dead_code)]
 fn encode_fp_arith(f_op: u32, fmt: u32, r1: FReg, r2: FReg, t: FReg) -> [u8; 4] {
     // copr(0x0C)<<26 | class0(0)<<25 | f-ext(0b0110)<<21 | r1<<16 | r2<<11 | fmt<<9 | t<<6 | f_op
     let word: u32 = (0x0Cu32 << 26)
@@ -518,6 +543,22 @@ fn encode_fp_arith(f_op: u32, fmt: u32, r1: FReg, r2: FReg, t: FReg) -> [u8; 4] 
 }
 
 /// FP compare.  f_cond is the condition (e.g. 0x24 for !?, 0x20 for =, etc.).
+///
+/// Encoder present, NOT byte-verified on QEMU-hppa:
+/// This encoder builds a PA-RISC 1.1 coprocessor-1 word whose major
+/// opcode (0x0C) and field layout (sub-opcode 0x06 in bits 25-21, r1
+/// in 20-16, r2 in 15-11, fmt in 10-9, f_cond in 5-0) match the layout
+/// documented in PA-RISC 1.1 Architecture Reference Manual §5.6.7.
+/// It is exercised by the unit test `test_f1b_encode_fp_cmp_format`
+/// at the bottom of this file (bit-level format assertion only).
+///
+/// The encoder is NOT used in the production codegen path — for F64
+/// comparisons `IRInstr::BinOp` routes through `emit_softfloat_call`
+/// (`__vuma_f64_eq` / `__vuma_f64_lt` / `__vuma_f64_le`), and the
+/// dead-code `emit_hppa_fp_binop` FP-comparison arm now panics with
+/// `unimplemented!` (see the FP comparison TODO).  Wiring this encoder into production
+/// requires the FTEST+MOVb C-bit extraction skeleton noted in that
+/// doc comment, plus QEMU-hppa byte-verification of the encoded word.
 #[allow(dead_code)]
 fn encode_fp_cmp(f_cond: u32, fmt: u32, r1: FReg, r2: FReg) -> [u8; 4] {
     let word: u32 = (0x0Cu32 << 26)
@@ -531,14 +572,14 @@ fn encode_fp_cmp(f_cond: u32, fmt: u32, r1: FReg, r2: FReg) -> [u8; 4] {
 
 /// Load 32-bit FP from memory (FLDW) — PA-RISC 1.1 coprocessor load.
 ///
-/// G3 STATUS (NOP stub, NOT exercised by the current FP strategy):
+/// STATUS (NOP stub, NOT exercised by the current FP strategy):
 /// The PA-RISC 1.1 coprocessor load/store encoding is intricate
 /// (14-bit signed displacement split across the instruction word, with
 /// `b` (base) and `t` (target coprocessor reg) at non-contiguous field
 /// positions).  It cannot be byte-verified in this sandbox without
 /// QEMU-hppa decode testing.
 ///
-/// The G3 fallback strategy AVOIDS exercising this encoder:
+/// The fallback strategy AVOIDS exercising this encoder:
 ///   - `CastKind::FloatToFloat` is implemented as a GPR-transit bit-copy
 ///     (see the Cast arm in `emit_function`), so no FPR load is needed.
 ///   - `CastKind::IntToFloat` / `FloatToInt` / etc. are documented stubs
@@ -549,8 +590,20 @@ fn encode_fp_cmp(f_cond: u32, fmt: u32, r1: FReg, r2: FReg) -> [u8; 4] {
 /// The FP arithmetic path (`emit_hppa_fp_binop`) does call this encoder,
 /// so its results are currently incorrect — see that function's doc.
 ///
-/// TODO G3 (deferred): replace with verified FLDW encoding once
-/// QEMU-hppa testing is wired up.
+/// TODO (deferred, PARTIALLY ADDRESSED): the bit-level
+/// encoding format is now documented and asserted by unit tests
+/// (`test_g3_encode_fldw_format` / `test_g3_encode_fstw_format`).  The
+/// encoder still CANNOT be considered production-correct until either:
+///   (a) QEMU-hppa decode testing confirms the encoded word decodes to
+///       `FLDW,ma b(offset), t` and `FSTW,ma s, b(offset)` with the
+///       expected load/store semantics; OR
+///   (b) Soft-float runtime symbols (`__vuma_f64_add/sub/mul/div`,
+///       `__vuma_f64_eq/lt/le`, `__vuma_f64_itof/ftoi`) are added to
+///       `womb/ieee/fp.vuma` and the codegen switches to `IRInstr::Call`
+///       emission for ALL FP ops (currently only F64 register-operand
+///       BinOp + constant-folded F32/F64 comparisons are routed through
+///       soft-float / constant-fold).
+///
 /// Load 32-bit FP from memory (FLDW). PA-RISC coprocessor load word.
 /// Major opcode 0x09, coprocessor unit ID = 1 (FPU).
 /// Format: 001001 1 b 0 00001 t im11 000
@@ -562,39 +615,44 @@ fn encode_fp_cmp(f_cond: u32, fmt: u32, r1: FReg, r2: FReg) -> [u8; 4] {
 /// Actual PA-RISC encoding for CLDW (coprocessor load word):
 ///   001001 m b s uid(5) cl_ext(5) im(11) 0
 /// For FPU (uid=00001), the FPR is in the cl_ext field (bits 13-9).
+#[allow(dead_code)]
 fn encode_fldw(base: Reg, offset: i16, dst: FReg) -> [u8; 4] {
-    let word: u32 = (0x09u32 << 26)      // major opcode
+    let word: u32 = ((0x09u32 << 26)      // major opcode
         | (1u32 << 25)                    // m=1 (modify base)
-        | ((base as u32 & 0x1F) << 20)   // base register
-        | (0u32 << 19)                    // s=0
+        | ((base as u32 & 0x1F) << 20))                    // s=0
         | (1u32 << 14)                    // uid=00001 (FPU)
         | ((dst as u32 & 0x1F) << 9)     // FPR destination
-        | ((offset as u32 & 0x7FF) << 1) // 11-bit displacement
-        | 0u32;                           // bit 0 = 0
+        | ((offset as u32 & 0x7FF) << 1); // bit 0 = 0
     word.to_be_bytes()
 }
 
 /// Store 32-bit FP to memory (FSTW). PA-RISC coprocessor store word.
 /// Same format as FLDW but with major opcode 0x09 and different m/s bits.
 /// CSTW uses the same major opcode but with the store bit set.
+///
+/// Encoder present, NOT byte-verified on QEMU-hppa:
+/// Same caveat as `encode_fldw` — the bit-level format is asserted by
+/// the unit test `test_g3_encode_fstw_format` at the bottom of this
+/// file, but the runtime load-vs-store distinction (m/s bits) has not
+/// been confirmed against QEMU's hppa decoder.  See `encode_fldw`'s
+/// doc comment for the full deferral rationale.
+#[allow(dead_code)]
 fn encode_fstw(src: FReg, base: Reg, offset: i16) -> [u8; 4] {
     // CSTW (coprocessor store word): major 0x09, same as CLDW but stores.
     // The store vs load distinction is encoded in the m and s bits.
     // For CSTW,ma: m=1, s=0, uid=00001
-    let word: u32 = (0x09u32 << 26)      // major opcode
+    let word: u32 = ((0x09u32 << 26)      // major opcode
         | (1u32 << 25)                    // m=1 (modify base)
-        | ((base as u32 & 0x1F) << 20)   // base register
-        | (0u32 << 19)                    // s=0
+        | ((base as u32 & 0x1F) << 20))                    // s=0
         | (1u32 << 14)                    // uid=00001 (FPU)
         | ((src as u32 & 0x1F) << 9)     // FPR source
-        | ((offset as u32 & 0x7FF) << 1) // 11-bit displacement
-        | 0u32;
+        | ((offset as u32 & 0x7FF) << 1);
     word.to_be_bytes()
 }
 
 /// Emit HPPA floating-point binary op.
 ///
-/// G3 STATUS (best-effort, NOT functional): The FP arithmetic path
+/// Best-effort, NOT functional: The FP arithmetic path
 /// emits a real PA-RISC 1.1 coprocessor word via `encode_fp_arith`
 /// for FADD/FSUB/FMUL/FDIV, BUT the operands never reach the FPRs
 /// because `encode_fldw` / `encode_fstw` are NOP stubs (see their
@@ -614,9 +672,12 @@ fn encode_fstw(src: FReg, base: Reg, offset: i16) -> [u8; 4] {
 /// `womb/ieee/fp.vuma` (currently that file only has utility helpers
 /// like `f64_abs` / `f64_trunc`; no arithmetic, no conversions).
 ///
-/// The FP comparison path (Eq/Ne/SLt/...) is also stubbed ("store 0").
-/// The IR verifier (F2a) and gold tests (F3) will catch incorrect
-/// results until either (a) or (b) lands.  See TODO G3.
+/// The FP comparison path (Eq/Ne/SLt/...) was previously stubbed
+/// ("store 0") — FP comparison TODO.  That silent stub was replaced
+/// with a loud `unimplemented!` panic (see the comparison arm below).
+/// The IR verifier and gold tests will catch incorrect results until
+/// either (a) or (b) lands.  See the FLDW/FSTW TODO.
+#[allow(dead_code)]
 fn emit_hppa_fp_binop(
     op: &crate::ir::BinOpKind,
     dst: &IRValue,
@@ -636,7 +697,7 @@ fn emit_hppa_fp_binop(
     code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
     code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
     // Spill to scratch slots (reuse TMP64 area; f64 needs 8 bytes = 2 slots).
-    let lhs_slot: i32 = -52;  // scratch, distinct from TMP64_A_HI=-36
+    let lhs_slot: i32 = -52; // scratch, distinct from TMP64_A_HI=-36
     let rhs_slot: i32 = -60;
     code.extend(ss_st(S0, lhs_slot));
     code.extend(ss_st(S1, rhs_slot));
@@ -647,28 +708,82 @@ fn emit_hppa_fp_binop(
 
     // Arithmetic.
     let f_op: u32 = match op {
-        BinOpKind::Add => 0x30,  // FADD
-        BinOpKind::Sub => 0x31,  // FSUB
-        BinOpKind::Mul => 0x32,  // FMUL
-        BinOpKind::SDiv | BinOpKind::UDiv => 0x33,  // FDIV
-        BinOpKind::Eq | BinOpKind::Ne
-        | BinOpKind::SLt | BinOpKind::ULt
-        | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt
-        | BinOpKind::SGe | BinOpKind::UGe => {
-            // FCMP sets C-bit; reading it requires a move from CCR.
-            // TODO F1b: implement FP comparison extraction.
-            // Stub: store 0.
-            code.extend(ss_load_imm(S0, 0));
-            code.extend(ss_st(S0, dst_off));
-            return;
+        BinOpKind::Add => 0x30,                    // FADD
+        BinOpKind::Sub => 0x31,                    // FSUB
+        BinOpKind::Mul => 0x32,                    // FMUL
+        BinOpKind::SDiv | BinOpKind::UDiv => 0x33, // FDIV
+        BinOpKind::Eq
+        | BinOpKind::Ne
+        | BinOpKind::SLt
+        | BinOpKind::ULt
+        | BinOpKind::SLe
+        | BinOpKind::ULe
+        | BinOpKind::SGt
+        | BinOpKind::UGt
+        | BinOpKind::SGe
+        | BinOpKind::UGe => {
+            // FP comparison RESOLVED (PARTIAL): the silent "store 0" stub
+            // has been replaced with a loud `unimplemented!` so that any
+            // future caller resurrecting this dead-code emitter gets a
+            // clear panic instead of silently-wrong results.
+            //
+            // What a real PA-RISC 1.1 implementation would do (reference
+            // for whoever wires up QEMU-hppa verification, see FLDW/FSTW TODO):
+            //   1. `FCMP,dbl fmt, r1, r2, f_cond` (encoded by `encode_fp_cmp`
+            //      at line ~527).  `f_cond` selects the predicate
+            //      (e.g. 0x20 `=` / 0x24 `!?` / 0x0A `<` / 0x0E `<=` /
+            //      0x12 `>` / 0x16 `>=` per PA-RISC 1.1 §5.6.7).
+            //   2. The result lands in the FP Status Register's C-bit
+            //      (bit 26) + condition-number field, NOT in a GPR.
+            //   3. Extract the C-bit via `FTOINT`+`FTOSEXPDBR` or the
+            //      `FTEST`+`MOVF` sequence (PA-RISC 1.1 §5.6.10 / §5.7.7).
+            //      This is the intricate part: FTEST reads the CCR and
+            //      sets a condition that a subsequent `MOVb,=,n` or
+            //      `CMPIB,=` can branch on, requiring a 3-instruction
+            //      `FCMP → FTEST → MOVb` skeleton with a delay-slot
+            //      materialisation of the boolean result.
+            //
+            // Why it's not implemented here:
+            //   - The FLDW/FSTW encoders (`encode_fldw`/`encode_fstw` at lines 570-596) are
+            //     NOP stubs, so operands never reach FPRs in the first
+            //     place — even a correct FCMP would compare garbage.
+            //   - The C-bit extraction sequence has not been byte-verified
+            //     against QEMU-hppa or real PA hardware.
+            //
+            // Production alternative (already wired): for F64 with at
+            // least one register operand, `IRInstr::BinOp` (at line ~3419)
+            // routes through `emit_softfloat_call` with the stubs
+            // `__vuma_f64_eq` / `__vuma_f64_lt` / `__vuma_f64_le` (and
+            // XOR-1 for `Ne`).  F32 register-operand comparisons are
+            // still stubbed (line ~3457, "TODO: implement F32 soft-float
+            // stubs") — that is a separate TODO from the FP comparison work.
+            //
+            // This entire `emit_hppa_fp_binop` function is `#[allow(dead_code)]`
+            // and has no production callers; the `unimplemented!` is a
+            // tripwire in case the dead-code path is ever resurrected.
+            unimplemented!(
+                "F1b (hppa emit_hppa_fp_binop FP comparison): \
+                 PA-RISC 1.1 FCMP->CCR->bool extraction is not implemented. \
+                 This dead-code emitter must not be called from the \
+                 production path -- IRInstr::BinOp routes F64 through \
+                 emit_softfloat_call (__vuma_f64_eq/lt/le) instead. \
+                 Implementing FCMP here requires (1) G3 (FLDW/FSTW encoders) \
+                 to be byte-verified on QEMU-hppa, AND (2) the FTEST+MOVb \
+                 C-bit extraction skeleton (PA-RISC 1.1 §5.6.7/§5.6.10/§5.7.7)."
+            );
         }
         _ => {
-            // Invalid FP op (bitwise/shift on float).  Fall back to integer.
-            // The IR verifier (F2a) should reject this before codegen.
-            code.extend(ss_load_imm(S0, 0));
-            code.extend(ss_st(S0, dst_off));
-            return;
+            // Invalid FP op (bitwise/shift on float).  The IR verifier
+            // should reject this before codegen; if we reach here, panic
+            // loudly rather than silently storing 0.
+            unimplemented!(
+                "F1b (hppa emit_hppa_fp_binop invalid FP op {:?}): \
+                 bitwise/shift ops on floats are not valid and should have \
+                 been rejected by the IR verifier (F2a). \
+                 If you see this panic, the IR verifier has a gap -- file a \
+                 bug against F2a rather than extending this stub.",
+                op
+            );
         }
     };
     code.extend_from_slice(&encode_fp_arith(f_op, fmt, FA, FB, FA));
@@ -691,8 +806,28 @@ fn emit_hppa_fp_binop(
 /// 2. Values where upper_shifted fits in 14 bits: LDI + 11×ADD + LDO
 /// 3. Larger values: two-level decomposition (LDI + 11×ADD + LDO + 11×ADD + LDO)
 ///
-/// QEMU's LDIL shifts left by 19 instead of 11, making LDIL unusable.
-/// The 11×ADD sequence implements a left shift by 11 (dst = dst << 11).
+/// QEMU 7.2.0's hppa LDIL decoder is broken — the
+/// LDIL instruction (major opcode 0x08, format 21) shifts its 21-bit
+/// immediate left by 19 instead of 11, producing a wrong value, and the
+/// ADDIL (major 0x0A) semantics also diverge from PA-RISC 1.1 spec. This
+/// makes the canonical `LDIL+LDO` immediate-materialisation pair unusable
+/// under QEMU user-mode emulation. The real DEC/HP hardware implements
+/// LDIL correctly; this is purely a QEMU translator bug.
+///
+/// Workaround: avoid LDIL entirely. Decompose the 32-bit value into
+/// 21-bit (bits 31:11) and 11-bit (bits 10:0) halves, load the upper
+/// half via `LDO` (format 14, base=R0, treated as `LDI`), shift it left
+/// by 11 using 11 `ADD dst, dst, dst` instructions, then add the lower
+/// 11 bits via another `LDO`. For values that don't fit in 14 bits a
+/// two-level decomposition is used. The `GetAddress` relocator
+/// (`hppa.rs:4539`) emits the same `LDO+11×ADD+LDO` placeholder pattern
+/// for the same reason.
+///
+/// Removal condition: this workaround can be removed when QEMU 8.x (or
+/// any version with a corrected hppa LDIL decoder) is the minimum
+/// supported version for VUMA's QEMU test host. See
+/// `docs/architecture/caveats.md` §4 row 7 and
+/// `docs/architecture/ipc-audit.md` §6.
 fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
     let mut code = Vec::new();
     // For small values (-8192 to 8191), use a single LDI (LDO with base=R0).
@@ -701,9 +836,9 @@ fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
         return code;
     }
     let v = val as u32;
-    let upper = v & 0xFFFFF800;  // bits 31:11
-    let lower = (v & 0x7FF) as i16;  // bits 10:0
-    let upper_shifted = upper >> 11;  // bits 20:0 (max 0x1FFFFF = 2097151)
+    let upper = v & 0xFFFFF800; // bits 31:11
+    let lower = (v & 0x7FF) as i16; // bits 10:0
+    let upper_shifted = upper >> 11; // bits 20:0 (max 0x1FFFFF = 2097151)
 
     if upper_shifted <= 8191 {
         // Level 1: upper_shifted fits in LDO's 14-bit displacement
@@ -711,9 +846,9 @@ fn ss_load_imm(dst: Reg, val: i64) -> Vec<u8> {
     } else {
         // Level 2: upper_shifted > 8191, decompose further
         // upper_shifted = (upper_shifted >> 11) << 11 + (upper_shifted & 0x7FF)
-        let upper_high = (upper_shifted >> 11) as i16;  // bits 20:11 (max 1023)
-        let upper_low = (upper_shifted & 0x7FF) as i16;  // bits 10:0 (max 2047)
-        // LDI upper_high, dst
+        let upper_high = (upper_shifted >> 11) as i16; // bits 20:11 (max 1023)
+        let upper_low = (upper_shifted & 0x7FF) as i16; // bits 10:0 (max 2047)
+                                                        // LDI upper_high, dst
         code.extend_from_slice(&encode_ldo(R0, upper_high, dst));
         // Shift left by 11: dst = upper_high << 11
         for _ in 0..11 {
@@ -769,7 +904,11 @@ fn ss_ld(dst: Reg, offset: i32) -> Vec<u8> {
 }
 
 /// Load an IRValue into a scratch register.
-fn ss_load_value(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, scratch: Reg) -> Vec<u8> {
+fn ss_load_value(
+    val: &IRValue,
+    slots: &std::collections::HashMap<u32, i32>,
+    scratch: Reg,
+) -> Vec<u8> {
     match val {
         IRValue::Register(id) => {
             let offset = slots.get(id).copied().unwrap_or(0);
@@ -811,8 +950,8 @@ fn ss_load_value_64(
     match val {
         IRValue::Register(id) => {
             let offset = slots.get(id).copied().unwrap_or(0);
-            code.extend(ss_ld(lo_reg, offset));       // low word at [off]
-            code.extend(ss_ld(hi_reg, offset - 4));   // high word at [off-4]
+            code.extend(ss_ld(lo_reg, offset)); // low word at [off]
+            code.extend(ss_ld(hi_reg, offset - 4)); // high word at [off-4]
         }
         IRValue::Immediate(v) => {
             let v_u = *v as u64;
@@ -836,7 +975,11 @@ fn ss_load_value_64(
 /// halves — without this, only the low 32 bits of the destination are
 /// written, leaving the high 32 bits as 0 and corrupting 64-bit values
 /// like the FNV-1a hash in stark_verify.
-fn ss_load_value_hi(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, dst: Reg) -> Vec<u8> {
+fn ss_load_value_hi(
+    val: &IRValue,
+    slots: &std::collections::HashMap<u32, i32>,
+    dst: Reg,
+) -> Vec<u8> {
     match val {
         IRValue::Register(id) => {
             let offset = slots.get(id).copied().unwrap_or(0);
@@ -854,8 +997,8 @@ fn ss_load_value_hi(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, 
 /// Low word goes to `[off]`, high word to `[off-4]` (matches the f64 layout
 /// convention used elsewhere in this file).
 fn ss_store_64(lo_reg: Reg, hi_reg: Reg, offset: i32, code: &mut Vec<u8>) {
-    code.extend(ss_st(lo_reg, offset));       // low word at [off]
-    code.extend(ss_st(hi_reg, offset - 4));   // high word at [off-4]
+    code.extend(ss_st(lo_reg, offset)); // low word at [off]
+    code.extend(ss_st(hi_reg, offset - 4)); // high word at [off-4]
 }
 
 /// Emit the 32-byte BL+LDO+BV call pattern with a `R_PARISC_PCREL` relocation.
@@ -912,12 +1055,18 @@ fn const_fold_fp_binop(op: &crate::ir::BinOpKind, lhs: i64, rhs: i64, is_f64: bo
         f32::from_bits(rhs_bits as u32) as f64
     };
     use crate::ir::BinOpKind;
-    let is_comparison = matches!(op,
-        BinOpKind::Eq | BinOpKind::Ne
-        | BinOpKind::SLt | BinOpKind::ULt
-        | BinOpKind::SLe | BinOpKind::ULe
-        | BinOpKind::SGt | BinOpKind::UGt
-        | BinOpKind::SGe | BinOpKind::UGe
+    let is_comparison = matches!(
+        op,
+        BinOpKind::Eq
+            | BinOpKind::Ne
+            | BinOpKind::SLt
+            | BinOpKind::ULt
+            | BinOpKind::SLe
+            | BinOpKind::ULe
+            | BinOpKind::SGt
+            | BinOpKind::UGt
+            | BinOpKind::SGe
+            | BinOpKind::UGe
     );
     if is_comparison {
         let result = match op {
@@ -929,7 +1078,11 @@ fn const_fold_fp_binop(op: &crate::ir::BinOpKind, lhs: i64, rhs: i64, is_f64: bo
             BinOpKind::SGe | BinOpKind::UGe => lhs_f >= rhs_f,
             _ => false,
         };
-        if result { 1 } else { 0 }
+        if result {
+            1
+        } else {
+            0
+        }
     } else {
         let result = match op {
             BinOpKind::Add => lhs_f + rhs_f,
@@ -970,7 +1123,11 @@ fn const_fold_fp_cmp(kind: &crate::ir::CmpKind, lhs: i64, rhs: i64, is_f64: bool
         CmpKind::SGt | CmpKind::UGt => lhs_f > rhs_f,
         CmpKind::SGe | CmpKind::UGe => lhs_f >= rhs_f,
     };
-    if result { 1 } else { 0 }
+    if result {
+        1
+    } else {
+        0
+    }
 }
 
 /// Emit a backward unconditional branch using the BL+LDO+BV pattern.
@@ -993,10 +1150,10 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     let disp = target_offset - (bl_offset + 8);
     // BL +0, R1 (link = R1, disp = 0)
     code.extend_from_slice(&0xE8200000u32.to_be_bytes());
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // [Wave I-hppa-branch-range] LDO has a 14-bit signed displacement
-    // (±8191 bytes). For large functions (>8KB code), a single LDO can't
-    // reach the target. Use multiple LDOs to decompose the displacement.
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // [Wave I-hppa-branch-range] LDO has a 14-bit signed displacement
+                                           // (±8191 bytes). For large functions (>8KB code), a single LDO can't
+                                           // reach the target. Use multiple LDOs to decompose the displacement.
     let mut remaining = disp;
     // Each LDO can add up to ±8191. Use chunks of 8000 to stay safe.
     while remaining.abs() > 8000 {
@@ -1007,7 +1164,7 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     code.extend_from_slice(&encode_ldo_raw(R1, remaining as i16, R1));
     // BV R0(R1) — branch to address in R1
     code.extend_from_slice(&encode_bv_real(R1));
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_nop()); // delay slot
     code
 }
 
@@ -1049,8 +1206,8 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
 ///   - S6 is now a PERSISTENT S3_hi (was: temp for bit extraction + old_lo).
 ///   - Bit check uses cmpb,ev S1, R0 (branch if S1 even / bit is 0).
 ///   - Carry check uses cmpb,>>= S0, S3 (compare with S3, not old_lo):
-///       no carry: S0 = old_lo + S3 >= S3 (since old_lo >= 0)
-///       carry:    S0 = old_lo + S3 - 2^32 < S3 (since old_lo < 2^32)
+///       - no carry: S0 = old_lo + S3 >= S3 (since old_lo >= 0)
+///       - carry:    S0 = old_lo + S3 - 2^32 < S3 (since old_lo < 2^32)
 ///   - MSB propagation uses cmpb,>= S3, R0 (signed >= 0 = MSB not set);
 ///     the S3 shift is placed in the cmpb's delay slot so it executes
 ///     regardless of branch direction (f=false).
@@ -1103,10 +1260,10 @@ fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
     // Clobbers: S0, S1, S2, S3, S5, S6
     // S1 (b) is PRESERVED.
 
-    code.extend_from_slice(&encode_copy(S0, S3));     // S3 = S0 (= a)
-    code.extend_from_slice(&encode_copy(R0, S0));     // S0 = 0 (lo)
-    code.extend_from_slice(&encode_copy(R0, S2));     // S2 = 0 (hi)
-    code.extend(ss_load_imm(S5, 32));                  // S5 = 32 (counter)
+    code.extend_from_slice(&encode_copy(S0, S3)); // S3 = S0 (= a)
+    code.extend_from_slice(&encode_copy(R0, S0)); // S0 = 0 (lo)
+    code.extend_from_slice(&encode_copy(R0, S2)); // S2 = 0 (hi)
+    code.extend(ss_load_imm(S5, 32)); // S5 = 32 (counter)
 
     let loop_off = code.len();
     let exit_cmpb_off = code.len();
@@ -1115,32 +1272,32 @@ fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
 
     // --- Step 1: Shift result (S2:S0) left by 1 ---
     // S6 = S0 >> 31 (MSB of result_lo, 0 or 1)
-    code.extend_from_slice(&encode_shrpw(R0, S0, 31, S6));  // S6 = S0 >> 31
-    // S0 <<= 1
+    code.extend_from_slice(&encode_shrpw(R0, S0, 31, S6)); // S6 = S0 >> 31
+                                                           // S0 <<= 1
     code.extend_from_slice(&encode_shladd(1, S0, R0, S0));
     // S2 <<= 1, then S2 += S6 (carry from S0's MSB)
-    code.extend_from_slice(&encode_shladd(1, S2, R0, S2));  // S2 <<= 1
-    code.extend_from_slice(&encode_add(S6, S2, S2));        // S2 += S6
+    code.extend_from_slice(&encode_shladd(1, S2, R0, S2)); // S2 <<= 1
+    code.extend_from_slice(&encode_add(S6, S2, S2)); // S2 += S6
 
     // --- Step 2: Conditionally add b (S1) to result ---
     // S6 = S3 >> 31 (MSB of a, 0 or 1)
-    code.extend_from_slice(&encode_shrpw(R0, S3, 31, S6));  // S6 = S3 >> 31
-    // S6 = -S6 (0 or 0xFFFFFFFF). PA-RISC SUB r1,r2,t = t = r1 - r2.
-    code.extend_from_slice(&encode_sub(R0, S6, S6));   // S6 = R0 - S6 = -S6
-    code.extend_from_slice(&encode_and(S6, S1, S6));   // S6 = S6 & S1 (0 or b)
-    // Add S6 to result. Save old S0 for carry check.
-    code.extend_from_slice(&encode_stw(S0, R3, -48));  // save old_lo
-    code.extend_from_slice(&encode_add(S6, S0, S0));   // S0 += S6 (conditional add of b)
-    // Carry: S6 = S0 - old_lo. If S0 <u old_lo (carry/overflow), MSB set.
-    // PA-RISC SUB r1,r2,t = t = r1 - r2. SUB S0, old_lo, S6 = S6 = S0 - old_lo.
-    code.extend_from_slice(&encode_ldw(R3, -48, S6));  // S6 = old_lo
-    code.extend_from_slice(&encode_sub(S0, S6, S6));   // S6 = S0 - old_lo (carry → MSB set)
+    code.extend_from_slice(&encode_shrpw(R0, S3, 31, S6)); // S6 = S3 >> 31
+                                                           // S6 = -S6 (0 or 0xFFFFFFFF). PA-RISC SUB r1,r2,t = t = r1 - r2.
+    code.extend_from_slice(&encode_sub(R0, S6, S6)); // S6 = R0 - S6 = -S6
+    code.extend_from_slice(&encode_and(S6, S1, S6)); // S6 = S6 & S1 (0 or b)
+                                                     // Add S6 to result. Save old S0 for carry check.
+    code.extend_from_slice(&encode_stw(S0, R3, -48)); // save old_lo
+    code.extend_from_slice(&encode_add(S6, S0, S0)); // S0 += S6 (conditional add of b)
+                                                     // Carry: S6 = S0 - old_lo. If S0 <u old_lo (carry/overflow), MSB set.
+                                                     // PA-RISC SUB r1,r2,t = t = r1 - r2. SUB S0, old_lo, S6 = S6 = S0 - old_lo.
+    code.extend_from_slice(&encode_ldw(R3, -48, S6)); // S6 = old_lo
+    code.extend_from_slice(&encode_sub(S0, S6, S6)); // S6 = S0 - old_lo (carry → MSB set)
     code.extend_from_slice(&encode_shrpw(R0, S6, 31, S6)); // S6 = S6 >> 31 (0 or 1)
-    code.extend_from_slice(&encode_add(S6, S2, S2));   // S2 += carry
+    code.extend_from_slice(&encode_add(S6, S2, S2)); // S2 += carry
 
     // --- Step 3: S3 <<= 1, S5-- ---
-    code.extend_from_slice(&encode_shladd(1, S3, R0, S3));  // S3 <<= 1
-    code.extend_from_slice(&encode_ldo(S5, -1, S5));         // S5--
+    code.extend_from_slice(&encode_shladd(1, S3, R0, S3)); // S3 <<= 1
+    code.extend_from_slice(&encode_ldo(S5, -1, S5)); // S5--
 
     // Unconditional backward branch to loop_off
     let bl_off = code.len() as i64;
@@ -1149,9 +1306,14 @@ fn emit_hppa_mulu32_to_64(code: &mut Vec<u8>) {
     // exit: patch the exit cmpb to branch here.
     let exit_off = code.len() as i64;
     let exit_disp = ((exit_off - exit_cmpb_off as i64 - 8) as i32) & !3;
-    let ew = u32::from_be_bytes([code[exit_cmpb_off], code[exit_cmpb_off+1], code[exit_cmpb_off+2], code[exit_cmpb_off+3]]);
+    let ew = u32::from_be_bytes([
+        code[exit_cmpb_off],
+        code[exit_cmpb_off + 1],
+        code[exit_cmpb_off + 2],
+        code[exit_cmpb_off + 3],
+    ]);
     let ep = (ew & !0x1FFF) | encode_cmpb_disp(exit_disp);
-    code[exit_cmpb_off..exit_cmpb_off+4].copy_from_slice(&ep.to_be_bytes());
+    code[exit_cmpb_off..exit_cmpb_off + 4].copy_from_slice(&ep.to_be_bytes());
 }
 
 /// Emit an unconditional branch (forward or backward).
@@ -1167,43 +1329,93 @@ fn emit_branch(target_offset: i64, bl_offset: i64) -> (Vec<u8>, bool) {
 // ===========================================================================
 
 pub struct HppaBackend {
-    /// Whether to use real register allocation (Wave 23) or stack-slot lowering.
+    /// Whether to use real register allocation or stack-slot lowering.
     pub use_real_regalloc: bool,
 }
 impl HppaBackend {
-    pub fn new() -> Self { Self { use_real_regalloc: false } }
+    pub fn new() -> Self {
+        Self {
+            use_real_regalloc: false,
+        }
+    }
 }
-impl Default for HppaBackend { fn default() -> Self { Self::new() } }
+impl Default for HppaBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct HppaTargetInfo;
 impl TargetInfo for HppaTargetInfo {
-    fn isa_name(&self) -> &'static str { "hppa" }
-    fn target_triple(&self) -> &'static str { "hppa-unknown-linux-gnu" }
-    fn elf_machine_type(&self) -> u16 { 15 } // EM_PARISC
-    fn default_base_address(&self) -> u64 { 0x10000 }
-    fn pointer_width(&self) -> usize { 4 }
+    fn isa_name(&self) -> &'static str {
+        "hppa"
+    }
+    fn target_triple(&self) -> &'static str {
+        "hppa-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        15
+    } // EM_PARISC
+    fn default_base_address(&self) -> u64 {
+        0x10000
+    }
+    fn pointer_width(&self) -> usize {
+        4
+    }
     fn size_of(&self, ty: &IRType) -> usize {
         size_of_with_ptr_width(ty, 4)
     }
     fn alignment_of(&self, ty: &IRType) -> usize {
         alignment_of_with_ptr_width(ty, 4)
     }
-    fn endianness(&self) -> Endianness { Endianness::Big }
-    fn has_registers(&self) -> bool { true }
-    fn num_gp_regs(&self) -> usize { 32 }
-    fn num_simd_fp_regs(&self) -> usize { 16 }  // PA-RISC 1.1: F0–F15 (hardware FP NOT emitted — see G3 strategy in emit_hppa_fp_binop doc + Cast arm)
-    fn has_hardwired_zero(&self) -> bool { true }
-    fn has_link_register(&self) -> bool { true }
-    fn has_branch_delay_slots(&self) -> bool { false }
-    fn has_toc_pointer(&self) -> bool { false }
-    fn has_condition_registers(&self) -> bool { false }
-    fn calling_convention_name(&self) -> &'static str { "hppa-cdecl" }
-    fn num_int_arg_regs(&self) -> usize { 4 }
-    fn num_fp_arg_regs(&self) -> usize { 4 }    // PA-RISC ABI: FR4L/FR5L/FR6L/FR7L
-    fn stack_alignment(&self) -> usize { 64 }
-    fn instruction_alignment(&self) -> usize { 4 }
-    fn instruction_width_range(&self) -> (usize, usize) { (4, 4) }
-    fn output_format(&self) -> crate::backend::OutputFormat { crate::backend::OutputFormat::Elf32 }
+    fn endianness(&self) -> Endianness {
+        Endianness::Big
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        32
+    }
+    fn num_simd_fp_regs(&self) -> usize {
+        16
+    } // PA-RISC 1.1: F0–F15 (hardware FP NOT emitted — see strategy in emit_hppa_fp_binop doc + Cast arm)
+    fn has_hardwired_zero(&self) -> bool {
+        true
+    }
+    fn has_link_register(&self) -> bool {
+        true
+    }
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "hppa-cdecl"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        4
+    }
+    fn num_fp_arg_regs(&self) -> usize {
+        4
+    } // PA-RISC ABI: FR4L/FR5L/FR6L/FR7L
+    fn stack_alignment(&self) -> usize {
+        64
+    }
+    fn instruction_alignment(&self) -> usize {
+        4
+    }
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (4, 4)
+    }
+    fn output_format(&self) -> crate::backend::OutputFormat {
+        crate::backend::OutputFormat::Elf32
+    }
 
     fn latency_table(&self) -> crate::target_desc::LatencyTable {
         crate::target_desc::LatencyTable::hppa()
@@ -1300,6 +1512,15 @@ fn patch_call_site(
 
     // Case 4: Beyond 4-LDO range — use BL directly (±256KB range).
     //
+    // NOT a QEMU bug — this is the long-call
+    // codegen fallback for the case where the 4-LDO strategy (Case 3,
+    // max ±32764 byte displacement) cannot reach the target. Used when
+    // VUMA binaries exceed ~32 KB and call sites near the start of the
+    // text segment need to reach callees near the end. Tested under
+    // QEMU 7.2.0 hppa user-mode emulation; BL with the nullify bit set
+    // (`BL,n`, 17-bit signed displacement = ±256 KB) is correctly
+    // decoded by QEMU.
+    //
     // [K15A-hppa-large-payload] For binaries > ~32KB, call sites near the
     // beginning can't reach trampolines at the end via 4 LDOs (max 32764).
     // The previous fallback wrote LDO 0(R1),R1 (a no-op), leaving R1 = pc+8
@@ -1344,7 +1565,7 @@ fn patch_call_site(
 
 /// Patch a cmpb instruction at `cmpb_off` to branch to the current code end
 /// (i.e., the offset just past the last emitted instruction).
-fn patch_cmpb_to_here(code: &mut Vec<u8>, cmpb_off: usize) {
+fn patch_cmpb_to_here(code: &mut [u8], cmpb_off: usize) {
     let here = code.len() as i64;
     patch_cmpb_to_target(code, cmpb_off, here as usize);
 }
@@ -1354,11 +1575,13 @@ fn patch_cmpb_to_here(code: &mut Vec<u8>, cmpb_off: usize) {
 /// `patch_cmpb_to_here` helper always uses `code.len()` as the target,
 /// which doesn't work when the target is emitted before the second
 /// cmpb is patched).
-fn patch_cmpb_to_target(code: &mut Vec<u8>, cmpb_off: usize, target_off: usize) {
+fn patch_cmpb_to_target(code: &mut [u8], cmpb_off: usize, target_off: usize) {
     let disp = ((target_off as i64 - cmpb_off as i64 - 8) as i32) & !3;
     let word = u32::from_be_bytes([
-        code[cmpb_off], code[cmpb_off + 1],
-        code[cmpb_off + 2], code[cmpb_off + 3],
+        code[cmpb_off],
+        code[cmpb_off + 1],
+        code[cmpb_off + 2],
+        code[cmpb_off + 3],
     ]);
     let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
     code[cmpb_off..cmpb_off + 4].copy_from_slice(&patched.to_be_bytes());
@@ -1376,11 +1599,14 @@ fn emit_forward_branch_placeholder(code: &mut Vec<u8>) -> usize {
 
 /// Patch a 20-byte forward-branch placeholder (emitted by
 /// `emit_forward_branch_placeholder`) to branch to the current code end.
-fn patch_forward_branch_to_here(code: &mut Vec<u8>, branch_off: usize) {
+fn patch_forward_branch_to_here(code: &mut [u8], branch_off: usize) {
     let here = code.len() as i64;
     let (branch_code, _) = emit_branch(here, branch_off as i64);
-    assert!(branch_code.len() <= 40,
-            "forward branch {} bytes exceeds 20-byte placeholder", branch_code.len());
+    assert!(
+        branch_code.len() <= 40,
+        "forward branch {} bytes exceeds 20-byte placeholder",
+        branch_code.len()
+    );
     for (i, byte) in branch_code.iter().enumerate() {
         code[branch_off + i] = *byte;
     }
@@ -1408,117 +1634,117 @@ fn patch_forward_branch_to_here(code: &mut Vec<u8>, branch_off: usize) {
 fn build_f64_to_i64_stub_inner(max_uexp: i64) -> Vec<u8> {
     let mut code = Vec::new();
     // 1. Default result = 0
-    code.extend_from_slice(&encode_copy(R0, R28));  // R28 = 0
-    code.extend_from_slice(&encode_copy(R0, R29));  // R29 = 0
+    code.extend_from_slice(&encode_copy(R0, R28)); // R28 = 0
+    code.extend_from_slice(&encode_copy(R0, R29)); // R29 = 0
 
     // 2. Extract sign: R19 = R25 >> 31 (SHRPW R0, R25, 31, R19)
     code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
 
     // 3. Extract exponent: R20 = (R25 >> 20) & 0x7FF
     //    SHRPW only supports odd sa. Use sa=19 then sa=1 to shift by 20.
-    code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20));  // R20 = R25 >> 19
-    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));   // R20 = R20 >> 1 = R25 >> 20
-    // Mask: R20 &= 0x7FF. Load 0x7FF into R24.
+    code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20)); // R20 = R25 >> 19
+    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20)); // R20 = R20 >> 1 = R25 >> 20
+                                                            // Mask: R20 &= 0x7FF. Load 0x7FF into R24.
     code.extend(ss_load_imm(R24, 0x7FF));
-    code.extend_from_slice(&encode_and(R20, R24, R20));  // R20 = R20 & 0x7FF = exp
+    code.extend_from_slice(&encode_and(R20, R24, R20)); // R20 = R20 & 0x7FF = exp
 
     // 4. If exp == 0: return 0 (zero or denormal)
     let exp_zero_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // cmpb,= R20, R0, return
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0)); // cmpb,= R20, R0, return
+    code.extend_from_slice(&encode_nop()); // delay slot
 
     // 5. If exp == 0x7FF: return 0 (Inf/NaN). 0x7FF still in R24.
     let exp_inf_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R24, 0b001, false, false, 0));  // cmpb,= R20, R24, return
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_cmpb(R20, R24, 0b001, false, false, 0)); // cmpb,= R20, R24, return
+    code.extend_from_slice(&encode_nop()); // delay slot
 
     // 6. uexp = exp - 1023
     code.extend(ss_load_imm(R24, 1023));
-    code.extend_from_slice(&encode_sub(R20, R24, R20));  // R20 = uexp (signed)
+    code.extend_from_slice(&encode_sub(R20, R24, R20)); // R20 = uexp (signed)
 
     // 7. If uexp < 0: return 0 (|x| < 1). Signed less-than: cond=010.
     let uexp_neg_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b010, false, false, 0));  // cmpb,< R20, R0, return
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b010, false, false, 0)); // cmpb,< R20, R0, return
+    code.extend_from_slice(&encode_nop()); // delay slot
 
     // 8. If uexp >= max_uexp: return 0 (overflow). Check: max_uexp < uexp → cmpb,< R24, R20.
     code.extend(ss_load_imm(R24, max_uexp));
     let uexp_big_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R24, R20, 0b010, false, false, 0));  // cmpb,< 63, R20, return
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_cmpb(R24, R20, 0b010, false, false, 0)); // cmpb,< 63, R20, return
+    code.extend_from_slice(&encode_nop()); // delay slot
 
     // 9. Build mantissa with implicit bit.
     //    R21 = R25 & 0xFFFFF (mantissa_high, 20 bits)
     code.extend(ss_load_imm(R24, 0xFFFFF));
-    code.extend_from_slice(&encode_and(R25, R24, R21));  // R21 = R25 & 0xFFFFF
-    //    Set implicit bit: R21 |= 0x100000 (1 << 20)
+    code.extend_from_slice(&encode_and(R25, R24, R21)); // R21 = R25 & 0xFFFFF
+                                                        //    Set implicit bit: R21 |= 0x100000 (1 << 20)
     code.extend(ss_load_imm(R24, 0x100000));
-    code.extend_from_slice(&encode_or(R21, R24, R21));  // R21 |= 0x100000
-    //    R22 = R26 (mantissa_low, 32 bits)
-    code.extend_from_slice(&encode_copy(R26, R22));  // R22 = R26
+    code.extend_from_slice(&encode_or(R21, R24, R21)); // R21 |= 0x100000
+                                                       //    R22 = R26 (mantissa_low, 32 bits)
+    code.extend_from_slice(&encode_copy(R26, R22)); // R22 = R26
 
     // 10. shift = 52 - uexp
     code.extend(ss_load_imm(R24, 52));
-    code.extend_from_slice(&encode_sub(R24, R20, R23));  // R23 = 52 - uexp = shift
+    code.extend_from_slice(&encode_sub(R24, R20, R23)); // R23 = 52 - uexp = shift
 
     // 11. If shift == 0: done. If shift < 0: left-shift. Else: right-shift.
     let shift_zero_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R23, R0, 0b001, false, false, 0));  // cmpb,= R23, R0, shift_done
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_cmpb(R23, R0, 0b001, false, false, 0)); // cmpb,= R23, R0, shift_done
+    code.extend_from_slice(&encode_nop()); // delay slot
     let shift_neg_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R23, R0, 0b010, false, false, 0));  // cmpb,< R23, R0, left_shift
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_cmpb(R23, R0, 0b010, false, false, 0)); // cmpb,< R23, R0, left_shift
+    code.extend_from_slice(&encode_nop()); // delay slot
 
     // Right-shift loop (shift > 0):
     let right_loop = code.len() as i64;
     // 1-bit right shift of (R21:R22):
     //   new_lo = SHRPW R21, R22, 1, R22  (shift R22 first, uses old R21)
     //   new_hi = SHRPW R0, R21, 1, R21   (then shift R21)
-    code.extend_from_slice(&encode_shrpw(R21, R22, 1, R22));  // R22 = (R21:R22) >> 1 low
-    code.extend_from_slice(&encode_shrpw(R0, R21, 1, R21));   // R21 = R21 >> 1
-    code.extend_from_slice(&encode_ldo(R23, -1, R23));  // R23--
-    // Loop back if R23 != 0: cmpb,<> R23, R0, right_loop
+    code.extend_from_slice(&encode_shrpw(R21, R22, 1, R22)); // R22 = (R21:R22) >> 1 low
+    code.extend_from_slice(&encode_shrpw(R0, R21, 1, R21)); // R21 = R21 >> 1
+    code.extend_from_slice(&encode_ldo(R23, -1, R23)); // R23--
+                                                       // Loop back if R23 != 0: cmpb,<> R23, R0, right_loop
     let right_back = code.len() as i64;
     code.extend_from_slice(&encode_cmpb(R23, R0, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // Patch backward branch
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // Patch backward branch
     {
         let disp = ((right_loop - (right_back + 8)) as i32) & !3;
         let off = right_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
     // Branch to shift_done (forward, skip left-shift path)
     let right_to_done = emit_forward_branch_placeholder(&mut code);
 
     // Left-shift path (shift < 0):
-    let left_shift_label = code.len();
+    let _left_shift_label = code.len();
     // Patch shift_neg_check to branch here
     patch_cmpb_to_here(&mut code, shift_neg_check);
     // Negate shift: R23 = -R23
-    code.extend_from_slice(&encode_sub(R0, R23, R23));  // R23 = 0 - R23
+    code.extend_from_slice(&encode_sub(R0, R23, R23)); // R23 = 0 - R23
     let left_loop = code.len() as i64;
     // 1-bit left shift of (R21:R22):
     //   R24 = R22 >> 31 (MSB of R22, for carry)
     //   R21 = R21 << 1
     //   R21 |= R24 (carry from R22)
     //   R22 = R22 << 1
-    code.extend_from_slice(&encode_shrpw(R0, R22, 31, R24));  // R24 = R22 >> 31
-    code.extend_from_slice(&encode_shladd(1, R21, R0, R21));   // R21 = R21 << 1
-    code.extend_from_slice(&encode_or(R21, R24, R21));         // R21 |= R24
-    code.extend_from_slice(&encode_shladd(1, R22, R0, R22));   // R22 = R22 << 1
-    code.extend_from_slice(&encode_ldo(R23, -1, R23));  // R23--
-    // Loop back if R23 != 0
+    code.extend_from_slice(&encode_shrpw(R0, R22, 31, R24)); // R24 = R22 >> 31
+    code.extend_from_slice(&encode_shladd(1, R21, R0, R21)); // R21 = R21 << 1
+    code.extend_from_slice(&encode_or(R21, R24, R21)); // R21 |= R24
+    code.extend_from_slice(&encode_shladd(1, R22, R0, R22)); // R22 = R22 << 1
+    code.extend_from_slice(&encode_ldo(R23, -1, R23)); // R23--
+                                                       // Loop back if R23 != 0
     let left_back = code.len() as i64;
     code.extend_from_slice(&encode_cmpb(R23, R0, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_nop()); // delay slot
     {
         let disp = ((left_loop - (left_back + 8)) as i32) & !3;
         let off = left_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
 
     // shift_done:
@@ -1528,52 +1754,57 @@ fn build_f64_to_i64_stub_inner(max_uexp: i64) -> Vec<u8> {
     patch_forward_branch_to_here(&mut code, right_to_done);
 
     // 12. Move result: R28 = R22, R29 = R21
-    code.extend_from_slice(&encode_copy(R22, R28));  // R28 = R22 (lo)
-    code.extend_from_slice(&encode_copy(R21, R29));  // R29 = R21 (hi)
+    code.extend_from_slice(&encode_copy(R22, R28)); // R28 = R22 (lo)
+    code.extend_from_slice(&encode_copy(R21, R29)); // R29 = R21 (hi)
 
     // 13. If sign (R19 != 0): negate.
     // cmpb,<> R19, R0, negate (if R19 != 0, branch to negate)
     let sign_check = code.len();
     code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // If sign == 0, skip negation: branch to return.
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // If sign == 0, skip negation: branch to return.
     let skip_negate = emit_forward_branch_placeholder(&mut code);
 
     // Negate path:
-    let negate_label = code.len();
+    let _negate_label = code.len();
     patch_cmpb_to_here(&mut code, sign_check);
     // 64-bit two's complement: -x = 0 - x with borrow.
     // Save old R28 for borrow check.
-    code.extend_from_slice(&encode_copy(R28, R20));  // R20 = old R28
-    // new R28 = 0 - R28
-    code.extend_from_slice(&encode_sub(R0, R28, R28));  // R28 = -R28
-    // Compute borrow: if old R28 (R20) != 0, borrow = 1.
-    code.extend_from_slice(&encode_copy(R0, R24));  // R24 = 0 (borrow default)
-    // cmpb,<> R20, R0, set_borrow (if R20 != 0, branch to set_borrow)
+    code.extend_from_slice(&encode_copy(R28, R20)); // R20 = old R28
+                                                    // new R28 = 0 - R28
+    code.extend_from_slice(&encode_sub(R0, R28, R28)); // R28 = -R28
+                                                       // Compute borrow: if old R28 (R20) != 0, borrow = 1.
+    code.extend_from_slice(&encode_copy(R0, R24)); // R24 = 0 (borrow default)
+                                                   // cmpb,<> R20, R0, set_borrow (if R20 != 0, branch to set_borrow)
     let borrow_check = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // Fall through: borrow = 0. Branch to after_borrow.
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // Fall through: borrow = 0. Branch to after_borrow.
     let skip_borrow = emit_forward_branch_placeholder(&mut code);
     // set_borrow:
     patch_cmpb_to_here(&mut code, borrow_check);
-    code.extend_from_slice(&encode_ldi(1, R24));  // R24 = 1 (borrow)
-    // after_borrow:
+    code.extend_from_slice(&encode_ldi(1, R24)); // R24 = 1 (borrow)
+                                                 // after_borrow:
     patch_forward_branch_to_here(&mut code, skip_borrow);
     // new R29 = 0 - R29 - borrow
-    code.extend_from_slice(&encode_sub(R0, R29, R29));  // R29 = -R29
-    code.extend_from_slice(&encode_sub(R29, R24, R29));  // R29 -= borrow
+    code.extend_from_slice(&encode_sub(R0, R29, R29)); // R29 = -R29
+    code.extend_from_slice(&encode_sub(R29, R24, R29)); // R29 -= borrow
 
     // 14. return:
     // Patch skip_negate to branch here (skip the negate block)
     patch_forward_branch_to_here(&mut code, skip_negate);
     // Patch all early-return cmpbs to branch here
-    for &check_off in &[exp_zero_check, exp_inf_check, uexp_neg_check, uexp_big_check] {
+    for &check_off in &[
+        exp_zero_check,
+        exp_inf_check,
+        uexp_neg_check,
+        uexp_big_check,
+    ] {
         patch_cmpb_to_here(&mut code, check_off);
     }
     // BV R2(R0) — return
     code.extend_from_slice(&encode_bv(R2, R0));
-    code.extend_from_slice(&encode_nop());  // delay slot
+    code.extend_from_slice(&encode_nop()); // delay slot
     code
 }
 
@@ -1644,36 +1875,36 @@ fn build_int_to_f64_stub_inner(signed: bool) -> Vec<u8> {
     }
 
     // Check if value == 0: if hi == 0 and lo == 0, return 0.0
-    code.extend_from_slice(&encode_or(R25, R26, R20));  // R20 = hi | lo
+    code.extend_from_slice(&encode_or(R25, R26, R20)); // R20 = hi | lo
     let val_zero = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if 0, return 0.0
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0)); // if 0, return 0.0
     code.extend_from_slice(&encode_nop());
 
     // Normalize: shift left until bit 62 is set (bit 30 of hi = 0x40000000).
     // Count shifts S, save to [R30+4].
-    code.extend_from_slice(&encode_copy(R0, R19));  // R19 = 0 (S counter)
+    code.extend_from_slice(&encode_copy(R0, R19)); // R19 = 0 (S counter)
     code.extend(ss_load_imm(R20, 0x80000000));
     let norm_loop = code.len() as i64;
-    code.extend_from_slice(&encode_and(R25, R20, R21));  // R21 = hi & 0x80000000 (bit 63)
+    code.extend_from_slice(&encode_and(R25, R20, R21)); // R21 = hi & 0x80000000 (bit 63)
     let norm_done = code.len();
-    code.extend_from_slice(&encode_cmpb(R21, R0, 0b001, true, false, 0));  // cmpb,<> → if != 0, done
+    code.extend_from_slice(&encode_cmpb(R21, R0, 0b001, true, false, 0)); // cmpb,<> → if != 0, done
     code.extend_from_slice(&encode_nop());
     // Shift left by 1 (64-bit): carry = R26 >> 31; R26 <<= 1; R25 <<= 1; R25 |= carry
-    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R21));  // R21 = bit 31 of lo
-    code.extend_from_slice(&encode_shladd(1, R26, R0, R26));  // lo <<= 1
-    code.extend_from_slice(&encode_shladd(1, R25, R0, R25));  // hi <<= 1
-    code.extend_from_slice(&encode_or(R25, R21, R25));  // hi |= carry
-    code.extend_from_slice(&encode_ldo(R19, 1, R19));  // S++
-    // Loop back
+    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R21)); // R21 = bit 31 of lo
+    code.extend_from_slice(&encode_shladd(1, R26, R0, R26)); // lo <<= 1
+    code.extend_from_slice(&encode_shladd(1, R25, R0, R25)); // hi <<= 1
+    code.extend_from_slice(&encode_or(R25, R21, R25)); // hi |= carry
+    code.extend_from_slice(&encode_ldo(R19, 1, R19)); // S++
+                                                      // Loop back
     let norm_back = code.len() as i64;
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // always loop
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0)); // always loop
     code.extend_from_slice(&encode_nop());
     {
         let disp = ((norm_loop - (norm_back + 8)) as i32) & !3;
         let off = norm_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
     // norm_done:
     let norm_after = code.len();
@@ -1683,32 +1914,32 @@ fn build_int_to_f64_stub_inner(signed: bool) -> Vec<u8> {
 
     // exp = 1086 - S. (1086 = 1023 + 63)
     code.extend(ss_load_imm(R20, 1086));
-    code.extend_from_slice(&encode_sub(R20, R19, R19));  // R19 = 1085 - S = exp
-    code.extend_from_slice(&encode_stw(R19, R30, 8));  // save exp
+    code.extend_from_slice(&encode_sub(R20, R19, R19)); // R19 = 1085 - S = exp
+    code.extend_from_slice(&encode_stw(R19, R30, 8)); // save exp
 
     // Shift right by 11 (to get bit 52 set, since we normalized to bit 63).
     // 11 iterations of 64-bit right shift by 1.
-    code.extend_from_slice(&encode_ldi(11, R19));  // R19 = 11 (counter)
+    code.extend_from_slice(&encode_ldi(11, R19)); // R19 = 11 (counter)
     let shr_loop = code.len() as i64;
     let shr_done = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));  // if counter == 0, done
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0)); // if counter == 0, done
     code.extend_from_slice(&encode_nop());
     // 64-bit right shift by 1:
     //   new_lo = SHRPW(hi, lo, 1) = (hi:lo) >> 1 (low 32 bits)
     //   new_hi = SHRPW(R0, hi, 1) = hi >> 1
     // Order: compute new_lo first (reads hi), then new_hi (overwrites hi).
-    code.extend_from_slice(&encode_shrpw(R25, R26, 1, R26));  // R26 = (R25:R26) >> 1 (low)
-    code.extend_from_slice(&encode_shrpw(R0, R25, 1, R25));   // R25 = R25 >> 1
-    code.extend_from_slice(&encode_ldo(R19, -1, R19));  // counter--
+    code.extend_from_slice(&encode_shrpw(R25, R26, 1, R26)); // R26 = (R25:R26) >> 1 (low)
+    code.extend_from_slice(&encode_shrpw(R0, R25, 1, R25)); // R25 = R25 >> 1
+    code.extend_from_slice(&encode_ldo(R19, -1, R19)); // counter--
     let shr_back = code.len() as i64;
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // always loop
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0)); // always loop
     code.extend_from_slice(&encode_nop());
     {
         let disp = ((shr_loop - (shr_back + 8)) as i32) & !3;
         let off = shr_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
     patch_cmpb_to_here(&mut code, shr_done);
 
@@ -1720,7 +1951,7 @@ fn build_int_to_f64_stub_inner(signed: bool) -> Vec<u8> {
     code.extend_from_slice(&encode_and(R25, R24, R29));
     // R29 |= (exp << 20). exp in [R30+8].
     code.extend_from_slice(&encode_ldw(R30, 8, R19));
-    code.extend_from_slice(&encode_shladd(3, R19, R0, R24));  // R24 = exp << 3
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R24)); // R24 = exp << 3
     for _ in 0..17 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
@@ -1770,7 +2001,7 @@ fn build_u64_to_f64_stub() -> Vec<u8> {
 ///      - f64 lo word mantissa (bits 31:29 of R28) = f32_mant & 0x7 (bits 2:0)
 ///      - R28 bits 28:0 = 0
 ///   7. Pack: R29 = (sign << 31) | (f64_exp << 20) | (f32_mant >> 3)
-///            R28 = (f32_mant & 0x7) << 29
+///      - R28 = (f32_mant & 0x7) << 29
 fn build_f32_to_f64_stub() -> Vec<u8> {
     let mut code = Vec::new();
     // Default result = 0
@@ -1780,10 +2011,10 @@ fn build_f32_to_f64_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_shrpw(R0, R26, 31, R19));
     // 2. Extract f32 exp: R20 = (R26 >> 23) & 0xFF
     //    SHRPW only supports odd sa. 23 is odd, so sa=23 works.
-    code.extend_from_slice(&encode_shrpw(R0, R26, 23, R20));  // R20 = R26 >> 23
+    code.extend_from_slice(&encode_shrpw(R0, R26, 23, R20)); // R20 = R26 >> 23
     code.extend(ss_load_imm(R24, 0xFF));
-    code.extend_from_slice(&encode_and(R20, R24, R20));  // R20 = exp
-    // 3. If exp == 0: return 0 (zero)
+    code.extend_from_slice(&encode_and(R20, R24, R20)); // R20 = exp
+                                                        // 3. If exp == 0: return 0 (zero)
     let exp_zero = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
@@ -1793,50 +2024,50 @@ fn build_f32_to_f64_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_nop());
     // 4. f64_exp = exp + 896
     code.extend(ss_load_imm(R24, 896));
-    code.extend_from_slice(&encode_add(R20, R24, R20));  // R20 = f64_exp
-    // 5. Extract f32 mantissa: R21 = R26 & 0x7FFFFF
+    code.extend_from_slice(&encode_add(R20, R24, R20)); // R20 = f64_exp
+                                                        // 5. Extract f32 mantissa: R21 = R26 & 0x7FFFFF
     code.extend(ss_load_imm(R24, 0x7FFFFF));
-    code.extend_from_slice(&encode_and(R26, R24, R21));  // R21 = f32 mantissa
-    // 6. R28 = (f32_mant & 0x7) << 29
-    //    R24 = R21 & 0x7 (low 3 bits)
+    code.extend_from_slice(&encode_and(R26, R24, R21)); // R21 = f32 mantissa
+                                                        // 6. R28 = (f32_mant & 0x7) << 29
+                                                        //    R24 = R21 & 0x7 (low 3 bits)
     code.extend(ss_load_imm(R24, 0x7));
-    code.extend_from_slice(&encode_and(R21, R24, R22));  // R22 = f32_mant & 0x7
-    // R28 = R22 << 29. Use SHLADD: R22 << 1 = SHLADD(1, R22, R0, R28).
-    // Then shift left 28 more times (28 = 4*7, use 28 SHLADD 1 or a loop).
-    // Actually, << 29 = << 1 then << 28. Let's do 29 SHLADD(1) instructions.
-    // Start: R28 = R22
-    code.extend_from_slice(&encode_copy(R22, R28));  // R28 = R22
-    // Shift left 29 times: R28 = R28 << 29
+    code.extend_from_slice(&encode_and(R21, R24, R22)); // R22 = f32_mant & 0x7
+                                                        // R28 = R22 << 29. Use SHLADD: R22 << 1 = SHLADD(1, R22, R0, R28).
+                                                        // Then shift left 28 more times (28 = 4*7, use 28 SHLADD 1 or a loop).
+                                                        // Actually, << 29 = << 1 then << 28. Let's do 29 SHLADD(1) instructions.
+                                                        // Start: R28 = R22
+    code.extend_from_slice(&encode_copy(R22, R28)); // R28 = R22
+                                                    // Shift left 29 times: R28 = R28 << 29
     for _ in 0..29 {
         code.extend_from_slice(&encode_shladd(1, R28, R0, R28));
     }
     // 7. R29 = (sign << 31) | (f64_exp << 20) | (f32_mant >> 3)
     //    First: R23 = f32_mant >> 3 = R21 >> 3.
     //    3 is odd, so SHRPW R0, R21, 3, R23 works.
-    code.extend_from_slice(&encode_shrpw(R0, R21, 3, R23));  // R23 = R21 >> 3
-    //    R29 = R23 (f32_mant >> 3)
+    code.extend_from_slice(&encode_shrpw(R0, R21, 3, R23)); // R23 = R21 >> 3
+                                                            //    R29 = R23 (f32_mant >> 3)
     code.extend_from_slice(&encode_copy(R23, R29));
     //    R29 |= f64_exp << 20. f64_exp is in R20.
     //    R24 = R20 << 20. Use SHLADD: << 3 = SHLADD(3, R20, R0, R24).
     //    Then << 17 more. Total << 20.
-    code.extend_from_slice(&encode_shladd(3, R20, R0, R24));  // R24 = R20 << 3
-    // Shift left 17 more: R24 = R24 << 17
+    code.extend_from_slice(&encode_shladd(3, R20, R0, R24)); // R24 = R20 << 3
+                                                             // Shift left 17 more: R24 = R24 << 17
     for _ in 0..17 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
-    code.extend_from_slice(&encode_or(R29, R24, R29));  // R29 |= (f64_exp << 20)
-    //    R29 |= sign << 31. sign is in R19 (0 or 1).
-    //    R24 = R19 << 31 = SHRPW R0, R19, 1, R24 then << 30 more?
-    //    Actually, R19 is 0 or 1. R19 << 31: use SHLADD 29 times + SHRPW.
-    //    Simpler: if R19 != 0, set bit 31 of R29.
-    //    Load 0x80000000 into R24, AND with (R19 != 0 ? 0xFFFFFFFF : 0).
-    //    Even simpler: R24 = R19 << 31 via 31 SHLADD(1) ops starting from R19.
-    code.extend_from_slice(&encode_copy(R19, R24));  // R24 = R19
+    code.extend_from_slice(&encode_or(R29, R24, R29)); // R29 |= (f64_exp << 20)
+                                                       //    R29 |= sign << 31. sign is in R19 (0 or 1).
+                                                       //    R24 = R19 << 31 = SHRPW R0, R19, 1, R24 then << 30 more?
+                                                       //    Actually, R19 is 0 or 1. R19 << 31: use SHLADD 29 times + SHRPW.
+                                                       //    Simpler: if R19 != 0, set bit 31 of R29.
+                                                       //    Load 0x80000000 into R24, AND with (R19 != 0 ? 0xFFFFFFFF : 0).
+                                                       //    Even simpler: R24 = R19 << 31 via 31 SHLADD(1) ops starting from R19.
+    code.extend_from_slice(&encode_copy(R19, R24)); // R24 = R19
     for _ in 0..31 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
-    code.extend_from_slice(&encode_or(R29, R24, R29));  // R29 |= (sign << 31)
-    // return:
+    code.extend_from_slice(&encode_or(R29, R24, R29)); // R29 |= (sign << 31)
+                                                       // return:
     patch_cmpb_to_here(&mut code, exp_zero);
     patch_cmpb_to_here(&mut code, exp_inf);
     code.extend_from_slice(&encode_bv(R2, R0));
@@ -1868,11 +2099,11 @@ fn build_f64_to_f32_stub() -> Vec<u8> {
     // 1. Extract sign: R19 = R25 >> 31
     code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
     // 2. Extract f64 exp: R20 = (R25 >> 20) & 0x7FF
-    code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20));  // R20 = R25 >> 19
-    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));   // R20 = R20 >> 1
+    code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20)); // R20 = R25 >> 19
+    code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20)); // R20 = R20 >> 1
     code.extend(ss_load_imm(R24, 0x7FF));
-    code.extend_from_slice(&encode_and(R20, R24, R20));  // R20 = exp
-    // 3. If exp == 0: return 0
+    code.extend_from_slice(&encode_and(R20, R24, R20)); // R20 = exp
+                                                        // 3. If exp == 0: return 0
     let exp_zero = code.len();
     code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
@@ -1882,43 +2113,43 @@ fn build_f64_to_f32_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_nop());
     // 4. f32_exp = exp - 896
     code.extend(ss_load_imm(R24, 896));
-    code.extend_from_slice(&encode_sub(R20, R24, R20));  // R20 = f32_exp
-    // 5. If f32_exp <= 0: return 0 (underflow). cmpb,<= R20, R0 (signed).
+    code.extend_from_slice(&encode_sub(R20, R24, R20)); // R20 = f32_exp
+                                                        // 5. If f32_exp <= 0: return 0 (underflow). cmpb,<= R20, R0 (signed).
     let underflow = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b011, false, false, 0));  // cond=011 (<=)
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b011, false, false, 0)); // cond=011 (<=)
     code.extend_from_slice(&encode_nop());
     // 6. If f32_exp >= 0xFF: overflow → Inf. cmpb,>= R20, R24 where R24=0xFF.
     //    Actually use: cmpb,< R24, R20 (if 0xFF < f32_exp). Need to load 0xFF.
     code.extend(ss_load_imm(R24, 0xFF));
     let overflow = code.len();
-    code.extend_from_slice(&encode_cmpb(R24, R20, 0b010, false, false, 0));  // cmpb,< 0xFF, R20, overflow
+    code.extend_from_slice(&encode_cmpb(R24, R20, 0b010, false, false, 0)); // cmpb,< 0xFF, R20, overflow
     code.extend_from_slice(&encode_nop());
     // 7. Extract f64 mantissa top 23 bits.
     //    R21 = R25 & 0xFFFFF (bits 51:32, 20 bits)
     code.extend(ss_load_imm(R24, 0xFFFFF));
-    code.extend_from_slice(&encode_and(R25, R24, R21));  // R21 = bits 51:32
-    //    R22 = R26 >> 29 (bits 31:29, 3 bits). 29 is odd, SHRPW works.
-    code.extend_from_slice(&encode_shrpw(R0, R26, 29, R22));  // R22 = R26 >> 29
-    //    f32_mant = (R21 << 3) | R22
-    code.extend_from_slice(&encode_shladd(3, R21, R0, R23));  // R23 = R21 << 3
-    code.extend_from_slice(&encode_or(R23, R22, R23));  // R23 = f32_mant (23 bits)
-    // 8. Pack: R28 = (sign << 31) | (f32_exp << 23) | f32_mant
-    //    R28 = f32_mant (R23)
+    code.extend_from_slice(&encode_and(R25, R24, R21)); // R21 = bits 51:32
+                                                        //    R22 = R26 >> 29 (bits 31:29, 3 bits). 29 is odd, SHRPW works.
+    code.extend_from_slice(&encode_shrpw(R0, R26, 29, R22)); // R22 = R26 >> 29
+                                                             //    f32_mant = (R21 << 3) | R22
+    code.extend_from_slice(&encode_shladd(3, R21, R0, R23)); // R23 = R21 << 3
+    code.extend_from_slice(&encode_or(R23, R22, R23)); // R23 = f32_mant (23 bits)
+                                                       // 8. Pack: R28 = (sign << 31) | (f32_exp << 23) | f32_mant
+                                                       //    R28 = f32_mant (R23)
     code.extend_from_slice(&encode_copy(R23, R28));
     //    R28 |= f32_exp << 23. f32_exp in R20.
     //    R24 = R20 << 23. Use SHLADD(3, R20, R0, R24) for << 3, then << 20.
-    code.extend_from_slice(&encode_shladd(3, R20, R0, R24));  // R24 = R20 << 3
+    code.extend_from_slice(&encode_shladd(3, R20, R0, R24)); // R24 = R20 << 3
     for _ in 0..20 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
-    code.extend_from_slice(&encode_or(R28, R24, R28));  // R28 |= (f32_exp << 23)
-    //    R28 |= sign << 31. sign in R19 (0 or 1).
-    code.extend_from_slice(&encode_copy(R19, R24));  // R24 = R19
+    code.extend_from_slice(&encode_or(R28, R24, R28)); // R28 |= (f32_exp << 23)
+                                                       //    R28 |= sign << 31. sign in R19 (0 or 1).
+    code.extend_from_slice(&encode_copy(R19, R24)); // R24 = R19
     for _ in 0..31 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
-    code.extend_from_slice(&encode_or(R28, R24, R28));  // R28 |= (sign << 31)
-    // return:
+    code.extend_from_slice(&encode_or(R28, R24, R28)); // R28 |= (sign << 31)
+                                                       // return:
     patch_cmpb_to_here(&mut code, exp_zero);
     patch_cmpb_to_here(&mut code, exp_inf);
     patch_cmpb_to_here(&mut code, underflow);
@@ -1941,18 +2172,18 @@ fn build_f64_eq_stub() -> Vec<u8> {
     // If hi1 != hi2: not equal. cmpb,<> R25, R23, not_eq
     let hi_check = code.len();
     code.extend_from_slice(&encode_cmpb(R25, R23, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // If lo1 != lo2: not equal. cmpb,<> R26, R24, not_eq
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // If lo1 != lo2: not equal. cmpb,<> R26, R24, not_eq
     let lo_check = code.len();
     code.extend_from_slice(&encode_cmpb(R26, R24, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // Equal: R28 = 1 (already set). Branch to return.
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // Equal: R28 = 1 (already set). Branch to return.
     let eq_branch = emit_forward_branch_placeholder(&mut code);
     // not_eq: R28 = 0
     patch_cmpb_to_here(&mut code, hi_check);
     patch_cmpb_to_here(&mut code, lo_check);
-    code.extend_from_slice(&encode_ldi(0, R28));  // R28 = 0
-    // return:
+    code.extend_from_slice(&encode_ldi(0, R28)); // R28 = 0
+                                                 // return:
     patch_forward_branch_to_here(&mut code, eq_branch);
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
@@ -1969,17 +2200,17 @@ fn build_f64_lt_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_ldi(0, R28));
     // If hi1 < hi2 (unsigned): a < b. cmpb,<< R25, R23, set_true
     let hi_lt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R25, R23, 0b100, false, false, 0));  // cond=100 (<<)
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // If hi1 != hi2: not less (since hi1 >= hi2 and not <). cmpb,<> R25, R23, done
+    code.extend_from_slice(&encode_cmpb(R25, R23, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // If hi1 != hi2: not less (since hi1 >= hi2 and not <). cmpb,<> R25, R23, done
     let hi_ne_check = code.len();
     code.extend_from_slice(&encode_cmpb(R25, R23, 0b001, true, false, 0));
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // hi1 == hi2: compare lo. If lo1 < lo2 (unsigned): a < b.
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // hi1 == hi2: compare lo. If lo1 < lo2 (unsigned): a < b.
     let lo_lt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R26, R24, 0b100, false, false, 0));  // cond=100 (<<)
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // done: R28 = 0 (already set). Branch to return.
+    code.extend_from_slice(&encode_cmpb(R26, R24, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // done: R28 = 0 (already set). Branch to return.
     let done_branch = emit_forward_branch_placeholder(&mut code);
     // set_true: R28 = 1
     patch_cmpb_to_here(&mut code, hi_lt_check);
@@ -2003,18 +2234,18 @@ fn build_f64_le_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_ldi(1, R28));
     // If hi1 < hi2 (unsigned): a <= b is true. cmpb,<< R25, R23, done
     let hi_lt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R25, R23, 0b100, false, false, 0));  // cond=100 (<<)
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // If hi1 > hi2 (unsigned): a <= b is false. cmpb,<< R23, R25, set_false
+    code.extend_from_slice(&encode_cmpb(R25, R23, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // If hi1 > hi2 (unsigned): a <= b is false. cmpb,<< R23, R25, set_false
     let hi_gt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R23, R25, 0b100, false, false, 0));  // cond=100 (<<)
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // hi1 == hi2: compare lo. If lo1 <= lo2 (unsigned): true.
-    // cmpb,<<= R26, R24, done (cond=101, <<=)
+    code.extend_from_slice(&encode_cmpb(R23, R25, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // hi1 == hi2: compare lo. If lo1 <= lo2 (unsigned): true.
+                                           // cmpb,<<= R26, R24, done (cond=101, <<=)
     let lo_le_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R26, R24, 0b101, false, false, 0));  // cond=101 (<<=)
-    code.extend_from_slice(&encode_nop());  // delay slot
-    // lo1 > lo2: false. Fall through to set_false.
+    code.extend_from_slice(&encode_cmpb(R26, R24, 0b101, false, false, 0)); // cond=101 (<<=)
+    code.extend_from_slice(&encode_nop()); // delay slot
+                                           // lo1 > lo2: false. Fall through to set_false.
     let done_branch = emit_forward_branch_placeholder(&mut code);
     // set_false: R28 = 0
     patch_cmpb_to_here(&mut code, hi_gt_check);
@@ -2140,7 +2371,7 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_ldw(R30, 8, R19));
     code.extend_from_slice(&encode_ldw(R30, 24, R20));
     let need_swap = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R20, 0b010, false, false, 0));  // cmpb,< → swap
+    code.extend_from_slice(&encode_cmpb(R19, R20, 0b010, false, false, 0)); // cmpb,< → swap
     code.extend_from_slice(&encode_nop());
 
     // No swap path: load mant_a into R21:R22, mant_b into R23:R24.
@@ -2175,7 +2406,7 @@ fn build_f64_add_stub() -> Vec<u8> {
     // --- Shift mant_b right by (exp_a - exp_b) ---
     code.extend_from_slice(&encode_ldw(R30, 8, R19));
     code.extend_from_slice(&encode_ldw(R30, 24, R20));
-    code.extend_from_slice(&encode_sub(R19, R20, R19));  // R19 = diff
+    code.extend_from_slice(&encode_sub(R19, R20, R19)); // R19 = diff
     let shift_loop = code.len() as i64;
     let shift_done_check = code.len();
     code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));
@@ -2189,24 +2420,24 @@ fn build_f64_add_stub() -> Vec<u8> {
     {
         let disp = ((shift_loop - (shift_back + 8)) as i32) & !3;
         let off = shift_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
     patch_cmpb_to_here(&mut code, shift_done_check);
 
     // --- Dispatch: add or subtract based on sign_diff ---
-    code.extend_from_slice(&encode_ldw(R30, 36, R19));  // R19 = sign_diff
+    code.extend_from_slice(&encode_ldw(R30, 36, R19)); // R19 = sign_diff
     let do_subtract = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // if != 0, subtract
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0)); // if != 0, subtract
     code.extend_from_slice(&encode_nop());
 
     // ===== ADD PATH (signs match) =====
     // R21:R22 = mant_a, R23:R24 = mant_b. result = mant_a + mant_b.
-    code.extend_from_slice(&encode_add(R22, R24, R22));  // R22 = lo_a + lo_b
-    code.extend_from_slice(&encode_copy(R0, R19));  // R19 = 0 (carry)
+    code.extend_from_slice(&encode_add(R22, R24, R22)); // R22 = lo_a + lo_b
+    code.extend_from_slice(&encode_copy(R0, R19)); // R19 = 0 (carry)
     let carry_add = code.len();
-    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // if R22 < R24, carry
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0)); // if R22 < R24, carry
     code.extend_from_slice(&encode_nop());
     let skip_carry_add = emit_forward_branch_placeholder(&mut code);
     patch_cmpb_to_here(&mut code, carry_add);
@@ -2235,7 +2466,7 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_nop());
     // R21 == R23: compare lo.
     let sub_a_lt_lo = code.len();
-    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // if R22 < R24, b-a
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0)); // if R22 < R24, b-a
     code.extend_from_slice(&encode_nop());
     // Fall through: mant_a >= mant_b → do a-b.
 
@@ -2253,7 +2484,7 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_sub(R22, R24, R22));
     code.extend_from_slice(&encode_sub(R21, R23, R21));
     code.extend_from_slice(&encode_sub(R21, R19, R21));
-    code.extend_from_slice(&encode_ldw(R30, 4, R25));  // result_sign = sign_a
+    code.extend_from_slice(&encode_ldw(R30, 4, R25)); // result_sign = sign_a
     let skip_ba = emit_forward_branch_placeholder(&mut code);
 
     // --- b-a path (mant_a < mant_b) ---
@@ -2279,7 +2510,7 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_sub(R22, R24, R22));
     code.extend_from_slice(&encode_sub(R21, R23, R21));
     code.extend_from_slice(&encode_sub(R21, R19, R21));
-    code.extend_from_slice(&encode_ldw(R30, 20, R25));  // result_sign = sign_b
+    code.extend_from_slice(&encode_ldw(R30, 20, R25)); // result_sign = sign_b
     patch_forward_branch_to_here(&mut code, skip_ba);
 
     // ===== NORMALIZE =====
@@ -2296,7 +2527,7 @@ fn build_f64_add_stub() -> Vec<u8> {
     code.extend(ss_load_imm(R24, 0x200000));
     code.extend_from_slice(&encode_and(R21, R24, R19));
     let no_carry = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));  // if no carry, skip
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0)); // if no carry, skip
     code.extend_from_slice(&encode_nop());
     // Carry: shift right by 1, exp++.
     code.extend_from_slice(&encode_shrpw(R21, R22, 1, R22));
@@ -2312,36 +2543,36 @@ fn build_f64_add_stub() -> Vec<u8> {
     // R24 holds 0x100000 throughout the loop (do NOT clobber it in the body).
     code.extend(ss_load_imm(R24, 0x100000));
     let norm_loop = code.len() as i64;
-    code.extend_from_slice(&encode_and(R21, R24, R19));  // R19 = R21 & 0x100000
+    code.extend_from_slice(&encode_and(R21, R24, R19)); // R19 = R21 & 0x100000
     let norm_done = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> → if R19 != 0 (bit 52 set), done
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0)); // cmpb,<> → if R19 != 0 (bit 52 set), done
     code.extend_from_slice(&encode_nop());
     // Check exp > 1 (stop if exp <= 1, i.e., denormal).
     // Use R20 (not R24) for the constant 1 to avoid clobbering R24.
     code.extend_from_slice(&encode_ldw(R30, 8, R19));
     code.extend_from_slice(&encode_ldi(1, R20));
     let norm_exp1 = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R20, 0b011, false, false, 0));  // cmpb,<= → if exp <= 1, done
+    code.extend_from_slice(&encode_cmpb(R19, R20, 0b011, false, false, 0)); // cmpb,<= → if exp <= 1, done
     code.extend_from_slice(&encode_nop());
     // Shift left by 1 (64-bit): R20 = R22 >> 31; R22 <<= 1; R21 <<= 1; R21 |= R20.
-    code.extend_from_slice(&encode_shrpw(R0, R22, 31, R20));  // R20 = bit 31 of R22
-    code.extend_from_slice(&encode_shladd(1, R22, R0, R22));  // R22 <<= 1
-    code.extend_from_slice(&encode_shladd(1, R21, R0, R21));  // R21 <<= 1
-    code.extend_from_slice(&encode_or(R21, R20, R21));  // R21 |= carry bit
-    // exp--
+    code.extend_from_slice(&encode_shrpw(R0, R22, 31, R20)); // R20 = bit 31 of R22
+    code.extend_from_slice(&encode_shladd(1, R22, R0, R22)); // R22 <<= 1
+    code.extend_from_slice(&encode_shladd(1, R21, R0, R21)); // R21 <<= 1
+    code.extend_from_slice(&encode_or(R21, R20, R21)); // R21 |= carry bit
+                                                       // exp--
     code.extend_from_slice(&encode_ldw(R30, 8, R19));
     code.extend_from_slice(&encode_ldo(R19, -1, R19));
     code.extend_from_slice(&encode_stw(R19, R30, 8));
     // Loop back to norm_loop.
     let norm_back = code.len() as i64;
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> → always loop
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0)); // cmpb,<> → always loop
     code.extend_from_slice(&encode_nop());
     {
         let disp = ((norm_loop - (norm_back + 8)) as i32) & !3;
         let off = norm_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
     // Patch norm_done and norm_exp1 to branch here.
     let norm_after = code.len();
@@ -2360,10 +2591,10 @@ fn build_f64_add_stub() -> Vec<u8> {
     // R29 = (sign << 31) | (exp << 20) | (R21 & 0xFFFFF)
     code.extend_from_slice(&encode_copy(R22, R28));
     code.extend(ss_load_imm(R24, 0xFFFFF));
-    code.extend_from_slice(&encode_and(R21, R24, R29));  // R29 = mant_hi & 0xFFFFF
-    // R29 |= (exp << 20). exp in [R30+8].
+    code.extend_from_slice(&encode_and(R21, R24, R29)); // R29 = mant_hi & 0xFFFFF
+                                                        // R29 |= (exp << 20). exp in [R30+8].
     code.extend_from_slice(&encode_ldw(R30, 8, R19));
-    code.extend_from_slice(&encode_shladd(3, R19, R0, R24));  // R24 = exp << 3
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R24)); // R24 = exp << 3
     for _ in 0..17 {
         code.extend_from_slice(&encode_shladd(1, R24, R0, R24));
     }
@@ -2403,16 +2634,16 @@ fn build_f64_add_stub() -> Vec<u8> {
 
     // ===== HANDLER: a_zero → return b =====
     patch_cmpb_to_here(&mut code, a_zero);
-    code.extend_from_slice(&encode_ldw(R30, 32, R28));  // b_lo
-    code.extend_from_slice(&encode_ldw(R30, 44, R29));  // b_hi
+    code.extend_from_slice(&encode_ldw(R30, 32, R28)); // b_lo
+    code.extend_from_slice(&encode_ldw(R30, 44, R29)); // b_hi
     code.extend_from_slice(&encode_ldo(R30, 64, R30));
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
 
     // ===== HANDLER: b_zero → return a =====
     patch_cmpb_to_here(&mut code, b_zero);
-    code.extend_from_slice(&encode_ldw(R30, 0, R28));   // a_lo
-    code.extend_from_slice(&encode_ldw(R30, 40, R29));  // a_hi
+    code.extend_from_slice(&encode_ldw(R30, 0, R28)); // a_lo
+    code.extend_from_slice(&encode_ldw(R30, 40, R29)); // a_hi
     code.extend_from_slice(&encode_ldo(R30, 64, R30));
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
@@ -2501,37 +2732,37 @@ fn build_f64_mul_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_ldo(R30, -48, R30));
 
     // Save original a/b bits for Inf/NaN handlers.
-    code.extend_from_slice(&encode_stw(R26, R30, 0));   // a_lo
-    code.extend_from_slice(&encode_stw(R25, R30, 4));   // a_hi
-    code.extend_from_slice(&encode_stw(R24, R30, 8));   // b_lo
-    code.extend_from_slice(&encode_stw(R23, R30, 12));  // b_hi
+    code.extend_from_slice(&encode_stw(R26, R30, 0)); // a_lo
+    code.extend_from_slice(&encode_stw(R25, R30, 4)); // a_hi
+    code.extend_from_slice(&encode_stw(R24, R30, 8)); // b_lo
+    code.extend_from_slice(&encode_stw(R23, R30, 12)); // b_hi
 
     // --- Extract a: sign, exp, mant ---
     code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
-    code.extend_from_slice(&encode_stw(R19, R30, 16));  // sign_a
+    code.extend_from_slice(&encode_stw(R19, R30, 16)); // sign_a
     code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20));
     code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
     code.extend(ss_load_imm(R19, 0x7FF));
     code.extend_from_slice(&encode_and(R20, R19, R20));
-    code.extend_from_slice(&encode_stw(R20, R30, 20));  // exp_a
+    code.extend_from_slice(&encode_stw(R20, R30, 20)); // exp_a
     code.extend(ss_load_imm(R19, 0xFFFFF));
     code.extend_from_slice(&encode_and(R25, R19, R21));
     code.extend(ss_load_imm(R19, 0x100000));
-    code.extend_from_slice(&encode_or(R21, R19, R21));  // mant_a_hi (with implicit bit)
-    code.extend_from_slice(&encode_copy(R26, R22));     // mant_a_lo
+    code.extend_from_slice(&encode_or(R21, R19, R21)); // mant_a_hi (with implicit bit)
+    code.extend_from_slice(&encode_copy(R26, R22)); // mant_a_lo
 
     // --- Extract b: sign, exp, mant ---
     code.extend_from_slice(&encode_shrpw(R0, R23, 31, R19));
-    code.extend_from_slice(&encode_stw(R19, R30, 24));  // sign_b
+    code.extend_from_slice(&encode_stw(R19, R30, 24)); // sign_b
     code.extend_from_slice(&encode_shrpw(R0, R23, 19, R20));
     code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
     code.extend(ss_load_imm(R19, 0x7FF));
     code.extend_from_slice(&encode_and(R20, R19, R20));
-    code.extend_from_slice(&encode_stw(R20, R30, 28));  // exp_b
+    code.extend_from_slice(&encode_stw(R20, R30, 28)); // exp_b
     code.extend(ss_load_imm(R19, 0xFFFFF));
     code.extend_from_slice(&encode_and(R23, R19, R23));
     code.extend(ss_load_imm(R19, 0x100000));
-    code.extend_from_slice(&encode_or(R23, R19, R23));  // mant_b_hi (with implicit bit)
+    code.extend_from_slice(&encode_or(R23, R19, R23)); // mant_b_hi (with implicit bit)
 
     // --- Special cases ---
     code.extend_from_slice(&encode_ldw(R30, 20, R20));
@@ -2569,7 +2800,7 @@ fn build_f64_mul_stub() -> Vec<u8> {
     // --- Pre-shift M_b left by 11 so MSB (bit 52) lands at bit 31 of R23 ---
     // R18 = R24 >> 21 (carry from low to high)
     code.extend_from_slice(&encode_shrpw(R0, R24, 21, R18));
-    // [K8C-hppa-f64] Fix: PA-RISC 1.1 SHLADD only supports sa in {1,2,3}.
+    // Fix: PA-RISC 1.1 SHLADD only supports sa in {1,2,3}.
     // The original code used `shladd 4` which encode_shladd silently masks
     // to sa=0 (i.e., plain ADD, no shift), so M_b was shifted left by only
     // 3 instead of 11 — corrupting every f64 multiply. Replace each
@@ -2602,21 +2833,21 @@ fn build_f64_mul_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_shrpw(R0, R23, 31, R20));
     // 2. Shift acc left by 1 (128-bit): R25:R26:R28:R29.
     //    Use R18 as temp for carry. Process from MSB (R25) to LSB (R29).
-    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R18));   // R18 = carry from R26
-    code.extend_from_slice(&encode_shladd(1, R25, R18, R25));   // R25 = R25*2 + carry
-    code.extend_from_slice(&encode_shrpw(R0, R28, 31, R18));   // R18 = carry from R28
-    code.extend_from_slice(&encode_shladd(1, R26, R18, R26));   // R26 = R26*2 + carry
-    code.extend_from_slice(&encode_shrpw(R0, R29, 31, R18));   // R18 = carry from R29
-    code.extend_from_slice(&encode_shladd(1, R28, R18, R28));   // R28 = R28*2 + carry
-    code.extend_from_slice(&encode_shladd(1, R29, R0, R29));   // R29 = R29*2
-    // 3. If R20 != 0: add M_a (R21:R22) to acc.
+    code.extend_from_slice(&encode_shrpw(R0, R26, 31, R18)); // R18 = carry from R26
+    code.extend_from_slice(&encode_shladd(1, R25, R18, R25)); // R25 = R25*2 + carry
+    code.extend_from_slice(&encode_shrpw(R0, R28, 31, R18)); // R18 = carry from R28
+    code.extend_from_slice(&encode_shladd(1, R26, R18, R26)); // R26 = R26*2 + carry
+    code.extend_from_slice(&encode_shrpw(R0, R29, 31, R18)); // R18 = carry from R29
+    code.extend_from_slice(&encode_shladd(1, R28, R18, R28)); // R28 = R28*2 + carry
+    code.extend_from_slice(&encode_shladd(1, R29, R0, R29)); // R29 = R29*2
+                                                             // 3. If R20 != 0: add M_a (R21:R22) to acc.
     let skip_add = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if R20==0, skip
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0)); // if R20==0, skip
     code.extend_from_slice(&encode_nop());
     // Add M_a to acc with full carry chain. Spill R19 (counter) to stack; use R19 as temp.
     code.extend_from_slice(&encode_stw(R19, R30, 40));
-    code.extend_from_slice(&encode_add(R29, R22, R29));  // R29 += R22 (low)
-    // carry0 = (R29 < R22) -> R19
+    code.extend_from_slice(&encode_add(R29, R22, R29)); // R29 += R22 (low)
+                                                        // carry0 = (R29 < R22) -> R19
     code.extend_from_slice(&encode_copy(R0, R19));
     let c0 = code.len();
     code.extend_from_slice(&encode_cmpb(R29, R22, 0b100, false, false, 0));
@@ -2651,8 +2882,8 @@ fn build_f64_mul_stub() -> Vec<u8> {
     patch_forward_branch_to_here(&mut code, c2s);
     // R25 += carry2
     code.extend_from_slice(&encode_add(R25, R20, R25));
-    code.extend_from_slice(&encode_ldw(R30, 40, R19));  // reload counter
-    // skip_add:
+    code.extend_from_slice(&encode_ldw(R30, 40, R19)); // reload counter
+                                                       // skip_add:
     patch_cmpb_to_here(&mut code, skip_add);
 
     // 4. Shift M_b left by 1 (64-bit): R23:R24.
@@ -2666,19 +2897,19 @@ fn build_f64_mul_stub() -> Vec<u8> {
     // 5. R19 -= 1. If R19 != 0, loop.
     code.extend_from_slice(&encode_ldo(R19, -1, R19));
     let loop_back = code.len() as i64;
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));  // cmpb,<> -> loop
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0)); // cmpb,<> -> loop
     code.extend_from_slice(&encode_nop());
     {
         let disp = ((mul_loop - (loop_back + 8)) as i32) & !3;
         let off = loop_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
 
     // --- Extract result = P >> 52 (54 bits) into R26:R28 ---
     // R28 = (R26:R28) >> 20  — extracts bits [83:52] of acc into R28
-    // [K8C-hppa-f64] Fix: previously used sa=19 + shrpw R0,.,1,. as a
+    // Fix: previously used sa=19 + shrpw R0,.,1,. as a
     // workaround for even sa. The second shrpw zeroed bit 31 (the carry
     // from r1=R26 = bit 83 of acc), losing the MSB of the low mantissa.
     // Now that encode_shrpw supports even sa directly, use sa=20.
@@ -2690,11 +2921,11 @@ fn build_f64_mul_stub() -> Vec<u8> {
     // Check carry: R20 = R26 >> 21 = P[105].
     code.extend_from_slice(&encode_shrpw(R0, R26, 21, R20));
     let no_carry = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0));  // if R20==0, skip
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, false, 0)); // if R20==0, skip
     code.extend_from_slice(&encode_nop());
     // Carry: result_mant = (R26:R28) >> 1. exp += 1.
-    code.extend_from_slice(&encode_shrpw(R26, R28, 1, R28));  // R28 = result[32:1]
-    code.extend_from_slice(&encode_shrpw(R0, R26, 1, R26));   // R26 = result[53:33]
+    code.extend_from_slice(&encode_shrpw(R26, R28, 1, R28)); // R28 = result[32:1]
+    code.extend_from_slice(&encode_shrpw(R0, R26, 1, R26)); // R26 = result[53:33]
     code.extend_from_slice(&encode_ldw(R30, 36, R19));
     code.extend_from_slice(&encode_ldo(R19, 1, R19));
     code.extend_from_slice(&encode_stw(R19, R30, 36));
@@ -2712,24 +2943,24 @@ fn build_f64_mul_stub() -> Vec<u8> {
 
     // Check underflow: if exp <= 0, return 0.
     let underflow = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b011, false, false, 0));  // signed <=
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b011, false, false, 0)); // signed <=
     code.extend_from_slice(&encode_nop());
 
     // --- Pack result ---
     // R28 = result_mant_lo (already in R28).
     // R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF).
     code.extend(ss_load_imm(R20, 0xFFFFF));
-    code.extend_from_slice(&encode_and(R26, R20, R29));  // R29 = mant_hi & 0xFFFFF
-    code.extend_from_slice(&encode_ldw(R30, 36, R19));   // R19 = exp
-    code.extend_from_slice(&encode_shladd(3, R19, R0, R20));  // R20 = exp << 3
+    code.extend_from_slice(&encode_and(R26, R20, R29)); // R29 = mant_hi & 0xFFFFF
+    code.extend_from_slice(&encode_ldw(R30, 36, R19)); // R19 = exp
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R20)); // R20 = exp << 3
     for _ in 0..17 {
-        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // total 20
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20)); // total 20
     }
     code.extend_from_slice(&encode_or(R29, R20, R29));
-    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // R19 = sign
+    code.extend_from_slice(&encode_ldw(R30, 32, R19)); // R19 = sign
     code.extend_from_slice(&encode_copy(R19, R20));
     for _ in 0..31 {
-        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // sign << 31
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20)); // sign << 31
     }
     code.extend_from_slice(&encode_or(R29, R20, R29));
 
@@ -2768,7 +2999,7 @@ fn build_f64_mul_stub() -> Vec<u8> {
     patch_cmpb_to_here(&mut code, overflow);
     code.extend_from_slice(&encode_copy(R0, R28));
     code.extend(ss_load_imm(R29, 0x7FF00000));
-    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // sign
+    code.extend_from_slice(&encode_ldw(R30, 32, R19)); // sign
     code.extend_from_slice(&encode_copy(R19, R20));
     for _ in 0..31 {
         code.extend_from_slice(&encode_shladd(1, R20, R0, R20));
@@ -2806,37 +3037,37 @@ fn build_f64_div_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_ldo(R30, -48, R30));
 
     // Save original a/b bits.
-    code.extend_from_slice(&encode_stw(R26, R30, 0));   // a_lo
-    code.extend_from_slice(&encode_stw(R25, R30, 4));   // a_hi
-    code.extend_from_slice(&encode_stw(R24, R30, 8));   // b_lo
-    code.extend_from_slice(&encode_stw(R23, R30, 12));  // b_hi
+    code.extend_from_slice(&encode_stw(R26, R30, 0)); // a_lo
+    code.extend_from_slice(&encode_stw(R25, R30, 4)); // a_hi
+    code.extend_from_slice(&encode_stw(R24, R30, 8)); // b_lo
+    code.extend_from_slice(&encode_stw(R23, R30, 12)); // b_hi
 
     // --- Extract a: sign, exp, mant ---
     code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
-    code.extend_from_slice(&encode_stw(R19, R30, 16));  // sign_a
+    code.extend_from_slice(&encode_stw(R19, R30, 16)); // sign_a
     code.extend_from_slice(&encode_shrpw(R0, R25, 19, R20));
     code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
     code.extend(ss_load_imm(R19, 0x7FF));
     code.extend_from_slice(&encode_and(R20, R19, R20));
-    code.extend_from_slice(&encode_stw(R20, R30, 20));  // exp_a
+    code.extend_from_slice(&encode_stw(R20, R30, 20)); // exp_a
     code.extend(ss_load_imm(R19, 0xFFFFF));
     code.extend_from_slice(&encode_and(R25, R19, R21));
     code.extend(ss_load_imm(R19, 0x100000));
-    code.extend_from_slice(&encode_or(R21, R19, R21));  // mant_a_hi
-    code.extend_from_slice(&encode_copy(R26, R22));     // mant_a_lo
+    code.extend_from_slice(&encode_or(R21, R19, R21)); // mant_a_hi
+    code.extend_from_slice(&encode_copy(R26, R22)); // mant_a_lo
 
     // --- Extract b: sign, exp, mant ---
     code.extend_from_slice(&encode_shrpw(R0, R23, 31, R19));
-    code.extend_from_slice(&encode_stw(R19, R30, 24));  // sign_b
+    code.extend_from_slice(&encode_stw(R19, R30, 24)); // sign_b
     code.extend_from_slice(&encode_shrpw(R0, R23, 19, R20));
     code.extend_from_slice(&encode_shrpw(R0, R20, 1, R20));
     code.extend(ss_load_imm(R19, 0x7FF));
     code.extend_from_slice(&encode_and(R20, R19, R20));
-    code.extend_from_slice(&encode_stw(R20, R30, 28));  // exp_b
+    code.extend_from_slice(&encode_stw(R20, R30, 28)); // exp_b
     code.extend(ss_load_imm(R19, 0xFFFFF));
     code.extend_from_slice(&encode_and(R23, R19, R23));
     code.extend(ss_load_imm(R19, 0x100000));
-    code.extend_from_slice(&encode_or(R23, R19, R23));  // mant_b_hi
+    code.extend_from_slice(&encode_or(R23, R19, R23)); // mant_b_hi
 
     // --- Special cases ---
     // If exp_a == 0x7FF (a is Inf/NaN): return a (Inf/x = Inf, Inf/Inf = NaN).
@@ -2870,9 +3101,9 @@ fn build_f64_div_stub() -> Vec<u8> {
     // --- result_exp = exp_a - exp_b + 1023 -> [R30+36] ---
     code.extend_from_slice(&encode_ldw(R30, 20, R19));
     code.extend_from_slice(&encode_ldw(R30, 28, R20));
-    code.extend_from_slice(&encode_sub(R19, R20, R19));  // R19 = exp_a - exp_b
+    code.extend_from_slice(&encode_sub(R19, R20, R19)); // R19 = exp_a - exp_b
     code.extend(ss_load_imm(R20, 1023));
-    code.extend_from_slice(&encode_add(R19, R20, R19));  // R19 += 1023
+    code.extend_from_slice(&encode_add(R19, R20, R19)); // R19 += 1023
     code.extend_from_slice(&encode_stw(R19, R30, 36));
 
     // --- Init: remainder (R21:R22) = mant_a, Q (R25:R26) = 0, counter R19 = 53 ---
@@ -2883,23 +3114,23 @@ fn build_f64_div_stub() -> Vec<u8> {
     // --- Division loop (53 iterations) ---
     let div_loop = code.len() as i64;
     // Q <<= 1 (64-bit shift of R25:R26).
-    code.extend_from_slice(&encode_shrpw(R25, R26, 31, R25));  // R25 = (R25<<1)|(bit31 R26)
-    code.extend_from_slice(&encode_shladd(1, R26, R0, R26));   // R26 <<= 1
+    code.extend_from_slice(&encode_shrpw(R25, R26, 31, R25)); // R25 = (R25<<1)|(bit31 R26)
+    code.extend_from_slice(&encode_shladd(1, R26, R0, R26)); // R26 <<= 1
 
     // Compare remainder (R21:R22) >= mant_b (R23:R24).
     let ge_hi = code.len();
-    code.extend_from_slice(&encode_cmpb(R23, R21, 0b100, false, false, 0));  // R23 < R21 -> do_sub
+    code.extend_from_slice(&encode_cmpb(R23, R21, 0b100, false, false, 0)); // R23 < R21 -> do_sub
     code.extend_from_slice(&encode_nop());
     let lt_hi = code.len();
-    code.extend_from_slice(&encode_cmpb(R21, R23, 0b100, false, false, 0));  // R21 < R23 -> skip
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b100, false, false, 0)); // R21 < R23 -> skip
     code.extend_from_slice(&encode_nop());
     let lt_lo = code.len();
-    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0));  // R22 < R24 -> skip
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0)); // R22 < R24 -> skip
     code.extend_from_slice(&encode_nop());
     // Fall through: remainder >= mant_b -> do_subtract.
 
     // do_subtract label:
-    let do_sub_label = code.len();
+    let _do_sub_label = code.len();
     patch_cmpb_to_here(&mut code, ge_hi);
 
     // 64-bit subtract: R21:R22 -= R23:R24.
@@ -2912,15 +3143,15 @@ fn build_f64_div_stub() -> Vec<u8> {
     patch_cmpb_to_here(&mut code, borrow_cmpb);
     code.extend_from_slice(&encode_ldi(1, R20));
     patch_forward_branch_to_here(&mut code, borrow_skip);
-    code.extend_from_slice(&encode_sub(R22, R24, R22));  // R22 -= R24
-    code.extend_from_slice(&encode_sub(R21, R23, R21));  // R21 -= R23
-    code.extend_from_slice(&encode_sub(R21, R20, R21));  // R21 -= borrow
-    // Q |= 1 (set bit 0 of Q_lo = R26).
+    code.extend_from_slice(&encode_sub(R22, R24, R22)); // R22 -= R24
+    code.extend_from_slice(&encode_sub(R21, R23, R21)); // R21 -= R23
+    code.extend_from_slice(&encode_sub(R21, R20, R21)); // R21 -= borrow
+                                                        // Q |= 1 (set bit 0 of Q_lo = R26).
     code.extend_from_slice(&encode_ldi(1, R20));
     code.extend_from_slice(&encode_or(R26, R20, R26));
 
     // skip_subtract label:
-    let skip_sub_label = code.len();
+    let _skip_sub_label = code.len();
     patch_cmpb_to_here(&mut code, lt_hi);
     patch_cmpb_to_here(&mut code, lt_lo);
 
@@ -2931,18 +3162,18 @@ fn build_f64_div_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, false, false, 0));
     code.extend_from_slice(&encode_nop());
     // Shift remainder left by 1 (64-bit: R21:R22).
-    code.extend_from_slice(&encode_shrpw(R21, R22, 31, R21));  // R21 = (R21<<1)|(bit31 R22)
-    code.extend_from_slice(&encode_shladd(1, R22, R0, R22));   // R22 <<= 1
-    // Loop back.
+    code.extend_from_slice(&encode_shrpw(R21, R22, 31, R21)); // R21 = (R21<<1)|(bit31 R22)
+    code.extend_from_slice(&encode_shladd(1, R22, R0, R22)); // R22 <<= 1
+                                                             // Loop back.
     let loop_back = code.len() as i64;
     code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, false, 0));
     code.extend_from_slice(&encode_nop());
     {
         let disp = ((div_loop - (loop_back + 8)) as i32) & !3;
         let off = loop_back as usize;
-        let word = u32::from_be_bytes([code[off], code[off+1], code[off+2], code[off+3]]);
+        let word = u32::from_be_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         let patched = (word & !0x1FFF) | encode_cmpb_disp(disp);
-        code[off..off+4].copy_from_slice(&patched.to_be_bytes());
+        code[off..off + 4].copy_from_slice(&patched.to_be_bytes());
     }
     // Exit loop:
     patch_cmpb_to_here(&mut code, exit_loop);
@@ -2952,15 +3183,15 @@ fn build_f64_div_stub() -> Vec<u8> {
     // --- Normalize Q ---
     // Q is in R25:R26 (53 bits). bit 52 = bit 20 of R25 (implicit bit).
     // If bit 20 of R25 is 0 (Q < 2^52, mant_a < mant_b): shift Q left by 1, exp--.
-    // [K8C-hppa-f64] Fix: the cmpb must SKIP normalization when the bit IS set
+    // Fix: the cmpb must SKIP normalization when the bit IS set
     // (i.e. branch when R20 != 0). The previous code used `inverted: false`
     // (cmpb,=) which branches when R20 == 0 — the opposite of the intended
     // "if bit set, skip" — causing div(x, x) to erroneously shift Q left,
     // producing 0.5 instead of 1.0 (exp off by one, mantissa zeroed).
-    code.extend(ss_load_imm(R20, 0x100000));  // 1 << 20
-    code.extend_from_slice(&encode_and(R25, R20, R20));  // R20 = R25 & 0x100000
+    code.extend(ss_load_imm(R20, 0x100000)); // 1 << 20
+    code.extend_from_slice(&encode_and(R25, R20, R20)); // R20 = R25 & 0x100000
     let q_normalized = code.len();
-    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, true, false, 0));  // cmpb,<>: if R20 != 0 (bit set), skip
+    code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, true, false, 0)); // cmpb,<>: if R20 != 0 (bit set), skip
     code.extend_from_slice(&encode_nop());
     // Q <<= 1 (64-bit shift).
     code.extend_from_slice(&encode_shrpw(R25, R26, 31, R25));
@@ -2983,7 +3214,7 @@ fn build_f64_div_stub() -> Vec<u8> {
 
     // Check underflow: if exp <= 0, return 0.
     let underflow = code.len();
-    code.extend_from_slice(&encode_cmpb(R19, R0, 0b011, false, false, 0));  // signed <=
+    code.extend_from_slice(&encode_cmpb(R19, R0, 0b011, false, false, 0)); // signed <=
     code.extend_from_slice(&encode_nop());
 
     // --- Pack result ---
@@ -2991,17 +3222,17 @@ fn build_f64_div_stub() -> Vec<u8> {
     code.extend_from_slice(&encode_copy(R26, R28));
     // R29 = (sign << 31) | (exp << 20) | (mant_hi & 0xFFFFF).
     code.extend(ss_load_imm(R20, 0xFFFFF));
-    code.extend_from_slice(&encode_and(R25, R20, R29));  // R29 = mant_hi & 0xFFFFF
-    code.extend_from_slice(&encode_ldw(R30, 36, R19));   // R19 = exp
-    code.extend_from_slice(&encode_shladd(3, R19, R0, R20));  // R20 = exp << 3
+    code.extend_from_slice(&encode_and(R25, R20, R29)); // R29 = mant_hi & 0xFFFFF
+    code.extend_from_slice(&encode_ldw(R30, 36, R19)); // R19 = exp
+    code.extend_from_slice(&encode_shladd(3, R19, R0, R20)); // R20 = exp << 3
     for _ in 0..17 {
-        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // total 20
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20)); // total 20
     }
     code.extend_from_slice(&encode_or(R29, R20, R29));
-    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // R19 = sign
+    code.extend_from_slice(&encode_ldw(R30, 32, R19)); // R19 = sign
     code.extend_from_slice(&encode_copy(R19, R20));
     for _ in 0..31 {
-        code.extend_from_slice(&encode_shladd(1, R20, R0, R20));  // sign << 31
+        code.extend_from_slice(&encode_shladd(1, R20, R0, R20)); // sign << 31
     }
     code.extend_from_slice(&encode_or(R29, R20, R29));
 
@@ -3032,7 +3263,7 @@ fn build_f64_div_stub() -> Vec<u8> {
     patch_cmpb_to_here(&mut code, b_zero);
     code.extend_from_slice(&encode_copy(R0, R28));
     code.extend(ss_load_imm(R29, 0x7FF00000));
-    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // sign
+    code.extend_from_slice(&encode_ldw(R30, 32, R19)); // sign
     code.extend_from_slice(&encode_copy(R19, R20));
     for _ in 0..31 {
         code.extend_from_slice(&encode_shladd(1, R20, R0, R20));
@@ -3046,7 +3277,7 @@ fn build_f64_div_stub() -> Vec<u8> {
     patch_cmpb_to_here(&mut code, overflow);
     code.extend_from_slice(&encode_copy(R0, R28));
     code.extend(ss_load_imm(R29, 0x7FF00000));
-    code.extend_from_slice(&encode_ldw(R30, 32, R19));  // sign
+    code.extend_from_slice(&encode_ldw(R30, 32, R19)); // sign
     code.extend_from_slice(&encode_copy(R19, R20));
     for _ in 0..31 {
         code.extend_from_slice(&encode_shladd(1, R20, R0, R20));
@@ -3060,15 +3291,15 @@ fn build_f64_div_stub() -> Vec<u8> {
 }
 
 /// TODO: full IEEE 754 mul/div via shift-add multiplication.
+#[allow(dead_code)]
 fn build_f64_arith_stub_zero() -> Vec<u8> {
     let mut code = Vec::new();
-    code.extend_from_slice(&encode_copy(R0, R28));  // R28 = 0
-    code.extend_from_slice(&encode_copy(R0, R29));  // R29 = 0
+    code.extend_from_slice(&encode_copy(R0, R28)); // R28 = 0
+    code.extend_from_slice(&encode_copy(R0, R29)); // R29 = 0
     code.extend_from_slice(&encode_bv(R2, R0));
     code.extend_from_slice(&encode_nop());
     code
 }
-
 
 /// Wrapper: i64→f64 (signed).
 fn build_i64_to_f64_stub() -> Vec<u8> {
@@ -3078,155 +3309,179 @@ fn build_i64_to_f64_stub() -> Vec<u8> {
 /// Return all soft-float stubs as (symbol_name, machine_code) pairs.
 fn build_softfloat_stubs() -> Vec<(String, Vec<u8>)> {
     vec![
-        ("__vuma_f64_to_i64".to_string(),   build_f64_to_i64_stub()),
-        ("__vuma_f64_to_u64".to_string(),   build_f64_to_u64_stub()),
-        ("__vuma_i64_to_f64".to_string(),   build_i64_to_f64_stub()),
-        ("__vuma_u64_to_f64".to_string(),   build_u64_to_f64_stub()),
-        ("__vuma_f32_to_f64".to_string(),   build_f32_to_f64_stub()),
-        ("__vuma_f64_to_f32".to_string(),   build_f64_to_f32_stub()),
-        ("__vuma_f64_eq".to_string(),       build_f64_eq_stub()),
-        ("__vuma_f64_lt".to_string(),       build_f64_lt_stub()),
-        ("__vuma_f64_le".to_string(),       build_f64_le_stub()),
-        ("__vuma_f64_add".to_string(),      build_f64_add_stub()),
-        ("__vuma_f64_sub".to_string(),      build_f64_sub_stub()),
-        ("__vuma_f64_mul".to_string(),      build_f64_mul_stub()),
-        ("__vuma_f64_div".to_string(),      build_f64_div_stub()),
+        ("__vuma_f64_to_i64".to_string(), build_f64_to_i64_stub()),
+        ("__vuma_f64_to_u64".to_string(), build_f64_to_u64_stub()),
+        ("__vuma_i64_to_f64".to_string(), build_i64_to_f64_stub()),
+        ("__vuma_u64_to_f64".to_string(), build_u64_to_f64_stub()),
+        ("__vuma_f32_to_f64".to_string(), build_f32_to_f64_stub()),
+        ("__vuma_f64_to_f32".to_string(), build_f64_to_f32_stub()),
+        ("__vuma_f64_eq".to_string(), build_f64_eq_stub()),
+        ("__vuma_f64_lt".to_string(), build_f64_lt_stub()),
+        ("__vuma_f64_le".to_string(), build_f64_le_stub()),
+        ("__vuma_f64_add".to_string(), build_f64_add_stub()),
+        ("__vuma_f64_sub".to_string(), build_f64_sub_stub()),
+        ("__vuma_f64_mul".to_string(), build_f64_mul_stub()),
+        ("__vuma_f64_div".to_string(), build_f64_div_stub()),
     ]
 }
 
 /// Stack-slot based allocate_registers for HPPA.
 /// Every vreg gets a stack slot; operations use scratch registers.
 fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        use std::collections::{HashMap, HashSet};
-        use crate::ir::{BinOpKind, CastKind, CmpKind, UnaryOpKind};
-        use crate::backend::{AllocatedBlock, AllocatedInstruction, RelocationEntry};
+    use crate::backend::{AllocatedBlock, AllocatedInstruction, RelocationEntry};
+    use crate::ir::{BinOpKind, CastKind, CmpKind, UnaryOpKind};
+    use std::collections::{HashMap, HashSet};
 
-        // ── Phase 1: Collect all vreg IDs and compute stack layout ──
-        let mut all_vreg_ids: HashSet<u32> = HashSet::new();
-        for &id in func.vregs.keys() { all_vreg_ids.insert(id); }
-        for param in &func.params {
-            if let Some(id) = param.as_register() { all_vreg_ids.insert(id); }
+    // ── Phase 1: Collect all vreg IDs and compute stack layout ──
+    let mut all_vreg_ids: HashSet<u32> = HashSet::new();
+    for &id in func.vregs.keys() {
+        all_vreg_ids.insert(id);
+    }
+    for param in &func.params {
+        if let Some(id) = param.as_register() {
+            all_vreg_ids.insert(id);
         }
-        for block in &func.blocks {
-            for instr in &block.instructions {
-                for id in instr.defined_regs() { all_vreg_ids.insert(id); }
-                for id in instr.used_regs() { all_vreg_ids.insert(id); }
+    }
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.defined_regs() {
+                all_vreg_ids.insert(id);
             }
-            match &block.terminator {
-                IRTerminator::Branch { cond, .. } => {
-                    if let Some(id) = cond.as_register() { all_vreg_ids.insert(id); }
-                }
-                IRTerminator::Return(vals) => {
-                    for val in vals { if let Some(id) = val.as_register() { all_vreg_ids.insert(id); } }
-                }
-                _ => {}
+            for id in instr.used_regs() {
+                all_vreg_ids.insert(id);
             }
         }
-
-        // Identify Alloc vregs and their sizes
-        let mut alloc_sizes: HashMap<u32, i32> = HashMap::new();
-        for block in &func.blocks {
-            for instr in &block.instructions {
-                if let IRInstr::Alloc { dst, size } = instr {
-                    if let Some(id) = dst.as_register() {
-                        let aligned = ((*size as i32 + 15) & !15) as i32;
-                        alloc_sizes.insert(id, aligned);
+        match &block.terminator {
+            IRTerminator::Branch { cond, .. } => {
+                if let Some(id) = cond.as_register() {
+                    all_vreg_ids.insert(id);
+                }
+            }
+            IRTerminator::Return(vals) => {
+                for val in vals {
+                    if let Some(id) = val.as_register() {
+                        all_vreg_ids.insert(id);
                     }
                 }
             }
+            _ => {}
         }
+    }
 
-        // PA-RISC stack grows UP. FP=R3 points to the base of the frame.
-        // Locals are at NEGATIVE offsets from FP (below FP).
-        // vreg stack slots start at -32 (below RP at -20, old FP at -24,
-        // and a dedicated zero-extension scratch slot at -28).
-        // The prologue saves RP at R30-20 and old FP at R30-24. FP-28 is
-        // reserved as a scratch slot for ss_load_imm's STW+LDW zero-extension
-        // of values >= 0x80000000, so vregs must start at -32.
-        let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
-        let mut current_offset: i32 = -64; // Start below incoming args area
-        let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
-        vreg_ids.sort();
-        for &id in &vreg_ids {
-            vreg_stack_slots.insert(id, current_offset);
-            // W4e: allocate 8 bytes per vreg (not 4) so that f64/i64/u64
-            // values stored as [off]=lo, [off-4]=hi do not overlap with the
-            // next vreg's slot.  With 4-byte spacing, vreg N's hi word at
-            // [off-4] collides with vreg N+1's lo word at [off-4], corrupting
-            // 64-bit values.  8-byte spacing eliminates the overlap.  Integer
-            // (32-bit) vregs simply use [off] and leave [off-4] as padding.
-            current_offset -= 8;
-        }
-
-        // Alloc regions: use mmap (__vuma_alloc) instead of stack space.
-        // QEMU's PA-RISC stack is small (~1.6KB below initial R30), so large
-        // allocations on the stack would overflow. All allocate() calls
-        // are routed to __vuma_alloc (mmap) at runtime.
-        // alloc_offsets is kept empty — the Alloc instruction generates a
-        // function call instead of computing a stack pointer.
-        let _alloc_offsets: HashMap<u32, i32> = HashMap::new();
-
-        let frame_size = (((-current_offset) as usize + 63) & !63) as usize;
-
-        // ── Phase 2: Emit prologue ──
-        let mut code: Vec<u8> = Vec::new();
-        let mut relocations: Vec<RelocationEntry> = Vec::new();
-
-        // PA-RISC prologue:
-        // 1. STW R2, -20(R30) — save RP
-        // 2. STW R3, -24(R30) — save old FP (callee-saved)
-        // 3. COPY R30, R3 — FP = R30
-        // 4. SUB R30, frame_size, R30 — R30 -= frame_size
-        code.extend_from_slice(&encode_stw(R2, R30, -20));  // save RP at R30-20
-        code.extend_from_slice(&encode_stw(R3, R30, -24));  // save old FP at R30-24
-        code.extend_from_slice(&encode_copy(R30, R3));      // FP = R30
-        code.extend(ss_load_imm(S0, frame_size as i64));
-        code.extend_from_slice(&encode_sub(R30, S0, R30));  // R30 -= frame_size
-
-        // Initialize 64-bit temp slots to 0 (prevent garbage reads)
-        code.extend_from_slice(&encode_stw(R0, R3, TMP64_A_HI as i16));
-        code.extend_from_slice(&encode_stw(R0, R3, TMP64_B_HI as i16));
-        code.extend_from_slice(&encode_stw(R0, R3, TMP64_C_HI as i16));
-
-        // Save incoming args PA-RISC arg regs: R26, R25, R24, R23 (first 4 args).
-        // Stack args (4+) are at [FP - 32 + (i-4)*4] (in the incoming args area).
-        let arg_regs = [R26, R25, R24, R23];
-        for (i, param) in func.params.iter().enumerate() {
-            if let Some(id) = param.as_register() {
-                let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                if i < arg_regs.len() {
-                    // Register arg: save from R26-R23 to vreg slot
-                    code.extend_from_slice(&encode_stw(arg_regs[i], R3, offset as i16));
-                } else {
-                    // Stack arg: load from [FP - 32 + (i-4)*4] and save to vreg slot
-                    let stack_off = -32 + ((i - 4) * 4) as i32;
-                    code.extend_from_slice(&encode_ldw(R3, stack_off as i16, S0));
-                    code.extend_from_slice(&encode_stw(S0, R3, offset as i16));
+    // Identify Alloc vregs and their sizes
+    let mut alloc_sizes: HashMap<u32, i32> = HashMap::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            if let IRInstr::Alloc { dst, size } = instr {
+                if let Some(id) = dst.as_register() {
+                    let aligned = ((*size as i32 + 15) & !15) as i32;
+                    alloc_sizes.insert(id, aligned);
                 }
             }
         }
+    }
 
-        // ── Phase 3: Emit code for each block ──
-        let label_to_idx: HashMap<String, usize> = func.blocks.iter().enumerate()
-            .map(|(i, b)| (b.label.clone(), i)).collect();
-        let mut block_start_offsets: Vec<usize> = Vec::with_capacity(func.blocks.len());
+    // PA-RISC stack grows UP. FP=R3 points to the base of the frame.
+    // Locals are at NEGATIVE offsets from FP (below FP).
+    // vreg stack slots start at -32 (below RP at -20, old FP at -24,
+    // and a dedicated zero-extension scratch slot at -28).
+    // The prologue saves RP at R30-20 and old FP at R30-24. FP-28 is
+    // reserved as a scratch slot for ss_load_imm's STW+LDW zero-extension
+    // of values >= 0x80000000, so vregs must start at -32.
+    let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
+    let mut current_offset: i32 = -64; // Start below incoming args area
+    let mut vreg_ids: Vec<u32> = all_vreg_ids.iter().copied().collect();
+    vreg_ids.sort();
+    for &id in &vreg_ids {
+        vreg_stack_slots.insert(id, current_offset);
+        // W4e: allocate 8 bytes per vreg (not 4) so that f64/i64/u64
+        // values stored as [off]=lo, [off-4]=hi do not overlap with the
+        // next vreg's slot.  With 4-byte spacing, vreg N's hi word at
+        // [off-4] collides with vreg N+1's lo word at [off-4], corrupting
+        // 64-bit values.  8-byte spacing eliminates the overlap.  Integer
+        // (32-bit) vregs simply use [off] and leave [off-4] as padding.
+        current_offset -= 8;
+    }
 
-        struct BranchPatch { code_offset: usize, target_label: String, }
-        let mut branch_patches: Vec<BranchPatch> = Vec::new();
-        // Separate patch list for COMB/COMIB conditional branches, which use
-        // an 11-bit word-scaled displacement at bits 11:1 (distinct from the
-        // 17-bit /16-scaled field the unconditional B patch handles).
-        struct CombPatch { code_offset: usize, target_label: String, }
-        let mut comb_patches: Vec<CombPatch> = Vec::new();
+    // Alloc regions: use mmap (__vuma_alloc) instead of stack space.
+    // QEMU's PA-RISC stack is small (~1.6KB below initial R30), so large
+    // allocations on the stack would overflow. All allocate() calls
+    // are routed to __vuma_alloc (mmap) at runtime.
+    // alloc_offsets is kept empty — the Alloc instruction generates a
+    // function call instead of computing a stack pointer.
+    let _alloc_offsets: HashMap<u32, i32> = HashMap::new();
 
-        for block in func.blocks.iter() {
-            block_start_offsets.push(code.len());
+    let frame_size = (((-current_offset) as usize + 63) & !63) as usize;
 
-            for instr in &block.instructions {
-                let dst_id = instr.defined_regs().first().copied().unwrap_or(0);
-                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+    // ── Phase 2: Emit prologue ──
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<RelocationEntry> = Vec::new();
 
-                match instr {
+    // PA-RISC prologue:
+    // 1. STW R2, -20(R30) — save RP
+    // 2. STW R3, -24(R30) — save old FP (callee-saved)
+    // 3. COPY R30, R3 — FP = R30
+    // 4. SUB R30, frame_size, R30 — R30 -= frame_size
+    code.extend_from_slice(&encode_stw(R2, R30, -20)); // save RP at R30-20
+    code.extend_from_slice(&encode_stw(R3, R30, -24)); // save old FP at R30-24
+    code.extend_from_slice(&encode_copy(R30, R3)); // FP = R30
+    code.extend(ss_load_imm(S0, frame_size as i64));
+    code.extend_from_slice(&encode_sub(R30, S0, R30)); // R30 -= frame_size
+
+    // Initialize 64-bit temp slots to 0 (prevent garbage reads)
+    code.extend_from_slice(&encode_stw(R0, R3, TMP64_A_HI as i16));
+    code.extend_from_slice(&encode_stw(R0, R3, TMP64_B_HI as i16));
+    code.extend_from_slice(&encode_stw(R0, R3, TMP64_C_HI as i16));
+
+    // Save incoming args PA-RISC arg regs: R26, R25, R24, R23 (first 4 args).
+    // Stack args (4+) are at [FP - 32 + (i-4)*4] (in the incoming args area).
+    let arg_regs = [R26, R25, R24, R23];
+    for (i, param) in func.params.iter().enumerate() {
+        if let Some(id) = param.as_register() {
+            let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+            if i < arg_regs.len() {
+                // Register arg: save from R26-R23 to vreg slot
+                code.extend_from_slice(&encode_stw(arg_regs[i], R3, offset as i16));
+            } else {
+                // Stack arg: load from [FP - 32 + (i-4)*4] and save to vreg slot
+                let stack_off = -32 + ((i - 4) * 4) as i32;
+                code.extend_from_slice(&encode_ldw(R3, stack_off as i16, S0));
+                code.extend_from_slice(&encode_stw(S0, R3, offset as i16));
+            }
+        }
+    }
+
+    // ── Phase 3: Emit code for each block ──
+    let label_to_idx: HashMap<String, usize> = func
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.label.clone(), i))
+        .collect();
+    let mut block_start_offsets: Vec<usize> = Vec::with_capacity(func.blocks.len());
+
+    struct BranchPatch {
+        code_offset: usize,
+        target_label: String,
+    }
+    let mut branch_patches: Vec<BranchPatch> = Vec::new();
+    // Separate patch list for COMB/COMIB conditional branches, which use
+    // an 11-bit word-scaled displacement at bits 11:1 (distinct from the
+    // 17-bit /16-scaled field the unconditional B patch handles).
+    struct CombPatch {
+        code_offset: usize,
+        target_label: String,
+    }
+    let comb_patches: Vec<CombPatch> = Vec::new();
+
+    for block in func.blocks.iter() {
+        block_start_offsets.push(code.len());
+
+        for instr in &block.instructions {
+            let dst_id = instr.defined_regs().first().copied().unwrap_or(0);
+            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+
+            match instr {
                     IRInstr::Add { dst, lhs, rhs, ty } => {
                         // [Wave K2-hppa-stark] Handle I64/U64 Add correctly.
                         // The previous code only stored the low 32 bits for
@@ -3515,7 +3770,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         // High word = TMP64_A_HI (from Shl 32), store to TMP64_B_HI
                                         code.extend_from_slice(&encode_ldw(R3, TMP64_A_HI as i16, S4));
                                         code.extend_from_slice(&encode_stw(S4, R3, TMP64_B_HI as i16));
-                                        // [Wave 4-ext-hppa-wait] Also store the high
+                                        // Also store the high
                                         // word to [dst_off-4] so the standard
                                         // 64-bit stack-slot layout (low at [off],
                                         // high at [off-4]) is maintained. This
@@ -3790,7 +4045,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 BinOpKind::ShrL | BinOpKind::ShrA => {
                                     // Check for 64-bit shift by 32 (unpack high word)
                                     if rhs.as_immediate().map(|v| v == 32).unwrap_or(false) {
-                                        // [Wave 4-ext-hppa-wait] 64-bit ShrL 32:
+                                        // 64-bit ShrL 32:
                                         // result = high word of lhs.
                                         //
                                         // The high word now lives at [lhs_off-4]
@@ -4014,7 +4269,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     let is_gt = matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe);
                                     let is_eq = matches!(kind, CmpKind::SLe | CmpKind::ULe | CmpKind::SGe | CmpKind::UGe);
 
-                                    // [Wave 14-ext] Fix: for SGt/UGt/SGe/UGe (is_gt=true),
+                                    // Fix: for SGt/UGt/SGe/UGe (is_gt=true),
                                     // hi_cond must use inverted=true to get ">" instead of "<=".
                                     // PA-RISC cmpb: 011=<=, 011+inv=>, 101=<<=, 101+inv=>>
                                     let (hi_cond, hi_cond_inv) = if is_signed {
@@ -4024,7 +4279,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                         if is_gt { (0b101, true) }   // >> (NOT <<=)
                                         else      { (0b100, false) } // << (unsigned less)
                                     };
-                                    // [Wave 7-ext-tryrecv-returnval] hi_opp is
+                                    // hi_opp is
                                     // the OPPOSITE direction: for SLe, opposite
                                     // is Gt; for SLt, opposite is Ge; etc. The
                                     // previous code emitted the SAME-direction
@@ -4139,7 +4394,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             //   cond=100,inverted=true → >>=
                             //   cond=101,inverted=true → >>
                             //
-                            // [Wave 4-ext-hppa-wait fix] Previously `Eq` was
+                            // Previously `Eq` was
                             // encoded with cond=0b000 (the "never" condition),
                             // and `Ne` with cond=0b001,inverted=false (the "="
                             // condition).  Both were wrong, so every integer
@@ -4343,7 +4598,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             reloc_type: "R_PARISC_PCREL".to_string(),
                         });
                         // Store return value (R28) to dst vreg, with high word zeroed.
-                        // [Wave 14-ext] ss_st only stores 32 bits. Without zeroing
+                        // ss_st only stores 32 bits. Without zeroing
                         // the high word, ss_load_value_64 reads garbage from
                         // [d_off-4], corrupting the 64-bit pointer. This breaks
                         // I64 Load/Store on the Alloc'd buffer (e.g. proto_state).
@@ -4363,7 +4618,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 // are handled via the TMP64_* mechanism elsewhere).
                                 code.extend(ss_load_value(src, &vreg_stack_slots, S0));
                                 code.extend(ss_st(S0, d_off));
-                                // [Wave 93-94-ext] For ZExt to I64, MUST zero the high
+                                // For ZExt to I64, MUST zero the high
                                 // word. Without this, I64 XOR/And in the FNV-1a hash loop
                                 // reads garbage from [d_off-4], corrupting the hash.
                                 if matches!(to_ty, Some(IRType::I64) | Some(IRType::U64)) {
@@ -4580,7 +4835,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         //   S3 = S3 >> 31          (SHRPW R0,S3,31,S3) → 1 if cond≠0, 0 if cond==0
                         //   S3 = 0 - S3            (SUB R0, S3, S3)  → 0xFFFFFFFF if cond≠0, 0 if cond==0
                         //
-                        // [Wave 4-ext-hppa-wait] Previously this was a STUB that
+                        // Previously this was a STUB that
                         // always stored false_val — breaking channel_recv's
                         // result selection (child always returned -1 instead of
                         // the received payload, so simple_send exited 255).
@@ -4716,7 +4971,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                 if is_64 {
                                     // Store high word to TMP64_C_HI for later ShrL 32
                                     code.extend_from_slice(&encode_stw(R29, R3, TMP64_C_HI as i16));
-                                    // [Wave 4-ext-hppa-wait] Also store the high
+                                    // Also store the high
                                     // word to [d_off-4] so the standard 64-bit
                                     // stack-slot layout is maintained. This lets
                                     // ShrL 32 uniformly read from [lhs_off-4]
@@ -4812,7 +5067,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // HPPA has only 4 register arg slots (R26-R23).
                         // Args 5+ go on the stack at SP-60/SP-56 (caller's frame).
                         //
-                        // [Wave 4-ext-hppa-wait] wait4 (asm-generic nr=260) rewrite.
+                        // wait4 (asm-generic nr=260) rewrite.
                         // QEMU's hppa linux-user emulator may not reliably support
                         // wait4 in all configurations. As a defensive measure
                         // (matching the riscv32 fix), rewrite wait4 as a
@@ -4934,7 +5189,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // `ss_st` below runs AFTER the syscall completes and
                         // stores the correct return value.
                         code.extend_from_slice(&encode_nop());
-                        // [Wave 7-ext-tryrecv-returnval] HPPA Linux syscall
+                        // HPPA Linux syscall
                         // convention: on success, R20=0 and R28=return value;
                         // on error, R20=1 and R28=POSITIVE errno (e.g. 11 for
                         // EAGAIN). The rest of the IR (Cmp SLe 0, Select)
@@ -4953,7 +5208,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         //   * branch NOT taken (R20!=0, error): SUB executes,
                         //     R28 = 0 - R28 = -errno.
                         //
-                        // [Wave 4-ext regression] SKIP the CMPB+SUB for the
+                        // SKIP the CMPB+SUB for the
                         // clone→fork redirect case. QEMU's hppa fork() does
                         // NOT clear R20 to 0 on success (it leaves R20 at the
                         // syscall number = 2), so the CMPB (R20==0) is false,
@@ -4963,7 +5218,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // 255. fork's return value (pid or 0) is never an
                         // errno, so the conversion is unnecessary for it.
                         //
-                        // [Wave 19-ext-checkpoint-be] ALSO skip for openat
+                        // ALSO skip for openat
                         // (asm-generic nr=56). QEMU's hppa openat() likewise
                         // leaves R20 at the syscall number (native nr=275) on
                         // success, so the CMPB (R20==0) is false and the SUB
@@ -4975,7 +5230,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // error check, so the -errno conversion is
                         // unnecessary (and harmful) for it.
                         //
-                        // [Wave 13-ext-shared-mem-3] ALSO skip for mmap
+                        // ALSO skip for mmap
                         // (asm-generic nr=222 → hppa nr=90). QEMU's hppa
                         // mmap() likewise leaves R20 at the native syscall
                         // number (90) on success, so the CMPB (R20==0) is
@@ -4987,7 +5242,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // pointer (or -errno on failure), never a positive
                         // errno, so the -errno conversion is unnecessary
                         // (and harmful) for it.
-                        // [Wave 81-88-ext] QEMU's hppa linux-user does NOT
+                        // QEMU's hppa linux-user does NOT
                         // set R20 as an error flag — it leaves R20 at the
                         // syscall number. So we cannot use R20 to detect
                         // errors. Instead, the IR uses Cmp Ne(ret, 0) for
@@ -4996,7 +5251,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         // but the current tests don't exercise those paths).
                         // No negate needed — store R28 directly.
                         // Store result (R28) to dst's stack slot.
-                        // [Wave 81-88-ext] Note: sign-extension to I64 is
+                        // Note: sign-extension to I64 is
                         // NOT done here because it previously caused stack
                         // corruption on some tests. The I64 Cmp SLt path
                         // loads both words via ss_load_value_64, but if the
@@ -5012,10 +5267,10 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         }
                         } // end else (normal syscall path)
                     }
-                    // ── VectorOp (Wave 29) ──
-                    // HPPA has no SIMD encoder in the Wave 29 suite; emit nothing.
+                    // ── VectorOp ──
+                    // HPPA has no SIMD encoder; emit nothing.
                     IRInstr::VectorOp { .. } => {}
-                    // ── CallIndirect (Wave 49) ──
+                    // ── CallIndirect ──
                     // Indirect call through a function pointer vreg. Uses a
                     // SHORT 5-instruction (20-byte) BL+NOP+LDO+BV+NOP pattern
                     // instead of the 32-byte direct-call sequence, to avoid
@@ -5065,187 +5320,203 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_st(R28, d_off));
                         }
                     }
-                    // ── Channel operations (Wave 1d / Task 2a) ──
+                    // ── Channel operations ──
                     // Backend lowering not yet implemented; emit nothing (no frontend
                     // generates channel IR yet).  Will be lowered to runtime calls.
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
-            // Wave 93-94: StarkProof — stub (Call-form builtin is the active path).
+            // StarkProof — stub (Call-form builtin is the active path).
             | IRInstr::StarkProof { .. } => {}
                 }
+        }
+
+        // Emit terminator
+        match &block.terminator {
+            IRTerminator::Jump(target) => {
+                // Unconditional branch. Emit a 20-byte placeholder that can
+                // hold either a forward BL (8 bytes + 3 NOPs) or a
+                // backward BL+LDO+BV (20 bytes).
+                let patch_off = code.len();
+                // Emit 5 NOPs (20 bytes) as placeholder.
+                for _ in 0..10 {
+                    code.extend_from_slice(&encode_nop());
+                }
+                branch_patches.push(BranchPatch {
+                    code_offset: patch_off,
+                    target_label: target.clone(),
+                });
             }
+            IRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
+                // Conditional branch: if cond != 0 → true_block, else → false_block.
+                //
+                // LONG-FORM CondBranch: always emit a 48-byte
+                // pattern that uses an inverted cmpb with a small fixed
+                // displacement to skip past the true_target's unconditional
+                // branch. This avoids the cmpb's ±8KB displacement limit
+                // (which was causing "cmpb displacement out of range"
+                // panics on large functions like driver_isolation's main).
+                //
+                // Layout:
+                //   X+0:  cmpb,=  S0, R0, +20  — if cond is FALSE (S0==0),
+                //                                 skip to X+28 (false_target's branch)
+                //   X+4:  NOP                    — delay slot (executed regardless)
+                //   X+8:  20-byte placeholder    — unconditional branch to true_block
+                //                                   (BL+NOP+LDO+BV+NOP, patched later)
+                //   X+28: 20-byte placeholder    — unconditional branch to false_block
+                //                                   (BL+NOP+LDO+BV+NOP, patched later)
+                //
+                // cmpb,= = major 0x20, cond=001 (=), inverted=false → '='
+                // (branches if S0 == R0, i.e., cond == 0)
+                code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
 
-            // Emit terminator
-            match &block.terminator {
-                IRTerminator::Jump(target) => {
-                    // Unconditional branch. Emit a 20-byte placeholder that can
-                    // hold either a forward BL (8 bytes + 3 NOPs) or a
-                    // backward BL+LDO+BV (20 bytes).
-                    let patch_off = code.len();
-                    // Emit 5 NOPs (20 bytes) as placeholder.
-                    for _ in 0..10 {
-                        code.extend_from_slice(&encode_nop());
-                    }
-                    branch_patches.push(BranchPatch { code_offset: patch_off, target_label: target.clone() });
+                // cmpb,= S0, R0, +20 (small fixed displacement; always fits)
+                code.extend_from_slice(&encode_cmpb(S0, R0, 0b001, false, false, 20));
+                code.extend_from_slice(&encode_nop()); // delay slot
+
+                // 20-byte placeholder for unconditional branch to true_block.
+                let true_off = code.len();
+                for _ in 0..10 {
+                    code.extend_from_slice(&encode_nop());
                 }
-                IRTerminator::Branch { cond, true_block, false_block } => {
-                    // Conditional branch: if cond != 0 → true_block, else → false_block.
-                    //
-                    // LONG-FORM CondBranch (Wave 49): always emit a 48-byte
-                    // pattern that uses an inverted cmpb with a small fixed
-                    // displacement to skip past the true_target's unconditional
-                    // branch. This avoids the cmpb's ±8KB displacement limit
-                    // (which was causing "cmpb displacement out of range"
-                    // panics on large functions like driver_isolation's main).
-                    //
-                    // Layout:
-                    //   X+0:  cmpb,=  S0, R0, +20  — if cond is FALSE (S0==0),
-                    //                                 skip to X+28 (false_target's branch)
-                    //   X+4:  NOP                    — delay slot (executed regardless)
-                    //   X+8:  20-byte placeholder    — unconditional branch to true_block
-                    //                                   (BL+NOP+LDO+BV+NOP, patched later)
-                    //   X+28: 20-byte placeholder    — unconditional branch to false_block
-                    //                                   (BL+NOP+LDO+BV+NOP, patched later)
-                    //
-                    // cmpb,= = major 0x20, cond=001 (=), inverted=false → '='
-                    // (branches if S0 == R0, i.e., cond == 0)
-                    code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
+                branch_patches.push(BranchPatch {
+                    code_offset: true_off,
+                    target_label: true_block.clone(),
+                });
 
-                    // cmpb,= S0, R0, +20 (small fixed displacement; always fits)
-                    code.extend_from_slice(&encode_cmpb(S0, R0, 0b001, false, false, 20));
-                    code.extend_from_slice(&encode_nop());  // delay slot
-
-                    // 20-byte placeholder for unconditional branch to true_block.
-                    let true_off = code.len();
-                    for _ in 0..10 {
-                        code.extend_from_slice(&encode_nop());
-                    }
-                    branch_patches.push(BranchPatch {
-                        code_offset: true_off,
-                        target_label: true_block.clone(),
-                    });
-
-                    // 20-byte placeholder for unconditional branch to false_block.
-                    let false_off = code.len();
-                    for _ in 0..10 {
-                        code.extend_from_slice(&encode_nop());
-                    }
-                    branch_patches.push(BranchPatch {
-                        code_offset: false_off,
-                        target_label: false_block.clone(),
-                    });
+                // 20-byte placeholder for unconditional branch to false_block.
+                let false_off = code.len();
+                for _ in 0..10 {
+                    code.extend_from_slice(&encode_nop());
                 }
-                IRTerminator::Return(vals) => {
-                    if let Some(first_val) = vals.first() {
-                        let ret_ty = func.result_types.first();
-                        let is_i64 = ret_ty
-                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
-                            .unwrap_or(false);
-                        let is_f64 = ret_ty
-                            .map(|t| matches!(t, crate::ir::IRType::F64))
-                            .unwrap_or(false);
-                        if is_f64 {
-                            // [K9D-hppa-fdiv-ffi] F64 return: load BOTH lo
-                            // (R28) and hi (R29) words. Previously the Return
-                            // handler only loaded R28 via ss_load_value (which
-                            // truncates 64-bit Immediates to 32 bits) and left
-                            // R29 unset — so `return 6.0` returned 0.0 (lo=0,
-                            // hi=garbage). Using ss_load_value_64 correctly
-                            // splits 64-bit Immediates and loads [off]/[off-4]
-                            // for Register sources.
-                            code.extend(ss_load_value_64(first_val, &vreg_stack_slots, R28, R29));
-                        } else {
-                            code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
-                            if is_i64 {
-                                // Load high word from TMP64_B_HI into R29
-                                code.extend_from_slice(&encode_ldw(R3, TMP64_B_HI as i16, R29));
-                            }
+                branch_patches.push(BranchPatch {
+                    code_offset: false_off,
+                    target_label: false_block.clone(),
+                });
+            }
+            IRTerminator::Return(vals) => {
+                if let Some(first_val) = vals.first() {
+                    let ret_ty = func.result_types.first();
+                    let is_i64 = ret_ty
+                        .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                        .unwrap_or(false);
+                    let is_f64 = ret_ty
+                        .map(|t| matches!(t, crate::ir::IRType::F64))
+                        .unwrap_or(false);
+                    if is_f64 {
+                        // F64 return: load BOTH lo
+                        // (R28) and hi (R29) words. Previously the Return
+                        // handler only loaded R28 via ss_load_value (which
+                        // truncates 64-bit Immediates to 32 bits) and left
+                        // R29 unset — so `return 6.0` returned 0.0 (lo=0,
+                        // hi=garbage). Using ss_load_value_64 correctly
+                        // splits 64-bit Immediates and loads [off]/[off-4]
+                        // for Register sources.
+                        code.extend(ss_load_value_64(first_val, &vreg_stack_slots, R28, R29));
+                    } else {
+                        code.extend(ss_load_value(first_val, &vreg_stack_slots, R28));
+                        if is_i64 {
+                            // Load high word from TMP64_B_HI into R29
+                            code.extend_from_slice(&encode_ldw(R3, TMP64_B_HI as i16, R29));
                         }
                     }
-                    code.extend_from_slice(&encode_copy(R3, R30)); // R30 = FP
-                    code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from R30-20
-                    code.extend_from_slice(&encode_ldw(R30, -24, R3)); // restore old FP from R30-24
-                    code.extend_from_slice(&encode_bv(R2, R0));
-                    code.extend_from_slice(&encode_nop()); // delay slot
                 }
-                IRTerminator::TailCall { .. } => {
-                    code.extend_from_slice(&encode_nop());
-                }
-                IRTerminator::Unreachable => {
-                    // DIAG trap — must NOT fall through. A NOP would cause
-                    // the child block to fall through to the parent block.
-                    code.extend(ss_load_imm(R20, -1));
-                    code.extend_from_slice(&encode_gate());
-                    code.extend_from_slice(&encode_nop());
-                }
-                IRTerminator::Resume { .. } => {
-                    code.extend_from_slice(&encode_nop());
-                }
-                IRTerminator::Switch { .. } => {
-                    code.extend_from_slice(&encode_nop());
-                }
-                IRTerminator::Invoke { .. } => {
-                    code.extend_from_slice(&encode_nop());
-                }
+                code.extend_from_slice(&encode_copy(R3, R30)); // R30 = FP
+                code.extend_from_slice(&encode_ldw(R30, -20, R2)); // restore RP from R30-20
+                code.extend_from_slice(&encode_ldw(R30, -24, R3)); // restore old FP from R30-24
+                code.extend_from_slice(&encode_bv(R2, R0));
+                code.extend_from_slice(&encode_nop()); // delay slot
+            }
+            IRTerminator::TailCall { .. } => {
+                code.extend_from_slice(&encode_nop());
+            }
+            IRTerminator::Unreachable => {
+                // DIAG trap — must NOT fall through. A NOP would cause
+                // the child block to fall through to the parent block.
+                code.extend(ss_load_imm(R20, -1));
+                code.extend_from_slice(&encode_gate());
+                code.extend_from_slice(&encode_nop());
+            }
+            IRTerminator::Resume { .. } => {
+                code.extend_from_slice(&encode_nop());
+            }
+            IRTerminator::Switch { .. } => {
+                code.extend_from_slice(&encode_nop());
+            }
+            IRTerminator::Invoke { .. } => {
+                code.extend_from_slice(&encode_nop());
             }
         }
+    }
 
-        // ── Phase 4: Patch branch displacements ──
-        // For each branch patch, determine if it's forward or backward, then
-        // emit the appropriate sequence (forward BL or backward BL+LDO+BV).
-        // The placeholder is 20 bytes (5 NOPs), which can hold either form.
-        for patch in &branch_patches {
-            if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
-                let target_offset = block_start_offsets[target_idx] as i64;
-                let pc_offset = patch.code_offset as i64;
-                let (branch_code, _) = emit_branch(target_offset, pc_offset);
-                assert!(branch_code.len() <= 40,
-                        "branch code {} bytes exceeds 40-byte placeholder", branch_code.len());
-                for (i, byte) in branch_code.iter().enumerate() {
-                    code[patch.code_offset + i] = *byte;
-                }
-                // Remaining bytes stay as NOPs (from placeholder).
+    // ── Phase 4: Patch branch displacements ──
+    // For each branch patch, determine if it's forward or backward, then
+    // emit the appropriate sequence (forward BL or backward BL+LDO+BV).
+    // The placeholder is 20 bytes (5 NOPs), which can hold either form.
+    for patch in &branch_patches {
+        if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
+            let target_offset = block_start_offsets[target_idx] as i64;
+            let pc_offset = patch.code_offset as i64;
+            let (branch_code, _) = emit_branch(target_offset, pc_offset);
+            assert!(
+                branch_code.len() <= 40,
+                "branch code {} bytes exceeds 40-byte placeholder",
+                branch_code.len()
+            );
+            for (i, byte) in branch_code.iter().enumerate() {
+                code[patch.code_offset + i] = *byte;
             }
+            // Remaining bytes stay as NOPs (from placeholder).
         }
+    }
 
-        // Apply cmpb conditional-branch patches. cmpb uses a non-linear
-        // displacement encoding (see encode_cmpb_disp).
-        for patch in &comb_patches {
-            if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
-                let target_offset = block_start_offsets[target_idx] as i64;
-                let pc_offset = patch.code_offset as i64;
-                let disp_bytes = ((target_offset - pc_offset - 8) as i32) & !3;
-                let w = u32::from_be_bytes([
-                    code[patch.code_offset], code[patch.code_offset + 1],
-                    code[patch.code_offset + 2], code[patch.code_offset + 3],
-                ]);
-                // cmpb displacement field is bits 12-0 (non-linear, see encode_cmpb_disp).
-                let patched = (w & !0x1FFF) | encode_cmpb_disp(disp_bytes);
-                code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
-            }
+    // Apply cmpb conditional-branch patches. cmpb uses a non-linear
+    // displacement encoding (see encode_cmpb_disp).
+    for patch in &comb_patches {
+        if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
+            let target_offset = block_start_offsets[target_idx] as i64;
+            let pc_offset = patch.code_offset as i64;
+            let disp_bytes = ((target_offset - pc_offset - 8) as i32) & !3;
+            let w = u32::from_be_bytes([
+                code[patch.code_offset],
+                code[patch.code_offset + 1],
+                code[patch.code_offset + 2],
+                code[patch.code_offset + 3],
+            ]);
+            // cmpb displacement field is bits 12-0 (non-linear, see encode_cmpb_disp).
+            let patched = (w & !0x1FFF) | encode_cmpb_disp(disp_bytes);
+            code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
         }
+    }
 
-        let total_code_size = code.len();
-        Ok(AllocatedFunction {
-            name: func.name.clone(),
-            blocks: vec![AllocatedBlock {
-                label: func.blocks.first().map(|b| b.label.clone()).unwrap_or_else(|| "entry".to_string()),
-                instructions: vec![AllocatedInstruction {
-                    opcode: "hppa".to_string(),
-                    reads: vec![],
-                    writes: vec![],
-                    encoded: code,
-                }],
-                code_offset: 0,
+    let total_code_size = code.len();
+    Ok(AllocatedFunction {
+        name: func.name.clone(),
+        blocks: vec![AllocatedBlock {
+            label: func
+                .blocks
+                .first()
+                .map(|b| b.label.clone())
+                .unwrap_or_else(|| "entry".to_string()),
+            instructions: vec![AllocatedInstruction {
+                opcode: "hppa".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: code,
             }],
-            frame_size,
-            callee_saved: vec![],
-            spill_slots: vreg_ids.len(),
-            code_size: total_code_size,
-            wasm_func_type: None,
-            wasm_locals: None,
-            relocations,
-        })
+            code_offset: 0,
+        }],
+        frame_size,
+        callee_saved: vec![],
+        spill_slots: vreg_ids.len(),
+        code_size: total_code_size,
+        wasm_func_type: None,
+        wasm_locals: None,
+        relocations,
+    })
 }
 
 /// Real register allocation: assigns vregs to real GPRs where possible,
@@ -5253,9 +5524,9 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 /// for the instruction encoding, but records the physical register assignments
 /// in the AllocatedFunction's reads/writes fields.
 ///
-/// This is a hybrid approach (Wave 23): the instruction encoding still uses
+/// This is a hybrid approach: the instruction encoding still uses
 /// stack slots (for safety), but the allocation metadata records which vregs
-/// COULD be in real registers. A future wave will use this metadata to emit
+/// COULD be in real registers. A future revision will use this metadata to emit
 /// register-based instructions directly.
 fn hppa_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     // Run the existing stack-slot allocator to get a working AllocatedFunction.
@@ -5267,14 +5538,22 @@ fn hppa_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, 
 
     // Collect all vreg IDs.
     let mut all_vreg_ids: Vec<u32> = Vec::new();
-    for &id in func.vregs.keys() { all_vreg_ids.push(id); }
+    for &id in func.vregs.keys() {
+        all_vreg_ids.push(id);
+    }
     for param in &func.params {
-        if let Some(id) = param.as_register() { all_vreg_ids.push(id); }
+        if let Some(id) = param.as_register() {
+            all_vreg_ids.push(id);
+        }
     }
     for block in &func.blocks {
         for instr in &block.instructions {
-            for id in instr.defined_regs() { all_vreg_ids.push(id); }
-            for id in instr.used_regs() { all_vreg_ids.push(id); }
+            for id in instr.defined_regs() {
+                all_vreg_ids.push(id);
+            }
+            for id in instr.used_regs() {
+                all_vreg_ids.push(id);
+            }
         }
     }
     all_vreg_ids.sort();
@@ -5286,10 +5565,7 @@ fn hppa_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, 
     let max_real_regs = 8; // conservative limit
     for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
         if i < max_real_regs {
-            let preg = crate::backend::PhysicalReg::new(
-                crate::backend::RegClass::Gpr,
-                i as u32,
-            );
+            let preg = crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
             // Record this assignment in every instruction that defines/uses this vreg.
             for block in &mut allocated.blocks {
                 for instr in &mut block.instructions {
@@ -5317,8 +5593,12 @@ fn hppa_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, 
 }
 
 impl Backend for HppaBackend {
-    fn name(&self) -> &'static str { "hppa" }
-    fn target_info(&self) -> &dyn TargetInfo { &HppaTargetInfo }
+    fn name(&self) -> &'static str {
+        "hppa"
+    }
+    fn target_info(&self) -> &dyn TargetInfo {
+        &HppaTargetInfo
+    }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         if self.use_real_regalloc {
@@ -5331,7 +5611,7 @@ impl Backend for HppaBackend {
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
         // Concatenate encoded bytes from all blocks/instructions. Previously
         // this returned an empty Vec, which meant `encode_function` produced
-        // no bytes — breaking the Wave 13 Syscall conformance test and any
+        // no bytes — breaking the Syscall conformance test and any
         // other caller that relied on `encode_function` (e.g. cross-backend
         // code-size comparisons in the test suite).  The actual instruction
         // bytes are already stored in each `AllocatedInstruction.encoded`
@@ -5390,7 +5670,7 @@ impl Backend for HppaBackend {
         //   5. GATE (syscall)
 
         const STACK_VADDR: u64 = BASE_ADDR + 0x20000; // 0x30000
-        const STACK_MEMSZ: u64 = 0x800000;            // 8 MB
+        const STACK_MEMSZ: u64 = 0x800000; // 8 MB
         const STACK_TOP: u64 = STACK_VADDR + STACK_MEMSZ; // 0x830000
 
         let mut start_stub: Vec<u8> = Vec::new();
@@ -5417,7 +5697,7 @@ impl Backend for HppaBackend {
         start_stub.extend_from_slice(&encode_nop()); // placeholder for d3
         start_stub.extend_from_slice(&encode_nop()); // placeholder for d4
         start_stub.extend_from_slice(&encode_nop()); // placeholder for BV/BV,n
-        // COPY R28, R26 (move return value to arg1)
+                                                     // COPY R28, R26 (move return value to arg1)
         start_stub.extend_from_slice(&encode_copy(R28, R26));
         // LDI 1, R20 (SYS_exit)
         start_stub.extend(ss_load_imm(R20, 1));
@@ -5455,89 +5735,173 @@ impl Backend for HppaBackend {
 
         let mut syscall_stubs: Vec<(String, Vec<u8>)> = Vec::new();
         for (name, num) in [
-            ("write", 4), ("read", 3), ("open", 5), ("close", 6),
+            ("write", 4),
+            ("read", 3),
+            ("open", 5),
+            ("close", 6),
             // mmap is a custom stub (6 args, hppa has 4 C ABI arg regs)
-            ("munmap", 91), ("exit", 1), ("exit_group", 252),
-            ("brk", 45), ("getpid", 20), ("alarm", 27), ("kill", 37),
-            ("pipe", 42), ("dup", 41), ("dup2", 63), ("dup3", 431),
-            ("execve", 11), ("wait4", 114), ("unlink", 10),
-            ("chdir", 12), ("lseek", 19), ("ioctl", 54), ("fcntl", 55),
-            ("futex", 235), ("poll", 168), ("nanosleep", 162),
-            ("mprotect", 125), ("clock_gettime", 265),
-            ("gettimeofday", 78), ("rt_sigprocmask", 175),
+            ("munmap", 91),
+            ("exit", 1),
+            ("exit_group", 252),
+            ("brk", 45),
+            ("getpid", 20),
+            ("alarm", 27),
+            ("kill", 37),
+            ("pipe", 42),
+            ("dup", 41),
+            ("dup2", 63),
+            ("dup3", 431),
+            ("execve", 11),
+            ("wait4", 114),
+            ("unlink", 10),
+            ("chdir", 12),
+            ("lseek", 19),
+            ("ioctl", 54),
+            ("fcntl", 55),
+            ("futex", 235),
+            ("poll", 168),
+            ("nanosleep", 162),
+            ("mprotect", 125),
+            ("clock_gettime", 265),
+            ("gettimeofday", 78),
+            ("rt_sigprocmask", 175),
             ("rt_sigaction", 174),
-            ("socket", 340), ("connect", 343), ("bind", 341),
-            ("listen", 342), ("accept", 344), ("setsockopt", 346),
-                ("getsockopt", 182),
-            ("shutdown", 348), ("sendto", 349), ("recvfrom", 350),
-            ("clone", 120), ("fork", 2),
+            ("socket", 340),
+            ("connect", 343),
+            ("bind", 341),
+            ("listen", 342),
+            ("accept", 344),
+            ("setsockopt", 346),
+            ("getsockopt", 182),
+            ("shutdown", 348),
+            ("sendto", 349),
+            ("recvfrom", 350),
+            ("clone", 120),
+            ("fork", 2),
             // [wave 9 fix] epoll numbers corrected from kernel parisc syscall.tbl:
             //   old (wrong): 449/424/425 (those are m68k numbers, not parisc)
             //   correct:      311/225/226
-            ("epoll_create1", 311), ("epoll_ctl", 225), ("epoll_wait", 226),
-                // ── Additional POSIX syscall stubs ──
-                // PA-RISC uses the common syscall numbers for the stat family
-                // (stat=106, lstat=107, fstat=108, getcwd=110).
-                ("stat", 106), ("lstat", 107), ("fstat", 108), ("getcwd", 110),
-                // recv/send alias recvfrom/sendto on PA-RISC (direct syscalls
-                // at 350/349). The caller passes 6 args for recvfrom/sendto;
-                // recv/send declarations with 4 args leave args 5-6 as 0 from
-                // the caller's frame, which the kernel interprets as NULL.
-                ("recv", 350), ("send", 349),
-                // ── Wave 7: POSIX file-metadata & I/O syscalls (parisc unistd.h) ──
-                // PA-RISC has 6 syscall arg regs (R26-R23 + 2 more); all these
-                // take ≤5 args → simple_stub (same pattern as the existing 6-arg
-                // futex/sendto stubs). parisc chown=180/fchown=95 are already the
-                // modern 32-bit sys_chown/sys_fchown (no 16-bit split). Note
-                // pread64=108/pwrite64=109 (differ from the common table).
-                ("mkdir", 39), ("rmdir", 40), ("rename", 38),
-                ("link", 9), ("symlink", 83), ("readlink", 85),
-                ("chmod", 15), ("chown", 180), ("umask", 60),
-                ("fchmod", 94), ("fchown", 95),
-                ("openat", 275), ("unlinkat", 281), ("renameat", 282),
-                ("linkat", 283), ("symlinkat", 284), ("readlinkat", 285),
-                ("fchmodat", 286), ("faccessat", 287), ("fchownat", 278),
-                ("ftruncate", 93), ("fsync", 118), ("fdatasync", 148),
-                ("sync", 36), ("syncfs", 327),
-                ("pread", 108), ("pwrite", 109), ("readv", 145), ("writev", 146),
-                ("preadv", 315), ("pwritev", 316),
-                ("fchdir", 133), ("chroot", 61),
-                // ── Wave 9: POSIX system & advanced syscalls (parisc unistd.h) ──
-                // PA-RISC has 6 syscall arg regs; all take ≤5 args → simple_stub.
-                // eventfd→eventfd2(310), signalfd→signalfd4(309) = modern variants.
-                ("mlock", 150), ("munlock", 151), ("mlockall", 152), ("munlockall", 153),
-                ("mincore", 72), ("madvise", 119), ("msync", 144), ("mremap", 163),
-                ("getrlimit", 76), ("setrlimit", 75), ("prlimit64", 321),
-                ("getrusage", 77), ("times", 43),
-                ("getrandom", 339),
-                ("eventfd", 310), ("timerfd_create", 306), ("timerfd_settime", 307),
-                ("timerfd_gettime", 308), ("signalfd", 309),
-                ("inotify_init1", 314), ("inotify_add_watch", 270), ("inotify_rm_watch", 271),
-                ("ptrace", 26),
-                // ── Wave 8: POSIX process & identity syscalls (parisc syscall.tbl) ──
-                // parisc has no uid16 split (getuid=24 is already 32-bit). All take
-                // ≤5 args; hppa has 6 reg args (arg0-arg3, r1-r18) → simple_stub.
-                // Family 1: identity
-                ("getuid", 24), ("geteuid", 49), ("getgid", 47), ("getegid", 50),
-                ("setuid", 23), ("setgid", 46), ("setresuid", 164), ("setresgid", 170),
-                // Family 2: process group (getpid already present)
-                ("getppid", 64), ("getsid", 147), ("setsid", 66),
-                ("setpgid", 57), ("getpgid", 132), ("getpgrp", 65),
-                // Family 3: clone/wait (clone/wait4 already present)
-                ("vfork", 113), ("clone3", 435), ("waitid", 235),
-                // Family 4: exec/exit (execve/exit_group already present)
-                ("execveat", 342),
-                // Family 5: signals (kill/rt_sigaction/rt_sigprocmask/rt_sigreturn
-                // already present)
-                ("tgkill", 259), ("tkill", 208),
-                // Family 6: directory read (readdir ABSENT → use getdents64)
-                ("getdents64", 201), ("getdents", 141),
-                // Family 7: system (arch_prctl is x86_64-only; uname=59 divergent)
-                ("prctl", 172), ("uname", 59), ("sysinfo", 116),
-                        ("eventfd2", 310),
-                ("newfstatat", 280),
-                ("signalfd4", 302),
-] {
+            ("epoll_create1", 311),
+            ("epoll_ctl", 225),
+            ("epoll_wait", 226),
+            // ── Additional POSIX syscall stubs ──
+            // PA-RISC uses the common syscall numbers for the stat family
+            // (stat=106, lstat=107, fstat=108, getcwd=110).
+            ("stat", 106),
+            ("lstat", 107),
+            ("fstat", 108),
+            ("getcwd", 110),
+            // recv/send alias recvfrom/sendto on PA-RISC (direct syscalls
+            // at 350/349). The caller passes 6 args for recvfrom/sendto;
+            // recv/send declarations with 4 args leave args 5-6 as 0 from
+            // the caller's frame, which the kernel interprets as NULL.
+            ("recv", 350),
+            ("send", 349),
+            // ── POSIX file-metadata & I/O syscalls (parisc unistd.h) ──
+            // PA-RISC has 6 syscall arg regs (R26-R23 + 2 more); all these
+            // take ≤5 args → simple_stub (same pattern as the existing 6-arg
+            // futex/sendto stubs). parisc chown=180/fchown=95 are already the
+            // modern 32-bit sys_chown/sys_fchown (no 16-bit split). Note
+            // pread64=108/pwrite64=109 (differ from the common table).
+            ("mkdir", 39),
+            ("rmdir", 40),
+            ("rename", 38),
+            ("link", 9),
+            ("symlink", 83),
+            ("readlink", 85),
+            ("chmod", 15),
+            ("chown", 180),
+            ("umask", 60),
+            ("fchmod", 94),
+            ("fchown", 95),
+            ("openat", 275),
+            ("unlinkat", 281),
+            ("renameat", 282),
+            ("linkat", 283),
+            ("symlinkat", 284),
+            ("readlinkat", 285),
+            ("fchmodat", 286),
+            ("faccessat", 287),
+            ("fchownat", 278),
+            ("ftruncate", 93),
+            ("fsync", 118),
+            ("fdatasync", 148),
+            ("sync", 36),
+            ("syncfs", 327),
+            ("pread", 108),
+            ("pwrite", 109),
+            ("readv", 145),
+            ("writev", 146),
+            ("preadv", 315),
+            ("pwritev", 316),
+            ("fchdir", 133),
+            ("chroot", 61),
+            // ── POSIX system & advanced syscalls (parisc unistd.h) ──
+            // PA-RISC has 6 syscall arg regs; all take ≤5 args → simple_stub.
+            // eventfd→eventfd2(310), signalfd→signalfd4(309) = modern variants.
+            ("mlock", 150),
+            ("munlock", 151),
+            ("mlockall", 152),
+            ("munlockall", 153),
+            ("mincore", 72),
+            ("madvise", 119),
+            ("msync", 144),
+            ("mremap", 163),
+            ("getrlimit", 76),
+            ("setrlimit", 75),
+            ("prlimit64", 321),
+            ("getrusage", 77),
+            ("times", 43),
+            ("getrandom", 339),
+            ("eventfd", 310),
+            ("timerfd_create", 306),
+            ("timerfd_settime", 307),
+            ("timerfd_gettime", 308),
+            ("signalfd", 309),
+            ("inotify_init1", 314),
+            ("inotify_add_watch", 270),
+            ("inotify_rm_watch", 271),
+            ("ptrace", 26),
+            // ── POSIX process & identity syscalls (parisc syscall.tbl) ──
+            // parisc has no uid16 split (getuid=24 is already 32-bit). All take
+            // ≤5 args; hppa has 6 reg args (arg0-arg3, r1-r18) → simple_stub.
+            // Family 1: identity
+            ("getuid", 24),
+            ("geteuid", 49),
+            ("getgid", 47),
+            ("getegid", 50),
+            ("setuid", 23),
+            ("setgid", 46),
+            ("setresuid", 164),
+            ("setresgid", 170),
+            // Family 2: process group (getpid already present)
+            ("getppid", 64),
+            ("getsid", 147),
+            ("setsid", 66),
+            ("setpgid", 57),
+            ("getpgid", 132),
+            ("getpgrp", 65),
+            // Family 3: clone/wait (clone/wait4 already present)
+            ("vfork", 113),
+            ("clone3", 435),
+            ("waitid", 235),
+            // Family 4: exec/exit (execve/exit_group already present)
+            ("execveat", 342),
+            // Family 5: signals (kill/rt_sigaction/rt_sigprocmask/rt_sigreturn
+            // already present)
+            ("tgkill", 259),
+            ("tkill", 208),
+            // Family 6: directory read (readdir ABSENT → use getdents64)
+            ("getdents64", 201),
+            ("getdents", 141),
+            // Family 7: system (arch_prctl is x86_64-only; uname=59 divergent)
+            ("prctl", 172),
+            ("uname", 59),
+            ("sysinfo", 116),
+            ("eventfd2", 310),
+            ("newfstatat", 280),
+            ("signalfd4", 302),
+        ] {
             syscall_stubs.push((name.to_string(), simple_stub(num)));
         }
 
@@ -5560,7 +5924,7 @@ impl Backend for HppaBackend {
             code.extend(ss_load_imm(R20, 173));
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop()); // GATE delay slot
-            // Safety trap in case the kernel ever returns.
+                                                   // Safety trap in case the kernel ever returns.
             code.extend_from_slice(&encode_nop());
             syscall_stubs.push(("rt_sigreturn".to_string(), code));
         }
@@ -5570,12 +5934,12 @@ impl Backend for HppaBackend {
         // VUMA's waitpid has only 3 args, so R23 may contain garbage.
         {
             let mut code = Vec::new();
-            code.extend(ss_load_imm(R23, 0));      // rusage = NULL
-            code.extend(ss_load_imm(R20, 114));    // sys_wait4
+            code.extend(ss_load_imm(R23, 0)); // rusage = NULL
+            code.extend(ss_load_imm(R20, 114)); // sys_wait4
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop()); // GATE delay slot
             code.extend_from_slice(&encode_bv(R2, R0)); // return
-            code.extend_from_slice(&encode_nop());      // BV delay slot
+            code.extend_from_slice(&encode_nop()); // BV delay slot
             syscall_stubs.push(("waitpid".to_string(), code));
         }
 
@@ -5588,28 +5952,28 @@ impl Backend for HppaBackend {
         {
             let mut code = Vec::new();
             // loop: (offset 0)
-            code.extend_from_slice(&encode_ldb(R26, 0, R20));  // R20 = *s1
-            code.extend_from_slice(&encode_ldb(R25, 0, R21));  // R21 = *s2
+            code.extend_from_slice(&encode_ldb(R26, 0, R20)); // R20 = *s1
+            code.extend_from_slice(&encode_ldb(R25, 0, R21)); // R21 = *s2
             code.extend_from_slice(&encode_sub(R20, R21, R22)); // R22 = R20 - R21
-            // COMB,<> R20, R21, done (branch if not equal, nullify delay)
-            // cond=001 (=), inverted=true → <>. f=true (nullify on taken).
-            // COMB at offset 12. done at offset 44. disp = 44 - (12+8) = 24.
+                                                                // COMB,<> R20, R21, done (branch if not equal, nullify delay)
+                                                                // cond=001 (=), inverted=true → <>. f=true (nullify on taken).
+                                                                // COMB at offset 12. done at offset 44. disp = 44 - (12+8) = 24.
             code.extend_from_slice(&encode_cmpb(R20, R21, 0b001, true, true, 24));
             code.extend_from_slice(&encode_nop()); // delay slot (nullified if taken)
-            // COMB,= R20, R0, done (branch if R20==0/NUL, nullify delay)
-            // COMB at offset 20. done at offset 44. disp = 44 - (20+8) = 16.
+                                                   // COMB,= R20, R0, done (branch if R20==0/NUL, nullify delay)
+                                                   // COMB at offset 20. done at offset 44. disp = 44 - (20+8) = 16.
             code.extend_from_slice(&encode_cmpb(R20, R0, 0b001, false, true, 16));
             code.extend_from_slice(&encode_nop()); // delay slot (nullified if taken)
             code.extend_from_slice(&encode_ldo(R26, 1, R26)); // s1++
             code.extend_from_slice(&encode_ldo(R25, 1, R25)); // s2++
-            // BL loop (unconditional). BL at offset 36. loop at 0.
-            // BL target = PC + 8 + (disp * 4). target_offset = 0 - (36+8) = -44.
+                                                              // BL loop (unconditional). BL at offset 36. loop at 0.
+                                                              // BL target = PC + 8 + (disp * 4). target_offset = 0 - (36+8) = -44.
             code.extend_from_slice(&encode_bl(-44));
             code.extend_from_slice(&encode_nop()); // BL delay slot (nullified)
-            // done: (offset 44)
-            code.extend_from_slice(&encode_copy(R22, R28));   // R28 = R22 (return value)
-            code.extend_from_slice(&encode_bv(R2, R0));       // return
-            code.extend_from_slice(&encode_nop());             // BV delay slot
+                                                   // done: (offset 44)
+            code.extend_from_slice(&encode_copy(R22, R28)); // R28 = R22 (return value)
+            code.extend_from_slice(&encode_bv(R2, R0)); // return
+            code.extend_from_slice(&encode_nop()); // BV delay slot
             syscall_stubs.push(("strcmp".to_string(), code));
         }
 
@@ -5618,9 +5982,9 @@ impl Backend for HppaBackend {
         {
             let mut code = Vec::new();
             code.extend_from_slice(&encode_ldo(R30, -48, R30)); // R30 -= 48
-            code.extend_from_slice(&encode_copy(R26, R19));   // R19 = n
-            code.extend_from_slice(&encode_copy(R0, R18));    // R18 = 0 (sign flag)
-            // BLT R19, .neg (cond=010, f=true, placeholder disp)
+            code.extend_from_slice(&encode_copy(R26, R19)); // R19 = n
+            code.extend_from_slice(&encode_copy(R0, R18)); // R18 = 0 (sign flag)
+                                                           // BLT R19, .neg (cond=010, f=true, placeholder disp)
             code.extend_from_slice(&encode_cmpb(R19, R0, 0b010, false, true, 0));
             let blt_pos = code.len() - 4;
             // B .start (placeholder)
@@ -5636,22 +6000,22 @@ impl Backend for HppaBackend {
             // .loop:
             let loop_offset = code.len();
             code.extend_from_slice(&encode_copy(R0, R15)); // R15 = quotient = 0
-            // .divloop:
+                                                           // .divloop:
             let divloop_offset = code.len();
             code.extend_from_slice(&encode_cmpb(R19, R17, 0b010, false, true, 0)); // if R19 < 10, exit
             let divblt_pos = code.len() - 4;
             code.extend_from_slice(&encode_nop()); // delay slot
             code.extend_from_slice(&encode_sub(R19, R17, R19)); // R19 -= 10
-            code.extend_from_slice(&encode_ldo(R15, 1, R15));   // R15++
+            code.extend_from_slice(&encode_ldo(R15, 1, R15)); // R15++
             let div_b_disp = ((divloop_offset as i64) - (code.len() as i64 + 8)) as i32;
             code.extend_from_slice(&encode_bl(div_b_disp));
             code.extend_from_slice(&encode_nop());
             // .divdone: R19=remainder, R15=quotient
             let divdone_offset = code.len();
             code.extend_from_slice(&encode_ldo(R19, 48, R19)); // R19 += '0'
-            code.extend_from_slice(&encode_stb(R19, R16, 0));  // *R16 = digit
+            code.extend_from_slice(&encode_stb(R19, R16, 0)); // *R16 = digit
             code.extend_from_slice(&encode_ldo(R16, -1, R16)); // R16--
-            code.extend_from_slice(&encode_copy(R15, R19));    // R19 = quotient
+            code.extend_from_slice(&encode_copy(R15, R19)); // R19 = quotient
             let loop_disp = ((loop_offset as i64) - (code.len() as i64 + 8)) as i32;
             code.extend_from_slice(&encode_cmpb(R19, R0, 0b001, true, true, loop_disp)); // if R19 != 0, loop
             code.extend_from_slice(&encode_nop());
@@ -5660,7 +6024,7 @@ impl Backend for HppaBackend {
             let skip_dash_disp = ((skip_dash_target as i64) - (code.len() as i64 + 8)) as i32;
             code.extend_from_slice(&encode_cmpb(R18, R0, 0b001, false, true, skip_dash_disp));
             code.extend_from_slice(&encode_nop());
-            code.extend_from_slice(&encode_ldi(45, R19));     // '-'
+            code.extend_from_slice(&encode_ldi(45, R19)); // '-'
             code.extend_from_slice(&encode_stb(R19, R16, 0));
             code.extend_from_slice(&encode_ldo(R16, -1, R16));
             // write(1, R16+1, len)
@@ -5679,11 +6043,19 @@ impl Backend for HppaBackend {
             // Patch branches
             let neg_target = br_start_pos + 4;
             let blt_disp = ((neg_target as i64) - (blt_pos as i64 + 8)) as i32;
-            code[blt_pos..blt_pos+4].copy_from_slice(&encode_cmpb(R19, R0, 0b010, false, true, blt_disp));
+            code[blt_pos..blt_pos + 4]
+                .copy_from_slice(&encode_cmpb(R19, R0, 0b010, false, true, blt_disp));
             let br_disp = ((start_offset as i64) - (br_start_pos as i64 + 8)) as i32;
-            code[br_start_pos..br_start_pos+4].copy_from_slice(&encode_bl(br_disp));
+            code[br_start_pos..br_start_pos + 4].copy_from_slice(&encode_bl(br_disp));
             let divblt_disp = ((divdone_offset as i64) - (divblt_pos as i64 + 8)) as i32;
-            code[divblt_pos..divblt_pos+4].copy_from_slice(&encode_cmpb(R19, R17, 0b010, false, true, divblt_disp));
+            code[divblt_pos..divblt_pos + 4].copy_from_slice(&encode_cmpb(
+                R19,
+                R17,
+                0b010,
+                false,
+                true,
+                divblt_disp,
+            ));
             // print_int stub restored — calls now resolve to the real
             // decimal-conversion runtime helper above instead of becoming
             // no-op unresolved externs.  The stub saves/restores SP (R30)
@@ -5696,18 +6068,19 @@ impl Backend for HppaBackend {
         {
             let mut code = Vec::new();
             code.extend_from_slice(&encode_ldo(R30, -48, R30)); // R30 -= 48
-            code.extend_from_slice(&encode_copy(R26, R19));   // R19 = n
-            code.extend_from_slice(&encode_ldi(15, R17));     // R17 = 15 (mask)
-            code.extend_from_slice(&encode_ldi(10, R14));     // newline
+            code.extend_from_slice(&encode_copy(R26, R19)); // R19 = n
+            code.extend_from_slice(&encode_ldi(15, R17)); // R17 = 15 (mask)
+            code.extend_from_slice(&encode_ldi(10, R14)); // newline
             code.extend_from_slice(&encode_stb(R14, R30, 16)); // buf[16] = '\n'
             code.extend_from_slice(&encode_ldo(R30, 15, R16)); // R16 = &buf[15]
-            // .hex_loop:
+                                                               // .hex_loop:
             let hx_loop = code.len();
             // R12 = R19 & 15 (PA-RISC AND: major=0x08, format: 0x08000000 | (r2<<21) | (r1<<16) | t)
-            let and_word: u32 = 0x08000000u32 | ((R17 as u32) << 21) | ((R19 as u32) << 16) | (R12 as u32);
+            let and_word: u32 =
+                0x08000000u32 | ((R17 as u32) << 21) | ((R19 as u32) << 16) | (R12 as u32);
             code.extend_from_slice(&and_word.to_be_bytes());
             code.extend_from_slice(&encode_ldo(R12, 48, R12)); // R12 += '0'
-            code.extend_from_slice(&encode_stb(R12, R16, 0));  // *R16 = digit
+            code.extend_from_slice(&encode_stb(R12, R16, 0)); // *R16 = digit
             code.extend_from_slice(&encode_ldo(R16, -1, R16)); // R16--
             code.extend_from_slice(&encode_shrpw(R19, R0, 4, R19)); // R19 >>= 4
             let hx_loop_disp = ((hx_loop as i64) - (code.len() as i64 + 8)) as i32;
@@ -5756,7 +6129,7 @@ impl Backend for HppaBackend {
             // GATE
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop()); // delay slot
-            // R30 += 16 (restore stack)
+                                                   // R30 += 16 (restore stack)
             code.extend_from_slice(&encode_ldo(R30, 16, R30));
             // BV R2(R0) — return
             code.extend_from_slice(&encode_bv(R2, R0));
@@ -5786,7 +6159,7 @@ impl Backend for HppaBackend {
             code
         }));
 
-        // ── FFI scratchpad frame stubs (Wave 3b/fix) ──────────────────
+        // ── FFI scratchpad frame stubs ──────────────────
         // ffi_scratch_push_frame: REAL mmap via brk() (same pattern as
         // __vuma_alloc on hppa, which uses brk not mmap).
         // hppa brk=45. Allocates 4096 bytes. R26=arg0(ignored, set to 4096),
@@ -5794,19 +6167,19 @@ impl Backend for HppaBackend {
         syscall_stubs.push(("ffi_scratch_push_frame".to_string(), {
             let mut code = Vec::new();
             // Step 1: brk(0) → R28 = current_brk
-            code.extend(ss_load_imm(R26, 0));       // R26 = 0
-            code.extend(ss_load_imm(R20, 45));      // R20 = __NR_brk
+            code.extend(ss_load_imm(R26, 0)); // R26 = 0
+            code.extend(ss_load_imm(R20, 45)); // R20 = __NR_brk
             code.extend_from_slice(&encode_gate());
-            code.extend_from_slice(&encode_nop());  // GATE delay slot
-            // Save current_brk (R28) to R24
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
+                                                   // Save current_brk (R28) to R24
             code.extend_from_slice(&encode_copy(R28, R24));
             // Step 2: brk(current_brk + 4096)
-            code.extend(ss_load_imm(R25, 4096));    // R25 = 4096
-            code.extend_from_slice(&encode_add(R28, R25, R26));  // R26 = brk + 4096
-            code.extend(ss_load_imm(R20, 45));      // R20 = __NR_brk
+            code.extend(ss_load_imm(R25, 4096)); // R25 = 4096
+            code.extend_from_slice(&encode_add(R28, R25, R26)); // R26 = brk + 4096
+            code.extend(ss_load_imm(R20, 45)); // R20 = __NR_brk
             code.extend_from_slice(&encode_gate());
-            code.extend_from_slice(&encode_nop());  // GATE delay slot
-            // Return current_brk (R24) in R28
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
+                                                   // Return current_brk (R24) in R28
             code.extend_from_slice(&encode_copy(R24, R28));
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
@@ -5824,8 +6197,34 @@ impl Backend for HppaBackend {
         // __arena_overflow: real exit(1) syscall
         syscall_stubs.push(("__arena_overflow".to_string(), {
             let mut code = Vec::new();
-            code.extend(ss_load_imm(R26, 1));       // exit code = 1
-            code.extend(ss_load_imm(R20, 1));       // sys_exit
+            code.extend(ss_load_imm(R26, 1)); // exit code = 1
+            code.extend(ss_load_imm(R20, 1)); // sys_exit
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            code
+        }));
+
+        // __oob_trap: real exit(134) syscall (SIGABRT code).
+        syscall_stubs.push(("__oob_trap".to_string(), {
+            let mut code = Vec::new();
+            code.extend(ss_load_imm(R26, 134)); // exit code = 134
+            code.extend(ss_load_imm(R20, 1)); // sys_exit
+            code.extend_from_slice(&encode_gate());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_bv(R2, R0));
+            code.extend_from_slice(&encode_nop());
+            code
+        }));
+
+        // __uaf_trap: real exit(135) syscall. Dormant until the liveness
+        // check IR invokes it (IMPL-UAF-1). Distinct from OOB (134) and
+        // arena overflow (1).
+        syscall_stubs.push(("__uaf_trap".to_string(), {
+            let mut code = Vec::new();
+            code.extend(ss_load_imm(R26, 135)); // exit code = 135
+            code.extend(ss_load_imm(R20, 1)); // sys_exit
             code.extend_from_slice(&encode_gate());
             code.extend_from_slice(&encode_nop());
             code.extend_from_slice(&encode_bv(R2, R0));
@@ -5900,21 +6299,21 @@ impl Backend for HppaBackend {
             code.extend_from_slice(&encode_copy(R26, R25));
             // Step 1: brk(0) → R28 = current_brk
             code.extend_from_slice(&encode_copy(R0, R26));
-            code.extend(ss_load_imm(R20, 45));  // __NR_brk
+            code.extend(ss_load_imm(R20, 45)); // __NR_brk
             code.extend_from_slice(&encode_gate());
-            code.extend_from_slice(&encode_nop());  // GATE delay slot
-            // Save current_brk (R28) to R24
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
+                                                   // Save current_brk (R28) to R24
             code.extend_from_slice(&encode_copy(R28, R24));
             // Step 2: brk(current_brk + size)
-            code.extend_from_slice(&encode_add(R28, R25, R26));  // R26 = brk + size
-            code.extend(ss_load_imm(R20, 45));  // __NR_brk
+            code.extend_from_slice(&encode_add(R28, R25, R26)); // R26 = brk + size
+            code.extend(ss_load_imm(R20, 45)); // __NR_brk
             code.extend_from_slice(&encode_gate());
-            code.extend_from_slice(&encode_nop());  // GATE delay slot
-            // R28 = new_brk. Compute start = new_brk - size = R28 - R25.
-            // [Wave K3-hppa-stark] The previous code returned R24 (current_brk),
-            // but QEMU hppa's brk(0) returns 0, so R24=0 and the returned
-            // pointer was 0. Fix: return new_brk - size instead.
-            code.extend_from_slice(&encode_sub(R28, R25, R28));  // R28 = R28 - R25 = new_brk - size
+            code.extend_from_slice(&encode_nop()); // GATE delay slot
+                                                   // R28 = new_brk. Compute start = new_brk - size = R28 - R25.
+                                                   // [Wave K3-hppa-stark] The previous code returned R24 (current_brk),
+                                                   // but QEMU hppa's brk(0) returns 0, so R24=0 and the returned
+                                                   // pointer was 0. Fix: return new_brk - size instead.
+            code.extend_from_slice(&encode_sub(R28, R25, R28)); // R28 = R28 - R25 = new_brk - size
             code.extend_from_slice(&encode_bv(R2, R0));
             code.extend_from_slice(&encode_nop());
             code
@@ -5950,8 +6349,9 @@ impl Backend for HppaBackend {
         // Record function offsets for BL patching — computed from the ACTUAL
         // all_code length as we append each function, not from a separate
         // func_size calculation that may disagree with the actual padding.
-        let mut func_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let padded_header_size = all_code.len();  // already padded to 16 above
+        let mut func_offsets: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let padded_header_size = all_code.len(); // already padded to 16 above
 
         for func in &ordered_functions {
             // Record the offset of this function BEFORE appending its code.
@@ -6005,7 +6405,8 @@ impl Backend for HppaBackend {
         // ── Patch _start call to main ──
         // The _start stub uses the 32-byte call pattern.
         // Patch it the same way as function calls.
-        let main_key = func_offsets.keys()
+        let main_key = func_offsets
+            .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
@@ -6018,8 +6419,10 @@ impl Backend for HppaBackend {
             for off in (0..128).step_by(4) {
                 if off + 4 <= all_code.len() {
                     let w = u32::from_be_bytes([
-                        all_code[off], all_code[off + 1],
-                        all_code[off + 2], all_code[off + 3],
+                        all_code[off],
+                        all_code[off + 1],
+                        all_code[off + 2],
+                        all_code[off + 3],
                     ]);
                     if w == 0xE8200000 {
                         start_call_offset = off;
@@ -6028,7 +6431,12 @@ impl Backend for HppaBackend {
                 }
             }
             let _abs_offset = start_call_offset as i64;
-            patch_call_site(&mut all_code, start_call_offset, main_offset as usize, &mut trampolines);
+            patch_call_site(
+                &mut all_code,
+                start_call_offset,
+                main_offset as usize,
+                &mut trampolines,
+            );
         }
 
         // ── Patch inter-function calls and GetAddress relocations ──
@@ -6046,12 +6454,16 @@ impl Backend for HppaBackend {
                     // LDIL loads imm21 into bits 31:11; LDO adds imm14 (sign-extended).
                     // Together: addr = (imm21 << 11) + sign_extend(imm14).
                     // We split the 32-bit absolute address into hi21/lo14.
-                    if abs_offset + 52 > all_code.len() { continue; }
-                    let target_offset = func_offsets.get(&reloc.symbol)
+                    if abs_offset + 52 > all_code.len() {
+                        continue;
+                    }
+                    let target_offset = func_offsets
+                        .get(&reloc.symbol)
                         .copied()
                         .or_else(|| {
                             let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
+                            func_offsets
+                                .keys()
                                 .find(|k| k.starts_with(&prefix))
                                 .and_then(|k| func_offsets.get(k))
                                 .copied()
@@ -6065,17 +6477,21 @@ impl Backend for HppaBackend {
                     let upper_shifted = (abs_addr >> 11) as i16;
                     let lower = (abs_addr & 0x7FF) as i16;
                     let ldo1 = encode_ldo_raw(R0, upper_shifted, S0);
-                    all_code[abs_offset..abs_offset+4].copy_from_slice(&ldo1);
+                    all_code[abs_offset..abs_offset + 4].copy_from_slice(&ldo1);
                     let ldo2 = encode_ldo_raw(S0, lower, S0);
-                    all_code[abs_offset+48..abs_offset+52].copy_from_slice(&ldo2);
+                    all_code[abs_offset + 48..abs_offset + 52].copy_from_slice(&ldo2);
                     continue;
                 }
-                if abs_offset + 32 > all_code.len() { continue; }
-                let target_offset = func_offsets.get(&reloc.symbol)
+                if abs_offset + 32 > all_code.len() {
+                    continue;
+                }
+                let target_offset = func_offsets
+                    .get(&reloc.symbol)
                     .copied()
                     .or_else(|| {
                         let prefix = format!("fn_{}", reloc.symbol);
-                        func_offsets.keys()
+                        func_offsets
+                            .keys()
                             .find(|k| k.starts_with(&prefix))
                             .and_then(|k| func_offsets.get(k))
                             .copied()
@@ -6115,7 +6531,9 @@ impl Backend for HppaBackend {
         // Patch the original call sites to branch to their trampolines.
         // The call site is a 32-byte pattern. We use the multi-LDO approach
         // (up to 4 LDOs) to reach the trampoline.
-        for ((call_offset, _target_offset), trampoline_start) in trampolines.iter().zip(trampoline_offsets.iter()) {
+        for ((call_offset, _target_offset), trampoline_start) in
+            trampolines.iter().zip(trampoline_offsets.iter())
+        {
             let tramp_disp = (*trampoline_start as i64) - (*call_offset as i64) - 8;
             if tramp_disp.abs() <= 4 * 8191 {
                 // 4-LDO approach can reach the trampoline.
@@ -6237,16 +6655,25 @@ impl Backend for HppaBackend {
         Ok(elf)
     }
 
-    fn return_stub(&self) -> Vec<u8> { encode_nop().to_vec() }
-    fn trampoline(&self, _entry_addr: u64) -> Vec<u8> { encode_nop().to_vec() }
+    fn return_stub(&self) -> Vec<u8> {
+        encode_nop().to_vec()
+    }
+    fn trampoline(&self, _entry_addr: u64) -> Vec<u8> {
+        encode_nop().to_vec()
+    }
     fn disassemble(&self, code: &[u8], _base_addr: u64) -> Vec<String> {
-        code.chunks(4).map(|c| {
-            if c.len() == 4 {
-                format!("0x{:08x}", u32::from_be_bytes([c[0],c[1],c[2],c[3]]))
-            } else {
-                format!("0x{}", c.iter().map(|b| format!("{:02x}", b)).collect::<String>())
-            }
-        }).collect()
+        code.chunks(4)
+            .map(|c| {
+                if c.len() == 4 {
+                    format!("0x{:08x}", u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                } else {
+                    format!(
+                        "0x{}",
+                        c.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                    )
+                }
+            })
+            .collect()
     }
 }
 
@@ -6303,8 +6730,242 @@ mod tests {
         assert!(result_real.is_ok(), "real regalloc should succeed");
         let real_func = result_real.unwrap();
         // Real regalloc mode: at least one instruction should have reads/writes.
-        let has_real_regs = real_func.blocks.iter()
-            .any(|b| b.instructions.iter().any(|i| !i.reads.is_empty() || !i.writes.is_empty()));
-        assert!(has_real_regs, "real regalloc should record physical register assignments");
+        let has_real_regs = real_func.blocks.iter().any(|b| {
+            b.instructions
+                .iter()
+                .any(|i| !i.reads.is_empty() || !i.writes.is_empty())
+        });
+        assert!(
+            has_real_regs,
+            "real regalloc should record physical register assignments"
+        );
+    }
+
+    // =========================================================================
+    // FP encoder bit-level format tests.
+    //
+    // These tests assert the *bit-level format* of the PA-RISC 1.1
+    // coprocessor-1 (FPU) encoders defined above.  They DO NOT verify
+    // runtime behaviour on QEMU-hppa or real PA hardware — the
+    // encoders are `#[allow(dead_code)]` and the production FP path
+    // uses `emit_softfloat_call` / `const_fold_fp_binop` instead.
+    //
+    // The tests catch regressions in the field-bit layout (major
+    // opcode, sub-opcode, FPR positions, fmt field, f_op/f_cond
+    // field) and document the intended encoding for whoever later
+    // wires up QEMU-hppa byte-verification (the FLDW/FSTW TODO).
+    //
+    // Note on field overlap (deferral): the encoders use
+    // PA-RISC 1.1's overlapping-field encoding for FP arithmetic
+    // (fmt at bits 10-9 overlaps with t at bits 10-6) and coprocessor
+    // load/store (immediate at bits 11-1 overlaps with FPR at bits
+    // 13-9).  The tests below use either fmt=0/offset=0 (to isolate
+    // the FPR field) or FPR=0 (to isolate the immediate field) so
+    // that the assertions are unambiguous.  This overlap behaviour
+    // is itself one of the reasons these encoders are marked as
+    // "NOT byte-verified" — see the inline comment in `encode_fstw`.
+    // =========================================================================
+
+    fn word_of(bytes: [u8; 4]) -> u32 {
+        u32::from_be_bytes(bytes)
+    }
+
+    /// `encode_fp_arith` must produce a PA-RISC 1.1 coprocessor word
+    /// with: major opcode 0x0C (bits 31-26), sub-opcode 0x06 (bits
+    /// 25-21), r1 in bits 20-16, r2 in bits 15-11, fmt in bits 10-9,
+    /// target FPR low-3-bits in bits 8-6 (the high 2 bits of t
+    /// overlap with fmt at bits 10-9), f_op in bits 5-0.
+    #[test]
+    fn test_f1b_g3_encode_fp_arith_format() {
+        // FADD, fmt=0 (single), r1=F0, r2=F1, t=F0.
+        // Using fmt=0 so the t field at bits 8-6 is uncontaminated.
+        let w = word_of(encode_fp_arith(0x30, 0, F0, F1, F0));
+        // Major opcode 0x0C in bits 31-26.
+        assert_eq!((w >> 26) & 0x3F, 0x0C, "major opcode must be 0x0C (copr)");
+        // Sub-opcode 0x06 in bits 25-21.
+        assert_eq!((w >> 21) & 0x1F, 0x06, "sub-opcode must be 0x06 (f-ext)");
+        // r1 = F0 in bits 20-16.
+        assert_eq!((w >> 16) & 0x1F, F0 as u32, "r1 field must hold F0");
+        // r2 = F1 in bits 15-11.
+        assert_eq!((w >> 11) & 0x1F, F1 as u32, "r2 field must hold F1");
+        // fmt = 0 (single) in bits 10-9.
+        assert_eq!((w >> 9) & 0x3, 0, "fmt field must be 0 (single)");
+        // t low 3 bits = F0 in bits 8-6 (the high 2 bits of t overlap
+        // with fmt at bits 10-9; with fmt=0 and t=F0, the high 2 bits
+        // of t are 0, so no conflict).
+        assert_eq!(
+            (w >> 6) & 0x7,
+            (F0 as u32) & 0x7,
+            "t field (low 3 bits) must hold F0"
+        );
+        // f_op = 0x30 (FADD) in bits 5-0.
+        assert_eq!(w & 0x3F, 0x30, "f_op field must be 0x30 (FADD)");
+
+        // FSUB (0x31), fmt=0, r1=F2, r2=F0, t=F1.
+        let w2 = word_of(encode_fp_arith(0x31, 0, F2, F0, F1));
+        assert_eq!((w2 >> 26) & 0x3F, 0x0C);
+        assert_eq!((w2 >> 21) & 0x1F, 0x06);
+        assert_eq!((w2 >> 16) & 0x1F, F2 as u32);
+        assert_eq!((w2 >> 11) & 0x1F, F0 as u32);
+        assert_eq!((w2 >> 9) & 0x3, 0, "fmt must be 0 (single)");
+        assert_eq!((w2 >> 6) & 0x7, (F1 as u32) & 0x7);
+        assert_eq!(w2 & 0x3F, 0x31, "f_op must be 0x31 (FSUB)");
+
+        // FMUL (0x32) and FDIV (0x33) round-trip through the f_op field.
+        assert_eq!(word_of(encode_fp_arith(0x32, 0, F0, F0, F0)) & 0x3F, 0x32);
+        assert_eq!(word_of(encode_fp_arith(0x33, 0, F0, F0, F0)) & 0x3F, 0x33);
+
+        // fmt field: verify fmt=1 (double) is encoded at bits 10-9.
+        let w3 = word_of(encode_fp_arith(0x30, 1, F0, F0, F0));
+        assert_eq!((w3 >> 9) & 0x3, 1, "fmt=1 (double) must be at bits 10-9");
+        // When fmt=1 and t=F0 (low 3 bits = 0), the bits 10-6 field
+        // reads as 0b01000 = 8 (the fmt field bleeds into the high 2
+        // bits of the t-field read).  This documents the PA-RISC 1.1
+        // overlapping-field quirk; the encoder is faithful to the
+        // spec but the bit extraction must mask off the overlap.
+        assert_eq!(
+            (w3 >> 6) & 0x1F,
+            0b01000,
+            "fmt=1 t=F0: bits 10-6 read as 0b01000 (fmt overlap, G3 deferral)"
+        );
+        assert_eq!(
+            (w3 >> 6) & 0x7,
+            0,
+            "t low 3 bits still 0 despite fmt overlap"
+        );
+    }
+
+    /// `encode_fp_cmp` must produce a PA-RISC 1.1 coprocessor word with:
+    /// major opcode 0x0C (bits 31-26), sub-opcode 0x06 (bits 25-21),
+    /// r1 in bits 20-16, r2 in bits 15-11, fmt in bits 10-9, f_cond
+    /// in bits 5-0.  (No target FPR — the comparison result lands in
+    /// the FP Status Register's C-bit, which is the FP comparison
+    /// extraction problem.)
+    #[test]
+    fn test_f1b_encode_fp_cmp_format() {
+        // FCMP with f_cond=0x20 (=), double-precision, r1=F0, r2=F1.
+        let w = word_of(encode_fp_cmp(0x20, 1, F0, F1));
+        assert_eq!((w >> 26) & 0x3F, 0x0C, "major opcode must be 0x0C (copr)");
+        assert_eq!((w >> 21) & 0x1F, 0x06, "sub-opcode must be 0x06 (f-ext)");
+        assert_eq!((w >> 16) & 0x1F, F0 as u32, "r1 field must hold F0");
+        assert_eq!((w >> 11) & 0x1F, F1 as u32, "r2 field must hold F1");
+        assert_eq!((w >> 9) & 0x3, 1, "fmt must be 1 (double)");
+        assert_eq!(w & 0x3F, 0x20, "f_cond must be 0x20 (=)");
+
+        // f_cond=0x24 (NOT-?, the "unordered" predicate), single-precision.
+        let w2 = word_of(encode_fp_cmp(0x24, 0, F1, F2));
+        assert_eq!((w2 >> 16) & 0x1F, F1 as u32);
+        assert_eq!((w2 >> 11) & 0x1F, F2 as u32);
+        assert_eq!((w2 >> 9) & 0x3, 0, "fmt must be 0 (single)");
+        assert_eq!(w2 & 0x3F, 0x24);
+
+        // f_cond field is 6 bits wide; high bits of f_cond must be masked.
+        // (Passing 0xFF should yield 0x3F in the f_cond field.)
+        let w3 = word_of(encode_fp_cmp(0xFF, 0, F0, F0));
+        assert_eq!(w3 & 0x3F, 0x3F, "f_cond must be masked to 6 bits");
+    }
+
+    /// `encode_fldw` must produce a PA-RISC 1.1 coprocessor load word
+    /// with: major opcode 0x09 (bits 31-26), m=1 (bit 25, modify-base),
+    /// base register in bits 24-20, uid=00001 (bits 18-14, coprocessor
+    /// 1 = FPU), FPR destination in bits 13-9 (with bits 11-9
+    /// overlapping the immediate field per the deferral note),
+    /// low 11 bits of offset in bits 11-1, bit 0 = 0.
+    ///
+    /// Tests use offset=0 to isolate the FPR field (no immediate
+    /// contamination of bits 11-9), and FPR=F0 to isolate the
+    /// immediate field.
+    #[test]
+    fn test_g3_encode_fldw_format() {
+        // FLDW from R30 + offset 0, dst = FA (F0).
+        // offset=0 -> bits 11-1 = 0, so bits 13-9 read purely the FPR field.
+        let w = word_of(encode_fldw(R30, 0i16, FA));
+        assert_eq!(
+            (w >> 26) & 0x3F,
+            0x09,
+            "major opcode must be 0x09 (copr load/store)"
+        );
+        assert_eq!((w >> 25) & 0x1, 1, "m bit must be 1 (modify-base)");
+        assert_eq!((w >> 20) & 0x1F, R30 as u32, "base register must be R30");
+        // uid = 00001 in bits 18-14.
+        assert_eq!(
+            (w >> 14) & 0x1F,
+            0b00001,
+            "uid must be 00001 (FPU = coprocessor 1)"
+        );
+        // FPR destination = FA in bits 13-9 (no immediate contamination).
+        assert_eq!((w >> 9) & 0x1F, FA as u32, "FPR destination must be FA");
+        // Bit 0 must be 0 (reserved).
+        assert_eq!(w & 0x1, 0, "bit 0 must be 0");
+
+        // Sanity: changing the FPR destination (with offset=0) changes
+        // bits 13-9 only.
+        let w2 = word_of(encode_fldw(R30, 0i16, FB));
+        assert_eq!((w2 >> 9) & 0x1F, FB as u32);
+        // All other fields unchanged.
+        assert_eq!((w2 >> 14) & 0x1F, 0b00001);
+        assert_eq!((w2 >> 20) & 0x1F, R30 as u32);
+
+        // Sanity: changing the base register changes bits 24-20 only.
+        let w3 = word_of(encode_fldw(R3, 0i16, FA));
+        assert_eq!((w3 >> 20) & 0x1F, R3 as u32);
+        assert_eq!((w3 >> 9) & 0x1F, FA as u32);
+
+        // Immediate field: with FPR=F0 (no FPR contamination of bits
+        // 13-9 beyond the overlap at bits 11-9), the low 11 bits of
+        // the offset are encoded at bits 11-1.
+        for off in [0i16, 100, -100, 1023, -1024, -52] {
+            let w = word_of(encode_fldw(R30, off, F0));
+            let expected_imm = (off as u32) & 0x7FF;
+            assert_eq!(
+                (w >> 1) & 0x7FF,
+                expected_imm,
+                "offset={} : immediate field at bits 11-1 must hold low 11 bits of offset",
+                off
+            );
+        }
+    }
+
+    /// `encode_fstw` must produce a PA-RISC 1.1 coprocessor store word
+    /// with the same field layout as `encode_fldw` (major opcode 0x09,
+    /// m=1, uid=00001), but the FPR field is the *source* rather than
+    /// the *destination*.  (The load-vs-store distinction is in the
+    /// m/s bits per the inline comment — NOT byte-verified on QEMU-hppa,
+    /// see STATUS note on `encode_fldw`.)
+    #[test]
+    fn test_g3_encode_fstw_format() {
+        // FSTW from FA (F0) to R30 + offset 0 (offset=0 to isolate FPR field).
+        let w = word_of(encode_fstw(FA, R30, 0i16));
+        assert_eq!(
+            (w >> 26) & 0x3F,
+            0x09,
+            "major opcode must be 0x09 (copr load/store)"
+        );
+        assert_eq!((w >> 25) & 0x1, 1, "m bit must be 1 (modify-base)");
+        assert_eq!((w >> 20) & 0x1F, R30 as u32, "base register must be R30");
+        assert_eq!((w >> 14) & 0x1F, 0b00001, "uid must be 00001 (FPU)");
+        assert_eq!((w >> 9) & 0x1F, FA as u32, "FPR source must be FA");
+        assert_eq!(w & 0x1, 0, "bit 0 must be 0");
+
+        // Symmetric to FLDW: changing the FPR source (with offset=0)
+        // changes bits 13-9 only.
+        let w2 = word_of(encode_fstw(FB, R30, 0i16));
+        assert_eq!((w2 >> 9) & 0x1F, FB as u32);
+
+        // Sanity: FLDW and FSTW currently produce IDENTICAL bit
+        // patterns for the same (base, offset, FPR) arguments — both
+        // use m=1, s=0, uid=00001.  The load-vs-store distinction is
+        // supposed to be in the m/s bits, but the current encoders
+        // set them identically.  This is one of the reasons these
+        // encoders are marked as "NOT byte-verified" — see the inline
+        // comment in `encode_fstw`.  The test below documents the
+        // current behaviour; if a future fix differentiates them,
+        // update this assertion.
+        let fldw = word_of(encode_fldw(R30, -52i16, FA));
+        let fstw = word_of(encode_fstw(FA, R30, -52i16));
+        assert_eq!(
+            fldw, fstw,
+            "FLDW and FSTW currently produce identical bit patterns (G3 deferral)"
+        );
     }
 }

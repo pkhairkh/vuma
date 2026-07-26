@@ -1,9 +1,9 @@
 {
-  "timestamp": "2026-07-24 22:50:14 UTC",
+  "timestamp": "2026-07-24 23:05:31 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 29659,
-  "matches": 29658,
+  "matches": 29659,
   "skipped": 0,
   "pass_rate": "100.00%",
   "per_backend": {
@@ -27,22 +27,12 @@
       "match": 1561,
       "skipped": 0
     },
-    "armeb": {
-      "total": 1561,
-      "match": 1561,
-      "skipped": 0
-    },
     "arm32": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
     },
-    "ppc64": {
-      "total": 1561,
-      "match": 1561,
-      "skipped": 0
-    },
-    "mips64": {
+    "armeb": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
@@ -52,12 +42,17 @@
       "match": 1561,
       "skipped": 0
     },
-    "ppc64le": {
+    "mips64": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
     },
-    "riscv32": {
+    "ppc64": {
+      "total": 1561,
+      "match": 1561,
+      "skipped": 0
+    },
+    "ppc64le": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
@@ -67,17 +62,22 @@
       "match": 1561,
       "skipped": 0
     },
-    "alpha": {
+    "riscv32": {
       "total": 1561,
       "match": 1561,
       "skipped": 0
     },
     "s390x": {
       "total": 1561,
-      "match": 1560,
+      "match": 1561,
       "skipped": 0
     },
     "x86_32": {
+      "total": 1561,
+      "match": 1561,
+      "skipped": 0
+    },
+    "alpha": {
       "total": 1561,
       "match": 1561,
       "skipped": 0

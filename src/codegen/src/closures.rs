@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 
 use crate::backend::BackendError;
-use crate::ir::{IRFunction, IRInstr, IRProgram, IRType, IRValue, IRTerminator};
+use crate::ir::{IRFunction, IRInstr, IRProgram, IRTerminator, IRType, IRValue};
 
 /// A captured variable in a closure environment.
 #[derive(Debug, Clone)]
@@ -98,8 +98,7 @@ impl ClosureLowerer {
         let id = self.counter;
         self.counter += 1;
 
-        let func_name = body_func_name
-            .unwrap_or_else(|| format!("__closure_{}", id));
+        let func_name = body_func_name.unwrap_or_else(|| format!("__closure_{}", id));
         let env_struct_name = format!("ClosureEnv_{}", id);
 
         // Compute environment layout
@@ -266,7 +265,11 @@ fn terminator_vregs(term: &IRTerminator) -> Vec<u32> {
         IRTerminator::Return(vals) => vals.iter().filter_map(|v| v.as_register()).collect(),
         IRTerminator::Switch { discr, .. } => discr.as_register().into_iter().collect(),
         IRTerminator::Invoke { dst, args, .. } => {
-            let mut r: Vec<u32> = dst.as_ref().and_then(|v| v.as_register()).into_iter().collect();
+            let mut r: Vec<u32> = dst
+                .as_ref()
+                .and_then(|v| v.as_register())
+                .into_iter()
+                .collect();
             r.extend(args.iter().filter_map(|v| v.as_register()));
             r
         }
@@ -307,8 +310,7 @@ pub fn lower_closures(program: &mut IRProgram) -> Result<(), BackendError> {
     let mut lowerer = ClosureLowerer::new();
     // Track which closure ids already have a generated function definition
     // so multiple call sites with the same id share one definition.
-    let mut generated: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut generated: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut new_functions: Vec<IRFunction> = Vec::new();
 
     for func in &mut program.functions {
@@ -320,9 +322,12 @@ pub fn lower_closures(program: &mut IRProgram) -> Result<(), BackendError> {
             let mut rewritten: Vec<IRInstr> = Vec::new();
             for instr in block.instructions.drain(..) {
                 let (dst, callee, args, is_extern) = match &instr {
-                    IRInstr::Call { dst, func: callee, args, is_extern } => {
-                        (dst.clone(), callee.clone(), args.clone(), *is_extern)
-                    }
+                    IRInstr::Call {
+                        dst,
+                        func: callee,
+                        args,
+                        is_extern,
+                    } => (dst.clone(), callee.clone(), args.clone(), *is_extern),
                     _ => {
                         rewritten.push(instr);
                         continue;
@@ -624,7 +629,12 @@ mod tests {
         let has_capture_store = caller.blocks[0].instructions.iter().any(|i| {
             matches!(
                 i,
-                IRInstr::Store { value: IRValue::Register(1), offset: 0, ty: IRType::I64, .. }
+                IRInstr::Store {
+                    value: IRValue::Register(1),
+                    offset: 0,
+                    ty: IRType::I64,
+                    ..
+                }
             )
         });
         assert!(

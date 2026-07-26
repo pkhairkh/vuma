@@ -1,4 +1,12 @@
-#![allow(clippy::manual_range_contains, clippy::map_unwrap_or, clippy::unnecessary_cast, clippy::redundant_closure, clippy::if_same_then_else, clippy::collapsible_if, clippy::useless_format)]
+#![allow(
+    clippy::manual_range_contains,
+    clippy::map_unwrap_or,
+    clippy::unnecessary_cast,
+    clippy::redundant_closure,
+    clippy::if_same_then_else,
+    clippy::collapsible_if,
+    clippy::useless_format
+)]
 //! # VUMA Code Generation Module
 //!
 //! This crate handles code generation for the VUMA programming language,
@@ -29,37 +37,50 @@
 
 #[macro_use]
 mod vuma_log_w44 {
-    /// VUMA-native logging macro (Wave 44). Replaces the `log` crate in core
-    /// crates. No-op in release builds (format args still type-checked via
-    /// `format_args!`); `eprintln!` in debug. Not `#[macro_export]` to avoid
-    /// cross-crate name collisions — each core crate carries its own copy.
+    /// Logging macro for VUMA compiler diagnostics.
+    ///
+    /// In debug builds: always emits to stderr.
+    /// In release builds: emits to stderr if `VUMA_LOG` env var is set.
+    /// This ensures advisory verification warnings are visible in production.
+    #[macro_export]
     macro_rules! vuma_log {
         ($level:ident, $($arg:tt)*) => {{
-            #[cfg(debug_assertions)]
-            eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
-            #[cfg(not(debug_assertions))]
-            { let _ = format_args!($($arg)*); }
+            let emit = cfg!(debug_assertions) || std::env::var("VUMA_LOG").is_ok();
+            if emit {
+                eprintln!("[{}] {}", stringify!($level), format!($($arg)*));
+            }
         }};
     }
 }
-pub mod arm32;
-pub mod armeb;
-pub mod arm64;
 pub mod aarch64_be;
-pub mod m68k;
+pub mod alias_analysis;
 pub mod alpha;
-pub mod hppa;
+pub mod arm32;
+pub mod arm64;
+pub mod armeb;
 pub mod backend;
-pub mod control_flow;
-pub mod dwarf;
-pub mod emit;
-pub mod ir;
-pub mod ipc;
+/// Bitvector verification framework (Wave 7).
+/// Verifies e-graph rewrite rules by exhaustive enumeration.
+pub mod bv_verify;
 /// Capability tokens (Wave 11 — L2 Runtime Encapsulation).
 /// Re-exports from [`ipc::capability`] to provide a canonical
 /// `crate::capability` path for pipeline consumers.
 pub mod capability;
+pub mod closures;
+pub mod control_flow;
+pub mod dwarf;
+pub mod effects;
+pub mod egraph;
+pub mod emit;
+pub mod escape_analysis;
+pub mod hppa;
+pub mod ipc;
+pub mod ipc_lowering;
+pub mod ir;
 pub mod loongarch64;
+/// Correct loop unrolling (Wave 13b). Replaces the miscompiling vectorizer.
+pub mod loop_unroll;
+pub mod m68k;
 /// FFI Marshal Pass (Wave 10) — flattens `State<T>` args to raw pointers
 /// at `extern` call sites and tracks whether the state is preserved
 /// (`#[pure]` foreign function) or invalidated (must be re-initialized).
@@ -67,40 +88,35 @@ pub mod marshal;
 pub mod memory_safety;
 pub mod mips64;
 pub mod mips64be;
-pub mod opt;
-/// Bitvector verification framework (Wave 7).
-/// Verifies e-graph rewrite rules by exhaustive enumeration.
-pub mod bv_verify;
-/// Correct loop unrolling (Wave 13b). Replaces the miscompiling vectorizer.
-pub mod loop_unroll;
-pub mod egraph;
-pub mod closures;
 pub mod monomorphize;
-pub mod effects;
-pub mod escape_analysis;
-pub mod alias_analysis;
+pub mod opt;
 pub mod ppc64;
 pub mod ppc64le;
+pub mod proof_artifacts;
 pub mod regalloc;
 pub mod regalloc_emit;
-pub mod riscv_common;
-pub mod riscv64;
 pub mod riscv32;
+pub mod riscv64;
+pub mod riscv_common;
 pub mod runtime;
 pub mod s390x;
 pub mod scg_to_ir;
 pub mod scheduler;
-pub mod proof_artifacts;
-pub mod ipc_lowering;
-pub mod vectorize;
 pub mod sparc64;
 /// VUMA-generic (asm-generic) syscall numbering + per-arch translation
 /// tables (P1 foundation — not yet wired into `IRInstr::Syscall` emission).
 pub mod syscall_abi;
 pub mod target_desc;
+pub mod vectorize;
 pub mod wasm32;
-pub mod x86_64;
 pub mod x86_32;
+pub mod x86_64;
+
+/// Smoke test for the 4 thin-wrapper backends (Task 7-d). Compiles a
+/// trivial IR function on `armeb`, `aarch64_be`, `mips64be`, `ppc64le`
+/// and asserts non-empty `encode_function` output.
+#[cfg(test)]
+mod wrapper_smoke;
 
 /// Re-export the primary pipeline entry point for convenience.
 pub use scg_to_ir::ScgToIr;
@@ -237,3 +253,11 @@ impl std::error::Error for CodegenError {}
 
 /// Convenience alias for results in this crate.
 pub type Result<T> = std::result::Result<T, CodegenError>;
+
+/// Per-arch shared cache of function parameter types used by the ARM32,
+/// RISC-V32 and Wasm32 backends during parallel register allocation. The
+/// `OnceLock<RwLock<Option<...>>>` shape gives lazy, parallel-safe
+/// initialisation (see W8-a register-allocation race fix).
+pub type FuncParamTypesCache = std::sync::OnceLock<
+    std::sync::RwLock<Option<std::collections::HashMap<String, Vec<ir::IRType>>>>,
+>;

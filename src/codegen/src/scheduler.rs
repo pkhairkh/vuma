@@ -27,10 +27,10 @@
 //! - Added a `BackendLatencyTable` trait + `UniformLatencyTable` struct
 //!   so backends can override per-category latencies (default = all 1).
 
-use std::collections::{HashMap, HashSet, BinaryHeap};
-use std::cmp::Ordering;
 use crate::ir::IRInstr;
 use crate::target_desc::{FunctionalUnit, LatencyTable};
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 // ── Wave 27: per-backend latency model hook ────────────────────────────
 
@@ -63,7 +63,9 @@ impl BackendLatencyTable for LatencyTable {
 pub struct UniformLatencyTable;
 
 impl UniformLatencyTable {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl BackendLatencyTable for UniformLatencyTable {
@@ -103,7 +105,9 @@ impl Ord for ReadyEntry {
         // Higher critical_path first (max-heap).
         // On tie: lower pressure_delta first (reduce live regs).
         // On second tie: lower idx first (stable).
-        other.critical_path.cmp(&self.critical_path)
+        other
+            .critical_path
+            .cmp(&self.critical_path)
             .then_with(|| self.pressure_delta.cmp(&other.pressure_delta))
             .then_with(|| self.idx.cmp(&other.idx))
     }
@@ -129,7 +133,9 @@ fn classify_instr(instr: &IRInstr) -> &'static str {
         IRInstr::Div { .. } => "divide",
         IRInstr::Load { .. } => "load",
         IRInstr::Store { .. } => "store",
-        IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => "branch",
+        IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
+            "branch"
+        }
         IRInstr::Cmp { .. } => "arithmetic",
         IRInstr::Call { .. } | IRInstr::Syscall { .. } => "branch",
         IRInstr::Cast { .. } | IRInstr::Offset { .. } | IRInstr::Alloc { .. } => "arithmetic",
@@ -170,10 +176,7 @@ fn used_regs(instr: &IRInstr) -> Vec<u32> {
 /// just less precise. Use `schedule_block_with_alias` to share a
 /// whole-function `AliasAnalysis` across all blocks for full
 /// precision.
-pub fn schedule_block(
-    instructions: &[IRInstr],
-    latency_table: &LatencyTable,
-) -> Vec<usize> {
+pub fn schedule_block(instructions: &[IRInstr], latency_table: &LatencyTable) -> Vec<usize> {
     schedule_block_with_alias(instructions, latency_table, None)
 }
 
@@ -215,7 +218,10 @@ pub fn schedule_block_with_alias(
     // top and non-Phis are scheduled among themselves.
 
     // Find the Phi prefix: all leading Phi instructions.
-    let phi_count = instructions.iter().take_while(|i| matches!(i, IRInstr::Phi { .. })).count();
+    let phi_count = instructions
+        .iter()
+        .take_while(|i| matches!(i, IRInstr::Phi { .. }))
+        .count();
     if phi_count == n {
         // All instructions are Phis — nothing to schedule.
         return (0..n).collect();
@@ -346,15 +352,23 @@ fn schedule_block_inner_with_alias(
         // else keeps a serialisation edge.
         let is_load = matches!(instr, IRInstr::Load { .. });
         let is_store = matches!(instr, IRInstr::Store { .. });
-        let is_barrier = matches!(instr,
-            IRInstr::Alloc { .. } | IRInstr::Free { .. } | IRInstr::Call { .. }
-            | IRInstr::Syscall { .. } | IRInstr::Ret { .. }
-            | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. }
-            | IRInstr::AtomicCas { .. });
+        let is_barrier = matches!(
+            instr,
+            IRInstr::Alloc { .. }
+                | IRInstr::Free { .. }
+                | IRInstr::Call { .. }
+                | IRInstr::Syscall { .. }
+                | IRInstr::Ret { .. }
+                | IRInstr::AtomicLoad { .. }
+                | IRInstr::AtomicStore { .. }
+                | IRInstr::AtomicCas { .. }
+        );
 
         let my_addr = match instr {
-            IRInstr::Load { addr, .. } | IRInstr::Store { addr, .. }
-            | IRInstr::AtomicLoad { addr, .. } | IRInstr::AtomicStore { addr, .. } => Some(addr),
+            IRInstr::Load { addr, .. }
+            | IRInstr::Store { addr, .. }
+            | IRInstr::AtomicLoad { addr, .. }
+            | IRInstr::AtomicStore { addr, .. } => Some(addr),
             _ => None,
         };
 
@@ -362,11 +376,17 @@ fn schedule_block_inner_with_alias(
             for (j, prev) in instructions.iter().take(i).enumerate() {
                 let prev_is_load = matches!(prev, IRInstr::Load { .. });
                 let prev_is_store = matches!(prev, IRInstr::Store { .. });
-                let prev_is_barrier = matches!(prev,
-                    IRInstr::Alloc { .. } | IRInstr::Free { .. } | IRInstr::Call { .. }
-                    | IRInstr::Syscall { .. } | IRInstr::Ret { .. }
-                    | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. }
-                    | IRInstr::AtomicCas { .. });
+                let prev_is_barrier = matches!(
+                    prev,
+                    IRInstr::Alloc { .. }
+                        | IRInstr::Free { .. }
+                        | IRInstr::Call { .. }
+                        | IRInstr::Syscall { .. }
+                        | IRInstr::Ret { .. }
+                        | IRInstr::AtomicLoad { .. }
+                        | IRInstr::AtomicStore { .. }
+                        | IRInstr::AtomicCas { .. }
+                );
 
                 let needs_edge = if is_barrier || prev_is_barrier {
                     // Barriers serialise against everything.
@@ -399,8 +419,16 @@ fn schedule_block_inner_with_alias(
         // nothing after it can use the freed memory, and everything
         // before it must have completed).
         // Calls also depend on all previous instructions (conservative).
-        if matches!(instr, IRInstr::Free { .. } | IRInstr::Call { .. } | IRInstr::Syscall { .. } | IRInstr::Ret { .. }
-            | IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. }) {
+        if matches!(
+            instr,
+            IRInstr::Free { .. }
+                | IRInstr::Call { .. }
+                | IRInstr::Syscall { .. }
+                | IRInstr::Ret { .. }
+                | IRInstr::AtomicLoad { .. }
+                | IRInstr::AtomicStore { .. }
+                | IRInstr::AtomicCas { .. }
+        ) {
             for j in 0..i {
                 if !preds.contains(&j) {
                     preds.push(j);
@@ -431,11 +459,7 @@ fn schedule_block_inner_with_alias(
 
     // Compute critical-path lengths (longest path from each node to a leaf).
     let mut visited = vec![false; n];
-    fn compute_critical_path(
-        nodes: &mut Vec<DDGNode>,
-        idx: usize,
-        visited: &mut Vec<bool>,
-    ) {
+    fn compute_critical_path(nodes: &mut Vec<DDGNode>, idx: usize, visited: &mut Vec<bool>) {
         if visited[idx] {
             return;
         }
@@ -595,10 +619,7 @@ fn build_alias_info(instructions: &[IRInstr]) -> crate::alias_analysis::AliasAna
 /// function-wide view, the per-block fallback would miss the
 /// cross-block derivation and could reorder a Load past a Store to the
 /// same underlying allocation.
-pub fn schedule_function(
-    blocks: &mut [crate::ir::IRBlock],
-    latency_table: &LatencyTable,
-) {
+pub fn schedule_function(blocks: &mut [crate::ir::IRBlock], latency_table: &LatencyTable) {
     // Build a synthetic IRFunction that owns all the blocks so the
     // alias analyzer can see cross-block `Alloc`/`Cast`/`Offset`/
     // `BinOp`/`Phi` derivations. We don't need params / results / a
@@ -612,7 +633,8 @@ pub fn schedule_function(
             continue;
         }
 
-        let order = schedule_block_with_alias(&block.instructions, latency_table, Some(&alias_info));
+        let order =
+            schedule_block_with_alias(&block.instructions, latency_table, Some(&alias_info));
         let mut new_instrs = Vec::with_capacity(block.instructions.len());
         for &idx in &order {
             new_instrs.push(block.instructions[idx].clone());
@@ -624,16 +646,34 @@ pub fn schedule_function(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IRInstr, IRValue, BinOpKind};
+    use crate::ir::{BinOpKind, IRInstr, IRValue};
 
     #[test]
     fn test_schedule_simple() {
         // a = 1 + 2; b = a + 3; c = 4 + 5
         // c is independent of a, b → should be scheduled first (or concurrently)
         let instrs = vec![
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(2), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Register(1), rhs: IRValue::Immediate(3), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(3), lhs: IRValue::Immediate(4), rhs: IRValue::Immediate(5), ty: None },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Immediate(1),
+                rhs: IRValue::Immediate(2),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(2),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(3),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(3),
+                lhs: IRValue::Immediate(4),
+                rhs: IRValue::Immediate(5),
+                ty: None,
+            },
         ];
         let lt = LatencyTable::default_ooo();
         let order = schedule_block(&instrs, &lt);
@@ -643,7 +683,10 @@ mod tests {
         // c (idx 2) should be scheduled before b (idx 1)
         let pos_c = order.iter().position(|&x| x == 2).unwrap();
         let pos_b = order.iter().position(|&x| x == 1).unwrap();
-        assert!(pos_c < pos_b, "independent instruction should be scheduled before dependent one");
+        assert!(
+            pos_c < pos_b,
+            "independent instruction should be scheduled before dependent one"
+        );
     }
 
     #[test]
@@ -651,8 +694,20 @@ mod tests {
         // a = 1 + 2; b = a + 3
         // b must come after a
         let instrs = vec![
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(2), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Register(1), rhs: IRValue::Immediate(3), ty: None },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Immediate(1),
+                rhs: IRValue::Immediate(2),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(2),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(3),
+                ty: None,
+            },
         ];
         let lt = LatencyTable::default_ooo();
         let order = schedule_block(&instrs, &lt);
@@ -668,9 +723,27 @@ mod tests {
         // result c must still equal a + b. We verify by checking that
         // c (the dependent add) comes after BOTH a and b.
         let instrs = vec![
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: None }, // a = 1
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Immediate(2), rhs: IRValue::Immediate(0), ty: None }, // b = 2
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(3), lhs: IRValue::Register(1), rhs: IRValue::Register(2), ty: None },   // c = a + b
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Immediate(1),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            }, // a = 1
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(2),
+                lhs: IRValue::Immediate(2),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            }, // b = 2
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(3),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Register(2),
+                ty: None,
+            }, // c = a + b
         ];
         let lt = LatencyTable::default_ooo();
         let order = schedule_block(&instrs, &lt);
@@ -693,15 +766,57 @@ mod tests {
         // Compare against a dependent chain: a = 1; b = a + 1; c = b + 1
         // Here the chain length is 3 (a→b→c).
         let independent = vec![
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Immediate(2), rhs: IRValue::Immediate(0), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(3), lhs: IRValue::Immediate(3), rhs: IRValue::Immediate(0), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(4), lhs: IRValue::Immediate(4), rhs: IRValue::Immediate(0), ty: None },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Immediate(1),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(2),
+                lhs: IRValue::Immediate(2),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(3),
+                lhs: IRValue::Immediate(3),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(4),
+                lhs: IRValue::Immediate(4),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            },
         ];
         let dependent = vec![
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(1), lhs: IRValue::Immediate(1), rhs: IRValue::Immediate(0), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(2), lhs: IRValue::Register(1), rhs: IRValue::Immediate(1), ty: None },
-            IRInstr::BinOp { op: BinOpKind::Add, dst: IRValue::Register(3), lhs: IRValue::Register(2), rhs: IRValue::Immediate(1), ty: None },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(1),
+                lhs: IRValue::Immediate(1),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(2),
+                lhs: IRValue::Register(1),
+                rhs: IRValue::Immediate(1),
+                ty: None,
+            },
+            IRInstr::BinOp {
+                op: BinOpKind::Add,
+                dst: IRValue::Register(3),
+                lhs: IRValue::Register(2),
+                rhs: IRValue::Immediate(1),
+                ty: None,
+            },
         ];
         let lt = LatencyTable::default_ooo();
 
@@ -716,7 +831,11 @@ mod tests {
         // instructions must be issued in order, so the schedule preserves
         // the original order.
         let order_dep = schedule_block(&dependent, &lt);
-        assert_eq!(order_dep, vec![0, 1, 2], "dependent chain must preserve order");
+        assert_eq!(
+            order_dep,
+            vec![0, 1, 2],
+            "dependent chain must preserve order"
+        );
 
         // Critical-path length comparison: independent (1) ≤ dependent (3).
         // The scheduler's `critical_path` field for the first instr in
@@ -729,11 +848,12 @@ mod tests {
         // increase the critical path beyond the latency of the longest
         // single instruction (1 cycle).
         let indep_critical_path: u32 = 1; // all instrs latency 1, no chain
-        let dep_critical_path: u32 = 3;   // a→b→c chain, 3 cycles
+        let dep_critical_path: u32 = 3; // a→b→c chain, 3 cycles
         assert!(
             indep_critical_path <= dep_critical_path,
             "independent block's critical path ({}) should be ≤ dependent block's ({})",
-            indep_critical_path, dep_critical_path
+            indep_critical_path,
+            dep_critical_path
         );
     }
 
@@ -746,8 +866,14 @@ mod tests {
         //
         // v0 = Alloc(16); v1 = Alloc(16); Store(v0, 42); Load(v1)
         let instrs = vec![
-            IRInstr::Alloc { dst: IRValue::Register(1), size: 16 },         // v0 (vreg 1)
-            IRInstr::Alloc { dst: IRValue::Register(2), size: 16 },         // v1 (vreg 2)
+            IRInstr::Alloc {
+                dst: IRValue::Register(1),
+                size: 16,
+            }, // v0 (vreg 1)
+            IRInstr::Alloc {
+                dst: IRValue::Register(2),
+                size: 16,
+            }, // v1 (vreg 2)
             IRInstr::Store {
                 value: IRValue::Immediate(42),
                 addr: IRValue::Register(1),

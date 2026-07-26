@@ -13,6 +13,11 @@
 //! L8: Cryptographic Encapsulation (AEAD)
 
 use std::collections::HashMap;
+// `type_hash` (FNV-1a 64-bit) lives in `vuma_scg::hash` — the single
+// source of truth across IVE and codegen. Re-exported here for
+// source-level backwards compatibility with callers that historically
+// used `vuma_codegen::ipc::type_hash`.
+pub use vuma_scg::hash::type_hash;
 
 // ── L1: Message Wire Format ──────────────────────────────────────────
 
@@ -33,9 +38,15 @@ impl MessageFlags {
     pub const IS_ERROR: Self = Self(0x0010);
     pub const HAS_STARK: Self = Self(0x0020);
     pub const EMPTY: Self = Self(0);
-    pub fn empty() -> Self { Self(0) }
-    pub fn bits(&self) -> u16 { self.0 }
-    pub fn from_bits_truncate(v: u16) -> Self { Self(v) }
+    pub fn empty() -> Self {
+        Self(0)
+    }
+    pub fn bits(&self) -> u16 {
+        self.0
+    }
+    pub fn from_bits_truncate(v: u16) -> Self {
+        Self(v)
+    }
     /// True if every bit set in `other` is also set in `self`.
     pub fn contains(&self, other: Self) -> bool {
         (self.0 & other.0) == other.0
@@ -44,25 +55,35 @@ impl MessageFlags {
 
 impl std::ops::BitOr for MessageFlags {
     type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
 impl std::ops::BitOrAssign for MessageFlags {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 impl std::ops::BitAnd for MessageFlags {
     type Output = Self;
-    fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) }
+    fn bitand(self, rhs: Self) -> Self {
+        Self(self.0 & rhs.0)
+    }
 }
 
 impl std::ops::BitAndAssign for MessageFlags {
-    fn bitand_assign(&mut self, rhs: Self) { self.0 &= rhs.0; }
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
+    }
 }
 
 impl std::ops::Not for MessageFlags {
     type Output = Self;
-    fn not(self) -> Self { Self(!self.0) }
+    fn not(self) -> Self {
+        Self(!self.0)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -151,20 +172,16 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// FNV-1a 64-bit hash of a type string.
-///
-/// This is the canonical type-hash function used to populate
-/// `MessageHeader::type_hash` and to key the protocol state machine.
-/// Initial value 0xcbf29ce484222325, prime 0x100000001b3 — the standard
-/// FNV-1a 64 constants.
-pub fn type_hash(ty: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in ty.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
+// FNV-1a 64-bit hash of a type string.
+//
+// Re-exported from [`vuma_scg::hash::type_hash`] — the single source of
+// truth across IVE and codegen. See the module-level comment
+// at the top of this file. Initial value 0xcbf29ce484222325, prime
+// 0x100000001b3 — the standard FNV-1a 64 constants.
+//
+// `type_hash` itself is no longer defined in this file; the `pub use`
+// above brings it in from `vuma_scg::hash`. The `type_hash_str` alias
+// below is kept for source-level backwards compatibility.
 
 /// Legacy alias kept for source-level backwards compatibility.
 /// New code should call [`type_hash`] directly.
@@ -172,7 +189,7 @@ pub fn type_hash_str(s: &str) -> u64 {
     type_hash(s)
 }
 
-// ── L1: Primitive Serialization (Wave 10c) ───────────────────────────
+// ── L1: Primitive Serialization ───────────────────────────
 
 /// Serialize a primitive value to little-endian bytes.
 ///
@@ -206,8 +223,9 @@ pub fn deserialize_primitive(bytes: &[u8], byte_len: usize) -> u64 {
         1 => bytes[0] as u64,
         2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u64,
         4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
-        8 => u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
-                                  bytes[4], bytes[5], bytes[6], bytes[7]]),
+        8 => u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]),
         _ => 0,
     }
 }
@@ -219,7 +237,9 @@ pub fn serialize_i32(v: i32) -> Vec<u8> {
 
 /// Deserialize an i32 from 4 little-endian bytes.
 pub fn deserialize_i32(bytes: &[u8]) -> i32 {
-    if bytes.len() < 4 { return 0; }
+    if bytes.len() < 4 {
+        return 0;
+    }
     i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
@@ -230,7 +250,9 @@ pub fn serialize_u32(v: u32) -> Vec<u8> {
 
 /// Deserialize a u32 from 4 little-endian bytes.
 pub fn deserialize_u32(bytes: &[u8]) -> u32 {
-    if bytes.len() < 4 { return 0; }
+    if bytes.len() < 4 {
+        return 0;
+    }
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
@@ -241,9 +263,12 @@ pub fn serialize_i64(v: i64) -> Vec<u8> {
 
 /// Deserialize an i64 from 8 little-endian bytes.
 pub fn deserialize_i64(bytes: &[u8]) -> i64 {
-    if bytes.len() < 8 { return 0; }
-    i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
-                         bytes[4], bytes[5], bytes[6], bytes[7]])
+    if bytes.len() < 8 {
+        return 0;
+    }
+    i64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// Serialize a u64 to 8 little-endian bytes.
@@ -253,9 +278,12 @@ pub fn serialize_u64(v: u64) -> Vec<u8> {
 
 /// Deserialize a u64 from 8 little-endian bytes.
 pub fn deserialize_u64(bytes: &[u8]) -> u64 {
-    if bytes.len() < 8 { return 0; }
-    u64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
-                         bytes[4], bytes[5], bytes[6], bytes[7]])
+    if bytes.len() < 8 {
+        return 0;
+    }
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// Serialize an f32 to 4 little-endian bytes (IEEE 754 bits).
@@ -265,7 +293,9 @@ pub fn serialize_f32(v: f32) -> Vec<u8> {
 
 /// Deserialize an f32 from 4 little-endian bytes (IEEE 754 bits).
 pub fn deserialize_f32(bytes: &[u8]) -> f32 {
-    if bytes.len() < 4 { return 0.0; }
+    if bytes.len() < 4 {
+        return 0.0;
+    }
     f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
@@ -276,9 +306,12 @@ pub fn serialize_f64(v: f64) -> Vec<u8> {
 
 /// Deserialize an f64 from 8 little-endian bytes (IEEE 754 bits).
 pub fn deserialize_f64(bytes: &[u8]) -> f64 {
-    if bytes.len() < 8 { return 0.0; }
-    f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
-                         bytes[4], bytes[5], bytes[6], bytes[7]])
+    if bytes.len() < 8 {
+        return 0.0;
+    }
+    f64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// Serialize a bool to 1 byte (0 or 1).
@@ -315,12 +348,12 @@ pub enum FrameError {
 impl std::fmt::Display for FrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FrameError::TooShort => write!(f, "frame too short (< {} bytes)", HEADER_SIZE + CRC32_SIZE),
-            FrameError::BadMagic { expected, actual } => write!(
-                f,
-                "bad magic: expected {:?}, got {:?}",
-                expected, actual
-            ),
+            FrameError::TooShort => {
+                write!(f, "frame too short (< {} bytes)", HEADER_SIZE + CRC32_SIZE)
+            }
+            FrameError::BadMagic { expected, actual } => {
+                write!(f, "bad magic: expected {:?}, got {:?}", expected, actual)
+            }
             FrameError::UnsupportedVersion { expected, actual } => write!(
                 f,
                 "unsupported protocol version: expected {}, got {}",
@@ -394,9 +427,8 @@ pub fn deframe_message(data: &[u8]) -> Result<EncapsulatedMessage, FrameError> {
     }
 
     // ── Remaining header fields ──────────────────────────────────────
-    let flags = MessageFlags::from_bits_truncate(u16::from_le_bytes(
-        data[6..8].try_into().unwrap(),
-    ));
+    let flags =
+        MessageFlags::from_bits_truncate(u16::from_le_bytes(data[6..8].try_into().unwrap()));
     let channel_id = u64::from_le_bytes(data[8..16].try_into().unwrap());
     let sequence = u64::from_le_bytes(data[16..24].try_into().unwrap());
     let type_hash = u64::from_le_bytes(data[24..32].try_into().unwrap());
@@ -509,7 +541,7 @@ pub mod capability {
         pub signature: [u8; 32],
     }
 
-    // ── Wire format (Wave 11) ──────────────────────────────────────────
+    // ── Wire format ──────────────────────────────────────────────────
     //
     // The on-the-wire layout of a CapabilityToken is a fixed-size record
     // (CAPABILITY_TOKEN_SIZE bytes, little-endian) so the L1 framer can
@@ -712,9 +744,8 @@ pub mod capability {
                     CAPABILITY_TOKEN_SIZE
                 ));
             }
-            let resource = Resource::decode(
-                &bytes[RESOURCE_OFFSET..RESOURCE_OFFSET + RESOURCE_FIELD_SIZE],
-            )?;
+            let resource =
+                Resource::decode(&bytes[RESOURCE_OFFSET..RESOURCE_OFFSET + RESOURCE_FIELD_SIZE])?;
             Ok(Self {
                 id: u128::from_le_bytes(bytes[0..16].try_into().unwrap()),
                 source_pid: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
@@ -740,7 +771,9 @@ pub mod capability {
     }
 
     impl CapabilitySet {
-        pub fn new() -> Self { Self::default() }
+        pub fn new() -> Self {
+            Self::default()
+        }
 
         pub fn grant(&mut self, token: CapabilityToken) {
             self.tokens.insert(token.id, token);
@@ -755,8 +788,12 @@ pub mod capability {
         }
 
         pub fn verify(&self, token: &CapabilityToken, now: u64) -> bool {
-            if self.is_revoked(token.id) { return false; }
-            if now > token.expires_at { return false; }
+            if self.is_revoked(token.id) {
+                return false;
+            }
+            if now > token.expires_at {
+                return false;
+            }
             true
         }
 
@@ -826,8 +863,7 @@ pub mod capability {
                     .tokens
                     .iter()
                     .filter(|(_, t)| {
-                        t.source_pid == parent_target_pid
-                            && t.delegation_depth == parent_depth + 1
+                        t.source_pid == parent_target_pid && t.delegation_depth == parent_depth + 1
                     })
                     .map(|(k, _)| *k)
                     .collect();
@@ -837,7 +873,7 @@ pub mod capability {
         }
     }
 
-    // ── Grant / Verify (Wave 11) ───────────────────────────────────────
+    // ── Grant / Verify ───────────────────────────────────────────────
     //
     // `grant_capability` mints a fresh token whose `signature` field is a
     // deterministic 32-byte digest of every other field in the token,
@@ -865,10 +901,17 @@ pub mod capability {
         /// token — at least one field has been altered since grant time.
         InvalidSignature,
         /// `now` is outside `[created_at, expires_at]`.
-        Expired { now: u64, created_at: u64, expires_at: u64 },
+        Expired {
+            now: u64,
+            created_at: u64,
+            expires_at: u64,
+        },
         /// `token.resource` does not equal the resource the caller asked
         /// to be bound to. Carries both sides for diagnostics.
-        ResourceMismatch { expected: Resource, actual: Resource },
+        ResourceMismatch {
+            expected: Resource,
+            actual: Resource,
+        },
         /// The token's permissions are missing one or more of the
         /// required bits.
         InsufficientPermissions {
@@ -883,7 +926,11 @@ pub mod capability {
                 CapabilityError::InvalidSignature => {
                     write!(f, "invalid capability signature")
                 }
-                CapabilityError::Expired { now, created_at, expires_at } => write!(
+                CapabilityError::Expired {
+                    now,
+                    created_at,
+                    expires_at,
+                } => write!(
                     f,
                     "capability expired: now={} not in [{}, {}]",
                     now, created_at, expires_at
@@ -906,13 +953,12 @@ pub mod capability {
 
     /// FNV-1a 64-bit over `data`. Pure, allocation-free, deterministic.
     /// Used as the building block for [`compute_signature`].
+    ///
+    /// Delegates to [`vuma_scg::hash::fnv1a_64`] (single source of truth).
+    /// Kept as a local wrapper so existing call sites inside
+    /// `capability::compute_signature` continue to resolve unqualified.
     fn fnv1a_64(data: &[u8]) -> u64 {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            hash ^= b as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash
+        vuma_scg::hash::fnv1a_64(data)
     }
 
     /// Serialise every field of `token` *except* `signature` into a flat
@@ -955,8 +1001,7 @@ pub mod capability {
             chunk.push(i);
             chunk.extend_from_slice(&base);
             let h = fnv1a_64(&chunk);
-            sig[(i as usize) * 8..(i as usize + 1) * 8]
-                .copy_from_slice(&h.to_le_bytes());
+            sig[(i as usize) * 8..(i as usize + 1) * 8].copy_from_slice(&h.to_le_bytes());
         }
         sig
     }
@@ -974,6 +1019,7 @@ pub mod capability {
     ///   different keys produce different signatures for the same token
     ///   fields, so a token minted under one key will fail verification
     ///   under another.
+    #[allow(clippy::too_many_arguments)]
     pub fn grant_capability(
         id: u128,
         source_pid: u64,
@@ -1081,10 +1127,7 @@ pub mod capability {
     /// Returns `false` for an empty chain, a chain whose last
     /// element is not `token`, a chain that starts at a non-root
     /// depth, any broken parent→child link, or any depth overflow.
-    pub fn verify_delegation_chain(
-        token: &CapabilityToken,
-        chain: &[CapabilityToken],
-    ) -> bool {
+    pub fn verify_delegation_chain(token: &CapabilityToken, chain: &[CapabilityToken]) -> bool {
         // Empty chain has nothing to verify — a leaf with no provenance
         // is never authorisable through delegation.
         if chain.is_empty() {
@@ -1358,10 +1401,7 @@ pub enum ProtocolError {
     /// The current state does not permit a transition on the supplied
     /// `type_hash`. `expected` is the state the machine was in (and
     /// would have had to leave), and `got` is the offending type hash.
-    ProtocolViolation {
-        expected: ProtocolState,
-        got: u64,
-    },
+    ProtocolViolation { expected: ProtocolState, got: u64 },
     /// The channel has been closed and accepts no further transitions.
     /// Distinct from `ProtocolViolation` so a receiver can tear down
     /// cleanly rather than logging a protocol fault.
@@ -1402,17 +1442,29 @@ impl ProtocolStateMachine {
         let close = type_hash("close");
         // Forward path: a sender initiates, the receiver acknowledges.
         allowed.insert((ProtocolState::Idle, send), ProtocolState::WaitingForSend);
-        allowed.insert((ProtocolState::WaitingForSend, sent), ProtocolState::WaitingForRecv);
+        allowed.insert(
+            (ProtocolState::WaitingForSend, sent),
+            ProtocolState::WaitingForRecv,
+        );
         allowed.insert((ProtocolState::WaitingForRecv, recv), ProtocolState::Idle);
         // Receiver may also block first (idle → recv → wait for a send).
         allowed.insert((ProtocolState::Idle, recv), ProtocolState::WaitingForRecv);
         // Pipelined reply: a recv blocked in WaitingForRecv can flip
         // straight to WaitingForSend when the peer sends.
-        allowed.insert((ProtocolState::WaitingForRecv, send), ProtocolState::WaitingForSend);
+        allowed.insert(
+            (ProtocolState::WaitingForRecv, send),
+            ProtocolState::WaitingForSend,
+        );
         // Close is permitted from any live state.
         allowed.insert((ProtocolState::Idle, close), ProtocolState::Closed);
-        allowed.insert((ProtocolState::WaitingForSend, close), ProtocolState::Closed);
-        allowed.insert((ProtocolState::WaitingForRecv, close), ProtocolState::Closed);
+        allowed.insert(
+            (ProtocolState::WaitingForSend, close),
+            ProtocolState::Closed,
+        );
+        allowed.insert(
+            (ProtocolState::WaitingForRecv, close),
+            ProtocolState::Closed,
+        );
         Self {
             current_state: ProtocolState::Idle,
             allowed_transitions: allowed,
@@ -1476,8 +1528,6 @@ impl Default for WorkerConfig {
     }
 }
 
-
-
 // ── L5: Worker Encapsulation (seccomp sandboxing) ────────────────────
 
 /// Allowed syscalls for each trust level.
@@ -1485,15 +1535,17 @@ pub fn allowed_syscalls(trust: &TrustLevel) -> Vec<u32> {
     match trust {
         TrustLevel::Kernel => (0..512).collect(), // all syscalls
         TrustLevel::Verified => vec![
-            0, 1, 2, 3, 9, 10, 11, 12, 13, 14,  // read, write, open, close, mmap, mprotect, munmap, brk, rt_sigaction, rt_sigprocmask
-            22, 39, 56, 57, 59, 60, 61, 62,  // pipe, getpid, clone, fork, execve, exit, wait4, kill
-            63, 64, 72, 78, 79, 80,  // read, write, getcwd, getdents, getcwd, chdir
-            89, 90, 97,  // readlink, getuid, getrlimit
-            102, 107, 108,  // getuid, geteuid, getgid
-            202, 257,  // futex, openat
+            0, 1, 2, 3, 9, 10, 11, 12, 13,
+            14, // read, write, open, close, mmap, mprotect, munmap, brk, rt_sigaction, rt_sigprocmask
+            22, 39, 56, 57, 59, 60, 61,
+            62, // pipe, getpid, clone, fork, execve, exit, wait4, kill
+            63, 64, 72, 78, 79, 80, // read, write, getcwd, getdents, getcwd, chdir
+            89, 90, 97, // readlink, getuid, getrlimit
+            102, 107, 108, // getuid, geteuid, getgid
+            202, 257, // futex, openat
         ],
-        TrustLevel::Untrusted => vec![0, 1, 3, 9, 12, 60],  // read, write, close, mmap, brk, exit
-        TrustLevel::Sandboxed => vec![60],  // exit only
+        TrustLevel::Untrusted => vec![0, 1, 3, 9, 12, 60], // read, write, close, mmap, brk, exit
+        TrustLevel::Sandboxed => vec![60],                 // exit only
     }
 }
 
@@ -1558,8 +1610,8 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            cpu_time_ms: 5_000,                    // 5 s CPU budget
-            max_memory_bytes: 256 * 1024 * 1024,   // 256 MiB RSS
+            cpu_time_ms: 5_000,                  // 5 s CPU budget
+            max_memory_bytes: 256 * 1024 * 1024, // 256 MiB RSS
             max_ipc_messages: 10_000,
             max_file_descriptors: 64,
         }
@@ -1814,12 +1866,12 @@ pub struct ChannelState {
 ///   * `sequence`       as little-endian u64 (8 bytes),
 ///   * `protocol_state.as_tag()` as UTF-8 bytes,
 ///   * a single `0xFF` separator.
-/// The 32-byte hash is then built as **eight independent CRC32** (IEEE
-/// 802.3 — the same primitive L1 uses for frame integrity) values, each
-/// computed over `(lane_index, hash_input)`, laid out little-endian.
-/// CRC32 is sensitive to every input byte, so unlike the previous
-/// XOR-fold (which silently collapsed reorderings and repeated blocks)
-/// any single-bit change to any field flips bits in the hash.
+///     The 32-byte hash is then built as **eight independent CRC32** (IEEE
+///     802.3 — the same primitive L1 uses for frame integrity) values, each
+///     computed over `(lane_index, hash_input)`, laid out little-endian.
+///     CRC32 is sensitive to every input byte, so unlike the previous
+///     XOR-fold (which silently collapsed reorderings and repeated blocks)
+///     any single-bit change to any field flips bits in the hash.
 pub fn compute_integrity_hash(channels: &[ChannelState]) -> [u8; 32] {
     let mut hash_input: Vec<u8> = Vec::with_capacity(channels.len() * 24);
     for ch in channels {
@@ -1834,8 +1886,7 @@ pub fn compute_integrity_hash(channels: &[ChannelState]) -> [u8; 32] {
         prefixed.push(lane);
         prefixed.extend_from_slice(&hash_input);
         let crc = crc32(&prefixed);
-        hash[(lane as usize) * 4..(lane as usize + 1) * 4]
-            .copy_from_slice(&crc.to_le_bytes());
+        hash[(lane as usize) * 4..(lane as usize + 1) * 4].copy_from_slice(&crc.to_le_bytes());
     }
     hash
 }
@@ -1852,7 +1903,8 @@ pub fn compute_integrity_hash(channels: &[ChannelState]) -> [u8; 32] {
 /// vector so that [`restore_state`] can validate it without needing
 /// kernel metadata.
 pub fn checkpoint_state(channels: &[(u64, u64, ProtocolState)]) -> Checkpoint {
-    let channel_states: Vec<ChannelState> = channels.iter()
+    let channel_states: Vec<ChannelState> = channels
+        .iter()
         .map(|(id, seq, state)| ChannelState {
             channel_id: *id,
             sequence: *seq,
@@ -1901,7 +1953,10 @@ pub enum IpcError {
     BadMagic,
     UnsupportedVersion(u16),
     PayloadTooLarge(u64),
-    CrcMismatch { expected: u32, actual: u32 },
+    CrcMismatch {
+        expected: u32,
+        actual: u32,
+    },
     TruncatedMessage,
 
     // Channel errors
@@ -1913,7 +1968,10 @@ pub enum IpcError {
     PermissionDenied,
 
     // Type errors
-    TypeMismatch { expected: u64, actual: u64 },
+    TypeMismatch {
+        expected: u64,
+        actual: u64,
+    },
     InvalidMessageType,
     DeserializationError,
 
@@ -1948,12 +2006,18 @@ pub enum IpcError {
     MemoryWindowPermissionDenied,
 
     // Protocol errors
-    ProtocolViolation { expected: String, got: String },
+    ProtocolViolation {
+        expected: String,
+        got: String,
+    },
     UnexpectedMessage,
     MissingRequiredCapability,
 
     // Information flow (v2)
-    InformationFlowViolation { source: u64, target: u64 },
+    InformationFlowViolation {
+        source: u64,
+        target: u64,
+    },
     UnauthorizedDowngrade,
 
     // STARK (v2)
@@ -2153,7 +2217,10 @@ pub type AeadCipher = CryptoState;
 
 impl CryptoState {
     pub fn new(key: [u8; 32]) -> Self {
-        Self { key, nonce_counter: 0 }
+        Self {
+            key,
+            nonce_counter: 0,
+        }
     }
 
     /// Build the key stream for a message of length `len`, keyed by
@@ -2229,12 +2296,7 @@ impl CryptoState {
 
         // Tag verification FIRST — never decrypt before verifying.
         let expected = crc32(ct);
-        let actual = u32::from_le_bytes([
-            tag_bytes[0],
-            tag_bytes[1],
-            tag_bytes[2],
-            tag_bytes[3],
-        ]);
+        let actual = u32::from_le_bytes([tag_bytes[0], tag_bytes[1], tag_bytes[2], tag_bytes[3]]);
         if expected != actual {
             return Err(IpcError::CrcMismatch { expected, actual });
         }
@@ -2251,10 +2313,10 @@ impl CryptoState {
 
 // ── FFI Process Isolation (extern "process") ─────────────────────────
 //
-// Wave 25-32: real auto-marshalling, worker lifecycle, seccomp wiring,
+// Real auto-marshalling, worker lifecycle, seccomp wiring,
 // and crash-recovery for `extern "process"` call sites. The actual
 // `fork()`/`exec()` and IPC socket plumbing live in the runtime
-// backend (W33+); this module provides the in-process types and a
+// backend (a later wave); this module provides the in-process types and a
 // simulated lifecycle the supervisor exercises against the same code
 // paths, so the spawn → call → kill → restart state machine can be
 // unit-tested without spawning a real child process.
@@ -2268,11 +2330,11 @@ pub const FFI_MARSHAL_HEADER_SIZE: usize = 4 + 8;
 
 /// Configuration for an FFI worker process. Bundles the library path
 /// + symbol the worker will `dlopen`/`dlsym`, the [`TrustLevel`] used
-/// to derive the seccomp filter, the restart/timeout budget, and the
-/// prepared [`WorkerSandbox`] (W17-18) the forked child installs
-/// before `exec()`. Built via [`FfiWorkerConfig::new`] which derives
-/// the sandbox from the trust level so callers cannot forget the L5
-/// wire-up.
+///   to derive the seccomp filter, the restart/timeout budget, and the
+///   prepared [`WorkerSandbox`] the forked child installs
+///   before `exec()`. Built via [`FfiWorkerConfig::new`] which derives
+///   the sandbox from the trust level so callers cannot forget the L5
+///   wire-up.
 #[derive(Clone, Debug)]
 pub struct FfiWorkerConfig {
     pub library_path: String,
@@ -2349,11 +2411,7 @@ impl FfiCall {
     /// Construct a call envelope for `function_name` returning a value
     /// of type `return_type_hash`, with `args` as the marshalled
     /// argument blob.
-    pub fn new(
-        function_name: impl Into<String>,
-        args: Vec<u8>,
-        return_type_hash: u64,
-    ) -> Self {
+    pub fn new(function_name: impl Into<String>, args: Vec<u8>, return_type_hash: u64) -> Self {
         Self {
             function_name: function_name.into(),
             args,
@@ -2396,12 +2454,9 @@ impl FfiCall {
         if data.len() < FFI_MARSHAL_HEADER_SIZE {
             return Err(IpcError::TruncatedMessage);
         }
-        let payload_len = u32::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-        ]) as usize;
+        let payload_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         let type_hash = u64::from_le_bytes([
-            data[4], data[5], data[6], data[7],
-            data[8], data[9], data[10], data[11],
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
         ]);
         let end = FFI_MARSHAL_HEADER_SIZE
             .checked_add(payload_len)
@@ -2484,7 +2539,7 @@ struct FfiWorkerEntry {
 
 /// In-process supervisor for FFI worker processes. The real
 /// `fork()`/`exec()` + Unix-socket IPC lives in the runtime backend
-/// (W33+); this struct provides the simulated lifecycle the
+/// in the real runtime; this struct provides the simulated lifecycle the
 /// supervisor's state machine exercises against, so the
 /// spawn → call → kill → restart code paths can be tested without a
 /// real child process.
@@ -2670,7 +2725,9 @@ impl capability::CapabilitySet {
         subset_perms: capability::MemoryPermissions,
         signing_key: &[u8; 32],
     ) -> Result<capability::CapabilityToken, IpcError> {
-        let parent = self.tokens.get(&parent_id)
+        let parent = self
+            .tokens
+            .get(&parent_id)
             .ok_or(IpcError::CapabilityNotFound)?
             .clone();
 
@@ -2815,7 +2872,7 @@ impl CapabilityRegistry {
     }
 }
 
-// ── W41-48: Kernel/User Split (Microkernel) ─────────────────────────
+// ── Kernel/User Split (Microkernel) ───────────────────────────────
 //
 // The microkernel split: a single privileged KernelProcess runs with
 // full capability authority and dispatches syscalls via the IPC layer;
@@ -2877,7 +2934,10 @@ impl KernelProcess {
         // The kernel itself (pid == self.pid) is always allowed to
         // call its own syscalls (e.g. for boot-time initialization).
         if caller_pid != self.pid
-            && self.capabilities.get_process_capabilities(caller_pid).is_empty()
+            && self
+                .capabilities
+                .get_process_capabilities(caller_pid)
+                .is_empty()
         {
             return Err(IpcError::PermissionDenied);
         }
@@ -2923,12 +2983,7 @@ impl UserProcess {
     /// given trust level and resource limits. `resource_usage` starts
     /// at zero (no CPU time, no memory, no IPC messages, no FDs) —
     /// the supervisor populates it as the process runs.
-    pub fn new(
-        pid: u64,
-        parent_pid: u64,
-        trust_level: TrustLevel,
-        limits: ResourceLimits,
-    ) -> Self {
+    pub fn new(pid: u64, parent_pid: u64, trust_level: TrustLevel, limits: ResourceLimits) -> Self {
         Self {
             pid,
             parent_pid,
@@ -3153,7 +3208,7 @@ impl ProcessTable {
     }
 }
 
-// ── Supervisor (Fault Tolerance — W65-68) ────────────────────────────
+// ── Supervisor (Fault Tolerance) ────────────────────────────────────
 
 /// Per-worker bookkeeping the supervisor holds for one live (or recently
 /// exited) worker process. This is the L7 fault-containment record: it
@@ -3252,7 +3307,9 @@ impl Supervisor {
     /// (re-registering an already-tracked pid does not clobber its exit
     /// history — the supervisor's bookkeeping is the source of truth).
     pub fn register_worker(&mut self, pid: u64) {
-        self.workers.entry(pid).or_insert_with(|| WorkerState::new(pid));
+        self.workers
+            .entry(pid)
+            .or_insert_with(|| WorkerState::new(pid));
     }
 
     /// Unregister a worker pid. Returns `Ok(())` if the worker was
@@ -3295,10 +3352,7 @@ impl Supervisor {
         exit_code: i32,
         signal: i32,
     ) -> Result<RecoveryAction, IpcError> {
-        let state = self
-            .workers
-            .get_mut(&pid)
-            .ok_or(IpcError::WorkerNotFound)?;
+        let state = self.workers.get_mut(&pid).ok_or(IpcError::WorkerNotFound)?;
 
         // Record the exit history first — the audit log needs this even
         // if we end up escalating.
@@ -3348,7 +3402,7 @@ impl Supervisor {
     }
 }
 
-// ── Circuit Breaker (Fault Tolerance — W69-72) ───────────────────────
+// ── Circuit Breaker (Fault Tolerance) ───────────────────────────────
 
 /// Three-state circuit-breaker state machine. The breaker sits in front
 /// of any fallible IPC operation (e.g. a remote worker call, a hot-swap
@@ -3469,7 +3523,7 @@ impl CircuitBreaker {
     }
 }
 
-// ── Hot Reloading (W73-80) ───────────────────────────────────────────
+// ── Hot Reloading ───────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct HotSwapRequest {
@@ -3617,10 +3671,7 @@ impl HotSwapManager {
     ///     `success == false` and an error message. (The mock never
     ///     fails the health check, so this path is not exercised in
     ///     the default flow, but the contract is documented.)
-    pub fn perform_swap(
-        &mut self,
-        config: &HotSwapConfig,
-    ) -> Result<HotSwapResult, IpcError> {
+    pub fn perform_swap(&mut self, config: &HotSwapConfig) -> Result<HotSwapResult, IpcError> {
         // Version constraint: new_version must be strictly greater.
         if config.new_version <= config.old_version {
             return Err(IpcError::ProtocolViolation {
@@ -3682,7 +3733,7 @@ impl HotSwapManager {
     }
 }
 
-// ── Distributed Channels (W81-88) ────────────────────────────────────
+// ── Distributed Channels ────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct RemoteWorker {
@@ -3974,13 +4025,21 @@ impl SecurityLabel {
     /// Least upper bound of two labels. `Public.join(Secret) == Secret`,
     /// `Internal.join(Secret) == Secret`, etc.
     pub fn join(self, other: SecurityLabel) -> SecurityLabel {
-        if self >= other { self } else { other }
+        if self >= other {
+            self
+        } else {
+            other
+        }
     }
 
     /// Greatest lower bound of two labels. Useful for declassification
     /// analysis when combining a guarded value with a guard.
     pub fn meet(self, other: SecurityLabel) -> SecurityLabel {
-        if self <= other { self } else { other }
+        if self <= other {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -4043,11 +4102,7 @@ impl StarkProof {
     /// Helper: construct a proof whose `verifier_key` is correctly
     /// derived from `proof_data` and `public_inputs`. Used by tests
     /// and by the prover-side attestation builder.
-    pub fn new_valid(
-        proof_data: Vec<u8>,
-        public_inputs: Vec<u64>,
-        validity_window: u64,
-    ) -> Self {
+    pub fn new_valid(proof_data: Vec<u8>, public_inputs: Vec<u64>, validity_window: u64) -> Self {
         let mut p = Self {
             proof_data,
             public_inputs,
@@ -4120,21 +4175,37 @@ pub struct Permission {
 impl Permission {
     /// The full permission: read = write = execute = 1.0.
     pub fn full() -> Self {
-        Self { read: 1.0, write: 1.0, execute: 1.0 }
+        Self {
+            read: 1.0,
+            write: 1.0,
+            execute: 1.0,
+        }
     }
 
     /// The empty permission: all shares 0.0. Useful as a starting
     /// point for incremental merging.
     pub fn none() -> Self {
-        Self { read: 0.0, write: 0.0, execute: 0.0 }
+        Self {
+            read: 0.0,
+            write: 0.0,
+            execute: 0.0,
+        }
     }
 
     /// Halve every fraction. `full().split()` yields two half-
     /// permissions whose `merge` reconstructs the original.
     pub fn split(self) -> (Self, Self) {
         (
-            Self { read: self.read / 2.0, write: self.write / 2.0, execute: self.execute / 2.0 },
-            Self { read: self.read / 2.0, write: self.write / 2.0, execute: self.execute / 2.0 },
+            Self {
+                read: self.read / 2.0,
+                write: self.write / 2.0,
+                execute: self.execute / 2.0,
+            },
+            Self {
+                read: self.read / 2.0,
+                write: self.write / 2.0,
+                execute: self.execute / 2.0,
+            },
         )
     }
 
@@ -4149,14 +4220,20 @@ impl Permission {
     }
 
     /// Any positive read fraction grants read access.
-    pub fn can_read(&self) -> bool { self.read > 0.0 }
+    pub fn can_read(&self) -> bool {
+        self.read > 0.0
+    }
     /// Any positive write fraction grants write access. (Under
     /// classical CSL soundness only `write == 1.0` is safe; the
     /// compile-time checker uses the permissive predicate and
     /// separately enforces the uniqueness invariant.)
-    pub fn can_write(&self) -> bool { self.write > 0.0 }
+    pub fn can_write(&self) -> bool {
+        self.write > 0.0
+    }
     /// Any positive execute fraction grants execute access.
-    pub fn can_execute(&self) -> bool { self.execute > 0.0 }
+    pub fn can_execute(&self) -> bool {
+        self.execute > 0.0
+    }
 }
 
 // ── CT8: Formal Verification ─────────────────────────────────────────
@@ -4219,12 +4296,13 @@ pub fn verify_invariant_collapse() -> VerificationProof {
             "      invariant; the projection is the identity on the",
             "      subsumed layers and trivial on the others.",
             "  ∎",
-        ].join("\n"),
+        ]
+        .join("\n"),
         verified: true,
     }
 }
 
-// ── W49-56: Driver Isolation ──────────────────────────────────────────
+// ── Driver Isolation ──────────────────────────────────────────────────
 //
 // Drivers run as untrusted user-space workers. Each DriverWorker
 // encapsulates the device path, MMIO regions, IRQ vectors, and DMA
@@ -4265,7 +4343,11 @@ pub struct DmaBuffer {
 impl DmaBuffer {
     /// Construct a new DMA buffer descriptor.
     pub fn new(addr: u64, size: u64, direction: DmaDirection) -> Self {
-        Self { addr, size, direction }
+        Self {
+            addr,
+            size,
+            direction,
+        }
     }
 
     /// True iff `addr` is non-zero, `size` is non-zero, and
@@ -4274,9 +4356,7 @@ impl DmaBuffer {
     /// device — the IOMMU would reject the mapping anyway, so we fail
     /// fast at config time rather than at map time.
     pub fn is_valid(&self) -> bool {
-        self.addr != 0
-            && self.size != 0
-            && self.addr.checked_add(self.size).is_some()
+        self.addr != 0 && self.size != 0 && self.addr.checked_add(self.size).is_some()
     }
 }
 
@@ -4425,7 +4505,7 @@ impl DriverWorker {
     }
 }
 
-// ── W57-64: Sandboxing ────────────────────────────────────────────────
+// ── Sandboxing ────────────────────────────────────────────────────────
 //
 // Three sandboxed runtime services: an untrusted worker process with
 // a zero-capability default (SandboxedWorker), a length-bounded input
@@ -4442,7 +4522,7 @@ impl DriverWorker {
 /// `plugin_path` is the optional dlopen-style plugin the worker has
 /// loaded; `None` means "no plugin loaded" (a pure-Rust worker). The
 /// supervisor refuses to spawn a worker whose `plugin_path` is `Some`
-/// unless the binary has been attested (W33-40 STARK attestation).
+/// unless the binary has been attested (STARK attestation).
 #[derive(Clone, Debug)]
 pub struct SandboxedWorker {
     pub worker_pid: u64,
@@ -4602,11 +4682,11 @@ mod tests {
 
     #[test]
     fn test_crc32() {
-        assert_eq!(crc32(b""), 0);  // !0xFFFFFFFF == 0
+        assert_eq!(crc32(b""), 0); // !0xFFFFFFFF == 0
         assert_ne!(crc32(b"VUMA"), 0);
     }
 
-    // ── Wave 10c: serialization roundtrip tests ──
+    // ── serialization roundtrip tests ──
 
     #[test]
     fn test_serialize_i32_roundtrip() {
@@ -4681,12 +4761,20 @@ mod tests {
     fn test_serialize_primitive_widths() {
         assert_eq!(serialize_primitive(0x42, 1), vec![0x42]);
         assert_eq!(serialize_primitive(0x1234, 2), vec![0x34, 0x12]);
-        assert_eq!(serialize_primitive(0x12345678, 4), vec![0x78, 0x56, 0x34, 0x12]);
-        assert_eq!(serialize_primitive(0x123456789ABCDEF0, 8),
-                   vec![0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(
+            serialize_primitive(0x12345678, 4),
+            vec![0x78, 0x56, 0x34, 0x12]
+        );
+        assert_eq!(
+            serialize_primitive(0x123456789ABCDEF0, 8),
+            vec![0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12]
+        );
         assert_eq!(deserialize_primitive(&[0x42], 1), 0x42);
         assert_eq!(deserialize_primitive(&[0x34, 0x12], 2), 0x1234);
-        assert_eq!(deserialize_primitive(&[0x78, 0x56, 0x34, 0x12], 4), 0x12345678);
+        assert_eq!(
+            deserialize_primitive(&[0x78, 0x56, 0x34, 0x12], 4),
+            0x12345678
+        );
     }
 
     #[test]
@@ -4733,8 +4821,8 @@ mod tests {
         assert!(framed.len() > HEADER_SIZE);
         assert_eq!(&framed[0..4], &MAGIC);
         // Verify CRC
-        let crc = u32::from_le_bytes(framed[framed.len()-4..].try_into().unwrap());
-        assert_eq!(crc, crc32(&framed[..framed.len()-4]));
+        let crc = u32::from_le_bytes(framed[framed.len() - 4..].try_into().unwrap());
+        assert_eq!(crc, crc32(&framed[..framed.len() - 4]));
 
         // Roundtrip via deframe_message.
         let decoded = deframe_message(&framed).expect("deframe should succeed");
@@ -4779,16 +4867,18 @@ mod tests {
         let framed = frame_message(&msg);
 
         // Expected layout: header + payload + 1 cap token + CRC32.
-        let expected_len = HEADER_SIZE + msg.payload.len()
-            + capability::CAPABILITY_TOKEN_SIZE
-            + CRC32_SIZE;
+        let expected_len =
+            HEADER_SIZE + msg.payload.len() + capability::CAPABILITY_TOKEN_SIZE + CRC32_SIZE;
         assert_eq!(framed.len(), expected_len);
 
         let decoded = deframe_message(&framed).expect("deframe should succeed");
         assert_eq!(decoded.header.channel_id, 0xCAFE);
         assert_eq!(decoded.header.sequence, 0xBEEF);
         assert_eq!(decoded.header.type_hash, type_hash("Vec<u8>"));
-        assert_eq!(decoded.header.flags, MessageFlags::HAS_CAPS | MessageFlags::ENCRYPTED);
+        assert_eq!(
+            decoded.header.flags,
+            MessageFlags::HAS_CAPS | MessageFlags::ENCRYPTED
+        );
         assert_eq!(decoded.header.cap_count, 1);
         assert_eq!(decoded.payload, msg.payload);
         assert_eq!(decoded.capabilities.len(), 1);
@@ -4808,10 +4898,7 @@ mod tests {
             deframe_message(&too_short),
             Err(FrameError::TooShort)
         ));
-        assert!(matches!(
-            deframe_message(&[]),
-            Err(FrameError::TooShort)
-        ));
+        assert!(matches!(deframe_message(&[]), Err(FrameError::TooShort)));
     }
 
     #[test]
@@ -4913,7 +5000,10 @@ mod tests {
 
         let framed = frame_message(&msg);
         let decoded = deframe_message(&framed).unwrap();
-        assert_eq!(decoded.header.flags.bits() & MessageFlags::HAS_CAPS.bits(), MessageFlags::HAS_CAPS.bits());
+        assert_eq!(
+            decoded.header.flags.bits() & MessageFlags::HAS_CAPS.bits(),
+            MessageFlags::HAS_CAPS.bits()
+        );
         assert_eq!(decoded.capabilities.len(), 1);
     }
 
@@ -4924,7 +5014,11 @@ mod tests {
             source_pid: 1,
             target_pid: 2,
             resource: capability::Resource::Memory(0x1000, 0x1000),
-            permissions: capability::MemoryPermissions { read: true, write: false, execute: false },
+            permissions: capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
             delegation_depth: 0,
             created_at: 1000,
             expires_at: 2000,
@@ -4938,16 +5032,19 @@ mod tests {
         assert_eq!(decoded.target_pid, 2);
         assert!(decoded.permissions.read);
         assert!(!decoded.permissions.write);
-        // Wave 11: resource must now round-trip too (previously it was
+        // resource must now round-trip too (previously it was
         // dropped on encode and replaced with Memory(0,0) on decode).
-        assert_eq!(decoded.resource, capability::Resource::Memory(0x1000, 0x1000));
+        assert_eq!(
+            decoded.resource,
+            capability::Resource::Memory(0x1000, 0x1000)
+        );
         assert_eq!(decoded.signature, [0xAB; 32]);
         assert_eq!(decoded.created_at, 1000);
         assert_eq!(decoded.expires_at, 2000);
         assert_eq!(decoded.delegation_depth, 0);
     }
 
-    // ── Wave 10: Channel-send/recv framing integration tests ───────────
+    // ── Channel-send/recv framing integration tests ─────────────────
     //
     // The x86_64 backend's `channel_send` / `channel_recv` handlers in
     // `stack_slot_isel.rs` currently emit raw `write(fd, &msg, 8)` /
@@ -4981,7 +5078,9 @@ mod tests {
     #[test]
     fn test_frame_deframe_roundtrip_i32_channel_payload() {
         // Simulate a single `channel_send(ch, 42)` → `channel_recv(ch)`.
-        let msg = channel_i32_message(/*channel_id*/ 7, /*sequence*/ 0, /*value*/ 42);
+        let msg = channel_i32_message(
+            /*channel_id*/ 7, /*sequence*/ 0, /*value*/ 42,
+        );
         let framed = frame_message(&msg);
 
         // Framed layout: 44-byte header + 4-byte payload + 4-byte CRC.
@@ -5075,11 +5174,7 @@ mod tests {
         // framed messages are concatenated into a single stream (as
         // they would be when written to a pipe by a Rust helper), and
         // the receiver walks the stream one frame at a time.
-        let payloads: [(u64, i32); 3] = [
-            (0, 10),
-            (1, 20),
-            (2, 33),
-        ];
+        let payloads: [(u64, i32); 3] = [(0, 10), (1, 20), (2, 33)];
         let channel_id: u64 = 0xCAFE_F00D;
 
         // Producer side: frame each message and concatenate.
@@ -5128,9 +5223,9 @@ mod tests {
         assert_eq!(offset, stream.len());
     }
 
-    // ── Wave 11: Capability grant/verify/encode/decode tests ───────────
+    // ── Capability grant/verify/encode/decode tests ─────────────────
     //
-    // The pre-Wave-11 capability module had two stubs:
+    // The capability module previously had two stubs:
     //   (a) `CapabilityToken::encode` dropped the `resource` field entirely
     //       and padded with zeros;
     //   (b) `CapabilityToken::decode` always returned `Resource::Memory(0, 0)`
@@ -5148,7 +5243,11 @@ mod tests {
         // The framer multiplies cap_count by CAPABILITY_TOKEN_SIZE, so
         // encode() must produce *exactly* that many bytes — no more, no
         // fewer, regardless of which Resource variant is in the token.
-        let perms = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        };
         let cases = vec![
             capability::Resource::File("/etc/passwd".into()),
             capability::Resource::Network("10.0.0.1".into(), 443),
@@ -5182,7 +5281,11 @@ mod tests {
         // Each Resource variant must survive a full encode→decode round
         // trip with byte-exact equality on every field. This is the test
         // the old stub failed (it always decoded to Memory(0,0)).
-        let perms = capability::MemoryPermissions { read: true, write: false, execute: true };
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: true,
+        };
         let cases: Vec<capability::Resource> = vec![
             capability::Resource::File("/var/log/vuma.log".into()),
             capability::Resource::Network("127.0.0.1".into(), 8080),
@@ -5206,7 +5309,11 @@ mod tests {
             let decoded = capability::CapabilityToken::decode(&encoded)
                 .expect("decode must succeed for a valid encoding");
             // Whole-token equality is the strongest round-trip check.
-            assert_eq!(decoded, token, "full token must round-trip for {:?}", resource);
+            assert_eq!(
+                decoded, token,
+                "full token must round-trip for {:?}",
+                resource
+            );
         }
     }
 
@@ -5217,7 +5324,11 @@ mod tests {
         // rather than panicking on slice indexing.
         let short = vec![0u8; capability::CAPABILITY_TOKEN_SIZE - 1];
         let err = capability::CapabilityToken::decode(&short).unwrap_err();
-        assert!(err.contains("too short"), "unexpected error message: {}", err);
+        assert!(
+            err.contains("too short"),
+            "unexpected error message: {}",
+            err
+        );
     }
 
     #[test]
@@ -5240,7 +5351,11 @@ mod tests {
         // Clobber the resource tag byte (first byte of the resource field).
         encoded[capability::RESOURCE_OFFSET] = 0xFF;
         let err = capability::CapabilityToken::decode(&encoded).unwrap_err();
-        assert!(err.contains("unknown resource tag"), "unexpected error: {}", err);
+        assert!(
+            err.contains("unknown resource tag"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -5267,10 +5382,26 @@ mod tests {
 
     #[test]
     fn test_capability_perms_contains() {
-        let rwx = capability::MemoryPermissions { read: true, write: true, execute: true };
-        let r_only = capability::MemoryPermissions { read: true, write: false, execute: false };
-        let rw = capability::MemoryPermissions { read: true, write: true, execute: false };
-        let none = capability::MemoryPermissions { read: false, write: false, execute: false };
+        let rwx = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: true,
+        };
+        let r_only = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        let rw = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        };
+        let none = capability::MemoryPermissions {
+            read: false,
+            write: false,
+            execute: false,
+        };
 
         // rwx contains every subset.
         assert!(rwx.contains(&rwx));
@@ -5281,8 +5412,8 @@ mod tests {
         // r_only contains only r_only and none.
         assert!(r_only.contains(&r_only));
         assert!(r_only.contains(&none));
-        assert!(!r_only.contains(&rw));        // missing write
-        assert!(!r_only.contains(&rwx));       // missing write+execute
+        assert!(!r_only.contains(&rw)); // missing write
+        assert!(!r_only.contains(&rwx)); // missing write+execute
 
         // none contains only none.
         assert!(none.contains(&none));
@@ -5296,25 +5427,49 @@ mod tests {
         // and compares, so any non-determinism would make valid tokens
         // fail verification.
         let resource = capability::Resource::Memory(0x4000, 0x1000);
-        let perms = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let perms = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        };
         let key = b"vuma-test-signing-key-2024";
 
         let t1 = capability::grant_capability(
-            42, 1, 2, resource.clone(), perms.clone(), 0, 1_000, 500, key,
+            42,
+            1,
+            2,
+            resource.clone(),
+            perms.clone(),
+            0,
+            1_000,
+            500,
+            key,
         );
         let t2 = capability::grant_capability(
-            42, 1, 2, resource.clone(), perms.clone(), 0, 1_000, 500, key,
+            42,
+            1,
+            2,
+            resource.clone(),
+            perms.clone(),
+            0,
+            1_000,
+            500,
+            key,
         );
-        assert_eq!(t1.signature, t2.signature, "same inputs must produce same signature");
+        assert_eq!(
+            t1.signature, t2.signature,
+            "same inputs must produce same signature"
+        );
         assert_eq!(t1, t2, "whole tokens must be identical");
 
         // Different signing key → different signature (the key is mixed
         // into the hash input first, so any byte change cascades).
         let other_key = b"vuma-test-signing-key-9999";
-        let t3 = capability::grant_capability(
-            42, 1, 2, resource, perms, 0, 1_000, 500, other_key,
+        let t3 = capability::grant_capability(42, 1, 2, resource, perms, 0, 1_000, 500, other_key);
+        assert_ne!(
+            t1.signature, t3.signature,
+            "different signing keys must produce different signatures"
         );
-        assert_ne!(t1.signature, t3.signature, "different signing keys must produce different signatures");
     }
 
     #[test]
@@ -5322,22 +5477,44 @@ mod tests {
         // ttl_seconds is added to created_at (saturating) to produce
         // expires_at. Verify the arithmetic and the saturating edge.
         let token = capability::grant_capability(
-            1, 1, 2,
+            1,
+            1,
+            2,
             capability::Resource::Channel(1),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 500, b"k",
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            500,
+            b"k",
         );
         assert_eq!(token.created_at, 1_000);
         assert_eq!(token.expires_at, 1_500);
 
         // Saturating add: u64::MAX + 1 must not wrap to 0.
         let sat = capability::grant_capability(
-            2, 1, 2,
+            2,
+            1,
+            2,
             capability::Resource::Channel(1),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, u64::MAX, 1, b"k",
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            u64::MAX,
+            1,
+            b"k",
         );
-        assert_eq!(sat.expires_at, u64::MAX, "ttl add must saturate at u64::MAX");
+        assert_eq!(
+            sat.expires_at,
+            u64::MAX,
+            "ttl add must saturate at u64::MAX"
+        );
     }
 
     #[test]
@@ -5347,17 +5524,35 @@ mod tests {
         // four checks (signature, expiry, resource, perms) must pass.
         let resource = capability::Resource::Network("10.0.0.1".into(), 443);
         let granted_perms = capability::MemoryPermissions {
-            read: true, write: true, execute: false,
+            read: true,
+            write: true,
+            execute: false,
         };
         let key = b"secret-key";
         let token = capability::grant_capability(
-            7, 1, 2, resource.clone(), granted_perms, 0, 1_000, 500, key,
+            7,
+            1,
+            2,
+            resource.clone(),
+            granted_perms,
+            0,
+            1_000,
+            500,
+            key,
         );
 
         // now=1_200 is inside [1_000, 1_500].
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let result = capability::verify_capability(&token, key, 1_200, Some(&resource), &required);
-        assert!(result.is_ok(), "verify must succeed for a freshly-granted token: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "verify must succeed for a freshly-granted token: {:?}",
+            result.err()
+        );
 
         // Empty required perms always passes the perms check.
         let none = capability::MemoryPermissions::default();
@@ -5383,12 +5578,31 @@ mod tests {
         let resource = capability::Resource::File("/tmp/foo".into());
         let key = b"k";
         let token = capability::grant_capability(
-            1, 1, 2, resource, capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 100, 1_000, key,
+            1,
+            1,
+            2,
+            resource,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            100,
+            1_000,
+            key,
         );
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let result = capability::verify_capability(&token, key, 500, None, &required);
-        assert!(result.is_ok(), "None expected_resource must skip the resource check: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "None expected_resource must skip the resource check: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5401,11 +5615,25 @@ mod tests {
         let wrong_resource = capability::Resource::Memory(0x2000, 0x1000);
         let key = b"k";
         let token = capability::grant_capability(
-            1, 1, 2, granted_resource.clone(),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 100, 1_000, key,
+            1,
+            1,
+            2,
+            granted_resource.clone(),
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            100,
+            1_000,
+            key,
         );
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let err = capability::verify_capability(&token, key, 500, Some(&wrong_resource), &required)
             .expect_err("wrong resource must fail verify");
         match err {
@@ -5422,10 +5650,26 @@ mod tests {
         // Token grants read-only; caller requires read+write.
         let resource = capability::Resource::Channel(42);
         let key = b"k";
-        let granted_perms = capability::MemoryPermissions { read: true, write: false, execute: false };
-        let required_perms = capability::MemoryPermissions { read: true, write: true, execute: false };
+        let granted_perms = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        let required_perms = capability::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        };
         let token = capability::grant_capability(
-            1, 1, 2, resource, granted_perms.clone(), 0, 100, 1_000, key,
+            1,
+            1,
+            2,
+            resource,
+            granted_perms.clone(),
+            0,
+            100,
+            1_000,
+            key,
         );
         let err = capability::verify_capability(&token, key, 500, None, &required_perms)
             .expect_err("insufficient perms must fail verify");
@@ -5444,15 +5688,33 @@ mod tests {
         let resource = capability::Resource::Channel(1);
         let key = b"k";
         let token = capability::grant_capability(
-            1, 1, 2, resource,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 100, 500, key,
+            1,
+            1,
+            2,
+            resource,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            100,
+            500,
+            key,
         ); // valid in [100, 600]
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let err = capability::verify_capability(&token, key, 601, None, &required)
             .expect_err("now > expires_at must fail verify");
         match err {
-            capability::CapabilityError::Expired { now, created_at, expires_at } => {
+            capability::CapabilityError::Expired {
+                now,
+                created_at,
+                expires_at,
+            } => {
                 assert_eq!(now, 601);
                 assert_eq!(created_at, 100);
                 assert_eq!(expires_at, 600);
@@ -5467,11 +5729,25 @@ mod tests {
         let resource = capability::Resource::Channel(1);
         let key = b"k";
         let token = capability::grant_capability(
-            1, 1, 2, resource,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 500, key,
+            1,
+            1,
+            2,
+            resource,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            500,
+            key,
         ); // valid in [1_000, 1_500]
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let err = capability::verify_capability(&token, key, 999, None, &required)
             .expect_err("now < created_at must fail verify");
         assert!(matches!(err, capability::CapabilityError::Expired { .. }));
@@ -5484,12 +5760,26 @@ mod tests {
         let resource = capability::Resource::Channel(1);
         let key = b"k";
         let mut token = capability::grant_capability(
-            1, 1, 2, resource,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 100, 1_000, key,
+            1,
+            1,
+            2,
+            resource,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            100,
+            1_000,
+            key,
         );
         token.signature[0] ^= 0xFF;
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let err = capability::verify_capability(&token, key, 500, None, &required)
             .expect_err("tampered signature must fail verify");
         assert_eq!(err, capability::CapabilityError::InvalidSignature);
@@ -5503,13 +5793,27 @@ mod tests {
         let resource = capability::Resource::Channel(1);
         let key = b"k";
         let mut token = capability::grant_capability(
-            1, 1, 2, resource,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 100, 1_000, key,
+            1,
+            1,
+            2,
+            resource,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            100,
+            1_000,
+            key,
         );
         // Swap resource without re-signing.
         token.resource = capability::Resource::Channel(2);
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let err = capability::verify_capability(&token, key, 500, None, &required)
             .expect_err("tampered resource must fail verify (signature mismatch)");
         assert_eq!(err, capability::CapabilityError::InvalidSignature);
@@ -5524,11 +5828,25 @@ mod tests {
         let key_a = b"key-a";
         let key_b = b"key-b";
         let token = capability::grant_capability(
-            1, 1, 2, resource,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 100, 1_000, key_a,
+            1,
+            1,
+            2,
+            resource,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            100,
+            1_000,
+            key_a,
         );
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let err = capability::verify_capability(&token, key_b, 500, None, &required)
             .expect_err("verifying under the wrong key must fail");
         assert_eq!(err, capability::CapabilityError::InvalidSignature);
@@ -5548,7 +5866,11 @@ mod tests {
             7,
             9,
             resource.clone(),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
             0,
             5_000,
             10_000,
@@ -5562,9 +5884,17 @@ mod tests {
         assert_eq!(parsed, original, "encode→decode must be lossless");
 
         // Now verify the parsed token. now=7_500 is inside [5_000, 15_000].
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         let result = capability::verify_capability(&parsed, key, 7_500, Some(&resource), &required);
-        assert!(result.is_ok(), "parsed token must verify: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "parsed token must verify: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5573,7 +5903,7 @@ mod tests {
         // EncapsulatedMessage, frame the message, deframe it, and verify
         // the recovered capability. This proves the L1 framer's
         // cap_count * CAPABILITY_TOKEN_SIZE arithmetic still works after
-        // the constant changed from 96 → 160 in Wave 11.
+        // the constant changed from 96 → 160 when the resource field was added.
         let resource = capability::Resource::Channel(0xCAFE);
         let key = b"ipc-integration-key";
         let cap = capability::grant_capability(
@@ -5581,19 +5911,19 @@ mod tests {
             1,
             2,
             resource.clone(),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
             0,
             1_000,
             2_000,
             key,
         );
 
-        let mut msg = EncapsulatedMessage::new(
-            0xCAFE,
-            0xBEEF,
-            type_hash("Vec<u8>"),
-            vec![1, 2, 3, 4],
-        );
+        let mut msg =
+            EncapsulatedMessage::new(0xCAFE, 0xBEEF, type_hash("Vec<u8>"), vec![1, 2, 3, 4]);
         msg.header.flags = MessageFlags::HAS_CAPS;
         msg.capabilities = vec![cap.clone()];
 
@@ -5601,9 +5931,7 @@ mod tests {
         // Expected layout: header + payload + 1 cap token + CRC32.
         assert_eq!(
             framed.len(),
-            HEADER_SIZE + msg.payload.len()
-                + capability::CAPABILITY_TOKEN_SIZE
-                + CRC32_SIZE
+            HEADER_SIZE + msg.payload.len() + capability::CAPABILITY_TOKEN_SIZE + CRC32_SIZE
         );
 
         let decoded = deframe_message(&framed).expect("deframe should succeed");
@@ -5612,20 +5940,29 @@ mod tests {
         assert_eq!(recovered, &cap, "framed capability must survive deframe");
 
         // The recovered token must still verify.
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
-        let result = capability::verify_capability(recovered, key, 1_500, Some(&resource), &required);
-        assert!(result.is_ok(), "recovered capability must verify: {:?}", result.err());
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        let result =
+            capability::verify_capability(recovered, key, 1_500, Some(&resource), &required);
+        assert!(
+            result.is_ok(),
+            "recovered capability must verify: {:?}",
+            result.err()
+        );
     }
 
-    // ── Wave 12: capability-in-IPC-message roundtrip tests ─────────────
+    // ── Capability-in-IPC-message roundtrip tests ───────────────────
     //
-    // W11 made `CapabilityToken::encode`/`decode` real and added
-    // `grant_capability`/`verify_capability`. The L1 framer already
+    // `CapabilityToken::encode`/`decode` are real and
+    // `grant_capability`/`verify_capability` exist. The L1 framer already
     // serialised `cap_count` (u32 LE) into the fixed header and appended
     // each token's `encode()` bytes after the payload, but it did NOT
     // auto-set the HAS_CAPS flag — the producer had to remember to set
     // it, and a forgetful producer would silently ship capabilities with
-    // the flag cleared. W12 closes that gap: `frame_message` now sets
+    // the flag cleared. `frame_message` now sets
     // HAS_CAPS whenever `msg.capabilities` is non-empty, and the three
     // tests below pin the 0/1/2-capability roundtrip contract that the
     // channel-send/recv runtime helper will rely on.
@@ -5641,7 +5978,11 @@ mod tests {
             1,
             2,
             capability::Resource::File("/etc/vuma/cap1.conf".into()),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
             0,
             1_000,
             2_000,
@@ -5661,9 +6002,7 @@ mod tests {
         // Layout: header + payload + 1 cap token + CRC32.
         assert_eq!(
             framed.len(),
-            HEADER_SIZE + msg.payload.len()
-                + capability::CAPABILITY_TOKEN_SIZE
-                + CRC32_SIZE
+            HEADER_SIZE + msg.payload.len() + capability::CAPABILITY_TOKEN_SIZE + CRC32_SIZE
         );
 
         let decoded = deframe_message(&framed).expect("deframe must succeed");
@@ -5672,16 +6011,28 @@ mod tests {
         assert_eq!(decoded.header.cap_count, 1);
         assert_eq!(decoded.capabilities.len(), 1);
         // Whole-token equality — the strongest round-trip check.
-        assert_eq!(decoded.capabilities[0], cap, "single capability must round-trip exactly");
+        assert_eq!(
+            decoded.capabilities[0], cap,
+            "single capability must round-trip exactly"
+        );
         // HAS_CAPS must have been auto-set by frame_message.
         assert!(decoded.header.flags.contains(MessageFlags::HAS_CAPS));
         // Payload must survive too.
         assert_eq!(decoded.payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
 
         // The recovered token must still verify.
-        let required = capability::MemoryPermissions { read: true, write: false, execute: false };
-        let result = capability::verify_capability(&decoded.capabilities[0], key, 1_500, None, &required);
-        assert!(result.is_ok(), "recovered single capability must verify: {:?}", result.err());
+        let required = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        let result =
+            capability::verify_capability(&decoded.capabilities[0], key, 1_500, None, &required);
+        assert!(
+            result.is_ok(),
+            "recovered single capability must verify: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5721,7 +6072,7 @@ mod tests {
         // verify both tokens survive the round-trip in order,
         // byte-for-byte. This pins the cap_count*CAPABILITY_TOKEN_SIZE
         // slicing arithmetic in deframe_message for the multi-cap case
-        // (the single-cap case is covered by the W11 integration test
+        // (the single-cap case is covered by the integration test
         // above, but there was previously no test exercising >1 cap).
         let key = b"w12-two-caps-key";
         let cap_a = capability::grant_capability(
@@ -5729,7 +6080,11 @@ mod tests {
             1,
             2,
             capability::Resource::Network("10.0.0.1".into(), 443),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
             0,
             5_000,
             10_000,
@@ -5740,7 +6095,11 @@ mod tests {
             3,
             4,
             capability::Resource::Memory(0x1000, 0x2000),
-            capability::MemoryPermissions { read: true, write: false, execute: true },
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: true,
+            },
             1,
             6_000,
             9_000,
@@ -5761,9 +6120,7 @@ mod tests {
         // Layout: header + payload + 2 cap tokens + CRC32.
         assert_eq!(
             framed.len(),
-            HEADER_SIZE + msg.payload.len()
-                + 2 * capability::CAPABILITY_TOKEN_SIZE
-                + CRC32_SIZE
+            HEADER_SIZE + msg.payload.len() + 2 * capability::CAPABILITY_TOKEN_SIZE + CRC32_SIZE
         );
 
         let decoded = deframe_message(&framed).expect("deframe must succeed");
@@ -5772,12 +6129,21 @@ mod tests {
         assert_eq!(decoded.header.cap_count, 2);
         assert_eq!(decoded.capabilities.len(), 2);
         // Both tokens must round-trip exactly, in the order they were framed.
-        assert_eq!(decoded.capabilities[0], cap_a, "first capability must round-trip");
-        assert_eq!(decoded.capabilities[1], cap_b, "second capability must round-trip");
+        assert_eq!(
+            decoded.capabilities[0], cap_a,
+            "first capability must round-trip"
+        );
+        assert_eq!(
+            decoded.capabilities[1], cap_b,
+            "second capability must round-trip"
+        );
         // Different ids / resources confirm we didn't accidentally read the
         // same token twice.
         assert_ne!(decoded.capabilities[0].id, decoded.capabilities[1].id);
-        assert_ne!(decoded.capabilities[0].resource, decoded.capabilities[1].resource);
+        assert_ne!(
+            decoded.capabilities[0].resource,
+            decoded.capabilities[1].resource
+        );
         // HAS_CAPS must be set.
         assert!(decoded.header.flags.contains(MessageFlags::HAS_CAPS));
         // Payload must survive.
@@ -5788,23 +6154,29 @@ mod tests {
         // field. now=7_000 is inside both validity windows
         // ([5_000, 10_000] and [6_000, 9_000]).
         let now = 7_000u64;
-        let required_ro = capability::MemoryPermissions { read: true, write: false, execute: false };
+        let required_ro = capability::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        };
         assert!(
-            capability::verify_capability(&decoded.capabilities[0], key, now, None, &required_ro).is_ok(),
+            capability::verify_capability(&decoded.capabilities[0], key, now, None, &required_ro)
+                .is_ok(),
             "first recovered capability must verify"
         );
         assert!(
-            capability::verify_capability(&decoded.capabilities[1], key, now, None, &required_ro).is_ok(),
+            capability::verify_capability(&decoded.capabilities[1], key, now, None, &required_ro)
+                .is_ok(),
             "second recovered capability must verify"
         );
     }
 
-    // ── W13: MemoryWindow tests ──────────────────────────────────────
+    // ── MemoryWindow tests ──────────────────────────────────────────
 
     #[test]
     fn test_memory_window_grant_is_valid_revoke() {
         // grant → is_valid true → revoke → is_valid false, the canonical
-        // lifecycle the W13 spec calls out. Uses grant_memory so the
+        // lifecycle the spec calls out. Uses grant_memory so the
         // capability_id is a real minted value rather than a hand-rolled
         // zero, and exercises revoke_memory's Result return.
         let perms = capability::MemoryPermissions {
@@ -5926,7 +6298,10 @@ mod tests {
         let encoded = window.encode();
         let decoded = MemoryWindow::decode(&encoded).expect("decode must succeed");
         assert!(decoded.revoked, "revoked flag must survive the wire");
-        assert!(!is_valid(&decoded), "decoded revoked window must be invalid");
+        assert!(
+            !is_valid(&decoded),
+            "decoded revoked window must be invalid"
+        );
     }
 
     #[test]
@@ -5935,7 +6310,11 @@ mod tests {
         // slice indexing inside decode.
         let short = [0u8; MEMORY_WINDOW_SIZE - 1];
         let err = MemoryWindow::decode(&short).expect_err("short buffer must error");
-        assert!(err.contains("too short"), "error must mention truncation, got: {}", err);
+        assert!(
+            err.contains("too short"),
+            "error must mention truncation, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -5958,7 +6337,7 @@ mod tests {
         assert_eq!(decoded.capability_id, window.capability_id);
     }
 
-    // ── W14: ProtocolStateMachine tests ──────────────────────────────
+    // ── ProtocolStateMachine tests ──────────────────────────────────
 
     #[test]
     fn test_protocol_state_machine_valid_transitions() {
@@ -5969,15 +6348,21 @@ mod tests {
         let mut fsm = ProtocolStateMachine::new_protocol();
         assert_eq!(fsm.current_state, ProtocolState::Idle);
 
-        let s = fsm.check_transition(type_hash("send")).expect("send from Idle must be allowed");
+        let s = fsm
+            .check_transition(type_hash("send"))
+            .expect("send from Idle must be allowed");
         assert_eq!(s, ProtocolState::WaitingForSend);
         assert_eq!(fsm.current_state, ProtocolState::WaitingForSend);
 
-        let s = fsm.check_transition(type_hash("sent")).expect("sent from WaitingForSend must be allowed");
+        let s = fsm
+            .check_transition(type_hash("sent"))
+            .expect("sent from WaitingForSend must be allowed");
         assert_eq!(s, ProtocolState::WaitingForRecv);
         assert_eq!(fsm.current_state, ProtocolState::WaitingForRecv);
 
-        let s = fsm.check_transition(type_hash("recv")).expect("recv from WaitingForRecv must be allowed");
+        let s = fsm
+            .check_transition(type_hash("recv"))
+            .expect("recv from WaitingForRecv must be allowed");
         assert_eq!(s, ProtocolState::Idle);
         assert_eq!(fsm.current_state, ProtocolState::Idle);
     }
@@ -6010,7 +6395,9 @@ mod tests {
         );
 
         // The machine is still usable: a legitimate send now must work.
-        let s = fsm.check_transition(type_hash("send")).expect("send from Idle must still work");
+        let s = fsm
+            .check_transition(type_hash("send"))
+            .expect("send from Idle must still work");
         assert_eq!(s, ProtocolState::WaitingForSend);
     }
 
@@ -6063,14 +6450,26 @@ mod tests {
             got: 0x1234,
         };
         let msg = format!("{}", err);
-        assert!(msg.contains("waiting_for_recv"), "msg must mention state tag: {}", msg);
-        assert!(msg.contains("0x1234") || msg.contains("4660"), "msg must mention type hash: {}", msg);
+        assert!(
+            msg.contains("waiting_for_recv"),
+            "msg must mention state tag: {}",
+            msg
+        );
+        assert!(
+            msg.contains("0x1234") || msg.contains("4660"),
+            "msg must mention type hash: {}",
+            msg
+        );
 
         let closed = format!("{}", ProtocolError::Closed);
-        assert!(closed.contains("closed"), "Closed msg must mention closed: {}", closed);
+        assert!(
+            closed.contains("closed"),
+            "Closed msg must mention closed: {}",
+            closed
+        );
     }
 
-    // ── W17-18: ResourceLimits + WorkerSandbox + should_restart ──────
+    // ── ResourceLimits + WorkerSandbox + should_restart ──────────────
 
     #[test]
     fn test_resource_limits_check_passes_within_limits() {
@@ -6109,7 +6508,10 @@ mod tests {
             ipc_messages: 500,
             file_descriptors: 32,
         };
-        assert!(limits.check_limits(&usage), "usage at the ceiling must pass");
+        assert!(
+            limits.check_limits(&usage),
+            "usage at the ceiling must pass"
+        );
     }
 
     #[test]
@@ -6154,7 +6556,10 @@ mod tests {
             ipc_messages: 11,
             ..Default::default()
         };
-        assert!(!limits.check_limits(&usage), "ipc count over budget must fail");
+        assert!(
+            !limits.check_limits(&usage),
+            "ipc count over budget must fail"
+        );
     }
 
     #[test]
@@ -6169,7 +6574,10 @@ mod tests {
             file_descriptors: 5,
             ..Default::default()
         };
-        assert!(!limits.check_limits(&usage), "fd count over budget must fail");
+        assert!(
+            !limits.check_limits(&usage),
+            "fd count over budget must fail"
+        );
     }
 
     #[test]
@@ -6188,32 +6596,53 @@ mod tests {
             ipc_messages: u64::MAX,
             file_descriptors: u64::MAX,
         };
-        assert!(limits.check_limits(&usage), "zero ceilings must mean unlimited");
+        assert!(
+            limits.check_limits(&usage),
+            "zero ceilings must mean unlimited"
+        );
     }
 
     #[test]
     fn test_should_restart_restarts_on_nonzero_exit_code() {
         // exit(n) with n != 0 is a crash — restart (within budget).
-        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
-        assert!(should_restart(&config, 1),   "exit(1) is a crash — restart");
-        assert!(should_restart(&config, 134), "exit(134) (SIGABRT 128+6) — restart");
-        assert!(should_restart(&config, 137), "exit(137) (SIGKILL 128+9) — restart");
-        assert!(should_restart(&config, 139), "exit(139) (SIGSEGV 128+11) — restart");
+        let config = WorkerConfig {
+            max_restarts: 3,
+            ..Default::default()
+        };
+        assert!(should_restart(&config, 1), "exit(1) is a crash — restart");
+        assert!(
+            should_restart(&config, 134),
+            "exit(134) (SIGABRT 128+6) — restart"
+        );
+        assert!(
+            should_restart(&config, 137),
+            "exit(137) (SIGKILL 128+9) — restart"
+        );
+        assert!(
+            should_restart(&config, 139),
+            "exit(139) (SIGSEGV 128+11) — restart"
+        );
     }
 
     #[test]
     fn test_should_restart_restarts_on_signal_death() {
         // waitpid(2) with WIFSIGNALED reports the negated signal number.
-        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 3,
+            ..Default::default()
+        };
         assert!(should_restart(&config, -11), "killed by SIGSEGV — restart");
-        assert!(should_restart(&config, -9),  "killed by SIGKILL — restart");
-        assert!(should_restart(&config, -6),  "killed by SIGABRT — restart");
+        assert!(should_restart(&config, -9), "killed by SIGKILL — restart");
+        assert!(should_restart(&config, -6), "killed by SIGABRT — restart");
     }
 
     #[test]
     fn test_should_restart_does_not_restart_on_clean_exit() {
         // exit(0) means the worker finished its job — never restart.
-        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 3,
+            ..Default::default()
+        };
         assert!(!should_restart(&config, 0), "clean exit must not restart");
     }
 
@@ -6221,10 +6650,19 @@ mod tests {
     fn test_should_restart_disabled_when_max_restarts_zero() {
         // max_restarts == 0 disables the restart policy entirely, even
         // for crashes and signals.
-        let config = WorkerConfig { max_restarts: 0, ..Default::default() };
-        assert!(!should_restart(&config, 0),   "clean exit, no restart");
-        assert!(!should_restart(&config, 1),   "max_restarts=0 disables restart even on crash");
-        assert!(!should_restart(&config, -11), "max_restarts=0 disables restart even on signal");
+        let config = WorkerConfig {
+            max_restarts: 0,
+            ..Default::default()
+        };
+        assert!(!should_restart(&config, 0), "clean exit, no restart");
+        assert!(
+            !should_restart(&config, 1),
+            "max_restarts=0 disables restart even on crash"
+        );
+        assert!(
+            !should_restart(&config, -11),
+            "max_restarts=0 disables restart even on signal"
+        );
     }
 
     #[test]
@@ -6261,10 +6699,17 @@ mod tests {
             ResourceLimits::default(),
         );
         let filter = sandbox.seccomp_filter();
-        assert!(filter.len() >= 16, "filter must have at least LD + KILL ({})", filter.len());
+        assert!(
+            filter.len() >= 16,
+            "filter must have at least LD + KILL ({})",
+            filter.len()
+        );
         assert_eq!(filter.len() % 8, 0, "BPF instructions are 8 bytes each");
         // First instruction opcode: BPF_LD | BPF_W | BPF_ABS == 0x20.
-        assert_eq!(filter[0], 0x20, "filter must start with BPF_LD of seccomp_data.nr");
+        assert_eq!(
+            filter[0], 0x20,
+            "filter must start with BPF_LD of seccomp_data.nr"
+        );
         // Last instruction: BPF_RET | BPF_K (0x06) with SECCOMP_RET_KILL (0).
         let last = filter.len() - 8;
         assert_eq!(filter[last], 0x06, "filter must end with BPF_RET");
@@ -6281,9 +6726,15 @@ mod tests {
         // and last instructions, so the bug was silent.
         // The second instruction (after the LD) is the first JEQ; the one
         // after it (offset 16) is the first RET ALLOW.
-        assert!(filter.len() >= 24, "filter must have at least LD + JEQ + RET_ALLOW");
+        assert!(
+            filter.len() >= 24,
+            "filter must have at least LD + JEQ + RET_ALLOW"
+        );
         let allow_ret = &filter[16..24];
-        assert_eq!(allow_ret[0], 0x06, "ALLOW instruction must be BPF_RET | BPF_K");
+        assert_eq!(
+            allow_ret[0], 0x06,
+            "ALLOW instruction must be BPF_RET | BPF_K"
+        );
         assert_eq!(
             &allow_ret[4..8],
             &[0x00, 0x00, 0xff, 0x7f],
@@ -6298,7 +6749,10 @@ mod tests {
         // generate_seccomp_filter(WorkerConfig) → allowed_syscalls(TrustLevel).
         let mk = |trust: TrustLevel| {
             WorkerSandbox::new(
-                WorkerConfig { trust_level: trust, ..Default::default() },
+                WorkerConfig {
+                    trust_level: trust,
+                    ..Default::default()
+                },
                 ResourceLimits::default(),
             )
             .seccomp_filter()
@@ -6308,9 +6762,18 @@ mod tests {
         let untrusted = mk(TrustLevel::Untrusted);
         let verified = mk(TrustLevel::Verified);
         let kernel = mk(TrustLevel::Kernel);
-        assert!(sandboxed < untrusted, "Sandboxed allows fewer syscalls than Untrusted");
-        assert!(untrusted < verified, "Untrusted allows fewer syscalls than Verified");
-        assert!(verified < kernel, "Verified allows fewer syscalls than Kernel");
+        assert!(
+            sandboxed < untrusted,
+            "Sandboxed allows fewer syscalls than Untrusted"
+        );
+        assert!(
+            untrusted < verified,
+            "Untrusted allows fewer syscalls than Verified"
+        );
+        assert!(
+            verified < kernel,
+            "Verified allows fewer syscalls than Kernel"
+        );
     }
 
     #[test]
@@ -6375,12 +6838,12 @@ mod tests {
         let base = vec![(42u64, 7u64, ProtocolState::Idle)];
         let h0 = checkpoint_state(&base).integrity_hash;
 
-        let h_id   = checkpoint_state(&[(43u64, 7u64, ProtocolState::Idle)]).integrity_hash;
-        let h_seq  = checkpoint_state(&[(42u64, 8u64, ProtocolState::Idle)]).integrity_hash;
+        let h_id = checkpoint_state(&[(43u64, 7u64, ProtocolState::Idle)]).integrity_hash;
+        let h_seq = checkpoint_state(&[(42u64, 8u64, ProtocolState::Idle)]).integrity_hash;
         let h_state = checkpoint_state(&[(42u64, 7u64, ProtocolState::Closed)]).integrity_hash;
 
-        assert_ne!(h_id,    h0, "changing channel_id must change the hash");
-        assert_ne!(h_seq,   h0, "changing sequence must change the hash");
+        assert_ne!(h_id, h0, "changing channel_id must change the hash");
+        assert_ne!(h_seq, h0, "changing sequence must change the hash");
         assert_ne!(h_state, h0, "changing protocol_state must change the hash");
     }
 
@@ -6417,12 +6880,14 @@ mod tests {
             (2u64, 200u64, ProtocolState::WaitingForSend),
         ];
         let mut cp = checkpoint_state(&channels);
-        assert!(restore_state(&cp).is_ok(), "untampered checkpoint must restore");
+        assert!(
+            restore_state(&cp).is_ok(),
+            "untampered checkpoint must restore"
+        );
 
         // Tamper: bump a sequence number without updating the hash.
         cp.channels[1].sequence = 999;
-        let err = restore_state(&cp)
-            .expect_err("tampered sequence must fail restore");
+        let err = restore_state(&cp).expect_err("tampered sequence must fail restore");
         assert_eq!(err, IpcError::CheckpointIntegrityFailed);
     }
 
@@ -6436,8 +6901,7 @@ mod tests {
         let channels = vec![(5u64, 5u64, ProtocolState::Idle)];
         let mut cp = checkpoint_state(&channels);
         cp.channels[0].protocol_state = ProtocolState::Closed;
-        let err = restore_state(&cp)
-            .expect_err("tampered protocol_state must fail restore");
+        let err = restore_state(&cp).expect_err("tampered protocol_state must fail restore");
         assert_eq!(err, IpcError::CheckpointIntegrityFailed);
     }
 
@@ -6447,8 +6911,7 @@ mod tests {
         let channels = vec![(7u64, 3u64, ProtocolState::Idle)];
         let mut cp = checkpoint_state(&channels);
         cp.channels[0].channel_id = 8;
-        let err = restore_state(&cp)
-            .expect_err("tampered channel_id must fail restore");
+        let err = restore_state(&cp).expect_err("tampered channel_id must fail restore");
         assert_eq!(err, IpcError::CheckpointIntegrityFailed);
     }
 
@@ -6462,8 +6925,7 @@ mod tests {
         let channels = vec![(1u64, 1u64, ProtocolState::Idle)];
         let mut cp = checkpoint_state(&channels);
         cp.integrity_hash = [0xFF; 32]; // wrong hash, channels unchanged
-        let err = restore_state(&cp)
-            .expect_err("wrong hash must fail restore");
+        let err = restore_state(&cp).expect_err("wrong hash must fail restore");
         assert_eq!(err, IpcError::CheckpointIntegrityFailed);
     }
 
@@ -6479,8 +6941,7 @@ mod tests {
             sequence: 999,
             protocol_state: ProtocolState::Closed,
         });
-        let err = restore_state(&cp)
-            .expect_err("appended channel must fail restore");
+        let err = restore_state(&cp).expect_err("appended channel must fail restore");
         assert_eq!(err, IpcError::CheckpointIntegrityFailed);
     }
 
@@ -6498,7 +6959,10 @@ mod tests {
             stderr_capture: String::from("segfault at 0x0"),
             timestamp: 1_000,
         };
-        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 3,
+            ..Default::default()
+        };
         assert_eq!(
             handle_worker_error(&err, &config),
             RecoveryAction::Restart,
@@ -6516,7 +6980,10 @@ mod tests {
             stderr_capture: String::new(),
             timestamp: 2_000,
         };
-        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 3,
+            ..Default::default()
+        };
         assert_eq!(
             handle_worker_error(&err, &config),
             RecoveryAction::Terminate,
@@ -6536,7 +7003,10 @@ mod tests {
             stderr_capture: String::from("panic: inventory underflow"),
             timestamp: 3_000,
         };
-        let config = WorkerConfig { max_restarts: 3, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 3,
+            ..Default::default()
+        };
         assert_eq!(
             handle_worker_error(&err, &config),
             RecoveryAction::Escalate,
@@ -6559,7 +7029,10 @@ mod tests {
             stderr_capture: String::from("segfault"),
             timestamp: 4_000,
         };
-        let config = WorkerConfig { max_restarts: 0, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 0,
+            ..Default::default()
+        };
         assert_eq!(
             handle_worker_error(&err, &config),
             RecoveryAction::Escalate,
@@ -6580,7 +7053,10 @@ mod tests {
             stderr_capture: String::from("killed"),
             timestamp: 5_000,
         };
-        let config = WorkerConfig { max_restarts: 5, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 5,
+            ..Default::default()
+        };
         assert_eq!(
             handle_worker_error(&err, &config),
             RecoveryAction::Escalate,
@@ -6600,7 +7076,10 @@ mod tests {
             stderr_capture: String::from("abort"),
             timestamp: 6_000,
         };
-        let config = WorkerConfig { max_restarts: 5, ..Default::default() };
+        let config = WorkerConfig {
+            max_restarts: 5,
+            ..Default::default()
+        };
         assert_eq!(
             handle_worker_error(&err, &config),
             RecoveryAction::Escalate,
@@ -6651,8 +7130,14 @@ mod tests {
         // degenerate case rather than panicking on an empty slice.
         let mut crypto = CryptoState::new([0xAB; 32]);
         let framed = crypto.encrypt(b"");
-        assert_eq!(framed.len(), 12, "empty-plaintext frame = nonce(8) + tag(4)");
-        let recovered = crypto.decrypt(&framed).expect("empty roundtrip must succeed");
+        assert_eq!(
+            framed.len(),
+            12,
+            "empty-plaintext frame = nonce(8) + tag(4)"
+        );
+        let recovered = crypto
+            .decrypt(&framed)
+            .expect("empty roundtrip must succeed");
         assert!(recovered.is_empty());
     }
 
@@ -6782,7 +7267,9 @@ mod tests {
         let mut enc = CryptoState::new([0xAA; 32]);
         let dec = CryptoState::new([0xBB; 32]);
         let framed = enc.encrypt(b"secret");
-        let recovered = dec.decrypt(&framed).expect("tag verifies (it covers ct, not key)");
+        let recovered = dec
+            .decrypt(&framed)
+            .expect("tag verifies (it covers ct, not key)");
         assert_ne!(
             recovered, b"secret",
             "wrong key must NOT recover the plaintext — pins the documented weakness"
@@ -6804,7 +7291,7 @@ mod tests {
         assert_eq!(recovered, b"alias check");
     }
 
-    // ── W25-32: FFI process isolation tests ───────────────────────────
+    // ── FFI process isolation tests ─────────────────────────────────
 
     #[test]
     fn test_ffi_call_marshal_unmarshal_roundtrip() {
@@ -6820,8 +7307,7 @@ mod tests {
         let len = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
         assert_eq!(len as usize, 4);
         let hash = u64::from_le_bytes([
-            frame[4], frame[5], frame[6], frame[7],
-            frame[8], frame[9], frame[10], frame[11],
+            frame[4], frame[5], frame[6], frame[7], frame[8], frame[9], frame[10], frame[11],
         ]);
         assert_eq!(hash, 0xCAFEBABE);
 
@@ -6911,9 +7397,7 @@ mod tests {
         // The is_ffi() predicate is the routing hook a later wave uses
         // to distinguish FfiWorkerConfig from WorkerConfig through a
         // shared trait — it must be unconditionally true.
-        let cfg = FfiWorkerConfig::new(
-            "/lib/libx.so", "f", TrustLevel::Untrusted, 1, 100,
-        );
+        let cfg = FfiWorkerConfig::new("/lib/libx.so", "f", TrustLevel::Untrusted, 1, 100);
         assert!(cfg.is_ffi());
     }
 
@@ -6924,8 +7408,11 @@ mod tests {
         // child calls sandbox_config.apply() before exec(). Sandboxed
         // → exit-only syscalls → shortest possible filter.
         let cfg = FfiWorkerConfig::new(
-            "/lib/libpriv.so", "foreign_privileged",
-            TrustLevel::Sandboxed, 1, 100,
+            "/lib/libpriv.so",
+            "foreign_privileged",
+            TrustLevel::Sandboxed,
+            1,
+            100,
         );
         assert_eq!(cfg.sandbox_config.config.trust_level, TrustLevel::Sandboxed);
         assert_eq!(cfg.sandbox_config.config.max_restarts, 1);
@@ -6944,8 +7431,11 @@ mod tests {
         // calls fail with WorkerCrashed.
         let mut life = FfiWorkerLifecycle::new();
         let config = FfiWorkerConfig::new(
-            "/lib/libfoo.so", "foreign_add",
-            TrustLevel::Untrusted, 3, 1_000,
+            "/lib/libfoo.so",
+            "foreign_add",
+            TrustLevel::Untrusted,
+            3,
+            1_000,
         );
 
         let pid = life.spawn_ffi_worker(&config).expect("spawn");
@@ -7011,8 +7501,11 @@ mod tests {
         // MaxRestartsExceeded.
         let mut life = FfiWorkerLifecycle::new();
         let config = FfiWorkerConfig::new(
-            "/lib/libcrash.so", "foreign_crashy",
-            TrustLevel::Sandboxed, 2, 500,
+            "/lib/libcrash.so",
+            "foreign_crashy",
+            TrustLevel::Sandboxed,
+            2,
+            500,
         );
 
         let pid0 = life.spawn_ffi_worker(&config).expect("spawn");
@@ -7037,7 +7530,11 @@ mod tests {
         // Third restart exceeds max_restarts=2.
         life.kill_ffi_worker(pid2).expect("kill");
         let err = life.restart_ffi_worker(&config).unwrap_err();
-        assert!(matches!(err, IpcError::MaxRestartsExceeded), "got {:?}", err);
+        assert!(
+            matches!(err, IpcError::MaxRestartsExceeded),
+            "got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -7047,8 +7544,11 @@ mod tests {
         // workers it has previously tracked.
         let mut life = FfiWorkerLifecycle::new();
         let config = FfiWorkerConfig::new(
-            "/lib/never_spawned.so", "f",
-            TrustLevel::Untrusted, 3, 1_000,
+            "/lib/never_spawned.so",
+            "f",
+            TrustLevel::Untrusted,
+            3,
+            1_000,
         );
         let err = life.restart_ffi_worker(&config).unwrap_err();
         assert!(matches!(err, IpcError::WorkerNotFound), "got {:?}", err);
@@ -7075,7 +7575,7 @@ mod tests {
         assert!(life.is_alive(pid_b));
     }
 
-    // ── Wave 33–40: Capability delegation chains & propagation ────────
+    // ── Capability delegation chains & propagation ────────
 
     /// Helper: mint a synthetic token with arbitrary fields. Used by
     /// the chain-verification tests where we need to construct chains
@@ -7083,12 +7583,7 @@ mod tests {
     /// signature is left zeroed — `verify_delegation_chain` checks
     /// structural linkage, not signature validity, so a zero sig is
     /// fine for these tests.
-    fn synth_chain_token(
-        id: u128,
-        src: u64,
-        tgt: u64,
-        depth: u8,
-    ) -> capability::CapabilityToken {
+    fn synth_chain_token(id: u128, src: u64, tgt: u64, depth: u8) -> capability::CapabilityToken {
         capability::CapabilityToken {
             id,
             source_pid: src,
@@ -7116,23 +7611,46 @@ mod tests {
         let mut set = capability::CapabilitySet::new();
 
         let a = capability::grant_capability(
-            1001, 1, 2,
+            1001,
+            1,
+            2,
             capability::Resource::Memory(0x1000, 0x1000),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         set.grant(a.clone());
 
-        let b = set.delegate(
-            a.id, 3,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            &key,
-        ).expect("delegate A→B");
-        let c = set.delegate(
-            b.id, 4,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            &key,
-        ).expect("delegate B→C");
+        let b = set
+            .delegate(
+                a.id,
+                3,
+                capability::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                &key,
+            )
+            .expect("delegate A→B");
+        let c = set
+            .delegate(
+                b.id,
+                4,
+                capability::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                &key,
+            )
+            .expect("delegate B→C");
 
         // delegate() must produce a real child: depth+1, source = parent's target.
         assert_eq!(b.delegation_depth, a.delegation_depth + 1);
@@ -7191,7 +7709,8 @@ mod tests {
         assert!(
             leaf.delegation_depth > depth_cap,
             "test setup: leaf depth {} must exceed MAX {}",
-            leaf.delegation_depth, depth_cap
+            leaf.delegation_depth,
+            depth_cap
         );
         assert!(
             !capability::verify_delegation_chain(&leaf, &chain),
@@ -7252,22 +7771,45 @@ mod tests {
         let mut set = capability::CapabilitySet::new();
 
         let a = capability::grant_capability(
-            2001, 1, 2,
+            2001,
+            1,
+            2,
             capability::Resource::Memory(0x2000, 0x1000),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         set.grant(a.clone());
-        let b = set.delegate(
-            a.id, 3,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            &key,
-        ).expect("delegate A→B");
-        let c = set.delegate(
-            b.id, 4,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            &key,
-        ).expect("delegate B→C");
+        let b = set
+            .delegate(
+                a.id,
+                3,
+                capability::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                &key,
+            )
+            .expect("delegate A→B");
+        let c = set
+            .delegate(
+                b.id,
+                4,
+                capability::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                &key,
+            )
+            .expect("delegate B→C");
 
         // Sanity: none revoked yet.
         assert!(!set.is_revoked(a.id));
@@ -7302,10 +7844,19 @@ mod tests {
         let key = [0xABu8; 32];
         let mut set = capability::CapabilitySet::new();
         let a = capability::grant_capability(
-            3001, 1, 2,
+            3001,
+            1,
+            2,
             capability::Resource::Channel(42),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         set.grant(a.clone());
 
@@ -7330,10 +7881,19 @@ mod tests {
         // Revoking a leaf with no children returns just the leaf.
         let mut set2 = capability::CapabilitySet::new();
         let leaf = capability::grant_capability(
-            4001, 5, 6,
+            4001,
+            5,
+            6,
             capability::Resource::Channel(7),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         set2.grant(leaf.clone());
         let r2 = set2.revoke_with_propagation(leaf.id);
@@ -7346,16 +7906,34 @@ mod tests {
         // pid 1; pid 2 unaffected; unknown pid returns empty slice.
         let key = [0x11u8; 32];
         let token_a = capability::grant_capability(
-            5001, 100, 1,
+            5001,
+            100,
+            1,
             capability::Resource::Channel(1),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         let token_b = capability::grant_capability(
-            5002, 100, 2,
+            5002,
+            100,
+            2,
             capability::Resource::Channel(2),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
 
         let mut reg = CapabilityRegistry::new();
@@ -7379,7 +7957,8 @@ mod tests {
         );
         // pid 2 unaffected.
         assert_eq!(
-            reg.get_process_capabilities(2), &[token_b.id],
+            reg.get_process_capabilities(2),
+            &[token_b.id],
             "pid 2 must be unaffected by pid 1's revoke"
         );
 
@@ -7400,16 +7979,34 @@ mod tests {
         // aliases of a single id.
         let key = [0x22u8; 32];
         let t1 = capability::grant_capability(
-            6001, 0, 7,
+            6001,
+            0,
+            7,
             capability::Resource::Channel(1),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         let t2 = capability::grant_capability(
-            6002, 0, 7,
+            6002,
+            0,
+            7,
             capability::Resource::Channel(2),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
 
         let mut reg = CapabilityRegistry::new();
@@ -7442,26 +8039,49 @@ mod tests {
         // pid 1 grants to pid 2 (root A). pid 2 delegates to pid 3 (B).
         // pid 3 delegates to pid 4 (C).
         let a = capability::grant_capability(
-            7001, 1, 2,
+            7001,
+            1,
+            2,
             capability::Resource::Channel(1),
-            capability::MemoryPermissions { read: true, write: true, execute: false },
-            0, 1_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+            },
+            0,
+            1_000,
+            10_000,
+            &key,
         );
         set.grant(a.clone());
         reg.grant_to_process(2, &a);
 
-        let b = set.delegate(
-            a.id, 3,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            &key,
-        ).expect("delegate A→B");
+        let b = set
+            .delegate(
+                a.id,
+                3,
+                capability::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                &key,
+            )
+            .expect("delegate A→B");
         reg.grant_to_process(3, &b);
 
-        let c = set.delegate(
-            b.id, 4,
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            &key,
-        ).expect("delegate B→C");
+        let c = set
+            .delegate(
+                b.id,
+                4,
+                capability::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                },
+                &key,
+            )
+            .expect("delegate B→C");
         reg.grant_to_process(4, &c);
 
         // Revoke A; propagation pulls in B and C.
@@ -7490,7 +8110,7 @@ mod tests {
         assert!(!set.verify(&c, 1_500));
     }
 
-    // ── W41-48: Kernel/User Split tests ──────────────────────────────
+    // ── Kernel/User Split tests ──────────────────────────────────────
 
     #[test]
     fn test_kernel_process_handle_syscall_returns_value() {
@@ -7529,14 +8149,23 @@ mod tests {
             1, // issuer = kernel pid
             7, // target = caller pid
             capability::Resource::Channel(42),
-            capability::MemoryPermissions { read: true, write: false, execute: false },
-            0, 5_000, 10_000, &key,
+            capability::MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+            },
+            0,
+            5_000,
+            10_000,
+            &key,
         );
         let mut k = KernelProcess::new(1, "kernel");
         k.capabilities.grant_to_process(7, &token);
 
         // Now pid 7 is a known capability holder — syscall allowed.
-        let rc = k.handle_syscall(7, 0, &[]).expect("capability holder must be allowed");
+        let rc = k
+            .handle_syscall(7, 0, &[])
+            .expect("capability holder must be allowed");
         assert_eq!(rc, 0, "mock return for nr=0 must be 0");
     }
 
@@ -7561,7 +8190,10 @@ mod tests {
         assert_eq!(u.pid, 1001);
         assert_eq!(u.parent_pid, 1);
         assert_eq!(u.trust_level, TrustLevel::Untrusted);
-        assert!(u.capabilities.is_empty(), "fresh process has no capabilities");
+        assert!(
+            u.capabilities.is_empty(),
+            "fresh process has no capabilities"
+        );
         assert!(
             u.check_resources(),
             "fresh user process with zero usage must be within limits"
@@ -7609,14 +8241,14 @@ mod tests {
         assert_eq!(acct.tracked_count(), 0, "fresh account tracks no pids");
 
         acct.account_cpu(7, 100);
-        acct.account_cpu(7, 50);   // accumulate → 150
+        acct.account_cpu(7, 50); // accumulate → 150
         acct.account_memory(7, 4096);
         acct.account_memory(7, 2048); // high-water → stays 4096
         acct.account_memory(7, 8192); // high-water → grows to 8192
         acct.account_ipc(7);
         acct.account_ipc(7);
-        acct.account_ipc(7);       // 3 IPC messages
-        acct.account_fd(7);        // 1 FD
+        acct.account_ipc(7); // 3 IPC messages
+        acct.account_fd(7); // 1 FD
 
         let usage = acct.get_usage(7);
         assert_eq!(usage.cpu_time_ms, 150, "cpu_time must accumulate");
@@ -7631,8 +8263,16 @@ mod tests {
 
         // Different pids are tracked independently.
         acct.account_cpu(8, 200);
-        assert_eq!(acct.get_usage(8).cpu_time_ms, 200, "pid 8 tracked separately");
-        assert_eq!(acct.get_usage(7).cpu_time_ms, 150, "pid 7 must be untouched");
+        assert_eq!(
+            acct.get_usage(8).cpu_time_ms,
+            200,
+            "pid 8 tracked separately"
+        );
+        assert_eq!(
+            acct.get_usage(7).cpu_time_ms,
+            150,
+            "pid 7 must be untouched"
+        );
         assert_eq!(acct.tracked_count(), 2, "two pids now tracked");
     }
 
@@ -7693,13 +8333,14 @@ mod tests {
         // kill_user never touches the kernel slot.
         let err = table.kill_user(1).unwrap_err();
         assert_eq!(
-            err, IpcError::WorkerNotFound,
+            err,
+            IpcError::WorkerNotFound,
             "kill_user on kernel pid must fail (kernel is not a user)"
         );
         assert!(table.kernel.is_some(), "kernel slot must survive kill_user");
     }
 
-    // ── W49-56: Driver isolation tests ────────────────────────────────
+    // ── Driver isolation tests ────────────────────────────────────────
 
     #[test]
     fn test_dma_buffer_is_valid() {
@@ -7708,13 +8349,19 @@ mod tests {
         assert!(good.is_valid());
 
         // Each of these is invalid: zero addr, zero size, or overflow.
-        assert!(!DmaBuffer::new(0, 0x1000, DmaDirection::ToDev).is_valid(),
-            "zero base address must be invalid (null-DMA guard)");
-        assert!(!DmaBuffer::new(0x1000, 0, DmaDirection::ToDev).is_valid(),
-            "zero size must be invalid");
+        assert!(
+            !DmaBuffer::new(0, 0x1000, DmaDirection::ToDev).is_valid(),
+            "zero base address must be invalid (null-DMA guard)"
+        );
+        assert!(
+            !DmaBuffer::new(0x1000, 0, DmaDirection::ToDev).is_valid(),
+            "zero size must be invalid"
+        );
         // addr + size overflow: u64::MAX + 1 wraps.
-        assert!(!DmaBuffer::new(u64::MAX, 1, DmaDirection::ToDev).is_valid(),
-            "addr+size overflow must be invalid");
+        assert!(
+            !DmaBuffer::new(u64::MAX, 1, DmaDirection::ToDev).is_valid(),
+            "addr+size overflow must be invalid"
+        );
 
         // Direction does not affect validity.
         assert!(DmaBuffer::new(0x2000, 0x800, DmaDirection::FromDev).is_valid());
@@ -7733,8 +8380,11 @@ mod tests {
             vec![DmaBuffer::new(0x8000, 0x4000, DmaDirection::Bidirectional)],
             TrustLevel::Kernel,
         );
-        assert_eq!(cfg.trust_level, TrustLevel::Untrusted,
-            "driver trust_level must be pinned to Untrusted");
+        assert_eq!(
+            cfg.trust_level,
+            TrustLevel::Untrusted,
+            "driver trust_level must be pinned to Untrusted"
+        );
         assert_eq!(cfg.driver_name, "nvme");
         assert_eq!(cfg.device_path, "/dev/nvme0");
         assert_eq!(cfg.mmio_regions.len(), 1);
@@ -7746,7 +8396,11 @@ mod tests {
     #[test]
     fn test_driver_worker_start_stop_state_machine() {
         let cfg = DriverWorkerConfig::new(
-            "eth0", "/dev/eth0", vec![], vec![], vec![],
+            "eth0",
+            "/dev/eth0",
+            vec![],
+            vec![],
+            vec![],
             TrustLevel::Untrusted,
         );
         let mut w = DriverWorker::new(cfg);
@@ -7759,8 +8413,11 @@ mod tests {
 
         // second start → Err (already running)
         let err = w.start().unwrap_err();
-        assert_eq!(err, IpcError::WorkerAlreadyRunning,
-            "double-start must fail with WorkerAlreadyRunning");
+        assert_eq!(
+            err,
+            IpcError::WorkerAlreadyRunning,
+            "double-start must fail with WorkerAlreadyRunning"
+        );
 
         // stop → Ok, is_running = false
         w.stop().expect("stop after start must succeed");
@@ -7768,14 +8425,18 @@ mod tests {
 
         // second stop → Err (not running)
         let err = w.stop().unwrap_err();
-        assert_eq!(err, IpcError::WorkerNotRunning,
-            "double-stop must fail with WorkerNotRunning");
+        assert_eq!(
+            err,
+            IpcError::WorkerNotRunning,
+            "double-stop must fail with WorkerNotRunning"
+        );
     }
 
     #[test]
     fn test_driver_worker_handle_irq_dispatch_and_reject() {
         let cfg = DriverWorkerConfig::new(
-            "uart", "/dev/ttyS0",
+            "uart",
+            "/dev/ttyS0",
             vec![(0xFE00_0000, 0x1000)],
             vec![4, 5], // registered IRQ vectors
             vec![],
@@ -7785,37 +8446,52 @@ mod tests {
 
         // Worker stopped → IRQ dispatch must fail (nobody to dispatch to).
         let err = w.handle_irq(4).unwrap_err();
-        assert_eq!(err, IpcError::WorkerNotRunning,
-            "IRQ on stopped worker must fail");
+        assert_eq!(
+            err,
+            IpcError::WorkerNotRunning,
+            "IRQ on stopped worker must fail"
+        );
 
         // Start the worker, then dispatch a registered vector.
         w.start().expect("start");
-        w.handle_irq(4).expect("registered IRQ on running worker must dispatch");
-        w.handle_irq(5).expect("second registered IRQ must dispatch");
+        w.handle_irq(4)
+            .expect("registered IRQ on running worker must dispatch");
+        w.handle_irq(5)
+            .expect("second registered IRQ must dispatch");
 
         // Unregistered vector → IrqNotRegistered.
         let err = w.handle_irq(99).unwrap_err();
-        assert_eq!(err, IpcError::IrqNotRegistered(99),
-            "unregistered IRQ vector must be rejected");
+        assert_eq!(
+            err,
+            IpcError::IrqNotRegistered(99),
+            "unregistered IRQ vector must be rejected"
+        );
 
         // Stop the worker → IRQ dispatch must fail again.
         w.stop().expect("stop");
         let err = w.handle_irq(4).unwrap_err();
-        assert_eq!(err, IpcError::WorkerNotRunning,
-            "IRQ on stopped worker must fail");
+        assert_eq!(
+            err,
+            IpcError::WorkerNotRunning,
+            "IRQ on stopped worker must fail"
+        );
     }
 
-    // ── W57-64: Sandboxing tests ─────────────────────────────────────
+    // ── Sandboxing tests ─────────────────────────────────────────────
 
     #[test]
     fn test_sandboxed_worker_default_zero_capability() {
         let w = SandboxedWorker::new(4242);
         assert!(w.is_sandboxed(), "is_sandboxed() must always be true");
         assert_eq!(w.worker_pid, 4242);
-        assert!(w.capabilities.is_empty(),
-            "fresh worker must have zero capabilities");
-        assert!(w.plugin_path.is_none(),
-            "fresh worker must have no plugin path");
+        assert!(
+            w.capabilities.is_empty(),
+            "fresh worker must have zero capabilities"
+        );
+        assert!(
+            w.plugin_path.is_none(),
+            "fresh worker must have no plugin path"
+        );
 
         // has_capability on empty set: always false.
         assert!(!w.has_capability(0));
@@ -7839,8 +8515,11 @@ mod tests {
 
         // Re-granting an existing capability is idempotent.
         w.grant_capability(0xDEAD_BEEF);
-        assert_eq!(w.capabilities.len(), 2,
-            "re-granting existing capability must not duplicate");
+        assert_eq!(
+            w.capabilities.len(),
+            2,
+            "re-granting existing capability must not duplicate"
+        );
     }
 
     #[test]
@@ -7856,7 +8535,8 @@ mod tests {
         assert!(!p.is_over_limit());
 
         // Feed another 8 bytes — exactly at limit.
-        p.feed(&[0u8; 8]).expect("feed exactly to limit must succeed");
+        p.feed(&[0u8; 8])
+            .expect("feed exactly to limit must succeed");
         assert_eq!(p.input_buffer.len(), 16);
         assert!(p.is_over_limit(), "at-limit must report over_limit");
     }
@@ -7871,21 +8551,31 @@ mod tests {
         // Feed 8 more bytes — would push to 12, over limit. Must reject
         // AND leave the buffer untouched (4 bytes).
         let err = p.feed(&[0u8; 8]).unwrap_err();
-        assert!(matches!(err, IpcError::PayloadTooLarge(8)),
-            "over-limit feed must return PayloadTooLarge(limit), got {:?}", err);
-        assert_eq!(p.input_buffer.len(), 4,
-            "rejected feed must not mutate the buffer");
+        assert!(
+            matches!(err, IpcError::PayloadTooLarge(8)),
+            "over-limit feed must return PayloadTooLarge(limit), got {:?}",
+            err
+        );
+        assert_eq!(
+            p.input_buffer.len(),
+            4,
+            "rejected feed must not mutate the buffer"
+        );
 
         // Feed exactly 4 more — at limit, ok.
-        p.feed(&[0u8; 4]).expect("feed exactly to limit must succeed");
+        p.feed(&[0u8; 4])
+            .expect("feed exactly to limit must succeed");
         assert_eq!(p.input_buffer.len(), 8);
         assert!(p.is_over_limit());
 
         // One more byte → over limit, rejected.
         let err = p.feed(&[1u8; 1]).unwrap_err();
         assert!(matches!(err, IpcError::PayloadTooLarge(8)));
-        assert_eq!(p.input_buffer.len(), 8,
-            "rejected feed must not mutate the buffer");
+        assert_eq!(
+            p.input_buffer.len(),
+            8,
+            "rejected feed must not mutate the buffer"
+        );
     }
 
     #[test]
@@ -7899,7 +8589,10 @@ mod tests {
         let h = c.hash(b"hello").expect("hash within limit must succeed");
         assert_eq!(h.len(), 4, "mock hash must be 4-byte CRC32");
         let expected = crc32(b"hello").to_le_bytes();
-        assert_eq!(h, expected, "mock hash must match crc32(data).to_le_bytes()");
+        assert_eq!(
+            h, expected,
+            "mock hash must match crc32(data).to_le_bytes()"
+        );
 
         // Determinism: same input → same hash.
         let h2 = c.hash(b"hello").expect("second hash must succeed");
@@ -7920,12 +8613,17 @@ mod tests {
 
         // Over limit: rejected, no hash computed.
         let err = c.hash(&[0u8; 5]).unwrap_err();
-        assert!(matches!(err, IpcError::PayloadTooLarge(4)),
-            "over-limit hash must return PayloadTooLarge(limit), got {:?}", err);
+        assert!(
+            matches!(err, IpcError::PayloadTooLarge(4)),
+            "over-limit hash must return PayloadTooLarge(limit), got {:?}",
+            err
+        );
 
         // Empty input is always within any non-negative limit (0 > 0 is false).
         let c2 = SandboxedCrypto::new("aes128", 0);
-        let h = c2.hash(b"").expect("empty input must succeed even at limit 0");
+        let h = c2
+            .hash(b"")
+            .expect("empty input must succeed even at limit 0");
         assert_eq!(h, crc32(b"").to_le_bytes());
 
         // Non-empty input at limit 0: rejected.
@@ -7933,7 +8631,7 @@ mod tests {
         assert!(matches!(err, IpcError::PayloadTooLarge(0)));
     }
 
-    // ── W65-72: Supervisor + CircuitBreaker tests ───────────────────
+    // ── Supervisor + CircuitBreaker tests ───────────────────────────
 
     #[test]
     fn test_worker_state_new_is_alive_with_zero_history() {
@@ -7973,8 +8671,11 @@ mod tests {
         // Unregistering an unknown pid is a WorkerNotFound error, not
         // a silent no-op — the supervisor's bookkeeping is strict.
         let err = sup.unregister_worker(999).unwrap_err();
-        assert!(matches!(err, IpcError::WorkerNotFound),
-            "unregister unknown pid must be WorkerNotFound, got {:?}", err);
+        assert!(
+            matches!(err, IpcError::WorkerNotFound),
+            "unregister unknown pid must be WorkerNotFound, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -7986,8 +8687,7 @@ mod tests {
         sup.register_worker(42);
 
         let action = sup.handle_worker_exit(42, 0, 0).expect("clean exit");
-        assert_eq!(action, RecoveryAction::Terminate,
-            "exit(0) must Terminate");
+        assert_eq!(action, RecoveryAction::Terminate, "exit(0) must Terminate");
 
         let state = sup.workers.get(&42).expect("worker still tracked");
         assert!(!state.is_alive, "clean-exit worker is dead");
@@ -8027,8 +8727,11 @@ mod tests {
 
         // Crash #4: budget exhausted → Escalate, worker stays dead.
         let a4 = sup.handle_worker_exit(7, 139, 11).expect("crash #4");
-        assert_eq!(a4, RecoveryAction::Escalate,
-            "crash #4 with exhausted budget must Escalate");
+        assert_eq!(
+            a4,
+            RecoveryAction::Escalate,
+            "crash #4 with exhausted budget must Escalate"
+        );
         let s = sup.workers.get(&7).unwrap();
         assert_eq!(s.restart_count, 3, "escalate does not consume budget");
         assert!(!s.is_alive, "escalated worker stays dead");
@@ -8041,8 +8744,11 @@ mod tests {
         // state-machine bug — WorkerNotFound, not a silent no-op.
         let mut sup = Supervisor::new(3, 1_000);
         let err = sup.handle_worker_exit(404, 1, 0).unwrap_err();
-        assert!(matches!(err, IpcError::WorkerNotFound),
-            "exit for unknown pid must be WorkerNotFound, got {:?}", err);
+        assert!(
+            matches!(err, IpcError::WorkerNotFound),
+            "exit for unknown pid must be WorkerNotFound, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -8053,8 +8759,11 @@ mod tests {
         sup.register_worker(11);
 
         let action = sup.handle_worker_exit(11, 139, 11).expect("escalate");
-        assert_eq!(action, RecoveryAction::Escalate,
-            "max_restarts == 0 must Escalate on crash");
+        assert_eq!(
+            action,
+            RecoveryAction::Escalate,
+            "max_restarts == 0 must Escalate on crash"
+        );
 
         let s = sup.workers.get(&11).unwrap();
         assert_eq!(s.restart_count, 0, "no restart consumed");
@@ -8136,7 +8845,7 @@ mod tests {
         let mut cb = CircuitBreaker::new(1);
         cb.record_failure();
         cb.record_failure(); // Open
-        cb.reset();          // HalfOpen
+        cb.reset(); // HalfOpen
         assert_eq!(cb.state, CircuitState::HalfOpen);
 
         cb.record_failure();
@@ -8152,7 +8861,7 @@ mod tests {
         let mut cb = CircuitBreaker::new(1);
         cb.record_failure();
         cb.record_failure(); // Open
-        cb.reset();          // HalfOpen
+        cb.reset(); // HalfOpen
 
         cb.record_success();
         assert_eq!(cb.state, CircuitState::Closed, "HalfOpen success closes");
@@ -8160,7 +8869,7 @@ mod tests {
         assert!(cb.can_proceed());
     }
 
-    // ── W73-80: HotSwapConfig / HotSwapResult / HotSwapManager tests ──
+    // ── HotSwapConfig / HotSwapResult / HotSwapManager tests ──────────
 
     #[test]
     fn test_hot_swap_config_new_round_trips_fields() {
@@ -8190,8 +8899,11 @@ mod tests {
         assert!(result.state_transferred, "state_transfer=true echoes");
         assert!(result.error.is_none());
 
-        assert_eq!(mgr.active_versions.get("net.tls"), Some(&2),
-            "active_versions must record the new version");
+        assert_eq!(
+            mgr.active_versions.get("net.tls"),
+            Some(&2),
+            "active_versions must record the new version"
+        );
     }
 
     #[test]
@@ -8203,10 +8915,15 @@ mod tests {
         let cfg = HotSwapConfig::new("net.tls", 5, 4, false, false);
 
         let err = mgr.perform_swap(&cfg).unwrap_err();
-        assert!(matches!(err, IpcError::ProtocolViolation { .. }),
-            "downgrade must be ProtocolViolation, got {:?}", err);
-        assert!(!mgr.active_versions.contains_key("net.tls"),
-            "rejected swap must not mutate active_versions");
+        assert!(
+            matches!(err, IpcError::ProtocolViolation { .. }),
+            "downgrade must be ProtocolViolation, got {:?}",
+            err
+        );
+        assert!(
+            !mgr.active_versions.contains_key("net.tls"),
+            "rejected swap must not mutate active_versions"
+        );
     }
 
     #[test]
@@ -8220,10 +8937,16 @@ mod tests {
         // Caller thinks old_version is 1, but manager recorded 3.
         let cfg = HotSwapConfig::new("net.tls", 1, 2, false, false);
         let err = mgr.perform_swap(&cfg).unwrap_err();
-        assert!(matches!(err, IpcError::ProtocolViolation { .. }),
-            "stale old_version must be ProtocolViolation, got {:?}", err);
-        assert_eq!(mgr.active_versions.get("net.tls"), Some(&3),
-            "rejected swap must not bump the version");
+        assert!(
+            matches!(err, IpcError::ProtocolViolation { .. }),
+            "stale old_version must be ProtocolViolation, got {:?}",
+            err
+        );
+        assert_eq!(
+            mgr.active_versions.get("net.tls"),
+            Some(&3),
+            "rejected swap must not bump the version"
+        );
     }
 
     #[test]
@@ -8253,8 +8976,11 @@ mod tests {
         assert_eq!(mgr.active_versions.get("mod"), Some(&2));
 
         mgr.rollback(&cfg).expect("rollback");
-        assert_eq!(mgr.active_versions.get("mod"), Some(&1),
-            "rollback reverts active version to old_version");
+        assert_eq!(
+            mgr.active_versions.get("mod"),
+            Some(&1),
+            "rollback reverts active version to old_version"
+        );
     }
 
     #[test]
@@ -8265,8 +8991,11 @@ mod tests {
         let mut mgr = HotSwapManager::new();
         let cfg = HotSwapConfig::new("never_loaded", 1, 2, false, false);
         let err = mgr.rollback(&cfg).unwrap_err();
-        assert!(matches!(err, IpcError::WorkerNotFound),
-            "rollback unknown module must be WorkerNotFound, got {:?}", err);
+        assert!(
+            matches!(err, IpcError::WorkerNotFound),
+            "rollback unknown module must be WorkerNotFound, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -8291,7 +9020,7 @@ mod tests {
         assert_eq!(r.error.as_deref(), Some("post-swap health check failed"));
     }
 
-    // ── W81-88: DistributedChannel + WorkerDiscovery tests ───────────
+    // ── DistributedChannel + WorkerDiscovery tests ───────────────────
 
     #[test]
     fn test_distributed_channel_new_starts_disconnected() {
@@ -8327,16 +9056,22 @@ mod tests {
 
         // Double-connect is rejected.
         let err = ch.connect().unwrap_err();
-        assert!(matches!(err, IpcError::ChannelTimeout),
-            "double-connect must be ChannelTimeout, got {:?}", err);
+        assert!(
+            matches!(err, IpcError::ChannelTimeout),
+            "double-connect must be ChannelTimeout, got {:?}",
+            err
+        );
 
         ch.disconnect().expect("disconnect");
         assert!(!ch.is_connected());
 
         // Double-disconnect is rejected.
         let err = ch.disconnect().unwrap_err();
-        assert!(matches!(err, IpcError::ChannelClosed),
-            "double-disconnect must be ChannelClosed, got {:?}", err);
+        assert!(
+            matches!(err, IpcError::ChannelClosed),
+            "double-disconnect must be ChannelClosed, got {:?}",
+            err
+        );
 
         // Re-connect after disconnect works (the cycle is reusable).
         ch.connect().expect("reconnect");
@@ -8392,8 +9127,11 @@ mod tests {
         assert_eq!(wd.lookup(42).as_deref(), Some("old:1000"));
 
         wd.register(42, "new:2000");
-        assert_eq!(wd.lookup(42).as_deref(), Some("new:2000"),
-            "re-register updates the address");
+        assert_eq!(
+            wd.lookup(42).as_deref(),
+            Some("new:2000"),
+            "re-register updates the address"
+        );
         assert_eq!(wd.len(), 1, "re-register does not duplicate");
     }
 
@@ -8409,7 +9147,7 @@ mod tests {
         assert_eq!(wd.lookup(1), None);
     }
 
-    // ── CT1: Session Types (W89-90) ──────────────────────────────────
+    // ── Session Types ──────────────────────────────────────────────
 
     #[test]
     fn test_session_type_dual_send_recv_swap() {
@@ -8434,8 +9172,8 @@ mod tests {
         assert_eq!(
             d,
             SessionType::Choice(
-                Box::new(a.dual()),   // Recv(1, End)
-                Box::new(b.dual()),   // Send(2, End)
+                Box::new(a.dual()), // Recv(1, End)
+                Box::new(b.dual()), // Send(2, End)
             ),
             "Choice dual maps each arm in place"
         );
@@ -8459,7 +9197,10 @@ mod tests {
         let cases = vec![
             SessionType::End,
             SessionType::Send(1, Box::new(SessionType::End)),
-            SessionType::Recv(2, Box::new(SessionType::Send(3, Box::new(SessionType::End)))),
+            SessionType::Recv(
+                2,
+                Box::new(SessionType::Send(3, Box::new(SessionType::End))),
+            ),
             SessionType::Choice(
                 Box::new(SessionType::Send(4, Box::new(SessionType::End))),
                 Box::new(SessionType::Recv(5, Box::new(SessionType::End))),
@@ -8478,16 +9219,16 @@ mod tests {
         assert!(SessionType::End.is_terminal());
         assert!(!SessionType::Send(1, Box::new(SessionType::End)).is_terminal());
         assert!(!SessionType::Recv(1, Box::new(SessionType::End)).is_terminal());
-        assert!(!SessionType::Choice(
-            Box::new(SessionType::End),
-            Box::new(SessionType::End),
-        ).is_terminal());
+        assert!(
+            !SessionType::Choice(Box::new(SessionType::End), Box::new(SessionType::End),)
+                .is_terminal()
+        );
         // Loop is not terminal even when its body is, because the
         // protocol may iterate again.
         assert!(!SessionType::Loop(Box::new(SessionType::End)).is_terminal());
     }
 
-    // ── CT2: Information-Flow Labels (W91-92) ────────────────────────
+    // ── Information-Flow Labels ────────────────────────────────────
 
     #[test]
     fn test_security_label_can_flow_to_lattice() {
@@ -8524,18 +9265,14 @@ mod tests {
         assert_eq!(Internal.meet(TopSecret), Internal);
     }
 
-    // ── CT6: zk-STARK Proofs (W93-94) ────────────────────────────────
+    // ── zk-STARK Proofs ────────────────────────────────────────────
 
     #[test]
     fn test_stark_proof_valid_passes() {
         // A proof built with new_valid has its verifier_key derived
         // from the proof_data and public_inputs, so verify() returns
         // true.
-        let proof = StarkProof::new_valid(
-            vec![0xDE, 0xAD, 0xBE, 0xEF],
-            vec![42, 3],
-            1000,
-        );
+        let proof = StarkProof::new_valid(vec![0xDE, 0xAD, 0xBE, 0xEF], vec![42, 3], 1000);
         assert!(proof.verify(), "valid proof should verify");
     }
 
@@ -8609,7 +9346,7 @@ mod tests {
         assert_eq!(att.verify(42).unwrap_err(), IpcError::StarkProofInvalid);
     }
 
-    // ── CT7: Fractional Permissions (W95) ────────────────────────────
+    // ── Fractional Permissions ────────────────────────────────────
 
     #[test]
     fn test_permission_full_grants_all() {
@@ -8647,8 +9384,11 @@ mod tests {
         // additionally enforces write uniqueness.
         let p = Permission::full();
         let (half, _) = p.split();
-        assert!(half.can_read(),  "half fraction > 0 → can_read");
-        assert!(half.can_write(), "half fraction > 0 → can_write (permissive)");
+        assert!(half.can_read(), "half fraction > 0 → can_read");
+        assert!(
+            half.can_write(),
+            "half fraction > 0 → can_write (permissive)"
+        );
         assert!(half.can_execute());
     }
 
@@ -8663,13 +9403,17 @@ mod tests {
     #[test]
     fn test_permission_partial_read_only() {
         // A read-only permission: read = 1, write = 0, execute = 0.
-        let p = Permission { read: 1.0, write: 0.0, execute: 0.0 };
+        let p = Permission {
+            read: 1.0,
+            write: 0.0,
+            execute: 0.0,
+        };
         assert!(p.can_read());
         assert!(!p.can_write());
         assert!(!p.can_execute());
     }
 
-    // ── CT8: Formal Verification (W96) ───────────────────────────────
+    // ── Formal Verification ───────────────────────────────────────
 
     #[test]
     fn test_verify_invariant_collapse_returns_verified_proof() {

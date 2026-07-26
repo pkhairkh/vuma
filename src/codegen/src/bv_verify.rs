@@ -1,4 +1,4 @@
-//! # Bitvector Verification Framework (Wave 7)
+//! # Bitvector Verification Framework
 //!
 //! Verifies the soundness of e-graph rewrite rules by exhaustive enumeration
 //! over all possible bitvector inputs. This is a real, executable verification
@@ -44,9 +44,9 @@
 //! - `shr_zero_right`: x >> 0 == x (logical and arithmetic)
 //! - `shl_zero_right`: x << 0 == x
 //!
-//! ## Wave 5 additions (PMT state-operation rules)
+//! ## PMT state-operation rules
 //!
-//! Wave 5 adds four state-operation rewrite rules to `standard_rules()`.
+//! Four state-operation rewrite rules are added to `standard_rules()`.
 //! Two of them are encodable as bitvector identities and have explicit
 //! `verify_rule_*` entries below; the other two are structural and are
 //! admitted by the gate's "unknown rule → sound by construction" path
@@ -66,8 +66,15 @@
 //!   "unreferenced" guard — a whole-graph property the bitvector
 //!   framework cannot encode. The guard is checked at apply time by
 //!   `EGraph::is_eclass_referenced`.
-//! - `state_merge_compatible_layouts`: stub (returns `None`). Documented
-//!   as deferred to a future wave (requires lifetime analysis).
+//! - `state_merge_compatible_layouts`: structural check — verifies that
+//!   two PMT state layouts being merged (e.g. at a join point) agree on
+//!   field count, per-field offset, size, and type. Implemented by the
+//!   standalone [`state_merge_compatible_layouts`] function (not encodable
+//!   as a bitvector identity, so not in `verify_all_rules`). The
+//!   `apply: |_, _| None` stub in `egraph::standard_rules` remains a
+//!   no-op: the actual rewrite (merging two `StateInit`s) is deferred to
+//!   a future lifetime-aware pass; the check function lives here so that
+//!   pass can call it as a verification utility.
 
 use crate::egraph::RewriteRule;
 use crate::ir::BinOpKind;
@@ -151,7 +158,11 @@ pub fn eval_binop(op: BinOpKind, lhs: u64, rhs: u64) -> u64 {
             (lhs % m).checked_div(rhs % m).unwrap_or(0)
         }
         BinOpKind::SRem | BinOpKind::URem => {
-            if rhs.is_multiple_of(m) { 0 } else { (lhs % m) % (rhs % m) }
+            if rhs.is_multiple_of(m) {
+                0
+            } else {
+                (lhs % m) % (rhs % m)
+            }
         }
         BinOpKind::And => (lhs & rhs) % m,
         BinOpKind::Or => (lhs | rhs) % m,
@@ -167,7 +178,9 @@ pub fn eval_binop(op: BinOpKind, lhs: u64, rhs: u64) -> u64 {
             if val & sign_bit != 0 {
                 // Negative: sign-extend
                 let shifted = val >> shift;
-                let fill = if shift == 0 { 0 } else {
+                let fill = if shift == 0 {
+                    0
+                } else {
                     ((1u64 << shift) - 1) << (VERIFY_BITWIDTH - shift)
                 };
                 (shifted | fill) % m
@@ -263,7 +276,7 @@ pub fn verify_rule_2var(
 /// one per rule. If any rule is unsound, the caller should remove it from
 /// the rule set.
 ///
-/// This is the Wave 7 verification entry point. It replaces the hardcoded
+/// This is the bitvector-verification entry point. It replaces the hardcoded
 /// `verified: true` field with actual executable verification.
 pub fn verify_all_rules() -> Vec<VerificationResult> {
     use BinOpKind::*;
@@ -280,23 +293,39 @@ pub fn verify_all_rules() -> Vec<VerificationResult> {
         verify_rule_2var("mul_zero_right", |x, _y| eval_binop(Mul, x, 0), |_x, _y| 0),
         verify_rule_2var("mul_one_left", |_x, y| eval_binop(Mul, 1, y), |_x, y| y),
         verify_rule_2var("mul_one_right", |x, _y| eval_binop(Mul, x, 1), |x, _y| x),
-        verify_rule_2var("mul_two_to_add", |x, _y| eval_binop(Mul, x, 2), |x, _y| eval_binop(Add, x, x)),
-        verify_rule_2var("mul_two_left_to_add", |_x, y| eval_binop(Mul, 2, y), |_x, y| eval_binop(Add, y, y)),
+        verify_rule_2var(
+            "mul_two_to_add",
+            |x, _y| eval_binop(Mul, x, 2),
+            |x, _y| eval_binop(Add, x, x),
+        ),
+        verify_rule_2var(
+            "mul_two_left_to_add",
+            |_x, y| eval_binop(Mul, 2, y),
+            |_x, y| eval_binop(Add, y, y),
+        ),
         verify_rule_2var("and_zero_left", |_x, y| eval_binop(And, 0, y), |_x, _y| 0),
         verify_rule_2var("and_zero_right", |x, _y| eval_binop(And, x, 0), |_x, _y| 0),
         verify_rule_2var("or_zero_right", |x, _y| eval_binop(Or, x, 0), |x, _y| x),
         verify_rule_2var("xor_zero_right", |x, _y| eval_binop(Xor, x, 0), |x, _y| x),
-        verify_rule_2var("shr_zero_right_l", |x, _y| eval_binop(ShrL, x, 0), |x, _y| x),
-        verify_rule_2var("shr_zero_right_a", |x, _y| eval_binop(ShrA, x, 0), |x, _y| x),
+        verify_rule_2var(
+            "shr_zero_right_l",
+            |x, _y| eval_binop(ShrL, x, 0),
+            |x, _y| x,
+        ),
+        verify_rule_2var(
+            "shr_zero_right_a",
+            |x, _y| eval_binop(ShrA, x, 0),
+            |x, _y| x,
+        ),
         verify_rule_2var("shl_zero_right", |x, _y| eval_binop(Shl, x, 0), |x, _y| x),
         // ============================================================
-        // Wave 5 — PMT state-operation rules (encodable subset).
+        // PMT state-operation rules (encodable subset).
         //
         // These two rules are encodable as bitvector identities because
         // their soundness reduces to a value equality that holds for ALL
         // bitvector inputs (independent of the state's actual contents).
         //
-        // The other two Wave 5 rules (`state_dead_init_elim`,
+        // The other two state-operation rules (`state_dead_init_elim`,
         // `state_merge_compatible_layouts`) are structural and cannot be
         // encoded here — see the module-level doc comment for details.
         // They are admitted by the gate's "unknown rule → sound by
@@ -309,12 +338,129 @@ pub fn verify_all_rules() -> Vec<VerificationResult> {
         // StateRead(StateWrite(s, off, v), off, _) == v  (store-load
         // forward). The read returns the just-written value, regardless
         // of the state's other contents: g(s, v) = v.
-        verify_rule_2var(
-            "state_store_load_forward",
-            |_s, v| v,
-            |_s, v| v,
-        ),
+        verify_rule_2var("state_store_load_forward", |_s, v| v, |_s, v| v),
     ]
+}
+
+// ============================================================================
+// `state_merge_compatible_layouts` layout-compatibility check.
+//
+// This is the verification body for the e-graph rule of the same name
+// registered in `egraph::standard_rules`. The rule's `apply` closure in
+// `egraph.rs` remains a no-op stub (the actual rewrite — merging two
+// `StateInit`s at a join point — is deferred to a future lifetime-aware
+// buffer-merging pass). The check function below is the verification
+// utility that the future pass (and unit tests) will call to confirm
+// that two PMT state layouts are merge-compatible.
+// ============================================================================
+
+/// A layout incompatibility detected by [`state_merge_compatible_layouts`].
+///
+/// Carries a human-readable `reason` describing the first mismatch found
+/// (field count, or per-field offset/size/type). The string is suitable
+/// for surfacing to the user via the orchestrator / pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutIncompatibility {
+    /// Human-readable description of the first incompatibility found.
+    pub reason: String,
+}
+
+impl std::fmt::Display for LayoutIncompatibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "layout incompatibility: {}", self.reason)
+    }
+}
+
+impl std::error::Error for LayoutIncompatibility {}
+
+/// Verify that two PMT state layouts being merged (e.g. at a join point
+/// in the SCG where two control-flow paths produce state buffers that
+/// must be unioned into a single e-class) have compatible field counts,
+/// offsets, and types.
+///
+/// ## Compatibility rule
+///
+/// Two layouts `L1` and `L2` are *merge-compatible* iff:
+///
+/// 1. **Equal field count**: `L1.fields.len() == L2.fields.len()`.
+/// 2. **Per-field structural equality** (in declaration order): for each
+///    index `i`, `L1.fields[i]` and `L2.fields[i]` agree on
+///    - `offset` (byte offset from the start of the state buffer),
+///    - `size` (field width in bytes),
+///    - `type_name` (the field's type — two fields with the same offset
+///      and size but different types would interpret the same bytes
+///      differently, e.g. `u32` vs `f32`).
+///
+/// Field *names* are intentionally NOT compared: a state buffer is
+/// anonymous memory, and a merge is sound as long as reads/writes
+/// through either layout observe the same bytes with the same
+/// interpretation. Two structs with different field names but identical
+/// `(offset, size, type)` triples are layout-compatible (this mirrors
+/// C's struct-layout compatibility rule and LLVM's struct-type
+/// equivalence).
+///
+/// ## Return value
+///
+/// - `None` if the two layouts are merge-compatible.
+/// - `Some(LayoutIncompatibility)` if they are incompatible, with
+///   `reason` describing the first mismatch encountered (field count
+///   mismatch is checked before per-field mismatches; per-field checks
+///   short-circuit on the first mismatching field).
+///
+/// ## Why this is not in `verify_all_rules`
+///
+/// `verify_all_rules` verifies bitvector identities by exhaustive
+/// 8-bit enumeration. This rule is a *structural* check over typed
+/// layout descriptions (not bitvectors), so it cannot be encoded as a
+/// `verify_rule_1var` / `verify_rule_2var` entry. It lives here as a
+/// standalone verification utility; the bv_verify gate
+/// ([`verify_rules_with_counterexample`]) admits the rule's name via
+/// its "unknown rule → sound by construction" path, and the future
+/// lifetime-aware merging pass will call this function to actually
+/// enforce the compatibility constraint before performing a merge.
+pub fn state_merge_compatible_layouts(
+    lhs: &[vuma_scg::node::StructFieldInfo],
+    rhs: &[vuma_scg::node::StructFieldInfo],
+) -> Option<LayoutIncompatibility> {
+    // (1) Field count must match — different counts mean a read/write
+    // through one layout could touch bytes the other layout doesn't
+    // model, which is unsound.
+    if lhs.len() != rhs.len() {
+        return Some(LayoutIncompatibility {
+            reason: format!("field count mismatch: {} vs {}", lhs.len(), rhs.len()),
+        });
+    }
+
+    // (2) For each field at the same index, offset/size/type must agree.
+    // Names are intentionally not compared (see doc comment).
+    for (i, (a, b)) in lhs.iter().zip(rhs.iter()).enumerate() {
+        if a.offset != b.offset {
+            return Some(LayoutIncompatibility {
+                reason: format!(
+                    "field {} ({:?}) offset mismatch: {} vs {}",
+                    i, a.name, a.offset, b.offset
+                ),
+            });
+        }
+        if a.size != b.size {
+            return Some(LayoutIncompatibility {
+                reason: format!(
+                    "field {} ({:?}) size mismatch: {} vs {}",
+                    i, a.name, a.size, b.size
+                ),
+            });
+        }
+        if a.type_name != b.type_name {
+            return Some(LayoutIncompatibility {
+                reason: format!(
+                    "field {} ({:?}) type mismatch: {:?} vs {:?}",
+                    i, a.name, a.type_name, b.type_name
+                ),
+            });
+        }
+    }
+
+    None
 }
 
 /// Check that all rules are verified sound. Returns Err with the first
@@ -340,7 +486,7 @@ pub fn count_verified() -> (usize, usize) {
 }
 
 // ============================================================================
-// Wave 36 — gate entry-point: verify a rule set BEFORE saturating.
+// Gate entry-point: verify a rule set BEFORE saturating.
 // ============================================================================
 
 /// Verify that every rule in `rules` is sound, returning `Err(Counterexample)`
@@ -355,8 +501,8 @@ pub fn count_verified() -> (usize, usize) {
 /// ## Lookup strategy
 ///
 /// The gate builds a name → `VerificationResult` table from:
-/// 1. [`verify_all_rules`] (the Wave 7 exhaustive 8-bit verification of the
-///    17 standard algebraic identities), and
+/// 1. [`verify_all_rules`] (the exhaustive 8-bit verification of the 17
+///    standard algebraic identities), and
 /// 2. [`known_unsound_test_rules`] (a small set of deliberately-unsound rules
 ///    registered for testing the gate itself — see
 ///    `test_wave36_unsound_rule_rejected`).
@@ -365,26 +511,23 @@ pub fn count_verified() -> (usize, usize) {
 /// - If `rule.name` is in the table and the entry is **sound** → continue.
 /// - If `rule.name` is in the table and the entry is **unsound** → return
 ///   `Err(Counterexample { rule_name, inputs })`.
-/// - If `rule.name` is **unknown** to the table (e.g., the Wave 31
-///   commutativity / associativity / distributivity rules, which have no
-///   explicit bv_verify entry) → continue, assuming sound-by-construction.
-///   These rules are tautologies that the bv_verify framework cannot encode
-///   directly (they require e-class structural matching, not bitvector
-///   evaluation); the gate is best-effort, not a complete soundness oracle.
+/// - If `rule.name` is **unknown** to the table (e.g., the commutativity /
+///   associativity / distributivity rules, which have no explicit bv_verify
+///   entry) → continue, assuming sound-by-construction.  These rules are
+///   tautologies that the bv_verify framework cannot encode directly (they
+///   require e-class structural matching, not bitvector evaluation); the
+///   gate is best-effort, not a complete soundness oracle.
 ///
-/// This conservative behavior preserves backward compatibility with the W31
-/// rule set while still catching genuinely unsound rules (those that fail
-/// exhaustive bitvector evaluation).
-pub fn verify_rules_with_counterexample(
-    rules: &[RewriteRule],
-) -> Result<(), Counterexample> {
+/// This conservative behavior preserves backward compatibility with the
+/// standard rule set while still catching genuinely unsound rules (those
+/// that fail exhaustive bitvector evaluation).
+pub fn verify_rules_with_counterexample(rules: &[RewriteRule]) -> Result<(), Counterexample> {
     // Build name → result table from the standard verification set + the
     // known-unsound test rules.
-    let mut table: std::collections::HashMap<&'static str, VerificationResult> =
-        verify_all_rules()
-            .into_iter()
-            .map(|r| (r.rule_name, r))
-            .collect();
+    let mut table: std::collections::HashMap<&'static str, VerificationResult> = verify_all_rules()
+        .into_iter()
+        .map(|r| (r.rule_name, r))
+        .collect();
     for r in known_unsound_test_rules() {
         table.insert(r.rule_name, r);
     }
@@ -430,7 +573,11 @@ mod tests {
     #[test]
     fn test_all_rules_verified_sound() {
         let (sound, total) = count_verified();
-        assert_eq!(sound, total, "only {}/{} rules verified sound", sound, total);
+        assert_eq!(
+            sound, total,
+            "only {}/{} rules verified sound",
+            sound, total
+        );
         assert!(total >= 16, "expected at least 16 rules, got {}", total);
     }
 
@@ -466,10 +613,10 @@ mod tests {
     }
 
     // ========================================================================
-    // Wave 36 — gate tests
+    // Gate tests
     // ========================================================================
 
-    /// Wave 36 task: an unsound rule is rejected by the bv_verify gate.
+    /// An unsound rule is rejected by the bv_verify gate.
     ///
     /// Registers a deliberately-unsound rule (`wave36_unsound_inc`: claims
     /// `x + 1 == x`) and asserts that `verify_rules_with_counterexample`
@@ -491,8 +638,7 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert_eq!(
-            err.rule_name,
-            "wave36_unsound_inc",
+            err.rule_name, "wave36_unsound_inc",
             "Counterexample should name the offending rule"
         );
         assert!(
@@ -501,11 +647,11 @@ mod tests {
         );
     }
 
-    /// Wave 36 task: sound rules are accepted by the bv_verify gate.
+    /// Sound rules are accepted by the bv_verify gate.
     ///
     /// Constructs a rule list of names that ARE in the bv_verify verified
     /// set (all sound) and asserts the gate returns `Ok(())`. Also exercises
-    /// the W31 standard rule set (which contains rules unknown to bv_verify
+    /// the standard rule set (which contains rules unknown to bv_verify
     /// like `comm_add`) to confirm those are accepted (sound-by-construction
     /// assumption documented on `verify_rules_with_counterexample`).
     #[test]
@@ -536,19 +682,19 @@ mod tests {
             result.err()
         );
 
-        // (b) The full W31 standard rule set — includes comm_*, assoc_*,
+        // (b) The full standard rule set — includes comm_*, assoc_*,
         // distrib_*, peel_* (unknown to bv_verify → assumed sound) plus
-        // the W7 verified rules. The gate must accept all of them.
+        // the verified rules. The gate must accept all of them.
         let standard = crate::egraph::standard_rules();
         let result = verify_rules_with_counterexample(&standard);
         assert!(
             result.is_ok(),
-            "W31 standard rule set should be accepted by the gate: {:?}",
+            "standard rule set should be accepted by the gate: {:?}",
             result.err()
         );
     }
 
-    /// Wave 36 task: the gate surfaces the *first* counterexample only.
+    /// The gate surfaces the *first* counterexample only.
     ///
     /// If multiple unsound rules are present, the gate returns the
     /// counterexample for the first one encountered (in input order).
@@ -572,17 +718,21 @@ mod tests {
     }
 
     // ========================================================================
-    // Wave 5 — state-operation rule bv_verify tests.
+    // State-operation rule bv_verify tests.
     // ========================================================================
 
-    /// Wave 5: `state_transform_elision` is in the bv_verify table and
-    /// marked sound. The rule models `StateTransform(x, L, L) == x` as
-    /// the 1-variable identity `f(x) == x`.
+    /// `state_transform_elision` is in the bv_verify table and marked
+    /// sound. The rule models `StateTransform(x, L, L) == x` as the
+    /// 1-variable identity `f(x) == x`.
     #[test]
     fn test_wave5_state_transform_elision_is_sound() {
         let results: std::collections::HashMap<&'static str, VerificationResult> =
-            verify_all_rules().into_iter().map(|r| (r.rule_name, r)).collect();
-        let entry = results.get("state_transform_elision")
+            verify_all_rules()
+                .into_iter()
+                .map(|r| (r.rule_name, r))
+                .collect();
+        let entry = results
+            .get("state_transform_elision")
             .expect("state_transform_elision should be in verify_all_rules()");
         assert!(
             entry.sound,
@@ -594,28 +744,33 @@ mod tests {
         );
     }
 
-    /// Wave 5: `state_store_load_forward` is in the bv_verify table and
-    /// marked sound. The rule models `StateRead(StateWrite(s, off, v),
-    /// off, _) == v` as the 2-variable identity `g(s, v) == v`.
+    /// `state_store_load_forward` is in the bv_verify table and marked
+    /// sound. The rule models `StateRead(StateWrite(s, off, v), off, _) == v`
+    /// as the 2-variable identity `g(s, v) == v`.
     #[test]
     fn test_wave5_state_store_load_forward_is_sound() {
         let results: std::collections::HashMap<&'static str, VerificationResult> =
-            verify_all_rules().into_iter().map(|r| (r.rule_name, r)).collect();
-        let entry = results.get("state_store_load_forward")
+            verify_all_rules()
+                .into_iter()
+                .map(|r| (r.rule_name, r))
+                .collect();
+        let entry = results
+            .get("state_store_load_forward")
             .expect("state_store_load_forward should be in verify_all_rules()");
         assert!(
             entry.sound,
             "state_store_load_forward should be sound (read returns written value: g(s,v)==v)"
         );
         assert_eq!(
-            entry.cases_evaluated, VERIFY_MODULO * VERIFY_MODULO,
+            entry.cases_evaluated,
+            VERIFY_MODULO * VERIFY_MODULO,
             "should evaluate all 256*256 8-bit case pairs"
         );
     }
 
-    /// Wave 5: the gate accepts the four state-op rules when they
-    /// appear by name in a rule list. Two are in the bv_verify table
-    /// (sound); two are unknown (admitted as sound-by-construction).
+    /// The gate accepts the four state-op rules when they appear by
+    /// name in a rule list. Two are in the bv_verify table (sound); two
+    /// are unknown (admitted as sound-by-construction).
     #[test]
     fn test_wave5_state_op_rules_admitted_by_gate() {
         let mk = |name: &'static str| crate::egraph::RewriteRule {
@@ -637,8 +792,8 @@ mod tests {
         );
     }
 
-    /// Wave 5: the full `standard_rules()` set (which now includes the
-    /// four state-op rules) passes the bv_verify gate.
+    /// The full `standard_rules()` set (which includes the four state-op
+    /// rules) passes the bv_verify gate.
     #[test]
     fn test_wave5_full_standard_rules_pass_gate() {
         let standard = crate::egraph::standard_rules();
@@ -647,6 +802,153 @@ mod tests {
             result.is_ok(),
             "full standard_rules() (with Wave 5 state-op rules) must pass the gate: {:?}",
             result.err()
+        );
+    }
+
+    // ========================================================================
+    // `state_merge_compatible_layouts` unit tests.
+    //
+    // The rule's `apply` closure in `egraph::standard_rules` is a no-op
+    // stub (the actual rewrite is deferred to a future lifetime-aware
+    // pass), but the verification check implemented in
+    // [`super::state_merge_compatible_layouts`] is fully exercised here.
+    // ========================================================================
+
+    /// Helper: build a `StructFieldInfo` with the given (name, type, offset,
+    /// size). Keeps the tests below compact.
+    fn fld(name: &str, type_name: &str, offset: u64, size: u64) -> vuma_scg::node::StructFieldInfo {
+        vuma_scg::node::StructFieldInfo {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            offset,
+            size,
+        }
+    }
+
+    /// Case (1): two identical layouts → `None` (compatible).
+    ///
+    /// Same field count, same per-field (offset, size, type). The check
+    /// must return `None`, indicating the two state buffers can be merged
+    /// at a join point without changing program semantics.
+    #[test]
+    fn test_state_merge_compatible_layouts_identical() {
+        let lhs = vec![
+            fld("x", "u32", 0, 4),
+            fld("y", "u32", 4, 4),
+            fld("flag", "bool", 8, 1),
+        ];
+        // Same layout, cloned — should be compatible.
+        let rhs = lhs.clone();
+        assert_eq!(
+            state_merge_compatible_layouts(&lhs, &rhs),
+            None,
+            "identical layouts must be merge-compatible"
+        );
+    }
+
+    /// Case (1b): two layouts with the same (offset, size, type) triples
+    /// but *different field names* → `None` (compatible). Field names are
+    /// intentionally not compared (state buffers are anonymous memory;
+    /// only the byte interpretation matters).
+    #[test]
+    fn test_state_merge_compatible_layouts_names_differ() {
+        let lhs = vec![fld("x", "u32", 0, 4), fld("y", "u32", 4, 4)];
+        let rhs = vec![
+            fld("a", "u32", 0, 4), // same offset/size/type, different name
+            fld("b", "u32", 4, 4), // same offset/size/type, different name
+        ];
+        assert_eq!(
+            state_merge_compatible_layouts(&lhs, &rhs),
+            None,
+            "layouts with same (offset,size,type) but different names must be compatible"
+        );
+    }
+
+    /// Case (2): two layouts with different field counts → `Some`
+    /// (incompatible). The check must short-circuit on the count
+    /// mismatch and return a `LayoutIncompatibility` whose `reason`
+    /// mentions the count difference.
+    #[test]
+    fn test_state_merge_compatible_layouts_field_count_mismatch() {
+        let lhs = vec![fld("x", "u32", 0, 4), fld("y", "u32", 4, 4)];
+        let rhs = vec![fld("x", "u32", 0, 4)];
+        let err = state_merge_compatible_layouts(&lhs, &rhs)
+            .expect("different field counts must be incompatible");
+        assert!(
+            err.reason.contains("field count"),
+            "reason should mention 'field count', got: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("2") && err.reason.contains("1"),
+            "reason should mention both counts (2 vs 1), got: {}",
+            err.reason
+        );
+    }
+
+    /// Case (3): two layouts with the same field count but a different
+    /// per-field `offset` → `Some` (incompatible). The check must detect
+    /// the offset divergence and surface it in the `reason`.
+    #[test]
+    fn test_state_merge_compatible_layouts_offset_mismatch() {
+        let lhs = vec![
+            fld("x", "u32", 0, 4),
+            fld("y", "u32", 4, 4), // offset 4
+        ];
+        let rhs = vec![
+            fld("x", "u32", 0, 4),
+            fld("y", "u32", 8, 4), // offset 8 — divergence at index 1
+        ];
+        let err = state_merge_compatible_layouts(&lhs, &rhs)
+            .expect("different per-field offsets must be incompatible");
+        assert!(
+            err.reason.contains("offset"),
+            "reason should mention 'offset', got: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("field 1"),
+            "reason should mention the offending field index (1), got: {}",
+            err.reason
+        );
+    }
+
+    /// Extra case: same field count, same offset/size, but a different
+    /// `type_name` at index 0 (`u32` vs `f32` — same 4 bytes but a
+    /// different interpretation) → `Some` (incompatible). This is the
+    /// subtle case the rule exists to catch: a bit-for-bit identical
+    /// memory layout that would still be unsound to merge because the
+    /// read interpretation differs.
+    #[test]
+    fn test_state_merge_compatible_layouts_type_mismatch() {
+        let lhs = vec![fld("w", "u32", 0, 4)];
+        let rhs = vec![
+            fld("w", "f32", 0, 4), // same offset/size, different type
+        ];
+        let err = state_merge_compatible_layouts(&lhs, &rhs)
+            .expect("different per-field types must be incompatible");
+        assert!(
+            err.reason.contains("type"),
+            "reason should mention 'type', got: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("u32") && err.reason.contains("f32"),
+            "reason should mention both type names, got: {}",
+            err.reason
+        );
+    }
+
+    /// Extra case: two empty layouts → `None` (vacuously compatible).
+    /// Two state buffers with no fields can always be merged.
+    #[test]
+    fn test_state_merge_compatible_layouts_empty() {
+        let lhs: Vec<vuma_scg::node::StructFieldInfo> = vec![];
+        let rhs: Vec<vuma_scg::node::StructFieldInfo> = vec![];
+        assert_eq!(
+            state_merge_compatible_layouts(&lhs, &rhs),
+            None,
+            "two empty layouts must be merge-compatible"
         );
     }
 }

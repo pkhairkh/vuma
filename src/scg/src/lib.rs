@@ -1,5 +1,28 @@
 //! # VUMA SCG — Semantic Computation Graph
 //!
+//! **This crate is the canonical SCG IR for VUMA.** It is consumed by
+//! both the Invariant Verification Engine (IVE) — for liveness, dominance,
+//! region, and derivation analyses — and (planned, see Task 4 of the SCG
+//! unification track) the codegen backend. Other crates that currently
+//! hold local SCG-shaped stubs (notably `vuma_codegen::scg_to_ir`, which
+//! uses a statement-list-shaped SCG) are slated to be replaced by
+//! re-exports of the types defined here. See the "SCG Unification Status
+//! (Task 4-f)" section in `src/codegen/src/scg_to_ir.rs` for the current
+//! migration state — as of Wave 4-e, the *structure* of `CastNode`,
+//! `ControlNode`, and `SwitchArm` has been migrated here as generic types
+//! (`CodegenCastNode`, `CodegenControlNode`, `CodegenSwitchArm`); as of
+//! Wave 4-b, the *structure* of `AllocationNode` and `AccessNode` (both
+//! enums, unlike their graph-shaped struct counterparts) has been
+//! migrated here as `CodegenAllocationNode` and `CodegenAccessNode`; as
+//! of Wave 12-a, the *structure* of the binary `ComputationNode` has
+//! been migrated here as `CodegenComputationNode<E, K>`; as of Wave 13-c,
+//! the *structure* of the unary `UnaryComputationNode` and the function
+//! call `CallNode` (both codegen-only types with no semantic-SCG
+//! counterpart) have been migrated here as `CodegenUnaryComputationNode<E, K>`
+//! and `CodegenCallNode<E>`. The concrete operand/kind types (`ScgExpr`,
+//! `ScgType`, `CastKind`, `BinOpKind`, `UnaryOpKind`, `IRType`) remain
+//! codegen-local pending their own migration.
+//!
 //! This crate provides the core data structures and algorithms for the
 //! **Semantic Computation Graph (SCG)**, a central component of the VUMA
 //! framework for verified-unsafe memory access.
@@ -52,6 +75,7 @@ pub mod digraph;
 pub mod dominance;
 pub mod edge;
 pub mod graph;
+pub mod hash;
 pub mod liveness;
 pub mod llm_json;
 pub mod loop_detection;
@@ -65,16 +89,101 @@ pub mod transform;
 // Re-export the primary public API at the crate root for convenience.
 
 // -- Node types --
+//
+// Re-exports the full set of node payloads from `node.rs` at the crate root
+// so downstream crates (notably `vuma-codegen`'s `scg_to_ir.rs`, which is
+// unifying on the semantic SCG per Task 4) can write `vuma_scg::ComputationNode`
+// rather than `vuma_scg::node::ComputationNode`. Keep this list in sync with
+// the `pub struct`/`pub enum` declarations in `node.rs` (see Task 4-b in
+// worklog.md).
 pub use node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode,
-    ComputationKind, ComputationNode, ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode,
-    DeallocationNode, EffectNode, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
-    ProgramPoint, SyscallNode, VTableNode,
+    AccessMode,
+    AccessNode,
+    AllocationNode,
+    ArenaAllocNode,
+    ArenaFreeNode,
+    ArenaGrowNode,
+    ArenaNewNode,
+    BDReference,
+    CastNode,
+    ChannelCloseNode,
+    ChannelOpenNode,
+    ChannelRecvNode,
+    ChannelSendNode,
+    ClosureEnvNode,
+    CodegenAccessNode,
+    // (Wave 4-b) Generic statement-list-shaped allocation/access node
+    // types — the structure of the codegen-side AllocationNode /
+    // AccessNode (both enums, unlike their graph-shaped struct
+    // counterparts above) now lives in the canonical SCG crate.
+    // Codegen creates concrete aliases:
+    //   type AllocationNode = vuma_scg::CodegenAllocationNode<ScgExpr, ScgType>;
+    //   type AccessNode     = vuma_scg::CodegenAccessNode<ScgExpr, crate::ir::IRType>;
+    CodegenAllocationNode,
+    CodegenCallNode,
+    // (Wave 4-e) Generic statement-list-shaped node types — the structure
+    // of the codegen-side CastNode / ControlNode / SwitchArm now lives in
+    // the canonical SCG crate.  Codegen creates concrete aliases:
+    //   type CastNode    = vuma_scg::CodegenCastNode<ScgExpr, ScgType, CastKind>;
+    //   type ControlNode = vuma_scg::CodegenControlNode<ScgExpr, ScgStatement>;
+    //   type SwitchArm   = vuma_scg::CodegenSwitchArm<ScgStatement>;
+    CodegenCastNode,
+    // (Wave 12-a) Generic statement-list-shaped binary-computation node
+    // type — the structure of the codegen-side ComputationNode (struct
+    // with dst/op/lhs/rhs/tail_call/reassigns) now lives in the canonical
+    // SCG crate.  Codegen creates a concrete alias:
+    //   type ComputationNode = vuma_scg::CodegenComputationNode<ScgExpr, BinOpKind>;
+    CodegenComputationNode,
+    CodegenControlNode,
+    CodegenSwitchArm,
+    // (Wave 13-c) Generic statement-list-shaped unary-computation and
+    // function-call node types — both are codegen-only (no semantic-SCG
+    // counterpart).  Codegen creates concrete aliases:
+    //   type UnaryComputationNode = vuma_scg::CodegenUnaryComputationNode<ScgExpr, UnaryOpKind>;
+    //   type CallNode             = vuma_scg::CodegenCallNode<ScgExpr>;
+    CodegenUnaryComputationNode,
+    ComputationKind,
+    ComputationNode,
+    ConstantTimeNode,
+    ConstantTimeOp,
+    ControlKind,
+    ControlNode,
+    DeallocationNode,
+    EffectNode,
+    EnumDefNode,
+    EnumVariantInfo,
+    ForeignConsumeNode,
+    IntrinsicKind,
+    MatchArmInfo,
+    MatchNode,
+    MatchPatternInfo,
+    NodeData,
+    NodeId,
+    NodePayload,
+    NodeType,
+    PhantomNode,
+    ProgramPoint,
+    StateInitNode,
+    StateReadNode,
+    StateTransformNode,
+    StateWriteNode,
+    StructDefNode,
+    StructFieldInfo,
+    SyscallNode,
+    VTableNode,
 };
 
 /// Central visitor trait for dispatching on NodePayload.
 /// Eliminates the "11 duplicated match statements" DRY violation.
 pub use node::NodeVisitor;
+
+// -- Hashing utilities --
+//
+// Re-export the FNV-1a 64-bit single-source-of-truth hash functions so
+// downstream crates can write `vuma_scg::type_hash` rather than
+// `vuma_scg::hash::type_hash`. Per Task 1-b / Gap 6 fix, this is the canonical
+// type-hash used across IVE and codegen (previously duplicated in 7 places).
+pub use hash::{fnv1a_64, type_hash};
 
 // -- Edge types --
 pub use edge::{EdgeData, EdgeId, EdgeKind};
@@ -118,20 +227,19 @@ pub use liveness::{
 };
 
 // -- Loop detection --
-pub use loop_detection::{LoopDetector, LoopNestingTree, NaturalLoop};
+pub use loop_detection::{ControlFlowGraph, LoopDetector, LoopNestingTree, NaturalLoop};
 
 // -- Transform passes --
 pub use transform::{
     dead_region_elim, detect_tail_calls, licm, strength_reduce, CommonSubexpressionElimination,
-    ConstantFolding, DeadCodeElimination, DeadRegionElimination, InterproceduralAllocFlow,
-    InliningPass, LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass,
-    StrengthReduction, TailCallOptDetection, VerificationPass,
+    ConstantFolding, DeadCodeElimination, DeadRegionElimination, InliningPass,
+    InterproceduralAllocFlow, LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult,
+    SCGPass, StrengthReduction, TailCallOptDetection, VerificationPass,
 };
 
 // -- Structured output for LLMs --
 pub use structured_output::{
-    LlmEdge, LlmFunction, LlmNode, LlmRegion, LlmScgJson, LlmSourceLocation,
-    LlmSummary,
+    LlmEdge, LlmFunction, LlmNode, LlmRegion, LlmScgJson, LlmSourceLocation, LlmSummary,
 };
 
 #[cfg(test)]

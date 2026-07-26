@@ -55,8 +55,7 @@ use crate::Result;
 /// the operand width. Using W registers gives automatic 32-bit wrapping
 /// arithmetic, which is required for algorithms like SHA-256 that operate on
 /// `u32` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RegWidth {
     /// 32-bit W registers (W0–W30, WZR, WSP).
     W32,
@@ -125,7 +124,6 @@ impl RegWidth {
         }
     }
 }
-
 
 impl std::fmt::Display for RegWidth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1247,27 +1245,29 @@ impl Instruction {
     pub fn encode(&self) -> Result<u32> {
         match self {
             // ---- ADD (shifted register): 1 0 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
-            Instruction::ADD { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift } => {
-                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
-                    // ADD Xd, Xn, Xm, shift: sf=1, op=00, S=0, 01011, shift, 0, Rm, imm6, Rn, Rd
-                    // Base = 0x8B000000
-                    Ok(0x8B000000u32
-                        | (hw << 22)
-                        | (reg.encoding() << 16)
-                        | (imm6 << 10)
-                        | (rn.encoding() << 5)
-                        | rd.encoding())
+            Instruction::ADD { rd, rn, rm } => {
+                match rm {
+                    Operand::Reg { reg, shift } => {
+                        let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+                        // ADD Xd, Xn, Xm, shift: sf=1, op=00, S=0, 01011, shift, 0, Rm, imm6, Rn, Rd
+                        // Base = 0x8B000000
+                        Ok(0x8B000000u32
+                            | (hw << 22)
+                            | (reg.encoding() << 16)
+                            | (imm6 << 10)
+                            | (rn.encoding() << 5)
+                            | rd.encoding())
+                    }
+                    Operand::Imm12(imm) => {
+                        // ADD Xd, Xn, #imm: sf=1, op=0, S=0, 10001, shift=0, imm12, Rn, Rd
+                        // Base = 0x91000000
+                        Ok(0x91000000u32
+                            | ((*imm as u32) << 10)
+                            | (rn.encoding() << 5)
+                            | rd.encoding())
+                    }
                 }
-                Operand::Imm12(imm) => {
-                    // ADD Xd, Xn, #imm: sf=1, op=0, S=0, 10001, shift=0, imm12, Rn, Rd
-                    // Base = 0x91000000
-                    Ok(0x91000000u32
-                        | ((*imm as u32) << 10)
-                        | (rn.encoding() << 5)
-                        | rd.encoding())
-                }
-            },
+            }
 
             // ---- SUB (shifted register): sf 1 0 S 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
             //
@@ -1298,7 +1298,11 @@ impl Instruction {
             // shifted-register form per ARM ARM C6.2.851).
             Instruction::SUB { rd, rn, rm } => {
                 // S=1 only when rd is exactly XZR (CMP/SUBS alias).
-                let s_bit: u32 = if matches!(rd, Register::XZR) { 1 << 29 } else { 0 };
+                let s_bit: u32 = if matches!(rd, Register::XZR) {
+                    1 << 29
+                } else {
+                    0
+                };
                 match rm {
                     Operand::Reg { reg, shift } => {
                         let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
@@ -1316,53 +1320,47 @@ impl Instruction {
                         | (rn.encoding() << 5)
                         | rd.encoding()),
                 }
-            },
+            }
 
             // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
-            Instruction::MUL { rd, rn, rm } => Ok(0x9B007C00u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::MUL { rd, rn, rm } => {
+                Ok(0x9B007C00u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- SDIV ----
             // SDIV Xd, Xn, Xm: sf=1, 00, 1101, 011, Rm, 000011, Rn, Rd
             // Base = 0x9AC00C00
-            Instruction::SDIV { rd, rn, rm } => Ok(0x9AC00C00u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::SDIV { rd, rn, rm } => {
+                Ok(0x9AC00C00u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- UDIV ----
             // UDIV Xd, Xn, Xm: sf=1, 00, 1101, 011, Rm, 000010, Rn, Rd
             // Base = 0x9AC00800
-            Instruction::UDIV { rd, rn, rm } => Ok(0x9AC00800u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::UDIV { rd, rn, rm } => {
+                Ok(0x9AC00800u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- AND (shifted register) ----
             // AND Xd, Xn, Xm: sf=1, opc=00, 01010, N=0, shift=00, Rm, imm6=0, Rn, Rd
             // Base = 0x8A000000
-            Instruction::AND { rd, rn, rm } => Ok(0x8A000000u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::AND { rd, rn, rm } => {
+                Ok(0x8A000000u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- ORR (shifted register) ----
             // ORR Xd, Xn, Xm: sf=1, opc=01, 01010, N=0, shift=00, Rm, imm6=0, Rn, Rd
             // Base = 0xAA000000
-            Instruction::ORR { rd, rn, rm } => Ok(0xAA000000u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::ORR { rd, rn, rm } => {
+                Ok(0xAA000000u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- EOR (shifted register) ----
             // EOR Xd, Xn, Xm: sf=1, opc=10, 01010, N=0, shift=00, Rm, imm6=0, Rn, Rd
             // Base = 0xCA000000
-            Instruction::EOR { rd, rn, rm } => Ok(0xCA000000u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::EOR { rd, rn, rm } => {
+                Ok(0xCA000000u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- LSL / LSR / ASR (shifted register or immediate) ----
             // LSL Xd, Xn, Xm uses data processing shifted register format (same as ADD)
@@ -1434,10 +1432,9 @@ impl Instruction {
 
             // ---- RORV (rotate right variable): 1 00 11010 11 0 Rm 001011 Rn Rd ----
             // 64-bit base = 0x9AC02C00
-            Instruction::RORV { rd, rn, rm } => Ok(0x9AC02C00u32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::RORV { rd, rn, rm } => {
+                Ok(0x9AC02C00u32 | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- LDR (unsigned offset, 64-bit) ----
             Instruction::LDR { rt, rn, offset } => {
@@ -1469,10 +1466,7 @@ impl Instruction {
                     if imm12 <= 4095 {
                         // STR Xt, [Xn, #pimm]: 11_111_0_00_01_pimm_Rn_Rt
                         // Base = 0xF9000000
-                        Ok(0xF9000000u32
-                            | (imm12 << 10)
-                            | (rn.encoding() << 5)
-                            | rt.encoding())
+                        Ok(0xF9000000u32 | (imm12 << 10) | (rn.encoding() << 5) | rt.encoding())
                     } else {
                         Err(CodegenError::EncodingError(format!(
                             "STR offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
@@ -1518,10 +1512,7 @@ impl Instruction {
                 if *offset >= 0 && *offset % 4 == 0 {
                     let imm12 = (*offset as u32) / 4;
                     if imm12 <= 4095 {
-                        Ok(0xB9000000u32
-                            | (imm12 << 10)
-                            | (rn.encoding() << 5)
-                            | rt.encoding())
+                        Ok(0xB9000000u32 | (imm12 << 10) | (rn.encoding() << 5) | rt.encoding())
                     } else {
                         Err(CodegenError::EncodingError(format!(
                             "STR_W offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
@@ -1591,10 +1582,7 @@ impl Instruction {
                 if *offset >= 0 && *offset % 4 == 0 {
                     let imm12 = (*offset as u32) / 4;
                     if imm12 <= 4095 {
-                        Ok(0xB9800000u32
-                            | (imm12 << 10)
-                            | (rn.encoding() << 5)
-                            | rt.encoding())
+                        Ok(0xB9800000u32 | (imm12 << 10) | (rn.encoding() << 5) | rt.encoding())
                     } else {
                         Err(CodegenError::EncodingError(format!(
                             "LDRSW offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
@@ -1616,10 +1604,7 @@ impl Instruction {
                 if *offset >= 0 {
                     let imm12 = *offset as u32;
                     if imm12 <= 4095 {
-                        Ok(0x39000000u32
-                            | (imm12 << 10)
-                            | (rn.encoding() << 5)
-                            | rt.encoding())
+                        Ok(0x39000000u32 | (imm12 << 10) | (rn.encoding() << 5) | rt.encoding())
                     } else {
                         Err(CodegenError::EncodingError(format!(
                             "STRB offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
@@ -1641,10 +1626,7 @@ impl Instruction {
                 if *offset >= 0 && *offset % 2 == 0 {
                     let imm12 = (*offset as u32) / 2;
                     if imm12 <= 4095 {
-                        Ok(0x79000000u32
-                            | (imm12 << 10)
-                            | (rn.encoding() << 5)
-                            | rt.encoding())
+                        Ok(0x79000000u32 | (imm12 << 10) | (rn.encoding() << 5) | rt.encoding())
                     } else {
                         Err(CodegenError::EncodingError(format!(
                             "STRH offset {} too large (imm12 = {} exceeds 4095); use address computation instead",
@@ -1705,10 +1687,9 @@ impl Instruction {
             // ---- STXR ----
             // STXR Ws, Xt, [Xn]: 1_10_001000_0_Rs_0_11111_Rn_Rt
             // Base = 0xC8007C00
-            Instruction::STXR { rs, rt, rn } => Ok(0xC8007C00u32
-                | (rs.encoding() << 16)
-                | (rn.encoding() << 5)
-                | rt.encoding()),
+            Instruction::STXR { rs, rt, rn } => {
+                Ok(0xC8007C00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
+            }
 
             // ---- LDAXR (load-acquire exclusive, 64-bit) ----
             // LDAXR Xt, [Xn]: size=11, bits 29:23=0010001, L=1 (bit 22),
@@ -1843,37 +1824,37 @@ impl Instruction {
             // CMP Xn, Xm (register): sf=1, op=01, S=1, 01011, shift=00, 0, Rm, imm6=0, Rn, Rd=XZR
             // Base = 0xEB00001F (SUBS XZR, Xn, Xm)
             Instruction::CMP { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0xEB00001Fu32
-                    | (reg.encoding() << 16)
-                    | (rn.encoding() << 5)),
+                Operand::Reg { reg, shift: _ } => {
+                    Ok(0xEB00001Fu32 | (reg.encoding() << 16) | (rn.encoding() << 5))
+                }
                 // CMP Xn, #imm: sf=1, op=1, S=1, 10001, shift=0, imm12, Rn, Rd=XZR
                 // Base = 0xF100001F (SUBS XZR, Xn, #imm)
-                Operand::Imm12(imm) => Ok(0xF100001Fu32
-                    | ((*imm as u32) << 10)
-                    | (rn.encoding() << 5)),
+                Operand::Imm12(imm) => {
+                    Ok(0xF100001Fu32 | ((*imm as u32) << 10) | (rn.encoding() << 5))
+                }
             },
 
             // ---- CMN (alias for ADDS XZR, Rn, Rm) ----
             // CMN Xn, Xm (register): sf=1, op=00, S=1, 01011, shift=00, 0, Rm, imm6=0, Rn, Rd=XZR
             // Base = 0xAB00001F (ADDS XZR, Xn, Xm)
             Instruction::CMN { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0xAB00001Fu32
-                    | (reg.encoding() << 16)
-                    | (rn.encoding() << 5)),
+                Operand::Reg { reg, shift: _ } => {
+                    Ok(0xAB00001Fu32 | (reg.encoding() << 16) | (rn.encoding() << 5))
+                }
                 // CMN Xn, #imm: sf=1, op=0, S=1, 10001, shift=0, imm12, Rn, Rd=XZR
                 // Base = 0xB100001F (ADDS XZR, Xn, #imm)
-                Operand::Imm12(imm) => Ok(0xB100001Fu32
-                    | ((*imm as u32) << 10)
-                    | (rn.encoding() << 5)),
+                Operand::Imm12(imm) => {
+                    Ok(0xB100001Fu32 | ((*imm as u32) << 10) | (rn.encoding() << 5))
+                }
             },
 
             // ---- TST (alias for ANDS XZR, Rn, Rm) ----
             // TST Xn, Xm: sf=1, opc=00, 01010, N=1, shift=00, Rm, imm6=0, Rn, Rd=XZR
             // Base = 0xEA00001F (ANDS XZR, Xn, Xm)
             // NOTE: TST has N=1 (bit23=1) unlike AND which has N=0
-            Instruction::TST { rn, rm } => Ok(0xEA00001Fu32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)),
+            Instruction::TST { rn, rm } => {
+                Ok(0xEA00001Fu32 | (rm.encoding() << 16) | (rn.encoding() << 5))
+            }
 
             // ---- CSEL ----
             // CSEL: sf 0 0 1 1 0 1 0 0 0 Rm 0000 0 cond Rn Rd
@@ -2050,11 +2031,7 @@ impl Instruction {
             // (Previous encodings 0x1EE20000/0x1EE60000 used type=11 half-precision
             //  and missed the required bit-14 constant, producing wrong results on
             //  QEMU 7.2.  Verified against binutils aarch64-opc.c.)
-            Instruction::FCVT {
-                rd,
-                rn,
-                to_double,
-            } => {
+            Instruction::FCVT { rd, rn, to_double } => {
                 let base = if *to_double {
                     0x1E22C000u32 // FCVT Dd, Sn (f32→f64)
                 } else {
@@ -2068,38 +2045,47 @@ impl Instruction {
             //      emit the double-precision form). ----
             // FADD: 0x1E282800
             Instruction::Fadd { rd, rn, rm, double } => {
-                Ok(0x1E202800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())  // G7: cleared Rm field from base
+                Ok(0x1E202800u32
+                    | ((*double as u32) << 22)
+                    | (rm.encoding() << 16)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()) // G7: cleared Rm field from base
             }
             // FSUB: 0x1E283800
             Instruction::Fsub { rd, rn, rm, double } => {
-                Ok(0x1E203800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())  // G7: cleared Rm field from base
+                Ok(0x1E203800u32
+                    | ((*double as u32) << 22)
+                    | (rm.encoding() << 16)
+                    | (rn.encoding() << 5)
+                    | rd.encoding()) // G7: cleared Rm field from base
             }
             // FMUL: 0x1E200800
-            Instruction::Fmul { rd, rn, rm, double } => {
-                Ok(0x1E200800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
-            }
+            Instruction::Fmul { rd, rn, rm, double } => Ok(0x1E200800u32
+                | ((*double as u32) << 22)
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
             // FDIV: 0x1E201800
-            Instruction::Fdiv { rd, rn, rm, double } => {
-                Ok(0x1E201800u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5) | rd.encoding())
-            }
+            Instruction::Fdiv { rd, rn, rm, double } => Ok(0x1E201800u32
+                | ((*double as u32) << 22)
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)
+                | rd.encoding()),
             // FCMP: 0x1E202000 (double-precision)
-            Instruction::Fcmp { rn, rm, double } => {
-                Ok(0x1E202000u32 | ((*double as u32) << 22) | (rm.encoding() << 16) | (rn.encoding() << 5))
-            }
+            Instruction::Fcmp { rn, rm, double } => Ok(0x1E202000u32
+                | ((*double as u32) << 22)
+                | (rm.encoding() << 16)
+                | (rn.encoding() << 5)),
 
             // ---- DMB ----
             // DMB: 1101_0101_0000_0011_1011_1_CRm_111_11111
             // Base (CRm=0) = 0xD50330BF
-            Instruction::DMB { option } => {
-                Ok(0xD50330BFu32 | (option.encoding() << 8))
-            }
+            Instruction::DMB { option } => Ok(0xD50330BFu32 | (option.encoding() << 8)),
 
             // ---- DSB ----
             // DSB: 1101_0101_0000_0011_1011_1_CRm_101_11111
             // Base (CRm=0) = 0xD50330AF
-            Instruction::DSB { option } => {
-                Ok(0xD50330AFu32 | (option.encoding() << 8))
-            }
+            Instruction::DSB { option } => Ok(0xD50330AFu32 | (option.encoding() << 8)),
 
             // ---- ISB ----
             // ISB: 1101_0101_0000_0011_1101_1_1111_111_11111
@@ -2119,9 +2105,7 @@ impl Instruction {
                 if matches!(rm, Register::SP) {
                     Ok(0x910003E0 | rd.encoding())
                 } else {
-                    Ok(0xAA0003E0u32
-                        | (rm.encoding() << 16)
-                        | rd.encoding())
+                    Ok(0xAA0003E0u32 | (rm.encoding() << 16) | rd.encoding())
                 }
             }
 
@@ -2189,9 +2173,7 @@ impl Instruction {
             // ---- SVC ----
             // SVC: 1101_0100_0000_0000_0000_imm16_00001
             // Base = 0xD4000001
-            Instruction::SVC { imm16 } => {
-                Ok(0xD4000001u32 | ((*imm16 as u32) << 5))
-            }
+            Instruction::SVC { imm16 } => Ok(0xD4000001u32 | ((*imm16 as u32) << 5)),
 
             // ---- NOP ----
             // NOP: 1 1 0 1 0 1 0 1 0 0 0 0 0 0 1 1 0 0 1 0 0 0 0 0 1 1 1 0 0 0 0 0
@@ -2254,7 +2236,11 @@ impl Instruction {
             // (used by the Select lowering's compare-against-zero pattern)
             // correctly set flags for the subsequent CSEL/CSET.
             Instruction::SUB { rd, rn, rm } => {
-                let s_bit: u32 = if matches!(rd, Register::XZR) { 1 << 29 } else { 0 };
+                let s_bit: u32 = if matches!(rd, Register::XZR) {
+                    1 << 29
+                } else {
+                    0
+                };
                 match rm {
                     Operand::Reg { reg, shift } => {
                         let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
@@ -2275,7 +2261,7 @@ impl Instruction {
                         | (rn.encoding() << 5)
                         | rd.encoding()),
                 }
-            },
+            }
 
             // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
             // MADD: sf 0 0 1 1 0 1 1 000 Rm 0 Ra Rn Rd
@@ -2480,38 +2466,33 @@ impl Instruction {
             // ---- CMP (alias for SUBS XZR/WZR, Rn, Rm) ----
             // CMP: 64-bit base=0xEB00001F, 32-bit base=0x6B00001F
             Instruction::CMP { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0x6B00001Fu32
-                    | (reg.encoding() << 16)
-                    | (rn.encoding() << 5)),
+                Operand::Reg { reg, shift: _ } => {
+                    Ok((sf << 31) | 0x6B00001Fu32 | (reg.encoding() << 16) | (rn.encoding() << 5))
+                }
                 // CMP (immediate): 64-bit base=0xF100001F, 32-bit base=0x7100001F
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0x7100001Fu32
-                    | ((*imm as u32) << 10)
-                    | (rn.encoding() << 5)),
+                Operand::Imm12(imm) => {
+                    Ok((sf << 31) | 0x7100001Fu32 | ((*imm as u32) << 10) | (rn.encoding() << 5))
+                }
             },
 
             // ---- CMN (alias for ADDS XZR/WZR, Rn, Rm) ----
             // CMN: 64-bit base=0xAB00001F, 32-bit base=0x2B00001F
             Instruction::CMN { rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0x2B00001Fu32
-                    | (reg.encoding() << 16)
-                    | (rn.encoding() << 5)),
+                Operand::Reg { reg, shift: _ } => {
+                    Ok((sf << 31) | 0x2B00001Fu32 | (reg.encoding() << 16) | (rn.encoding() << 5))
+                }
                 // CMN (immediate): 64-bit base=0xB100001F, 32-bit base=0x3100001F
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0x3100001Fu32
-                    | ((*imm as u32) << 10)
-                    | (rn.encoding() << 5)),
+                Operand::Imm12(imm) => {
+                    Ok((sf << 31) | 0x3100001Fu32 | ((*imm as u32) << 10) | (rn.encoding() << 5))
+                }
             },
 
             // ---- TST (alias for ANDS XZR/WZR, Rn, Rm) ----
             // TST: 64-bit base=0xEA00001F, 32-bit base=0x6A00001F (ANDS XZR/WZR, Rn, Rm)
             // NOTE: ANDS has N=1 (bit23=1) unlike AND which has N=0
-            Instruction::TST { rn, rm } => Ok((sf << 31)
-                | 0x6A00001Fu32
-                | (rm.encoding() << 16)
-                | (rn.encoding() << 5)),
+            Instruction::TST { rn, rm } => {
+                Ok((sf << 31) | 0x6A00001Fu32 | (rm.encoding() << 16) | (rn.encoding() << 5))
+            }
 
             // ---- CSEL ----
             // CSEL: sf 00 1101 0100 Rm cond Rn Rd
@@ -2589,10 +2570,7 @@ impl Instruction {
                     //   32-bit: 0x110003E0 | Rd  (sf=0)
                     Ok((sf << 31) | 0x110003E0 | rd.encoding())
                 } else {
-                    Ok((sf << 31)
-                        | 0x2A0003E0u32
-                        | (rm.encoding() << 16)
-                        | rd.encoding())
+                    Ok((sf << 31) | 0x2A0003E0u32 | (rm.encoding() << 16) | rd.encoding())
                 }
             }
 
@@ -2619,37 +2597,29 @@ impl Instruction {
             // ---- CLZ Rd, Rn ----
             // One-source: sf 1 0 1 1 0 1 0 1 1 0 00000 010 Rn Rd
             // CLZ: 64-bit base=0xDAC01000, 32-bit base=0x5AC01000
-            Instruction::CLZ { rd, rn } => Ok((sf << 31)
-                | 0x5AC01000u32
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::CLZ { rd, rn } => {
+                Ok((sf << 31) | 0x5AC01000u32 | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- RBIT Rd, Rn ----
             // One-source: sf 1 0 1 1 0 1 0 1 1 0 00000 000 Rn Rd
             // RBIT: 64-bit base=0xDAC00000, 32-bit base=0x5AC00000
-            Instruction::RBIT { rd, rn } => Ok((sf << 31)
-                | 0x5AC00000u32
-                | (rn.encoding() << 5)
-                | rd.encoding()),
+            Instruction::RBIT { rd, rn } => {
+                Ok((sf << 31) | 0x5AC00000u32 | (rn.encoding() << 5) | rd.encoding())
+            }
 
             // ---- CBZ ----
             // CBZ: 64-bit base=0xB4000000, 32-bit base=0x34000000
             Instruction::CBZ { rt, offset } => {
                 let imm19 = (*offset) >> 2;
-                Ok((sf << 31)
-                    | 0x34000000u32
-                    | (((imm19 as u32) & 0x7FFFF) << 5)
-                    | rt.encoding())
+                Ok((sf << 31) | 0x34000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | rt.encoding())
             }
 
             // ---- CBNZ ----
             // CBNZ: 64-bit base=0xB5000000, 32-bit base=0x35000000
             Instruction::CBNZ { rt, offset } => {
                 let imm19 = (*offset) >> 2;
-                Ok((sf << 31)
-                    | 0x35000000u32
-                    | (((imm19 as u32) & 0x7FFFF) << 5)
-                    | rt.encoding())
+                Ok((sf << 31) | 0x35000000u32 | (((imm19 as u32) & 0x7FFFF) << 5) | rt.encoding())
             }
 
             // ---- SXTW (alias for SBFM Xd, Xn, #0, #31) ----
@@ -3207,8 +3177,12 @@ impl std::fmt::Display for Instruction {
             Instruction::RORV { rd, rn, rm } => write!(f, "rorv {}, {}, {}", rd, rn, rm),
             Instruction::LDR { rt, rn, offset } => write!(f, "ldr {}, [{}, #{}]", rt, rn, offset),
             Instruction::STR { rt, rn, offset } => write!(f, "str {}, [{}, #{}]", rt, rn, offset),
-            Instruction::LDR_W { rt, rn, offset } => write!(f, "ldr w{}, [{}, #{}]", rt.encoding(), rn, offset),
-            Instruction::STR_W { rt, rn, offset } => write!(f, "str w{}, [{}, #{}]", rt.encoding(), rn, offset),
+            Instruction::LDR_W { rt, rn, offset } => {
+                write!(f, "ldr w{}, [{}, #{}]", rt.encoding(), rn, offset)
+            }
+            Instruction::STR_W { rt, rn, offset } => {
+                write!(f, "str w{}, [{}, #{}]", rt.encoding(), rn, offset)
+            }
             Instruction::LDRB { rt, rn, offset } => write!(f, "ldrb {}, [{}, #{}]", rt, rn, offset),
             Instruction::LDRH { rt, rn, offset } => write!(f, "ldrh {}, [{}, #{}]", rt, rn, offset),
             Instruction::LDRSW { rt, rn, offset } => {
@@ -3275,25 +3249,73 @@ impl std::fmt::Display for Instruction {
                 write!(f, "sbfm {}, {}, #{}, #{}", rd, rn, immr, imms)
             }
             Instruction::SXTW { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
-            Instruction::SCVTF { rd, rn, src_64, dst_double } => {
+            Instruction::SCVTF {
+                rd,
+                rn,
+                src_64,
+                dst_double,
+            } => {
                 let dst_prefix = if *dst_double { "d" } else { "s" };
                 let src_prefix = if *src_64 { "x" } else { "w" };
-                write!(f, "scvtf {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+                write!(
+                    f,
+                    "scvtf {}{}, {}{}",
+                    dst_prefix,
+                    rd.encoding(),
+                    src_prefix,
+                    rn.encoding()
+                )
             }
-            Instruction::FCVTZS { rd, rn, dst_64, src_double } => {
+            Instruction::FCVTZS {
+                rd,
+                rn,
+                dst_64,
+                src_double,
+            } => {
                 let dst_prefix = if *dst_64 { "x" } else { "w" };
                 let src_prefix = if *src_double { "d" } else { "s" };
-                write!(f, "fcvtzs {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+                write!(
+                    f,
+                    "fcvtzs {}{}, {}{}",
+                    dst_prefix,
+                    rd.encoding(),
+                    src_prefix,
+                    rn.encoding()
+                )
             }
-            Instruction::UCVTF { rd, rn, src_64, dst_double } => {
+            Instruction::UCVTF {
+                rd,
+                rn,
+                src_64,
+                dst_double,
+            } => {
                 let dst_prefix = if *dst_double { "d" } else { "s" };
                 let src_prefix = if *src_64 { "x" } else { "w" };
-                write!(f, "ucvtf {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+                write!(
+                    f,
+                    "ucvtf {}{}, {}{}",
+                    dst_prefix,
+                    rd.encoding(),
+                    src_prefix,
+                    rn.encoding()
+                )
             }
-            Instruction::FCVTZU { rd, rn, dst_64, src_double } => {
+            Instruction::FCVTZU {
+                rd,
+                rn,
+                dst_64,
+                src_double,
+            } => {
                 let dst_prefix = if *dst_64 { "x" } else { "w" };
                 let src_prefix = if *src_double { "d" } else { "s" };
-                write!(f, "fcvtzu {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+                write!(
+                    f,
+                    "fcvtzu {}{}, {}{}",
+                    dst_prefix,
+                    rd.encoding(),
+                    src_prefix,
+                    rn.encoding()
+                )
             }
             Instruction::FCVT { rd, rn, to_double } => {
                 if *to_double {
@@ -3304,19 +3326,55 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::Fadd { rd, rn, rm, double } => {
                 let p = if *double { "d" } else { "s" };
-                write!(f, "fadd {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+                write!(
+                    f,
+                    "fadd {}{}, {}{}, {}{}",
+                    p,
+                    rd.encoding(),
+                    p,
+                    rn.encoding(),
+                    p,
+                    rm.encoding()
+                )
             }
             Instruction::Fsub { rd, rn, rm, double } => {
                 let p = if *double { "d" } else { "s" };
-                write!(f, "fsub {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+                write!(
+                    f,
+                    "fsub {}{}, {}{}, {}{}",
+                    p,
+                    rd.encoding(),
+                    p,
+                    rn.encoding(),
+                    p,
+                    rm.encoding()
+                )
             }
             Instruction::Fmul { rd, rn, rm, double } => {
                 let p = if *double { "d" } else { "s" };
-                write!(f, "fmul {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+                write!(
+                    f,
+                    "fmul {}{}, {}{}, {}{}",
+                    p,
+                    rd.encoding(),
+                    p,
+                    rn.encoding(),
+                    p,
+                    rm.encoding()
+                )
             }
             Instruction::Fdiv { rd, rn, rm, double } => {
                 let p = if *double { "d" } else { "s" };
-                write!(f, "fdiv {}{}, {}{}, {}{}", p, rd.encoding(), p, rn.encoding(), p, rm.encoding())
+                write!(
+                    f,
+                    "fdiv {}{}, {}{}, {}{}",
+                    p,
+                    rd.encoding(),
+                    p,
+                    rn.encoding(),
+                    p,
+                    rm.encoding()
+                )
             }
             Instruction::Fcmp { rn, rm, double } => {
                 let p = if *double { "d" } else { "s" };
@@ -3664,11 +3722,7 @@ impl InstructionSelector {
                         });
                     }
                     Operand::Reg { reg, .. } => {
-                        self.push(Instruction::RORV {
-                            rd,
-                            rn,
-                            rm: reg,
-                        });
+                        self.push(Instruction::RORV { rd, rn, rm: reg });
                     }
                 }
             }
@@ -4138,18 +4192,10 @@ impl InstructionSelector {
         // Derive type-info booleans from IR types.
         // When type info is unavailable (`None`), fall back to defaults
         // matching the prior behaviour (64-bit int, double-precision float).
-        let src_is_64bit_int = matches!(from_ty,
-            Some(IRType::I64) | Some(IRType::U64) | None
-        );
-        let dst_is_f64 = matches!(to_ty,
-            Some(IRType::F64) | None
-        );
-        let dst_is_64bit_int = matches!(to_ty,
-            Some(IRType::I64) | Some(IRType::U64) | None
-        );
-        let src_is_f64 = matches!(from_ty,
-            Some(IRType::F64) | None
-        );
+        let src_is_64bit_int = matches!(from_ty, Some(IRType::I64) | Some(IRType::U64) | None);
+        let dst_is_f64 = matches!(to_ty, Some(IRType::F64) | None);
+        let dst_is_64bit_int = matches!(to_ty, Some(IRType::I64) | Some(IRType::U64) | None);
+        let src_is_f64 = matches!(from_ty, Some(IRType::F64) | None);
 
         match kind {
             CastKind::BitCast => {
@@ -4389,7 +4435,7 @@ impl InstructionSelector {
                     IRType::I16 | IRType::U16 => 2,
                     _ => 1,
                 };
-                if *offset != 0 && (*offset as u32) % align != 0 {
+                if *offset != 0 && !(*offset as u32).is_multiple_of(align) {
                     // Non-aligned offset: compute base + offset first
                     // using X16 (IP0, scratch register) as temp
                     self.push(Instruction::ADD {
@@ -4450,7 +4496,7 @@ impl InstructionSelector {
                     IRType::I16 | IRType::U16 => 2,
                     _ => 1,
                 };
-                if *offset != 0 && (*offset as u32) % align != 0 {
+                if *offset != 0 && !(*offset as u32).is_multiple_of(align) {
                     self.push(Instruction::ADD {
                         rd: Register::X16,
                         rn,
@@ -5508,34 +5554,86 @@ mod tests {
     fn select_cast_int_to_float() {
         // i64 → f64: SCVTF Dd, Xn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::IntToFloat, Register::X0, Register::X1, Some(IRType::I64), Some(IRType::F64));
+        sel.select_cast(
+            CastKind::IntToFloat,
+            Register::X0,
+            Register::X1,
+            Some(IRType::I64),
+            Some(IRType::F64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: true, dst_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::SCVTF {
+                src_64: true,
+                dst_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "scvtf d0, x1");
 
         // i32 → f32: SCVTF Sd, Wn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::IntToFloat, Register::X2, Register::X3, Some(IRType::I32), Some(IRType::F32));
+        sel.select_cast(
+            CastKind::IntToFloat,
+            Register::X2,
+            Register::X3,
+            Some(IRType::I32),
+            Some(IRType::F32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: false, dst_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::SCVTF {
+                src_64: false,
+                dst_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "scvtf s2, w3");
 
         // i64 → f32: SCVTF Sd, Xn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::IntToFloat, Register::X4, Register::X5, Some(IRType::I64), Some(IRType::F32));
+        sel.select_cast(
+            CastKind::IntToFloat,
+            Register::X4,
+            Register::X5,
+            Some(IRType::I64),
+            Some(IRType::F32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: true, dst_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::SCVTF {
+                src_64: true,
+                dst_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "scvtf s4, x5");
 
         // i32 → f64: SCVTF Dd, Wn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::IntToFloat, Register::X6, Register::X7, Some(IRType::I32), Some(IRType::F64));
+        sel.select_cast(
+            CastKind::IntToFloat,
+            Register::X6,
+            Register::X7,
+            Some(IRType::I32),
+            Some(IRType::F64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: false, dst_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::SCVTF {
+                src_64: false,
+                dst_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "scvtf d6, w7");
     }
 
@@ -5544,18 +5642,44 @@ mod tests {
     fn select_cast_uint_to_float() {
         // u64 → f64: UCVTF Dd, Xn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::UIntToFloat, Register::X0, Register::X1, Some(IRType::U64), Some(IRType::F64));
+        sel.select_cast(
+            CastKind::UIntToFloat,
+            Register::X0,
+            Register::X1,
+            Some(IRType::U64),
+            Some(IRType::F64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::UCVTF { src_64: true, dst_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::UCVTF {
+                src_64: true,
+                dst_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "ucvtf d0, x1");
 
         // u32 → f32: UCVTF Sd, Wn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::UIntToFloat, Register::X2, Register::X3, Some(IRType::U32), Some(IRType::F32));
+        sel.select_cast(
+            CastKind::UIntToFloat,
+            Register::X2,
+            Register::X3,
+            Some(IRType::U32),
+            Some(IRType::F32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::UCVTF { src_64: false, dst_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::UCVTF {
+                src_64: false,
+                dst_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "ucvtf s2, w3");
     }
 
@@ -5564,34 +5688,86 @@ mod tests {
     fn select_cast_float_to_int() {
         // f64 → i64: FCVTZS Xd, Dn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToInt, Register::X0, Register::X1, Some(IRType::F64), Some(IRType::I64));
+        sel.select_cast(
+            CastKind::FloatToInt,
+            Register::X0,
+            Register::X1,
+            Some(IRType::F64),
+            Some(IRType::I64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: true, src_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVTZS {
+                dst_64: true,
+                src_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvtzs x0, d1");
 
         // f32 → i32: FCVTZS Wd, Sn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToInt, Register::X2, Register::X3, Some(IRType::F32), Some(IRType::I32));
+        sel.select_cast(
+            CastKind::FloatToInt,
+            Register::X2,
+            Register::X3,
+            Some(IRType::F32),
+            Some(IRType::I32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: false, src_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVTZS {
+                dst_64: false,
+                src_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvtzs w2, s3");
 
         // f32 → i64: FCVTZS Xd, Sn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToInt, Register::X4, Register::X5, Some(IRType::F32), Some(IRType::I64));
+        sel.select_cast(
+            CastKind::FloatToInt,
+            Register::X4,
+            Register::X5,
+            Some(IRType::F32),
+            Some(IRType::I64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: true, src_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVTZS {
+                dst_64: true,
+                src_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvtzs x4, s5");
 
         // f64 → i32: FCVTZS Wd, Dn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToInt, Register::X6, Register::X7, Some(IRType::F64), Some(IRType::I32));
+        sel.select_cast(
+            CastKind::FloatToInt,
+            Register::X6,
+            Register::X7,
+            Some(IRType::F64),
+            Some(IRType::I32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: false, src_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVTZS {
+                dst_64: false,
+                src_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvtzs w6, d7");
     }
 
@@ -5600,18 +5776,44 @@ mod tests {
     fn select_cast_float_to_uint() {
         // f64 → u64: FCVTZU Xd, Dn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToUInt, Register::X0, Register::X1, Some(IRType::F64), Some(IRType::U64));
+        sel.select_cast(
+            CastKind::FloatToUInt,
+            Register::X0,
+            Register::X1,
+            Some(IRType::F64),
+            Some(IRType::U64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZU { dst_64: true, src_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVTZU {
+                dst_64: true,
+                src_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvtzu x0, d1");
 
         // f32 → u32: FCVTZU Wd, Sn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToUInt, Register::X2, Register::X3, Some(IRType::F32), Some(IRType::U32));
+        sel.select_cast(
+            CastKind::FloatToUInt,
+            Register::X2,
+            Register::X3,
+            Some(IRType::F32),
+            Some(IRType::U32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZU { dst_64: false, src_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVTZU {
+                dst_64: false,
+                src_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvtzu w2, s3");
     }
 
@@ -5689,18 +5891,42 @@ mod tests {
     fn select_cast_float_to_float() {
         // f32 → f64: FCVT Dd, Sn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToFloat, Register::X0, Register::X1, Some(IRType::F32), Some(IRType::F64));
+        sel.select_cast(
+            CastKind::FloatToFloat,
+            Register::X0,
+            Register::X1,
+            Some(IRType::F32),
+            Some(IRType::F64),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVT { to_double: true, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVT {
+                to_double: true,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvt d0, s1");
 
         // f64 → f32: FCVT Sd, Dn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::FloatToFloat, Register::X2, Register::X3, Some(IRType::F64), Some(IRType::F32));
+        sel.select_cast(
+            CastKind::FloatToFloat,
+            Register::X2,
+            Register::X3,
+            Some(IRType::F64),
+            Some(IRType::F32),
+        );
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVT { to_double: false, .. }));
+        assert!(matches!(
+            instrs[0],
+            Instruction::FCVT {
+                to_double: false,
+                ..
+            }
+        ));
         assert_eq!(format!("{}", instrs[0]), "fcvt s2, d3");
     }
 

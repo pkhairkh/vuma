@@ -3,6 +3,25 @@
 //! Determines which allocations don't escape their function and can be
 //! stack-allocated instead of heap-allocated.
 //!
+//! # Scope — codegen optimisation pass, NOT IVE verification
+//!
+//! This module is part of `vuma_codegen` (see `codegen/src/lib.rs:82`)
+//! and is invoked from `pipeline.rs:7259-7261` as a Stage 8 / O2+
+//! optimisation pass:
+//!
+//! - [`analyze_escapes`] computes per-allocation escape info.
+//! - [`scalar_replace_aggregates`] (SROA) scalarises non-escaping
+//!   aggregates for downstream constant folding / CSE.
+//! - [`elide_non_escaping_allocs`] drops allocs whose memory is never
+//!   read or written, along with their matching `free`.
+//!
+//! **This module is NOT consumed by IVE** (`vuma_ive`). It performs no
+//! soundness verification — it is a pure codegen optimisation. The
+//! historical `docs/architecture/caveats.md §2` row 12 citation of
+//! `ive/src/escape.rs` was a stale path: that file never existed in
+//! this branch; escape analysis has always lived here in `codegen/`.
+//! See Wave 5-f worklog entry for the audit.
+//!
 //! # Algorithm
 //!
 //! 1. For each Alloc instruction (and each `__vuma_alloc`/`allocate` Call
@@ -32,8 +51,8 @@
 //!   `__vuma_free`/`free`/`Free` instruction.  This is the
 //!   "allocation elision" optimisation.
 
+use crate::ir::{IRFunction, IRInstr, IRTerminator, IRValue};
 use std::collections::{HashMap, HashSet};
-use crate::ir::{IRFunction, IRInstr, IRValue, IRTerminator};
 
 /// Result of escape analysis for a single allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,18 +87,20 @@ fn is_free_call(fname: &str) -> bool {
 fn is_safe_alloc_use(instr: &IRInstr, vreg: u32) -> bool {
     match instr {
         IRInstr::Load { addr, .. } | IRInstr::Store { addr, .. }
-            if addr.as_register() == Some(vreg) => true,
-        IRInstr::AtomicLoad { addr, .. } | IRInstr::AtomicStore { addr, .. }
-            if addr.as_register() == Some(vreg) => true,
-        IRInstr::AtomicCas { addr, .. } if addr.as_register() == Some(vreg) => true,
-        IRInstr::Free { ptr } if ptr.as_register() == Some(vreg) => true,
-        IRInstr::Call { func: fname, args, .. }
-            if is_free_call(fname)
-                && args.len() == 1
-                && args[0].as_register() == Some(vreg) =>
+            if addr.as_register() == Some(vreg) =>
         {
             true
         }
+        IRInstr::AtomicLoad { addr, .. } | IRInstr::AtomicStore { addr, .. }
+            if addr.as_register() == Some(vreg) =>
+        {
+            true
+        }
+        IRInstr::AtomicCas { addr, .. } if addr.as_register() == Some(vreg) => true,
+        IRInstr::Free { ptr } if ptr.as_register() == Some(vreg) => true,
+        IRInstr::Call {
+            func: fname, args, ..
+        } if is_free_call(fname) && args.len() == 1 && args[0].as_register() == Some(vreg) => true,
         _ => false,
     }
 }
@@ -90,9 +111,7 @@ fn terminator_used_regs(term: &IRTerminator) -> Vec<u32> {
         IRTerminator::Return(vals) => vals.iter().filter_map(|v| v.as_register()).collect(),
         IRTerminator::Branch { cond, .. } => cond.as_register().into_iter().collect(),
         IRTerminator::Switch { discr, .. } => discr.as_register().into_iter().collect(),
-        IRTerminator::Invoke { args, .. } => {
-            args.iter().filter_map(|v| v.as_register()).collect()
-        }
+        IRTerminator::Invoke { args, .. } => args.iter().filter_map(|v| v.as_register()).collect(),
         IRTerminator::TailCall { args, .. } => {
             args.iter().filter_map(|v| v.as_register()).collect()
         }
@@ -113,14 +132,14 @@ fn terminator_used_regs(term: &IRTerminator) -> Vec<u32> {
 ///   * direct `Load`/`Store`/`AtomicLoad`/`AtomicStore`/`AtomicCas`
 ///     whose `addr` operand is exactly the alloc vreg (SROA candidates),
 ///   * the matching `Free` / `__vuma_free` / `free` call.
-/// ANY other use — pointer arithmetic (`Add`/`Sub`/`Offset`), type
-/// casts (`Cast`), control-merge (`Phi`/`Select`), storing the alloc
-/// address as a value, passing to a non-`free` call, passing to a
-/// syscall, returning, branching on it, etc. — marks the allocation as
-/// escaping. This prevents SROA / alloc-elision from removing an
-/// allocation whose address is observed through a derived alias (the
-/// root cause of the Wave 2 SIGSEGV regressions on `mem_copy_buffer`,
-/// `doubly_linked_list`, `mf_address_return`, etc.).
+///     ANY other use — pointer arithmetic (`Add`/`Sub`/`Offset`), type
+///     casts (`Cast`), control-merge (`Phi`/`Select`), storing the alloc
+///     address as a value, passing to a non-`free` call, passing to a
+///     syscall, returning, branching on it, etc. — marks the allocation as
+///     escaping. This prevents SROA / alloc-elision from removing an
+///     allocation whose address is observed through a derived alias (the
+///     root cause of the Wave 2 SIGSEGV regressions on `mem_copy_buffer`,
+///     `doubly_linked_list`, `mf_address_return`, etc.).
 pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
     let mut allocs: HashSet<u32> = HashSet::new();
     let mut escapes: HashSet<u32> = HashSet::new();
@@ -135,9 +154,11 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
                         allocs.insert(vreg);
                     }
                 }
-                IRInstr::Call { dst: Some(dst), func: fname, .. }
-                    if is_alloc_call(fname) =>
-                {
+                IRInstr::Call {
+                    dst: Some(dst),
+                    func: fname,
+                    ..
+                } if is_alloc_call(fname) => {
                     if let Some(vreg) = dst.as_register() {
                         allocs.insert(vreg);
                     }
@@ -146,7 +167,11 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
                 // vreg is a heap allocation that must be tracked for escape
                 // analysis (otherwise the buffer passed to write() wouldn't
                 // be marked as escaping, and SROA/elision could remove it).
-                IRInstr::Syscall { nr: 222, dst: Some(dst), .. } => {
+                IRInstr::Syscall {
+                    nr: 222,
+                    dst: Some(dst),
+                    ..
+                } => {
                     if let Some(vreg) = dst.as_register() {
                         allocs.insert(vreg);
                     }
@@ -209,7 +234,9 @@ pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {
 /// Returns a map from function name to that function's per-alloc escape info.
 /// Used by the O2+ pipeline to drive SROA and alloc elision across the
 /// whole program without re-running the analysis per pass.
-pub fn analyze_escapes_program(funcs: &[IRFunction]) -> HashMap<String, HashMap<u32, EscapeResult>> {
+pub fn analyze_escapes_program(
+    funcs: &[IRFunction],
+) -> HashMap<String, HashMap<u32, EscapeResult>> {
     funcs
         .iter()
         .map(|f| (f.name.clone(), analyze_escapes(f)))
@@ -403,7 +430,9 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(dst, from, to);
                 }
                 // Wave 8b: renumber ch, value dst, and err_dst.
-                IRInstr::ChannelRecvResult { ch, dst, err_dst, .. } => {
+                IRInstr::ChannelRecvResult {
+                    ch, dst, err_dst, ..
+                } => {
                     sub(ch, from, to);
                     sub(dst, from, to);
                     sub(err_dst, from, to);
@@ -415,10 +444,19 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(dst, from, to);
                 }
                 // Wave 49: renumber func_ptr + args of indirect call.
-                IRInstr::CallIndirect { dst, func_ptr, args, .. } => {
-                    if let Some(d) = dst { sub(d, from, to); }
+                IRInstr::CallIndirect {
+                    dst,
+                    func_ptr,
+                    args,
+                    ..
+                } => {
+                    if let Some(d) = dst {
+                        sub(d, from, to);
+                    }
                     sub(func_ptr, from, to);
-                    for a in args { sub(a, from, to); }
+                    for a in args {
+                        sub(a, from, to);
+                    }
                 }
             }
         }
@@ -490,7 +528,9 @@ pub fn scalar_replace_aggregates(
         'outer: for (bi, block) in func.blocks.iter().enumerate() {
             for (ii, instr) in block.instructions.iter().enumerate() {
                 match instr {
-                    IRInstr::Load { dst, addr, offset, .. } => {
+                    IRInstr::Load {
+                        dst, addr, offset, ..
+                    } => {
                         if let (Some(dst_v), Some(addr_v)) = (dst.as_register(), addr.as_register())
                         {
                             if addr_v == alloc_vreg {
@@ -505,7 +545,12 @@ pub fn scalar_replace_aggregates(
                             }
                         }
                     }
-                    IRInstr::Store { value, addr, offset, .. } => {
+                    IRInstr::Store {
+                        value,
+                        addr,
+                        offset,
+                        ..
+                    } => {
                         if let Some(addr_v) = addr.as_register() {
                             if addr_v == alloc_vreg {
                                 // SROA's rename framework can only handle
@@ -612,7 +657,10 @@ pub fn scalar_replace_aggregates(
             continue;
         }
         // Bail if any offset has Loads but no Store (would read undef).
-        if loads_per_offset.keys().any(|o| !stores_per_offset.contains_key(o)) {
+        if loads_per_offset
+            .keys()
+            .any(|o| !stores_per_offset.contains_key(o))
+        {
             continue;
         }
 
@@ -631,8 +679,10 @@ pub fn scalar_replace_aggregates(
         }
 
         // Phase D: remove the Load/Store instructions (now dead).
-        let mut to_remove: Vec<(usize, usize)> =
-            accesses.iter().map(|a| (a.block_idx, a.instr_idx)).collect();
+        let mut to_remove: Vec<(usize, usize)> = accesses
+            .iter()
+            .map(|a| (a.block_idx, a.instr_idx))
+            .collect();
         to_remove.sort_unstable_by(|a, b| b.cmp(a));
         for (bi, ii) in to_remove {
             func.blocks[bi].instructions.remove(ii);
@@ -744,20 +794,18 @@ pub fn elide_non_escaping_allocs(
         let mut removed_alloc = false;
         for block in &mut func.blocks {
             block.instructions.retain(|instr| match instr {
-                IRInstr::Alloc { dst, .. }
-                    if dst.as_register() == Some(alloc_vreg) => {
-                        removed_alloc = true;
-                        false
-                    }
+                IRInstr::Alloc { dst, .. } if dst.as_register() == Some(alloc_vreg) => {
+                    removed_alloc = true;
+                    false
+                }
                 IRInstr::Call {
                     dst: Some(dst),
                     func: fname,
                     ..
-                } if is_alloc_call(fname)
-                    && dst.as_register() == Some(alloc_vreg) => {
-                        removed_alloc = true;
-                        false
-                    }
+                } if is_alloc_call(fname) && dst.as_register() == Some(alloc_vreg) => {
+                    removed_alloc = true;
+                    false
+                }
                 _ => true,
             });
         }
@@ -774,9 +822,7 @@ pub fn elide_non_escaping_allocs(
                 let is_matching_free = match instr {
                     IRInstr::Free { ptr } => ptr.as_register() == Some(alloc_vreg),
                     IRInstr::Call {
-                        func: fname,
-                        args,
-                        ..
+                        func: fname, args, ..
                     } if is_free_call(fname) => {
                         args.len() == 1 && args[0].as_register() == Some(alloc_vreg)
                     }
@@ -833,10 +879,7 @@ mod tests {
         // %v4 = add %v3, 1
         // ret %v4
         let instrs = vec![
-            IRInstr::Alloc {
-                dst: r(1),
-                size: 8,
-            },
+            IRInstr::Alloc { dst: r(1), size: 8 },
             IRInstr::Add {
                 dst: r(2),
                 lhs: IRValue::Immediate(0),
@@ -944,10 +987,7 @@ mod tests {
     fn test_sroa_skips_escaping_alloc() {
         // %v1 = alloc 8
         // ret %v1
-        let instrs = vec![IRInstr::Alloc {
-            dst: r(1),
-            size: 8,
-        }];
+        let instrs = vec![IRInstr::Alloc { dst: r(1), size: 8 }];
         let mut func = fn_with("sroa_escape", instrs, IRTerminator::Return(vec![r(1)]));
 
         let info = analyze_escapes(&func);
@@ -966,10 +1006,7 @@ mod tests {
     /// Alloc with no accesses at all → SROA skips it (alloc-elision handles it).
     #[test]
     fn test_sroa_skips_unused_alloc() {
-        let instrs = vec![IRInstr::Alloc {
-            dst: r(1),
-            size: 8,
-        }];
+        let instrs = vec![IRInstr::Alloc { dst: r(1), size: 8 }];
         let mut func = fn_with("sroa_unused", instrs, IRTerminator::Return(vec![]));
 
         let info = analyze_escapes(&func);
@@ -1016,9 +1053,17 @@ mod tests {
         let calls_remaining: usize = func
             .blocks
             .iter()
-            .map(|b| b.instructions.iter().filter(|i| matches!(i, IRInstr::Call { .. })).count())
+            .map(|b| {
+                b.instructions
+                    .iter()
+                    .filter(|i| matches!(i, IRInstr::Call { .. }))
+                    .count()
+            })
             .sum();
-        assert_eq!(calls_remaining, 0, "both alloc and free calls should be removed");
+        assert_eq!(
+            calls_remaining, 0,
+            "both alloc and free calls should be removed"
+        );
     }
 
     /// Alloc that escapes (passed to another Call) should NOT be elided.
@@ -1107,17 +1152,15 @@ mod tests {
         // fn f: %v1 = alloc 8; ret %v1   (escapes)
         // fn g: %v1 = alloc 8;           (does not escape)
         let mut f = IRFunction::new("f".to_string());
-        f.blocks[0].instructions.push(IRInstr::Alloc {
-            dst: r(1),
-            size: 8,
-        });
+        f.blocks[0]
+            .instructions
+            .push(IRInstr::Alloc { dst: r(1), size: 8 });
         f.blocks[0].terminator = IRTerminator::Return(vec![r(1)]);
 
         let mut g = IRFunction::new("g".to_string());
-        g.blocks[0].instructions.push(IRInstr::Alloc {
-            dst: r(1),
-            size: 8,
-        });
+        g.blocks[0]
+            .instructions
+            .push(IRInstr::Alloc { dst: r(1), size: 8 });
         g.blocks[0].terminator = IRTerminator::Return(vec![]);
 
         let map = analyze_escapes_program(&[f, g]);
@@ -1156,11 +1199,7 @@ mod tests {
             },
             IRInstr::Syscall {
                 nr: 64,
-                args: vec![
-                    IRValue::Immediate(1),
-                    r(1),
-                    IRValue::Immediate(3),
-                ],
+                args: vec![IRValue::Immediate(1), r(1), IRValue::Immediate(3)],
                 dst: Some(r(2)),
             },
             IRInstr::Call {
@@ -1206,10 +1245,7 @@ mod tests {
 
         let info = analyze_escapes(&func);
         let elided = elide_non_escaping_allocs(&mut func, &info);
-        assert_eq!(
-            elided, 0,
-            "alloc passed to syscall must NOT be elided"
-        );
+        assert_eq!(elided, 0, "alloc passed to syscall must NOT be elided");
     }
 
     /// P2 regression: allocate() lowers to Syscall{nr:222 (mmap)}. The mmap

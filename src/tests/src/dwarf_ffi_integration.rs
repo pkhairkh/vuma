@@ -26,21 +26,21 @@
 //! | 18 | Relocations for extern calls are properly emitted   | .rela.text entries reference extern symbols   |
 //! | 19 | ffi_demo.vuma compiles for x86_64                   | Full pipeline: source → ET_REL ELF           |
 
+use vuma::ffi::{
+    Arch, CallingConvention, ExternBlock, ExternFn, ExternRegistry, ExternType, Relocation,
+    RelocationKind, SyscallName, SyscallTable,
+};
+use vuma_codegen::scg_to_ir::{
+    ComputationNode, IRBuilder, Scg, ScgExpr, ScgFunction, ScgNode, ScgStatement, ScgType,
+};
 use vuma_codegen::{
     backend::BackendKind,
     dwarf::DwarfBuilder,
     emit::{emit_elf, EmitConfig},
     ir::{BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister},
 };
-use vuma_codegen::scg_to_ir::{
-    ComputationNode, IRBuilder, Scg, ScgExpr, ScgFunction, ScgNode, ScgStatement, ScgType,
-};
-use vuma::ffi::{
-    CallingConvention, ExternBlock, ExternFn, ExternRegistry, ExternType,
-    Relocation, RelocationKind, Arch, SyscallTable, SyscallName,
-};
-use vuma_parser::Parser;
 use vuma_parser::to_scg::AstToScg;
+use vuma_parser::Parser;
 use vuma_scg::NodeType;
 
 // ===========================================================================
@@ -52,7 +52,8 @@ fn make_simple_function() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(0));
-    func.vregs.insert(0, VirtualRegister::new(0, Some("ret".to_string())));
+    func.vregs
+        .insert(0, VirtualRegister::new(0, Some("ret".to_string())));
     func.current_block().terminator = IRTerminator::Return(vec![IRValue::Immediate(42)]);
     func
 }
@@ -62,15 +63,19 @@ fn make_extern_call_function() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
     func.results.push(IRValue::Register(0));
-    func.vregs.insert(0, VirtualRegister::new(0, Some("result".to_string())));
-    func.vregs.insert(1, VirtualRegister::new(1, Some("fd".to_string())));
-    func.vregs.insert(2, VirtualRegister::new(2, Some("buf".to_string())));
-    func.vregs.insert(3, VirtualRegister::new(3, Some("count".to_string())));
+    func.vregs
+        .insert(0, VirtualRegister::new(0, Some("result".to_string())));
+    func.vregs
+        .insert(1, VirtualRegister::new(1, Some("fd".to_string())));
+    func.vregs
+        .insert(2, VirtualRegister::new(2, Some("buf".to_string())));
+    func.vregs
+        .insert(3, VirtualRegister::new(3, Some("count".to_string())));
     func.current_block().instructions.push(IRInstr::Call {
         dst: Some(IRValue::Register(0)),
         func: "write".to_string(),
         args: vec![
-            IRValue::Immediate(1),       // fd
+            IRValue::Immediate(1),        // fd
             IRValue::Immediate(0x400000), // buf
             IRValue::Immediate(21),       // count
         ],
@@ -136,7 +141,11 @@ fn test_debug_elf_sections_present() {
     let elf = emit_elf(&[func], &[], &config, &[]).expect("ELF emission should succeed");
 
     // Verify ELF is valid
-    assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic must be correct");
+    assert_eq!(
+        &elf[0..4],
+        &[0x7f, b'E', b'L', b'F'],
+        "ELF magic must be correct"
+    );
 
     // The debug section names should appear somewhere in the ELF binary
     // (they are stored in the .shstrtab section).
@@ -177,7 +186,7 @@ fn test_debug_line_valid_entries() {
     let mut db = DwarfBuilder::new();
     db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
     db.add_subprogram("main", 0, 64);
-    db.add_line_entry(0, 1, 1, 0);  // offset 0, file 1, line 1
+    db.add_line_entry(0, 1, 1, 0); // offset 0, file 1, line 1
     db.add_line_entry(16, 1, 3, 0); // offset 16, file 1, line 3
     db.add_line_entry(32, 1, 5, 0); // offset 32, file 1, line 5
 
@@ -218,23 +227,35 @@ fn test_debug_frame_cie_fde_entries() {
     let frame = &sections.debug_frame;
 
     // .debug_frame must be non-empty
-    assert!(!frame.is_empty(), ".debug_frame should not be empty when CIE is set");
+    assert!(
+        !frame.is_empty(),
+        ".debug_frame should not be empty when CIE is set"
+    );
 
     // ---- CIE validation ----
     // First 4 bytes: CIE length (must be positive)
     let cie_length = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
-    assert!(cie_length > 0, "CIE length should be positive, got {}", cie_length);
+    assert!(
+        cie_length > 0,
+        "CIE length should be positive, got {}",
+        cie_length
+    );
 
     // Next 4 bytes: CIE_id = 0xFFFFFFFF (32-bit DWARF format)
     let cie_id = u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-    assert_eq!(cie_id, 0xFFFFFFFF, "CIE_id should be 0xFFFFFFFF, got {:#010X}", cie_id);
+    assert_eq!(
+        cie_id, 0xFFFFFFFF,
+        "CIE_id should be 0xFFFFFFFF, got {:#010X}",
+        cie_id
+    );
 
     // ---- FDE validation ----
     let cie_total = 4 + cie_length as usize; // 4 bytes for length field + body
     assert!(
         frame.len() > cie_total,
         ".debug_frame should have FDEs after CIE (frame len={}, CIE total={})",
-        frame.len(), cie_total
+        frame.len(),
+        cie_total
     );
 
     // First FDE starts after CIE
@@ -260,7 +281,10 @@ fn test_debug_frame_cie_fde_entries() {
         frame[fde_offset + 6],
         frame[fde_offset + 7],
     ]);
-    assert_eq!(fde_cie_ptr, 0, "FDE CIE_pointer should be 0 (offset to first CIE)");
+    assert_eq!(
+        fde_cie_ptr, 0,
+        "FDE CIE_pointer should be 0 (offset to first CIE)"
+    );
 }
 
 // -- Tests 4-11: Per-backend CIE presets --
@@ -274,10 +298,23 @@ fn test_cie_preset_aarch64() {
 
     let cie = db.cie().unwrap();
     assert_eq!(cie.cfa_reg, 31, "AArch64 CFA register should be SP (31)");
-    assert_eq!(cie.return_address_reg, 30, "AArch64 return address should be LR (30)");
-    assert_eq!(cie.code_alignment_factor, 4, "AArch64 code alignment should be 4");
-    assert_eq!(cie.data_alignment_factor, -8, "AArch64 data alignment should be -8");
-    assert_eq!(cie.saved_regs.len(), 2, "AArch64 should save 2 registers (FP + LR)");
+    assert_eq!(
+        cie.return_address_reg, 30,
+        "AArch64 return address should be LR (30)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 4,
+        "AArch64 code alignment should be 4"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -8,
+        "AArch64 data alignment should be -8"
+    );
+    assert_eq!(
+        cie.saved_regs.len(),
+        2,
+        "AArch64 should save 2 registers (FP + LR)"
+    );
 
     // Verify saved register details
     let has_fp = cie.saved_regs.iter().any(|r| r.reg == 29);
@@ -295,9 +332,18 @@ fn test_cie_preset_x86_64() {
 
     let cie = db.cie().unwrap();
     assert_eq!(cie.cfa_reg, 7, "x86_64 CFA register should be RSP (7)");
-    assert_eq!(cie.return_address_reg, 16, "x86_64 return address should be RIP (16)");
-    assert_eq!(cie.code_alignment_factor, 1, "x86_64 code alignment should be 1 (variable-length)");
-    assert_eq!(cie.data_alignment_factor, -8, "x86_64 data alignment should be -8");
+    assert_eq!(
+        cie.return_address_reg, 16,
+        "x86_64 return address should be RIP (16)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 1,
+        "x86_64 code alignment should be 1 (variable-length)"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -8,
+        "x86_64 data alignment should be -8"
+    );
 
     let has_rbp = cie.saved_regs.iter().any(|r| r.reg == 6);
     assert!(has_rbp, "x86_64 should save RBP (reg 6)");
@@ -312,9 +358,18 @@ fn test_cie_preset_riscv64() {
 
     let cie = db.cie().unwrap();
     assert_eq!(cie.cfa_reg, 2, "RISC-V CFA register should be SP (x2)");
-    assert_eq!(cie.return_address_reg, 1, "RISC-V return address should be RA (x1)");
-    assert_eq!(cie.code_alignment_factor, 2, "RISC-V code alignment should be 2");
-    assert_eq!(cie.data_alignment_factor, -8, "RISC-V data alignment should be -8");
+    assert_eq!(
+        cie.return_address_reg, 1,
+        "RISC-V return address should be RA (x1)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 2,
+        "RISC-V code alignment should be 2"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -8,
+        "RISC-V data alignment should be -8"
+    );
 
     let has_ra = cie.saved_regs.iter().any(|r| r.reg == 1);
     let has_fp = cie.saved_regs.iter().any(|r| r.reg == 8);
@@ -331,9 +386,18 @@ fn test_cie_preset_arm32() {
 
     let cie = db.cie().unwrap();
     assert_eq!(cie.cfa_reg, 13, "ARM32 CFA register should be SP (r13)");
-    assert_eq!(cie.return_address_reg, 14, "ARM32 return address should be LR (r14)");
-    assert_eq!(cie.code_alignment_factor, 2, "ARM32 code alignment should be 2");
-    assert_eq!(cie.data_alignment_factor, -4, "ARM32 data alignment should be -4");
+    assert_eq!(
+        cie.return_address_reg, 14,
+        "ARM32 return address should be LR (r14)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 2,
+        "ARM32 code alignment should be 2"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -4,
+        "ARM32 data alignment should be -4"
+    );
 
     let has_fp = cie.saved_regs.iter().any(|r| r.reg == 11);
     let has_lr = cie.saved_regs.iter().any(|r| r.reg == 14);
@@ -350,9 +414,18 @@ fn test_cie_preset_mips64() {
 
     let cie = db.cie().unwrap();
     assert_eq!(cie.cfa_reg, 29, "MIPS64 CFA register should be $sp (29)");
-    assert_eq!(cie.return_address_reg, 31, "MIPS64 return address should be $ra (31)");
-    assert_eq!(cie.code_alignment_factor, 4, "MIPS64 code alignment should be 4");
-    assert_eq!(cie.data_alignment_factor, -8, "MIPS64 data alignment should be -8");
+    assert_eq!(
+        cie.return_address_reg, 31,
+        "MIPS64 return address should be $ra (31)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 4,
+        "MIPS64 code alignment should be 4"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -8,
+        "MIPS64 data alignment should be -8"
+    );
 
     let has_ra = cie.saved_regs.iter().any(|r| r.reg == 31);
     let has_fp = cie.saved_regs.iter().any(|r| r.reg == 30);
@@ -369,9 +442,18 @@ fn test_cie_preset_ppc64() {
 
     let cie = db.cie().unwrap();
     assert_eq!(cie.cfa_reg, 1, "PPC64 CFA register should be R1 (SP)");
-    assert_eq!(cie.return_address_reg, 65, "PPC64 return address should be LR (65)");
-    assert_eq!(cie.code_alignment_factor, 4, "PPC64 code alignment should be 4");
-    assert_eq!(cie.data_alignment_factor, -8, "PPC64 data alignment should be -8");
+    assert_eq!(
+        cie.return_address_reg, 65,
+        "PPC64 return address should be LR (65)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 4,
+        "PPC64 code alignment should be 4"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -8,
+        "PPC64 data alignment should be -8"
+    );
 
     let has_lr = cie.saved_regs.iter().any(|r| r.reg == 65);
     assert!(has_lr, "PPC64 should save LR (reg 65)");
@@ -385,10 +467,22 @@ fn test_cie_preset_loongarch64() {
     assert!(db.cie().is_some(), "LoongArch64 CIE should be set");
 
     let cie = db.cie().unwrap();
-    assert_eq!(cie.cfa_reg, 3, "LoongArch64 CFA register should be $sp (r3)");
-    assert_eq!(cie.return_address_reg, 1, "LoongArch64 return address should be $ra (r1)");
-    assert_eq!(cie.code_alignment_factor, 4, "LoongArch64 code alignment should be 4");
-    assert_eq!(cie.data_alignment_factor, -8, "LoongArch64 data alignment should be -8");
+    assert_eq!(
+        cie.cfa_reg, 3,
+        "LoongArch64 CFA register should be $sp (r3)"
+    );
+    assert_eq!(
+        cie.return_address_reg, 1,
+        "LoongArch64 return address should be $ra (r1)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 4,
+        "LoongArch64 code alignment should be 4"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -8,
+        "LoongArch64 data alignment should be -8"
+    );
 
     let has_ra = cie.saved_regs.iter().any(|r| r.reg == 1);
     let has_fp = cie.saved_regs.iter().any(|r| r.reg == 22);
@@ -404,11 +498,26 @@ fn test_cie_preset_wasm32() {
     assert!(db.cie().is_some(), "Wasm32 CIE should be set (minimal)");
 
     let cie = db.cie().unwrap();
-    assert_eq!(cie.cfa_reg, 0, "Wasm32 CFA register should be 0 (placeholder)");
-    assert_eq!(cie.return_address_reg, 0, "Wasm32 return address should be 0 (placeholder)");
-    assert_eq!(cie.code_alignment_factor, 1, "Wasm32 code alignment should be 1");
-    assert_eq!(cie.data_alignment_factor, -4, "Wasm32 data alignment should be -4");
-    assert!(cie.saved_regs.is_empty(), "Wasm32 should have no saved registers (runtime handles unwinding");
+    assert_eq!(
+        cie.cfa_reg, 0,
+        "Wasm32 CFA register should be 0 (placeholder)"
+    );
+    assert_eq!(
+        cie.return_address_reg, 0,
+        "Wasm32 return address should be 0 (placeholder)"
+    );
+    assert_eq!(
+        cie.code_alignment_factor, 1,
+        "Wasm32 code alignment should be 1"
+    );
+    assert_eq!(
+        cie.data_alignment_factor, -4,
+        "Wasm32 data alignment should be -4"
+    );
+    assert!(
+        cie.saved_regs.is_empty(),
+        "Wasm32 should have no saved registers (runtime handles unwinding"
+    );
 }
 
 // -- Test 12: DwarfBuilder for_backend config consistency --
@@ -431,12 +540,18 @@ fn test_for_backend_config_consistency() {
     for (kind, expected_addr, expected_mil) in &expected {
         let db = DwarfBuilder::for_backend(*kind);
         assert_eq!(
-            db.address_size(), *expected_addr,
-            "{:?}: address_size should be {}", kind, expected_addr
+            db.address_size(),
+            *expected_addr,
+            "{:?}: address_size should be {}",
+            kind,
+            expected_addr
         );
         assert_eq!(
-            db.min_inst_length(), *expected_mil,
-            "{:?}: min_inst_length should be {}", kind, expected_mil
+            db.min_inst_length(),
+            *expected_mil,
+            "{:?}: min_inst_length should be {}",
+            kind,
+            expected_mil
         );
     }
 }
@@ -458,19 +573,23 @@ fn test_debug_sections_non_empty_all_backends() {
         let sections = db.emit_debug_sections();
         assert!(
             !sections.debug_abbrev.is_empty(),
-            "{:?}: .debug_abbrev should not be empty", kind
+            "{:?}: .debug_abbrev should not be empty",
+            kind
         );
         assert!(
             !sections.debug_info.is_empty(),
-            "{:?}: .debug_info should not be empty", kind
+            "{:?}: .debug_info should not be empty",
+            kind
         );
         assert!(
             !sections.debug_line.is_empty(),
-            "{:?}: .debug_line should not be empty", kind
+            "{:?}: .debug_line should not be empty",
+            kind
         );
         assert!(
             !sections.debug_frame.is_empty(),
-            "{:?}: .debug_frame should not be empty (CIE was set)", kind
+            "{:?}: .debug_frame should not be empty (CIE was set)",
+            kind
         );
     }
 }
@@ -495,7 +614,9 @@ fn test_extern_c_block_parsing() {
     "#;
 
     let mut parser = Parser::new(source);
-    let program = parser.parse_program().expect("extern block source should parse successfully");
+    let program = parser
+        .parse_program()
+        .expect("extern block source should parse successfully");
 
     // Find the extern block in the AST
     let extern_items: Vec<_> = program
@@ -505,18 +626,23 @@ fn test_extern_c_block_parsing() {
         .collect();
 
     assert_eq!(
-        extern_items.len(), 1,
-        "should have exactly 1 extern block, got {}", extern_items.len()
+        extern_items.len(),
+        1,
+        "should have exactly 1 extern block, got {}",
+        extern_items.len()
     );
 
     if let vuma_parser::ast::Item::ExternBlock(eb) = &extern_items[0] {
         assert_eq!(
             eb.convention, "C",
-            "calling convention should be 'C', got '{}'", eb.convention
+            "calling convention should be 'C', got '{}'",
+            eb.convention
         );
         assert_eq!(
-            eb.functions.len(), 3,
-            "should have 3 extern functions, got {}", eb.functions.len()
+            eb.functions.len(),
+            3,
+            "should have 3 extern functions, got {}",
+            eb.functions.len()
         );
 
         // Verify function names
@@ -594,9 +720,18 @@ fn test_extern_block_to_registry() {
     let registry = block.to_registry();
 
     // Verify function lookup
-    assert!(registry.is_extern("write"), "'write' should be a known extern function");
-    assert!(registry.is_extern("exit"), "'exit' should be a known extern function");
-    assert!(!registry.is_extern("unknown"), "'unknown' should not be an extern function");
+    assert!(
+        registry.is_extern("write"),
+        "'write' should be a known extern function"
+    );
+    assert!(
+        registry.is_extern("exit"),
+        "'exit' should be a known extern function"
+    );
+    assert!(
+        !registry.is_extern("unknown"),
+        "'unknown' should not be an extern function"
+    );
 
     // Verify calling convention
     assert_eq!(
@@ -617,16 +752,36 @@ fn test_extern_block_to_registry() {
 
     // Verify function names
     let names = registry.function_names();
-    assert!(names.contains(&"write"), "function names should contain 'write'");
-    assert!(names.contains(&"exit"), "function names should contain 'exit'");
+    assert!(
+        names.contains(&"write"),
+        "function names should contain 'write'"
+    );
+    assert!(
+        names.contains(&"exit"),
+        "function names should contain 'exit'"
+    );
 
     // Verify function type details
-    let write_fn = registry.get("write").expect("'write' should be in registry");
-    assert_eq!(write_fn.param_types.len(), 3, "'write' should have 3 parameters");
-    assert_eq!(write_fn.return_type, Some(ExternType::I64), "'write' should return i64");
+    let write_fn = registry
+        .get("write")
+        .expect("'write' should be in registry");
+    assert_eq!(
+        write_fn.param_types.len(),
+        3,
+        "'write' should have 3 parameters"
+    );
+    assert_eq!(
+        write_fn.return_type,
+        Some(ExternType::I64),
+        "'write' should return i64"
+    );
 
     let exit_fn = registry.get("exit").expect("'exit' should be in registry");
-    assert_eq!(exit_fn.param_types.len(), 1, "'exit' should have 1 parameter");
+    assert_eq!(
+        exit_fn.param_types.len(),
+        1,
+        "'exit' should have 1 parameter"
+    );
     assert_eq!(exit_fn.return_type, None, "'exit' should return void");
 }
 
@@ -642,7 +797,11 @@ fn test_extern_calls_undefined_symbols_in_elf() {
     let elf = emit_elf(&[func], &[], &config, &[]).expect("ELF obj emission should succeed");
 
     // Verify ELF magic
-    assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic must be correct");
+    assert_eq!(
+        &elf[0..4],
+        &[0x7f, b'E', b'L', b'F'],
+        "ELF magic must be correct"
+    );
 
     // Verify ET_REL type
     let e_type = u16::from_le_bytes([elf[16], elf[17]]);
@@ -674,7 +833,10 @@ fn test_extern_calls_undefined_symbols_in_elf() {
     let shstrtab = &elf[shstrtab_offset..shstrtab_offset + shstrtab_size];
     let get_shstrtab_name = |offset: u32| -> String {
         let start = offset as usize;
-        let end = shstrtab[start..].iter().position(|&b| b == 0).unwrap_or(shstrtab.len() - start);
+        let end = shstrtab[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(shstrtab.len() - start);
         String::from_utf8_lossy(&shstrtab[start..start + end]).to_string()
     };
 
@@ -712,7 +874,10 @@ fn test_extern_calls_undefined_symbols_in_elf() {
 
     let get_strtab_name = |offset: u32| -> String {
         let start = offset as usize;
-        let end = strtab_data[start..].iter().position(|&b| b == 0).unwrap_or(strtab_data.len() - start);
+        let end = strtab_data[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(strtab_data.len() - start);
         String::from_utf8_lossy(&strtab_data[start..start + end]).to_string()
     };
 
@@ -788,7 +953,10 @@ fn test_relocations_for_extern_calls() {
 
     let get_shstrtab_name = |offset: u32| -> String {
         let start = offset as usize;
-        let end = shstrtab[start..].iter().position(|&b| b == 0).unwrap_or(shstrtab.len() - start);
+        let end = shstrtab[start..]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(shstrtab.len() - start);
         String::from_utf8_lossy(&shstrtab[start..start + end]).to_string()
     };
 
@@ -802,17 +970,10 @@ fn test_relocations_for_extern_calls() {
 
         if name == ".rela.text" {
             rela_text_found = true;
-            assert_eq!(
-                sh_type, 4,
-                ".rela.text should have SHT_RELA type (4)"
-            );
+            assert_eq!(sh_type, 4, ".rela.text should have SHT_RELA type (4)");
 
             // Verify the section has data
-            let sh_size = u64::from_le_bytes(
-                elf[shdr_off + 32..shdr_off + 40]
-                    .try_into()
-                    .unwrap(),
-            );
+            let sh_size = u64::from_le_bytes(elf[shdr_off + 32..shdr_off + 40].try_into().unwrap());
             // Each RELA entry is 24 bytes (offset 8 + info 8 + addend 8)
             let num_entries = sh_size / 24;
             assert!(
@@ -854,7 +1015,9 @@ fn test_ffi_demo_compiles_x86_64() {
 
     // Phase 1: Parse the FFI demo source
     let mut parser = Parser::new(source);
-    let program = parser.parse_program().expect("ffi_demo should parse successfully");
+    let program = parser
+        .parse_program()
+        .expect("ffi_demo should parse successfully");
 
     // Verify extern block was parsed
     let has_extern = program
@@ -881,7 +1044,7 @@ fn test_ffi_demo_compiles_x86_64() {
                     lhs: ScgExpr::Int(0x400000),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "msg_len".to_string(),
@@ -889,7 +1052,7 @@ fn test_ffi_demo_compiles_x86_64() {
                     lhs: ScgExpr::Int(21),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Int(0)]),
             ],
@@ -902,12 +1065,18 @@ fn test_ffi_demo_compiles_x86_64() {
     let ir_program = builder.build(&cg_scg).expect("IR building should succeed");
 
     let config = EmitConfig::relocatable_obj_for(BackendKind::X86_64);
-    let elf = emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
-        .expect("ffi_demo x86_64 ELF obj emission should succeed");
+    let elf = emit_elf(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        &config,
+        &[],
+    )
+    .expect("ffi_demo x86_64 ELF obj emission should succeed");
 
     // Verify ELF is valid
     assert_eq!(
-        &elf[0..4], &[0x7f, b'E', b'L', b'F'],
+        &elf[0..4],
+        &[0x7f, b'E', b'L', b'F'],
         "ELF magic must be correct"
     );
 
@@ -938,36 +1107,90 @@ fn test_extern_registry_default_bindings() {
     let registry = ExternRegistry::with_default_bindings();
 
     // Linux syscall functions
-    assert!(registry.is_extern("write"), "default bindings should include 'write'");
-    assert!(registry.is_extern("read"), "default bindings should include 'read'");
-    assert!(registry.is_extern("exit"), "default bindings should include 'exit'");
-    assert!(registry.is_extern("mmap"), "default bindings should include 'mmap'");
-    assert!(registry.is_extern("munmap"), "default bindings should include 'munmap'");
-    assert!(registry.is_extern("brk"), "default bindings should include 'brk'");
+    assert!(
+        registry.is_extern("write"),
+        "default bindings should include 'write'"
+    );
+    assert!(
+        registry.is_extern("read"),
+        "default bindings should include 'read'"
+    );
+    assert!(
+        registry.is_extern("exit"),
+        "default bindings should include 'exit'"
+    );
+    assert!(
+        registry.is_extern("mmap"),
+        "default bindings should include 'mmap'"
+    );
+    assert!(
+        registry.is_extern("munmap"),
+        "default bindings should include 'munmap'"
+    );
+    assert!(
+        registry.is_extern("brk"),
+        "default bindings should include 'brk'"
+    );
 
     // C library functions
-    assert!(registry.is_extern("memcpy"), "default bindings should include 'memcpy'");
-    assert!(registry.is_extern("memset"), "default bindings should include 'memset'");
-    assert!(registry.is_extern("malloc"), "default bindings should include 'malloc'");
-    assert!(registry.is_extern("free"), "default bindings should include 'free'");
+    assert!(
+        registry.is_extern("memcpy"),
+        "default bindings should include 'memcpy'"
+    );
+    assert!(
+        registry.is_extern("memset"),
+        "default bindings should include 'memset'"
+    );
+    assert!(
+        registry.is_extern("malloc"),
+        "default bindings should include 'malloc'"
+    );
+    assert!(
+        registry.is_extern("free"),
+        "default bindings should include 'free'"
+    );
 
     // All should need relocation
-    assert!(registry.needs_relocation("write"), "write should need relocation");
-    assert!(registry.needs_relocation("malloc"), "malloc should need relocation");
+    assert!(
+        registry.needs_relocation("write"),
+        "write should need relocation"
+    );
+    assert!(
+        registry.needs_relocation("malloc"),
+        "malloc should need relocation"
+    );
 }
 
 /// Test: Verify that `RelocationKind::for_arch` returns the correct
 /// relocation type for each supported architecture.
 #[test]
 fn test_relocation_kind_for_arch() {
-    assert_eq!(RelocationKind::for_arch("aarch64"), RelocationKind::AArch64Call26);
-    assert_eq!(RelocationKind::for_arch("x86_64"), RelocationKind::X86_64Plt32);
-    assert_eq!(RelocationKind::for_arch("riscv64"), RelocationKind::RiscvCall);
+    assert_eq!(
+        RelocationKind::for_arch("aarch64"),
+        RelocationKind::AArch64Call26
+    );
+    assert_eq!(
+        RelocationKind::for_arch("x86_64"),
+        RelocationKind::X86_64Plt32
+    );
+    assert_eq!(
+        RelocationKind::for_arch("riscv64"),
+        RelocationKind::RiscvCall
+    );
     assert_eq!(RelocationKind::for_arch("arm32"), RelocationKind::Arm32Call);
     assert_eq!(RelocationKind::for_arch("mips64"), RelocationKind::Mips26);
-    assert_eq!(RelocationKind::for_arch("ppc64"), RelocationKind::Ppc64Rel24);
-    assert_eq!(RelocationKind::for_arch("loongarch64"), RelocationKind::LoongArchB26);
-    assert_eq!(RelocationKind::for_arch("unknown"), RelocationKind::GenericCall32);
+    assert_eq!(
+        RelocationKind::for_arch("ppc64"),
+        RelocationKind::Ppc64Rel24
+    );
+    assert_eq!(
+        RelocationKind::for_arch("loongarch64"),
+        RelocationKind::LoongArchB26
+    );
+    assert_eq!(
+        RelocationKind::for_arch("unknown"),
+        RelocationKind::GenericCall32
+    );
 }
 
 /// Test: Verify that `SyscallTable` provides correct syscall numbers for
@@ -982,7 +1205,10 @@ fn test_syscall_table_x86_64() {
     assert_eq!(table.get(SyscallName::Mmap), Some(9), "x86_64 mmap = 9");
 
     assert!(!table.is_empty(), "syscall table should not be empty");
-    assert!(table.len() >= 10, "x86_64 syscall table should have at least 10 entries");
+    assert!(
+        table.len() >= 10,
+        "x86_64 syscall table should have at least 10 entries"
+    );
 }
 
 /// Test: Verify that `SyscallTable` provides correct syscall numbers for
@@ -991,10 +1217,18 @@ fn test_syscall_table_x86_64() {
 fn test_syscall_table_aarch64() {
     let table = SyscallTable::for_arch(Arch::AArch64);
 
-    assert_eq!(table.get(SyscallName::Write), Some(64), "AArch64 write = 64");
+    assert_eq!(
+        table.get(SyscallName::Write),
+        Some(64),
+        "AArch64 write = 64"
+    );
     assert_eq!(table.get(SyscallName::Read), Some(63), "AArch64 read = 63");
     assert_eq!(table.get(SyscallName::Exit), Some(93), "AArch64 exit = 93");
-    assert_eq!(table.get(SyscallName::Mmap), Some(222), "AArch64 mmap = 222");
+    assert_eq!(
+        table.get(SyscallName::Mmap),
+        Some(222),
+        "AArch64 mmap = 222"
+    );
 }
 
 /// Test: Verify that `Relocation` struct can be constructed and its fields
@@ -1047,7 +1281,9 @@ fn test_dwarf_debug_full_pipeline() {
 
     // Convert to SCG
     let mut converter3 = AstToScg::new();
-    let _scg = converter3.convert(&program).expect("AST → SCG should succeed");
+    let _scg = converter3
+        .convert(&program)
+        .expect("AST → SCG should succeed");
 
     // Build a codegen-level SCG
     let cg_scg = Scg {
@@ -1062,7 +1298,7 @@ fn test_dwarf_debug_full_pipeline() {
                     lhs: ScgExpr::Int(42),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
- reassigns: None,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("x".to_string())]),
             ],
@@ -1078,11 +1314,20 @@ fn test_dwarf_debug_full_pipeline() {
     config.debug_info = true;
     config.section_headers = true;
 
-    let elf = emit_elf(&ir_program.functions, &ir_program.data_sections, &config, &[])
-        .expect("ELF emission with debug info should succeed");
+    let elf = emit_elf(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        &config,
+        &[],
+    )
+    .expect("ELF emission with debug info should succeed");
 
     // Verify ELF magic
-    assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F'], "ELF magic must be correct");
+    assert_eq!(
+        &elf[0..4],
+        &[0x7f, b'E', b'L', b'F'],
+        "ELF magic must be correct"
+    );
 
     // Verify debug section names are in the ELF
     let elf_str = String::from_utf8_lossy(&elf);
@@ -1107,7 +1352,8 @@ fn test_dwarf_debug_full_pipeline() {
     let e_shnum = u16::from_le_bytes([elf[60], elf[61]]);
     assert_eq!(
         e_shnum, 12,
-        "expected 12 section headers with debug info, got {}", e_shnum
+        "expected 12 section headers with debug info, got {}",
+        e_shnum
     );
 }
 
@@ -1143,7 +1389,8 @@ fn test_no_debug_sections_without_flag() {
     let e_shnum = u16::from_le_bytes([elf[60], elf[61]]);
     assert_eq!(
         e_shnum, 8,
-        "expected 8 section headers without debug info, got {}", e_shnum
+        "expected 8 section headers without debug info, got {}",
+        e_shnum
     );
 }
 

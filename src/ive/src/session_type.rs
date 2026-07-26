@@ -117,9 +117,7 @@ fn substitute(ty: &SessionType, depth: u32, replacement: &SessionType) -> Sessio
             Box::new(substitute(s1, depth, replacement)),
             Box::new(substitute(s2, depth, replacement)),
         ),
-        SessionType::Rec(s) => {
-            SessionType::Rec(Box::new(substitute(s, depth + 1, replacement)))
-        }
+        SessionType::Rec(s) => SessionType::Rec(Box::new(substitute(s, depth + 1, replacement))),
         SessionType::Var(n) => {
             if *n == depth {
                 replacement.clone()
@@ -152,21 +150,13 @@ pub enum SessionEventKind {
     },
     /// `channel_send(ch, msg)` — sends a message. The message type
     /// (as a string) must match the expected `Send<T, _>`.
-    Send {
-        vreg: u32,
-        msg_type: String,
-    },
+    Send { vreg: u32, msg_type: String },
     /// `channel_recv(ch)` — receives a message. The expected type
     /// must be `Recv<T, _>`.
-    Recv {
-        vreg: u32,
-        expected_type: String,
-    },
+    Recv { vreg: u32, expected_type: String },
     /// `channel_close(ch)` — closes the channel. The session type
     /// must be `End` at this point (protocol complete).
-    Close {
-        vreg: u32,
-    },
+    Close { vreg: u32 },
 }
 
 /// A violation of the session type protocol.
@@ -248,7 +238,10 @@ pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
                     }
                 }
             }
-            SessionEventKind::Recv { vreg, expected_type } => {
+            SessionEventKind::Recv {
+                vreg,
+                expected_type,
+            } => {
                 let current = state.get(vreg);
                 match current {
                     None => {
@@ -355,21 +348,21 @@ mod tests {
     fn test_dual_swaps_send_recv() {
         let s = SessionType::Send("i32".into(), Box::new(SessionType::End));
         let d = s.dual();
-        assert_eq!(d, SessionType::Recv("i32".into(), Box::new(SessionType::End)));
+        assert_eq!(
+            d,
+            SessionType::Recv("i32".into(), Box::new(SessionType::End))
+        );
         assert!(s.is_dual(&d));
     }
 
     #[test]
     fn test_dual_swaps_choice_offer() {
-        let s = SessionType::Choice(
-            Box::new(SessionType::End),
-            Box::new(SessionType::End),
-        );
+        let s = SessionType::Choice(Box::new(SessionType::End), Box::new(SessionType::End));
         let d = s.dual();
-        assert_eq!(d, SessionType::Offer(
-            Box::new(SessionType::End),
-            Box::new(SessionType::End),
-        ));
+        assert_eq!(
+            d,
+            SessionType::Offer(Box::new(SessionType::End), Box::new(SessionType::End),)
+        );
     }
 
     #[test]
@@ -380,16 +373,21 @@ mod tests {
     #[test]
     fn test_unfold_rec() {
         // Rec(Send(T, Var(0))) unfolds to Send(T, Rec(Send(T, Var(0))))
-        let rec = SessionType::Rec(Box::new(
-            SessionType::Send("i32".into(), Box::new(SessionType::Var(0)))
-        ));
-        let unfolded = rec.unfold();
-        assert_eq!(unfolded, SessionType::Send(
+        let rec = SessionType::Rec(Box::new(SessionType::Send(
             "i32".into(),
-            Box::new(SessionType::Rec(Box::new(
-                SessionType::Send("i32".into(), Box::new(SessionType::Var(0)))
-            )))
-        ));
+            Box::new(SessionType::Var(0)),
+        )));
+        let unfolded = rec.unfold();
+        assert_eq!(
+            unfolded,
+            SessionType::Send(
+                "i32".into(),
+                Box::new(SessionType::Rec(Box::new(SessionType::Send(
+                    "i32".into(),
+                    Box::new(SessionType::Var(0))
+                ))))
+            )
+        );
     }
 
     #[test]
@@ -398,15 +396,24 @@ mod tests {
         // Operations: open, send(i32), recv(i32), close
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "i32".into(),
+                },
                 at_node: 20,
             },
             SessionEvent {
-                kind: SessionEventKind::Recv { vreg: 0, expected_type: "i32".into() },
+                kind: SessionEventKind::Recv {
+                    vreg: 0,
+                    expected_type: "i32".into(),
+                },
                 at_node: 30,
             },
             SessionEvent {
@@ -415,7 +422,11 @@ mod tests {
             },
         ];
         let results = verify_session_types(&events);
-        assert!(results.is_empty(), "valid send→recv→close should have no violations: {:?}", results);
+        assert!(
+            results.is_empty(),
+            "valid send→recv→close should have no violations: {:?}",
+            results
+        );
     }
 
     #[test]
@@ -424,11 +435,17 @@ mod tests {
         // Operations: open, recv(i32) — but protocol expects send first!
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Recv { vreg: 0, expected_type: "i32".into() },
+                kind: SessionEventKind::Recv {
+                    vreg: 0,
+                    expected_type: "i32".into(),
+                },
                 at_node: 20,
             },
         ];
@@ -445,17 +462,25 @@ mod tests {
         // so we expect 2 violations: the type mismatch AND the incomplete session.
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "String".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "String".into(),
+                },
                 at_node: 20,
             },
         ];
         let results = verify_session_types(&events);
         assert!(results.len() >= 1);
-        assert!(results.iter().any(|r| r.error.as_ref().unwrap().contains("type mismatch")));
+        assert!(results
+            .iter()
+            .any(|r| r.error.as_ref().unwrap().contains("type mismatch")));
     }
 
     #[test]
@@ -464,11 +489,17 @@ mod tests {
         // Operations: open, send(i32), close — protocol expects recv!
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "i32".into(),
+                },
                 at_node: 20,
             },
             SessionEvent {
@@ -477,7 +508,9 @@ mod tests {
             },
         ];
         let results = verify_session_types(&events);
-        assert!(results.iter().any(|r| r.error.as_ref().unwrap().contains("not complete")));
+        assert!(results
+            .iter()
+            .any(|r| r.error.as_ref().unwrap().contains("not complete")));
     }
 
     #[test]
@@ -486,20 +519,31 @@ mod tests {
         // Operations: open, send(i32), send(i32) — second send unexpected!
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "i32".into(),
+                },
                 at_node: 20,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "i32".into(),
+                },
                 at_node: 30,
             },
         ];
         let results = verify_session_types(&events);
-        assert!(results.iter().any(|r| r.error.as_ref().unwrap().contains("not Send")));
+        assert!(results
+            .iter()
+            .any(|r| r.error.as_ref().unwrap().contains("not Send")));
     }
 
     #[test]
@@ -508,29 +552,42 @@ mod tests {
         // Operations: open, send(i32) — never recv, never close.
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "i32".into(),
+                },
                 at_node: 20,
             },
         ];
         let results = verify_session_types(&events);
-        assert!(results.iter().any(|r| r.error.as_ref().unwrap().contains("incomplete session")));
+        assert!(results
+            .iter()
+            .any(|r| r.error.as_ref().unwrap().contains("incomplete session")));
     }
 
     #[test]
     fn test_use_without_open_is_violation() {
-        let events = vec![
-            SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
-                at_node: 10,
+        let events = vec![SessionEvent {
+            kind: SessionEventKind::Send {
+                vreg: 0,
+                msg_type: "i32".into(),
             },
-        ];
+            at_node: 10,
+        }];
         let results = verify_session_types(&events);
         assert_eq!(results.len(), 1);
-        assert!(results[0].error.as_ref().unwrap().contains("no active session"));
+        assert!(results[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("no active session"));
     }
 
     #[test]
@@ -538,27 +595,45 @@ mod tests {
         // Two channels, each with its own protocol. Both must complete.
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 1, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 1,
+                    session_type: request_response(),
+                },
                 at_node: 15,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 0, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 0,
+                    msg_type: "i32".into(),
+                },
                 at_node: 20,
             },
             SessionEvent {
-                kind: SessionEventKind::Send { vreg: 1, msg_type: "i32".into() },
+                kind: SessionEventKind::Send {
+                    vreg: 1,
+                    msg_type: "i32".into(),
+                },
                 at_node: 25,
             },
             SessionEvent {
-                kind: SessionEventKind::Recv { vreg: 0, expected_type: "i32".into() },
+                kind: SessionEventKind::Recv {
+                    vreg: 0,
+                    expected_type: "i32".into(),
+                },
                 at_node: 30,
             },
             SessionEvent {
-                kind: SessionEventKind::Recv { vreg: 1, expected_type: "i32".into() },
+                kind: SessionEventKind::Recv {
+                    vreg: 1,
+                    expected_type: "i32".into(),
+                },
                 at_node: 35,
             },
             SessionEvent {
@@ -571,30 +646,50 @@ mod tests {
             },
         ];
         let results = verify_session_types(&events);
-        assert!(results.is_empty(), "two independent valid sessions should pass: {:?}", results);
+        assert!(
+            results.is_empty(),
+            "two independent valid sessions should pass: {:?}",
+            results
+        );
     }
 
     #[test]
     fn test_double_open_is_violation() {
         let events = vec![
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 10,
             },
             SessionEvent {
-                kind: SessionEventKind::Open { vreg: 0, session_type: request_response() },
+                kind: SessionEventKind::Open {
+                    vreg: 0,
+                    session_type: request_response(),
+                },
                 at_node: 20,
             },
         ];
         let results = verify_session_types(&events);
-        assert!(results.iter().any(|r| r.error.as_ref().unwrap().contains("already has an active session")));
+        assert!(results.iter().any(|r| r
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("already has an active session")));
     }
 
     #[test]
     fn test_all_sessions_valid_helper() {
         assert!(all_sessions_valid(&[]));
-        assert!(all_sessions_valid(&[SessionViolation { valid: true, error: None }]));
-        assert!(!all_sessions_valid(&[SessionViolation { valid: false, error: Some("x".into()) }]));
+        assert!(all_sessions_valid(&[SessionViolation {
+            valid: true,
+            error: None
+        }]));
+        assert!(!all_sessions_valid(&[SessionViolation {
+            valid: false,
+            error: Some("x".into())
+        }]));
     }
 }
 
@@ -615,7 +710,9 @@ pub struct SessionViolationIR {
 ///
 /// Currently advisory — logs warnings but does NOT abort compilation.
 /// A future strict mode could promote this to an error.
-pub fn verify_session_types_from_ir(program: &vuma_codegen::ir::IRProgram) -> Vec<SessionViolationIR> {
+pub fn verify_session_types_from_ir(
+    program: &vuma_codegen::ir::IRProgram,
+) -> Vec<SessionViolationIR> {
     let mut violations = Vec::new();
     // Collect channel events from the IR (Call instructions to channel_send/recv/open/close).
     let mut events: Vec<SessionEvent> = Vec::new();
@@ -624,9 +721,20 @@ pub fn verify_session_types_from_ir(program: &vuma_codegen::ir::IRProgram) -> Ve
             for (ii, instr) in block.instructions.iter().enumerate() {
                 if let vuma_codegen::ir::IRInstr::Call { func: name, .. } = instr {
                     let kind = match name.as_str() {
-                        "channel_open" => Some(SessionEventKind::Open { vreg: 0, session_type: SessionType::End }),
-                        "channel_send" | "channel_send_cap" => Some(SessionEventKind::Send { vreg: 0, msg_type: "i64".to_string() }),
-                        "channel_recv" | "channel_recv_proto" | "channel_recv_timeout" => Some(SessionEventKind::Recv { vreg: 0, expected_type: "i64".to_string() }),
+                        "channel_open" => Some(SessionEventKind::Open {
+                            vreg: 0,
+                            session_type: SessionType::End,
+                        }),
+                        "channel_send" | "channel_send_cap" => Some(SessionEventKind::Send {
+                            vreg: 0,
+                            msg_type: "i64".to_string(),
+                        }),
+                        "channel_recv" | "channel_recv_proto" | "channel_recv_timeout" => {
+                            Some(SessionEventKind::Recv {
+                                vreg: 0,
+                                expected_type: "i64".to_string(),
+                            })
+                        }
                         "channel_close" => Some(SessionEventKind::Close { vreg: 0 }),
                         _ => None,
                     };

@@ -292,7 +292,8 @@ pub fn scg_to_msg(scg: &SCG) -> Result<MSG, ConversionError> {
 
     // Step 2: Pre-scan — identify which allocation nodes exist and which regions
     // are freed, so we can assign correct region status upfront.
-    let mut freed_allocations: std::collections::HashSet<ScgNodeId> = std::collections::HashSet::new();
+    let mut freed_allocations: std::collections::HashSet<ScgNodeId> =
+        std::collections::HashSet::new();
     for node_data in scg.nodes() {
         if let NodePayload::Deallocation(dealloc) = &node_data.payload {
             freed_allocations.insert(dealloc.allocation_node);

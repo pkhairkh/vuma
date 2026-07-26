@@ -23,7 +23,9 @@
 
 use std::collections::{HashMap, HashSet};
 use vuma_codegen::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
-use vuma_codegen::wasm32::{compile_to_wasm, decode_unsigned_leb128, decode_signed_leb128, WasmType};
+use vuma_codegen::wasm32::{
+    compile_to_wasm, decode_signed_leb128, decode_unsigned_leb128, WasmType,
+};
 
 // ===========================================================================
 // Wasm binary section IDs
@@ -138,8 +140,8 @@ fn find_section<'a>(sections: &'a [ParsedSection], id: u8) -> Option<&'a ParsedS
 struct ImportInfo {
     module: String,
     name: String,
-    kind: u8,       // 0x00=function, 0x01=table, 0x02=memory, 0x03=global
-    type_idx: u32,  // Only valid for function imports
+    kind: u8,      // 0x00=function, 0x01=table, 0x02=memory, 0x03=global
+    type_idx: u32, // Only valid for function imports
 }
 
 /// Parse all imports from the import section content.
@@ -218,7 +220,7 @@ fn parse_imports(content: &[u8]) -> Vec<ImportInfo> {
 #[derive(Debug)]
 struct ExportInfo {
     name: String,
-    kind: u8,    // 0=function, 1=table, 2=memory, 3=global
+    kind: u8,   // 0=function, 1=table, 2=memory, 3=global
     index: u32, // Not read directly but kept for structural completeness
 }
 
@@ -297,8 +299,8 @@ fn test_wasm_type_section_valid() {
     let wasm = compile_default_wasm();
     let sections = parse_sections(&wasm);
 
-    let type_section = find_section(&sections, SECTION_TYPE)
-        .expect("Module should contain a type section (ID 1)");
+    let type_section =
+        find_section(&sections, SECTION_TYPE).expect("Module should contain a type section (ID 1)");
 
     let content = &type_section.content;
     let mut offset = 0usize;
@@ -429,8 +431,8 @@ fn test_wasm_function_section_matches_types() {
     let sections = parse_sections(&wasm);
 
     // Get the number of types from the type section
-    let type_section = find_section(&sections, SECTION_TYPE)
-        .expect("Module should contain a type section");
+    let type_section =
+        find_section(&sections, SECTION_TYPE).expect("Module should contain a type section");
     let (num_types, _) = decode_unsigned_leb128(&type_section.content);
 
     // Parse the function section
@@ -624,7 +626,9 @@ fn test_wasm_export_section_start() {
     );
 
     // Also verify that 'main' is exported if we compiled a main function
-    let has_main = exports.iter().any(|exp| exp.name == "main" && exp.kind == 0x00);
+    let has_main = exports
+        .iter()
+        .any(|exp| exp.name == "main" && exp.kind == 0x00);
     assert!(
         has_main,
         "Module should export 'main' as a function, found exports: {:?}",

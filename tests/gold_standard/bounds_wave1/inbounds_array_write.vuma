@@ -1,0 +1,23 @@
+// inbounds_array_write — Array write within bounds
+// Expected exit code: 99
+//
+// Bounds Wave 1 positive test: allocate a 16-byte buffer, write 99
+// to index 0, read it back. With `--safe`, the Store at index 0 is
+// in-bounds so the `__oob_trap` check (UGe 0, 16) is false and no
+// trap fires. Without `--safe`, the Store is well-defined and the
+// Load returns 99.
+//
+// VUMA Key Concepts:
+//   - state_new(Layout) allocation
+//   - `[u8; 16]` array field
+//   - in-bounds Store (write) → in-bounds Load (read) round-trip
+//   - identical codegen site to inbounds_array_read but emphasises
+//     the WRITE path (Store) of the bounds-checked index expression
+
+layout Buf = { data: [u8; 16] }
+
+fn main() -> i32 {
+    let b = state_new(Buf);
+    b.data[0] = 99;
+    return b.data[0];
+}

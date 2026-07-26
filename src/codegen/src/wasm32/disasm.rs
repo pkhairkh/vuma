@@ -44,9 +44,19 @@ impl std::fmt::Display for WasmInstr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // Control
-            WasmInstr::Block(ty) => write!(f, "block {}", ty.map_or("void".to_string(), |t| t.to_string())),
-            WasmInstr::Loop(ty) => write!(f, "loop {}", ty.map_or("void".to_string(), |t| t.to_string())),
-            WasmInstr::If(ty) => write!(f, "if {}", ty.map_or("void".to_string(), |t| t.to_string())),
+            WasmInstr::Block(ty) => write!(
+                f,
+                "block {}",
+                ty.map_or("void".to_string(), |t| t.to_string())
+            ),
+            WasmInstr::Loop(ty) => write!(
+                f,
+                "loop {}",
+                ty.map_or("void".to_string(), |t| t.to_string())
+            ),
+            WasmInstr::If(ty) => {
+                write!(f, "if {}", ty.map_or("void".to_string(), |t| t.to_string()))
+            }
             WasmInstr::Else => write!(f, "else"),
             WasmInstr::End => write!(f, "end"),
             WasmInstr::Br(idx) => write!(f, "br {idx}"),
@@ -901,29 +911,94 @@ impl WasmInstr {
                     let a = align as u32;
                     let o = offset as u32;
                     match sub_op {
-                        0x10 => WasmInstr::I32AtomicLoad { align: a, offset: o },
-                        0x11 => WasmInstr::I64AtomicLoad { align: a, offset: o },
-                        0x12 => WasmInstr::I32AtomicLoad8U { align: a, offset: o },
-                        0x13 => WasmInstr::I32AtomicLoad16U { align: a, offset: o },
-                        0x14 => WasmInstr::I64AtomicLoad8U { align: a, offset: o },
-                        0x15 => WasmInstr::I64AtomicLoad16U { align: a, offset: o },
-                        0x16 => WasmInstr::I64AtomicLoad32U { align: a, offset: o },
-                        0x17 => WasmInstr::I32AtomicStore { align: a, offset: o },
-                        0x18 => WasmInstr::I64AtomicStore { align: a, offset: o },
-                        0x19 => WasmInstr::I32AtomicStore8 { align: a, offset: o },
-                        0x1A => WasmInstr::I32AtomicStore16 { align: a, offset: o },
-                        0x1B => WasmInstr::I64AtomicStore8 { align: a, offset: o },
-                        0x1C => WasmInstr::I64AtomicStore16 { align: a, offset: o },
-                        0x1D => WasmInstr::I64AtomicStore32 { align: a, offset: o },
-                        0x48 => WasmInstr::I32AtomicRmwCmpxchg { align: a, offset: o },
-                        0x49 => WasmInstr::I64AtomicRmwCmpxchg { align: a, offset: o },
-                        0x4A => WasmInstr::I32AtomicRmw8CmpxchgU { align: a, offset: o },
-                        0x4B => WasmInstr::I32AtomicRmw16CmpxchgU { align: a, offset: o },
-                        0x4C => WasmInstr::I64AtomicRmw8CmpxchgU { align: a, offset: o },
-                        0x4D => WasmInstr::I64AtomicRmw16CmpxchgU { align: a, offset: o },
-                        0x4E => WasmInstr::I64AtomicRmw32CmpxchgU { align: a, offset: o },
+                        0x10 => WasmInstr::I32AtomicLoad {
+                            align: a,
+                            offset: o,
+                        },
+                        0x11 => WasmInstr::I64AtomicLoad {
+                            align: a,
+                            offset: o,
+                        },
+                        0x12 => WasmInstr::I32AtomicLoad8U {
+                            align: a,
+                            offset: o,
+                        },
+                        0x13 => WasmInstr::I32AtomicLoad16U {
+                            align: a,
+                            offset: o,
+                        },
+                        0x14 => WasmInstr::I64AtomicLoad8U {
+                            align: a,
+                            offset: o,
+                        },
+                        0x15 => WasmInstr::I64AtomicLoad16U {
+                            align: a,
+                            offset: o,
+                        },
+                        0x16 => WasmInstr::I64AtomicLoad32U {
+                            align: a,
+                            offset: o,
+                        },
+                        0x17 => WasmInstr::I32AtomicStore {
+                            align: a,
+                            offset: o,
+                        },
+                        0x18 => WasmInstr::I64AtomicStore {
+                            align: a,
+                            offset: o,
+                        },
+                        0x19 => WasmInstr::I32AtomicStore8 {
+                            align: a,
+                            offset: o,
+                        },
+                        0x1A => WasmInstr::I32AtomicStore16 {
+                            align: a,
+                            offset: o,
+                        },
+                        0x1B => WasmInstr::I64AtomicStore8 {
+                            align: a,
+                            offset: o,
+                        },
+                        0x1C => WasmInstr::I64AtomicStore16 {
+                            align: a,
+                            offset: o,
+                        },
+                        0x1D => WasmInstr::I64AtomicStore32 {
+                            align: a,
+                            offset: o,
+                        },
+                        0x48 => WasmInstr::I32AtomicRmwCmpxchg {
+                            align: a,
+                            offset: o,
+                        },
+                        0x49 => WasmInstr::I64AtomicRmwCmpxchg {
+                            align: a,
+                            offset: o,
+                        },
+                        0x4A => WasmInstr::I32AtomicRmw8CmpxchgU {
+                            align: a,
+                            offset: o,
+                        },
+                        0x4B => WasmInstr::I32AtomicRmw16CmpxchgU {
+                            align: a,
+                            offset: o,
+                        },
+                        0x4C => WasmInstr::I64AtomicRmw8CmpxchgU {
+                            align: a,
+                            offset: o,
+                        },
+                        0x4D => WasmInstr::I64AtomicRmw16CmpxchgU {
+                            align: a,
+                            offset: o,
+                        },
+                        0x4E => WasmInstr::I64AtomicRmw32CmpxchgU {
+                            align: a,
+                            offset: o,
+                        },
                         _ => {
-                            return Err(DecodeError::UnknownOpcode { opcode: sub_op as u8 });
+                            return Err(DecodeError::UnknownOpcode {
+                                opcode: sub_op as u8,
+                            });
                         }
                     }
                 }

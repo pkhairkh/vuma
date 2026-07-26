@@ -1,16 +1,22 @@
 //! Dump codegen SCG statements for a .vuma file.
+use vuma::pipeline::{bridge_scg_to_codegen, run_scg_transforms, CompileConfig};
 use vuma_codegen::scg_to_ir::ScgStatement;
-use vuma_parser::{Parser, AstToScg};
-use vuma::pipeline::{CompileConfig, run_scg_transforms, bridge_scg_to_codegen};
+use vuma_parser::{AstToScg, Parser};
 
 fn dump_stmt(stmt: &ScgStatement, indent: usize) {
     let pad = "  ".repeat(indent);
     match stmt {
         ScgStatement::Computation(c) => {
-            println!("{}Computation: dst={} op={:?} lhs={:?} rhs={:?} reassigns={:?}", pad, c.dst, c.op, c.lhs, c.rhs, c.reassigns);
+            println!(
+                "{}Computation: dst={} op={:?} lhs={:?} rhs={:?} reassigns={:?}",
+                pad, c.dst, c.op, c.lhs, c.rhs, c.reassigns
+            );
         }
         ScgStatement::Call(c) => {
-            println!("{}Call: dst={:?} func={} args={:?} reassigns={:?}", pad, c.dst, c.func, c.args, c.reassigns);
+            println!(
+                "{}Call: dst={:?} func={} args={:?} reassigns={:?}",
+                pad, c.dst, c.func, c.args, c.reassigns
+            );
         }
         ScgStatement::Access(a) => {
             println!("{}Access: {:?}", pad, a);
@@ -29,7 +35,9 @@ fn dump_stmt(stmt: &ScgStatement, indent: usize) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "examples/test_call.vuma".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "examples/test_call.vuma".to_string());
     let source = std::fs::read_to_string(&path).unwrap();
     let mut parser = Parser::new(&source);
     let result = parser.parse_program();
@@ -38,8 +46,14 @@ fn main() {
         return;
     }
     let ast = result.unwrap();
-    let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e)).unwrap() };
-    let config = CompileConfig { opt_level: vuma::pipeline::OptLevel::O0, ..Default::default() };
+    let mut scg = {
+        let mut c = AstToScg::new();
+        c.convert(&ast).map_err(|e| format!("scg: {}", e)).unwrap()
+    };
+    let config = CompileConfig {
+        opt_level: vuma::pipeline::OptLevel::O0,
+        ..Default::default()
+    };
     let _ = run_scg_transforms(&mut scg, &config);
     let codegen_scg = bridge_scg_to_codegen(&scg);
 

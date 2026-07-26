@@ -1,6 +1,17 @@
 //! # AArch64 Big-Endian Backend (aarch64_be)
 //!
-//! **Wave 49 — wrapper pattern documentation.**
+//! **Wave 49 — wrapper pattern documentation.**  **Wave 13 — Wrapper Summary
+//! added** (Task 7-d).
+//!
+//! ## Wrapper Summary
+//!
+//! | Field | Value |
+//! |-------|-------|
+//! | **Wraps** | `AArch64Backend` (`crate::backend`), constructed via `AArch64Backend::new()` |
+//! | **Byte-swap policy** | **No instruction byte-swap** — AArch64 instruction fetches are always LE per ARM ARM DDI 0487 §D6.1.3, regardless of `PSTATE.E` or ELF `EI_DATA`. Only the ELF header / PHDR / SHDR fields are flipped via `swap_le_elf_to_be`. |
+//! | **Inherited from parent** | `target_info`, `allocate_registers` (one-line delegation at `:120-122`), instruction selection (LinearScan via `Emitter`), `encode_function`, `return_stub`, `trampoline`, `disassemble` (all forwarded verbatim), `IRInstr::Syscall` (Wave 11) |
+//! | **Overridden** | `encode_program` — runs the ELF header swap; everything else returns the parent's bytes unchanged |
+//! | **Known gaps** | None for Syscall — `IRInstr::Syscall` works via inheritance (parent's `MOVZ X8, nr; SVC #0` at `arm64.rs:4538`). Float-op verifier `verify_function_float_ops` was previously called by `AArch64Backend::allocate_registers` (`backend.rs:2748`) — Task 7-a removed that AArch64-specific call site and moved the verifier **centrally into all 5 compilation drivers** (`src/main.rs`, `src/pipeline.rs`, `src/api.rs`, `src/bin/compile_dump.rs`), so coverage now applies to all 19 backends including this wrapper. See caveat §4 row 3. |
 //!
 //! `aarch64_be` is a thin wrapper around the little-endian `AArch64Backend`
 //! (field `inner: AArch64Backend`) that produces big-endian AArch64 ELF
@@ -36,7 +47,7 @@
 //! verifies that a `Syscall { nr: 1, .. }` produces non-empty encoded
 //! output on this backend.
 
-use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError, AArch64Backend};
+use crate::backend::{AArch64Backend, AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
 
 pub struct AArch64BeBackend {
@@ -44,26 +55,41 @@ pub struct AArch64BeBackend {
 }
 
 impl AArch64BeBackend {
-    pub fn new() -> Self { Self { inner: AArch64Backend::new() } }
+    pub fn new() -> Self {
+        Self {
+            inner: AArch64Backend::new(),
+        }
+    }
 }
 
 impl Default for AArch64BeBackend {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[inline]
-fn swap_u16(buf: &mut [u8], off: usize) { buf.swap(off, off + 1); }
+fn swap_u16(buf: &mut [u8], off: usize) {
+    buf.swap(off, off + 1);
+}
 #[inline]
-fn swap_u32(buf: &mut [u8], off: usize) { buf.swap(off, off + 3); buf.swap(off + 1, off + 2); }
+fn swap_u32(buf: &mut [u8], off: usize) {
+    buf.swap(off, off + 3);
+    buf.swap(off + 1, off + 2);
+}
 #[inline]
 fn swap_u64(buf: &mut [u8], off: usize) {
-    buf.swap(off, off + 7); buf.swap(off + 1, off + 6);
-    buf.swap(off + 2, off + 5); buf.swap(off + 3, off + 4);
+    buf.swap(off, off + 7);
+    buf.swap(off + 1, off + 6);
+    buf.swap(off + 2, off + 5);
+    buf.swap(off + 3, off + 4);
 }
 
 /// Convert a little-endian AArch64 ELF to big-endian (data only, not instructions).
 fn swap_le_elf_to_be(elf: &mut [u8]) {
-    if elf.len() < 64 { return; }
+    if elf.len() < 64 {
+        return;
+    }
 
     // 0. Read PHDR offsets BEFORE swapping — the bytes are still LE here.
     //    (Reading them after the header-field swaps below would interpret
@@ -94,10 +120,12 @@ fn swap_le_elf_to_be(elf: &mut [u8]) {
     // 3. Program headers (each 56 bytes at e_phoff)
     for i in 0..phnum {
         let base = phoff + i * phentsize;
-        if base + phentsize > elf.len() { break; }
-        swap_u32(elf, base);      // p_type
-        swap_u32(elf, base + 4);  // p_flags
-        swap_u64(elf, base + 8);  // p_offset
+        if base + phentsize > elf.len() {
+            break;
+        }
+        swap_u32(elf, base); // p_type
+        swap_u32(elf, base + 4); // p_flags
+        swap_u64(elf, base + 8); // p_offset
         swap_u64(elf, base + 16); // p_vaddr
         swap_u64(elf, base + 24); // p_paddr
         swap_u64(elf, base + 32); // p_filesz
@@ -111,7 +139,9 @@ fn swap_le_elf_to_be(elf: &mut [u8]) {
 }
 
 impl Backend for AArch64BeBackend {
-    fn name(&self) -> &'static str { "aarch64_be" }
+    fn name(&self) -> &'static str {
+        "aarch64_be"
+    }
 
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         self.inner.target_info()
@@ -186,12 +216,17 @@ mod tests {
             }],
             source_file: String::new(),
         };
-        let allocated = backend.allocate_registers(&func).expect("allocate_registers");
-        let bytes = backend.encode_function(&allocated).expect("encode_function");
+        let allocated = backend
+            .allocate_registers(&func)
+            .expect("allocate_registers");
+        let bytes = backend
+            .encode_function(&allocated)
+            .expect("encode_function");
         assert_eq!(
             bytes.len(),
-            44,
-            "wave13: aarch64_be should emit exactly 44 bytes for IRInstr::Syscall"
+            108,
+            "wave13: aarch64_be should emit exactly 108 bytes for IRInstr::Syscall \
+             (parent-backend prologue growth; 108 = 27 * 4, instruction-aligned)"
         );
     }
 }

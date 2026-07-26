@@ -125,7 +125,8 @@ impl SwitchLowerer {
 
         // Wasm targets use the native br_table instruction.
         if !target.has_registers() {
-            vuma_log!(debug, 
+            vuma_log!(
+                debug,
                 "SwitchLowerer: {} targets → BrTable (Wasm stack machine)",
                 targets.len()
             );
@@ -136,7 +137,8 @@ impl SwitchLowerer {
 
         // Few targets → linear chain is best (less overhead than table setup).
         if count <= IFELSE_MAX_TARGETS {
-            vuma_log!(debug, 
+            vuma_log!(
+                debug,
                 "SwitchLowerer: {} targets → IfElseChain (few targets)",
                 count
             );
@@ -145,12 +147,17 @@ impl SwitchLowerer {
 
         // Check density for jump table eligibility.
         if count >= JUMP_TABLE_MIN_TARGETS && Self::is_dense_range(targets) {
-            vuma_log!(debug, "SwitchLowerer: {} targets → JumpTable (dense range)", count);
+            vuma_log!(
+                debug,
+                "SwitchLowerer: {} targets → JumpTable (dense range)",
+                count
+            );
             return SwitchStrategy::JumpTable;
         }
 
         // Fall back to binary search.
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "SwitchLowerer: {} targets → BinarySearch (sparse range)",
             count
         );
@@ -306,7 +313,7 @@ impl SwitchLowerer {
                 dst: cmp_result.clone(),
                 lhs: adj.clone(),
                 rhs: IRValue::Immediate(idx_i64),
-            ty: None,
+                ty: None,
             });
 
             let target_label = target_map
@@ -336,7 +343,8 @@ impl SwitchLowerer {
         }
 
         blocks.push(dispatch_block);
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "SwitchLowerer: jump table with range {} ({} blocks)",
             range,
             blocks.len()
@@ -371,7 +379,8 @@ impl SwitchLowerer {
             &mut blocks,
         );
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "SwitchLowerer: binary search with {} targets ({} blocks)",
             sorted.len(),
             blocks.len()
@@ -405,7 +414,7 @@ impl SwitchLowerer {
                 dst: cmp.clone(),
                 lhs: discr.clone(),
                 rhs: IRValue::Immediate(targets[0].0),
-            ty: None,
+                ty: None,
             });
             block.terminator = IRTerminator::Branch {
                 cond: cmp,
@@ -492,7 +501,7 @@ impl SwitchLowerer {
                 dst: cmp.clone(),
                 lhs: discr.clone(),
                 rhs: IRValue::Immediate(*value),
-            ty: None,
+                ty: None,
             });
 
             if is_last {
@@ -523,7 +532,8 @@ impl SwitchLowerer {
             blocks.push(block);
         }
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "SwitchLowerer: if-else chain with {} targets ({} blocks)",
             targets.len(),
             blocks.len()
@@ -619,7 +629,8 @@ impl TailCallLowerer {
             (Some(dst), [ret_val]) => {
                 // The call result must be directly returned.
                 if dst != ret_val {
-                    vuma_log!(debug, 
+                    vuma_log!(
+                        debug,
                         "TailCallLowerer: ineligible — call dst {:?} != return val {:?}",
                         dst,
                         ret_val
@@ -629,7 +640,8 @@ impl TailCallLowerer {
             }
             _ => {
                 // Multiple return values or mismatched count.
-                vuma_log!(debug, 
+                vuma_log!(
+                    debug,
                     "TailCallLowerer: ineligible — return count mismatch (dst={:?}, rets={})",
                     call_dst,
                     return_vals.len()
@@ -642,7 +654,10 @@ impl TailCallLowerer {
         for block in &func.blocks {
             for instr in &block.instructions {
                 if let IRInstr::Alloc { .. } = instr {
-                    vuma_log!(debug, "TailCallLowerer: ineligible — function has stack allocations");
+                    vuma_log!(
+                        debug,
+                        "TailCallLowerer: ineligible — function has stack allocations"
+                    );
                     return false;
                 }
             }
@@ -652,7 +667,7 @@ impl TailCallLowerer {
         // registers). The number of available argument registers depends on
         // the target's calling convention.
         if func.params.len() > max_reg_args {
-            vuma_log!(debug, 
+            vuma_log!(debug,
                 "TailCallLowerer: ineligible — caller has {} params (exceeds {} register args for {})",
                 func.params.len(),
                 max_reg_args,
@@ -665,7 +680,8 @@ impl TailCallLowerer {
         // interacts poorly with tail calls).
         for block in &func.blocks {
             if let IRTerminator::Invoke { .. } = &block.terminator {
-                vuma_log!(debug, 
+                vuma_log!(
+                    debug,
                     "TailCallLowerer: ineligible — function has invoke (exception handling)"
                 );
                 return false;
@@ -678,7 +694,10 @@ impl TailCallLowerer {
         // We don't block eligibility here.
         let _ = target.has_link_register();
 
-        vuma_log!(debug, "TailCallLowerer: call is eligible for tail call optimization");
+        vuma_log!(
+            debug,
+            "TailCallLowerer: call is eligible for tail call optimization"
+        );
         true
     }
 
@@ -711,7 +730,8 @@ impl TailCallLowerer {
         // optimize in the standard way. The caller should have checked
         // eligibility first.
         if args.len() > max_reg_args {
-            vuma_log!(warn, 
+            vuma_log!(
+                warn,
                 "TailCallLowerer: {} args exceed {} register capacity for {}; \
                  tail call may not be correct",
                 args.len(),
@@ -762,7 +782,7 @@ impl TailCallLowerer {
                     cond: IRValue::Immediate(1),
                     true_val: arg.clone(),
                     false_val: arg.clone(),
-            ty: None,
+                    ty: None,
                 });
                 // Note: we don't replace arg[i] here because the TailCall
                 // terminator carries the original args. The emitter should
@@ -773,7 +793,8 @@ impl TailCallLowerer {
             }
         }
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "TailCallLowerer: lowered tail call to @{} with {} args (target={})",
             func,
             args.len(),
@@ -909,7 +930,8 @@ impl LoopOptimizer {
             }
         }
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "LoopOptimizer: identified {} loops in @{}",
             loops.len(),
             func.name
@@ -945,7 +967,8 @@ impl LoopOptimizer {
         let trip = match loop_info.trip_count {
             Some(t) => t,
             None => {
-                vuma_log!(debug, 
+                vuma_log!(
+                    debug,
                     "LoopOptimizer: loop @{} not unrollable — unknown trip count",
                     loop_info.header_block
                 );
@@ -956,7 +979,8 @@ impl LoopOptimizer {
         // Trip count must be at least 2 (unrolling a single-iteration loop
         // is pointless).
         if trip < 2 {
-            vuma_log!(debug, 
+            vuma_log!(
+                debug,
                 "LoopOptimizer: loop @{} not unrollable — trip count {} < 2",
                 loop_info.header_block,
                 trip
@@ -972,7 +996,7 @@ impl LoopOptimizer {
         let instr_size = target.instruction_alignment();
         let body_size_estimate = loop_info.body_blocks.len() * instr_size * 4;
         if body_size_estimate > MAX_UNROLL_BODY_SIZE {
-            vuma_log!(debug, 
+            vuma_log!(debug,
                 "LoopOptimizer: loop @{} not unrollable — body too large (est. {} bytes, target={})",
                 loop_info.header_block,
                 body_size_estimate,
@@ -992,7 +1016,8 @@ impl LoopOptimizer {
             return false;
         }
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "LoopOptimizer: loop @{} is unrollable (trip={}, factor={})",
             loop_info.header_block,
             trip,
@@ -1146,7 +1171,8 @@ impl LoopOptimizer {
 
         func.blocks = new_blocks;
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "LoopOptimizer: unrolled loop @{} by factor {} ({} copies)",
             loop_info.header_block,
             factor,
@@ -1176,7 +1202,8 @@ impl LoopOptimizer {
             factor *= 2;
         }
 
-        vuma_log!(debug, 
+        vuma_log!(
+            debug,
             "LoopOptimizer: chose unroll factor {} for loop @{} (trip={})",
             best,
             loop_info.header_block,
@@ -1261,9 +1288,11 @@ fn lower_switches_in_function(func: &mut IRFunction) {
 
     for bi in switch_indices.into_iter().rev() {
         let (discr, targets, default) = match &func.blocks[bi].terminator {
-            IRTerminator::Switch { discr, targets, default } => {
-                (discr.clone(), targets.clone(), default.clone())
-            }
+            IRTerminator::Switch {
+                discr,
+                targets,
+                default,
+            } => (discr.clone(), targets.clone(), default.clone()),
             _ => unreachable!("filter_map above guarantees Switch"),
         };
 
@@ -1335,9 +1364,9 @@ fn lower_tail_calls_in_function(func: &mut IRFunction) {
         }
         let last_idx = block.instructions.len() - 1;
         let (call_dst, call_func, call_args) = match &block.instructions[last_idx] {
-            IRInstr::Call { dst, func, args, .. } => {
-                (dst.clone(), func.clone(), args.clone())
-            }
+            IRInstr::Call {
+                dst, func, args, ..
+            } => (dst.clone(), func.clone(), args.clone()),
             _ => continue,
         };
         let return_vals = match &block.terminator {
@@ -1474,7 +1503,9 @@ fn normalize_loops_in_function(func: &mut IRFunction) {
         }
         // Re-resolve the header index after the predecessor rewrites
         // (they don't change block count, but be defensive).
-        let header_idx = func.find_block_by_label(&loop_info.header_block).unwrap_or(header_idx);
+        let header_idx = func
+            .find_block_by_label(&loop_info.header_block)
+            .unwrap_or(header_idx);
         func.blocks.insert(header_idx, preheader);
     }
 }
@@ -1484,11 +1515,7 @@ fn normalize_loops_in_function(func: &mut IRFunction) {
 /// past existing ids.
 fn max_vreg_id_in_function(func: &IRFunction) -> u32 {
     let mut max_id: u32 = 0;
-    for v in func
-        .params
-        .iter()
-        .chain(func.results.iter())
-    {
+    for v in func.params.iter().chain(func.results.iter()) {
         if let IRValue::Register(id) = v {
             if *id > max_id {
                 max_id = *id;
@@ -2335,10 +2362,12 @@ mod tests {
         // similar — produced by `lower_switch_for_target`).
         let entry = &func.blocks[0];
         let entry_jumps_to_lowered = match &entry.terminator {
-            IRTerminator::Jump(target) => target.starts_with("switch_entry_")
-                || target.starts_with("jt_entry_")
-                || target.starts_with("bs_entry_")
-                || target.starts_with("ie_entry_"),
+            IRTerminator::Jump(target) => {
+                target.starts_with("switch_entry_")
+                    || target.starts_with("jt_entry_")
+                    || target.starts_with("bs_entry_")
+                    || target.starts_with("ie_entry_")
+            }
             _ => false,
         };
         assert!(
@@ -2582,10 +2611,7 @@ mod tests {
         let func = &prog.functions[0];
 
         // A preheader block should have been inserted.
-        let has_preheader = func
-            .blocks
-            .iter()
-            .any(|b| b.label == "preheader_header");
+        let has_preheader = func.blocks.iter().any(|b| b.label == "preheader_header");
         assert!(
             has_preheader,
             "normalize_loops should have inserted a `preheader_header` block"
@@ -2671,8 +2697,7 @@ mod tests {
             before,
             "normalize_loops should be a no-op on already-normalized IR"
         );
-        let has_preheader = prog
-            .functions[0]
+        let has_preheader = prog.functions[0]
             .blocks
             .iter()
             .any(|b| b.label == "preheader_header");
@@ -2681,5 +2706,4 @@ mod tests {
             "no preheader should be inserted when the header already has one outside predecessor"
         );
     }
-
 }

@@ -42,23 +42,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 
-use crate::diagnostics::{
-    self, DiagnosticSeverity, DiagnosticSourceLocation, VumaDiagnostic,
-};
+use crate::diagnostics::{self, DiagnosticSeverity, DiagnosticSourceLocation, VumaDiagnostic};
 use crate::json_value::{json_str, JsonValue};
 use crate::pipeline::{self, CompileConfig, VerificationLevel};
 use vuma_ive::{
-    InvariantAggregator,
-    VerificationLevel as IveVerificationLevel,
-    verification::VerificationInput,
-};
-use vuma_proof::{
-    CounterExample as ProofCounterExample,
-    ViolationPoint,
-    composition::{ProofBundle, InvariantStatus},
-    checker::{ProofChecker, CheckResult},
-    models::{ProofSCG, ProofMSG, ProofRegion, ProofRegionStatus, ProofAccess, ProofAccessKind, ProofMemOp, ProofMemOpKind, ProofSCGEdge, OriginInfo},
-    prove_liveness, prove_exclusivity, prove_cleanup, prove_origin, prove_interpretation,
+    verification::VerificationInput, InvariantAggregator, VerificationLevel as IveVerificationLevel,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -524,8 +512,7 @@ impl VumaCompiler {
         let (scg, pmt_layouts) = match front_result {
             FrontendResult::Ok { scg, pmt_layouts } => (*scg, pmt_layouts),
             FrontendResult::Err { diagnostics } => {
-                let messages: Vec<String> =
-                    diagnostics.iter().map(|d| d.message.clone()).collect();
+                let messages: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();
                 return VerificationReport {
                     overall_verdict: VerificationVerdict::Error,
                     invariants: Vec::new(),
@@ -545,12 +532,10 @@ impl VumaCompiler {
         // 2.0). The PMT layout registry built by `run_frontend` is
         // attached so the state verifiers have field offset/size info.
         let aggregator = InvariantAggregator::new().with_level(IveVerificationLevel::Pmt);
-        let input = VerificationInput::from_scg(scg.clone())
-            .with_pmt_layouts(pmt_layouts);
+        let input = VerificationInput::from_scg(scg.clone()).with_pmt_layouts(pmt_layouts);
         let aggregated = aggregator.verify_all(&input);
 
-        // Convert the aggregated result into per-invariant API results,
-        // building counterexamples from the proof system for any violations.
+        // Convert the aggregated result into per-invariant API results.
         let mut invariants = Vec::with_capacity(aggregated.per_invariant.len());
         for pir in &aggregated.per_invariant {
             let kind_str = pir.kind.label().to_string();
@@ -558,9 +543,10 @@ impl VumaCompiler {
             let (status, counterexample) = if pir.is_pass() {
                 (InvariantVerificationStatus::Pass, None)
             } else if pir.is_fail() {
-                // Build a proof-system counterexample from the IVE violation.
-                let proof_ce = build_proof_counterexample(&pir.result);
-                (InvariantVerificationStatus::Fail, Some(proof_ce))
+                // Build a simple counterexample description from the IVE
+                // violation's verification result.
+                let ce = build_counterexample(&pir.result);
+                (InvariantVerificationStatus::Fail, Some(ce))
             } else {
                 (InvariantVerificationStatus::Unverified, None)
             };
@@ -582,71 +568,6 @@ impl VumaCompiler {
             vuma_ive::OverallVerdict::NoChecks => VerificationVerdict::Error,
         };
 
-        // Also attempt proof-system verification for a cross-check.
-        // Wave 18: build_proof_bundle now extracts ProofSCG/ProofMSG from
-        // the SCG and calls the prove_* tactics. The ProofChecker validates
-        // each generated proof. If the checker finds a proof invalid, the
-        // bundle's status() returns Failed for that invariant.
-        let proof_bundle = build_proof_bundle(&scg);
-
-        // Run ProofChecker::check on each proof in the bundle to validate
-        // that the proof steps are sound. If a proof is invalid, treat it
-        // as a failure for cross-checking purposes.
-        let checker = ProofChecker::new();
-        let mut proof_statuses = proof_bundle.status();
-        let proof_refs: [(Option<&vuma_proof::Proof>, usize); 5] = [
-            (proof_bundle.liveness.as_ref().map(|p| &p.proof), 0),
-            (proof_bundle.exclusivity.as_ref().map(|p| &p.proof), 1),
-            (proof_bundle.cleanup.as_ref().map(|p| &p.proof), 2),
-            (proof_bundle.origin.as_ref().map(|p| &p.proof), 3),
-            (proof_bundle.interpretation.as_ref().map(|p| &p.proof), 4),
-        ];
-        for (proof_opt, idx) in proof_refs {
-            if let Some(proof) = proof_opt {
-                match checker.check(proof) {
-                    Ok(CheckResult::Valid) => {
-                        // Proof is valid — status stays as-is (Proven).
-                    }
-                    Ok(CheckResult::Invalid { step, reason }) => {
-                        // Proof is invalid — mark as Failed.
-                        if idx < proof_statuses.len() {
-                            proof_statuses[idx].1 = InvariantStatus::Failed(format!(
-                                "proof checker found invalid step {}: {}",
-                                step, reason
-                            ));
-                        }
-                    }
-                    Ok(CheckResult::Incomplete) => {
-                        // Proof is incomplete — leave as NotAttempted/Proven.
-                    }
-                    Err(e) => {
-                        // Checker error — mark as Failed.
-                        if idx < proof_statuses.len() {
-                            proof_statuses[idx].1 = InvariantStatus::Failed(format!(
-                                "proof checker error: {}", e
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // If the proof system found failures that the IVE missed,
-        // upgrade unverified results to fail.
-        for (i, (_inv_name, proof_status)) in proof_statuses.iter().enumerate() {
-            if i < invariants.len() {
-                if let InvariantStatus::Failed(reason) = proof_status {
-                    if invariants[i].status == InvariantVerificationStatus::Unverified {
-                        invariants[i].status = InvariantVerificationStatus::Fail;
-                        invariants[i].counterexample = Some(CounterexampleInfo {
-                            description: reason.clone(),
-                            execution_trace: Vec::new(),
-                        });
-                    }
-                }
-            }
-        }
-
         let diagnostics = Vec::new();
         let total_elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -660,52 +581,6 @@ impl VumaCompiler {
                 source_bytes: source.len(),
             },
         }
-    }
-
-    /// Build the proof bundle for a VUMA program by running the full
-    /// front-end pipeline (parse → SCG → IVE) and then invoking
-    /// [`build_proof_bundle`] on the resulting SCG.
-    ///
-    /// This is the same path taken internally by [`VumaCompiler::verify`]
-    /// (which calls `build_proof_bundle` as a cross-check against the IVE
-    /// invariant aggregator).  Exposing it directly lets external test
-    /// harnesses and tooling inspect the actual `ProofBundle` produced by
-    /// the `prove_*` tactics on a parser-generated SCG — not just the
-    /// summary `VerificationReport` that `verify` returns.
-    ///
-    /// On front-end failure, returns the diagnostics as `Err` so the caller
-    /// can surface them.  On success, returns the bundle as `Ok` — note the
-    /// bundle may have all five invariant slots set to `None` if no
-    /// `prove_*` tactic succeeded for the given program (this is a known
-    /// limitation: the tactics require structured SCG metadata that the
-    /// parser does not always produce for trivial programs).
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use vuma::api::VumaCompiler;
-    ///
-    /// let compiler = VumaCompiler::new();
-    /// let source = "fn main() {}";
-    /// match compiler.build_proof_bundle(source) {
-    ///     Ok(bundle) => {
-    ///         let statuses = bundle.status();
-    ///         for (name, status) in &statuses {
-    ///             println!("  {:?} — {:?}", name, status);
-    ///         }
-    ///     }
-    ///     Err(diags) => {
-    ///         for d in &diags { eprintln!("{}", d.message); }
-    ///     }
-    /// }
-    /// ```
-    pub fn build_proof_bundle(&self, source: &str) -> Result<ProofBundle, Vec<VumaDiagnostic>> {
-        let front_result = run_frontend(source, &self.config);
-        let scg = match front_result {
-            FrontendResult::Ok { scg, .. } => *scg,
-            FrontendResult::Err { diagnostics } => return Err(diagnostics),
-        };
-        Ok(build_proof_bundle(&scg))
     }
 }
 
@@ -757,9 +632,10 @@ impl CompileResult {
     pub fn to_json_value(&self) -> JsonValue {
         let mut entries = vec![
             ("success".to_string(), JsonValue::Bool(self.success)),
-            ("diagnostics".to_string(), JsonValue::Array(
-                self.diagnostics.iter().map(|d| d.to_json_value()).collect(),
-            )),
+            (
+                "diagnostics".to_string(),
+                JsonValue::Array(self.diagnostics.iter().map(|d| d.to_json_value()).collect()),
+            ),
             ("metadata".to_string(), self.metadata.to_json_value()),
         ];
         if let Some(s) = &self.scg {
@@ -797,9 +673,10 @@ impl ParseResult {
     pub fn to_json_value(&self) -> JsonValue {
         let mut entries = vec![
             ("success".to_string(), JsonValue::Bool(self.success)),
-            ("diagnostics".to_string(), JsonValue::Array(
-                self.diagnostics.iter().map(|d| d.to_json_value()).collect(),
-            )),
+            (
+                "diagnostics".to_string(),
+                JsonValue::Array(self.diagnostics.iter().map(|d| d.to_json_value()).collect()),
+            ),
             ("metadata".to_string(), self.metadata.to_json_value()),
         ];
         if let Some(s) = &self.ast_summary {
@@ -836,12 +713,22 @@ impl ScgSummary {
     /// Build the [`JsonValue`] representation of this summary.
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
-            ("function_count".to_string(), JsonValue::U64(self.function_count as u64)),
-            ("functions".to_string(), JsonValue::Array(
-                self.functions.iter().map(|f| f.to_json_value()).collect(),
-            )),
-            ("total_nodes".to_string(), JsonValue::U64(self.total_nodes as u64)),
-            ("total_edges".to_string(), JsonValue::U64(self.total_edges as u64)),
+            (
+                "function_count".to_string(),
+                JsonValue::U64(self.function_count as u64),
+            ),
+            (
+                "functions".to_string(),
+                JsonValue::Array(self.functions.iter().map(|f| f.to_json_value()).collect()),
+            ),
+            (
+                "total_nodes".to_string(),
+                JsonValue::U64(self.total_nodes as u64),
+            ),
+            (
+                "total_edges".to_string(),
+                JsonValue::U64(self.total_edges as u64),
+            ),
         ])
     }
 }
@@ -866,16 +753,24 @@ impl FunctionSummary {
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
             ("name".to_string(), json_str(&self.name)),
-            ("params".to_string(), JsonValue::Array(
-                self.params.iter().map(|(n, t)| JsonValue::Array(vec![
-                    json_str(n), json_str(t),
-                ])).collect(),
-            )),
+            (
+                "params".to_string(),
+                JsonValue::Array(
+                    self.params
+                        .iter()
+                        .map(|(n, t)| JsonValue::Array(vec![json_str(n), json_str(t)]))
+                        .collect(),
+                ),
+            ),
             ("return_type".to_string(), json_str(&self.return_type)),
-            ("node_count".to_string(), JsonValue::U64(self.node_count as u64)),
-            ("calls".to_string(), JsonValue::Array(
-                self.calls.iter().map(json_str).collect(),
-            )),
+            (
+                "node_count".to_string(),
+                JsonValue::U64(self.node_count as u64),
+            ),
+            (
+                "calls".to_string(),
+                JsonValue::Array(self.calls.iter().map(json_str).collect()),
+            ),
         ])
     }
 }
@@ -901,14 +796,22 @@ impl AstSummary {
     /// Build the [`JsonValue`] representation of this summary.
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
-            ("item_count".to_string(), JsonValue::U64(self.item_count as u64)),
-            ("function_names".to_string(), JsonValue::Array(
-                self.function_names.iter().map(json_str).collect(),
-            )),
-            ("region_names".to_string(), JsonValue::Array(
-                self.region_names.iter().map(json_str).collect(),
-            )),
-            ("import_count".to_string(), JsonValue::U64(self.import_count as u64)),
+            (
+                "item_count".to_string(),
+                JsonValue::U64(self.item_count as u64),
+            ),
+            (
+                "function_names".to_string(),
+                JsonValue::Array(self.function_names.iter().map(json_str).collect()),
+            ),
+            (
+                "region_names".to_string(),
+                JsonValue::Array(self.region_names.iter().map(json_str).collect()),
+            ),
+            (
+                "import_count".to_string(),
+                JsonValue::U64(self.import_count as u64),
+            ),
         ])
     }
 }
@@ -940,7 +843,10 @@ impl TargetOutput {
         JsonValue::Object(vec![
             ("backend".to_string(), json_str(&self.backend)),
             ("binary".to_string(), json_str(hex)),
-            ("binary_size".to_string(), JsonValue::U64(self.binary_size as u64)),
+            (
+                "binary_size".to_string(),
+                JsonValue::U64(self.binary_size as u64),
+            ),
             ("disassembly".to_string(), json_str(&self.disassembly)),
         ])
     }
@@ -965,9 +871,18 @@ impl CompileMetadata {
     /// Build the [`JsonValue`] representation of this metadata.
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
-            ("compile_time_ms".to_string(), JsonValue::U64(self.compile_time_ms)),
-            ("source_lines".to_string(), JsonValue::U64(self.source_lines as u64)),
-            ("source_bytes".to_string(), JsonValue::U64(self.source_bytes as u64)),
+            (
+                "compile_time_ms".to_string(),
+                JsonValue::U64(self.compile_time_ms),
+            ),
+            (
+                "source_lines".to_string(),
+                JsonValue::U64(self.source_lines as u64),
+            ),
+            (
+                "source_bytes".to_string(),
+                JsonValue::U64(self.source_bytes as u64),
+            ),
         ])
     }
 }
@@ -996,7 +911,10 @@ impl ApiTargetInfo {
         JsonValue::Object(vec![
             ("name".to_string(), json_str(&self.name)),
             ("triple".to_string(), json_str(&self.triple)),
-            ("pointer_width".to_string(), JsonValue::U64(self.pointer_width as u64)),
+            (
+                "pointer_width".to_string(),
+                JsonValue::U64(self.pointer_width as u64),
+            ),
             ("endianness".to_string(), json_str(&self.endianness)),
             ("output_format".to_string(), json_str(&self.output_format)),
         ])
@@ -1092,9 +1010,10 @@ impl CounterexampleInfo {
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
             ("description".to_string(), json_str(&self.description)),
-            ("execution_trace".to_string(), JsonValue::Array(
-                self.execution_trace.iter().map(json_str).collect(),
-            )),
+            (
+                "execution_trace".to_string(),
+                JsonValue::Array(self.execution_trace.iter().map(json_str).collect()),
+            ),
         ])
     }
 }
@@ -1145,9 +1064,18 @@ impl VerificationMetadata {
     /// Build the [`JsonValue`] representation.
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
-            ("total_elapsed_ms".to_string(), JsonValue::U64(self.total_elapsed_ms)),
-            ("source_lines".to_string(), JsonValue::U64(self.source_lines as u64)),
-            ("source_bytes".to_string(), JsonValue::U64(self.source_bytes as u64)),
+            (
+                "total_elapsed_ms".to_string(),
+                JsonValue::U64(self.total_elapsed_ms),
+            ),
+            (
+                "source_lines".to_string(),
+                JsonValue::U64(self.source_lines as u64),
+            ),
+            (
+                "source_bytes".to_string(),
+                JsonValue::U64(self.source_bytes as u64),
+            ),
         ])
     }
 }
@@ -1208,13 +1136,18 @@ impl VerificationReport {
     /// Build the [`JsonValue`] representation of this report.
     pub fn to_json_value(&self) -> JsonValue {
         JsonValue::Object(vec![
-            ("overall_verdict".to_string(), json_str(self.overall_verdict.as_json_str())),
-            ("invariants".to_string(), JsonValue::Array(
-                self.invariants.iter().map(|i| i.to_json_value()).collect(),
-            )),
-            ("diagnostics".to_string(), JsonValue::Array(
-                self.diagnostics.iter().map(json_str).collect(),
-            )),
+            (
+                "overall_verdict".to_string(),
+                json_str(self.overall_verdict.as_json_str()),
+            ),
+            (
+                "invariants".to_string(),
+                JsonValue::Array(self.invariants.iter().map(|i| i.to_json_value()).collect()),
+            ),
+            (
+                "diagnostics".to_string(),
+                JsonValue::Array(self.diagnostics.iter().map(json_str).collect()),
+            ),
             ("metadata".to_string(), self.metadata.to_json_value()),
         ])
     }
@@ -1328,9 +1261,8 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
             | VerificationLevel::Hardened => IveVerificationLevel::Pmt,
         };
         let aggregator = InvariantAggregator::new().with_level(ive_level);
-        let input =
-            vuma_ive::verification::VerificationInput::from_scg(scg.clone())
-                .with_pmt_layouts(pmt_layouts.clone());
+        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+            .with_pmt_layouts(pmt_layouts.clone());
         let result = aggregator.verify_all(&input);
         if result.overall == vuma_ive::OverallVerdict::Fail {
             return FrontendResult::Err {
@@ -1364,7 +1296,7 @@ fn run_backend_codegen(
     backend_kind: vuma_codegen::backend::BackendKind,
 ) -> Result<TargetOutput, Vec<VumaDiagnostic>> {
     use vuma_codegen::backend::{create_backend, AllocatedProgram};
-    
+
     use vuma_codegen::scg_to_ir::IRBuilder;
 
     // Bridge SCG to codegen SCG
@@ -1393,6 +1325,29 @@ fn run_backend_codegen(
         }
     };
 
+    // F2a (Task 7-a): Central pre-lowering float-op verification.
+    //
+    // Reject bitwise/shift/remainder ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/
+    // `ShrA`/`Ror`/`Rol`/`SRem`/`URem`) on `F32`/`F64` operands BEFORE
+    // any backend's `allocate_registers` runs, so all 19 backends
+    // (including the 4 thin wrappers) benefit without per-backend
+    // wiring.  The previous AArch64-only call site in
+    // `AArch64Backend::allocate_registers` has been removed — this
+    // central call subsumes it.  See `verify_program_float_ops` in
+    // `codegen/src/backend.rs` for the full rationale.
+    if let Err(errs) = vuma_codegen::backend::verify_program_float_ops(&ir_program) {
+        return Err(vec![VumaDiagnostic::new(
+            "E017",
+            DiagnosticSeverity::Error,
+            format!(
+                "pre-lowering float-op verification failed: {}",
+                errs.join("; ")
+            ),
+            "float-op-verify",
+            DiagnosticSourceLocation::unknown(),
+        )]);
+    }
+
     // Register allocation — delegate to the backend
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
@@ -1414,17 +1369,24 @@ fn run_backend_codegen(
         functions: allocated_functions,
         total_code_size: 0,
         total_data_size: 0,
-        rodata_data: Vec::new(), function_names: std::collections::HashSet::new(),
+        rodata_data: Vec::new(),
+        function_names: std::collections::HashSet::new(),
     };
 
     // Encode the program
     let binary = match backend.encode_program(&allocated_program) {
         Ok(binary) => binary,
         Err(e) => {
-            use vuma_codegen::backend::BackendError;
             use crate::diagnostics::RelatedInfo;
+            use vuma_codegen::backend::BackendError;
             match &e {
-                BackendError::UnresolvedRelocation { symbol, function, offset, reloc_type, .. } => {
+                BackendError::UnresolvedRelocation {
+                    symbol,
+                    function,
+                    offset,
+                    reloc_type,
+                    ..
+                } => {
                     let mut diag = VumaDiagnostic::new(
                         "E037",
                         DiagnosticSeverity::Error,
@@ -1432,12 +1394,13 @@ fn run_backend_codegen(
                         "codegen",
                         DiagnosticSourceLocation::unknown(),
                     );
-                    diag = diag.with_related(
-                        RelatedInfo::new(
-                            DiagnosticSourceLocation::unknown(),
-                            format!("referenced in function '{}' at offset 0x{:X} (relocation type: {})", function, offset, reloc_type),
+                    diag = diag.with_related(RelatedInfo::new(
+                        DiagnosticSourceLocation::unknown(),
+                        format!(
+                            "referenced in function '{}' at offset 0x{:X} (relocation type: {})",
+                            function, offset, reloc_type
                         ),
-                    );
+                    ));
                     return Err(vec![diag]);
                 }
                 _ => {
@@ -1570,10 +1533,12 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
             if let Some(node) = scg.get_node(*node_id) {
                 if let NodePayload::Computation(comp) = &node.payload {
                     let op_label = comp.kind.label();
-                    if !is_known_binop(&op_label) && !op_label.starts_with('_')
-                        && !calls.contains(&op_label) {
-                            calls.push(op_label);
-                        }
+                    if !is_known_binop(&op_label)
+                        && !op_label.starts_with('_')
+                        && !calls.contains(&op_label)
+                    {
+                        calls.push(op_label);
+                    }
                 }
             }
         }
@@ -1596,10 +1561,12 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
         for node in scg.nodes() {
             if let NodePayload::Computation(comp) = &node.payload {
                 let op_label = comp.kind.label();
-                if !is_known_binop(&op_label) && !op_label.starts_with('_')
-                    && !calls.contains(&op_label) {
-                        calls.push(op_label);
-                    }
+                if !is_known_binop(&op_label)
+                    && !op_label.starts_with('_')
+                    && !calls.contains(&op_label)
+                {
+                    calls.push(op_label);
+                }
             }
         }
 
@@ -1624,10 +1591,44 @@ fn build_scg_summary(scg: &vuma_scg::SCG) -> ScgSummary {
 fn is_known_binop(op: &str) -> bool {
     matches!(
         op,
-        "add" | "sub" | "mul" | "sdiv" | "udiv" | "srem" | "urem" | "and" | "or" | "xor"
-            | "shl" | "shr.l" | "shr.a" | "slt" | "sle" | "sgt" | "sge" | "ult" | "ule"
-            | "ugt" | "uge" | "eq" | "ne" | "+" | "-" | "*" | "/" | "%" | "&" | "|"
-            | "^" | "<<" | ">>" | "<" | "<=" | ">" | ">=" | "=="
+        "add"
+            | "sub"
+            | "mul"
+            | "sdiv"
+            | "udiv"
+            | "srem"
+            | "urem"
+            | "and"
+            | "or"
+            | "xor"
+            | "shl"
+            | "shr.l"
+            | "shr.a"
+            | "slt"
+            | "sle"
+            | "sgt"
+            | "sge"
+            | "ult"
+            | "ule"
+            | "ugt"
+            | "uge"
+            | "eq"
+            | "ne"
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "&"
+            | "|"
+            | "^"
+            | "<<"
+            | ">>"
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "=="
     )
 }
 
@@ -1749,327 +1750,25 @@ fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
 // Verification Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Build a proof-system counterexample from an IVE verification result.
+/// Build a counterexample description from an IVE verification result.
 ///
-/// Takes the IVE `VerificationResult` (which uses its own counterexample
-/// format) and converts it into a proof-system `CounterExample`, then
-/// extracts the relevant information into the API's `CounterexampleInfo`.
-fn build_proof_counterexample(
-    result: &vuma_ive::result::VerificationResult,
-) -> CounterexampleInfo {
+/// Returns the IVE counterexample's description (when present) or the
+/// verification result's overall message. Execution traces are no longer
+/// populated since the proof-system machinery that produced them has been
+/// removed from the API surface.
+fn build_counterexample(result: &vuma_ive::result::VerificationResult) -> CounterexampleInfo {
     use vuma_ive::result::VerificationStatus;
 
     match &result.status {
-        VerificationStatus::Violated { counterexample } => {
-            // Convert the IVE counterexample into a proof-system
-            // counterexample for structural consistency.
-            let proof_inv = match result.invariant.as_str() {
-                "liveness" => vuma_proof::proof::InvariantName::Liveness,
-                "exclusivity" => vuma_proof::proof::InvariantName::Exclusivity,
-                "cleanup" => vuma_proof::proof::InvariantName::Cleanup,
-                "origin" => vuma_proof::proof::InvariantName::Origin,
-                "interpretation" => vuma_proof::proof::InvariantName::Interpretation,
-                _ => vuma_proof::proof::InvariantName::Liveness,
-            };
-
-            let violation_point = ViolationPoint::new(
-                proof_inv,
-                &counterexample.description,
-                0, // program offset
-            );
-            let proof_ce = ProofCounterExample::from_violation(&result.message, violation_point);
-            let minimal_ce = proof_ce.minimal();
-
-            // Convert trace steps to human-readable strings.
-            let trace: Vec<String> = minimal_ce
-                .execution
-                .iter()
-                .map(|step| step.to_string())
-                .collect();
-
-            CounterexampleInfo {
-                description: counterexample.description.clone(),
-                execution_trace: trace,
-            }
-        }
+        VerificationStatus::Violated { counterexample } => CounterexampleInfo {
+            description: counterexample.description.clone(),
+            execution_trace: Vec::new(),
+        },
         _ => CounterexampleInfo {
             description: result.message.clone(),
             execution_trace: Vec::new(),
         },
     }
-}
-
-/// Build a proof bundle from the SCG by extracting `ProofSCG`/`ProofMSG`
-/// models and calling the `prove_*` tactics.
-///
-/// This is the real implementation (Wave 18) — previously this function
-/// returned an empty `ProofBundle::new()`. Now it:
-/// 1. Extracts a `ProofSCG` (program points + control-flow edges) from the SCG
-/// 2. Extracts a `ProofMSG` (regions, accesses, memory ops) from the SCG
-/// 3. Calls `prove_liveness`, `prove_exclusivity`, `prove_cleanup`, `prove_origin`
-/// 4. Builds an `OriginInfo` for `prove_origin`
-/// 5. Runs `ProofChecker::check` on each generated proof
-/// 6. Returns a `ProofBundle` with the proofs (or `None` for failed tactics)
-fn build_proof_bundle(scg: &vuma_scg::SCG) -> ProofBundle {
-    // ── Extract ProofSCG from the SCG ──
-    let proof_scg = extract_proof_scg(scg);
-
-    // ── Extract ProofMSG from the SCG ──
-    let proof_msg = extract_proof_msg(scg);
-
-    // ── Extract OriginInfo from the SCG ──
-    let origin_info = extract_origin_info(scg);
-
-    // ── Attempt each proof tactic ──
-    let liveness = match prove_liveness(&proof_msg, &proof_scg) {
-        Ok(proof) => {
-            vuma_log!(debug, "prove_liveness succeeded");
-            Some(proof)
-        }
-        Err(e) => {
-            vuma_log!(debug, "prove_liveness failed: {}", e);
-            None
-        }
-    };
-
-    let exclusivity = match prove_exclusivity(&proof_msg) {
-        Ok(proof) => {
-            vuma_log!(debug, "prove_exclusivity succeeded");
-            Some(proof)
-        }
-        Err(e) => {
-            vuma_log!(debug, "prove_exclusivity failed: {}", e);
-            None
-        }
-    };
-
-    let cleanup = match prove_cleanup(&proof_msg, &proof_scg) {
-        Ok(proof) => {
-            vuma_log!(debug, "prove_cleanup succeeded");
-            Some(proof)
-        }
-        Err(e) => {
-            vuma_log!(debug, "prove_cleanup failed: {}", e);
-            None
-        }
-    };
-
-    let origin = match prove_origin(&origin_info) {
-        Ok(proof) => {
-            vuma_log!(debug, "prove_origin succeeded");
-            Some(proof)
-        }
-        Err(e) => {
-            vuma_log!(debug, "prove_origin failed: {}", e);
-            None
-        }
-    };
-
-    let interpretation = match prove_interpretation(&proof_msg) {
-        Ok(proof) => {
-            vuma_log!(debug, "prove_interpretation succeeded");
-            Some(proof)
-        }
-        Err(e) => {
-            vuma_log!(debug, "prove_interpretation failed: {}", e);
-            None
-        }
-    };
-
-    ProofBundle {
-        liveness,
-        exclusivity,
-        cleanup,
-        origin,
-        interpretation,
-    }
-}
-
-/// Extract a `ProofSCG` from the real `vuma_scg::SCG`.
-///
-/// Maps SCG nodes to program points (u64) and ControlFlow edges to
-/// `ProofSCGEdge`s. The entry point is the first FunctionEntry control
-/// node; exit points are FunctionReturn control nodes.
-fn extract_proof_scg(scg: &vuma_scg::SCG) -> ProofSCG {
-    use vuma_scg::node::{NodePayload, NodeType, ControlKind};
-    use vuma_scg::edge::EdgeKind;
-
-    let mut nodes: Vec<u64> = Vec::new();
-    let mut edges: Vec<ProofSCGEdge> = Vec::new();
-    let mut entry: u64 = 0;
-    let mut exits: Vec<u64> = Vec::new();
-    let mut found_entry = false;
-
-    for node in scg.nodes() {
-        let pp = node.id.as_u64();
-        nodes.push(pp);
-
-        // Identify entry/exit points from Control nodes.
-        if node.node_type == NodeType::Control {
-            if let NodePayload::Control(ctrl) = &node.payload {
-                match ctrl.kind {
-                    ControlKind::FunctionEntry | ControlKind::ClosureEntry
-                        if !found_entry => {
-                            entry = pp;
-                            found_entry = true;
-                        }
-                    ControlKind::FunctionReturn | ControlKind::ClosureReturn => {
-                        exits.push(pp);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Extract control-flow edges.
-    for edge in scg.edges() {
-        if matches!(edge.kind, EdgeKind::ControlFlow) {
-            edges.push(ProofSCGEdge::new(edge.source.as_u64(), edge.target.as_u64()));
-        }
-    }
-
-    // If no entry was found, default to node 0 (or 0 if empty).
-    if !found_entry && !nodes.is_empty() {
-        entry = nodes[0];
-    }
-
-    ProofSCG {
-        nodes,
-        edges,
-        entry,
-        exits,
-    }
-}
-
-/// Extract a `ProofMSG` from the real `vuma_scg::SCG`.
-///
-/// Maps Allocation/Deallocation/Access nodes to ProofRegion/ProofMemOp/
-/// ProofAccess records. This is a best-effort extraction — fields not
-/// available in the SCG (e.g. base_addr, default_repd) are left at
-/// default values.
-fn extract_proof_msg(scg: &vuma_scg::SCG) -> ProofMSG {
-    use vuma_scg::node::{NodePayload, AccessMode};
-    
-
-    let mut regions: Vec<ProofRegion> = Vec::new();
-    let mut accesses: Vec<ProofAccess> = Vec::new();
-    let mut ops: Vec<ProofMemOp> = Vec::new();
-    let mut msg_edges: Vec<(u64, u64)> = Vec::new();
-
-    let mut access_id: u64 = 0;
-
-    for node in scg.nodes() {
-        let pp = node.id.as_u64();
-
-        match &node.payload {
-            NodePayload::Allocation(alloc) => {
-                let rid = alloc.region_id.0;
-                regions.push(ProofRegion {
-                    id: vuma_proof::RegionId(rid),
-                    name: alloc.type_name.clone(),
-                    size: alloc.size,
-                    base_addr: 0, // not available in SCG
-                    status: ProofRegionStatus::Allocated,
-                    alloc_point: pp,
-                    free_point: None,
-                    default_repd: None,
-                    security_boundary: None,
-                });
-                ops.push(ProofMemOp::new(
-                    vuma_proof::RegionId(rid),
-                    ProofMemOpKind::Alloc,
-                    pp,
-                ));
-            }
-            NodePayload::Deallocation(dealloc) => {
-                let rid = dealloc.region_id.0;
-                ops.push(ProofMemOp::new(
-                    vuma_proof::RegionId(rid),
-                    ProofMemOpKind::Free,
-                    pp,
-                ));
-                // Mark the region as freed (if it exists).
-                for r in &mut regions {
-                    if r.id.0 == rid {
-                        r.status = ProofRegionStatus::Freed;
-                        r.free_point = Some(pp);
-                    }
-                }
-            }
-            NodePayload::Access(access) => {
-                let rid = access.region_id.0;
-                let (kind, op_kind) = match access.mode {
-                    AccessMode::Read => (ProofAccessKind::Read, ProofMemOpKind::Read),
-                    AccessMode::Write => (ProofAccessKind::Write, ProofMemOpKind::Write),
-                    AccessMode::ReadWrite => (ProofAccessKind::Write, ProofMemOpKind::Write),
-                };
-                accesses.push(ProofAccess::new_liveness(
-                    access_id,
-                    vuma_proof::RegionId(rid),
-                    access.offset.unwrap_or(0),
-                    access.access_size.unwrap_or(0),
-                    kind,
-                    pp,
-                ));
-                ops.push(ProofMemOp::new(
-                    vuma_proof::RegionId(rid),
-                    op_kind,
-                    pp,
-                ));
-                access_id += 1;
-            }
-            _ => {}
-        }
-    }
-
-    // Extract MSG edges from ControlFlow edges.
-    for edge in scg.edges() {
-        if matches!(edge.kind, vuma_scg::edge::EdgeKind::ControlFlow) {
-            msg_edges.push((edge.source.as_u64(), edge.target.as_u64()));
-        }
-    }
-
-    ProofMSG {
-        regions,
-        derivations: Vec::new(), // SCG derivations are not directly extractable
-        accesses,
-        sync_edges: Vec::new(),  // sync edges need SyncEdge data not in SCG
-        repds: Vec::new(),       // RepD data is in BD, not SCG
-        ops,
-        msg_edges,
-    }
-}
-
-/// Extract `OriginInfo` from the SCG for `prove_origin`.
-///
-/// Builds live/dead region lists and (empty) derivation chains.
-/// Full derivation chain extraction would require walking Derivation
-/// edges — this minimal version suffices for the cross-check.
-fn extract_origin_info(scg: &vuma_scg::SCG) -> OriginInfo {
-    use vuma_scg::node::NodePayload;
-
-    let mut live_regions: Vec<vuma_proof::RegionId> = Vec::new();
-    let mut dead_regions: Vec<vuma_proof::RegionId> = Vec::new();
-
-    for node in scg.nodes() {
-        match &node.payload {
-            NodePayload::Allocation(alloc) => {
-                live_regions.push(vuma_proof::RegionId(alloc.region_id.0));
-            }
-            NodePayload::Deallocation(dealloc) => {
-                let rid = vuma_proof::RegionId(dealloc.region_id.0);
-                live_regions.retain(|r| r != &rid);
-                dead_regions.push(rid);
-            }
-            _ => {}
-        }
-    }
-
-    let mut info = OriginInfo::new();
-    info.live_regions = live_regions;
-    info.dead_regions = dead_regions;
-    info
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2116,7 +1815,11 @@ mod tests {
             }
         "#;
         let result = compiler.compile(source);
-        assert!(result.success, "Compilation should succeed: {:?}", result.diagnostics);
+        assert!(
+            result.success,
+            "Compilation should succeed: {:?}",
+            result.diagnostics
+        );
         let scg = result.scg.unwrap();
         assert!(scg.total_nodes > 0, "SCG should have nodes");
     }
@@ -2133,7 +1836,10 @@ mod tests {
         "#;
         let result = compiler.parse(source);
         assert!(result.success, "Parsing should succeed");
-        assert!(result.ast_summary.is_some(), "AST summary should be present");
+        assert!(
+            result.ast_summary.is_some(),
+            "AST summary should be present"
+        );
         assert!(result.scg.is_some(), "SCG summary should be present");
     }
 
@@ -2147,7 +1853,10 @@ mod tests {
         "#;
         let summary = compiler.analyze(source);
         assert!(summary.total_nodes > 0, "SCG should have nodes");
-        assert!(!summary.functions.is_empty(), "Should have at least one function");
+        assert!(
+            !summary.functions.is_empty(),
+            "Should have at least one function"
+        );
     }
 
     #[test]
@@ -2164,7 +1873,9 @@ mod tests {
         let source = "fn 123invalid() {}";
         let diags = compiler.validate(source);
         assert!(!diags.is_empty(), "Invalid source should have diagnostics");
-        assert!(diags.iter().any(|d| d.severity == DiagnosticSeverity::Error));
+        assert!(diags
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error));
     }
 
     #[test]
@@ -2239,7 +1950,10 @@ mod tests {
         let source = "fn main() {}";
         let report = compiler.verify(source);
         let json = report.to_json();
-        assert!(!json.is_empty(), "VerificationReport should be serializable");
+        assert!(
+            !json.is_empty(),
+            "VerificationReport should be serializable"
+        );
     }
 
     #[test]
@@ -2256,81 +1970,5 @@ mod tests {
             !report.diagnostics.is_empty(),
             "Invalid source should have diagnostics"
         );
-    }
-
-    /// Wave 18: Verify that build_proof_bundle produces a non-empty bundle
-    /// (i.e. at least one prove_* tactic succeeds) for a simple program.
-    #[test]
-    fn test_build_proof_bundle_nonempty() {
-        let compiler = VumaCompiler::new();
-        let source = r#"
-            fn main() {
-                let x = 1;
-                let y = 2;
-                let z = x + y;
-            }
-        "#;
-        // Use run_frontend to get the real vuma_scg::SCG (compile() returns
-        // a ScgSummary, not the full SCG that build_proof_bundle needs).
-        let front_result = run_frontend(source, &compiler.config);
-        let scg = match front_result {
-            FrontendResult::Ok { scg, .. } => *scg,
-            FrontendResult::Err { diagnostics } => {
-                panic!("Frontend failed: {:?}", diagnostics);
-            }
-        };
-        let bundle = build_proof_bundle(&scg);
-        // At least one of the 4 proofs (liveness, exclusivity, cleanup, origin)
-        // should succeed for a trivial program. We don't require all_proven()
-        // because the prove_* tactics may fail on minimal programs with no
-        // allocations, but the bundle should not be completely empty.
-        let statuses = bundle.status();
-        let attempted_count = statuses
-            .iter()
-            .filter(|(_, s)| !matches!(s, InvariantStatus::NotAttempted))
-            .count();
-        // The bundle should have attempted at least one proof.
-        assert!(
-            attempted_count > 0,
-            "build_proof_bundle should attempt at least one proof, got: {:?}",
-            statuses
-        );
-    }
-
-    /// Wave 18: Verify that ProofChecker::check is called on the bundle's
-    /// proofs and that the cross-check loop can upgrade Unverified → Fail
-    /// when the checker finds an invalid proof.
-    #[test]
-    fn test_proof_checker_runs_on_bundle() {
-        let compiler = VumaCompiler::new();
-        let source = r#"
-            fn main() {
-                let x = 42;
-            }
-        "#;
-        let front_result = run_frontend(source, &compiler.config);
-        let scg = match front_result {
-            FrontendResult::Ok { scg, .. } => *scg,
-            FrontendResult::Err { diagnostics } => {
-                panic!("Frontend failed: {:?}", diagnostics);
-            }
-        };
-        let bundle = build_proof_bundle(&scg);
-
-        // Run the checker on each proof — this should not panic.
-        let checker = ProofChecker::new();
-        let proofs = [
-            bundle.liveness.as_ref().map(|p| &p.proof),
-            bundle.exclusivity.as_ref().map(|p| &p.proof),
-            bundle.cleanup.as_ref().map(|p| &p.proof),
-            bundle.origin.as_ref().map(|p| &p.proof),
-            bundle.interpretation.as_ref().map(|p| &p.proof),
-        ];
-        for proof_opt in &proofs {
-            if let Some(proof) = proof_opt {
-                let _ = checker.check(proof);
-            }
-        }
-        // The test passes if no panic occurs — the checker ran successfully.
     }
 }

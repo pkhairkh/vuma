@@ -10,7 +10,11 @@ use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::target_desc::LatencyTable;
 
 /// Verify that a backend's latency table matches the expected ISA factory.
-fn assert_backend_uses_isa_table(kind: BackendKind, expected_factory: fn() -> LatencyTable, isa_name: &str) {
+fn assert_backend_uses_isa_table(
+    kind: BackendKind,
+    expected_factory: fn() -> LatencyTable,
+    isa_name: &str,
+) {
     let backend = create_backend(kind).expect("backend creation should succeed");
     let table = backend.target_info().latency_table();
     let expected = expected_factory();
@@ -71,7 +75,11 @@ fn wave10_proper_ppc64_uses_ppc64_table() {
 
 #[test]
 fn wave10_proper_loongarch64_uses_loongarch64_table() {
-    assert_backend_uses_isa_table(BackendKind::LoongArch64, LatencyTable::loongarch64, "loongarch64");
+    assert_backend_uses_isa_table(
+        BackendKind::LoongArch64,
+        LatencyTable::loongarch64,
+        "loongarch64",
+    );
 }
 
 #[test]
@@ -123,19 +131,41 @@ fn wave10_proper_ppc64le_inherits_ppc64_table() {
 fn wave10_proper_tables_differ_across_heterogeneous_isas() {
     // The backends are heterogeneous — different ISAs have different pipelines,
     // register files, and latencies. The latency tables must reflect this.
-    let x86_64_mul = create_backend(BackendKind::X86_64).unwrap()
-        .target_info().latency_table().lookup("multiply").0;
-    let m68k_mul = create_backend(BackendKind::M68k).unwrap()
-        .target_info().latency_table().lookup("multiply").0;
-    let alpha_mul = create_backend(BackendKind::Alpha).unwrap()
-        .target_info().latency_table().lookup("multiply").0;
-    let ppc64_mul = create_backend(BackendKind::PowerPC64).unwrap()
-        .target_info().latency_table().lookup("multiply").0;
+    let x86_64_mul = create_backend(BackendKind::X86_64)
+        .unwrap()
+        .target_info()
+        .latency_table()
+        .lookup("multiply")
+        .0;
+    let m68k_mul = create_backend(BackendKind::M68k)
+        .unwrap()
+        .target_info()
+        .latency_table()
+        .lookup("multiply")
+        .0;
+    let alpha_mul = create_backend(BackendKind::Alpha)
+        .unwrap()
+        .target_info()
+        .latency_table()
+        .lookup("multiply")
+        .0;
+    let ppc64_mul = create_backend(BackendKind::PowerPC64)
+        .unwrap()
+        .target_info()
+        .latency_table()
+        .lookup("multiply")
+        .0;
 
     // x86_64: mul=3, m68k: mul=20, alpha: mul=7, ppc64: mul=5
     // These MUST differ — if they were all default_ooo(), they'd all be 3.
-    assert_ne!(x86_64_mul, m68k_mul, "x86_64 and m68k must have different mul latency");
-    assert_ne!(x86_64_mul, alpha_mul, "x86_64 and alpha must have different mul latency");
+    assert_ne!(
+        x86_64_mul, m68k_mul,
+        "x86_64 and m68k must have different mul latency"
+    );
+    assert_ne!(
+        x86_64_mul, alpha_mul,
+        "x86_64 and alpha must have different mul latency"
+    );
     assert_eq!(x86_64_mul, 3, "x86_64 mul should be 3");
     assert_eq!(m68k_mul, 20, "m68k mul should be 20");
     assert_eq!(alpha_mul, 7, "alpha mul should be 7");
@@ -157,5 +187,9 @@ fn wave10_proper_production_pipeline_uses_backend_table() {
     };
 
     let result = compile(source, &config);
-    assert!(result.is_ok(), "production compile should succeed with per-ISA table: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "production compile should succeed with per-ISA table: {:?}",
+        result.err()
+    );
 }

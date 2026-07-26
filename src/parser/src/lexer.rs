@@ -1787,8 +1787,8 @@ impl<'src> Lexer<'src> {
             // Check if this is a known LLM-generated macro pattern
             if crate::error::check_llm_construct(&macro_name).is_some() {
                 self.bump(); // consume the '!'
-                // Return a MacroIdent token so the parser can easily detect it.
-                // The lexeme will be the full "name!" text.
+                             // Return a MacroIdent token so the parser can easily detect it.
+                             // The lexeme will be the full "name!" text.
                 return self.make_token(TokenKind::MacroIdent, start, line, column);
             }
         }

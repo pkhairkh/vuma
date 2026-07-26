@@ -32,12 +32,11 @@
 //! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
 
 use crate::backend::{
-    AllocatedFunction, AllocatedProgram, Backend,
-    BackendError, TargetInfo, X86_64TargetInfo,
+    AllocatedFunction, AllocatedProgram, Backend, BackendError, TargetInfo, X86_64TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction};
 #[cfg(test)]
 use crate::ir::IRValue;
+use crate::ir::{BinOpKind, CmpKind, IRFunction};
 #[cfg(test)]
 use crate::ir::{CastKind, IRInstr, UnaryOpKind};
 use std::collections::{HashMap, HashSet};
@@ -693,7 +692,7 @@ pub fn encode_lea_rip_rel(dst: Gpr, disp32: i32) -> Vec<u8> {
         code.push(0x48); // REX.W
     }
     code.push(0x8D); // LEA opcode
-    // ModRM: mod=00, reg=dst, r/m=101 (RIP-relative)
+                     // ModRM: mod=00, reg=dst, r/m=101 (RIP-relative)
     code.push(0x05 | ((dst.encoding() & 7) << 3));
     code.extend_from_slice(&disp32.to_le_bytes());
     code
@@ -1631,7 +1630,13 @@ pub fn encode_mulsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF2);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x59);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x59);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1642,7 +1647,13 @@ pub fn encode_mulss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF3);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x59);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x59);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1653,7 +1664,13 @@ pub fn encode_divsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF2);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x5E);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x5E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1664,7 +1681,13 @@ pub fn encode_divss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF3);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x5E);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x5E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1675,7 +1698,13 @@ pub fn encode_sqrtsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF2);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x51);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x51);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1686,7 +1715,13 @@ pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF3);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x51);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x51);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1697,7 +1732,13 @@ pub fn encode_minsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF2);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x5D);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x5D);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1708,7 +1749,13 @@ pub fn encode_maxsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0xF2);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x5F);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x5F);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1719,7 +1766,13 @@ pub fn encode_ucomisd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let r = dst.needs_rex();
     let b = src.needs_rex();
     code.push(0x66);
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } } code.push(0x0F); code.push(0x2E);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x2E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1729,8 +1782,13 @@ pub fn encode_ucomiss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
     let r = dst.needs_rex();
     let b = src.needs_rex();
-    if r || b { if let Some(rex) = rex_prefix(false, r, false, b) { code.push(rex); } }
-    code.push(0x0F); code.push(0x2E);
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0x0F);
+    code.push(0x2E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
     code
 }
@@ -1994,150 +2052,153 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                         }
                     } else {
                         match op2 {
-                        // SYSCALL
-                        0x05 => "syscall".to_string(),
-                        // IMUL r64, r64
-                        0xAF => {
-                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
-                            pos = new_pos;
-                            format!("imul {}, {}", gpr_name_64(r), gpr_name_64(rm))
-                        }
-                        // Jcc rel32
-                        0x80..=0x8F => {
-                            let cc_name = match op2 & 0xF {
-                                0 => "jo",
-                                1 => "jno",
-                                2 => "jb",
-                                3 => "jae",
-                                4 => "je",
-                                5 => "jne",
-                                6 => "jbe",
-                                7 => "ja",
-                                8 => "js",
-                                9 => "jns",
-                                0xA => "jp",
-                                0xB => "jnp",
-                                0xC => "jl",
-                                0xD => "jge",
-                                0xE => "jle",
-                                0xF => "jg",
-                                _ => "j??",
-                            };
-                            if pos + 4 <= bytes.len() {
-                                let rel = i32::from_le_bytes(
-                                    bytes[pos..pos + 4].try_into().unwrap_or([0; 4]),
-                                );
-                                pos += 4;
-                                format!(
-                                    "{} {:#x}",
-                                    cc_name,
-                                    (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
-                                )
-                            } else {
-                                pos = bytes.len();
-                                format!("{} ???", cc_name)
+                            // SYSCALL
+                            0x05 => "syscall".to_string(),
+                            // IMUL r64, r64
+                            0xAF => {
+                                let (r, rm, new_pos) =
+                                    decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                                pos = new_pos;
+                                format!("imul {}, {}", gpr_name_64(r), gpr_name_64(rm))
                             }
-                        }
-                        // BT/BTS/BTR/BTC r/m64, r64 (0F BA /x is the imm8 form,
-                        // but 0F A3/AB/B3/BB are the reg forms — handled below.)
-                        0xBA => {
-                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
-                            pos = np;
-                            let op_name = match r & 7 {
-                                4 => "bt",
-                                5 => "bts",
-                                6 => "btr",
-                                7 => "btc",
-                                _ => "0f ba",
-                            };
-                            if pos < bytes.len() {
-                                let imm = bytes[pos] as i8 as i32;
-                                pos += 1;
-                                format!("{} {}, {}", op_name, op, imm)
-                            } else {
-                                format!("{} {}, ???", op_name, op)
+                            // Jcc rel32
+                            0x80..=0x8F => {
+                                let cc_name = match op2 & 0xF {
+                                    0 => "jo",
+                                    1 => "jno",
+                                    2 => "jb",
+                                    3 => "jae",
+                                    4 => "je",
+                                    5 => "jne",
+                                    6 => "jbe",
+                                    7 => "ja",
+                                    8 => "js",
+                                    9 => "jns",
+                                    0xA => "jp",
+                                    0xB => "jnp",
+                                    0xC => "jl",
+                                    0xD => "jge",
+                                    0xE => "jle",
+                                    0xF => "jg",
+                                    _ => "j??",
+                                };
+                                if pos + 4 <= bytes.len() {
+                                    let rel = i32::from_le_bytes(
+                                        bytes[pos..pos + 4].try_into().unwrap_or([0; 4]),
+                                    );
+                                    pos += 4;
+                                    format!(
+                                        "{} {:#x}",
+                                        cc_name,
+                                        (start_pc + (pos - start) as u64).wrapping_add(rel as u64)
+                                    )
+                                } else {
+                                    pos = bytes.len();
+                                    format!("{} ???", cc_name)
+                                }
                             }
-                        }
-                        // BSWAP r64 (0F C8+rd)
-                        0xC8..=0xCF => {
-                            let reg_idx = (op2 - 0xC8) | (if rex_b { 8 } else { 0 });
-                            format!("bswap {}", gpr_name_64(reg_idx))
-                        }
-                        // MOVZX r64, r8
-                        0xB6 => {
-                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
-                            pos = np;
-                            format!("movzx {}, {}", gpr_name_64(r), op)
-                        }
-                        // MOVZX r64, r16
-                        0xB7 => {
-                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
-                            pos = np;
-                            format!("movzx {}, {}", gpr_name_64(r), op)
-                        }
-                        // MOVSX r64, r8
-                        0xBE => {
-                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
-                            pos = np;
-                            format!("movsx {}, {}", gpr_name_64(r), op)
-                        }
-                        // MOVSX r64, r16
-                        0xBF => {
-                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
-                            pos = np;
-                            format!("movsx {}, {}", gpr_name_64(r), op)
-                        }
-                        // SETcc r/m8
-                        0x90..=0x9F => {
-                            let (_, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, false, rex_b);
-                            pos = new_pos;
-                            let cc_name = match op2 & 0xF {
-                                0 => "seto",
-                                1 => "setno",
-                                2 => "setb",
-                                3 => "setae",
-                                4 => "sete",
-                                5 => "setne",
-                                6 => "setbe",
-                                7 => "seta",
-                                8 => "sets",
-                                9 => "setns",
-                                0xA => "setp",
-                                0xB => "setnp",
-                                0xC => "setl",
-                                0xD => "setge",
-                                0xE => "setle",
-                                0xF => "setg",
-                                _ => "set??",
-                            };
-                            format!("{} {}", cc_name, gpr_name_8(rm, rex != 0))
-                        }
-                        // CMOVcc r64, r64
-                        0x40..=0x4F => {
-                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
-                            pos = new_pos;
-                            let cc_name = match op2 & 0xF {
-                                0 => "cmovo",
-                                1 => "cmovno",
-                                2 => "cmovb",
-                                3 => "cmovae",
-                                4 => "cmove",
-                                5 => "cmovne",
-                                6 => "cmovbe",
-                                7 => "cmova",
-                                8 => "cmovs",
-                                9 => "cmovns",
-                                0xA => "cmovp",
-                                0xB => "cmovnp",
-                                0xC => "cmovl",
-                                0xD => "cmovge",
-                                0xE => "cmovle",
-                                0xF => "cmovg",
-                                _ => "cmov??",
-                            };
-                            format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
-                        }
-                        _ => format!("0f {:02x}", op2),
+                            // BT/BTS/BTR/BTC r/m64, r64 (0F BA /x is the imm8 form,
+                            // but 0F A3/AB/B3/BB are the reg forms — handled below.)
+                            0xBA => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                let op_name = match r & 7 {
+                                    4 => "bt",
+                                    5 => "bts",
+                                    6 => "btr",
+                                    7 => "btc",
+                                    _ => "0f ba",
+                                };
+                                if pos < bytes.len() {
+                                    let imm = bytes[pos] as i8 as i32;
+                                    pos += 1;
+                                    format!("{} {}, {}", op_name, op, imm)
+                                } else {
+                                    format!("{} {}, ???", op_name, op)
+                                }
+                            }
+                            // BSWAP r64 (0F C8+rd)
+                            0xC8..=0xCF => {
+                                let reg_idx = (op2 - 0xC8) | (if rex_b { 8 } else { 0 });
+                                format!("bswap {}", gpr_name_64(reg_idx))
+                            }
+                            // MOVZX r64, r8
+                            0xB6 => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("movzx {}, {}", gpr_name_64(r), op)
+                            }
+                            // MOVZX r64, r16
+                            0xB7 => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("movzx {}, {}", gpr_name_64(r), op)
+                            }
+                            // MOVSX r64, r8
+                            0xBE => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("movsx {}, {}", gpr_name_64(r), op)
+                            }
+                            // MOVSX r64, r16
+                            0xBF => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("movsx {}, {}", gpr_name_64(r), op)
+                            }
+                            // SETcc r/m8
+                            0x90..=0x9F => {
+                                let (_, rm, new_pos) =
+                                    decode_modrm_reg_rm(bytes, pos, false, rex_b);
+                                pos = new_pos;
+                                let cc_name = match op2 & 0xF {
+                                    0 => "seto",
+                                    1 => "setno",
+                                    2 => "setb",
+                                    3 => "setae",
+                                    4 => "sete",
+                                    5 => "setne",
+                                    6 => "setbe",
+                                    7 => "seta",
+                                    8 => "sets",
+                                    9 => "setns",
+                                    0xA => "setp",
+                                    0xB => "setnp",
+                                    0xC => "setl",
+                                    0xD => "setge",
+                                    0xE => "setle",
+                                    0xF => "setg",
+                                    _ => "set??",
+                                };
+                                format!("{} {}", cc_name, gpr_name_8(rm, rex != 0))
+                            }
+                            // CMOVcc r64, r64
+                            0x40..=0x4F => {
+                                let (r, rm, new_pos) =
+                                    decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                                pos = new_pos;
+                                let cc_name = match op2 & 0xF {
+                                    0 => "cmovo",
+                                    1 => "cmovno",
+                                    2 => "cmovb",
+                                    3 => "cmovae",
+                                    4 => "cmove",
+                                    5 => "cmovne",
+                                    6 => "cmovbe",
+                                    7 => "cmova",
+                                    8 => "cmovs",
+                                    9 => "cmovns",
+                                    0xA => "cmovp",
+                                    0xB => "cmovnp",
+                                    0xC => "cmovl",
+                                    0xD => "cmovge",
+                                    0xE => "cmovle",
+                                    0xF => "cmovg",
+                                    _ => "cmov??",
+                                };
+                                format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
+                            }
+                            _ => format!("0f {:02x}", op2),
                         }
                     }
                 }
@@ -2610,9 +2671,8 @@ fn decode_modrm_operand(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize
         // Base register: raw == 5 with mod == 0 means "no base", disp32 follows.
         if base_raw == 5 && mod_bits == 0 {
             if new_pos + 4 <= bytes.len() {
-                disp = i32::from_le_bytes(
-                    bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
-                ) as i64;
+                disp = i32::from_le_bytes(bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]))
+                    as i64;
                 new_pos += 4;
                 has_disp = true;
             }
@@ -2622,9 +2682,8 @@ fn decode_modrm_operand(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize
     } else if rm_raw == 5 && mod_bits == 0 {
         // mod=0, r/m=5: disp32 (RIP-relative).
         if new_pos + 4 <= bytes.len() {
-            disp = i32::from_le_bytes(
-                bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
-            ) as i64;
+            disp =
+                i32::from_le_bytes(bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4])) as i64;
             new_pos += 4;
             has_disp = true;
             rip_relative = true;
@@ -2635,20 +2694,17 @@ fn decode_modrm_operand(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize
 
     // Displacement based on mod.
     match mod_bits {
-        1
-            if new_pos < bytes.len() => {
-                disp = bytes[new_pos] as i8 as i64;
-                new_pos += 1;
-                has_disp = true;
-            }
-        2
-            if new_pos + 4 <= bytes.len() => {
-                disp = i32::from_le_bytes(
-                    bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
-                ) as i64;
-                new_pos += 4;
-                has_disp = true;
-            }
+        1 if new_pos < bytes.len() => {
+            disp = bytes[new_pos] as i8 as i64;
+            new_pos += 1;
+            has_disp = true;
+        }
+        2 if new_pos + 4 <= bytes.len() => {
+            disp =
+                i32::from_le_bytes(bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4])) as i64;
+            new_pos += 4;
+            has_disp = true;
+        }
         _ => {}
     }
 
@@ -2756,7 +2812,12 @@ fn decode_modrm_xmm_rm(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize)
 /// segment. It has `p_filesz = 0` and `p_memsz = bss_size`, so the kernel
 /// zero-fills it at load time. This provides writable memory for global
 /// variables (e.g., those created by `allocate()` in VUMA source).
-fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64, rodata_data: &[u8]) -> Vec<u8> {
+fn build_minimal_x86_64_elf(
+    code: &[u8],
+    base_addr: u64,
+    bss_size: u64,
+    rodata_data: &[u8],
+) -> Vec<u8> {
     // Use 4K for file offset alignment (keeps the file small) but 64K for
     // virtual address alignment.  QEMU 10.x on hosts with 16K or 64K page
     // sizes requires MAP_FIXED_NOREPLACE addresses to be host-page-aligned.
@@ -2765,7 +2826,7 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64, rodata_d
     // causing "Unable to find a guest_base" errors.  Aligning vaddrs to 64K
     // (the largest common aarch64 page size) ensures compatibility.
     const FILE_PAGE_SIZE: u64 = 0x1000; // 4 KB — file offset alignment
-    const VADDR_ALIGN: u64 = 0x10000;   // 64 KB — virtual address alignment
+    const VADDR_ALIGN: u64 = 0x10000; // 64 KB — virtual address alignment
 
     // ELF section header constants (Elf64_Shdr sh_type / sh_flags).
     // SHT_NULL (0) is implicit: section 0 is emitted as 64 zero bytes.
@@ -2797,7 +2858,11 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64, rodata_d
     // but within the first page — valid for ET_EXEC with PF_R).
     let rodata_offset: u64 = phdr_end; // right after program headers
     let rodata_size: u64 = rodata_data.len() as u64;
-    let rodata_vaddr: u64 = if has_rodata { base_addr + rodata_offset } else { 0 };
+    let rodata_vaddr: u64 = if has_rodata {
+        base_addr + rodata_offset
+    } else {
+        0
+    };
 
     // Page-align the text segment start for mmap compatibility (required by QEMU).
     // .text follows .rodata in the file.
@@ -3077,26 +3142,50 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // "mov eax, #num ; syscall ; ret" sequence.
     for (name, num) in [
         // Core I/O & process
-        ("read", 0), ("write", 1), ("open", 2), ("close", 3),
-        ("stat", 4), ("fstat", 5), ("lstat", 6), ("poll", 7),
-        ("lseek", 8), ("mprotect", 10),
+        ("read", 0),
+        ("write", 1),
+        ("open", 2),
+        ("close", 3),
+        ("stat", 4),
+        ("fstat", 5),
+        ("lstat", 6),
+        ("poll", 7),
+        ("lseek", 8),
+        ("mprotect", 10),
         ("munmap", 11),
         ("brk", 12),
         // Signal-related (simple variants; sigaction needs a 4th arg, kept inline)
         ("rt_sigprocmask", 14),
         ("rt_sigreturn", 15),
-        ("ioctl", 16), ("pipe", 22), ("dup", 32), ("dup2", 33),
-        ("nanosleep", 35), ("alarm", 37),
-        ("getpid", 39), ("fork", 57), ("execve", 59), ("exit_group", 231),
-        ("kill", 62), ("getcwd", 79), ("chdir", 80), ("fcntl", 72),
+        ("ioctl", 16),
+        ("pipe", 22),
+        ("dup", 32),
+        ("dup2", 33),
+        ("nanosleep", 35),
+        ("alarm", 37),
+        ("getpid", 39),
+        ("fork", 57),
+        ("execve", 59),
+        ("exit_group", 231),
+        ("kill", 62),
+        ("getcwd", 79),
+        ("chdir", 80),
+        ("fcntl", 72),
         ("unlink", 87),
         // Time
         ("gettimeofday", 96),
         ("clock_gettime", 228),
         // Networking
-        ("socket", 41), ("connect", 42), ("accept", 43),
-        ("send", 44), ("recv", 45), ("sendto", 44), ("recvfrom", 45),
-        ("bind", 49), ("listen", 50), ("shutdown", 48),
+        ("socket", 41),
+        ("connect", 42),
+        ("accept", 43),
+        ("send", 44),
+        ("recv", 45),
+        ("sendto", 44),
+        ("recvfrom", 45),
+        ("bind", 49),
+        ("listen", 50),
+        ("shutdown", 48),
         // epoll (create1 is simple; ctl needs RCX->R10, kept inline)
         ("epoll_create1", 291),
         // dup3 (modern variant of dup2)
@@ -3107,53 +3196,105 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // All take ≤5 args; x86_64 has 6 register args (RDI/RSI/RDX/R10/R8/R9),
         // so every entry fits the simple "mov eax,#num; syscall; ret" stub.
         // Family 1: dir/link ops
-        ("mkdir", 83), ("rmdir", 84), ("rename", 82),
-        ("link", 86), ("symlink", 88), ("readlink", 89),
+        ("mkdir", 83),
+        ("rmdir", 84),
+        ("rename", 82),
+        ("link", 86),
+        ("symlink", 88),
+        ("readlink", 89),
         // Family 2: mode/owner
-        ("chmod", 90), ("fchmod", 91), ("chown", 92),
-        ("fchown", 93), ("umask", 95),
+        ("chmod", 90),
+        ("fchmod", 91),
+        ("chown", 92),
+        ("fchown", 93),
+        ("umask", 95),
         // Family 3: *at variants
-        ("fchownat", 260), ("openat", 257), ("unlinkat", 263),
-        ("renameat", 264), ("linkat", 265), ("symlinkat", 266),
-        ("readlinkat", 267), ("fchmodat", 268), ("faccessat", 269),
+        ("fchownat", 260),
+        ("openat", 257),
+        ("unlinkat", 263),
+        ("renameat", 264),
+        ("linkat", 265),
+        ("symlinkat", 266),
+        ("readlinkat", 267),
+        ("fchmodat", 268),
+        ("faccessat", 269),
         // Family 4: sync/truncate
-        ("ftruncate", 46), ("fsync", 74), ("fdatasync", 75),
-        ("sync", 162), ("syncfs", 306),
+        ("ftruncate", 46),
+        ("fsync", 74),
+        ("fdatasync", 75),
+        ("sync", 162),
+        ("syncfs", 306),
         // Family 5: positioned & vector I/O
-        ("pread", 17), ("pwrite", 18), ("readv", 19), ("writev", 20),
-        ("preadv", 295), ("pwritev", 296),
+        ("pread", 17),
+        ("pwrite", 18),
+        ("readv", 19),
+        ("writev", 20),
+        ("preadv", 295),
+        ("pwritev", 296),
         // Family 7: cwd/root (getcwd=79/chdir=80 already above)
-        ("fchdir", 81), ("chroot", 161),
+        ("fchdir", 81),
+        ("chroot", 161),
         // ── Wave 9: POSIX system & advanced syscalls (x86_64 syscall_64.tbl) ──
         // All take ≤5 args; x86_64 has 6 reg args → simple_stub.
         // eventfd→eventfd2(290), signalfd→signalfd4(289) = modern flag-accepting variants.
-        ("mlock", 149), ("munlock", 150), ("mlockall", 151), ("munlockall", 152),
-        ("mincore", 27), ("madvise", 28), ("msync", 26),
-        ("getrlimit", 97), ("setrlimit", 160), ("prlimit64", 302),
-        ("getrusage", 98), ("times", 100),
+        ("mlock", 149),
+        ("munlock", 150),
+        ("mlockall", 151),
+        ("munlockall", 152),
+        ("mincore", 27),
+        ("madvise", 28),
+        ("msync", 26),
+        ("getrlimit", 97),
+        ("setrlimit", 160),
+        ("prlimit64", 302),
+        ("getrusage", 98),
+        ("times", 100),
         ("getrandom", 318),
-        ("eventfd", 290), ("timerfd_create", 283), ("timerfd_settime", 286),
-        ("timerfd_gettime", 287), ("signalfd", 289),
-        ("inotify_init1", 294), ("inotify_add_watch", 254), ("inotify_rm_watch", 255),
+        ("eventfd", 290),
+        ("timerfd_create", 283),
+        ("timerfd_settime", 286),
+        ("timerfd_gettime", 287),
+        ("signalfd", 289),
+        ("inotify_init1", 294),
+        ("inotify_add_watch", 254),
+        ("inotify_rm_watch", 255),
         ("ptrace", 101),
         // ── Wave 8: POSIX process & identity syscalls (x86_64 syscall_64.tbl) ──
         // All take ≤5 args; x86_64 has 6 reg args (RDI/RSI/RDX/R10/R8/R9) → simple_stub.
         // Family 1: identity
-        ("getuid", 102), ("geteuid", 107), ("getgid", 104), ("getegid", 108),
-        ("setuid", 105), ("setgid", 106), ("setresuid", 117), ("setresgid", 119),
+        ("getuid", 102),
+        ("geteuid", 107),
+        ("getgid", 104),
+        ("getegid", 108),
+        ("setuid", 105),
+        ("setgid", 106),
+        ("setresuid", 117),
+        ("setresgid", 119),
         // Family 2: process group (getpid already present)
-        ("getppid", 110), ("getsid", 124), ("setsid", 112),
-        ("setpgid", 109), ("getpgid", 121), ("getpgrp", 111),
+        ("getppid", 110),
+        ("getsid", 124),
+        ("setsid", 112),
+        ("setpgid", 109),
+        ("getpgid", 121),
+        ("getpgrp", 111),
         // Family 3: clone/wait (clone/wait4 already present)
-        ("vfork", 58), ("clone3", 435), ("waitid", 247),
+        ("vfork", 58),
+        ("clone3", 435),
+        ("waitid", 247),
         // Family 4: exec/exit (execve/exit_group already present)
         ("execveat", 322),
         // Family 5: signals (kill/rt_sigprocmask/rt_sigreturn already present)
-        ("tgkill", 234), ("tkill", 200), ("rt_sigaction", 13),
+        ("tgkill", 234),
+        ("tkill", 200),
+        ("rt_sigaction", 13),
         // Family 6: directory read (readdir ABSENT on x86_64 → use getdents64)
-        ("getdents64", 217), ("getdents", 78),
+        ("getdents64", 217),
+        ("getdents", 78),
         // Family 7: system (arch_prctl=158 is x86_64-only)
-        ("prctl", 157), ("arch_prctl", 158), ("uname", 63), ("sysinfo", 99),
+        ("prctl", 157),
+        ("arch_prctl", 158),
+        ("uname", 63),
+        ("sysinfo", 99),
     ] {
         stubs.push((name.to_string(), simple_stub(num)));
     }
@@ -3181,10 +3322,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // registers — no stack-arg plumbing needed.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));   // sys_mmap
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9)); // sys_mmap
         code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
-        code.extend(encode_syscall());                      // syscall
-        code.extend(encode_ret());                          // ret
+        code.extend(encode_syscall()); // syscall
+        code.extend(encode_ret()); // ret
         stubs.push(("mmap".to_string(), code));
     }
 
@@ -3192,10 +3333,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Need to move 4th arg from RCX -> R10 before syscall (same as mmap).
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 25));   // sys_mremap
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 25)); // sys_mremap
         code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
-        code.extend(encode_syscall());                      // syscall
-        code.extend(encode_ret());                          // ret
+        code.extend(encode_syscall()); // syscall
+        code.extend(encode_ret()); // ret
         stubs.push(("mremap".to_string(), code));
     }
 
@@ -3203,9 +3344,9 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // No ret -- exit never returns.  Include INT3 as a safety guard.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60));  // sys_exit
-        code.extend(encode_syscall());                     // syscall
-        code.extend(encode_int3());                        // safety guard
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60)); // sys_exit
+        code.extend(encode_syscall()); // syscall
+        code.extend(encode_int3()); // safety guard
         stubs.push(("exit".to_string(), code));
     }
 
@@ -3213,13 +3354,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // args: RDI=size -> mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_reg(Gpr::Rsi, Gpr::Rdi));  // RSI = size
-        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));  // RDI = 0 (NULL addr)
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));       // RDX = PROT_READ|PROT_WRITE
-        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22));    // R10 = MAP_PRIVATE|MAP_ANONYMOUS
-        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32));    // R8 = -1 (fd)
-        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));    // R9 = 0 (offset)
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));       // sys_mmap
+        code.extend(encode_mov_reg_reg(Gpr::Rsi, Gpr::Rdi)); // RSI = size
+        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi)); // RDI = 0 (NULL addr)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3)); // RDX = PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22)); // R10 = MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32)); // R8 = -1 (fd)
+        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9)); // R9 = 0 (offset)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9)); // sys_mmap
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("__vuma_alloc".to_string(), code));
@@ -3230,8 +3371,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // must load R10 = 8 before the syscall.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 13));  // sys_rt_sigaction
-        code.extend(encode_mov_reg_imm32(Gpr::R10, 8));   // sigsetsize = 8
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 13)); // sys_rt_sigaction
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 8)); // sigsetsize = 8
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("sigaction".to_string(), code));
@@ -3241,7 +3382,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // VUMA declares 3 args; the 4th (rusage) must be NULL (0).
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 61));  // sys_wait4
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 61)); // sys_wait4
         code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10)); // rusage = NULL
         code.extend(encode_syscall());
         code.extend(encode_ret());
@@ -3252,7 +3393,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Full 4-arg wait4: move RCX -> R10 before syscall.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 61));  // sys_wait4
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 61)); // sys_wait4
         code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10 (rusage)
         code.extend(encode_syscall());
         code.extend(encode_ret());
@@ -3274,54 +3415,54 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // 4th arg (optval) is in RCX under SysV but R10 for syscall.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 54));  // sys_setsockopt
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 54)); // sys_setsockopt
         code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("setsockopt".to_string(), code));
 
-    // getsockopt(sockfd, level, optname, optval, optlen) -> int  [syscall 55]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 55));  // sys_getsockopt
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("getsockopt".to_string(), code));
+        // getsockopt(sockfd, level, optname, optval, optlen) -> int  [syscall 55]
+        {
+            let mut code = Vec::new();
+            code.extend(encode_mov_reg_imm32(Gpr::Rax, 55)); // sys_getsockopt
+            code.extend(encode_syscall());
+            code.extend(encode_ret());
+            stubs.push(("getsockopt".to_string(), code));
 
-    // signalfd4(args...) -> int  [syscall 289]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 289));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("signalfd4".to_string(), code));
-    }
+            // signalfd4(args...) -> int  [syscall 289]
+            {
+                let mut code = Vec::new();
+                code.extend(encode_mov_reg_imm32(Gpr::Rax, 289));
+                code.extend(encode_syscall());
+                code.extend(encode_ret());
+                stubs.push(("signalfd4".to_string(), code));
+            }
 
-    // newfstatat(args...) -> int  [syscall 262]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 262));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("newfstatat".to_string(), code));
-    }
+            // newfstatat(args...) -> int  [syscall 262]
+            {
+                let mut code = Vec::new();
+                code.extend(encode_mov_reg_imm32(Gpr::Rax, 262));
+                code.extend(encode_syscall());
+                code.extend(encode_ret());
+                stubs.push(("newfstatat".to_string(), code));
+            }
 
-    // eventfd2(args...) -> int  [syscall 290]
-    {
-        let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 290));
-        code.extend(encode_syscall());
-        code.extend(encode_ret());
-        stubs.push(("eventfd2".to_string(), code));
-    }
-    }
+            // eventfd2(args...) -> int  [syscall 290]
+            {
+                let mut code = Vec::new();
+                code.extend(encode_mov_reg_imm32(Gpr::Rax, 290));
+                code.extend(encode_syscall());
+                code.extend(encode_ret());
+                stubs.push(("eventfd2".to_string(), code));
+            }
+        }
     }
 
     // clone(flags, stack, ptid, ctid, tls) -> pid_t  [syscall 56]
     // 4th arg (ctid) is in RCX under SysV but R10 for syscall.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 56));  // sys_clone
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 56)); // sys_clone
         code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10 (ctid)
         code.extend(encode_syscall());
         code.extend(encode_ret());
@@ -3354,19 +3495,19 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Not a syscall -- implemented as a small assembly loop.
     {
         let code: Vec<u8> = vec![
-            0x8A, 0x07,                         // mov al, [rdi]
-            0x8A, 0x0E,                         // mov cl, [rsi]
-            0x38, 0xC8,                         // cmp al, cl
-            0x75, 0x0C,                         // jne .done (+12)
-            0x84, 0xC0,                         // test al, al
-            0x74, 0x08,                         // jz .done (+8)
-            0x48, 0xFF, 0xC7,                   // inc rdi
-            0x48, 0xFF, 0xC6,                   // inc rsi
-            0xEB, 0xEC,                         // jmp .loop (-20)
-            0x0F, 0xB6, 0xC0,                   // movzx eax, al
-            0x0F, 0xB6, 0xC9,                   // movzx ecx, cl
-            0x29, 0xC8,                         // sub eax, ecx
-            0xC3,                               // ret
+            0x8A, 0x07, // mov al, [rdi]
+            0x8A, 0x0E, // mov cl, [rsi]
+            0x38, 0xC8, // cmp al, cl
+            0x75, 0x0C, // jne .done (+12)
+            0x84, 0xC0, // test al, al
+            0x74, 0x08, // jz .done (+8)
+            0x48, 0xFF, 0xC7, // inc rdi
+            0x48, 0xFF, 0xC6, // inc rsi
+            0xEB, 0xEC, // jmp .loop (-20)
+            0x0F, 0xB6, 0xC0, // movzx eax, al
+            0x0F, 0xB6, 0xC9, // movzx ecx, cl
+            0x29, 0xC8, // sub eax, ecx
+            0xC3, // ret
         ];
         stubs.push(("strcmp".to_string(), code));
     }
@@ -3418,14 +3559,14 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
         code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1 (sys_write)
         code.extend_from_slice(&[0x0F, 0x05]); // syscall
-        // .positive:
-        //   (note: syscall clobbers rcx and r11, but rcx is reloaded below)
+                                               // .positive:
+                                               //   (note: syscall clobbers rcx and r11, but rcx is reloaded below)
 
         // lea rcx, [rsp+20] (point to end of buffer)
         code.extend_from_slice(&[0x48, 0x8D, 0x4C, 0x24, 0x14]); // lea rcx, [rsp+20]
-        // mov byte [rcx], 0x0a (newline)
+                                                                 // mov byte [rcx], 0x0a (newline)
         code.extend_from_slice(&[0xC6, 0x01, 0x0A]); // mov byte [rcx], 10
-        // sub rcx, 1
+                                                     // sub rcx, 1
         code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
 
         // Handle n=0: test r8, r8; jnz loop; mov byte [rcx], '0'; jmp done
@@ -3446,12 +3587,12 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend_from_slice(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
         code.extend_from_slice(&[0x49, 0xC7, 0xC1, 0x0A, 0x00, 0x00, 0x00]); // mov r9, 10
         code.extend_from_slice(&[0x49, 0xF7, 0xF9]); // idiv r9 (was: div r9)
-        // mov r8, rax; add dl, 0x30; mov [rcx], dl; sub rcx, 1
+                                                     // mov r8, rax; add dl, 0x30; mov [rcx], dl; sub rcx, 1
         code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax
         code.extend_from_slice(&[0x80, 0xC2, 0x30]); // add dl, 0x30
         code.extend_from_slice(&[0x88, 0x11]); // mov [rcx], dl
         code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
-        // test r8, r8; jnz loop
+                                                           // test r8, r8; jnz loop
         code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
         code.extend_from_slice(&[0x75, 0xDF]); // jnz -33 (back to loop)
 
@@ -3461,7 +3602,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x15]); // lea rdx, [rsp+21]
         code.extend_from_slice(&[0x48, 0x29, 0xCA]); // sub rdx, rcx
         code.extend_from_slice(&[0x48, 0x89, 0xCE]); // mov rsi, rcx
-        // mov rdi, 1; mov rax, 1; syscall
+                                                     // mov rdi, 1; mov rax, 1; syscall
         code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
         code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1
         code.extend_from_slice(&[0x0F, 0x05]); // syscall
@@ -3480,10 +3621,10 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         let mut code = Vec::new();
         code.extend_from_slice(&[0x55]); // push rbp
         code.extend_from_slice(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
-        // Save buf (rdi) in r8, count (rsi) in r9
+                                                     // Save buf (rdi) in r8, count (rsi) in r9
         code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi (buf)
         code.extend_from_slice(&[0x49, 0x89, 0xF1]); // mov r9, rsi (count)
-        // Check count == 0 -> skip
+                                                     // Check count == 0 -> skip
         code.extend_from_slice(&[0x4D, 0x85, 0xC9]); // test r9, r9
         code.extend_from_slice(&[0x74, 0x3C]); // jz +60 (to pop rbp; ret)
 
@@ -3492,37 +3633,37 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // loop_start (offset = 15):
         // Load byte: movzx eax, byte [r8]
         code.extend_from_slice(&[0x41, 0x0F, 0xB6, 0x00]); // movzx eax, byte [r8]
-        // Compute high nibble: shr eax, 4
+                                                           // Compute high nibble: shr eax, 4
         code.extend_from_slice(&[0xC1, 0xE8, 0x04]); // shr eax, 4
-        // Convert to hex char: add al, 0x30; cmp al, 0x3A; jl +2; add al, 7
+                                                     // Convert to hex char: add al, 0x30; cmp al, 0x3A; jl +2; add al, 7
         code.extend_from_slice(&[0x04, 0x30]); // add al, 0x30
         code.extend_from_slice(&[0x3C, 0x3A]); // cmp al, 0x3A
         code.extend_from_slice(&[0x7C, 0x02]); // jl +2
         code.extend_from_slice(&[0x04, 0x07]); // add al, 7
-        // Store high nibble on stack: mov [rsp-8], al
+                                               // Store high nibble on stack: mov [rsp-8], al
         code.extend_from_slice(&[0x88, 0x44, 0x24, 0xF8]); // mov [rsp-8], al
-        // Load byte again: movzx eax, byte [r8]
+                                                           // Load byte again: movzx eax, byte [r8]
         code.extend_from_slice(&[0x41, 0x0F, 0xB6, 0x00]); // movzx eax, byte [r8]
-        // Compute low nibble: and eax, 0xF
+                                                           // Compute low nibble: and eax, 0xF
         code.extend_from_slice(&[0x83, 0xE0, 0x0F]); // and eax, 0xF
-        // Convert to hex char
+                                                     // Convert to hex char
         code.extend_from_slice(&[0x04, 0x30]); // add al, 0x30
         code.extend_from_slice(&[0x3C, 0x3A]); // cmp al, 0x3A
         code.extend_from_slice(&[0x7C, 0x02]); // jl +2
         code.extend_from_slice(&[0x04, 0x07]); // add al, 7
-        // Store low nibble: mov [rsp-7], al
+                                               // Store low nibble: mov [rsp-7], al
         code.extend_from_slice(&[0x88, 0x44, 0x24, 0xF9]); // mov [rsp-7], al
-        // Write 2 bytes to stdout: write(1, rsp-8, 2)
+                                                           // Write 2 bytes to stdout: write(1, rsp-8, 2)
         code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
         code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0xF8]); // lea rsi, [rsp-8]
         code.extend_from_slice(&[0xBA, 0x02, 0x00, 0x00, 0x00]); // mov edx, 2
         code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1 (sys_write)
         code.extend_from_slice(&[0x0F, 0x05]); // syscall
-        // Advance: inc r8; dec r9; jnz loop_start
+                                               // Advance: inc r8; dec r9; jnz loop_start
         code.extend_from_slice(&[0x49, 0xFF, 0xC0]); // inc r8
         code.extend_from_slice(&[0x49, 0xFF, 0xC9]); // dec r9
         code.extend_from_slice(&[0x75, 0xBA]); // jnz -70 (back to loop_start at offset 15)
-        // done: pop rbp; ret
+                                               // done: pop rbp; ret
         code.extend_from_slice(&[0x5D]); // pop rbp
         code.extend_from_slice(&[0xC3]); // ret
         stubs.push(("print_hex".to_string(), code));
@@ -3535,13 +3676,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // RSI at it, write(1, rsp, 1), pop to restore RSP, ret.
     {
         let mut code = Vec::new();
-        code.extend_from_slice(&[0x6A, 0x0A]);                  // push 0x0A (newline char)
-        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1));          // mov edi, 1 (stdout)
-        code.extend_from_slice(&[0x48, 0x89, 0xE6]);             // mov rsi, rsp
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 1));          // mov edx, 1
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));          // mov rax, 1 (sys_write)
+        code.extend_from_slice(&[0x6A, 0x0A]); // push 0x0A (newline char)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1)); // mov edi, 1 (stdout)
+        code.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 1)); // mov edx, 1
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1)); // mov rax, 1 (sys_write)
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rax));                       // pop rax (restore stack)
+        code.extend(encode_pop(Gpr::Rax)); // pop rax (restore stack)
         code.extend(encode_ret());
         stubs.push(("print_newline".to_string(), code));
     }
@@ -3583,14 +3724,20 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // table, same as print_int, mmap, etc.).
     {
         let mut code = Vec::with_capacity(14);
-        code.extend(encode_mov_reg_imm64(Gpr::Rax, RUNTIME_ARGV_STORAGE_PLACEHOLDER));
+        code.extend(encode_mov_reg_imm64(
+            Gpr::Rax,
+            RUNTIME_ARGV_STORAGE_PLACEHOLDER,
+        ));
         code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rax, 0));
         code.extend(encode_ret());
         stubs.push(("__vuma_argc".to_string(), code));
     }
     {
         let mut code = Vec::with_capacity(15);
-        code.extend(encode_mov_reg_imm64(Gpr::Rax, RUNTIME_ARGV_STORAGE_PLACEHOLDER));
+        code.extend(encode_mov_reg_imm64(
+            Gpr::Rax,
+            RUNTIME_ARGV_STORAGE_PLACEHOLDER,
+        ));
         code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rax, 8));
         code.extend(encode_ret());
         stubs.push(("__vuma_argv".to_string(), code));
@@ -3608,13 +3755,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     //   exit. This is REAL code (mmap syscall #9), not a return-0 stub.
     {
         let mut code = Vec::new();
-        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));  // addr = NULL
-        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 4096));    // len = 4096
-        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));       // PROT_READ|PROT_WRITE
-        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22));    // MAP_PRIVATE|MAP_ANONYMOUS
-        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32));    // fd = -1
-        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));    // offset = 0
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));       // sys_mmap
+        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi)); // addr = NULL
+        code.extend(encode_mov_reg_imm32(Gpr::Rsi, 4096)); // len = 4096
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3)); // PROT_READ|PROT_WRITE
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22)); // MAP_PRIVATE|MAP_ANONYMOUS
+        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32)); // fd = -1
+        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9)); // offset = 0
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9)); // sys_mmap
         code.extend(encode_syscall());
         code.extend(encode_ret());
         stubs.push(("ffi_scratch_push_frame".to_string(), code));
@@ -3638,7 +3785,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     //   use this instead of crashing (jump to address 0).
     {
         let mut code = Vec::new();
-        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));  // return 0
+        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // return 0
         code.extend(encode_ret());
         stubs.push(("__ffi_fallback_stub".to_string(), code));
     }
@@ -3647,11 +3794,36 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Real exit(1) — arena bounds check overflow trap.
     {
         let mut code = Vec::new();
-        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1));   // exit code = 1
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60));   // sys_exit
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 1)); // exit code = 1
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60)); // sys_exit
         code.extend(encode_syscall());
-        code.extend(encode_int3());                          // safety guard
+        code.extend(encode_int3()); // safety guard
         stubs.push(("__arena_overflow".to_string(), code));
+    }
+
+    // __oob_trap() → void  [syscall 60 = sys_exit, code=134]
+    // Real exit(134) — out-of-bounds trap. Uses exit code 134 (SIGABRT)
+    // to distinguish OOB from arena overflow (exit 1) in CI logs.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 134)); // exit code = 134
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60)); // sys_exit
+        code.extend(encode_syscall());
+        code.extend(encode_int3()); // safety guard
+        stubs.push(("__oob_trap".to_string(), code));
+    }
+
+    // __uaf_trap() → void  [syscall 60 = sys_exit, code=135]
+    // Real exit(135) — use-after-free trap. Uses exit code 135 to
+    // distinguish UAF from OOB (134) and arena overflow (1) in CI logs.
+    // Dormant until the liveness check IR invokes it (IMPL-UAF-1).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rdi, 135)); // exit code = 135
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60)); // sys_exit
+        code.extend(encode_syscall());
+        code.extend(encode_int3()); // safety guard
+        stubs.push(("__uaf_trap".to_string(), code));
     }
 
     // Wave 5: __call_indirect1(ptr: u64, arg: u64) -> u64
@@ -3670,7 +3842,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         let mut code = Vec::new();
         code.extend(&[0x48, 0x89, 0xF8]); // mov rax, rdi
         code.extend(&[0x48, 0x89, 0xF7]); // mov rdi, rsi
-        code.extend(&[0xFF, 0xE0]);       // jmp rax
+        code.extend(&[0xFF, 0xE0]); // jmp rax
         stubs.push(("__call_indirect1".to_string(), code));
     }
 
@@ -3681,7 +3853,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     {
         let mut code = Vec::new();
         code.extend(&[0x8B, 0x07]); // mov eax, [rdi]
-        code.extend(&[0xC3]);       // ret
+        code.extend(&[0xC3]); // ret
         stubs.push(("__vuma_load_u32".to_string(), code));
     }
 
@@ -3691,7 +3863,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     {
         let mut code = Vec::new();
         code.extend(&[0x89, 0x37]); // mov [rdi], esi
-        code.extend(&[0xC3]);       // ret
+        code.extend(&[0xC3]); // ret
         stubs.push(("__vuma_store_u32".to_string(), code));
     }
 
@@ -3701,7 +3873,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     {
         let mut code = Vec::new();
         code.extend(&[0x48, 0x8B, 0x07]); // mov rax, [rdi]
-        code.extend(&[0xC3]);              // ret
+        code.extend(&[0xC3]); // ret
         stubs.push(("__vuma_load_u64".to_string(), code));
     }
 
@@ -3711,7 +3883,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     {
         let mut code = Vec::new();
         code.extend(&[0x48, 0x89, 0x37]); // mov [rdi], rsi
-        code.extend(&[0xC3]);              // ret
+        code.extend(&[0xC3]); // ret
         stubs.push(("__vuma_store_u64".to_string(), code));
     }
 
@@ -3723,7 +3895,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     {
         let mut code = Vec::new();
         code.extend(&[0x0F, 0xB6, 0x07]); // movzx eax, byte [rdi]
-        code.extend(&[0xC3]);             // ret
+        code.extend(&[0xC3]); // ret
         stubs.push(("__vuma_load_u8".to_string(), code));
     }
 
@@ -3738,9 +3910,9 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     //   Total: 40 88 37 C3 (4 bytes).
     {
         let mut code = Vec::new();
-        code.extend(&[0x40]);             // REX (enable SIL)
-        code.extend(&[0x88, 0x37]);       // mov byte [rdi], sil
-        code.extend(&[0xC3]);             // ret
+        code.extend(&[0x40]); // REX (enable SIL)
+        code.extend(&[0x88, 0x37]); // mov byte [rdi], sil
+        code.extend(&[0xC3]); // ret
         stubs.push(("__vuma_store_u8".to_string(), code));
     }
 
@@ -3866,7 +4038,6 @@ impl Backend for X86_64Backend {
         &self.target_info
     }
 
-
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         stack_slot_isel::allocate_registers(func)
     }
@@ -3915,9 +4086,8 @@ impl Backend for X86_64Backend {
         // These are small functions that use the `syscall` instruction
         // directly, avoiding the need for libc linkage.
         let runtime_stubs = build_runtime_syscall_stubs();
-        let runtime_stubs_total_size: usize = runtime_stubs.iter()
-            .map(|(_, code)| code.len())
-            .sum();
+        let runtime_stubs_total_size: usize =
+            runtime_stubs.iter().map(|(_, code)| code.len()).sum();
 
         // Compute offsets: _start stub → runtime stubs → user functions
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
@@ -3945,7 +4115,9 @@ impl Backend for X86_64Backend {
         // User functions follow the runtime stubs
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -3966,7 +4138,10 @@ impl Backend for X86_64Backend {
         // layout is finalized. The placeholder is the same sentinel used in
         // the __vuma_argc/__vuma_argv runtime stubs, so a single scan-and-
         // replace pass over all_code patches every occurrence.
-        start_stub.extend(encode_mov_reg_imm64(Gpr::Rax, RUNTIME_ARGV_STORAGE_PLACEHOLDER));
+        start_stub.extend(encode_mov_reg_imm64(
+            Gpr::Rax,
+            RUNTIME_ARGV_STORAGE_PLACEHOLDER,
+        ));
 
         // mov [rax], rdi — save argc to [bss_argv_storage + 0]
         start_stub.extend(encode_mov_mem_reg(Gpr::Rax, 0, Gpr::Rdi));
@@ -3997,14 +4172,15 @@ impl Backend for X86_64Backend {
         //   [31..34) mov rdi, rax           (3 bytes)
         //   [34..41) mov rax, 60           (7 bytes)
         //   [41..43) syscall                (2 bytes)
-        let main_key = func_offsets.keys()
+        let main_key = func_offsets
+            .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
             let rel32_patch_offset = 27usize; // offset of rel32 within start_stub
-            // rel32 = target - (call_site + 5)
-            // call_site = offset of the E8 byte = 26
+                                              // rel32 = target - (call_site + 5)
+                                              // call_site = offset of the E8 byte = 26
             let rel32 = (main_offset as i64) - (26i64 + 5i64);
             start_stub[rel32_patch_offset..rel32_patch_offset + 4]
                 .copy_from_slice(&(rel32 as i32).to_le_bytes());
@@ -4059,8 +4235,7 @@ impl Backend for X86_64Backend {
         // read from this slot. This reservation is unconditional so the
         // stubs are always safe to call (even programs that never reference
         // them just waste 16 bytes of BSS).
-        let bss_size: u64 = RUNTIME_ARGV_STORAGE_SIZE
-            + data_symbols.len() as u64 * BSS_SLOT_SIZE;
+        let bss_size: u64 = RUNTIME_ARGV_STORAGE_SIZE + data_symbols.len() as u64 * BSS_SLOT_SIZE;
 
         // ── Compute BSS virtual address ──────────────────────────────
         // The BSS segment starts at the next 64K boundary after the text
@@ -4100,7 +4275,10 @@ impl Backend for X86_64Backend {
             .iter()
             .enumerate()
             .map(|(i, name)| {
-                (name.clone(), bss_vaddr + RUNTIME_ARGV_STORAGE_SIZE + i as u64 * BSS_SLOT_SIZE)
+                (
+                    name.clone(),
+                    bss_vaddr + RUNTIME_ARGV_STORAGE_SIZE + i as u64 * BSS_SLOT_SIZE,
+                )
             })
             .collect();
 
@@ -4122,15 +4300,14 @@ impl Backend for X86_64Backend {
                     // S = symbol value (target address)
                     // A = addend (current value at the relocation site)
                     // P = place (address of the relocation site)
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let current_val = i32::from_le_bytes([
                             all_code[abs_offset],
@@ -4178,15 +4355,14 @@ impl Backend for X86_64Backend {
                     if abs_offset + 4 > all_code.len() {
                         continue;
                     }
-                    let target_offset = func_offsets.get(&reloc.symbol)
-                        .copied()
-                        .or_else(|| {
-                            let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
-                        });
+                    let target_offset = func_offsets.get(&reloc.symbol).copied().or_else(|| {
+                        let prefix = format!("fn_{}", reloc.symbol);
+                        func_offsets
+                            .keys()
+                            .find(|k| k.starts_with(&prefix))
+                            .and_then(|k| func_offsets.get(k))
+                            .copied()
+                    });
                     if let Some(target_offset) = target_offset {
                         let current_val = i32::from_le_bytes([
                             all_code[abs_offset],
@@ -4208,8 +4384,7 @@ impl Backend for X86_64Backend {
                         continue; // skip invalid relocations
                     }
                     if let Some(&addr) = data_symbol_addrs.get(&reloc.symbol) {
-                        all_code[abs_offset..abs_offset + 8]
-                            .copy_from_slice(&addr.to_le_bytes());
+                        all_code[abs_offset..abs_offset + 8].copy_from_slice(&addr.to_le_bytes());
                     } else if func_offsets.contains_key(&reloc.symbol) {
                         // Function symbol with absolute relocation — patch with
                         // the function's virtual address (text_vaddr + offset).
@@ -4222,10 +4397,11 @@ impl Backend for X86_64Backend {
                             reloc.symbol, func.name, reloc.offset
                         );
                     }
-                } else {
                 }
             }
-            let func_size: usize = func.blocks.iter()
+            let func_size: usize = func
+                .blocks
+                .iter()
                 .flat_map(|b| b.instructions.iter())
                 .map(|i| i.encoded.len())
                 .sum();
@@ -4272,13 +4448,19 @@ impl Backend for X86_64Backend {
         // The two __vuma_argc/__vuma_argv stub placeholders are always present
         // in the runtime stubs table, so the expected count is 3.
         if patched_count == 0 {
-            vuma_log!(warn,
+            vuma_log!(
+                warn,
                 "Wave 47: runtime argv-storage placeholder not found in emitted code — \
                  _start stub did not save argc/argv; __vuma_argc/__vuma_argv will trap if called"
             );
         }
 
-        Ok(build_minimal_x86_64_elf(&all_code, BASE_ADDR, bss_size, &program.rodata_data))
+        Ok(build_minimal_x86_64_elf(
+            &all_code,
+            BASE_ADDR,
+            bss_size,
+            &program.rodata_data,
+        ))
     }
 
     fn return_stub(&self) -> Vec<u8> {
@@ -4798,13 +4980,19 @@ mod tests {
         // PT_GNU_STACK is always emitted (even without BSS) and marks the
         // stack as non-executable.
         let ph2 = 64 + 56;
-        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
+        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2 + 1], elf[ph2 + 2], elf[ph2 + 3]]);
         assert_eq!(p_type, 0x6474e551, "PT_GNU_STACK type");
-        let p_flags = u32::from_le_bytes([elf[ph2+4], elf[ph2+5], elf[ph2+6], elf[ph2+7]]);
+        let p_flags = u32::from_le_bytes([elf[ph2 + 4], elf[ph2 + 5], elf[ph2 + 6], elf[ph2 + 7]]);
         assert_eq!(p_flags, 6, "PT_GNU_STACK flags = PF_R | PF_W (no PF_X)");
         let p_align = u64::from_le_bytes([
-            elf[ph2+48], elf[ph2+49], elf[ph2+50], elf[ph2+51],
-            elf[ph2+52], elf[ph2+53], elf[ph2+54], elf[ph2+55],
+            elf[ph2 + 48],
+            elf[ph2 + 49],
+            elf[ph2 + 50],
+            elf[ph2 + 51],
+            elf[ph2 + 52],
+            elf[ph2 + 53],
+            elf[ph2 + 54],
+            elf[ph2 + 55],
         ]);
         assert_eq!(p_align, 0x10, "PT_GNU_STACK align");
     }
@@ -4834,23 +5022,41 @@ mod tests {
         // Second program header (BSS LOAD) starts at offset 64 + 56 = 120
         // Elf64_Phdr layout: p_type(4) p_flags(4) p_offset(8) p_vaddr(8) p_paddr(8) p_filesz(8) p_memsz(8) p_align(8)
         let ph2 = 64 + 56;
-        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
+        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2 + 1], elf[ph2 + 2], elf[ph2 + 3]]);
         assert_eq!(p_type, 1); // PT_LOAD
-        let p_flags = u32::from_le_bytes([elf[ph2+4], elf[ph2+5], elf[ph2+6], elf[ph2+7]]);
+        let p_flags = u32::from_le_bytes([elf[ph2 + 4], elf[ph2 + 5], elf[ph2 + 6], elf[ph2 + 7]]);
         assert_eq!(p_flags, 6); // PF_R | PF_W
         let p_filesz = u64::from_le_bytes([
-            elf[ph2+32], elf[ph2+33], elf[ph2+34], elf[ph2+35],
-            elf[ph2+36], elf[ph2+37], elf[ph2+38], elf[ph2+39],
+            elf[ph2 + 32],
+            elf[ph2 + 33],
+            elf[ph2 + 34],
+            elf[ph2 + 35],
+            elf[ph2 + 36],
+            elf[ph2 + 37],
+            elf[ph2 + 38],
+            elf[ph2 + 39],
         ]);
         assert_eq!(p_filesz, 0); // BSS has no file content
         let p_memsz = u64::from_le_bytes([
-            elf[ph2+40], elf[ph2+41], elf[ph2+42], elf[ph2+43],
-            elf[ph2+44], elf[ph2+45], elf[ph2+46], elf[ph2+47],
+            elf[ph2 + 40],
+            elf[ph2 + 41],
+            elf[ph2 + 42],
+            elf[ph2 + 43],
+            elf[ph2 + 44],
+            elf[ph2 + 45],
+            elf[ph2 + 46],
+            elf[ph2 + 47],
         ]);
         assert_eq!(p_memsz, 16);
         let bss_vaddr = u64::from_le_bytes([
-            elf[ph2+16], elf[ph2+17], elf[ph2+18], elf[ph2+19],
-            elf[ph2+20], elf[ph2+21], elf[ph2+22], elf[ph2+23],
+            elf[ph2 + 16],
+            elf[ph2 + 17],
+            elf[ph2 + 18],
+            elf[ph2 + 19],
+            elf[ph2 + 20],
+            elf[ph2 + 21],
+            elf[ph2 + 22],
+            elf[ph2 + 23],
         ]);
         // BSS vaddr should be 64K-aligned and after the text segment
         assert_eq!(bss_vaddr % 0x10000, 0, "BSS vaddr should be 64K-aligned");
@@ -4859,13 +5065,19 @@ mod tests {
         // Third program header (PT_GNU_STACK) starts at offset 64 + 2*56 = 176.
         // Always emitted; marks stack non-executable.
         let ph3 = 64 + 2 * 56;
-        let p_type3 = u32::from_le_bytes([elf[ph3], elf[ph3+1], elf[ph3+2], elf[ph3+3]]);
+        let p_type3 = u32::from_le_bytes([elf[ph3], elf[ph3 + 1], elf[ph3 + 2], elf[ph3 + 3]]);
         assert_eq!(p_type3, 0x6474e551, "PT_GNU_STACK type");
-        let p_flags3 = u32::from_le_bytes([elf[ph3+4], elf[ph3+5], elf[ph3+6], elf[ph3+7]]);
+        let p_flags3 = u32::from_le_bytes([elf[ph3 + 4], elf[ph3 + 5], elf[ph3 + 6], elf[ph3 + 7]]);
         assert_eq!(p_flags3, 6, "PT_GNU_STACK flags = PF_R | PF_W (no PF_X)");
         let p_align3 = u64::from_le_bytes([
-            elf[ph3+48], elf[ph3+49], elf[ph3+50], elf[ph3+51],
-            elf[ph3+52], elf[ph3+53], elf[ph3+54], elf[ph3+55],
+            elf[ph3 + 48],
+            elf[ph3 + 49],
+            elf[ph3 + 50],
+            elf[ph3 + 51],
+            elf[ph3 + 52],
+            elf[ph3 + 53],
+            elf[ph3 + 54],
+            elf[ph3 + 55],
         ]);
         assert_eq!(p_align3, 0x10, "PT_GNU_STACK align");
     }

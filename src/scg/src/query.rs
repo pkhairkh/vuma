@@ -65,7 +65,6 @@ pub enum SCGQuery {
     },
 
     // ── LLM-friendly queries ──────────────────────────────────────────
-
     /// List all functions defined in the program.
     ///
     /// Returns function entry nodes with their names, return nodes,
@@ -613,10 +612,7 @@ fn query_list_functions(scg: &SCG) -> QueryResult {
         });
     }
 
-    let node_ids: Vec<NodeId> = functions
-        .iter()
-        .map(|f| f.entry_node_id)
-        .collect();
+    let node_ids: Vec<NodeId> = functions.iter().map(|f| f.entry_node_id).collect();
 
     QueryResult {
         node_ids,
@@ -708,7 +704,11 @@ fn query_function_inputs_outputs(scg: &SCG, function: NodeId) -> QueryResult {
     let name = call_graph.function_label(&fid).map(|s| s.to_string());
     let return_node_id = call_graph.function_return(&fid);
     let is_recursive = call_graph.is_recursive(&fid);
-    let calls: Vec<NodeId> = call_graph.callees(&fid).iter().map(|cge| cge.callee.0).collect();
+    let calls: Vec<NodeId> = call_graph
+        .callees(&fid)
+        .iter()
+        .map(|cge| cge.callee.0)
+        .collect();
     let called_by: Vec<NodeId> = call_graph.callers(&fid).iter().map(|cf| cf.0).collect();
 
     let func_info = FunctionInfo {
@@ -744,7 +744,8 @@ fn query_data_flow_path(scg: &SCG, from: NodeId, to: NodeId, max_depth: usize) -
 
     // BFS to find the shortest data-flow path from `from` to `to`
     let mut visited: HashSet<NodeId> = HashSet::new();
-    let mut parent: std::collections::HashMap<NodeId, (NodeId, EdgeId)> = std::collections::HashMap::new();
+    let mut parent: std::collections::HashMap<NodeId, (NodeId, EdgeId)> =
+        std::collections::HashMap::new();
     let mut queue = std::collections::VecDeque::new();
     queue.push_back(from);
     visited.insert(from);
@@ -838,8 +839,16 @@ fn query_callers_of(scg: &SCG, function: NodeId) -> QueryResult {
             return_node_id,
             name,
             node_ids: Vec::new(),
-            calls: call_graph.callees(caller_fid).iter().map(|cge| cge.callee.0).collect(),
-            called_by: call_graph.callers(caller_fid).iter().map(|cf| cf.0).collect(),
+            calls: call_graph
+                .callees(caller_fid)
+                .iter()
+                .map(|cge| cge.callee.0)
+                .collect(),
+            called_by: call_graph
+                .callers(caller_fid)
+                .iter()
+                .map(|cf| cf.0)
+                .collect(),
             is_recursive: call_graph.is_recursive(caller_fid),
             input_nodes: Vec::new(),
             output_nodes: Vec::new(),
@@ -862,8 +871,8 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode, NodePayload, NodeType,
-        ProgramPoint,
+        AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode,
+        NodePayload, NodeType, ProgramPoint,
     };
     use crate::region::{DeploymentTarget, SCGRegion};
 

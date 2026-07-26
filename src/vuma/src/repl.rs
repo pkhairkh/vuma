@@ -59,7 +59,7 @@ use vuma_ive::verification::VerificationInput;
 use vuma_ive::{
     AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAggregator, VerificationLevel,
 };
-use vuma_parser::ast::{Expr, Item, Lit, Stmt, Type as AstType};
+use vuma_parser::ast::{Expr, Item, Lit, Stmt};
 use vuma_parser::to_scg::AstToScg;
 use vuma_parser::{offset_to_location, ParseError, Parser, Span};
 use vuma_scg::llm_json::{build_array, build_object, json_str, json_usize, JsonValue};
@@ -92,8 +92,7 @@ mod ansi {
 
 /// Check if the terminal supports ANSI color codes.
 fn supports_color() -> bool {
-    std::env::var("TERM").is_ok_and(|v| v != "dumb")
-        || std::env::var("COLORTERM").is_ok()
+    std::env::var("TERM").is_ok_and(|v| v != "dumb") || std::env::var("COLORTERM").is_ok()
 }
 
 /// Wrap text in ANSI color codes if the terminal supports color.
@@ -113,17 +112,32 @@ macro_rules! color {
 
 /// VUMA keywords for tab completion.
 const VUMA_KEYWORDS: &[&str] = &[
-    "fn", "let", "const", "mut", "if", "else", "while", "for", "loop",
-    "return", "break", "continue", "match", "struct", "enum", "impl",
-    "trait", "type", "use", "mod", "pub", "self", "super", "crate",
-    "true", "false", "as", "in", "ref", "move",
+    "fn", "let", "const", "mut", "if", "else", "while", "for", "loop", "return", "break",
+    "continue", "match", "struct", "enum", "impl", "trait", "type", "use", "mod", "pub", "self",
+    "super", "crate", "true", "false", "as", "in", "ref", "move",
 ];
 
 /// REPL command names for tab completion.
 const REPL_COMMANDS: &[&str] = &[
-    ":help", ":load", ":type", ":scg", ":target", ":verify", ":wasm",
-    ":backends", ":check", ":diagnostics", ":exports", ":compile",
-    ":profile", ":history", ":reset", ":quit", ":show", ":q", ":exit",
+    ":help",
+    ":load",
+    ":type",
+    ":scg",
+    ":target",
+    ":verify",
+    ":wasm",
+    ":backends",
+    ":check",
+    ":diagnostics",
+    ":exports",
+    ":compile",
+    ":profile",
+    ":history",
+    ":reset",
+    ":quit",
+    ":show",
+    ":q",
+    ":exit",
 ];
 
 /// Complete a partial input, returning a list of possible completions.
@@ -1216,9 +1230,10 @@ Expressions:
         self.last_verification = None;
         self.loaded_file = None;
         // Keep history and profile.
-        Ok(ReplResult::Ok(Some(
-            color!(ansi::GREEN, "REPL state reset."),
-        )))
+        Ok(ReplResult::Ok(Some(color!(
+            ansi::GREEN,
+            "REPL state reset."
+        ))))
     }
 
     // -----------------------------------------------------------------------
@@ -1275,7 +1290,10 @@ Expressions:
         output.push_str(&format!("  SCG edges:    {}\n", edge_count));
         output.push_str(&format!("  Est. binary:  {}\n", size_str));
         output.push_str(&format!("  Source bytes: {}\n", self.session_source.len()));
-        output.push_str(&color!(ansi::DIM, "  (Full Wasm emission requires vuma-codegen; size is estimated)"));
+        output.push_str(&color!(
+            ansi::DIM,
+            "  (Full Wasm emission requires vuma-codegen; size is estimated)"
+        ));
 
         Ok(ReplResult::Ok(Some(output)))
     }
@@ -1289,16 +1307,48 @@ Expressions:
     /// Shows all 10 backend architectures with their current status.
     fn cmd_backends(&self) -> Result<ReplResult, ReplError> {
         let backends = [
-            ("aarch64", "ARM64/AArch64", "✅ Stable — 100% gold-standard pass"),
+            (
+                "aarch64",
+                "ARM64/AArch64",
+                "✅ Stable — 100% gold-standard pass",
+            ),
             ("x86_64", "x86-64", "✅ Stable — 100% gold-standard pass"),
-            ("riscv64", "RISC-V 64-bit", "✅ Stable — 100% gold-standard pass"),
-            ("arm32", "ARM32/AArch32", "✅ Stable — 100% gold-standard pass"),
+            (
+                "riscv64",
+                "RISC-V 64-bit",
+                "✅ Stable — 100% gold-standard pass",
+            ),
+            (
+                "arm32",
+                "ARM32/AArch32",
+                "✅ Stable — 100% gold-standard pass",
+            ),
             ("mips64", "MIPS64", "✅ Stable — 100% gold-standard pass"),
-            ("ppc64", "PowerPC 64-bit", "✅ Stable — 100% gold-standard pass"),
-            ("loongarch64", "LoongArch64", "✅ Stable — 100% gold-standard pass"),
-            ("x86_32", "x86-32 (i386)", "✅ Stable — 100% gold-standard pass"),
-            ("riscv32", "RISC-V 32-bit", "✅ Stable — 100% gold-standard pass"),
-            ("wasm32", "WebAssembly 32-bit", "✅ Stable — 100% gold-standard pass"),
+            (
+                "ppc64",
+                "PowerPC 64-bit",
+                "✅ Stable — 100% gold-standard pass",
+            ),
+            (
+                "loongarch64",
+                "LoongArch64",
+                "✅ Stable — 100% gold-standard pass",
+            ),
+            (
+                "x86_32",
+                "x86-32 (i386)",
+                "✅ Stable — 100% gold-standard pass",
+            ),
+            (
+                "riscv32",
+                "RISC-V 32-bit",
+                "✅ Stable — 100% gold-standard pass",
+            ),
+            (
+                "wasm32",
+                "WebAssembly 32-bit",
+                "✅ Stable — 100% gold-standard pass",
+            ),
         ];
 
         let mut output = String::new();
@@ -1311,10 +1361,7 @@ Expressions:
             } else {
                 String::new()
             };
-            output.push_str(&format!(
-                "  {:14} {:20} {}{}\n",
-                id, name, status, marker
-            ));
+            output.push_str(&format!("  {:14} {:20} {}{}\n", id, name, status, marker));
         }
 
         output.push_str(&format!(
@@ -1349,7 +1396,10 @@ Expressions:
             let report = DiagnosticsReport::from_aggregated(result);
             diagnostics.push(build_object(vec![
                 ("source".to_string(), json_str("ive_verification")),
-                ("overall".to_string(), json_str(format!("{:?}", result.overall))),
+                (
+                    "overall".to_string(),
+                    json_str(format!("{:?}", result.overall)),
+                ),
                 ("details".to_string(), json_str(format!("{}", report))),
                 ("timestamp_ms".to_string(), json_usize(0)),
             ]));
@@ -1378,7 +1428,10 @@ Expressions:
                 ("severity".to_string(), json_str("info")),
                 ("node_count".to_string(), json_usize(self.scg.node_count())),
                 ("edge_count".to_string(), json_usize(self.scg.edge_count())),
-                ("region_count".to_string(), json_usize(self.scg.region_count())),
+                (
+                    "region_count".to_string(),
+                    json_usize(self.scg.region_count()),
+                ),
                 ("message".to_string(), json_str("SCG is populated")),
             ]));
         }
@@ -1457,12 +1510,14 @@ Expressions:
             for item in &program.items {
                 match item {
                     Item::FnDef(f) => {
-                        let params: Vec<String> = f.params.iter().map(|p| {
-                            match &p.ty {
+                        let params: Vec<String> = f
+                            .params
+                            .iter()
+                            .map(|p| match &p.ty {
                                 Some(t) => format!("{}: {}", p.name, t),
                                 None => format!("{}: _", p.name),
-                            }
-                        }).collect();
+                            })
+                            .collect();
                         let ret = match &f.return_type {
                             Some(t) => format!(" -> {}", t),
                             None => String::new(),
@@ -1549,10 +1604,7 @@ Expressions:
         // Strategy 1: Try the simple evaluator for known variables.
         let evaluator = SimpleEvaluator::new(self.simple_vars.clone());
         if let Some(_value) = evaluator.eval(expr) {
-            return Ok(ReplResult::Ok(Some(format!(
-                "{} : i64",
-                expr.trim()
-            ))));
+            return Ok(ReplResult::Ok(Some(format!("{} : i64", expr.trim()))));
         }
 
         // Strategy 2: Try to parse as a VUMA expression wrapped in a function.
@@ -1610,7 +1662,9 @@ Expressions:
                 // Match by payload content.
                 let matches = match &node.payload {
                     vuma_scg::NodePayload::Computation(c) => c.kind.label().contains(expr),
-                    vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().is_some_and(|t| t.contains(expr)),
+                    vuma_scg::NodePayload::Allocation(a) => {
+                        a.type_name.as_ref().is_some_and(|t| t.contains(expr))
+                    }
                     _ => false,
                 };
                 if matches {
@@ -1633,9 +1687,7 @@ Expressions:
     /// Shows the SCG nodes and edges associated with the named function.
     fn cmd_scg(&mut self, func_name: &str) -> Result<ReplResult, ReplError> {
         if func_name.is_empty() {
-            return Ok(ReplResult::Ok(Some(
-                "Usage: :scg <func_name>".to_string(),
-            )));
+            return Ok(ReplResult::Ok(Some("Usage: :scg <func_name>".to_string())));
         }
 
         if self.scg.node_count() == 0 {
@@ -1653,7 +1705,9 @@ Expressions:
             // the node's payload (operation, type_name, etc.).
             let matches = match &node.payload {
                 vuma_scg::NodePayload::Computation(c) => c.kind.label().contains(func_name),
-                vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().is_some_and(|t| t.contains(func_name)),
+                vuma_scg::NodePayload::Allocation(a) => {
+                    a.type_name.as_ref().is_some_and(|t| t.contains(func_name))
+                }
                 _ => false,
             };
             if matches {
@@ -1663,7 +1717,8 @@ Expressions:
 
         if found_nodes.is_empty() {
             // List available regions as hints.
-            let region_list: Vec<String> = self.scg.regions().map(|r| format!("{}", r.id)).collect();
+            let region_list: Vec<String> =
+                self.scg.regions().map(|r| format!("{}", r.id)).collect();
             return Ok(ReplResult::Ok(Some(format!(
                 "Function '{}' not found in current SCG.\n\
                  Available regions: {}",
@@ -1673,8 +1728,7 @@ Expressions:
         }
 
         // Collect edges connected to found nodes.
-        let node_ids: std::collections::HashSet<_> =
-            found_nodes.iter().map(|n| n.id).collect();
+        let node_ids: std::collections::HashSet<_> = found_nodes.iter().map(|n| n.id).collect();
         for edge in self.scg.edges() {
             if node_ids.contains(&edge.source) || node_ids.contains(&edge.target) {
                 found_edges.push(edge.clone());
@@ -1699,7 +1753,10 @@ Expressions:
                 .unwrap_or_default();
             output.push_str(&format!(
                 "    [{:?}] {} ({}){}\n",
-                node.node_type, node_label(node), node.id, bd_str
+                node.node_type,
+                node_label(node),
+                node.id,
+                bd_str
             ));
         }
 
@@ -1845,10 +1902,7 @@ Expressions:
     /// Supports basic up/down arrow key history navigation via ANSI
     /// escape sequences.
     pub fn run(&mut self) -> Result<(), ReplError> {
-        println!(
-            "{}",
-            color!(ansi::BOLD_CYAN, "VUMA REPL v0.1.0-alpha.1")
-        );
+        println!("{}", color!(ansi::BOLD_CYAN, "VUMA REPL v0.1.0-alpha.1"));
         println!("Type :help for available commands. Tab completes commands/keywords.\n");
 
         while self.running {
@@ -1918,13 +1972,19 @@ Expressions:
                         }
                     }
                     ReplError::Compilation(msg) => {
-                        eprintln!("{}", color!(ansi::RED, &format!("Compilation error: {}", msg)));
+                        eprintln!(
+                            "{}",
+                            color!(ansi::RED, &format!("Compilation error: {}", msg))
+                        );
                     }
                     ReplError::ScgConstruction(msg) => {
                         eprintln!("{}", color!(ansi::RED, &format!("SCG error: {}", msg)));
                     }
                     ReplError::MsgConversion(e) => {
-                        eprintln!("{}", color!(ansi::YELLOW, &format!("MSG conversion warning: {}", e)));
+                        eprintln!(
+                            "{}",
+                            color!(ansi::YELLOW, &format!("MSG conversion warning: {}", e))
+                        );
                     }
                     ReplError::General(msg) => {
                         eprintln!("{}", color!(ansi::RED, msg));
@@ -1944,18 +2004,6 @@ impl Default for VumaRepl {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ---------------------------------------------------------------------------
-// AST Type Formatting
-// ---------------------------------------------------------------------------
-
-/// Format an AST [`Type`] into a human-readable string.
-#[allow(dead_code)]
-fn format_ast_type(ty: &AstType) -> String {
-    // Delegate to the Type's Display impl which already handles
-    // all variants correctly.
-    format!("{}", ty)
 }
 
 // ---------------------------------------------------------------------------
@@ -2438,7 +2486,10 @@ mod tests {
         // Switch to x86_64.
         let result = repl.process_line(":target x86_64").unwrap();
         if let ReplResult::Ok(Some(text)) = result {
-            assert!(text.contains("x86_64"), "Should mention x86_64, got: {text}");
+            assert!(
+                text.contains("x86_64"),
+                "Should mention x86_64, got: {text}"
+            );
         }
         assert_eq!(repl.target(), "x86_64");
 
@@ -2525,9 +2576,15 @@ mod tests {
             assert!(text.contains(":wasm"), "Help should mention :wasm");
             assert!(text.contains(":backends"), "Help should mention :backends");
             assert!(text.contains(":check"), "Help should mention :check");
-            assert!(text.contains(":diagnostics"), "Help should mention :diagnostics");
+            assert!(
+                text.contains(":diagnostics"),
+                "Help should mention :diagnostics"
+            );
             assert!(text.contains(":exports"), "Help should mention :exports");
-            assert!(text.contains("Current target"), "Help should show current target");
+            assert!(
+                text.contains("Current target"),
+                "Help should show current target"
+            );
         }
     }
 

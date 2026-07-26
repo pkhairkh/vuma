@@ -5,12 +5,12 @@
 //! without intervening modifications). This is a measure of codegen quality
 //! that helps identify optimization opportunities.
 
-use super::{BenchmarkResult, measure};
-use vuma_codegen::scg_to_ir::{
-    Scg, ScgNode, ScgFunction, ScgStatement, ScgType, ScgExpr,
-    ComputationNode, AllocationNode, AccessNode,
-};
+use super::{measure, BenchmarkResult};
 use vuma_codegen::ir::{BinOpKind, IRInstr, IRProgram};
+use vuma_codegen::scg_to_ir::{
+    AccessNode, AllocationNode, ComputationNode, Scg, ScgExpr, ScgFunction, ScgNode, ScgStatement,
+    ScgType,
+};
 use vuma_codegen::ScgToIr;
 
 /// Run codegen quality benchmarks.
@@ -21,10 +21,13 @@ pub fn run_benchmarks() -> Vec<BenchmarkResult> {
     for &size in &[10, 50, 100] {
         let scg = build_program_with_memory(size);
 
-        let (mean_ns, median_ns) = measure(|| {
-            let mut ir_builder = ScgToIr::new();
-            let _ = ir_builder.convert(&scg);
-        }, 10);
+        let (mean_ns, median_ns) = measure(
+            || {
+                let mut ir_builder = ScgToIr::new();
+                let _ = ir_builder.convert(&scg);
+            },
+            10,
+        );
 
         let mut ir_builder = ScgToIr::new();
         if let Ok(ir_program) = ir_builder.convert(&scg) {
@@ -41,7 +44,10 @@ pub fn run_benchmarks() -> Vec<BenchmarkResult> {
                 .with_extra("total_stores", metrics.total_stores as u64)
                 .with_extra("redundant_loads", metrics.redundant_loads as u64)
                 .with_extra("redundant_stores", metrics.redundant_stores as u64)
-                .with_extra("redundancy_ratio", format!("{:.3}", metrics.redundancy_ratio))
+                .with_extra(
+                    "redundancy_ratio",
+                    format!("{:.3}", metrics.redundancy_ratio),
+                ),
             );
         }
     }

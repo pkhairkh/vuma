@@ -345,10 +345,7 @@ impl VumaForLLM {
         }
 
         // Add context about the compiler stage.
-        explanation.push_str(&format!(
-            " [stage: {}]",
-            diagnostic.source
-        ));
+        explanation.push_str(&format!(" [stage: {}]", diagnostic.source));
 
         // Add chain information.
         if !diagnostic.chain.is_empty() {
@@ -392,7 +389,7 @@ impl VumaForLLM {
         }
 
         // Include legacy suggestions.
-        for s in &diagnostic.legacy_suggestions {
+        for s in &diagnostic.text_suggestions {
             suggestions.push(s.clone());
         }
 
@@ -401,43 +398,64 @@ impl VumaForLLM {
             let code_desc = code_description(&diagnostic.code);
             let hint = match diagnostic.code.as_str() {
                 "E001" | "E009" | "E010" => {
-                    format!("{}: Check the syntax near the reported location. \
+                    format!(
+                        "{}: Check the syntax near the reported location. \
                              Common fixes: missing semicolons, mismatched braces, \
-                             or incorrect operator usage.", code_desc)
+                             or incorrect operator usage.",
+                        code_desc
+                    )
                 }
                 "E002" => {
-                    format!("{}: The variable '{}' is not defined in the current scope. \
+                    format!(
+                        "{}: The variable '{}' is not defined in the current scope. \
                              Make sure it is declared before use, or check for typos.",
-                             code_desc, diagnostic.message)
+                        code_desc, diagnostic.message
+                    )
                 }
                 "E003" => {
-                    format!("{}: The types don't match. Check that the left-hand side \
+                    format!(
+                        "{}: The types don't match. Check that the left-hand side \
                              and right-hand side of the expression have compatible types.",
-                             code_desc)
+                        code_desc
+                    )
                 }
                 "E004" => {
-                    format!("{}: A symbol with this name already exists. Choose a \
-                             different name or remove the duplicate.", code_desc)
+                    format!(
+                        "{}: A symbol with this name already exists. Choose a \
+                             different name or remove the duplicate.",
+                        code_desc
+                    )
                 }
                 "E021" => {
-                    format!("{}: The code appears to use C/Rust syntax instead of VUMA \
+                    format!(
+                        "{}: The code appears to use C/Rust syntax instead of VUMA \
                              syntax. Replace `int` with `i32` or `i64`, remove type \
                              annotations after variable names, and use VUMA's assignment \
-                             syntax.", code_desc)
+                             syntax.",
+                        code_desc
+                    )
                 }
                 "E022" => {
-                    format!("{}: VUMA uses range-based for loops, not C-style. \
+                    format!(
+                        "{}: VUMA uses range-based for loops, not C-style. \
                              Replace `for (i=0; i<n; i++)` with `for i in 0..n`.",
-                             code_desc)
+                        code_desc
+                    )
                 }
                 "E023" => {
-                    format!("{}: VUMA uses sized integer types like `i8`, `i16`, \
+                    format!(
+                        "{}: VUMA uses sized integer types like `i8`, `i16`, \
                              `i32`, `i64`, `u8`, `u32`, `u64`. Replace the unknown \
-                             type with a VUMA-sized type.", code_desc)
+                             type with a VUMA-sized type.",
+                        code_desc
+                    )
                 }
                 _ => {
-                    format!("{}: Review the error message and check the relevant \
-                             code near the reported location.", code_desc)
+                    format!(
+                        "{}: Review the error message and check the relevant \
+                             code near the reported location.",
+                        code_desc
+                    )
                 }
             };
             suggestions.push(hint);
@@ -548,11 +566,15 @@ impl LLMCompileResult {
 
         let mut entries = vec![
             ("success".to_string(), JsonValue::Bool(self.success)),
-            ("diagnostics".to_string(), JsonValue::Array(
-                self.diagnostics.iter().map(|d| d.to_json_value()).collect(),
-            )),
+            (
+                "diagnostics".to_string(),
+                JsonValue::Array(self.diagnostics.iter().map(|d| d.to_json_value()).collect()),
+            ),
             ("explanation".to_string(), json_str(&self.explanation)),
-            ("binary_sizes".to_string(), JsonValue::Object(binary_sizes_entries)),
+            (
+                "binary_sizes".to_string(),
+                JsonValue::Object(binary_sizes_entries),
+            ),
         ];
         if let Some(s) = &self.scg_json {
             entries.push(("scg_json".to_string(), s.clone()));
@@ -589,7 +611,10 @@ impl LLMTargetInfo {
         JsonValue::Object(vec![
             ("name".to_string(), json_str(&self.name)),
             ("triple".to_string(), json_str(&self.triple)),
-            ("pointer_width".to_string(), JsonValue::U64(self.pointer_width as u64)),
+            (
+                "pointer_width".to_string(),
+                JsonValue::U64(self.pointer_width as u64),
+            ),
             ("endianness".to_string(), json_str(&self.endianness)),
             ("output_format".to_string(), json_str(&self.output_format)),
         ])

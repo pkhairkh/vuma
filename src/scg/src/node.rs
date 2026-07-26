@@ -4,7 +4,6 @@
 //! Nodes represent operations, allocations, accesses, and control flow points
 //! within the SCG, each carrying type-specific metadata.
 
-
 use crate::region::RegionId;
 
 /// Unique identifier for a node within the SCG.
@@ -252,6 +251,43 @@ pub enum NodePayload {
     ChannelClose(ChannelCloseNode),
 }
 
+/// Known VUMA intrinsic operations. Used for nominal typing instead of
+/// substring matching on labels (Gap 7 full fix).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IntrinsicKind {
+    CapabilityGrant,
+    CapabilityDelegate,
+    CapabilityVerify,
+    CapabilityRevoke,
+    StarkProve,
+    StarkVerify,
+}
+impl IntrinsicKind {
+    /// Returns the canonical lowercase name used in labels.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CapabilityGrant => "capability_grant",
+            Self::CapabilityDelegate => "capability_delegate",
+            Self::CapabilityVerify => "capability_verify",
+            Self::CapabilityRevoke => "capability_revoke",
+            Self::StarkProve => "stark_prove",
+            Self::StarkVerify => "stark_verify",
+        }
+    }
+    /// Returns the IntrinsicKind for a given label, or None if not an intrinsic.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.to_lowercase().as_str() {
+            "capability_grant" => Some(Self::CapabilityGrant),
+            "capability_delegate" => Some(Self::CapabilityDelegate),
+            "capability_verify" => Some(Self::CapabilityVerify),
+            "capability_revoke" => Some(Self::CapabilityRevoke),
+            "stark_prove" => Some(Self::StarkProve),
+            "stark_verify" => Some(Self::StarkVerify),
+            _ => None,
+        }
+    }
+}
+
 /// The kind of computation performed by a [`ComputationNode`].
 ///
 /// This enum classifies computation into broad categories. The generic
@@ -261,6 +297,11 @@ pub enum NodePayload {
 pub enum ComputationKind {
     /// A generic / unclassified operation (backward-compatible).
     Other(String),
+    /// A known VUMA intrinsic operation, nominally typed (Gap 7 full fix).
+    /// The label() of this variant equals `IntrinsicKind::as_str()`, so
+    /// binary serialization round-trips transparently with old `Other(...)`
+    /// intrinsic strings.
+    Intrinsic(IntrinsicKind),
     /// Struct field access: loads or stores a field at a known byte offset
     /// from a struct base pointer.
     StructAccess {
@@ -297,7 +338,12 @@ impl ComputationKind {
     pub fn label(&self) -> String {
         match self {
             ComputationKind::Other(op) => op.clone(),
-            ComputationKind::StructAccess { struct_name, field_name, .. } => {
+            ComputationKind::Intrinsic(k) => k.as_str().to_string(),
+            ComputationKind::StructAccess {
+                struct_name,
+                field_name,
+                ..
+            } => {
                 format!("struct_access::{}::{}", struct_name, field_name)
             }
             ComputationKind::EnumTag { enum_name, .. } => {
@@ -306,6 +352,21 @@ impl ComputationKind {
             ComputationKind::MatchNode { arm_count, .. } => {
                 format!("match_dispatch({}_arms)", arm_count)
             }
+        }
+    }
+
+    /// Constructs a `ComputationKind` from a free-form operation name,
+    /// promoting known intrinsic names to `Intrinsic(IntrinsicKind)`.
+    ///
+    /// This is the canonical entry point for parser/construction sites
+    /// that previously emitted `ComputationKind::Other(s)` and relied on
+    /// downstream string matching (Gap 7 full fix). Non-intrinsic strings
+    /// fall through to `Other(s)` unchanged.
+    pub fn from_op_name<S: AsRef<str>>(op: S) -> Self {
+        let s = op.as_ref();
+        match IntrinsicKind::from_label(s) {
+            Some(k) => ComputationKind::Intrinsic(k),
+            None => ComputationKind::Other(s.to_string()),
         }
     }
 }
@@ -343,10 +404,12 @@ impl ComputationNode {
     /// Create a new ComputationNode with a generic (string) operation.
     ///
     /// This is a convenience constructor that wraps the operation string
-    /// in `ComputationKind::Other`.
+    /// in `ComputationKind::Other`, *unless* the name is a known VUMA
+    /// intrinsic (Gap 7 full fix), in which case it is promoted to
+    /// `ComputationKind::Intrinsic(IntrinsicKind)` for nominal typing.
     pub fn new(operation: &str, result_type: Option<String>, tail_call: bool) -> Self {
         Self {
-            kind: ComputationKind::Other(operation.to_string()),
+            kind: ComputationKind::from_op_name(operation),
             result_type,
             tail_call,
         }
@@ -936,6 +999,314 @@ pub struct ChannelCloseNode {
     pub channel: String,
 }
 
+// ---------------------------------------------------------------------------
+// Codegen-side SCG types (Wave 4-e — SCG unification track)
+// ---------------------------------------------------------------------------
+//
+// The canonical SCG IR in this crate is *graph-shaped* (`SCG` +
+// `NodePayload` + `EdgeKind`, nodes referenced by `NodeId`).  The
+// codegen crate (`vuma-codegen::scg_to_ir`) uses a separate
+// *statement-list-shaped* SCG (`Vec<ScgStatement>` in source order,
+// with embedded `ScgExpr` operands).  The two shapes serve different
+// consumers (IVE vs `IRBuilder`) and a full unification is a
+// multi-wave effort — see the "SCG Unification Status" doc in
+// `src/codegen/src/scg_to_ir.rs`.
+//
+// Wave 4-e takes an incremental step: the *structure* of three
+// codegen-side SCG node types (`CastNode`, `ControlNode`, `SwitchArm`)
+// is moved here as **generic** types.  The concrete type parameters
+// (expression type `E`, statement type `S`, type representation `T`,
+// cast-kind `K`) are filled in by the codegen crate via **type
+// aliases**, e.g.:
+//
+// ```ignore
+// // In vuma_codegen::scg_to_ir:
+// type CastNode = vuma_scg::CodegenCastNode<ScgExpr, ScgType, CastKind>;
+// type ControlNode = vuma_scg::CodegenControlNode<ScgExpr, ScgStatement>;
+// type SwitchArm = vuma_scg::CodegenSwitchArm<ScgStatement>;
+// ```
+//
+// This moves the canonical *shape* definitions into `vuma-scg`
+// without requiring the concrete operand/kind types (`ScgExpr`,
+// `ScgType`, `CastKind`, `BinOpKind`) to also move — those remain
+// codegen-local pending their own migration (see the "Remaining local"
+// list in the SCG Unification Status doc).  Future waves can move
+// those types here too and specialize these generics, or replace
+// the generics with concrete types.
+//
+// The existing semantic `CastNode` (3 fields: `from_type`, `to_type`,
+// `is_lossless`) and `ControlNode` (struct wrapping `ControlKind`)
+// defined above are **not** affected — they remain the graph-shaped
+// payload types used by IVE.  The generics below carry the
+// statement-list-shaped payload used by `IRBuilder`.
+
+/// Generic shape of a codegen-side cast node.
+///
+/// Represents a type conversion or coercion from one type to another
+/// in the statement-list SCG.  The concrete expression type `E`, type
+/// representation `T`, and cast-kind `K` are filled in by the codegen
+/// crate via a type alias.
+#[derive(Debug, Clone)]
+pub struct CodegenCastNode<E, T, K> {
+    /// Destination variable name.
+    pub dst: String,
+    /// Source expression.
+    pub src: E,
+    /// Cast kind.
+    pub kind: K,
+    /// Source type.
+    pub from_ty: T,
+    /// Target type.
+    pub to_ty: T,
+}
+
+/// A single arm of a switch expression (codegen-side, generic over the
+/// body-statement type `S`).
+#[derive(Debug, Clone)]
+pub struct CodegenSwitchArm<S> {
+    /// The integer value this arm matches.
+    pub value: i64,
+    /// The body statements for this arm.
+    pub body: Vec<S>,
+}
+
+/// Generic shape of a codegen-side control-flow node.
+///
+/// An enum representing `if`/`loop`/`break`/`continue`/`switch` in the
+/// statement-list SCG.  The concrete expression type `E` and statement
+/// type `S` are filled in by the codegen crate via a type alias.
+#[derive(Debug, Clone)]
+pub enum CodegenControlNode<E, S> {
+    /// `if cond { then } else { else_ }`
+    If {
+        /// The condition expression.
+        cond: E,
+        /// Statements in the then-branch.
+        then_body: Vec<S>,
+        /// Optional else-branch statements.
+        else_body: Option<Vec<S>>,
+    },
+    /// `loop { body }`
+    Loop {
+        /// Loop body statements.
+        body: Vec<S>,
+        /// Optional `for`-range tuple: `(iterator_name, start_expr, end_expr)`.
+        for_range: Option<(String, E, E)>,
+        /// Optional `while`-condition variable name.
+        while_cond: Option<String>,
+    },
+    /// `break` (from inside a loop).
+    Break,
+    /// `continue` (from inside a loop).
+    Continue,
+    /// `switch discriminant { case value => body, .. default => body }`
+    ///
+    /// Lowers to a sequence of compare-and-branch instructions for small
+    /// switch ranges, or a jump table for dense contiguous ranges.
+    /// `MatchNode` in the graph-shaped SCG is lowered into this variant
+    /// by the codegen bridge.
+    Switch {
+        /// The discriminant expression being switched on.
+        discriminant: E,
+        /// The switch arms: each arm has a value and a body.
+        arms: Vec<CodegenSwitchArm<S>>,
+        /// The default arm (always present — like a match expression).
+        default_body: Vec<S>,
+    },
+}
+
+/// Generic shape of a codegen-side memory-allocation node.
+///
+/// Reserves memory either on the stack (`Stack`, fixed size known at
+/// compile time) or on the heap (`Heap`, dynamic size computed at
+/// runtime via an expression).  The concrete expression type `E` (used
+/// for the heap size expression) and type representation `T` (used for
+/// the allocation's static type) are filled in by the codegen crate via
+/// a type alias.
+///
+/// (Wave 4-b) The codegen `AllocationNode` is an **enum** (statement-list
+/// SCG), distinct from the semantic [`AllocationNode`] above (a struct
+/// payload for the graph-shaped SCG, with `size`/`align`/`region_id`/
+/// `type_name` fields).  Both types coexist: the semantic struct remains
+/// the IVE-facing payload; the generic enum below carries the
+/// statement-list-shaped payload used by `IRBuilder::lower_allocation`.
+#[derive(Debug, Clone)]
+pub enum CodegenAllocationNode<E, T> {
+    /// Stack allocation (fixed size known at compile time).
+    Stack {
+        /// Name of the allocated variable.
+        name: String,
+        /// Size in bytes.
+        size: u32,
+        /// Type of the allocation.
+        ty: T,
+    },
+    /// Heap allocation (dynamic size, calls allocator at runtime).
+    Heap {
+        /// Name of the allocated variable.
+        name: String,
+        /// Expression computing the allocation size.
+        size_expr: E,
+        /// Type of the allocation.
+        ty: T,
+    },
+}
+
+/// Generic shape of a codegen-side memory-access node.
+///
+/// A read (`Load`) or write (`Store`) through a pointer expression,
+/// optionally at a byte offset and optionally with a type override
+/// (used by the PMT state-field access path to select load/store
+/// width).  The concrete expression type `E` (pointer / offset /
+/// stored-value expressions) and the optional-type-override type `T`
+/// (the IR-level type for the load/store) are filled in by the codegen
+/// crate via a type alias.
+///
+/// (Wave 4-b) The codegen `AccessNode` is an **enum** (statement-list
+/// SCG), distinct from the semantic [`AccessNode`] above (a struct
+/// payload for the graph-shaped SCG, with `mode`/`region_id`/`offset`/
+/// `access_size` fields).  Both types coexist.
+#[derive(Debug, Clone)]
+pub enum CodegenAccessNode<E, T> {
+    /// Read: `dst = *ptr` or `dst = ptr.field`.
+    Load {
+        /// Destination variable name.
+        dst: String,
+        /// Pointer expression to read from.
+        ptr: E,
+        /// Optional byte offset from the pointer.
+        offset: Option<E>,
+        /// Optional load type override. When `None`, the IR builder
+        /// determines the type (U8 for byte loads, U64 for pointer
+        /// loads). When `Some`, the specified type is used directly.
+        ty: Option<T>,
+    },
+    /// Write: `*ptr = val` or `ptr.field = val`.
+    Store {
+        /// Pointer expression to write to.
+        ptr: E,
+        /// Optional byte offset from the pointer.
+        offset: Option<E>,
+        /// Value expression to store.
+        value: E,
+        /// Optional store type override. When `None`, defaults to U8
+        /// for non-pointer values and U64 for pointer values.
+        ty: Option<T>,
+    },
+}
+
+/// Generic shape of a codegen-side binary computation node.
+///
+/// Represents a binary arithmetic / logic / comparison operation in the
+/// statement-list SCG (`dst = lhs op rhs`).  The concrete expression type
+/// `E` and binary-operator kind `K` are filled in by the codegen crate via
+/// a type alias.  This is the statement-list counterpart of the graph-shaped
+/// [`ComputationNode`] above (which carries a [`ComputationKind`] label and
+/// is consumed by IVE).  The `reassigns` field lets the IR builder maintain
+/// user-visible variable name → vreg mappings across `x = expr` reassignments
+/// so that if/else merge points can construct correct phi nodes.
+///
+/// (Wave 12-a) The codegen `ComputationNode` is a **struct** with operand
+/// expressions inline (statement-list SCG), distinct from the semantic
+/// [`ComputationNode`] above (a graph-node payload with `kind` /
+/// `result_type` / `tail_call` fields, used by IVE capability-intrinsic
+/// checks).  Both types coexist: the semantic struct remains the IVE-facing
+/// payload; the generic struct below carries the statement-list-shaped
+/// payload consumed by `IRBuilder::lower_computation`.
+#[derive(Debug, Clone)]
+pub struct CodegenComputationNode<E, K> {
+    /// Destination variable name (SCG node id, e.g. "v_5").
+    pub dst: String,
+    /// Binary operation kind.
+    pub op: K,
+    /// Left-hand side expression.
+    pub lhs: E,
+    /// Right-hand side expression.
+    pub rhs: E,
+    /// Whether this is a tail call.
+    pub tail_call: bool,
+    /// For reassignments ("x = expr"), the user-visible variable name being
+    /// reassigned (e.g. "x").  `None` for let-bindings and non-assignment
+    /// computations.
+    pub reassigns: Option<String>,
+}
+
+/// Generic shape of a codegen-side unary computation node.
+///
+/// Represents a unary operation in the statement-list SCG
+/// (`dst = op operand`) — e.g. `neg`, `not`, `clz`, `ctz`, `popcnt`.  The
+/// concrete expression type `E` (operand) and unary-operator kind `K` are
+/// filled in by the codegen crate via a type alias.  This is the
+/// statement-list counterpart of the graph-shaped
+/// [`ComputationNode`] above: the semantic payload carries a
+/// [`ComputationKind::Intrinsic`] label covering unary intrinsics
+/// (`clz` / `ctz` / `popcnt`) via the kind tag rather than a dedicated
+/// node type, so there is no separate semantic `UnaryComputationNode` to
+/// coexist with.
+///
+/// (Wave 13-c) The codegen `UnaryComputationNode` is a **struct** with
+/// the operand expression inline (statement-list SCG).  It is consumed
+/// by `IRBuilder::lower_unary_computation`.  The structure now lives in
+/// the canonical SCG crate as `CodegenUnaryComputationNode<E, K>`, and
+/// codegen instantiates it via the transparent type alias
+/// `type UnaryComputationNode = vuma_scg::CodegenUnaryComputationNode<ScgExpr, UnaryOpKind>;`.
+#[derive(Debug, Clone)]
+pub struct CodegenUnaryComputationNode<E, K> {
+    /// Destination variable name (SCG node id, e.g. "v_7").
+    pub dst: String,
+    /// Unary operation kind.
+    pub op: K,
+    /// The operand expression.
+    pub operand: E,
+    /// Whether this is a tail call.
+    pub tail_call: bool,
+}
+
+/// Generic shape of a codegen-side function call node.
+///
+/// Represents a function call in the statement-list SCG
+/// (`dst = func(args...)`, or `func(args...)` when `dst` is `None`).  The
+/// concrete expression type `E` (per-argument) is filled in by the codegen
+/// crate via a type alias.  There is no separate semantic
+/// `CallNode` in the canonical SCG — calls are represented at the
+/// graph-node level via [`ComputationNode`] payloads (with
+/// [`ComputationKind::Other`] naming the callee) plus edges; the
+/// statement-list-shaped call node below exists because the codegen
+/// pipeline needs explicit argument lists and the `is_extern` /
+/// `reassigns` flags during IR lowering.
+///
+/// The `is_extern` flag tells the backend to emit a relocation instead of
+/// a local branch (e.g. for foreign/extern functions and certain
+/// intrinsics like `AtomicLoad` / `AtomicStore` / `AtomicCas` that the
+/// bridge emits as `CallNode`s with `is_extern: true`).  The `reassigns`
+/// field, mirroring [`CodegenComputationNode::reassigns`], lets the IR
+/// builder register the user-visible destination name (e.g. `out` in
+/// `out = atomic_load(...)`) in the names map so `resolve_expr` can find
+/// it later.
+///
+/// (Wave 13-c) The codegen `CallNode` is a **struct** with argument
+/// expressions inline.  It is consumed by `IRBuilder::lower_call`.  The
+/// structure now lives in the canonical SCG crate as
+/// `CodegenCallNode<E>`, and codegen instantiates it via the transparent
+/// type alias `type CallNode = vuma_scg::CodegenCallNode<ScgExpr>;`.
+#[derive(Debug, Clone)]
+pub struct CodegenCallNode<E> {
+    /// Optional destination variable for the return value.
+    pub dst: Option<String>,
+    /// Function name to call.
+    pub func: String,
+    /// Argument expressions.
+    pub args: Vec<E>,
+    /// Whether this is a call to an extern (foreign) function.  When
+    /// `true`, the backend emits a relocation instead of a local branch.
+    pub is_extern: bool,
+    /// Optional user-visible variable name being assigned (e.g. `out` in
+    /// `out = atomic_load(...)`).  When set, `lower_call` also registers
+    /// this name in the names map so `resolve_expr` can find it.  This is
+    /// the call-node analogue of [`CodegenComputationNode::reassigns`].
+    pub reassigns: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,16 +1483,46 @@ pub trait NodeVisitor {
     fn visit_default(&mut self, payload: &NodePayload) -> Self::Output;
 
     // ── Existing node types (override as needed) ──
-    fn visit_computation(&mut self, c: &ComputationNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
-    fn visit_allocation(&mut self, a: &AllocationNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
-    fn visit_deallocation(&mut self, d: &DeallocationNode, payload: &NodePayload) -> Self::Output { let _ = d; self.visit_default(payload) }
-    fn visit_access(&mut self, a: &AccessNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
-    fn visit_cast(&mut self, c: &CastNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
-    fn visit_effect(&mut self, e: &EffectNode, payload: &NodePayload) -> Self::Output { let _ = e; self.visit_default(payload) }
-    fn visit_control(&mut self, c: &ControlNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
-    fn visit_phantom(&mut self, p: &PhantomNode, payload: &NodePayload) -> Self::Output { let _ = p; self.visit_default(payload) }
-    fn visit_vtable(&mut self, v: &VTableNode, payload: &NodePayload) -> Self::Output { let _ = v; self.visit_default(payload) }
-    fn visit_closure_env(&mut self, c: &ClosureEnvNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_computation(&mut self, c: &ComputationNode, payload: &NodePayload) -> Self::Output {
+        let _ = c;
+        self.visit_default(payload)
+    }
+    fn visit_allocation(&mut self, a: &AllocationNode, payload: &NodePayload) -> Self::Output {
+        let _ = a;
+        self.visit_default(payload)
+    }
+    fn visit_deallocation(&mut self, d: &DeallocationNode, payload: &NodePayload) -> Self::Output {
+        let _ = d;
+        self.visit_default(payload)
+    }
+    fn visit_access(&mut self, a: &AccessNode, payload: &NodePayload) -> Self::Output {
+        let _ = a;
+        self.visit_default(payload)
+    }
+    fn visit_cast(&mut self, c: &CastNode, payload: &NodePayload) -> Self::Output {
+        let _ = c;
+        self.visit_default(payload)
+    }
+    fn visit_effect(&mut self, e: &EffectNode, payload: &NodePayload) -> Self::Output {
+        let _ = e;
+        self.visit_default(payload)
+    }
+    fn visit_control(&mut self, c: &ControlNode, payload: &NodePayload) -> Self::Output {
+        let _ = c;
+        self.visit_default(payload)
+    }
+    fn visit_phantom(&mut self, p: &PhantomNode, payload: &NodePayload) -> Self::Output {
+        let _ = p;
+        self.visit_default(payload)
+    }
+    fn visit_vtable(&mut self, v: &VTableNode, payload: &NodePayload) -> Self::Output {
+        let _ = v;
+        self.visit_default(payload)
+    }
+    fn visit_closure_env(&mut self, c: &ClosureEnvNode, payload: &NodePayload) -> Self::Output {
+        let _ = c;
+        self.visit_default(payload)
+    }
 
     /// Central dispatch — calls the appropriate visit_* method.
     /// This is the ONLY match statement that needs updating when a new
