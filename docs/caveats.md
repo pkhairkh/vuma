@@ -346,3 +346,61 @@ callees; state-var declarations; foreign-consume markers). Effort estimate:
 Lean proof (`proof/**`) files were modified by IVE-0-A — only this `docs/caveats.md`
 §0.5 sub-paragraph and the new `PLAN_IVE_IR_DIVERGENCE.md` plan file. This entry
 is APPEND-ONLY: no pre-existing line in this file was edited to add it.
+## 0.7. IVE Inert Verifier Triage — Wave 0
+
+> **Added by:** IVE Wave 0 task C (branch `task/ive-0-c`).
+> **Scope:** Triage of 4 structurally-inert IVE verifiers identified during
+> Wave 0 baseline. For each: RESTORE now (small fix), DEFER to Wave 2
+> (Lean proof + real input propagation), or REMOVE (mark as inert in
+> source). Wave 0 task C RESTOREs at most 2; the rest are DEFERRED or
+> REMOVE'd per the table below.
+>
+> **Cross-ref:** §2 "IVE (Intermediate Verification Engine)" row
+> "Advisory verifiers never abort" previously claimed the linear-channel
+> gate was "dormant due to a pre-existing parser gap" — that claim is now
+> STALE (the parser was fixed; see row 1 below). §2 row "Borrow region /
+> FFI modules library-only" is also stale (the gate is invoked from
+> `pipeline.rs` Stage 7c at two callsites and is now LIVE).
+
+### Decision table
+
+| # | Verifier | Location | Inert mechanism (pre-Wave-0) | Decision (Wave 0 task C) | Rationale / next step |
+|---|----------|----------|------------------------------|--------------------------|------------------------|
+| 1 | `borrow_region::verify_linear_channels` | `src/ive/src/borrow_region.rs`; callsites `src/pipeline.rs:5916-6065` (`compile_with_path`) and `src/pipeline.rs:7416-7570` (`compile_with_recovery`) | HARD-FAIL gate wired but **believed** DORMANT due to parser emitting generic `ControlNode` payloads with `call_channel_*` labels instead of the dedicated `NodePayload::Channel*` variants the call site pattern-matches. | **RESTORE (DONE).** No source-level behavioural change required — the parser was already fixed. `src/parser/src/to_scg.rs::try_emit_channel_node` (line ~2508) emits `NodePayload::Channel{Open,Send,Recv,Close}` and short-circuits the generic FunctionEntry/FunctionReturn lowering. The Stage 7c call site builds a non-empty `events` Vec for any channel-using program, and `verify_linear_channels` fires genuine use-after-close / double-close / uninitialized-use violations. The module docstring's "DORMANT" claim was stale; this task updates it to "LIVE". End-to-end regression tests in `tests/linear_channel_hard_fail.rs` (`linear_channel_use_after_close_fails_by_default`, `linear_channel_double_close_fails_by_default`) run without `#[ignore]` and pin the contract. | Smallest possible RESTORE: docstring-only change. The verifier's contract was already correct; only the documentation lagged. Wave 2 will add a Lean soundness proof (`proof/PMT/IVE/Soundness/BorrowRegion.lean`, file does not yet exist). |
+| 2 | `arena_bounds::verify_arena_bounds` | `src/ive/src/arena_bounds.rs:26-44` | Function body unconditionally returns `Vec::new()`; the loop over `accessed_vars` has an empty body (comment only); inputs are discarded via `let _ = (arena_vars, accessed_vars);`. ZERO callers in `pipeline.rs`. The `all_valid(&[])` shortcut makes the unit tests pass trivially. | **REMOVE (DONE).** Marked as INERT in the module-level docstring (`//! # IVE Wave 0 task C — INERT (REMOVE); restoration deferred to Wave 2`). No source-code deletion in Wave 0 — the function and tests are retained so Wave 2 can either RESTORE with proper SCG/IR plumbing + Lean proof, or DELETE as confirmed-redundant. Callers MUST NOT rely on `verify_arena_bounds` for any real verification. | The actual arena-bounds enforcement is performed at RUNTIME by the codegen — `pipeline.rs:11710` emits `ComputationNode(UGe)` + `ControlNode::If { __oob_trap }` calling `__arena_overflow()` at every arena-alloc site. Arena LINEARITY (use-after-`arena_free`) is handled by the invariant aggregator's `consumed_vars` tracking. The IVE-level wrapper was therefore redundant from inception; its signature (`arena_vars`, `accessed_vars` HashSets) is too narrow to reconstruct either check without SCG/IR plumbing that does not exist. Wave 2 will decide RESTORE-vs-DELETE. |
+| 3 | `information_flow::verify_information_flow_from_ir` | `src/ive/src/information_flow.rs:478-524`; callsite `src/pipeline.rs:5462` | The IR-level wrapper hardcodes every security label to `SecurityLabel::Public` (for both `ChannelSend` events and `Store` events, lines 496-497, 507-508). Because `Public → Public` is always a legal flow, the underlying `verify_information_flow` cannot produce any violations by construction. The HARD-FAIL gate at `pipeline.rs:5463-5479` therefore never fires. | **DEFER to Wave 2.** No Wave 0 source change. The underlying `verify_information_flow` (line 167) does real work on real inputs; the gap is in the wrapper's input-shaping. Restoration requires propagating security labels from the AST (where `#[secret]` / `#[public]` annotations are collected by `pipeline.rs::collect_secret_vars` at `:9708`) THROUGH the IR — currently the IR has no label-carrying instructions. This is non-trivial: it touches the parser (label emission), the IR type (`IRInstr` / `IRValue`), and the codegen-lowering path. Wave 2 will add the IR label plumbing + a Lean soundness proof (`proof/PMT/IVE/Soundness/InformationFlow.lean`, file does not yet exist). | Restoration is NOT a "small fix" — it requires changes across parser, IR, and codegen crates. Wave 2 is the appropriate venue. The Wave 0 pipeline.rs comment-fix (above) makes the structural-vs-empirical distinction explicit so future readers don't mistake "zero violations" for empirical validation. |
+| 4 | `session_type::verify_session_types_from_ir` | `src/ive/src/session_type.rs:713-759`; callsite `src/pipeline.rs:5442` | The IR-level wrapper hardcodes `SessionType::End` for every `channel_open` event (line 727) AND hardcodes `vreg: 0` for ALL channel events (Open, Send, Recv, Close). Because `End` means "the session is already complete", any subsequent `Send`/`Recv`/`Close` on `vreg=0` would be a session violation — BUT all events share `vreg=0`, so the first `Open` records `state[0]=End`, and the next `Send`/`Recv` fires "send on vreg 0 but protocol expects End (not Send)". In practice the gold-standard suite has no channel-using programs that reach this IR path, so "zero violations" is structural (the wrapper cannot meaningfully exercise the verifier), not empirical. | **DEFER to Wave 2.** No Wave 0 source change. The underlying `verify_session_types` (line 182) does real work on real inputs (it tracks state per `vreg` and validates Send/Recv/Close transitions). The gap is in the wrapper's input-shaping. Restoration requires (a) propagating real session-type annotations from the AST through the IR, and (b) extracting the actual channel handle's vreg/name from IR `Call` arguments (currently hardcoded to `0`). Wave 2 will add the IR annotation plumbing + a Lean soundness proof (`proof/PMT/IVE/Soundness/SessionType.lean`, file does not yet exist). | Restoration is NOT a "small fix" — it requires AST session-type annotation support (which the parser does not currently emit), IR plumbing, and codegen cooperation. Wave 2 is the appropriate venue. The Wave 0 pipeline.rs comment-fix (above) makes the structural-vs-empirical distinction explicit. |
+
+### Summary
+
+- **RESTORE now (1):** `borrow_region` — docstring-only fix; parser already
+  emits dedicated `NodePayload::Channel*` variants; gate is LIVE.
+- **REMOVE (mark inert in source, 1):** `arena_bounds` — structurally
+  redundant with the runtime `__oob_trap` guard and the invariant
+  aggregator's linearity tracking. Source retained for Wave 2
+  RESTORE-vs-DELETE decision.
+- **DEFER to Wave 2 (2):** `information_flow`, `session_type` — restoration
+  requires AST→IR label / session-type annotation propagation across
+  parser, IR, and codegen crates. Wave 2 will also add Lean soundness
+  proofs (`proof/PMT/IVE/Soundness/{InformationFlow,SessionType}.lean`).
+- **Pipeline comment fixes:** `src/pipeline.rs` Stage 7c comments at the
+  l1l3-collapse block (`pipeline.rs:5382-5394`) and the session-type +
+  information-flow block (`pipeline.rs:5423-5438`) have been updated to
+  honestly describe the gates' current state. The "INV-2 found zero
+  violations" framing has been replaced with explicit
+  structural-vs-empirical language. The l1l3-collapse gate is REAL (it
+  inspects `IRInstr::Call` argument shapes and CAN fire); the
+  session-type and information-flow gates are STRUCTURALLY inert because
+  their wrappers hardcode the inputs.
+
+### Out-of-scope follow-ups (NOT done in Wave 0)
+
+- `tests/linear_channel_hard_fail.rs` header docstring (lines 16-54)
+  still describes the OLD parser-gap state and the `#[ignore]` attributes
+  that have since been removed from the actual tests. The tests
+  themselves are up to date; only the header prose is stale. Cleanup is
+  a documentation-only follow-up.
+- §2 "IVE" row "Advisory verifiers never abort" claims the linear-channel
+  gate is "dormant due to a pre-existing parser gap" — STALE per row 1
+  above. Editing existing §2 lines is out-of-scope for Wave 0 task C
+  (caveats.md edits are APPEND-ONLY). Wave 1 or later may amend §2.
