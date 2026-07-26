@@ -312,6 +312,18 @@ impl Arena {
         self.assert_owner_thread();
         self.base
     }
+
+    /// Test-only setter for the bump offset. Used by
+    /// `arena_proof_model::tests::mirror_matches_real_alloc_exhaustive_small`
+    /// to position the arena at a specific `used` offset before calling
+    /// `alloc_raw`, so the mirror can be cross-checked against the real
+    /// allocator across a matrix of (capacity, used, size) combinations
+    /// without first having to perform `used / 8` real allocations to
+    /// reach the desired offset.
+    #[cfg(test)]
+    pub fn set_offset_for_testing(&mut self, o: usize) {
+        self.offset = o;
+    }
 }
 
 impl Drop for Arena {

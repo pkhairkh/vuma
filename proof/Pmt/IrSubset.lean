@@ -1,27 +1,14 @@
-import Init.Prelude
-import Init.Data.Fin.Basic
+import Pmt.Model
 
 /-!
 # `IrSubset` — IR instructions and their small-step semantics over the Arena
 
 This file models the subset of the Rust SCG IR (`src/scg/src/ir.rs`)
-consisting of the three instructions
-
-```rust
-pub enum Instr {
-    Alloc     { dst: String, size: usize, align: usize },
-    Free      { src: String },
-    StateRead { dst: String, src: String, field: String },
-}
-```
-
-as the Lean inductive `IrInstr`, and gives a small-step operational
-semantics `Step : IrInstr → Arena → Env → Arena → Env → Prop` over the
-bump-allocator `Arena` model from `Arena.lean`.
-
-The `USize` / `Ptr` / `Arena` definitions are pasted in directly (no
-`import` of the sibling modules) so this file is self-contained, exactly
-as in `Arena.lean`. Everything lives in `namespace Pmt`.
+consisting of eight instructions (alloc, free, stateRead, stateWrite,
+stateTransform, chanNew, chanSend, chanRecv) as the Lean inductive
+`IrInstr`, and gives a small-step operational semantics
+`Step : IrInstr → Arena → Env → Arena → Env → Prop` over the
+bump-allocator `Arena` model from `Model.lean`.
 
 Note on `size`/`align` types. Rust's `usize` is modelled here as
 `USize = Fin (2^64)` (the convention used throughout the `Pmt` layer), and
@@ -34,61 +21,29 @@ it is the faithful mirror of Rust `usize`.
 
 namespace Pmt
 
-/-! ## `USize` — `usize` on a 64-bit target, modelled as `Fin (2^64)`. -/
+/-! ## `IrInstr` — the eight-instruction IR subset. -/
 
-/-- `usize` on a 64-bit target is exactly the finite ordinal `Fin (2^64)`.
-
-    Marked `@[reducible]` so the `Fin` `Ord`/`Decidable` instances (used by
-    the `<` comparison in `Arena.alloc`) resolve by unfolding. -/
-@[reducible] def USize := Fin (2^64)
-
-/-- `checked_add` for `USize`: returns `none` exactly on overflow. -/
-def USize.add (a b : USize) : Option USize :=
-  if a.val + b.val < 2^64 then some (Fin.add a b) else none
-
-/-! ## `Ptr` — an address with allocation-site provenance. -/
-
-/-- A pointer carries an absolute address and a provenance tag identifying
-    the allocation it was derived from. -/
-structure Ptr where
-  addr : Nat
-  provenance : Nat
-
-/-! ## `Arena` — a bump allocator over one mmap'd region. -/
-
-/-- A faithful arena: a single mmap'd region `[base, base + capacity)`,
-    a bump `used` offset, and a monotone `alloc_id` provenance counter. -/
-structure Arena where
-  base     : Ptr
-  capacity : USize
-  used     : USize
-  alloc_id : Nat
-
--- The bump allocator does not consult `align`; it is carried as an
--- IR-level parameter for parity with Rust's `Alloc { size, align }`, so
--- we disable the `unusedVariables` linter for this definition.
-set_option linter.unusedVariables false in
-/-- Checked bump allocation. Returns `none` when `USize.add a.used size`
-    overflows *or* the resulting bump offset meets/exceeds `capacity`; on
-    success bumps `used`, increments `alloc_id`, and returns a pointer with
-    `addr = base.addr + used.val` (old offset) and `provenance = alloc_id`. -/
-def Arena.alloc (a : Arena) (size align : USize) : Option (Arena × Ptr) :=
-  match USize.add a.used size with
-  | none => none
-  | some new_used =>
-    if new_used < a.capacity then
-      some ({ a with used := new_used, alloc_id := a.alloc_id + 1 },
-            { addr := a.base.addr + a.used.val, provenance := a.alloc_id })
-    else none
-
-/-! ## `IrInstr` — the three-instruction IR subset. -/
-
-/-- The IR subset: `alloc`, `free`, and `stateRead`, mirroring the Rust
-    `Instr` enum. `size`/`align` are `USize` (Rust `usize`). -/
+/-- The IR subset: `alloc`, `free`, `stateRead`, `stateWrite`,
+    `stateTransform`, plus the three IPC-channel instructions
+    `chanNew`, `chanSend`, `chanRecv`, mirroring an extension of the
+    Rust `Instr` enum. `size`/`align` are `USize` (Rust `usize`).
+    `stateTransform dst src` moves the pointer held by `src` into
+    `dst` *linearly*: `dst` receives the pointer, `src` is consumed
+    (`none`), other variables are untouched. The three `chan*`
+    instructions model IPC-channel allocation and message passing:
+    `chanNew dst cap` allocates a fresh channel of capacity `cap`
+    into `dst`; `chanSend chan val` sends `val` along `chan`;
+    `chanRecv dst chan` receives a value from `chan` into `dst`
+    (non-linearly: `chan` is *not* consumed). -/
 inductive IrInstr where
-  | alloc     (dst : String) (size align : USize)
-  | free      (src : String)
-  | stateRead (dst src field : String)
+  | alloc          (dst : String) (size align : USize)
+  | free           (src : String)
+  | stateRead      (dst src field : String)
+  | stateWrite     (dst src field : String)
+  | stateTransform (dst src : String)
+  | chanNew        (dst : String) (cap : Nat)
+  | chanSend       (chan val : String)
+  | chanRecv       (dst chan : String)
 
 /-! ## `Env` — a name → pointer environment. -/
 
@@ -100,9 +55,32 @@ def Env := String → Option Ptr
 
     Each instruction has an explicit *ok* and *err* constructor. The error
     constructors are first-class (not merely the absence of the ok case):
-    `alloc_err` / `free_err` / `read_err` each leave both the arena and the
-    environment unchanged. This is what the downstream simulation proof
-    needs to case-split on the outcome of every instruction. -/
+    `alloc_err` / `free_err` / `read_err` / `write_err` / `transform_err`
+    / `chanNew_err` / `chanSend_err` / `chanRecv_err` each leave both the
+    arena and the environment unchanged. This is what the downstream
+    simulation proof needs to case-split on the outcome of every
+    instruction. The `write_ok` constructor also leaves the environment
+    unchanged — a successful `stateWrite` mutates the *memory contents*
+    pointed-to by `src`, but since we do not model memory contents in
+    the `(Arena, Env)` state, the write is observationally a no-op on
+    the state (the pointer in `dst` is unchanged; only the bytes it
+    addresses change, which are outside the model). The `transform_ok`
+    constructor asserts LINEAR semantics: `dst` is bound to the pointer
+    previously held by `src`, `src` is consumed (`none`), and every
+    other variable is left untouched.
+
+    The three IPC-channel constructors are:
+      * `chanNew_ok`  — for `cap > 0`, binds `dst` to the canonical
+        fresh-channel pointer `{addr := 0, provenance := 0}` (the
+        arena is unchanged; the channel object itself is outside the
+        `(Arena, Env)` model). `chanNew_err` fires when `cap = 0`.
+      * `chanSend_ok` — for `env chan = some p`, both arena and env
+        are unchanged (a send mutates channel contents, which are
+        outside the model). `chanSend_err` fires when `env chan = none`.
+      * `chanRecv_ok` — for `env chan = some p`, binds `dst` to `p`
+        NON-LINEARLY: `chan` is *not* consumed, so every other variable
+        (including `chan`) is left untouched. `chanRecv_err` fires when
+        `env chan = none`. -/
 
 set_option linter.unusedVariables false in
 /-- `Step i a env a' env'` holds when executing `i` in arena `a` under
@@ -130,5 +108,38 @@ inductive Step : IrInstr → Arena → Env → Arena → Env → Prop where
   | read_err  : ∀ a env src dst field,
       env src = none →
       Step (IrInstr.stateRead dst src field) a env a env
+  | write_ok  : ∀ a env src dst field p,
+      env src = some p →
+      Step (IrInstr.stateWrite dst src field) a env a env
+  | write_err : ∀ a env src dst field,
+      env src = none →
+      Step (IrInstr.stateWrite dst src field) a env a env
+  | transform_ok : ∀ a env dst src p,
+      env src = some p →
+      Step (IrInstr.stateTransform dst src) a env a
+        (fun x => if x = dst then some p else if x = src then none else env x)
+  | transform_err : ∀ a env dst src,
+      env src = none →
+      Step (IrInstr.stateTransform dst src) a env a env
+  | chanNew_ok  : ∀ a env dst cap,
+      cap > 0 →
+      Step (IrInstr.chanNew dst cap) a env a
+        (fun x => if x = dst then some { addr := 0, provenance := 0 } else env x)
+  | chanNew_err : ∀ a env dst cap,
+      cap = 0 →
+      Step (IrInstr.chanNew dst cap) a env a env
+  | chanSend_ok : ∀ a env chan val p,
+      env chan = some p →
+      Step (IrInstr.chanSend chan val) a env a env
+  | chanSend_err : ∀ a env chan val,
+      env chan = none →
+      Step (IrInstr.chanSend chan val) a env a env
+  | chanRecv_ok : ∀ a env dst chan p,
+      env chan = some p →
+      Step (IrInstr.chanRecv dst chan) a env a
+        (fun x => if x = dst then some p else env x)
+  | chanRecv_err : ∀ a env dst chan,
+      env chan = none →
+      Step (IrInstr.chanRecv dst chan) a env a env
 
 end Pmt
