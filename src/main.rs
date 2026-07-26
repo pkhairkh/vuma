@@ -378,7 +378,7 @@ enum Commands {
     /// `chmod +x`'d and executed (with no argv; to pass argv to the linked
     /// binary, run it directly after `vuma link` writes it). The
     /// `--run` flag is a convenience for the smoke-test workflow; the
-    /// end-to-end test in `wave48_self_host.rs` invokes the linked ELF
+    /// end-to-end test in `self_host.rs` invokes the linked ELF
     /// directly via `std::process::Command` so it can pass argv.
     Link {
         /// Input VUMA source files (two or more). The first file is the
