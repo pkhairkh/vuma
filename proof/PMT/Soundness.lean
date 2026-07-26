@@ -41,6 +41,25 @@ adds (a) static dataflow coverage (`DataflowOk`) and (b) per-step
 `no_oob_trap_for_well_typed_strong` for the strengthened
 non-trapping corollary.
 
+**Single-threaded limitation (PMT-1-C).** `pmt_soundness` is a
+**single-threaded** soundness theorem: it models one `exec` pass over a
+flattened `Program = List Step` with no concurrent interleaving. The
+3 atomic `PmtInstr` variants added in PMT-1-C (`atomic_load`,
+`atomic_store`, `atomic_cas` — see `PMT.PmtInstr` §4) are treated
+exactly like non-atomic memory accesses for the purposes of this
+theorem: their atomicity annotation (`AtomicOrdering`, `PMT.PmtInstr`
+§3.5) is *vacuous* under single-threaded execution (there is no other
+thread to race with), and their underlying load/store/CAS memory
+effect is modeled at the IVE / runtime layer, not as a PMT `Step`
+(`PmtInstr.to_steps` returns `[]` for all three — see
+`PMT.ExecFunction` §1.7c). The `pmt_soundness` statement and proof
+are therefore **unchanged** by PMT-1-C — no `single_threaded`
+hypothesis is added to the theorem signature (the single-threaded-ness
+is implicit in the absence of any concurrency / interleaving
+machinery in `exec`). A full concurrent-execution semantics
+(interleaved `exec`, memory-model axioms, happens-before relations) is
+out of scope for PMT-1-C and is not modeled here.
+
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
 `just proof` from the repo root) — the legacy `lean PMT/Soundness.lean`
