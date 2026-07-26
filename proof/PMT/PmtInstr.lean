@@ -27,6 +27,19 @@ The PMT-relevant variants fall into two groups:
     IR functions whose body contains arithmetic interleaved with memory
     operations without needing to abstract the arithmetic away first.
 
+  * **Control-flow variants (3, added in PMT-1-B):** `phi`, `branch`,
+    `cond_branch`. These model the Rust `IRInstr::Phi` /
+    `IRInstr::Branch` / `IRInstr::CondBranch` variants that are
+    `PmtInstr`s (i.e., they live in `IRBlock.instructions`) but carry
+    no memory effect. Their semantics are resolved at the CFG level
+    (block successors / predecessors), not the `Step` level: each has
+    `effect = .none`, `well_typed = True`, `to_steps = []`. The helper
+    `PmtInstr.successor_labels` (defined in `PMT.IRProgram`)
+    classifies the CFG-target labels contributed by each control-flow
+    variant, so that `IRBlock.well_typed` can validate that the block's
+    declared `successors` field is consistent with the control-flow
+    instructions it contains.
+
 The simulation relation `pmt_instr_simulates_ir_instr`
 connects each `PmtInstr` variant to its Rust `IRInstr` counterpart. All
 theorems in this file close without `sorry`.
@@ -40,6 +53,13 @@ under `PmtInstr.to_steps`, so they do not contribute `Step`s to
 `IRFunction.flat_steps` and therefore do not perturb the
 name-uniqueness conjuncts of `WellTyped` — `pmt_soundness` is
 preserved sorry-free.
+
+The 3 control-flow variants (PMT-1-B) likewise flatten to `[]`:
+their effect is to redirect execution between `IRBlock`s, which is
+modeled at the CFG level (`IRBlock.successors`, the `IRTerminator`
+of each block, and the `PmtInstr.successor_labels` helper), not as
+`Step`s. The `pmt_soundness` argument — which operates over the
+flattened `Program = List Step` — is therefore unaffected.
 
 **References.**
   * Rust source: `src/codegen/src/ir.rs` (3,481 lines, 32 IRInstr variants).
@@ -203,9 +223,26 @@ here as `ty : IRType` (the `None` default is omitted — the existing
 (the `Offset { dst, base, offset }` variant is a separate Rust
 variant not in PMT scope).
 
-Other Rust `IRInstr` variants (Phi, Atomic*, VectorOp, Channel*,
+**Control-flow variants (3, PMT-1-B):** mirror the Rust `IRInstr`
+variants that redirect execution between `IRBlock`s. Each has
+`effect = .none`, `well_typed = True`, `to_steps = []` (control flow
+is resolved at the CFG level, not the step level):
+  - Rust `IRInstr::Phi`        ↔ Lean `PmtInstr.phi`
+  - Rust `IRInstr::Branch`     ↔ Lean `PmtInstr.branch`
+  - Rust `IRInstr::CondBranch` ↔ Lean `PmtInstr.cond_branch`
+
+Field shapes mirror Rust (`src/codegen/src/ir.rs:1470-1650`). The
+Rust `Phi { dst, incoming }` shape has NO `ty` field (the task brief
+listed a `ty : IRType` field, but the Rust source at ir.rs:1470 has
+only `dst` and `incoming`); we mirror Rust faithfully (2 fields). For
+`Branch`, the Rust `{ target }` shape is mirrored faithfully (1
+field). For `CondBranch`, the Rust `{ cond, true_target, false_target }`
+shape is mirrored faithfully (3 fields).
+
+Other Rust `IRInstr` variants (Atomic*, VectorOp, Channel*,
 StarkProof, Offset, Syscall) are not modeled here. They are either:
-  - Pure computation (no memory effect) — out of scope for PMT.
+  - Atomic / channel operations — out of scope for PMT-1-B (modeled
+    by PMT-1-C / PMT-1-D respectively).
   - Channel operations — modeled via `PmtInstr.call "channel_send"`.
 -/
 inductive PmtInstr where
@@ -242,6 +279,15 @@ inductive PmtInstr where
     -- Rust `CtEq { dst, lhs, rhs, ty }`
   | get_address : IRValue → String → PmtInstr
     -- Rust `GetAddress { dst, name }`
+  -- Control-flow variants (3, PMT-1-B) — `effect = .none`, `to_steps = []`
+  | phi          : IRValue → List (IRValue × String) → PmtInstr
+    -- Rust `Phi { dst, incoming: Vec<(IRValue, String)> }`
+    -- (NOTE: Rust `Phi` has NO `ty` field — task brief's listed `ty`
+    -- is a divergence; we mirror Rust faithfully.)
+  | branch       : String → PmtInstr
+    -- Rust `Branch { target: String }`
+  | cond_branch  : IRValue → String → String → PmtInstr
+    -- Rust `CondBranch { cond, true_target, false_target }`
   deriving Repr
 
 /-- §5: A PMT-relevant basic block — a list of PmtInstr. -/
@@ -295,6 +341,10 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .ct_select _ _ _ _ _ => .none
   | .ct_eq _ _ _ _ => .none
   | .get_address _ _ => .none
+  -- Control-flow variants (PMT-1-B): pure control flow, no arena effect.
+  | .phi _ _ => .none
+  | .branch _ => .none
+  | .cond_branch _ _ _ => .none
 
 /-- §10: WellTypedness for PmtInstr (per-instruction).
 This is the per-instruction check that IVE's `verify_state_reads` /
@@ -327,6 +377,10 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .ct_select _ _ _ _ _ => True
   | .ct_eq _ _ _ _ => True
   | .get_address _ _ => True
+  -- Control-flow variants (PMT-1-B): pure control flow, no arena involvement.
+  | .phi _ _ => True
+  | .branch _ => True
+  | .cond_branch _ _ _ => True
 
 /-- §11: WellTypedness for a PmtBlock. -/
 def PmtBlock.well_typed (b : PmtBlock) (env : String → Layout) : Prop :=
@@ -402,5 +456,10 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .ct_select _ _ _ _ _ => []
   | .ct_eq _ _ _ _ => []
   | .get_address _ _ => []
+  -- Control-flow variants (PMT-1-B): control flow resolved at the CFG
+  -- level (block successors / `PmtInstr.successor_labels`), not as Steps.
+  | .phi _ _ => []
+  | .branch _ => []
+  | .cond_branch _ _ _ => []
 
 end PMT
