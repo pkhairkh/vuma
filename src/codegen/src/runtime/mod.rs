@@ -7,6 +7,7 @@
 //!   - arena: Rust-level arena allocator for testing and callback path
 
 pub mod arena;
+pub mod arena_proof_model;
 pub mod callback;
 pub mod ffi_scratch;
 #[cfg(feature = "pmt-runtime-check")]

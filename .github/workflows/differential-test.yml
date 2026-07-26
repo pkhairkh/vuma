@@ -1,0 +1,76 @@
+# ============================================================================
+# VUMA Differential Test Workflow
+# ============================================================================
+# Runs the arena differential test and the mirror-vs-real-alloc parity test
+# for the `vuma-codegen` crate. Both must pass; a failure in either fails
+# the workflow. Kept separate from the main CI matrix so differential
+# regressions surface quickly without being masked by unrelated failures.
+# ============================================================================
+
+name: Differential Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs when a new commit lands on the same branch/PR so
+# differential results always reflect the latest code.
+concurrency:
+  group: differential-test-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  differential-test:
+    name: Differential Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache the global Cargo registry/git directory. Keyed on the lockfile
+      # so dependency changes invalidate cleanly.
+      - name: Cache ~/.cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: differential-test-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            differential-test-cargo-${{ runner.os }}-
+
+      # Cache the per-workspace build artifacts under target/. Keyed on the
+      # lockfile hash plus the runner OS for correctness across rebuilds.
+      - name: Cache target/
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: differential-test-target-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            differential-test-target-${{ runner.os }}-
+
+      # ── Test 1: arena_differential ----------------------------------------
+      # Exercises the arena allocator against a reference implementation
+      # across a broad sweep of allocation patterns. --nocapture keeps the
+      # diagnostic output visible in the Actions log on failure.
+      - name: Run arena_differential test
+        run: cargo test -p vuma-codegen --test arena_differential -- --nocapture
+
+      # ── Test 2: mirror_matches_real_alloc ---------------------------------
+      # Verifies the mirror allocator tracks the real allocator byte-for-byte
+      # (layouts, offsets, free-list state) so it can serve as a differential
+      # oracle.
+      - name: Run mirror_matches_real_alloc test
+        run: cargo test -p vuma-codegen mirror_matches_real_alloc
