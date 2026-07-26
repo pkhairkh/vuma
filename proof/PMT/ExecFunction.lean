@@ -96,6 +96,83 @@ theorem PmtInstr.to_steps_call (fn : String) (args : List String) :
       = args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩) := by
   rfl
 
+/-! ## §1.7a. Reflection lemmas for the 12 pure-arithmetic variants (PMT-1-A)
+
+Each arithmetic `PmtInstr` variant flattens to the empty `List Step` —
+they are pure register-to-register computations with no memory effect.
+The 12 lemmas below are each provable by `rfl` (the `PmtInstr.to_steps`
+definition maps each arithmetic constructor to `[]` literally). They
+feed the `cases i with` block of `PmtInstr.to_steps_preserves_WF_Layout`
+(§1.8) so that the per-instruction `WF_Layout` preservation proof
+remains exhaustive over the enlarged `PmtInstr` inductive (19
+constructors: 7 memory + 12 arithmetic). -/
+
+/-- §1.7a.1: `bin_op` flattens to `[]`. -/
+theorem PmtInstr.to_steps_bin_op (op : BinOpKind) (dst lhs rhs : IRValue)
+    (ty : IRType) :
+    PmtInstr.to_steps (.bin_op op dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.2: `unary_op` flattens to `[]`. -/
+theorem PmtInstr.to_steps_unary_op (op : UnaryOpKind) (dst src : IRValue)
+    (ty : IRType) :
+    PmtInstr.to_steps (.unary_op op dst src ty) = [] := by
+  rfl
+
+/-- §1.7a.3: `cast` flattens to `[]`. -/
+theorem PmtInstr.to_steps_cast (k : CastKind) (dst src : IRValue)
+    (from_ty to_ty : IRType) :
+    PmtInstr.to_steps (.cast k dst src from_ty to_ty) = [] := by
+  rfl
+
+/-- §1.7a.4: `add` flattens to `[]`. -/
+theorem PmtInstr.to_steps_add (dst lhs rhs : IRValue) (ty : IRType) :
+    PmtInstr.to_steps (.add dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.5: `sub` flattens to `[]`. -/
+theorem PmtInstr.to_steps_sub (dst lhs rhs : IRValue) (ty : IRType) :
+    PmtInstr.to_steps (.sub dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.6: `mul` flattens to `[]`. -/
+theorem PmtInstr.to_steps_mul (dst lhs rhs : IRValue) (ty : IRType) :
+    PmtInstr.to_steps (.mul dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.7: `div` flattens to `[]`. -/
+theorem PmtInstr.to_steps_div (dst lhs rhs : IRValue) (ty : IRType) :
+    PmtInstr.to_steps (.div dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.8: `cmp` flattens to `[]`. -/
+theorem PmtInstr.to_steps_cmp (k : CmpKind) (dst lhs rhs : IRValue)
+    (ty : IRType) :
+    PmtInstr.to_steps (.cmp k dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.9: `select` flattens to `[]`. -/
+theorem PmtInstr.to_steps_select (dst cond then_val else_val : IRValue)
+    (ty : IRType) :
+    PmtInstr.to_steps (.select dst cond then_val else_val ty) = [] := by
+  rfl
+
+/-- §1.7a.10: `ct_select` flattens to `[]`. -/
+theorem PmtInstr.to_steps_ct_select (dst cond then_val else_val : IRValue)
+    (ty : IRType) :
+    PmtInstr.to_steps (.ct_select dst cond then_val else_val ty) = [] := by
+  rfl
+
+/-- §1.7a.11: `ct_eq` flattens to `[]`. -/
+theorem PmtInstr.to_steps_ct_eq (dst lhs rhs : IRValue) (ty : IRType) :
+    PmtInstr.to_steps (.ct_eq dst lhs rhs ty) = [] := by
+  rfl
+
+/-- §1.7a.12: `get_address` flattens to `[]`. -/
+theorem PmtInstr.to_steps_get_address (dst : IRValue) (name : String) :
+    PmtInstr.to_steps (.get_address dst name) = [] := by
+  rfl
+
 /-- §1.8: Every `Step` produced by `PmtInstr.to_steps` carries a
 `WF_Layout` when the instruction is well-typed under `env`.
 
@@ -141,6 +218,46 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     exact WF_Layout_empty
   | ret val =>
     rw [PmtInstr.to_steps_ret] at hs
+    simp at hs
+  -- 12 pure-arithmetic variants (PMT-1-A): each flattens to `[]`, so the
+  -- membership hypothesis `hs : s ∈ []` is vacuous. The per-instruction
+  -- `well_typed` predicate is `True` for all arithmetic variants, so
+  -- `hi` is `trivial` and not consulted.
+  | bin_op op dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_bin_op] at hs
+    simp at hs
+  | unary_op op dst src ty =>
+    rw [PmtInstr.to_steps_unary_op] at hs
+    simp at hs
+  | cast k dst src from_ty to_ty =>
+    rw [PmtInstr.to_steps_cast] at hs
+    simp at hs
+  | add dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_add] at hs
+    simp at hs
+  | sub dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_sub] at hs
+    simp at hs
+  | mul dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_mul] at hs
+    simp at hs
+  | div dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_div] at hs
+    simp at hs
+  | cmp k dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_cmp] at hs
+    simp at hs
+  | select dst cond then_val else_val ty =>
+    rw [PmtInstr.to_steps_select] at hs
+    simp at hs
+  | ct_select dst cond then_val else_val ty =>
+    rw [PmtInstr.to_steps_ct_select] at hs
+    simp at hs
+  | ct_eq dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_ct_eq] at hs
+    simp at hs
+  | get_address dst name =>
+    rw [PmtInstr.to_steps_get_address] at hs
     simp at hs
 
 /-! ## §2. Per-block flattening: `IRBlock.to_steps` -/
