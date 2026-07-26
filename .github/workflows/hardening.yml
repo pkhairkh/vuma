@@ -41,7 +41,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: wave50-${{ github.head_ref || github.ref }}
+  group: hardening-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -67,7 +67,7 @@ jobs:
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: wave50-clippy-${{ runner.os }}
+          key: hardening-clippy-${{ runner.os }}
 
       - name: Run Clippy (advisory)
         # Advisory only — pre-existing ci.yml (line 124) enforces strict
@@ -121,7 +121,7 @@ jobs:
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: wave50-test-${{ runner.os }}
+          key: hardening-test-${{ runner.os }}
 
       - name: Run full test suite (--no-fail-fast)
         # --no-fail-fast keeps the suite running after a failure so that

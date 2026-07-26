@@ -6410,7 +6410,7 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
     // names appear 4-5 times each (18 occurrences total → 14 duplicates
     // after the first occurrences are kept). The original policy
     // rejected every duplicate as a hard error, blocking the bootstrap
-    // self-host test (`test_wave48_bootstrap_self_host`).
+    // self-host test (`test_bootstrap_impl_self_host`).
     //
     // The current dedup-or-conflict policy replaces that hard-reject:
     // identical duplicates are silently dropped (the bootstrap
@@ -6570,7 +6570,7 @@ fn merge_module_asts(module_asts: &[AstProgram]) -> Result<AstProgram, Vec<VumaE
 /// file). Two textually-identical fn definitions copy-pasted into two
 /// different `.vuma` files have *different* spans (the files have
 /// different lengths and the helper preamble appears at different line
-/// numbers — see the site map in `test_wave48_bootstrap_self_host`'s
+/// numbers — see the site map in `test_bootstrap_impl_self_host`'s
 /// doc-comment). A naive `PartialEq` on `FnDef` (which `FnDef` does NOT
 /// derive, but if it did) would compare the spans and report the two
 /// fns as different even when their source text is byte-identical. That
