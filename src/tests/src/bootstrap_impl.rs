@@ -357,7 +357,7 @@ fn test_wave48_bootstrap_constants_defined() {
 /// function as a stub. After remediation, the header should describe them
 /// as real passes.
 #[test]
-fn test_wave48_bootstrap_header_updated() {
+fn test_bootstrap_header_updated() {
     let source = read_ir_builder_source();
 
     // The header line must NOT still say "stubs".
@@ -367,9 +367,12 @@ fn test_wave48_bootstrap_header_updated() {
          functions as stubs"
     );
 
-    // The header line must now describe them as real passes.
+    // The header line must still describe the pipeline entry points.
+    // (Originally checked for "Wave 48 — pipeline entry points"; the
+    //  "Wave N" prefix was removed in commit 912551f2's wave-terminology
+    //  cleanup, so we now check for the stable substring.)
     assert!(
-        source.contains("Wave 48 — pipeline entry points"),
+        source.contains("pipeline entry points"),
         "ir_builder.vuma's pipeline header must still exist (with updated \
          wording)"
     );
