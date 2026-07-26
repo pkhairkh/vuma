@@ -19,6 +19,14 @@ The flattening is structural:
     the CFG level (`PmtInstr.successor_labels` in `PMT.IRProgram` §6.5), not
     as `Step`s. They are kept in the model so that `instr_sim` /
     `block_sim` traversal in `PMT.SimRel` can carry them through structurally.
+  - The 3 atomic `PmtInstr` variants added in PMT-1-C (`atomic_load`,
+    `atomic_store`, `atomic_cas`) likewise flatten to `[]`: under PMT's
+    single-threaded soundness model, atomicity is vacuous (no other thread
+    to race with), and the underlying load/store/CAS memory effect is
+    modeled at the IVE / runtime layer, not as a PMT `Step`. The
+    `AtomicOrdering` tag is preserved for forward-compatibility but never
+    inspected by `to_steps`. A full concurrent-execution semantics is
+    out of scope for PMT-1-C.
 
 All theorems in this file close without `sorry`, including the
 previously-`sorry`-backed `to_program_preserves_well_typed_full` (§5.1),
@@ -206,6 +214,42 @@ theorem PmtInstr.to_steps_cond_branch (cond : IRValue)
     PmtInstr.to_steps (.cond_branch cond true_target false_target) = [] := by
   rfl
 
+/-! ## §1.7c. Reflection lemmas for the 3 atomic variants (PMT-1-C)
+
+Each atomic `PmtInstr` variant flattens to the empty `List Step` — under
+PMT's single-threaded soundness model, atomicity is vacuous (there is no
+other thread to race with), and the underlying load/store/CAS memory
+effect is modeled at the IVE / runtime layer, not as a PMT `Step`. The
+3 lemmas below are each provable by `rfl` (the `PmtInstr.to_steps`
+definition maps each atomic constructor to `[]` literally, regardless
+of the `AtomicOrdering` tag value). They feed the `cases i with` block
+of `PmtInstr.to_steps_preserves_WF_Layout` (§1.8) so that the
+per-instruction `WF_Layout` preservation proof remains exhaustive
+over the enlarged `PmtInstr` inductive (25 constructors: 7 memory +
+12 arithmetic + 3 control-flow + 3 atomic). -/
+
+/-- §1.7c.1: `atomic_load` flattens to `[]` (single-threaded: atomicity
+vacuous; memory effect modeled at the IVE / runtime layer). -/
+theorem PmtInstr.to_steps_atomic_load (dst addr : IRValue) (ty : IRType)
+    (ordering : AtomicOrdering) :
+    PmtInstr.to_steps (.atomic_load dst addr ty ordering) = [] := by
+  rfl
+
+/-- §1.7c.2: `atomic_store` flattens to `[]` (single-threaded: atomicity
+vacuous; memory effect modeled at the IVE / runtime layer). -/
+theorem PmtInstr.to_steps_atomic_store (value addr : IRValue) (ty : IRType)
+    (ordering : AtomicOrdering) :
+    PmtInstr.to_steps (.atomic_store value addr ty ordering) = [] := by
+  rfl
+
+/-- §1.7c.3: `atomic_cas` flattens to `[]` (single-threaded: atomicity
+vacuous; memory effect modeled at the IVE / runtime layer). -/
+theorem PmtInstr.to_steps_atomic_cas (dst addr expected desired : IRValue)
+    (ty : IRType) (success_order failure_order : AtomicOrdering) :
+    PmtInstr.to_steps
+      (.atomic_cas dst addr expected desired ty success_order failure_order) = [] := by
+  rfl
+
 /-- §1.8: Every `Step` produced by `PmtInstr.to_steps` carries a
 `WF_Layout` when the instruction is well-typed under `env`.
 
@@ -306,6 +350,23 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     simp at hs
   | cond_branch cond true_target false_target =>
     rw [PmtInstr.to_steps_cond_branch] at hs
+    simp at hs
+  -- 3 atomic variants (PMT-1-C): each flattens to `[]`, so the
+  -- membership hypothesis `hs : s ∈ []` is vacuous. Under PMT's
+  -- single-threaded semantics the atomicity is vacuous (no other thread
+  -- to race with), and the underlying load/store/CAS memory effect is
+  -- modeled at the IVE / runtime layer — not as a PMT `Step`. The
+  -- per-instruction `well_typed` predicate is `True` for all atomic
+  -- variants, so `hi` is `trivial` and not consulted. The
+  -- `AtomicOrdering` tag is not inspected.
+  | atomic_load dst addr ty ordering =>
+    rw [PmtInstr.to_steps_atomic_load] at hs
+    simp at hs
+  | atomic_store value addr ty ordering =>
+    rw [PmtInstr.to_steps_atomic_store] at hs
+    simp at hs
+  | atomic_cas dst addr expected desired ty success_order failure_order =>
+    rw [PmtInstr.to_steps_atomic_cas] at hs
     simp at hs
 
 /-! ## §2. Per-block flattening: `IRBlock.to_steps` -/
