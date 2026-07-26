@@ -262,13 +262,13 @@ help:
 # x86_64 compiles but needs libc linking to run).
 ffi-test: $(COMPILE_DUMP)
 	@echo "=== FFI Wave 6 tests (aarch64) ==="
-	@for t in tests/gold_standard/ffi_wave1/*.vuma tests/gold_standard/ffi_wave2/*.vuma; do \
+	@for t in tests/gold_standard/ffi_call/*.vuma tests/gold_standard/ffi_borrow/*.vuma; do \
 	        ./target/debug/compile_dump "$$t" /tmp/ffi_test.bin aarch64 --verify 2>/dev/null && \
 	        qemu-aarch64 /tmp/ffi_test.bin; \
 	        echo "  $$? : $$(basename $$t)"; \
 	done
 	@echo "=== FFI Wave 6 tests (x86_64 compile-only) ==="
-	@for t in tests/gold_standard/ffi_wave1/*.vuma; do \
+	@for t in tests/gold_standard/ffi_call/*.vuma; do \
 	        ./target/debug/compile_dump "$$t" /tmp/ffi_test.bin x86_64 --verify 2>/dev/null && \
 	        echo "  OK : $$(basename $$t)"; \
 	done

@@ -95,13 +95,13 @@ pub mod sha256d_backends;
 #[cfg(test)]
 pub mod wasm_validation;
 #[cfg(test)]
-pub mod wave47_bootstrap;
+pub mod bootstrap_argv;
 #[cfg(test)]
-pub mod wave48_bootstrap;
+pub mod bootstrap_impl;
 #[cfg(test)]
-pub mod wave48_self_host;
+pub mod self_host;
 #[cfg(test)]
-pub mod wave50;
+pub mod hardening;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

@@ -5,7 +5,7 @@
   "source_dir": "tests/gold_standard",
   "total_programs": 1589,
   "categories": {
-    "arena_wave0": {
+    "arena_basic": {
       "title": "Arena Wave ",
       "program_count": 3,
       "programs": [
@@ -14,7 +14,7 @@
         "arena_new_parse.vuma"
       ]
     },
-    "arena_wave1": {
+    "arena_alloc": {
       "title": "Arena Wave ",
       "program_count": 4,
       "programs": [
@@ -24,7 +24,7 @@
         "arena_overflow.vuma"
       ]
     },
-    "arena_wave2": {
+    "arena_grow": {
       "title": "Arena Wave ",
       "program_count": 1,
       "programs": [
@@ -360,7 +360,7 @@
         "xor_then_shr.vuma"
       ]
     },
-    "bounds_wave1": {
+    "bounds_basic": {
       "title": "Bounds Wave 1 (In-bounds positive)",
       "program_count": 8,
       "programs": [
@@ -374,7 +374,7 @@
         "uaf_compile_time.vuma"
       ]
     },
-    "bounds_wave1_safe": {
+    "bounds_safe": {
       "title": "Bounds Wave 1 (OOB negative, requires --safe)",
       "program_count": 7,
       "programs": [
@@ -911,7 +911,7 @@
         "s85_edge_const_fold.vuma"
       ]
     },
-    "ffi_wave0": {
+    "ffi_basic": {
       "title": "FFI Wave 0",
       "program_count": 9,
       "programs": [
@@ -926,7 +926,7 @@
         "unmarshal_attr.vuma"
       ]
     },
-    "ffi_wave1": {
+    "ffi_call": {
       "title": "FFI Wave 1",
       "program_count": 3,
       "programs": [
@@ -935,7 +935,7 @@
         "write_real.vuma"
       ]
     },
-    "ffi_wave2": {
+    "ffi_borrow": {
       "title": "FFI Wave 2",
       "program_count": 4,
       "programs": [
@@ -945,7 +945,7 @@
         "write_during_borrow_reject.vuma"
       ]
     },
-    "ffi_wave3": {
+    "ffi_consume": {
       "title": "FFI Wave 3",
       "program_count": 4,
       "programs": [
@@ -955,7 +955,7 @@
         "use_after_close_reject.vuma"
       ]
     },
-    "ffi_wave4": {
+    "ffi_advanced": {
       "title": "FFI Wave 4",
       "program_count": 2,
       "programs": [
@@ -1557,7 +1557,7 @@
         "s4_nl_outer_product.vuma"
       ]
     },
-    "pmt_wave1": {
+    "pmt_basic": {
       "title": "PMT Wave ",
       "program_count": 5,
       "programs": [
@@ -1568,7 +1568,7 @@
         "transform_decl.vuma"
       ]
     },
-    "pmt_wave10": {
+    "pmt_transform": {
       "title": "PMT Wave 0",
       "program_count": 3,
       "programs": [
@@ -1577,7 +1577,7 @@
         "ffi_write.vuma"
       ]
     },
-    "pmt_wave2": {
+    "pmt_state": {
       "title": "PMT Wave ",
       "program_count": 16,
       "programs": [
@@ -1599,7 +1599,7 @@
         "two_states.vuma"
       ]
     },
-    "pmt_wave3_negative": {
+    "pmt_negative": {
       "title": "PMT Wave _negative",
       "program_count": 5,
       "programs": [
@@ -1610,7 +1610,7 @@
         "write_after_consume.vuma"
       ]
     },
-    "pmt_wave5": {
+    "pmt_liveness": {
       "title": "PMT Wave ",
       "program_count": 5,
       "programs": [
@@ -1621,7 +1621,7 @@
         "transform_identity.vuma"
       ]
     },
-    "pmt_wave7": {
+    "pmt_session": {
       "title": "PMT Wave ",
       "program_count": 5,
       "programs": [
@@ -1632,7 +1632,7 @@
         "pmt_swap.vuma"
       ]
     },
-    "pmt_wave8": {
+    "pmt_buffer": {
       "title": "PMT Wave ",
       "program_count": 3,
       "programs": [
@@ -1641,7 +1641,7 @@
         "single_buffer.vuma"
       ]
     },
-    "pmt_wave9": {
+    "pmt_advanced": {
       "title": "PMT Wave ",
       "program_count": 5,
       "programs": [

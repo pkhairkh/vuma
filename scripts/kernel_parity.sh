@@ -57,11 +57,11 @@ EXECUTABLE_BACKENDS="x86_64 aarch64 riscv64 arm32 ppc64le loongarch64 s390x mips
 # Tests to run on each backend.
 # Format: "test_file:expected_exit"
 TESTS=(
-    "tests/gold_standard/arena_wave1/arena_basic.vuma:42"
-    "tests/gold_standard/arena_wave1/arena_grow.vuma:0"
-    "tests/gold_standard/arena_wave1/arena_multiple.vuma:0"
-    "tests/gold_standard/arena_wave1/arena_overflow.vuma:1"
-    "tests/gold_standard/pmt_wave2/init_read.vuma:42"
+    "tests/gold_standard/arena_alloc/arena_basic.vuma:42"
+    "tests/gold_standard/arena_alloc/arena_grow.vuma:0"
+    "tests/gold_standard/arena_alloc/arena_multiple.vuma:0"
+    "tests/gold_standard/arena_alloc/arena_overflow.vuma:1"
+    "tests/gold_standard/pmt_state/init_read.vuma:42"
     "tests/gold_standard/arithmetic/arith_clamp.vuma:100"
     "tests/gold_standard/control_flow/cf2_for_count.vuma:5"
     "tests/gold_standard/functions/fn2_add_two.vuma:7"
