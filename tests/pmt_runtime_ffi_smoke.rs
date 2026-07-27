@@ -121,6 +121,73 @@ mod lean_ffi_prim {
 }
 
 // ===========================================================================
+// Lean module initialiser (Wave C-1).
+//
+// The `_prim` externs above are called DIRECTLY by this test (NOT through
+// `verification.rs::verify_pmt_via_lean`, which internally calls
+// `lean_ffi::init()`). Without `initialize_PMT` the Lean runtime is
+// uninitialised and even the fully-primitive `lean_verified_capacity_check_prim`
+// (which takes only `u64`s, no Lean objects) SIGSEGVs: Lean's module
+// initialisers register internal tables the runtime consults on every entry.
+// This module mirrors `verification.rs::lean_ffi::init()` but is self-contained
+// so the test does not depend on the `ive` crate internals.
+//
+// The linkage stub (`lean_stub.c`) does NOT export `initialize_PMT`, so the
+// extern declaration AND the call are gated on `lean_ffi_linked`; under the
+// stub `ensure_init()` is a no-op (the stub symbols need no runtime init).
+// ===========================================================================
+
+#[cfg(feature = "pmt-runtime-check")]
+mod lean_init {
+    use std::ffi::c_void;
+
+    /// Guards exactly-once execution of `initialize_PMT` across threads.
+    #[cfg(lean_ffi_linked)]
+    static INIT: std::sync::Once = std::sync::Once::new();
+
+    // `initialize_PMT` is exported by `proof/.lake/build/ir/PMT.c` (Lean's C
+    // backend) and is present in `liblean_extraction.a` ONLY on the real-Lean
+    // path (when `lean_ffi_linked` is set by build.rs). The linkage stub does
+    // NOT define this symbol, so the extern must be gated to avoid an
+    // undefined-symbol link error on the stub path.
+    #[cfg(lean_ffi_linked)]
+    extern "C" {
+        fn initialize_PMT(builtin: u8, w: *mut c_void) -> *mut c_void;
+        fn lean_mk_string(s: *const std::ffi::c_char) -> *mut c_void;
+    }
+
+    #[cfg(lean_ffi_linked)]
+    pub fn str_to_lean(s: &str) -> *mut c_void {
+        use std::ffi::CString;
+        let sanitized: String = s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+        let c_str = CString::new(sanitized).unwrap_or_else(|_| CString::new("").unwrap());
+        unsafe { lean_mk_string(c_str.as_ptr()) }
+    }
+
+    #[cfg(not(lean_ffi_linked))]
+    pub fn str_to_lean(_s: &str) -> *mut c_void { std::ptr::null_mut() }
+
+    /// Invoke `initialize_PMT` exactly once (thread-safe via `Once`) before
+    /// any `_prim` extern call. Required on the real-Lean path so the Lean
+    /// runtime is initialised; a no-op under the stub.
+    #[cfg(lean_ffi_linked)]
+    pub fn ensure_init() {
+        INIT.call_once(|| {
+            // `builtin = 1` => run Lean's standard builtin initialisers.
+            // A null return indicates init failure (Lean convention); we
+            // proceed regardless — the subsequent `_prim` call will then
+            // surface the failure as a test abort rather than a silent skip.
+            let _res = unsafe { initialize_PMT(1, std::ptr::null_mut()) };
+        });
+    }
+
+    /// No-op stub-path variant: `lean_stub.c` neither exports
+    /// `initialize_PMT` nor needs Lean runtime initialisation.
+    #[cfg(not(lean_ffi_linked))]
+    pub fn ensure_init() {}
+}
+
+// ===========================================================================
 // Smoke tests — only compiled when the Lean archive is linked
 // (`pmt-runtime-check` feature on; `build.rs` compiles `lean_stub.c` or the
 // real extracted C into `liblean_extraction.a`).
@@ -129,6 +196,7 @@ mod lean_ffi_prim {
 #[cfg(feature = "pmt-runtime-check")]
 mod smoke {
     use super::lean_ffi_prim::{lean_verified_capacity_check_prim, lean_verify_state_reads_prim};
+    use super::lean_init;
     use std::ffi::c_void;
 
     // The `#[ignore]` message is inlined into the cfg_attr below (the
@@ -147,9 +215,18 @@ mod smoke {
     /// with `lean_mk_string`-built empty Lean strings (Wave 6 TODO).
     #[test]
     #[cfg_attr(not(lean_ffi_linked), ignore = "stub-linked (lean_ffi_linked NOT set): asserts the linkage stub\'s hardcoded return, not a real Lean output. Run with `--ignored` to exercise the Rust->C ABI plumbing against the C-compiled stub. When real Lean is linked, this ignore is dropped and the test asserts the real Lean output.")]
+    // C-1: under real Lean this prim takes 2x boxed lean_object* (Lean
+    // String) args. We marshal empty Lean strings via lean_mk_string
+    // (exposed in the lean_init module above). Empty reads vacuously
+    // pass -> real Lean returns 1 (true).
     fn smoke_lean_verify_state_reads_prim() {
-        let env: *mut c_void = std::ptr::null_mut();
-        let reads: *mut c_void = std::ptr::null_mut();
+        // C-1: initialise the Lean runtime before any `_prim` call. Under
+        // the stub (`lean_ffi_linked` NOT set) this is a no-op.
+        lean_init::ensure_init();
+
+        // Marshal empty Lean strings (real Lean) or null (stub).
+        let env: *mut c_void = lean_init::str_to_lean("");
+        let reads: *mut c_void = lean_init::str_to_lean("");
 
         // SAFETY: FFI call into the linked `liblean_extraction.a` symbol.
         // Under the stub the function ignores its arguments and returns a
@@ -182,6 +259,15 @@ mod smoke {
     #[test]
     #[cfg_attr(not(lean_ffi_linked), ignore = "stub-linked (lean_ffi_linked NOT set): asserts the linkage stub\'s hardcoded return, not a real Lean output. Run with `--ignored` to exercise the Rust->C ABI plumbing against the C-compiled stub. When real Lean is linked, this ignore is dropped and the test asserts the real Lean output.")]
     fn smoke_lean_verified_capacity_check_prim() {
+        // C-1: initialise the Lean runtime BEFORE the `_prim` call. The
+        // capacity prim takes only `u64`s (no Lean objects) but still
+        // requires `initialize_PMT` to have run — Lean's module
+        // initialisers register internal tables the runtime consults on
+        // every entry, and without them even this primitive call
+        // SIGSEGVs. Under the stub (`lean_ffi_linked` NOT set) this is a
+        // no-op.
+        lean_init::ensure_init();
+
         let (used, size, capacity): (u64, u64, u64) = (0, 10, 100);
 
         // SAFETY: FFI call into the linked `liblean_extraction.a` symbol.
