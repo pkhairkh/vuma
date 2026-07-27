@@ -404,3 +404,21 @@ is APPEND-ONLY: no pre-existing line in this file was edited to add it.
   gate is "dormant due to a pre-existing parser gap" — STALE per row 1
   above. Editing existing §2 lines is out-of-scope for Wave 0 task C
   (caveats.md edits are APPEND-ONLY). Wave 1 or later may amend §2.
+
+## §FFI — No-FFI Residual TCB: Syscall ABI
+
+**Status**: Documented as residual TCB (trusted, not verified).
+
+**Scope**: The 6 Linux syscalls `write`, `read`, `exit`, `mmap`, `munmap`, `brk` are routed through the VUMA `IRInstr::Syscall` builtin (per FFI Wave 1 task B). They are NOT foreign function calls — they are primitive effects that cross the user/kernel boundary.
+
+**TCB contract**: The syscall ABI is trusted. VUMA does not verify:
+- Kernel implementation of `write`/`read`/`exit`/`mmap`/`munmap`/`brk`.
+- Kernel-side memory safety (e.g., that `write(fd, buf, n)` reads exactly `n` bytes from `buf`).
+- Kernel-side resource accounting (e.g., that `mmap` actually allocates the requested region).
+
+**User-side invariants (still verified)**:
+- Argument registers are well-typed (`fd: i64`, `buf: ptr`, `count: i64`, etc.).
+- The syscall number is in the allowlist (`SyscallName::{Write, Read, Exit, Mmap, Munmap, Brk}` only — no arbitrary syscalls).
+- The syscall effect is classified in the Lean model (PMT-1-E added `PmtInstr.syscall` with `.writes`/`.reads`/`.none` effects per syscall).
+
+**Implication for FFI pillar**: The `ffi_pillar_sound` theorem (to be proven in FFI-1-D) states "no VUMA program can invoke foreign code; the only foreign surface is the syscall ABI (trusted TCB)". The syscall ABI is the residual TCB — it's the boundary between VUMA-verified code and the unverified kernel.

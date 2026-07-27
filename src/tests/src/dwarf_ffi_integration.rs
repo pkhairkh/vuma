@@ -1100,41 +1100,48 @@ fn test_ffi_demo_compiles_x86_64() {
 // Additional FFI infrastructure tests
 // ===========================================================================
 
-/// Test: Verify that `ExternRegistry::with_default_bindings()` contains
-/// the Linux syscall bindings.
+/// Test: Verify that `ExternRegistry::with_default_bindings()` returns an
+/// empty registry per the No-FFI design.
 ///
 /// (FFI Wave 1 task A removed the legacy libc bindings — `memcpy`,
 /// `memset`, `malloc`, `free` are now VUMA IR builtins: `BulkCopy`,
 /// `BulkFill`, `Alloc`, `Free`.  See `src/codegen/src/ir.rs` and the
 /// FFI-1-A entry in the worklog.)
+///
+/// (FFI Wave 1 task B removed the syscall extern bindings — `write`,
+/// `read`, `exit`, `mmap`, `munmap`, `brk` are now routed through the
+/// VUMA `IRInstr::Syscall` builtin (syscalls are primitive effects,
+/// part of the TCB, NOT foreign function calls).  See `docs/caveats.md`
+/// §FFI and the FFI-1-B entry in the worklog.)
 #[test]
 fn test_extern_registry_default_bindings() {
     let registry = ExternRegistry::with_default_bindings();
 
-    // Linux syscall functions
+    // Per the No-FFI design, the 6 Linux syscalls are NO LONGER registered
+    // as extern functions — they route through `IRInstr::Syscall`.
     assert!(
-        registry.is_extern("write"),
-        "default bindings should include 'write'"
+        !registry.is_extern("write"),
+        "write should be a VUMA syscall (IRInstr::Syscall), not an extern"
     );
     assert!(
-        registry.is_extern("read"),
-        "default bindings should include 'read'"
+        !registry.is_extern("read"),
+        "read should be a VUMA syscall (IRInstr::Syscall), not an extern"
     );
     assert!(
-        registry.is_extern("exit"),
-        "default bindings should include 'exit'"
+        !registry.is_extern("exit"),
+        "exit should be a VUMA syscall (IRInstr::Syscall), not an extern"
     );
     assert!(
-        registry.is_extern("mmap"),
-        "default bindings should include 'mmap'"
+        !registry.is_extern("mmap"),
+        "mmap should be a VUMA syscall (IRInstr::Syscall), not an extern"
     );
     assert!(
-        registry.is_extern("munmap"),
-        "default bindings should include 'munmap'"
+        !registry.is_extern("munmap"),
+        "munmap should be a VUMA syscall (IRInstr::Syscall), not an extern"
     );
     assert!(
-        registry.is_extern("brk"),
-        "default bindings should include 'brk'"
+        !registry.is_extern("brk"),
+        "brk should be a VUMA syscall (IRInstr::Syscall), not an extern"
     );
 
     // The legacy libc bindings (memcpy/memset/malloc/free) were removed by
@@ -1157,14 +1164,24 @@ fn test_extern_registry_default_bindings() {
         "free should be a VUMA builtin (IRInstr::Free), not an extern"
     );
 
-    // Syscalls still need relocation.
+    // No default externs — syscalls and libc builtins no longer need
+    // relocation (they are IR-level instructions, not external symbols).
     assert!(
-        registry.needs_relocation("write"),
-        "write should need relocation"
+        !registry.needs_relocation("write"),
+        "write is no longer an extern — should not need relocation"
+    );
+    assert!(
+        !registry.needs_relocation("mmap"),
+        "mmap is no longer an extern — should not need relocation"
     );
     assert!(
         !registry.needs_relocation("malloc"),
         "malloc is no longer an extern — should not need relocation"
+    );
+    assert_eq!(
+        registry.function_names().len(),
+        0,
+        "with_default_bindings() should return an empty registry"
     );
 }
 
