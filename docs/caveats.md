@@ -853,3 +853,64 @@ this §13 entry supersedes them where stated.
 | Top-level `axiom`s (FFI codedomain) | 0 | 0 (see `proof/AUDIT_FFI.md`; transitive `own_ex_exclusive` via PMT) | PASS |
 | `cargo build --release` | PASS | PASS | PASS |
 | Residual TCB items | 9 (listed above) | 9 | documented |
+
+## §FFI-Faithfulness — Final Independent Re-Audit (FFI-8-A)
+
+**Source**: `proof/AUDIT_FFI_FAITH_FINAL.md` (FFI Wave 8 task A,
+independent re-audit on `main` HEAD at `8f41e469`, FFI-7-A merged).
+
+**Scope**: Re-verification that every one of the 11 faithfulness gaps
+documented in `proof/AUDIT_FFI_FAITHFULNESS_GAPS.md` is genuinely
+closed on `main` HEAD, by running the verification commands specified
+in the FFI-8-A task brief against the actual Rust and Lean source. This
+re-audit was performed by an independent subagent (FFI-8-A) and modified
+**no** Rust or Lean proof files — only audit documentation
+(`proof/AUDIT_FFI_FAITH_FINAL.md`) and this caveats section.
+
+**Result**: **All 11 gaps CLOSED.**
+
+| # | Gap | Severity | Status | Closed by |
+|---|-----|----------|--------|-----------|
+| 1 | 5 active extern calls in pipeline.rs | HIGH | CLOSED | FFI-5-B |
+| 2 | Lean vs Rust SyscallName allowlist mismatch | HIGH | CLOSED | FFI-4-B |
+| 3 | Lean NoExterns does not check .syscall | HIGH | CLOSED | FFI-4-A + FFI-5-A |
+| 4 | Lean PmtInstr missing bulk_copy/bulk_fill | HIGH | CLOSED | FFI-3-A |
+| 5 | Lean PmtInstr.transform ≠ Rust Transform | HIGH | CLOSED | FFI-3-B |
+| 6 | AUDIT_FFI.md false claim "zero extern blocks" | MEDIUM | CLOSED | FFI-7-A |
+| 7 | AUDIT_FFI.md false claim about is_extern usage | MEDIUM | CLOSED | FFI-7-A |
+| 8 | Dead prefix-guard in x86_64/mod.rs | LOW | CLOSED | FFI-7-A |
+| 9 | Dead pmt_ops.rs in production | LOW | CLOSED | FFI-7-A |
+| 10 | AUDIT_FFI.md false claim about __oob_trap | LOW | CLOSED | FFI-7-A |
+| 11 | Lean PmtInstr missing 4 CF variants | INFO | CLOSED | FFI-3-C |
+
+**Final verdict**: **FFI pillar is faithfully verified.**
+
+The FFI pillar's two theorems (`no_ffi_program_sound` and
+`ffi_pillar_sound`) are proven sorry-free with zero non-standard axioms
+in FFI scope (transitive `own_ex_exclusive` is PMT's residual axiom,
+not FFI's). The Lean `PmtInstr` model mirrors all FFI-relevant Rust
+`IRInstr` variants exercised by realistic VUMA programs (including
+`bulk_copy`, `bulk_fill`, `transform_layouts`, and the 4 control-flow
+variants `invoke`/`resume`/`switch`/`tail_call`). The Lean `NoExterns`
+predicate checks both `.call name _` (built-in callees) and
+`.syscall nr _ _` (allowlist via `syscall_nr_table`). The Lean
+`SyscallName` inductive mirrors Rust's 19-variant enum field-for-field.
+The 4 compiler-emitted syscalls (`mmap`/`mprotect`/`mremap`/`munmap`)
+are routed through `IRInstr::Syscall`. The only remaining
+`is_extern: true` externs from compiler-internal paths are
+`__arena_overflow` (in `NoExterns.builtin_callees`, emitted as a
+per-backend trap stub) and `AtomicLoad`/`AtomicStore`/`AtomicCas`
+(intercepted by `lower_call`); user-source `extern "C" { fn ... }`
+blocks remain the legitimate FFI-permitted residual. The dead code
+identified in Gaps #8 and #9 is removed. The audit report
+(`proof/AUDIT_FFI.md`) accurately describes the post-Waves-3-7 state.
+
+**Build verification**: `cargo build --release` PASS (only pre-existing
+warnings); `lake build` PASS (110/110 build steps green, "Build
+completed successfully"; zero new sorries, zero new warnings).
+
+**Pointer**: For the per-gap verification commands and observed output,
+see `proof/AUDIT_FFI_FAITH_FINAL.md`. For the original gap list and
+post-closure status blocks, see `proof/AUDIT_FFI_FAITHFULNESS_GAPS.md`.
+For the FFI pillar audit report (corrected by FFI-7-A), see
+`proof/AUDIT_FFI.md`.
