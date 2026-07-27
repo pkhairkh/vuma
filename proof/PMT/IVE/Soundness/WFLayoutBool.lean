@@ -48,11 +48,11 @@ equalities. No `sorry`. -/
 
 instance : DecidableEq PMT.Field := fun f₁ f₂ =>
   match f₁, f₂ with
-  | ⟨o₁, s₁⟩, ⟨o₂, s₂⟩ =>
-    if h : o₁ = o₂ ∧ s₁ = s₂ then
+  | ⟨n₁, o₁, s₁, tn₁⟩, ⟨n₂, o₂, s₂, tn₂⟩ =>  -- PMT-FAITH-6-C: 4 fields
+    if h : n₁ = n₂ ∧ o₁ = o₂ ∧ s₁ = s₂ ∧ tn₁ = tn₂ then
       isTrue (by
-        obtain ⟨ho, hs⟩ := h
-        rw [ho, hs])
+        obtain ⟨hn, ho, hs, htn⟩ := h
+        rw [hn, ho, hs, htn])
     else
       isFalse (by
         intro heq
@@ -67,11 +67,11 @@ instance : DecidableEq PMT.Field := fun f₁ f₂ =>
 `DecidableEq Field` above). -/
 instance : DecidableEq PMT.Layout := fun l₁ l₂ =>
   match l₁, l₂ with
-  | ⟨ts₁, fs₁⟩, ⟨ts₂, fs₂⟩ =>
-    if h : ts₁ = ts₂ ∧ fs₁ = fs₂ then
+  | ⟨n₁, ts₁, fs₁⟩, ⟨n₂, ts₂, fs₂⟩ =>  -- PMT-FAITH-6-C: 3 fields (added name)
+    if h : n₁ = n₂ ∧ ts₁ = ts₂ ∧ fs₁ = fs₂ then
       isTrue (by
-        obtain ⟨hts, hfs⟩ := h
-        rw [hts, hfs])
+        obtain ⟨hn, hts, hfs⟩ := h
+        rw [hn, hts, hfs])
     else
       isFalse (by
         intro heq
@@ -129,43 +129,26 @@ since `DecidableEq Field` is in scope): if `f₁ = f₂` then `f₁ ≠ f₂`
 is contradictory; otherwise `Disjoint f₁ f₂` is recovered directly.
  -/
 theorem wf_layout_bool_iff_wf_layout (l : PMT.Layout) :
-    wf_layout_bool l ↔ PMT.WF_Layout l := by
-  unfold wf_layout_bool PMT.WF_Layout
+    wf_layout_bool l ↔ (PMT.WF_Layout l ∧ PMT.WF_Layout_Disjoint l ∧ PMT.WF_Layout_NonEmpty l) := by
+  -- PMT-FAITH-6-C: WF_Layout is now 1 conjunct (per-field bounds only).
+  -- The disjointness + non-empty conjuncts are separate predicates.
+  -- wf_layout_bool (IVE-Faith, 3 conjuncts) bridges to all 3.
+  unfold wf_layout_bool PMT.WF_Layout PMT.WF_Layout_Disjoint PMT.WF_Layout_NonEmpty
   simp only [Bool.and_eq_true_iff, List.all_eq_true, decide_eq_true_iff]
-  -- After simp the iff goal has shape `((A ∧ B) ∧ C) ↔ (A ∧ (B' ∧ C))`,
-  -- where the LHS's `(A ∧ B) ∧ C` reflects `wf_layout_bool`'s
-  -- left-associated `&&` chain and the RHS's `A ∧ (B' ∧ C)` reflects
-  -- `WF_Layout`'s right-associated `∧` chain. We bridge the two with
-  -- the appropriate constructor shapes.
   refine ⟨fun h => ?_, fun h => ?_⟩
-  · -- forward direction: `wf_layout_bool` → `WF_Layout`.
-    -- `h : (A ∧ B) ∧ C` (left-assoc).
-    obtain ⟨⟨h1, h2⟩, h3⟩ := h
-    -- Goal: `A ∧ (B' ∧ C)` (right-assoc).
+  · obtain ⟨⟨h1, h2⟩, h3⟩ := h
     refine ⟨?_, ?_, ?_⟩
-    · -- Conjunct 1: identical structure (`∀ f, f ∈ l.fields →
-      -- f.offset + f.size ≤ l.total_size`).
-      exact fun f hf => h1 f hf
-    · -- Conjunct 2: bridge `f₁ = f₂ ∨ Disjoint f₁ f₂` to
-      -- `f₁ ≠ f₂ → Disjoint f₁ f₂`.
-      intro f₁ f₂ hf₁ hf₂ hne
+    · exact fun f hf => h1 f hf
+    · intro f₁ f₂ hf₁ hf₂ hne
       have hpair := h2 f₁ hf₁ f₂ hf₂
-      -- `hpair : f₁ = f₂ ∨ Disjoint f₁ f₂`; `hne : f₁ ≠ f₂`.
       rcases hpair with heq | hdis
       · exact absurd heq hne
       · exact hdis
-    · -- Conjunct 3: identical structure.
-      exact h3
-  · -- backward direction: `WF_Layout` → `wf_layout_bool`.
-    -- `h : A ∧ (B' ∧ C)` (right-assoc).
-    obtain ⟨h1, h2, h3⟩ := h
-    -- Goal: `(A ∧ B) ∧ C` (left-assoc).
+    · exact h3
+  · obtain ⟨h1, h2, h3⟩ := h
     refine ⟨⟨?_, ?_⟩, ?_⟩
-    · -- Conjunct 1: identical structure.
-      exact fun f hf => h1 f hf
-    · -- Conjunct 2: bridge `f₁ ≠ f₂ → Disjoint f₁ f₂` to
-      -- `f₁ = f₂ ∨ Disjoint f₁ f₂` via `DecidableEq Field`.
-      intro f₁ hf₁ f₂ hf₂
+    · exact fun f hf => h1 f hf
+    · intro f₁ hf₁ f₂ hf₂
       by_cases heq : f₁ = f₂
       · exact Or.inl heq
       · exact Or.inr (h2 f₁ f₂ hf₁ hf₂ heq)

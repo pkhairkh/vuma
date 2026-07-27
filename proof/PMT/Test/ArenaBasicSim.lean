@@ -57,26 +57,17 @@ track which field is accessed, so the extra field would be redundant
 for the `exec` computation (it only consults `layout.total_size`). -/
 
 /-- Simplified Widget layout: single 4-byte field `x` at offset 0. -/
-def widgetLayout : Layout := ⟨4, [⟨0, 4⟩]⟩
+def widgetLayout : Layout := ⟨"layout", 4, [⟨"f", 0, 4, "i32"⟩]⟩
 
 /-- The widget layout is well-formed: field `x` is in bounds
 (`0 + 4 ≤ 4`), disjointness is vacuous (single field), and
 `total_size > 0`. -/
 theorem wf_widgetLayout : WF_Layout widgetLayout := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · -- Field bounds: every field's `[offset, offset+size)` fits in 4.
-    intro f hf
-    simp [widgetLayout] at hf
-    rcases hf with rfl
-    simp [widgetLayout]
-  · -- Disjointness: every distinct pair of fields is non-overlapping.
-    intros f₁ f₂ h₁ h₂ hne
-    simp [widgetLayout] at h₁ h₂
-    rcases h₁ with rfl; rcases h₂ with rfl
-    exact (hne rfl).elim
-  · -- Non-empty: total_size > 0.
-    exact Or.inl (by decide)
+  intro f hf
+  simp [widgetLayout] at hf
+  rcases hf with rfl
+  simp [widgetLayout]
 
 /-! ## §2. Initial execution state (models `arena_new(4096)`).
 
