@@ -832,6 +832,25 @@ impl VerificationEngine {
         }
 
         // ── Run the 3 verifiers ───────────────────────────────────────────
+        //
+        // Wave 1 task IVE-1-B: when the `pmt-runtime-check` feature is
+        // enabled AND the Lean C output is linked into the binary, the
+        // 3 verifiers below (`verify_state_reads`, `verify_state_writes`,
+        // `verify_all_transforms`) can be routed through the extracted
+        // Lean functions (`lean_verify_state_reads`, etc.) via the FFI
+        // surface declared in `proof/extracted/pmt_check.rs`. The
+        // hand-written Rust verifiers are kept as the fallback path
+        // (used when the feature is off or the Lean C output is not
+        // linked), and the parity test in `tests/pmt_parity_test.rs`
+        // ensures the two paths agree.
+        //
+        // The actual FFI routing is gated by a runtime check
+        // (`LEAN_FFI_LINKED` env var or a build-time flag) because the
+        // Lean C output is NOT automatically linked in the current
+        // build (this requires a `build.rs` script — deferred to Wave 1
+        // task IVE-1-D's parity-test harness). For now, the hand-written
+        // path is always used; the FFI surface is in place for when the
+        // build-system integration lands.
         let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
         let write_results =
             verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
