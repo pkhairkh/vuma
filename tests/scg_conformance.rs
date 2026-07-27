@@ -215,38 +215,35 @@ fn deprecated_scg_to_codegen_bridge_preserves_typed_state() {
     );
 }
 
-/// Task 7-D step 2+3 (canonical AST→codegen path) — the CANONICAL binary
-/// producer `bridge_ast_to_codegen_scg` lowers `state_new(L)` / `p.field`
-/// read/write to UNTYPED `AllocationNode::Stack` / `AccessNode::Store|Load`
-/// statements, losing the `layout_name` + typed-state information **in the
-/// emitted codegen SCG nodes**. This is the Round 7 divergence: IVE verifies
-/// the typed semantic SCG, but the binary is produced from this UNTYPED
-/// codegen SCG.
+/// Task 2-B (canonical AST→codegen path) — the CANONICAL binary producer
+/// `bridge_ast_to_codegen_scg` lowers `state_new(L)` / `p.field` read/write
+/// to UNTYPED `AllocationNode::Stack` / `AccessNode::Store|Load` statements,
+/// so the emitted codegen SCG nodes carry NO typed-state payload (the binary
+/// is byte-identical to pre-SCG-CLOSURE). BUT the bridge now ALSO produces
+/// recoverable `TypedStateMeta` metadata as a side product of its single
+/// canonical AST walk — the standalone `extract_typed_state_meta_from_ast`
+/// parallel walker was merged into the bridge in Task 2-A and deleted in
+/// Task 2-B, so there is no longer a DUPLICATE AST walk.
 ///
-/// **Task SCG-CLOSURE — divergence NARROWED.** The codegen SCG nodes are
-/// STILL untyped (the emitted binary is byte-identical), BUT the typed-state
-/// info is now PRESERVED as recoverable `TypedStateMeta` metadata via
-/// `vuma::pipeline::extract_typed_state_meta_from_ast` — a parallel AST walk
-/// that records one `TypedStateMeta` entry per typed-state op the bridge
-/// lowered away. So the divergence narrows from "5 typed-state payloads
-/// LOST" to "0 lost — preserved as `TypedStateMeta` metadata": IVE *could*
+/// **Task SCG-CLOSURE — typed-state metadata PRESERVED.** The divergence
+/// narrows from "5 typed-state payloads LOST" to "0 lost — preserved as
+/// `TypedStateMeta` metadata threaded through the bridge itself": IVE *could*
 /// replay this metadata against the codegen SCG to recover the typed-state
 /// view it verifies on the semantic SCG.
 ///
-/// This test asserts BOTH sides of the narrowed divergence:
+/// This test asserts BOTH properties of the merged bridge:
 ///   * the codegen SCG's `PmtOp` typed-state counts are STILL 0 (the bridge
 ///     still lowers to untyped Allocation/Access — binary unchanged); AND
-///   * the `TypedStateMeta` metadata recovers all 3 typed-state ops the
-///     Point source exercises (StateInit{Point}, StateWrite{p,Point,x},
+///   * the `TypedStateMeta` metadata returned by
+///     `bridge_ast_to_codegen_scg_with_meta` recovers all 3 typed-state ops
+///     the Point source exercises (StateInit{Point}, StateWrite{p,Point,x},
 ///     StateRead{p,Point,x}), with the `layout_name` preserved.
 ///
 /// `StateTransform` + `ForeignConsume` are not exercised by this source
 /// (covered by `semantic_scg_carries_all_five_typed_state_payloads` for the
-/// full 5-kind shape). If the bridge starts emitting typed `PmtOp` payloads
-/// directly (divergence fully closed), flip the first block to assert
-/// preservation and update `PLAN_IVE_IR_DIVERGENCE.md` §3.
+/// full 5-kind shape).
 #[test]
-fn canonical_ast_bridge_loses_typed_state_divergence_documented() {
+fn canonical_ast_bridge_preserves_typed_state_metadata() {
     // Source exercises state_new (semantic StateInit), field write
     // (semantic StateWrite), field read (semantic StateRead). AstToScg
     // emits typed payloads for these on the semantic side; the codegen
@@ -273,8 +270,10 @@ fn main() -> i32 {
     );
     let ast = parse_output.unwrap();
 
-    let cg = vuma::pipeline::bridge_ast_to_codegen_scg(&ast);
-    let counts = count_codegen_typed_state(&cg);
+    // Single canonical AST walk: the bridge returns BOTH the codegen SCG
+    // (untyped nodes) AND the TypedStateMeta metadata (typed-state info
+    // preserved as a side product of lowering). No separate parallel walk.
+    let (cg, meta) = vuma::pipeline::bridge_ast_to_codegen_scg_with_meta(&ast);
 
     // ── Side A (UNCHANGED): the codegen SCG's emitted nodes are STILL
     //    untyped. The canonical AST→codegen bridge emits ZERO typed
@@ -285,18 +284,19 @@ fn main() -> i32 {
     //    bridge started emitting typed payloads directly (divergence FULLY
     //    closed at the node level) — flip this block to assert preservation
     //    and update PLAN_IVE_IR_DIVERGENCE.md §3.
+    let counts = count_codegen_typed_state(&cg);
     assert_eq!(counts[0], 0, "StateInit still lowers to untyped Allocation");
     assert_eq!(counts[1], 0, "StateRead still lowers to untyped Access/Load");
     assert_eq!(counts[2], 0, "StateWrite still lowers to untyped Access/Store");
     assert_eq!(counts[3], 0, "StateTransform not emitted by this source");
     assert_eq!(counts[4], 0, "ForeignConsume not emitted by this source");
 
-    // ── Side B (SCG-CLOSURE): the typed-state info is now PRESERVED as
-    //    recoverable `TypedStateMeta` metadata. The extractor walks the
-    //    SAME AST the bridge lowered and records one entry per typed-state
-    //    op the bridge lowered away — so the `layout_name` that Side A
-    //    lost at the node level is recovered here at the metadata level.
-    let meta = vuma::pipeline::extract_typed_state_meta_from_ast(&ast);
+    // ── Side B (SCG-CLOSURE): the typed-state info is PRESERVED as
+    //    recoverable `TypedStateMeta` metadata, now produced by the bridge's
+    //    own canonical walk (merged in Task 2-A; standalone extractor deleted
+    //    in Task 2-B). One entry per typed-state op the bridge lowered away,
+    //    so the `layout_name` that Side A lost at the node level is recovered
+    //    here at the metadata level.
 
     // `[StateInit, StateRead, StateWrite, StateTransform, ForeignConsume]`
     // counts across the recovered metadata.
@@ -316,7 +316,7 @@ fn main() -> i32 {
         "TypedStateMeta must recover exactly the 3 typed-state ops the Point \
          source exercises ([StateInit, StateRead, StateWrite] = [1,1,1]; \
          StateTransform + ForeignConsume not exercised). If this fails, the \
-         extractor's typed-state recognition drifted from the bridge's."
+         bridge's typed-state recognition drifted."
     );
 
     // ── Side B (cont.): the recovered metadata carries the IVE-relevant
