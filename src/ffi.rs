@@ -10,8 +10,11 @@
 //! - **`extern "C"` block syntax** — declares external functions in VUMA source
 //! - **Syscall bindings** — Linux kernel interfaces: `write`, `read`, `exit`,
 //!   `mmap`, `munmap`, `brk`
-//! - **C library bindings** — libc functions: `memcpy`, `memset`, `malloc`,
-//!   `free`
+//! - **VUMA builtins (No-FFI)** — the legacy libc bindings (`memcpy`,
+//!   `memset`, `malloc`, `free`) have been replaced by verified VUMA IR
+//!   builtins (`IRInstr::BulkCopy`, `IRInstr::BulkFill`, `IRInstr::Alloc`,
+//!   `IRInstr::Free`) per the FFI Wave 1 No-FFI design — see
+//!   `src/codegen/src/ir.rs` and FFI-1-A in the worklog.
 //! - **Codegen support** — extern function calls emit relocations instead of
 //!   local `BL` instructions
 //!
@@ -189,35 +192,6 @@ pub fn linux_syscall_bindings() -> ExternBlock {
     }
 }
 
-/// Returns the standard C library bindings as an `ExternBlock`.
-pub fn c_library_bindings() -> ExternBlock {
-    ExternBlock {
-        convention: CallingConvention::C,
-        functions: vec![
-            ExternFn {
-                name: "memcpy".to_string(),
-                param_types: vec![ExternType::Ptr, ExternType::Ptr, ExternType::I64],
-                return_type: Some(ExternType::Ptr),
-            },
-            ExternFn {
-                name: "memset".to_string(),
-                param_types: vec![ExternType::Ptr, ExternType::I64, ExternType::I64],
-                return_type: Some(ExternType::Ptr),
-            },
-            ExternFn {
-                name: "malloc".to_string(),
-                param_types: vec![ExternType::I64],
-                return_type: Some(ExternType::Ptr),
-            },
-            ExternFn {
-                name: "free".to_string(),
-                param_types: vec![ExternType::Ptr],
-                return_type: None,
-            },
-        ],
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ExternRegistry — tracks all known extern functions
 // ---------------------------------------------------------------------------
@@ -238,11 +212,15 @@ impl ExternRegistry {
         Self::default()
     }
 
-    /// Create a registry pre-populated with Linux syscall and C library bindings.
+    /// Create a registry pre-populated with the Linux syscall bindings.
+    ///
+    /// The legacy libc bindings (`memcpy`, `memset`, `malloc`, `free`) have
+    /// been replaced by VUMA IR builtins (`IRInstr::BulkCopy`,
+    /// `IRInstr::BulkFill`, `IRInstr::Alloc`, `IRInstr::Free`) per the
+    /// FFI Wave 1 No-FFI design (see FFI-1-A in the worklog).
     pub fn with_default_bindings() -> Self {
         let mut registry = Self::new();
         registry.register_block(&linux_syscall_bindings());
-        registry.register_block(&c_library_bindings());
         registry
     }
 
@@ -868,21 +846,16 @@ mod tests {
         assert!(bindings.functions.iter().any(|f| f.name == "brk"));
     }
 
-    #[test]
-    fn test_c_library_bindings() {
-        let bindings = c_library_bindings();
-        assert_eq!(bindings.convention, CallingConvention::C);
-        assert!(bindings.functions.iter().any(|f| f.name == "memcpy"));
-        assert!(bindings.functions.iter().any(|f| f.name == "memset"));
-        assert!(bindings.functions.iter().any(|f| f.name == "malloc"));
-        assert!(bindings.functions.iter().any(|f| f.name == "free"));
-    }
+    // The legacy `test_c_library_bindings` test was removed by FFI Wave 1
+    // task A — `c_library_bindings()` was deleted because `memcpy` /
+    // `memset` / `malloc` / `free` are now lowered as the VUMA IR builtins
+    // `IRInstr::BulkCopy` / `IRInstr::BulkFill` / `IRInstr::Alloc` /
+    // `IRInstr::Free` (see `src/codegen/src/ir.rs`).
 
     #[test]
     fn test_extern_registry() {
         let registry = ExternRegistry::with_default_bindings();
         assert!(registry.is_extern("write"));
-        assert!(registry.is_extern("malloc"));
         assert!(!registry.is_extern("my_local_fn"));
         assert!(registry.needs_relocation("write"));
         assert_eq!(registry.convention("write"), Some(CallingConvention::C));

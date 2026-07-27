@@ -2384,7 +2384,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                 | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                 // StarkProof — stub (Call-form builtin is the active path).
-                | IRInstr::StarkProof { .. } => Vec::new(),
+                | IRInstr::StarkProof { .. }
+                // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+                // replacements): backend lowering not yet implemented on
+                // loongarch64; emit no bytes (x86_64 is the canonical path).
+                | IRInstr::BulkCopy { .. }
+                | IRInstr::BulkFill { .. } => Vec::new(),
                 // ── CallIndirect (driver_call) ──
                 // Lower an indirect call: load args into $a0-$a5, load the
                 // function pointer into a scratch register, then `jirl $ra,
