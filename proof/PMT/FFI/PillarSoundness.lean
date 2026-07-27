@@ -41,7 +41,7 @@ trust). The `ffi_pillar_sound` theorem formalizes this:
                           | .call name _ =>
                             name ∈ NoExterns.builtin_callees ∨
                             name ∈ syscall_callees
-                          | .call_indirect _ _ => False
+                          | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A
                           | _ => True) ∧
       -- Every syscall number maps (via syscall_nr_table) to a
       -- SyscallName in the allowlist (FFI-5-A / Gap #3 proof-side
@@ -229,7 +229,7 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
       | .call name _ =>
         name ∈ NoExterns.builtin_callees ∨
         name ∈ syscall_callees
-      | .call_indirect _ _ => False
+      | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A
       | _ => True)
     ∧ -- (2) Every `.syscall nr _ _` instruction in `P` carries a
       --     syscall number `nr` that maps (via `syscall_nr_table`, the
@@ -270,8 +270,8 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
     by_cases hcall : ∃ name args, i = .call name args
     · obtain ⟨name, args, rfl⟩ := hcall
       exact Or.inl h
-    · by_cases hci : ∃ a b', i = .call_indirect a b'
-      · obtain ⟨a, b', rfl⟩ := hci
+    · by_cases hci : ∃ a b c, i = .call_indirect a b c  -- PMT-FAITH-6-A
+      · obtain ⟨a, b, c, rfl⟩ := hci  -- PMT-FAITH-6-A: 3 args
         exact h
       · -- For all other PmtInstr variants, the match's `_` arm
         -- reduces to `True`, which is provable by `trivial`.
@@ -311,7 +311,7 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         | channel_recv_timeout _ _ => exact trivial
         | channel_recv_result _ _ _ _ => exact trivial
         | stark_proof _ _ _ => exact trivial
-        | call_indirect a b' => exact absurd ⟨a, b', rfl⟩ hci
+        | call_indirect a b c => exact absurd ⟨a, b, c, rfl⟩ hci  -- PMT-FAITH-6-A
         -- 2 bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill`
         -- are opaque memory writes (memcpy/memset replacements).
         -- Neither is a `.call` nor a `.call_indirect`, so the match's

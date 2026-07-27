@@ -94,8 +94,8 @@ here in `ExecFunction.lean`, since they are used by
 `IRProgram.to_program_preserves_well_typed` below. -/
 
 /-- §1.1: `ret` flattens to the empty list of steps. -/
-theorem PmtInstr.to_steps_ret (v : IRValue) :
-    PmtInstr.to_steps (.ret v) = [] := by
+theorem PmtInstr.to_steps_ret (vs : List IRValue) :
+    PmtInstr.to_steps (.ret vs) = [] := by
   rfl
 
 /-- §1.2: `alloc` flattens to a singleton list. -/
@@ -360,12 +360,14 @@ theorem PmtInstr.to_steps_stark_proof (input dst : IRValue)
     PmtInstr.to_steps (.stark_proof input dst constraints) = [] := by
   rfl
 
-/-- §1.7d.9: `call_indirect` flattens to one self-loop step per argument
-vreg — exactly mirroring `.call` (placeholder self-loops until call
-semantics are modeled). -/
-theorem PmtInstr.to_steps_call_indirect (func_ptr : String) (args : List String) :
-    PmtInstr.to_steps (.call_indirect func_ptr args)
-      = args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩) := by
+/-- §1.7d.9: `call_indirect` flattens to `[]` (PMT-FAITH-6-A).
+
+Previously flattened to one self-loop Step per arg using String var names —
+but call_indirect now takes (Option IRValue, IRValue, List IRValue) bit-faithfully,
+and there's no faithful IRValue→String mapping for Step.in_var (FAITH-2-L gap).
+Emit [] and document: per-arg liveness tracking deferred to FAITH-2-L closure. -/
+theorem PmtInstr.to_steps_call_indirect (dst : Option IRValue) (func_ptr : IRValue) (args : List IRValue) :
+    PmtInstr.to_steps (.call_indirect dst func_ptr args) = [] := by
   rfl
 
 /-- §1.7d.10: `syscall` flattens to `[]` (opaque effect; syscalls are
@@ -604,10 +606,10 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
   | stark_proof input dst constraints =>
     rw [PmtInstr.to_steps_stark_proof] at hs
     simp at hs
-  | call_indirect func_ptr args =>
-    rw [PmtInstr.to_steps_call_indirect, List.mem_map] at hs
-    obtain ⟨v, _, rfl⟩ := hs
-    exact WF_Layout_empty
+  | call_indirect dst func_ptr args =>
+    -- PMT-FAITH-6-A: flattens to []; membership hypothesis is vacuous.
+    rw [PmtInstr.to_steps_call_indirect] at hs
+    simp at hs
   | syscall nr args dst =>
     rw [PmtInstr.to_steps_syscall] at hs
     simp at hs
@@ -768,10 +770,10 @@ theorem PmtInstr.to_steps_op_transform
   | stark_proof input dst constraints =>
     rw [PmtInstr.to_steps_stark_proof] at hs
     simp at hs
-  | call_indirect func_ptr args =>
-    rw [PmtInstr.to_steps_call_indirect, List.mem_map] at hs
-    obtain ⟨v, _, rfl⟩ := hs
-    rfl
+  | call_indirect dst func_ptr args =>
+    -- PMT-FAITH-6-A: flattens to []; membership hypothesis is vacuous.
+    rw [PmtInstr.to_steps_call_indirect] at hs
+    simp at hs
   | syscall nr args dst =>
     rw [PmtInstr.to_steps_syscall] at hs
     simp at hs
