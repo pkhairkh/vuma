@@ -16,7 +16,7 @@ For each claim in the FFI spec, I verified:
 
 | # | Severity | Gap | Affected claim |
 |---|----------|-----|----------------|
-| 1 | **HIGH** | 5 active extern calls remain in `src/pipeline.rs` AST-bridge path: `mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow` | "No foreign function calls in VUMA (No-FFI path)" |
+| 1 | **HIGH** | ~~5 active extern calls remain in `src/pipeline.rs` AST-bridge path: `mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow`~~ **CLOSED by FFI-5-B** | "No foreign function calls in VUMA (No-FFI path)" |
 | 2 | **HIGH** | ~~Lean `SyscallName` allowlist has 6 syscalls; Rust `SyscallName` enum has 16+~~ **CLOSED by FFI-4-B** | "6 syscalls routed through IRInstr::Syscall" |
 | 3 | **HIGH** | ~~Lean `NoExterns` predicate does NOT check `.syscall` instructions~~ **predicate-side CLOSED by FFI-4-A; proof-side CLOSED by FFI-5-A** | `ffi_pillar_sound` Conjunct 2 is vacuously true |
 | 4 | **HIGH** | ~~Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions)~~ **CLOSED by FFI-3-A** | Lean cannot model programs using memcpy/memset replacements |
@@ -30,7 +30,98 @@ For each claim in the FFI spec, I verified:
 
 ---
 
-## Gap #1 — 5 active extern calls remain in pipeline.rs (HIGH)
+## Gap #1 — 5 active extern calls remain in pipeline.rs (HIGH) — CLOSED by FFI-5-B
+
+**Status (FFI-5-B, post-closure):** The 4 remaining compiler-emitted
+syscall externs (`mmap`, `mprotect`, `mremap`, `munmap`) in
+`src/pipeline.rs`'s AST-bridge path (the `arena_new` / `arena_grow` /
+`arena_free` lowering of `Expr::ArenaNew / ArenaGrow / ArenaFree`) have
+been re-routed from `ScgStatement::Call(CallNode { is_extern: true, .. })`
+to `ScgStatement::Syscall(SyscallCallNode { nr, dst, args })`. Each
+`SyscallCallNode` uses the **VUMA-generic (Linux asm-generic) syscall
+number** — the same `nr` contract the existing `Expr::Syscall { nr, .. }`
+path and `ScgStatement::Syscall` consumers (e.g. `Expr::Allocate` →
+`nr=222` for mmap at `pipeline.rs:11381`; `PStmt::Free` → `nr=215` for
+munmap) already use:
+
+| Function | asm-generic `nr` | Native x86_64 (via `syscall_abi::translate`) | Site count |
+|----------|------------------|---------------------------------------------|------------|
+| `mmap`   | 222              | 9                                           | 1 (arena_new) |
+| `mprotect` | 226            | 10                                          | 2 (arena_new guard, arena_grow guard) |
+| `mremap` | 216              | 25                                          | 1 (arena_grow) |
+| `munmap` | 215              | 11                                          | 1 (arena_free) |
+
+The asm-generic numbering is critical: `syscall_abi::translate_or_warn`
+(per-arch) maps the generic `nr` to the backend's native syscall number
+(e.g. 222 → 9 on x86_64, 222 → 192 mmap2 on i386, 222 → 90 on PPC64,
+etc.). The task brief's "(mmap=9, munmap=11, mprotect=10, mremap=25 on
+Linux x86_64)" referred to the *native x86_64* numbers; passing those
+verbatim would have collided with the translation table (e.g. nr=25 in
+the x86_64 table maps to 72 = fcntl, not 25 = mremap). Using
+asm-generic numbers matches the existing codebase contract (verified
+against `escape_analysis.rs` test fixtures: `nr: 222` for mmap, `nr: 215`
+for munmap, `nr: 64` for write — all asm-generic) and produces the
+correct native number on every backend.
+
+`__arena_overflow` was deliberately **NOT** routed through
+`IRInstr::Syscall` — it is a trap (every backend emits its own
+`__arena_overflow` stub at the codegen level, e.g. `xor eax, eax; ret`
+on x86_64), not a syscall. It remains a `CallNode { is_extern: true,
+func: "__arena_overflow" }`, but `__arena_overflow` is in
+`NoExterns.builtin_callees` (added by FFI-5-A's `where` clause at
+`proof/PMT/PillarSoundness.lean:231-235`: `["channel_open", ...,
+"__oob_trap", "__arena_overflow", "__uaf_trap"]`). The `NoExterns`
+predicate's `.call name _` arm accepts it as a built-in callee — it
+never reaches the backend's extern-call resolution as a real foreign
+call (the codegen layer recognizes the name and emits a per-backend
+trap stub).
+
+After FFI-5-B, `src/pipeline.rs` no longer emits any `CallNode` with
+`is_extern: true` for a syscall (the 4 syscalls above are now
+`SyscallCallNode`s). The only remaining `is_extern: true` `CallNode`s
+in `src/pipeline.rs` are:
+- `__arena_overflow` (arena-overflow trap; in `builtin_callees`),
+- `AtomicLoad`/`AtomicStore`/`AtomicCas` (intercepted by
+  `scg_to_ir.rs::lower_call` and re-emitted as `IRInstr::Atomic*` —
+  never reach the backend as extern calls),
+- user-source `extern "C" { fn ... }` blocks (the legitimate residual
+  extern surface that the FFI pillar explicitly permits).
+
+`cargo build --release` PASS, `cargo test -p vuma --lib` PASS,
+`cargo test -p vuma-codegen --lib` PASS, `lake build` PASS. No Lean
+changes were needed for the `__arena_overflow` part of the fix — it
+was already in `NoExterns.builtin_callees` (FFI-5-A added the comment
++ entry at `proof/PMT/PillarSoundness.lean:231-235`).
+
+**Lean residual (pre-existing, not closed by FFI-5-B).** The Lean
+`NoExterns` predicate's `.syscall nr _ _` arm (FFI-4-A) checks
+`syscall_nr_table nr = some sn ∧ sn ∈ SyscallName.allowlist`. The
+current `syscall_nr_table` (`proof/PMT/PillarSoundness.lean:159-179`)
+is keyed on **x86_64 native** syscall numbers (`9↦Mmap, 10↦Mprotect,
+11↦Munmap, 12↦Brk, 0↦Read, 1↦Write, 60↦Exit, 231↦ExitGroup` — no
+`Mremap` entry). However, the Rust IR (and hence the Lean `PmtInstr`
+that mirrors it) carries the **asm-generic** syscall number (`nr=222`
+for mmap, `nr=215` for munmap, `nr=226` for mprotect, `nr=216` for
+mremap — matching `syscall_abi::translate_or_warn`'s input contract
+and the existing `Expr::Allocate` lowering at `pipeline.rs:11381`).
+
+This means a Lean program mirroring a Rust program that uses
+`arena_new` / `arena_grow` / `arena_free` would have `nr=222/215/226/216`
+in its `PmtInstr.syscall` instructions, and `syscall_nr_table` would
+return `none` for all four — so `NoExterns P` would not hold, and
+`ffi_pillar_sound`'s hypothesis `h_no_ffi : NoExterns P` could not be
+discharged for such programs. This is the same residual that already
+affects the pre-FFI-5-B `Expr::Allocate` lowering (`nr=222`); FFI-5-B
+extends the surface but does not introduce a new kind of gap. The
+proper fix — extending `syscall_nr_table` to be keyed on asm-generic
+numbers (or adding a separate `nr_native_x86_64` table) and adding a
+`Mremap` variant to both Lean `SyscallName` inductives and the Rust
+`SyscallName` enum (`src/ffi.rs`) — is out of FFI-5-B's ≤3-file /
+≤6-read scope. Recommended follow-up wave: FFI-5-C "sync Lean
+`syscall_nr_table` to asm-generic; add `Mremap` to Rust `SyscallName`
+and both Lean `SyscallName` inductives". This residual is filed as a
+sub-item of Gap #1 (Lean-side) and does NOT affect the Rust-side
+faithfulness invariant (which is the deliverable of FFI-5-B).
 
 **Claim** (from spec & `proof/AUDIT_FFI.md`):
 > "No foreign function calls in VUMA (No-FFI path)."
