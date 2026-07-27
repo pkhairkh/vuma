@@ -31,18 +31,17 @@
 #   - Lean : proof/lean-toolchain  → leanprover/lean4:v4.21.0
 #   - Rust : rust-toolchain.toml   → nightly-2026-03-01
 #
-# Triggers: push/PR to `main` (permanent) and to `cleanup-attack` (temporary,
-# for this attack wave — remove the `cleanup-attack` entries once the gate
-# is merged to main and verified green).
+# Triggers: push/PR to `main`. (The temporary `cleanup-attack` trigger was
+# removed in the post-merge cleanup after PR #12 landed and CI went green.)
 # ============================================================================
 
 name: Lean-Rust Parity
 
 on:
   push:
-    branches: [main, cleanup-attack]
+    branches: [main]
   pull_request:
-    branches: [main, cleanup-attack]
+    branches: [main]
 
 # Cancel in-flight runs when a new commit lands on the same branch/PR.
 # Keeps the (intentionally serial) chain from piling up.
