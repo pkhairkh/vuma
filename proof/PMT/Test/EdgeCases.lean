@@ -49,7 +49,7 @@ def zeroState : ExecState :=
   3. `0 + 1 > 0` reduces to `true`, so the overflow guard's
      then-branch yields `.error .arena_overflow`. -/
 example :
-    step zeroState ⟨"in", "out", ⟨1, []⟩, .transform⟩ =
+    step zeroState ⟨"in", "out", ⟨"layout", 1, []⟩, .transform⟩ =
     Except.error TrapCode.arena_overflow := by
   rfl
 
@@ -65,7 +65,7 @@ def exactFitState : ExecState :=
 succeeds (no overflow trap). This guards against a regression that
 would swap `>` for `≥` in the overflow guard. -/
 example :
-    (step exactFitState ⟨"in", "out", ⟨16, []⟩, .transform⟩).isOk = true := by
+    (step exactFitState ⟨"in", "out", ⟨"layout", 16, []⟩, .transform⟩).isOk = true := by
   rfl
 
 /-! ## §3. Single-step program with empty rest. -/
@@ -76,35 +76,29 @@ layout's `total_size` and returns `Result.ok final_used`. Here the
 unfolds `exec` once, matches on `step`'s `.ok` constructor, then
 unfolds `exec []` to `Result.ok s.arena.used`. -/
 example :
-    exec [⟨"in", "out", ⟨8, []⟩, .transform⟩] exactFitState = Result.ok 8 := by
+    exec [⟨"in", "out", ⟨"layout", 8, []⟩, .transform⟩] exactFitState = Result.ok 8 := by
   rfl
 
 /-! ## §4. Empty layout (`total_size = 0`, `fields = []`) is well-formed. -/
 
 /-- The third conjunct of `WF_Layout` is `0 < total_size ∨ fields = []`.
-For `⟨0, []⟩` the left disjunct is `0 < 0 = false`, but the right
+For `⟨"layout", 0, []⟩` the left disjunct is `0 < 0 = false`, but the right
 disjunct is `[] = [] = true`, so the layout is well-formed.
 
 The first two conjuncts (field-bounds and disjointness) are vacuous
 because there are no fields. -/
-example : WF_Layout ⟨0, []⟩ := by
+example : WF_Layout ⟨"layout", 0, []⟩ := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf; cases hf
-  · intros _ _ h₁ _ _; cases h₁
-  · exact Or.inr rfl
+  intro f hf; cases hf
 
 /-! ## §5. Layout with size but no fields is well-formed. -/
 
 /-- A layout with `total_size = 8` and empty `fields` is well-formed:
 the third conjunct holds via `0 < 8` (left disjunct). The first two
 conjuncts are vacuous. -/
-example : WF_Layout ⟨8, []⟩ := by
+example : WF_Layout ⟨"layout", 8, []⟩ := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf; cases hf
-  · intros _ _ h₁ _ _; cases h₁
-  · exact Or.inl (by decide)
+  intro f hf; cases hf
 
 /-! ## §6. Two steps sharing `in_var`/`out_var` are NOT `WellTyped`. -/
 
@@ -116,7 +110,7 @@ keeps both steps, giving length `2 ≠ 1`. So `WellTyped` does not hold.
 
 The proof instantiates the universal with the first step, computes the
 filter's actual length (2), and derives the contradiction `2 = 1`. -/
-def dupStep : Step := ⟨"a", "b", ⟨8, []⟩, .transform⟩
+def dupStep : Step := ⟨"a", "b", ⟨"layout", 8, []⟩, .transform⟩
 
 /-- A 2-element program whose steps share `in_var` and `out_var` —
 this violates the name-uniqueness conjunct of `WellTyped`. -/
