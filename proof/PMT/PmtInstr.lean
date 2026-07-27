@@ -511,7 +511,13 @@ inductive PmtInstr where
     -- convention), which has been replaced by the inlined `IRInstr::Transform`
     -- variant. The Lean model now has ONE Transform variant matching Rust
     -- bit-faithfully (closes FAITH-2-C).
-  | call        : String → List String → PmtInstr             -- (builtin_name, arg_vars)
+  | call        : Option IRValue → String → List IRValue → Bool → PmtInstr
+    -- PMT-FAITH-6-B: bit-faithful mirror of Rust (ir.rs:1422)
+    -- `Call { dst: Option<IRValue>, func: String, args: Vec<IRValue>, is_extern: bool }`.
+    -- Previously (String, List String) — dropped dst + is_extern, used String
+    -- var-name instead of IRValue vreg. Now bit-faithful: (dst, func, args, is_extern).
+    -- The is_extern flag is essential for NoExterns (FAITH-2-F): the name-based
+    -- check must be supplemented by is_extern = false.
   | ret         : List IRValue → PmtInstr                      -- (return values) — PMT-FAITH-6-A: List, matches Rust Ret { values: Vec<IRValue> }
   -- Pure-arithmetic variants (12, PMT-1-A) — `effect = .none`, `to_steps = []`
   | bin_op      : BinOpKind → IRValue → IRValue → IRValue → IRType → PmtInstr
@@ -715,7 +721,7 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .store in_var _ _ _ => .reads in_var
   | .free in_var => .consumes in_var
   | .transform_layouts _ _ _ _ => .none  -- PMT-FAITH-5-A: pointer copy, no arena effect.
-  | .call _ _ => .none
+  | .call _ _ _ _ => .none  -- PMT-FAITH-6-B: 4 args
   | .ret _ => .none
   -- Pure-arithmetic variants (PMT-1-A): no state effect.
   | .bin_op _ _ _ _ _ => .none
@@ -798,7 +804,7 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .store in_var _ _ _ => WF_Layout (layout_env in_var)
   | .free in_var => WF_Layout (layout_env in_var)
   | .transform_layouts _ _ _ _ => True  -- PMT-FAITH-5-A: pointer copy, no WF_Layout check.
-  | .call _ _ => True
+  | .call _ _ _ _ => True  -- PMT-FAITH-6-B: 4 args
   | .ret _ => True
   -- Pure-arithmetic variants (PMT-1-A): pure computation, no arena involvement.
   | .bin_op _ _ _ _ _ => True
@@ -919,7 +925,7 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .store in_var _ _ _ => [⟨in_var, in_var, ⟨1, []⟩, .transform⟩]
   | .free in_var => [⟨in_var, in_var, ⟨1, []⟩, .transform⟩]
   | .transform_layouts _ _ _ _ => []  -- PMT-FAITH-5-A: pointer copy, no Step.
-  | .call _ args => args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)
+  | .call _ _ _ _ => []  -- PMT-FAITH-6-B: 4 args; emit [] (FAITH-2-L gap, args are IRValue not String)
   | .ret _ => []
   -- Pure-arithmetic variants (PMT-1-A): pure computation, no Steps emitted.
   | .bin_op _ _ _ _ _ => []
