@@ -63,3 +63,4 @@ import PMT.Test.ArenaBasicSim
 import PMT.Test.SorryFreeAudit
 import PMT.Test.PropertyTests
 import PMT.Test.EdgeCases
+import PMT.Test.RealisticProgram
