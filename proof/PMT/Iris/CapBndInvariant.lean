@@ -138,6 +138,52 @@ structure CapBndInv (γ_used γ_cap : GhostName) (a : Arena) : Prop where
     pair-introduction. -/
 theorem frame_rule {P Q : Prop} (hP : P) (hQ : Q) : Sep P Q := ⟨hP, hQ⟩
 
+-- TODO(Wave 2-C): requires threading Heap through CapBndInv.
+/-
+  ## Genuine frame rule (Wave 2-C, task 2-C)
+
+  The `frame_rule` above uses the DEGENERATE `Sep (P Q : Prop) where
+  left, right` (plain conjunction, defined earlier in this module), so
+  its proof is the trivial `⟨hP, hQ⟩`. The GENUINE version must use
+  `PMT.Iris.GenuineSep.Sep`, whose real disjointness + merge witnesses
+  are
+
+      def Sep (P Q : Heap → Prop) (h : Heap) : Prop :=
+        ∃ h1 h2, P h1 ∧ Q h2 ∧ h1.disjoint h2 ∧ h1.merge h2 = h
+
+  The `hdisj` / `hmerge` hypotheses in the statement below are exactly
+  the last two conjuncts, obtained by destructuring
+  `GenuineSep.Sep P R h` via `obtain ⟨h1, h2, hp, hq, hd, hu⟩`.
+
+  Intended statement (h1/h2 bound explicitly because `autoImplicit =
+  false` in `lakefile.toml`):
+
+      theorem frame_rule_genuine
+          (P Q : Heap → Prop) (R : Heap → Prop) (h : Heap)
+          (h1 h2 : Heap)
+          (hP : P h1) (hQ : Q h2)
+          (hdisj : h1.disjoint h2) (hmerge : h1.merge h2 = h) :
+          CapBndInv P h1 → CapBndInv R h →
+          CapBndInv (fun h' => P h' ∧ R (h'.merge h2)) h := by
+        -- genuine proof using disjointness
+
+  BLOCKED on `CapBndInv` arity. `CapBndInv` is currently indexed by
+  `(γ_used γ_cap : GhostName) (a : Arena)` (see its definition above):
+  it carries NO `Heap` component. Consequently `CapBndInv P h1` with
+  `P : Heap → Prop` and `h1 : Heap` is ill-typed — both a kind mismatch
+  (`Heap → Prop` is not a `GhostName`) and an arity mismatch
+  (`CapBndInv` expects three arguments `(γ_used, γ_cap, a)`, while the
+  template supplies two). To STATE — let alone PROVE —
+  `frame_rule_genuine`, `CapBndInv` must be re-parameterised to be a
+  `Heap → Prop` (or to thread a `Heap` alongside the `Arena`/ghost
+  names). That refactor touches the `structure CapBndInv` definition
+  and its two downstream lemmas (`alloc_preserves_cap_bnd`,
+  `cap_bnd_implies_capacity`), and is deferred to a later Wave-2 step.
+  The degenerate `frame_rule` above is RETAINED for backward
+  compatibility. No `sorry` / `admit` is added to the live theory: the
+  statement lives ONLY in this comment block.
+-/
+
 /-- `alloc` preserves `[cap_bnd]`: if `[cap_bnd]` holds before `alloc`,
     and the `alloc` precondition `a.used + l.total_size ≤ a.capacity`
     holds, then `[cap_bnd]` holds after `alloc` — with the ghost state
