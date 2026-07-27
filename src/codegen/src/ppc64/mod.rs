@@ -5850,25 +5850,15 @@ impl Backend for PPC64Backend {
                 }));
             }
 
-            // __ffi_fallback_stub: return 0 (LI R3, 0; BLR). Fallback for
-            // truly unknown externs (e.g. C library functions not linked).
+            // __ffi_fallback_stub: TRAP (trap -> SIGTRAP on ppc64).
+            //   Unresolved externs in ET_EXEC mode are a build-time bug. The
+            //   binary traps at runtime (`trap` = `tw 31,r0,r0`, raises
+            //   SIGTRAP on Linux ppc64) rather than silently returning 0.
+            //   Round 7 verified the old `LI R3,0; BLR` (return 0) behavior
+            //   was unsound: it turned "missing symbol" into "no-op success".
             {
                 let mut code = Vec::new();
-                code.extend_from_slice(
-                    &Instruction::Li {
-                        rt: Gpr::R3,
-                        simm: 0,
-                    }
-                    .encode(),
-                );
-                code.extend_from_slice(
-                    &Instruction::Bclr {
-                        bo: 20,
-                        bi: 0,
-                        bh: 0,
-                    }
-                    .encode(),
-                ); // BLR
+                code.extend_from_slice(&Instruction::Trap.encode()); // trap (tw 31,r0,r0)
                 stubs.push(("__ffi_fallback_stub".to_string(), code));
             }
 
@@ -6123,9 +6113,9 @@ impl Backend for PPC64Backend {
                             .copy_from_slice(&patched.to_be_bytes());
                     } else {
                         // External symbol — patch BL to point at __ffi_fallback_stub
-                        // (LI R3, 0; BLR → returns 0) instead of leaving it as
-                        // offset 0 (which traps). This matches the aarch64/x86_64
-                        // backends' ffi_stub behavior.
+                        // (trap → SIGTRAP) instead of leaving it as offset 0.
+                        // The trap makes the unresolved-extern build bug
+                        // observable; see the stub definition above.
                         if let Some(&fallback_off) = func_offsets.get("__ffi_fallback_stub") {
                             let existing = u32::from_be_bytes([
                                 all_code[abs_offset],
