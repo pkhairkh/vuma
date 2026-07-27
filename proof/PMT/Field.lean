@@ -18,7 +18,7 @@ This file depends on the data model (`Arena`, `Layout`, `Field`,
 (no Iris import — the affine fragment is encoded with explicit
 resource tokens). All theorems close without `sorry`.
 
-Note: the ghost-state liveness content (`state_read_requires_live`,
+Note: the ghost-state liveness content (`linear_implies_accessible`,
 `state_transform`, `state_transform_kills_input`) lives in
 `PMT.Liveness` (§5), as documented in `lakefile.toml`.
 

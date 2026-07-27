@@ -155,7 +155,7 @@ theorem live_mirror_ghost (γ : GhostName) (var : String) (b : Liveness)
     `Accessible` (its runtime `LinearToken` has `status = live`).
 
     This bridges the new Iris-style invariant to the existing
-    `state_read_requires_live` theorem in `PMT.Liveness`, which uses
+    `linear_implies_accessible` theorem in `PMT.Liveness`, which uses
     `Accessible` as its liveness precondition. The hypotheses
     `htvar` and `hmirror` witness that the runtime token `t` is the
     mirror of the ghost invariant: same `var`, same `live` status. -/
