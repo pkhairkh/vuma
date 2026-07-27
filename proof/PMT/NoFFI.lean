@@ -149,7 +149,7 @@ theorem no_ffi_program_sound
 
         ∀ P, NoFFI P ↔ ∀ f b i, match i with
                                 | .call name _ => name ∈ builtin_callees
-                                | .call_indirect _ _ => False
+                                | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A: 3 args now
                                 | .syscall nr _ _ =>
                                   ∃ sn, syscall_nr_table nr = some sn
                                       ∧ sn ∈ SyscallName.allowlist
@@ -174,7 +174,7 @@ theorem no_ffi_after_removal (P : IRProgram) :
                 (i : PmtInstr) (_hi : i ∈ b.instructions),
       match i with
       | .call name _ => name ∈ NoExterns.builtin_callees
-      | .call_indirect _ _ => False
+      | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A: 3 args now
       | .syscall nr _ _ =>
         ∃ sn, syscall_nr_table nr = some sn ∧ sn ∈ SyscallName.allowlist
       | _ => True := by

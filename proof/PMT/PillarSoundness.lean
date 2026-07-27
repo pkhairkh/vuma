@@ -232,7 +232,7 @@ def NoExterns (P : IRProgram) : Prop :=
      (i : PmtInstr) (_hi : i ∈ b.instructions),
     match i with
     | .call name _ => name ∈ builtin_callees
-    | .call_indirect _ _ => False  -- indirect calls are never No-FFI
+    | .call_indirect _ _ _ => False  -- indirect calls are never No-FFI (PMT-FAITH-6-A: 3 args now)
     | .syscall nr _ _ =>
       -- FFI-4-A (Gap #3 closure): the syscall number must map (via
       -- `syscall_nr_table`) to a `SyscallName` in the allowlist.
