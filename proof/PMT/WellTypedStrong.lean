@@ -504,6 +504,237 @@ theorem no_oob_trap_for_well_typed_strong
     ∀ r, exec prog s = r → r ≠ Result.trap 134 :=
   no_oob_trap_aux prog hwf.1 hwf.2.2 s hstep hcap
 
+/-! ## §7.5. No-UAF-trap theorem (PMT-3-B)
+
+The `no_oob_trap_aux` proof above already establishes (in its `cons` case)
+that `step s i ≠ .error .uaf` for every step `i` — the UAF guard
+`s.live i.in_var = .dead` is contradicted by `hstep i h_i_mem` which gives
+`s.live i.in_var = .live`. The OOB proof uses this fact only to proceed
+past the UAF guard to the OOB check; the UAF trap itself is not excluded
+from the conclusion (`to_exit = 135 ≠ 134` is enough for the OOB exclusion).
+
+This section states and proves the UAF exclusion directly: for
+`WellTypedStrong` programs with the `hstep` liveness hypothesis, the
+execution never traps with `.uaf` (exit code 135). The proof is by
+induction on `prog`, mirroring `no_oob_trap_aux`'s structure but with a
+stronger conclusion.
+
+The key insight: `hstep` is PRESERVED by `step` (the `no_oob_trap_aux`
+proof establishes `hstep'` for the `rest` of the program in the `ok s'`
+case). So at every step, the current `in_var` is live in the current
+state, which directly contradicts the UAF guard. -/
+
+private theorem no_uaf_trap_aux
+    (prog : Program)
+    (hwf : WellTyped prog)
+    (s : ExecState)
+    (hstep : ∀ st : Step, st ∈ prog →
+              WF_Layout st.layout ∧ s.live st.in_var = Liveness.live)
+    (hcap : CapacityInvariant s.arena) :
+    ∀ r, exec prog s = r → r ≠ Result.trap 135 := by
+  induction prog generalizing s with
+  | nil =>
+    intro r hr
+    rw [exec] at hr
+    subst hr
+    intro h; injection h
+  | cons i rest ih =>
+    intro r hr
+    rw [exec] at hr
+    cases h_step : step s i with
+    | error c =>
+      rw [h_step] at hr
+      -- Case-split on whether c = .uaf.
+      by_cases hcu : c = TrapCode.uaf
+      · -- c = .uaf: derive contradiction from hstep liveness.
+        exfalso
+        subst hcu
+        have h_i_mem : i ∈ i :: rest := @List.mem_cons_self _ i rest
+        obtain ⟨_, hlive_i⟩ := hstep i h_i_mem
+        rw [step, hlive_i, if_neg (by intro h; cases h)] at h_step
+        -- h_step : (match i.op with ...) = .error .uaf
+        -- None of the branches produce .uaf (the UAF guard was the only one).
+        cases h_op : i.op with
+        | field_access f =>
+          rw [h_op] at h_step
+          simp only [] at h_step
+          by_cases h : f.offset + f.size > i.layout.total_size
+          · rw [if_pos h] at h_step; cases h_step
+          · rw [if_neg h] at h_step; cases h_step
+        | alloc =>
+          rw [h_op] at h_step
+          simp only [] at h_step
+          by_cases h : s.arena.used + i.layout.total_size > s.arena.capacity
+          · rw [if_pos h] at h_step; cases h_step
+          · rw [if_neg h] at h_step; cases h_step
+        | transform =>
+          rw [h_op] at h_step
+          simp only [] at h_step
+          by_cases h : s.arena.used + i.layout.total_size > s.arena.capacity
+          · rw [if_pos h] at h_step; cases h_step
+          · rw [if_neg h] at h_step; cases h_step
+      · -- c ≠ .uaf: c.to_exit ≠ 135 (only .uaf maps to 135).
+        cases c with
+        | arena_overflow =>
+          simp only [] at hr
+          rw [show TrapCode.arena_overflow.to_exit = 1 from rfl] at hr
+          subst hr
+          intro h; injection h with h'; omega
+        | oob =>
+          simp only [] at hr
+          rw [show TrapCode.oob.to_exit = 134 from rfl] at hr
+          subst hr
+          intro h; injection h with h'; omega
+        | uaf => exact absurd rfl hcu
+    | ok s' =>
+      rw [h_step] at hr
+      -- Derive `hstep'` for `rest` at `s'` — same structure as `no_oob_trap_aux`.
+      cases h_op : i.op with
+      | field_access f =>
+        have h_i_mem : i ∈ i :: rest := @List.mem_cons_self _ i rest
+        obtain ⟨_, hlive_i⟩ := hstep i h_i_mem
+        have h_unfold : step s i = Except.ok s' := h_step
+        rw [step, hlive_i, if_neg (by intro h; cases h), h_op] at h_unfold
+        simp only [] at h_unfold
+        by_cases h_oob : f.offset + f.size > i.layout.total_size
+        · rw [if_pos h_oob] at h_unfold
+          cases h_unfold
+        · rw [if_neg h_oob] at h_unfold
+          injection h_unfold with h_eq
+          rw [← h_eq] at hr
+          have hstep' : ∀ st : Step, st ∈ rest →
+                WF_Layout st.layout ∧ s.live st.in_var = Liveness.live := by
+            intro st hst
+            exact hstep st (List.mem_cons_of_mem _ hst)
+          exact ih (WellTyped_cons_proj i rest hwf) s hstep' hcap r hr
+      | alloc =>
+        have h_i_mem : i ∈ i :: rest := @List.mem_cons_self _ i rest
+        obtain ⟨_, hlive_i⟩ := hstep i h_i_mem
+        have h_unfold : step s i = Except.ok s' := h_step
+        rw [step, hlive_i, if_neg (by intro h; cases h), h_op] at h_unfold
+        simp only [] at h_unfold
+        by_cases h_ovf : s.arena.used + i.layout.total_size > s.arena.capacity
+        · rw [if_pos h_ovf] at h_unfold
+          cases h_unfold
+        · rw [if_neg h_ovf] at h_unfold
+          injection h_unfold with h_eq
+          have hstep' : ∀ st : Step, st ∈ rest →
+                WF_Layout st.layout ∧ s'.live st.in_var = Liveness.live := by
+            intro st hst
+            have hst_mem : st ∈ i :: rest := List.mem_cons_of_mem _ hst
+            obtain ⟨hwf_st, hlive_st⟩ := hstep st hst_mem
+            refine ⟨hwf_st, ?_⟩
+            rw [← h_eq]
+            show (if st.in_var = i.in_var then Liveness.dead
+                  else if st.in_var = i.out_var then Liveness.live
+                  else s.live st.in_var) = Liveness.live
+            by_cases h_eq_in : st.in_var = i.in_var
+            · exfalso
+              have h_in_uniq :
+                  (List.filter (fun s' => s'.in_var == st.in_var) (i :: rest)).length = 1 :=
+                hwf.2.1 st hst_mem
+              rw [List.filter_cons] at h_in_uniq
+              by_cases hbeq : i.in_var == st.in_var
+              · rw [if_pos hbeq, List.length_cons] at h_in_uniq
+                have h_st_in_filter :
+                    st ∈ List.filter (fun s' => s'.in_var == st.in_var) rest := by
+                  rw [List.mem_filter]; refine ⟨hst, ?_⟩; simp
+                have h_empty :
+                    List.filter (fun s' => s'.in_var == st.in_var) rest = [] :=
+                  List.length_eq_zero_iff.mp (by omega)
+                exact List.not_mem_nil (h_empty ▸ h_st_in_filter)
+              · rw [h_eq_in] at hbeq
+                have h_refl : (i.in_var == i.in_var) = true := by simp
+                exact hbeq h_refl
+            · rw [if_neg h_eq_in]
+              by_cases h_eq_out : st.in_var = i.out_var
+              · rw [if_pos h_eq_out]
+              · rw [if_neg h_eq_out]
+                exact hlive_st
+          have hcap' : CapacityInvariant s'.arena := by
+            rw [← h_eq]
+            show s.arena.used + i.layout.total_size ≤ s.arena.capacity
+            omega
+          exact ih (WellTyped_cons_proj i rest hwf) s' hstep' hcap' r hr
+      | transform =>
+        have h_i_mem : i ∈ i :: rest := @List.mem_cons_self _ i rest
+        obtain ⟨_, hlive_i⟩ := hstep i h_i_mem
+        have h_unfold : step s i = Except.ok s' := h_step
+        rw [step, hlive_i, if_neg (by intro h; cases h), h_op] at h_unfold
+        simp only [] at h_unfold
+        by_cases h_ovf : s.arena.used + i.layout.total_size > s.arena.capacity
+        · rw [if_pos h_ovf] at h_unfold
+          cases h_unfold
+        · rw [if_neg h_ovf] at h_unfold
+          injection h_unfold with h_eq
+          have hstep' : ∀ st : Step, st ∈ rest →
+                WF_Layout st.layout ∧ s'.live st.in_var = Liveness.live := by
+            intro st hst
+            have hst_mem : st ∈ i :: rest := List.mem_cons_of_mem _ hst
+            obtain ⟨hwf_st, hlive_st⟩ := hstep st hst_mem
+            refine ⟨hwf_st, ?_⟩
+            rw [← h_eq]
+            show (if st.in_var = i.in_var then Liveness.dead
+                  else if st.in_var = i.out_var then Liveness.live
+                  else s.live st.in_var) = Liveness.live
+            by_cases h_eq_in : st.in_var = i.in_var
+            · exfalso
+              have h_in_uniq :
+                  (List.filter (fun s' => s'.in_var == st.in_var) (i :: rest)).length = 1 :=
+                hwf.2.1 st hst_mem
+              rw [List.filter_cons] at h_in_uniq
+              by_cases hbeq : i.in_var == st.in_var
+              · rw [if_pos hbeq, List.length_cons] at h_in_uniq
+                have h_st_in_filter :
+                    st ∈ List.filter (fun s' => s'.in_var == st.in_var) rest := by
+                  rw [List.mem_filter]; refine ⟨hst, ?_⟩; simp
+                have h_empty :
+                    List.filter (fun s' => s'.in_var == st.in_var) rest = [] :=
+                  List.length_eq_zero_iff.mp (by omega)
+                exact List.not_mem_nil (h_empty ▸ h_st_in_filter)
+              · rw [h_eq_in] at hbeq
+                have h_refl : (i.in_var == i.in_var) = true := by simp
+                exact hbeq h_refl
+            · rw [if_neg h_eq_in]
+              by_cases h_eq_out : st.in_var = i.out_var
+              · rw [if_pos h_eq_out]
+              · rw [if_neg h_eq_out]
+                exact hlive_st
+          have hcap' : CapacityInvariant s'.arena := by
+            rw [← h_eq]
+            show s.arena.used + i.layout.total_size ≤ s.arena.capacity
+            omega
+          exact ih (WellTyped_cons_proj i rest hwf) s' hstep' hcap' r hr
+
+/-- §7.5: **`no_uaf_trap_for_well_typed_strong`** — for `WellTypedStrong`
+    programs with the `hstep` liveness hypothesis, the execution never
+    traps with `.uaf` (exit code 135).
+
+    The UAF trap requires `s.live i.in_var = .dead` at some step `i`.
+    The `hstep` hypothesis gives `s.live i.in_var = .live` for every
+    step in the initial state, and `hstep` is preserved by `step`
+    (established in the `no_uaf_trap_aux` proof's `ok s'` case via
+    `WellTyped`'s in_var name-uniqueness). So at every step, the
+    current `in_var` is live in the current state, contradicting the
+    UAF guard.
+
+    **PMT-3-B.** This theorem is the UAF counterpart of
+    `no_oob_trap_for_well_typed_strong` (§7). Together, the two
+    theorems exclude exit codes 134 and 135 for `WellTypedStrong`
+    programs. The remaining trap code (1, arena-overflow) requires
+    an additional "total allocation fits in capacity" hypothesis that
+    is out of scope. -/
+theorem no_uaf_trap_for_well_typed_strong
+    (prog : Program) (initial_var : String)
+    (hwf : WellTypedStrong prog initial_var)
+    (s : ExecState)
+    (hstep : ∀ st : Step, st ∈ prog →
+              WF_Layout st.layout ∧ s.live st.in_var = Liveness.live)
+    (hcap : CapacityInvariant s.arena)
+    (_hinit : s.live initial_var = Liveness.live) :
+    ∀ r, exec prog s = r → r ≠ Result.trap 135 :=
+  no_uaf_trap_aux prog hwf.1 s hstep hcap
+
 /-! ## §8. Program-level lift: `IRProgram.well_typed → WellTypedStrong (to_program)` (PMT-1-E)
 
 This section proves the program-level lift theorem that closes the
