@@ -199,36 +199,36 @@ def leanVerifyTransform
     Bool :=
   (PMT.IVE.Soundness.verify_transform_st layouts t).valid
 
+/-- Helper: reconstruct a `String → Option LayoutInfo` function from a list of
+(var, LayoutInfo) pairs. Unknown vars map to `none` (mirrors Rust's HashMap.get() → None).
+Faithful model: LayoutInfo carries FieldInfo with name/offset/size/type_name. -/
+def layout_env_from_list_faith (env_list : List (String × PMT.IVE.Soundness.LayoutInfo))
+    (var : String) : Option PMT.IVE.Soundness.LayoutInfo :=
+  env_list.lookup var
+
 /-- `@[export lean_verify_state_reads]` — extracted form of
-`PMT.IVE.Soundness.verify_state_reads`. Takes a list of (var, layout)
-pairs (the env), a list of (var, field_types) pairs, and a list of
-`StateRead` (var + field + expected_type), returns `true` iff every
-read passes (i.e., the verification list is all `valid = true`).
-The Rust FFI marshals each list as a `lean_object*`. -/
+`PMT.IVE.Soundness.verify_state_reads`. Faithful: takes a list of (var, LayoutInfo)
+pairs (the env) and a list of StateRead (var + field_name + expected_type).
+Returns true iff every read passes. -/
 @[export lean_verify_state_reads]
 def leanVerifyStateReads
-    (env_list : List (String × PMT.Layout))
-    (ft_list : List (String × List (PMT.Field × String)))
+    (env_list : List (String × PMT.IVE.Soundness.LayoutInfo))
     (reads : List PMT.IVE.Soundness.StateRead) : Bool :=
-  let env := layout_env_from_list env_list
-  let fts := field_types_env_from_list ft_list
-  let results := PMT.IVE.Soundness.verify_state_reads env fts reads
+  let env := layout_env_from_list_faith env_list
+  let results := PMT.IVE.Soundness.verify_state_reads env reads
   results.all (fun r => r.valid)
 
 /-- `@[export lean_verify_state_writes]` — extracted form of
-`PMT.IVE.Soundness.verify_state_writes`. Takes a list of (var, layout)
-pairs, a list of (var, field_types) pairs, a list of consumed var names,
-and a list of `StateWrite` (var + field + value_type + after_consume),
-returns `true` iff every write passes. -/
+`PMT.IVE.Soundness.verify_state_writes`. Faithful: takes a list of (var, LayoutInfo)
+pairs, a list of consumed var names, and a list of StateWrite (var + field_name +
+value_type + after_consume). Returns true iff every write passes. -/
 @[export lean_verify_state_writes]
 def leanVerifyStateWrites
-    (env_list : List (String × PMT.Layout))
-    (ft_list : List (String × List (PMT.Field × String)))
+    (env_list : List (String × PMT.IVE.Soundness.LayoutInfo))
     (consumed : List String)
     (writes : List PMT.IVE.Soundness.StateWrite) : Bool :=
-  let env := layout_env_from_list env_list
-  let fts := field_types_env_from_list ft_list
-  let results := PMT.IVE.Soundness.verify_state_writes env fts consumed writes
+  let env := layout_env_from_list_faith env_list
+  let results := PMT.IVE.Soundness.verify_state_writes env consumed writes
   results.all (fun r => r.valid)
 
 /-- Soundness bridge for the extracted `lean_verify_transform`:
