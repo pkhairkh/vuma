@@ -1,5 +1,6 @@
 import PMT.Soundness
 import PMT.PmtInstr
+import PMT.ExecFunction
 
 /-!
 ## WellTypedStrong — strengthened WellTyped predicate (sorry-free)
@@ -502,5 +503,106 @@ theorem no_oob_trap_for_well_typed_strong
     --                  | Result.trap 134 => False | _ => True`.
     ∀ r, exec prog s = r → r ≠ Result.trap 134 :=
   no_oob_trap_aux prog hwf.1 hwf.2.2 s hstep hcap
+
+/-! ## §8. Program-level lift: `IRProgram.well_typed → WellTypedStrong (to_program)` (PMT-1-E)
+
+This section proves the program-level lift theorem that closes the
+non-degenerate `full_simulation_strong` proof in `PMT.SimRel`. The lift
+takes `IRProgram.well_typed env` (the IR-level well-typedness predicate
+defined in `PMT.IRProgram` §11) plus an IR-level dataflow hypothesis and
+produces `WellTypedStrong (IRProgram.to_program p) initial_var` (the
+flat-program-level strengthened predicate defined in §3.1 above).
+
+The lift has three conjuncts:
+
+  1. **`WellTyped`** (basic — name-uniqueness + `WF_Layout`). Closed by
+     `IRProgram.to_program_preserves_well_typed_full` in
+     `PMT.ExecFunction` §5.1, which lifts `IRProgram.well_typed` through
+     `IRFunction.to_program`/`IRBlock.to_steps`/`PmtInstr.to_steps` and
+     uses the `IRFunction.in_vars_unique`/`out_vars_unique` conjuncts of
+     `IRFunction.well_typed` for the two name-uniqueness conjuncts.
+  2. **`DataflowOk`** (every `in_var` is `initial_var` or produced by
+     some `out_var`). NOT implied by `IRProgram.well_typed` alone (the
+     IR-level predicate enforces name-uniqueness but not producer-for-
+     every-reader dataflow). Taken as an explicit hypothesis
+     `hdataflow : DataflowOk p.to_program initial_var`. A future
+     refinement may add an IR-level `IRFunction.dataflow_ok` conjunct
+     (analogous to `in_vars_unique`/`out_vars_unique`) so the hypothesis
+     can be discharged at the IR level; for PMT-1-E the flat-program
+     `DataflowOk` hypothesis suffices.
+  3. **`FieldAccessOk`** (every `PmtOp.field_access f` op references a
+     field `f` registered in `s.layout.fields`). Closed trivially by
+     `IRProgram.to_program_FieldAccessOk` (§8.1 below), because
+     `PmtInstr.to_steps` NEVER produces a `Step` with
+     `op = .field_access` — every step carries `op = .transform`
+     (per `PmtInstr.to_steps_op_transform` in `PMT.ExecFunction` §1.9).
+     The `FieldAccessOk` match therefore reduces to `True` for every
+     step in the flattened program.
+
+The lift theorem is the bridge that lets `full_simulation_strong`
+(`PMT.SimRel` §10) invoke `pmt_soundness_strong` (§6.1 above) on the
+flattened program, yielding a non-degenerate simulation in which the
+program actually executes (rather than trivially trapping with UAF on
+the first step as in the prior vacuous proof). -/
+
+/-- §8.1: `IRProgram.to_program` satisfies `FieldAccessOk` — every
+runtime `PmtOp.field_access f` op references a field `f` registered in
+`s.layout.fields`.
+
+This holds TRIVIALLY for any `IRProgram.to_program` because
+`PmtInstr.to_steps` never produces a `Step` with `op = .field_access`:
+every `Step` carries `op = PmtOp.transform` (per
+`PmtInstr.to_steps_op_transform` in `PMT.ExecFunction` §1.9). The
+`FieldAccessOk` match therefore reduces to `True` for every step.
+
+The proof lifts `PmtInstr.to_steps_op_transform` through two layers of
+`List.flatMap` (`IRFunction.to_program` and `IRBlock.to_steps`) using
+`List.mem_flatMap` to expose the originating `PmtInstr` — mirroring the
+structure of `IRProgram.to_program_preserves_well_typed` in
+`PMT.ExecFunction` §5. -/
+theorem IRProgram.to_program_FieldAccessOk (p : IRProgram) :
+    FieldAccessOk (IRProgram.to_program p) := by
+  intro s hs
+  obtain ⟨functions, data_sections⟩ := p
+  cases functions with
+  | nil =>
+    simp only [IRProgram.to_program, List.not_mem_nil] at hs
+  | cons f rest =>
+    simp only [IRProgram.to_program, IRFunction.to_program] at hs
+    rw [List.mem_flatMap] at hs
+    obtain ⟨b, hb_in_blocks, hs_b⟩ := hs
+    simp only [IRBlock.to_steps] at hs_b
+    rw [List.mem_flatMap] at hs_b
+    obtain ⟨i, hi_in_instrs, hs_i⟩ := hs_b
+    -- `s.op = .transform` by `PmtInstr.to_steps_op_transform`.
+    have h_op : s.op = PmtOp.transform :=
+      PmtInstr.to_steps_op_transform i s hs_i
+    -- `FieldAccessOk` match: for `op = .transform`, reduces to `True`.
+    rw [h_op]
+    trivial
+
+/-- §8.2: `IRProgram.well_typed` lifts to `WellTypedStrong (to_program)`.
+
+The lift combines:
+  - `WellTyped (p.to_program)` — from `to_program_preserves_well_typed_full`
+    (`PMT.ExecFunction` §5.1).
+  - `DataflowOk (p.to_program) initial_var` — taken as hypothesis
+    `hdataflow` (NOT implied by `IRProgram.well_typed` alone).
+  - `FieldAccessOk (p.to_program)` — from `to_program_FieldAccessOk`
+    (§8.1 above), holds trivially because `PmtInstr.to_steps` never
+    produces a `.field_access` op.
+
+This is the bridge that lets `full_simulation_strong` (`PMT.SimRel` §10)
+invoke `pmt_soundness_strong` on the flattened program — yielding a
+non-degenerate simulation in which the program actually executes. -/
+theorem IRProgram.well_typed.to_program_well_typed_strong
+    (p : IRProgram) (env : String → Layout) (initial_var : String)
+    (hwf : p.well_typed env)
+    (hdataflow : DataflowOk (p.to_program) initial_var) :
+    WellTypedStrong (p.to_program) initial_var := by
+  unfold WellTypedStrong
+  refine ⟨?_, hdataflow, ?_⟩
+  · exact IRProgram.to_program_preserves_well_typed_full p env hwf
+  · exact IRProgram.to_program_FieldAccessOk p
 
 end PMT
