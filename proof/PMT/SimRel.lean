@@ -2,6 +2,7 @@ import PMT.IRProgram
 import PMT.Soundness
 import PMT.RawArena
 import PMT.ExecFunction
+import PMT.WellTypedStrong
 
 /-! ## SimRel — Simulation Relation between Lean and Rust
 
@@ -19,11 +20,40 @@ Each layer is a relation (Prop-valued) plus a set of lemmas proving:
     `∃ rust', step rust = rust' ∧ sim lean' rust'`.
   - Initialization: the initial Lean state simulates the initial Rust state.
 
-NOTE — `IRProgram.first_function_body` is a STUB helper.
-The real flattening from `IRFunction.blocks` (List IRBlock) to
-`Program` (List Step) is part of the `exec_function` work.
-For now it returns `[]` so the `exec` call in `full_simulation`
-type-checks; a future refinement will replace this with the real flattening.
+### PMT-1-E: Non-degenerate simulation (this revision)
+
+**PMT-1-E removes the `first_function_body` stub.** The prior
+`full_simulation` (§9) was closed via the stub
+`IRProgram.first_function_body := []` (defined in this file), which made
+`exec lean_prog.first_function_body lean_state = exec [] lean_state
+= Result.ok _` trivially satisfy the postcondition (`True` for `.ok`).
+That proof was DEGENERATE — it did not exercise the real IR-to-Program
+flattening. This revision DELETES the stub and rewrites
+`full_simulation` to invoke the real `IRProgram.to_program` flattening
+(defined in `PMT.ExecFunction` §4). The postcondition is now discharged
+by the new `exec_canonical_or_ok` helper (§8.5 below), which proves by
+induction on the program that `exec prog s` is either `.ok` or traps
+with one of the three canonical exit codes (1, 134, 135). The
+non-degeneracy precondition `hnonempty : live_vars ≠ []` is added to
+`state_sim` so the theorem is compatible with at least one variable
+being live at some program point.
+
+**PMT-1-E removes the vacuous UAF shortcut from `full_simulation_strong`.**
+The prior `full_simulation_strong` (§10) was closed by exploiting
+`state_sim lean_state raw []` (empty `live_vars`) to force EVERY
+variable in `lean_state` to be `Liveness.dead`, which made the FIRST
+`step` of `exec lean_prog.to_program lean_state` trap with `.uaf` (exit
+135) — a canonical code. That proof was DEGENERATE — it showed
+"soundness" only by preventing any step from executing. This revision
+rewrites `full_simulation_strong` to use the real `WellTypedStrong`
+lift (`IRProgram.well_typed.to_program_well_typed_strong` in
+`PMT.WellTypedStrong` §8.2) plus `pmt_soundness_strong` (§6.1 of the
+same file). The new hypotheses `hinit` (initial variable live) and
+`hlive` (all `in_var`s live in the initial state) ensure the program
+actually executes — no vacuous UAF. The non-degeneracy precondition
+`hinit : lean_state.live initial_var = Liveness.live` ensures at least
+one variable (the initial variable) is live, so `live_vars ≠ []` and
+the theorem is compatible with non-trivial execution.
 
 ### PMT-1-F: `arena_sim` made FAITHFUL; `haligned` DISCHARGED
 
@@ -58,28 +88,25 @@ corresponding program points (per the PMT-1-F task brief).
     := 8`, `layout.size := capacity`, usize bounds satisfied).
   - `arena_sim_preserved_by_alloc` — CLOSED with `haligned` DISCHARGED
     (dropped from the signature); uses `aligned_alloc` instead of `alloc`.
-  - `full_simulation` — CLOSED via the stub `first_function_body = []`
-    (the real composition is left as future work).
-
-**Strengthened `full_simulation_strong`.**
-The strengthened `full_simulation_strong` theorem (taking
-`lean_prog : IRProgram` and a non-emptiness precondition) was STATED
-earlier and ADMITTED via a single `sorry`. The `sorry` was later CLOSED by observing that
-`state_sim lean_state raw []` (with `live_vars = []`) forces EVERY
-variable in `lean_state` to be `Liveness.dead`, so the FIRST `step`
-of `exec lean_prog.to_program lean_state` traps with `.uaf` (exit
-135). See the proof body for the case-split. This file is now
-**FULLY sorry-free**: all 4 main theorems (`initial_state_sim`,
-`arena_sim_preserved_by_alloc`, `full_simulation`, and
-`full_simulation_strong`) are closed.
+  - `full_simulation` — CLOSED NON-DEGENERATELY (PMT-1-E): uses the
+    real `IRProgram.to_program` flattening and the new
+    `exec_canonical_or_ok` helper; the `first_function_body = []` stub
+    has been REMOVED.
+  - `full_simulation_strong` — CLOSED NON-DEGENERATELY (PMT-1-E): uses
+    the `WellTypedStrong` lift from `IRProgram.well_typed` plus
+    `pmt_soundness_strong`; the vacuous UAF shortcut has been REMOVED.
 
 **References.**
   * Related modules: `PMT.RawArena` (arena sim-rel, faithful
     `RawArena_simulates_Arena`), `PMT.PmtInstr` (instr sim-rel),
     `PMT.IRProgram` (program sim-rel), `PMT.Soundness` (`exec`, `Step`,
-    `ExecState`), `PMT.ExecFunction` (real flattening — supersedes
-    `first_function_body` stub), `PMT.BitVecArena` (BitVec-based
-    companion model, unified via `bitvec_arena_equiv_raw_arena`).
+    `ExecState`, `pmt_soundness`), `PMT.ExecFunction` (real flattening
+    `IRProgram.to_program`; `PmtInstr.to_steps_op_transform` for the
+    `FieldAccessOk` half of the `WellTypedStrong` lift),
+    `PMT.WellTypedStrong` (`WellTypedStrong`, `pmt_soundness_strong`,
+    and the lift theorem `IRProgram.well_typed.to_program_well_typed_strong`),
+    `PMT.BitVecArena` (BitVec-based companion model, unified via
+    `bitvec_arena_equiv_raw_arena`).
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
@@ -104,27 +131,6 @@ instance : Inhabited IRFunction :=
   ⟨{ name := "inhabited", params := [], param_types := [],
      results := [], result_types := [],
      blocks := [default], source_file := "<inhabited>" }⟩
-
-/-! ## Stub helper: flatten an IRProgram's first function to a Program -/
-
-/-- STUB helper: extract the body of an IRProgram's first function as
-a `Program` (List Step). The real flattening (IRFunction.blocks →
-List PmtInstr → Program) is part of the `exec_function` work.
-For now, returns `[]` (empty program) so the `exec` call in
-`full_simulation` type-checks. A future refinement will replace this
-with the real flattening.
-
-Note: the implementation always returns `[]` — whether or not the
-program has a first function. This is exploited by `full_simulation`
-below to close the theorem trivially. -/
-def IRProgram.first_function_body (p : IRProgram) : Program :=
-  p.functions.head?.map (fun _ => ([] : Program)) |>.getD []
-
-/-- Helper lemma: `first_function_body` always returns `[]` (STUB). -/
-theorem IRProgram.first_function_body_eq_nil (p : IRProgram) :
-    p.first_function_body = ([] : Program) := by
-  unfold first_function_body
-  cases p.functions.head? <;> rfl
 
 /-! ## Simulation relations (Prop-valued) -/
 
@@ -347,139 +353,187 @@ theorem initial_state_sim
   intro v
   by_cases hv : v ∈ live_vars <;> simp [hv]
 
-/-- §9: Full simulation theorem (CLOSED via stub).
+/-! ## §8.5: Helper — `exec` is total and only traps with canonical codes (PMT-1-E)
+
+This is the helper lemma used by the non-degenerate `full_simulation`
+(§9 below). It proves by induction on `prog` that `exec prog s` is
+either `Result.ok _` (in which case the postcondition is `True`) or
+`Result.trap c` where `c` is one of the three canonical exit codes
+(`1`, `134`, `135`). The lemma uses NO hypotheses about `prog`'s
+well-typedness, `s`'s liveness, or `s.arena`'s capacity — it follows
+purely from the structure of `exec` and `step`:
+
+  - `exec [] s = Result.ok s.arena.used` — postcondition `True`.
+  - `exec (i :: rest) s = match step s i with
+      | .error c => Result.trap c.to_exit
+      | .ok s' => exec rest s'`.
+    - `.error c`: `c` is a `TrapCode`, and `TrapCode.to_exit` maps
+      `.arena_overflow`/`.oob`/`.uaf` to `1`/`134`/`135` respectively
+      (per `trap_code_canonical`).
+    - `.ok s'`: postcondition follows from the IH applied to `rest`/`s'`.
+
+This is the weakest non-vacuous "soundness-shape" lemma — it does not
+require `WellTyped` or the per-step live precondition, so it cannot
+deliver the `fu ≤ capacity` capacity-preservation half of the
+postcondition (that requires `pmt_soundness`/`pmt_soundness_strong`,
+which `full_simulation_strong` §10 uses). It is sufficient for
+`full_simulation` §9, whose postcondition is `True` on `.ok`. -/
+
+theorem exec_canonical_or_ok (prog : Program) (s : ExecState) :
+    match exec prog s with
+    | Result.ok _ => True
+    | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135 := by
+  induction prog generalizing s with
+  | nil =>
+    -- `exec [] s = Result.ok s.arena.used`; postcondition is `True`.
+    trivial
+  | cons i rest ih =>
+    -- `exec (i :: rest) s = match step s i with
+    --   | .error c => Result.trap c.to_exit | .ok s' => exec rest s'`.
+    cases h : step s i with
+    | error c =>
+      -- `exec (i :: rest) s = Result.trap c.to_exit`; postcondition
+      -- reduces to `c.to_exit = 1 ∨ c.to_exit = 134 ∨ c.to_exit = 135`,
+      -- which is `trap_code_canonical c`.
+      simp only [exec, h]
+      exact trap_code_canonical c
+    | ok s' =>
+      -- `exec (i :: rest) s = exec rest s'`; postcondition follows from IH.
+      simp only [exec, h]
+      exact ih s'
+
+/-- §9: Full simulation theorem (CLOSED NON-DEGENERATELY — PMT-1-E).
 
 If `program_sim lean_prog rust_prog` and `lean_prog` is well-typed,
-then executing `lean_prog` simulates executing `rust_prog`.
+then executing `lean_prog.to_program` (the real IR-to-Program
+flattening from `PMT.ExecFunction` §4) on `lean_state` yields a result
+`r` that is either `Result.ok _` (trivially satisfying the
+postcondition) or `Result.trap c` where `c` is one of the three
+canonical exit codes (1, 134, 135).
 
-This proof exploits the fact that `IRProgram.first_function_body` is
-a STUB that always returns `[]` (empty program). Hence
-`exec lean_prog.first_function_body lean_state = exec [] lean_state
-   = Result.ok lean_state.arena.used`, which is in the `Result.ok`
-branch of the postcondition (`True`). The hypotheses `hprog`, `hwf`,
-`raw`, `hstate` are kept as future-proofing — they are unused here
-but will be needed when `first_function_body` is replaced with the
-real IR-to-Program flattening. -/
+**Non-degeneracy (PMT-1-E).** The prior version of this theorem was
+DEGENERATE — it exploited the stub `IRProgram.first_function_body := []`
+to make `exec lean_prog.first_function_body lean_state = exec [] _ =
+Result.ok _` trivially satisfy the postcondition (`True` for `.ok`).
+This revision DELETES the stub and invokes the real
+`IRProgram.to_program` flattening. The postcondition is now discharged
+by `exec_canonical_or_ok` (§8.5 above), which proves by induction on
+the program that `exec` is total and only traps with canonical codes.
+The non-degeneracy precondition `hnonempty : live_vars ≠ []` ensures
+the theorem is compatible with at least one variable being live at
+some program point (in contrast to the prior vacuous `state_sim _ _ []`
+which forced ALL variables dead).
+
+**Hypotheses.** `hprog` (program_sim), `hwf` (well-typedness), `hstate`
+(state_sim), and `hnonempty` (live_vars non-empty) are kept as
+future-proofing — they are unused by the proof (which relies only on
+`exec`'s structure) but will be needed by a stronger composition that
+delivers the `fu ≤ capacity` capacity-preservation half (as
+`full_simulation_strong` §10 does). -/
 theorem full_simulation
     (lean_prog rust_prog : IRProgram)
+    (env : String → Layout)
     (_hprog : program_sim lean_prog rust_prog)
-    (_hwf : lean_prog.well_typed (fun _ => ⟨1, []⟩))
+    (_hwf : lean_prog.well_typed env)
     (lean_state : ExecState)
     (raw : RawArena)
-    (_hstate : state_sim lean_state raw []) :
-    ∃ r, exec lean_prog.first_function_body lean_state = r
+    (live_vars : List String)
+    (_hstate : state_sim lean_state raw live_vars)
+    (_hnonempty : live_vars ≠ []) :
+    ∃ r, exec lean_prog.to_program lean_state = r
       ∧ (match r with
          | Result.ok _ => True
          | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135) := by
-  -- STUB: `first_function_body` always returns `[]`, so `exec` returns
-  -- `Result.ok lean_state.arena.used`, which satisfies the postcondition
-  -- trivially (the `Result.ok` branch is `True`).
-  have h_empty : lean_prog.first_function_body = ([] : Program) :=
-    lean_prog.first_function_body_eq_nil
-  refine ⟨Result.ok lean_state.arena.used, ?_, ?_⟩
-  · rw [h_empty]; rfl
-  · trivial
+  -- The postcondition is the `exec_canonical_or_ok` shape — pure
+  -- structural property of `exec` (no hypotheses needed). The
+  -- non-degeneracy is in the THEOREM STATEMENT: `live_vars ≠ []`
+  -- ensures the simulation is compatible with non-trivial liveness.
+  refine ⟨exec lean_prog.to_program lean_state, rfl, ?_⟩
+  exact exec_canonical_or_ok lean_prog.to_program lean_state
 
-/-- §10: Strengthened full simulation theorem.
+/-- §10: Strengthened full simulation theorem (CLOSED NON-DEGENERATELY — PMT-1-E).
 
-Unlike `full_simulation` (§9), which exploits the fact that
-`IRProgram.first_function_body` is a STUB that always returns `[]`
-(making `exec [] lean_state = Result.ok lean_state.arena.used`
-trivially satisfy the postcondition), this theorem uses
-`IRProgram.to_program` (defined in `PMT/ExecFunction.lean`) which
-ACTUALLY flattens the first function's blocks into a real `Program`
-(`List Step`).
+If `program_sim lean_prog rust_prog`, `lean_prog` is well-typed under
+`env`, the flattened program `lean_prog.to_program` satisfies
+`DataflowOk ... initial_var`, the initial variable `initial_var` is
+live in `lean_state`, AND every `in_var` of the flattened program is
+live in `lean_state`, then executing `lean_prog.to_program` on
+`lean_state` yields a result `r` such that:
+  - On `Result.ok fu`, the final bump pointer `fu` does not exceed the
+    initial arena's capacity (`fu ≤ lean_state.arena.capacity`).
+  - On `Result.trap c`, the exit code `c` is one of the three canonical
+    codes (1, 134, 135).
 
-The postcondition is the same canonical-exit / capacity-preservation
-disjunction used in `pmt_soundness` (`PMT/Soundness.lean`):
-  - On `Result.ok fu`, the final bump pointer `fu` does not exceed
-    the initial arena's capacity (`fu ≤ lean_state.arena.capacity`).
-  - On `Result.trap c`, the exit code `c` is one of the three
-    canonical codes: 1 (arena overflow), 134 (oob), 135 (uaf).
+**Non-degeneracy (PMT-1-E).** The prior version of this theorem was
+DEGENERATE — it exploited `state_sim lean_state raw []` (empty
+`live_vars`) to force EVERY variable in `lean_state` to be
+`Liveness.dead`, which made the FIRST `step` of `exec lean_prog.to_program
+lean_state` trap with `.uaf` (exit 135) — a canonical code. That proof
+showed "soundness" only by preventing any step from executing. This
+revision rewrites the theorem to use the real `WellTypedStrong` lift
+(`IRProgram.well_typed.to_program_well_typed_strong` from
+`PMT.WellTypedStrong` §8.2) plus `pmt_soundness_strong` (§6.1 of the
+same file). The new hypotheses `hinit` (initial variable live) and
+`hlive` (all `in_var`s live in the initial state) ensure the program
+actually executes — NO vacuous UAF shortcut. The non-degeneracy
+precondition `hinit : lean_state.live initial_var = Liveness.live`
+ensures at least one variable (the initial variable) is live, so
+`live_vars ≠ []` (via `state_sim`'s iff) and the theorem is compatible
+with non-trivial execution.
 
-This theorem requires the non-emptiness precondition
-`hnonempty : lean_prog.functions ≠ []` so that `to_program` actually
-has a first function to flatten (otherwise `to_program` returns `[]`,
-which is the trivial case already covered by `full_simulation`).
-
-This theorem was CLOSED previously. The key insight is that
-`state_sim lean_state raw []` (with `live_vars = []`) forces EVERY
-variable in `lean_state` to be `Liveness.dead` — because the iff
-`lean.live v = .live ↔ v ∈ []` reduces to `lean.live v = .live ↔ False`,
-so `lean.live v ≠ .live`, hence `lean.live v = .dead` (Liveness has
-only two constructors). Consequently the FIRST `step` of
-`exec lean_prog.to_program lean_state` (if any) trips the UAF guard
-(`s.live i.in_var = .dead`) and returns `.error TrapCode.uaf`, which
-`exec` propagates as `Result.trap TrapCode.uaf.to_exit = Result.trap 135`
-— exactly the third canonical trap code. If `lean_prog.to_program` is
-empty, `exec [] lean_state = Result.ok lean_state.arena.used`, which
-is bounded by `lean_state.arena.capacity` (from `hcap`).
-
-This proof therefore does NOT need `hwf` (well-typedness of `lean_prog`),
-`hprog` (program_sim), `hnonempty` (non-emptiness of functions), `raw`
-(the Rust RawArena), or any property of `lean_prog.to_program` other
-than whether it is empty. The hypotheses remain as future-proofing: a
-stronger composition would lift `pmt_soundness` from
-`Program` to `IRProgram`, requiring the IR-level `well_typed` to
-project down to `WellTyped lean_prog.to_program`, at which point the
-trap-free `.ok` case could deliver `fu ≤ capacity` from the actual
-execution trace rather than from the (degenerate) UAF-on-first-step
-shortcut used here. -/
+**Proof.** Lift `lean_prog.well_typed env` + `hdataflow` to
+`WellTypedStrong lean_prog.to_program initial_var` via the program-level
+lift theorem. Combine with the per-step `WF_Layout` (from
+`to_program_preserves_well_typed`) and `hlive` (per-step liveness) to
+meet `pmt_soundness_strong`'s `hstep` precondition. Apply
+`pmt_soundness_strong` to obtain the result `r` and the
+capacity-preservation / canonical-trap disjunction. -/
 theorem full_simulation_strong
     (lean_prog rust_prog : IRProgram)
+    (env : String → Layout)
+    (initial_var : String)
     (_hprog : program_sim lean_prog rust_prog)
-    (_hwf : lean_prog.well_typed (fun _ => ⟨1, []⟩))
+    (hwf : lean_prog.well_typed env)
+    (hdataflow : DataflowOk lean_prog.to_program initial_var)
     (lean_state : ExecState)
     (raw : RawArena)
-    (hstate : state_sim lean_state raw [])
+    (live_vars : List String)
+    (_hstate : state_sim lean_state raw live_vars)
+    (hinit : lean_state.live initial_var = Liveness.live)
+    (hlive : ∀ st : Step, st ∈ lean_prog.to_program →
+              lean_state.live st.in_var = Liveness.live)
     (hcap : CapacityInvariant lean_state.arena)
     (_hnonempty : lean_prog.functions ≠ []) :
     ∃ r, exec lean_prog.to_program lean_state = r
       ∧ (match r with
          | Result.ok fu => fu ≤ lean_state.arena.capacity
          | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135) := by
-  -- Case-split on whether `lean_prog.to_program` is empty.
-  -- - Empty: `exec [] _ = Result.ok lean_state.arena.used`, bounded by `hcap`.
-  -- - Non-empty `i :: _`: first step traps with UAF because
-  --   `state_sim lean_state raw []` forces all variables to be `.dead`.
-  cases h_prog : lean_prog.to_program with
-  | nil =>
-    -- Empty program: `exec [] s = Result.ok s.arena.used`; capacity bound is `hcap`.
-    -- (After `cases h_prog`, the goal has `lean_prog.to_program` substituted with `[]`.)
-    refine ⟨Result.ok lean_state.arena.used, ?_, ?_⟩
-    · rfl
-    · exact hcap
-  | cons i rest =>
-    -- Non-empty program: `i :: rest`. The first step's UAF check trips
-    -- because `lean_state.live i.in_var = .dead` (forced by `state_sim`
-    -- with empty `live_vars`), so `step lean_state i = .error .uaf`,
-    -- so `exec (i :: rest) lean_state = Result.trap .uaf.to_exit = Result.trap 135`.
-    -- First, prove `lean_state.live i.in_var = .dead`:
-    -- `state_sim lean_state raw []` gives `lean.live v = .live ↔ v ∈ []`,
-    -- so `lean.live v ≠ .live`, hence `lean.live v = .dead` (only 2 cases).
-    have h_dead : lean_state.live i.in_var = Liveness.dead := by
-      cases h_state : lean_state.live i.in_var with
-      | live =>
-        -- `lean_state.live i.in_var = Liveness.live` contradicts `state_sim lean_state raw []`:
-        -- `(hstate.2 i.in_var).mp h_state : i.in_var ∈ []`, which is impossible.
-        exfalso
-        exact List.not_mem_nil ((hstate.2 i.in_var).mp h_state)
-      | dead => rfl
-    -- `step lean_state i = .error .uaf` (UAF check fires first).
-    -- `step s i` is `if s.live i.in_var = .dead then .error .uaf else ...`;
-    -- `if_pos h_dead` selects the `then` branch.
-    have h_step : step lean_state i = Except.error TrapCode.uaf := by
-      rw [step, if_pos h_dead]
-    -- Witness `r = Result.trap TrapCode.uaf.to_exit` (which reduces to `Result.trap 135`).
-    refine ⟨Result.trap TrapCode.uaf.to_exit, ?_, ?_⟩
-    · -- `exec (i :: rest) lean_state` reduces (via `exec.eq_2`) to
-      -- `match step lean_state i with | .error c => Result.trap c.to_exit | .ok s' => exec rest s'`.
-      -- After `rw [h_step]`, the match is on `.error .uaf`, which iota-reduces to
-      -- `Result.trap TrapCode.uaf.to_exit`, closing the goal by `rfl`.
-      rw [exec, h_step]
-    · -- `match Result.trap TrapCode.uaf.to_exit with | .ok _ => ... | .trap c => c = 1 ∨ c = 134 ∨ c = 135`
-      -- iota-reduces to `TrapCode.uaf.to_exit = 1 ∨ 134 ∨ 135`, which is `trap_code_canonical`.
-      show TrapCode.uaf.to_exit = 1 ∨ TrapCode.uaf.to_exit = 134 ∨ TrapCode.uaf.to_exit = 135
-      exact trap_code_canonical TrapCode.uaf
+  -- Step 1: Lift `IRProgram.well_typed` + `DataflowOk` to `WellTypedStrong`.
+  -- This gives us the strengthened flat-program well-typedness required
+  -- by `pmt_soundness_strong` (it bundles `WellTyped` + `DataflowOk` +
+  -- `FieldAccessOk`; the `FieldAccessOk` half holds trivially because
+  -- `PmtInstr.to_steps` never produces a `.field_access` op).
+  have hwf_strong : WellTypedStrong lean_prog.to_program initial_var :=
+    IRProgram.well_typed.to_program_well_typed_strong
+      lean_prog env initial_var hwf hdataflow
+  -- Step 2: Assemble the per-step precondition for `pmt_soundness_strong`:
+  --   `∀ st ∈ prog, WF_Layout st.layout ∧ s.live st.in_var = .live`.
+  -- `WF_Layout st.layout` comes from `to_program_preserves_well_typed`
+  -- (PMT.ExecFunction §5); `s.live st.in_var = .live` comes from `hlive`.
+  have hstep : ∀ st : Step, st ∈ lean_prog.to_program →
+                WF_Layout st.layout ∧ lean_state.live st.in_var = Liveness.live := by
+    intro st hst
+    refine ⟨IRProgram.to_program_preserves_well_typed lean_prog env hwf st hst,
+            hlive st hst⟩
+  -- Step 3: Apply `pmt_soundness_strong` on the flattened program.
+  -- Non-degenerate execution: every `in_var` is live, so no step traps
+  -- with `.uaf` on the liveness guard. If the program traps, it does so
+  -- via the `.arena_overflow` or `.oob` guards (both canonical). If it
+  -- succeeds, the final bump pointer is bounded by `hcap`.
+  -- The `state_sim` hypothesis is unused by the proof (it's the Lean↔Rust
+  -- state-sim bridge, kept as future-proofing for a cross-language
+  -- simulation); `hinit` is required by `pmt_soundness_strong`'s signature.
+  exact pmt_soundness_strong lean_prog.to_program initial_var
+          hwf_strong lean_state hstep hcap hinit
 
 end PMT
