@@ -42,7 +42,7 @@ jobs:
       # Cache the global Cargo registry/git directory. Keyed on the lockfile
       # so dependency changes invalidate cleanly.
       - name: Cache ~/.cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -54,7 +54,7 @@ jobs:
       # Cache the per-workspace build artifacts under target/. Keyed on the
       # lockfile hash plus the runner OS for correctness across rebuilds.
       - name: Cache target/
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: differential-test-target-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
