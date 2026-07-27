@@ -394,11 +394,62 @@ below.
 |---------|-----------|--------|
 | `pmt_soundness` | PMT state operations preserve the layout invariants of the backing arena. | Sorry-free. |
 | `no_oob_trap_for_well_typed_strong` | Well-typed PMT programs never trap on an out-of-bounds memory access. | Proven. |
+| `pmt_pillar_sound` | **PMT pillar theorem.** For a VUMA program `P` with `NoExterns P`, `P.well_typed env`, `DataflowOk`, and `CapacityInvariant`, the Lean `exec` is memory-safe: (1) produces a result, (2) on success `final_used ≤ capacity`, (3) never traps with the OOB code (134). | **Proven, sorry-free, conditional on the IVE-1-A and FFI-1-D hypotheses** (not yet on `main`). |
 | `verify_transform_sound` | The Rust `verify_transform` verifier accepts only state transforms that preserve the layout's invariants. | Proven. |
 | `verify_state_reads_sound` | Soundness of `verify_state_reads` w.r.t. the Lean PMT model. | Proven (sorry-free). |
 | `verify_state_writes_sound` | Soundness of `verify_state_writes` w.r.t. the Lean PMT model. | Proven (sorry-free). |
 | `alloc_preserves_all_invariants` | The Iris bundle `[cap_bnd] ∗ [live_mirror] ∗ [guard]` is preserved by `alloc` (Composition theorem). | Proven (sorry-free). |
 | `exec_satisfies_pipeline_spec` | Lean `exec` meets the `PipelineSpec` that `pipeline::compile` claims to meet. | Proven (sorry-free; reduces to `pmt_soundness`). |
+
+### 6.1 Verification Status (PMT Wave 2 — partial, PMT-only)
+
+The VUMA verification effort is structured around **three pillar theorems**
+— one per orchestrator (PMT, IVE, FFI). As of PMT Wave 2 task B (partial),
+only the **PMT** pillar is mathematically verified:
+
+| Pillar | Theorem | Status |
+|--------|---------|--------|
+| **PMT** | `pmt_pillar_sound` (`proof/PMT/PillarSoundness.lean`) | **Mathematically verified.** Lean 4, sorry-free, conditional on the IVE-1-A and FFI-1-D hypotheses (not yet on `main`). |
+| **IVE** | IVE-3-A (IVE pillar theorem) | **Pending.** The IVE orchestrator is at Wave 0 / early Wave 1; IVE-1-A (computable `WF_Layout`) is not yet on `main`. The `h_well_typed : P.well_typed env` hypothesis of `pmt_pillar_sound` is structural only until IVE-1-A lands. |
+| **FFI** | FFI-2-A (FFI pillar theorem) | **Pending.** The FFI orchestrator is at Wave 0 / early Wave 1; FFI-1-D (No-FFI theorem) is not yet on `main`. The `h_no_externs : NoExterns P` hypothesis of `pmt_pillar_sound` is taken as an assumption until FFI-1-D lands. |
+
+**Residual non-standard axiom in the PMT codedomain.** One non-standard
+axiom remains: `own_ex_exclusive` (in
+`proof/PMT/Iris/LiveMirrorInvariant.lean`, transitively invoked by
+`no_oob_trap_for_well_typed_strong` → `live_mirror_exclusive`). The
+non-degenerate `RealOwn` predicate and the soundly-derived
+`own_ex_exclusive_derived` theorem are in place in
+`proof/PMT/Iris/HeapModel.lean`; the bridge from the degenerate `Own` to
+`RealOwn` (which would remove the axiom) cascades through five Iris
+structures (`CapBndInv`, `ArenaRes`, `LiveMirrorInv`, `GuardInvariant`,
+`FractionalPerm`) and is **deferred to a follow-up wave**. The full
+`pmt_pillar_sound_full` theorem (additionally excluding exit codes 135
+and 1) is likewise deferred — needs UAF safety + overflow safety lemmas.
+
+**Residual Trusted Computing Base (TCB).** `pmt_pillar_sound` is a
+statement about the Lean `exec` model on `IRProgram`s, *not* about the
+Rust `pipeline::compile` output. The Lean proofs cover the PMT memory
+model and the IVE-side `verify_*` soundness theorems; they do NOT cover
+the production compiler pipeline. The residual TCB — the components
+whose correctness is **not** established by `pmt_pillar_sound` — is:
+
+- Parser (`src/parser/`).
+- AST → SCG bridge (`src/scg/`).
+- Codegen SCG → IR lowering (`src/codegen/`).
+- Optimizer (`src/codegen/src/opt/`).
+- Register allocator (`src/codegen/src/regalloc/`).
+- Backend instruction selection (per-backend `Isel` in `src/codegen/src/backends/`).
+- ELF / Wasm emission (`src/codegen/src/emit.rs`, `src/codegen/src/wasm/`).
+- OS interface (mmap, syscalls, process spawning).
+- Hardware (CPU, MMU, caches, devices).
+
+The `PipelineSim` scaffolding (`proof/PMT/PipelineSim.lean`) is the
+translation-validation bridge between Lean `exec` and Rust
+`pipeline::compile`; it is currently a degenerate `rfl` (see the PMT-0-C
+worklog entry) and is **not** implied by `pmt_pillar_sound` as it stands.
+Closing that bridge — and thereby shrinking the residual TCB on the
+codegen side — is the subject of the deferred `pmt_pillar_sound_full`
+work and the follow-up-wave axiom-removal work.
 
 The `pmt_soundness` theorem is the load-bearing result: the other
 theorems reduce to it. The headline theorems above and the ~60 supporting
