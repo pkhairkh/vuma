@@ -163,7 +163,12 @@ mod lean_ffi {
         pub fn lean_verify_state_writes(env_list: *mut LeanObject, consumed: *mut LeanObject, writes: *mut LeanObject) -> u8;
 
         // _prim wrappers (String-based, C-marshallable) — parse §9 format internally
-        pub fn lean_verify_transform_prim(registry: *mut LeanObject, input_layout: *mut LeanObject, output_layout: *mut LeanObject) -> u8;
+        pub fn lean_verify_transform_prim(
+            registry: *mut LeanObject,
+            input_layout: *mut LeanObject,
+            output_layout: *mut LeanObject,
+            kind: *mut LeanObject,  // NEW: "identity" | "reinterpret" | "copy"
+        ) -> u8;
         pub fn lean_verify_state_reads_prim(registry: *mut LeanObject, reads: *mut LeanObject) -> u8;
         pub fn lean_verify_state_writes_prim(registry: *mut LeanObject, consumed: *mut LeanObject, writes: *mut LeanObject) -> u8;
 
@@ -200,7 +205,10 @@ fn serialize_registry(env: &[(&str, Layout)]) -> String {
 fn serialize_reads(reads: &[(&str, Field)]) -> String {
     let mut s = String::new();
     for (var, f) in reads {
-        s.push_str(&format!("{}\t{}\t\n", var, field_name(f)));
+        // expected_type "u64" matches the registry's field type_name (see
+        // serialize_registry); an empty value caused verify_state_reads to
+        // fail on a type mismatch, breaking the reads-pass parity tests.
+        s.push_str(&format!("{}\t{}\tu64\n", var, field_name(f)));
     }
     s
 }
@@ -257,20 +265,22 @@ fn lean_verify_transform(
     out_layout: &Layout,
     kind: TransformKind,
 ) -> bool {
-    // Serialize both layouts into a registry, then call lean_verify_transform_prim
-    // with the registry + layout names. The kind is encoded by choosing the
-    // layout names: for Identity both names are "in", for Reinterpret "in"/"out",
-    // for Copy "in"/"out" (Copy accepts any pair).
+    // Serialize BOTH layouts under DIFFERENT names ("in" and "out"), then call
+    // lean_verify_transform_prim with the registry + layout names + the explicit
+    // kind string. The Lean _prim wrapper now takes an explicit kind and performs
+    // wf_layout + kind-specific checks (mirroring hand_verify_transform), rather
+    // than inferring the kind from layout-name/size comparison.
     let registry = serialize_registry(&[("in", in_layout.clone()), ("out", out_layout.clone())]);
-    let (in_name, out_name) = match kind {
-        TransformKind::Identity => ("in", "in"),
-        TransformKind::Reinterpret => ("in", "out"),
-        TransformKind::Copy => ("in", "out"),
+    let kind_str = match kind {
+        TransformKind::Identity => "identity",
+        TransformKind::Reinterpret => "reinterpret",
+        TransformKind::Copy => "copy",
     };
     let reg_lean = lean_ffi::str_to_lean(&registry);
-    let in_lean = lean_ffi::str_to_lean(in_name);
-    let out_lean = lean_ffi::str_to_lean(out_name);
-    unsafe { lean_ffi::lean_verify_transform_prim(reg_lean, in_lean, out_lean) != 0 }
+    let in_lean = lean_ffi::str_to_lean("in");
+    let out_lean = lean_ffi::str_to_lean("out");
+    let kind_lean = lean_ffi::str_to_lean(kind_str);
+    unsafe { lean_ffi::lean_verify_transform_prim(reg_lean, in_lean, out_lean, kind_lean) != 0 }
 }
 
 #[cfg(not(feature = "pmt-runtime-check"))]
