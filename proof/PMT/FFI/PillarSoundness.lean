@@ -234,6 +234,17 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         | channel_recv_result _ _ _ _ => exact trivial
         | stark_proof _ _ _ => exact trivial
         | call_indirect a b' => exact absurd ⟨a, b', rfl⟩ hci
+        -- 4 control-flow variants II (FFI-3-C / Gap #11 closure):
+        -- `switch` / `invoke` / `tail_call` / `resume` are pure
+        -- control-flow constructs (mirrors of Rust `IRTerminator`
+        -- variants). They do not name an extern callee (no `.call`
+        -- nor `.call_indirect`), so the FFI pillar's match's `_` arm
+        -- reduces to `True`, provable by `trivial` — same precedent
+        -- as `branch` / `cond_branch` / `phi`.
+        | switch _ _ _ => exact trivial
+        | invoke _ _ _ _ _ => exact trivial
+        | tail_call _ _ => exact trivial
+        | resume _ => exact trivial
   -- Conjunct 2: if a call name is in syscall_callees, then it's the
   -- toString of some SyscallName in the allowlist (by definition of
   -- syscall_callees as the image of allowlist under toString).
