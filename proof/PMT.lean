@@ -44,6 +44,8 @@ import PMT.MiscLemmas
 import PMT.HelperLemmas
 import PMT.PipelineSim
 import PMT.PillarSoundness
+import PMT.NoFFI
+import PMT.FFI.PillarSoundness
 import PMT.Iris.HeapModel
 import PMT.Iris.CapBndInvariant
 import PMT.Iris.ArenaRes

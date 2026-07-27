@@ -655,3 +655,40 @@ The IVE pillar theorem is conditional on the residual TCB. The IVE pillar
 itself has no undischarged hypotheses within its scope.
 
 See `proof/AUDIT_IVE.md` for the full audit report.
+
+## §FFI — No-FFI Verification Status (FFI-1-D)
+
+**Status**: FFI pillar 100 % verified via the No-FFI path (FFI Wave 1 complete).
+
+**Scope**: After FFI Wave 1 tasks A/B/C/D:
+  - 4 libc functions (`memcpy`, `memset`, `malloc`, `free`) replaced with
+    verified VUMA builtins (`IRInstr::BulkCopy`, `BulkFill`, `Alloc`, `Free`).
+  - 6 Linux syscalls (`write`, `read`, `exit`, `mmap`, `munmap`, `brk`)
+    routed through `IRInstr::Syscall` (a primitive effect, part of the TCB).
+  - 8 PMT/arena ops (`__vuma_state_*`, `__vuma_arena_*`) inlined as
+    IR instructions (`IRInstr::Alloc` / `Load` / `Store` / `Transform` / `Free`).
+  - `no_ffi_program_sound` theorem proven sorry-free (in `proof/PMT/NoFFI.lean`).
+  - `ffi_pillar_sound` theorem proven sorry-free (in `proof/PMT/FFI/PillarSoundness.lean`).
+
+**What the FFI pillar guarantees.**
+  - No VUMA program can invoke foreign code (no `extern` calls remain).
+  - Every call instruction targets either a built-in (in
+    `NoExterns.builtin_callees`) or a syscall (in `SyscallName.allowlist`).
+  - The only foreign surface is the syscall ABI (kernel trust).
+
+**Residual TCB** (out of scope, documented):
+  - Syscall ABI (kernel trust): `write`, `read`, `exit`, `mmap`, `munmap`,
+    `brk` semantics.
+  - Parser, AST→SCG bridge, codegen SCG→IR lowering, optimizer, regalloc,
+    backend instruction selection, ELF/Wasm emission, hardware.
+
+The FFI pillar theorem is conditional on the residual TCB. The FFI pillar
+itself has no undischarged hypotheses within FFI scope.
+
+**Axiom audit (FFI scope).**
+  - `grep -rn "sorry" proof/PMT/FFI/ proof/PMT/NoFFI.lean` = 0 actual
+    `sorry` tactics (3 matches in docstrings only — "sorry-free" prose).
+  - `grep -rn "^axiom" proof/PMT/FFI/ proof/PMT/NoFFI.lean` = 0 axioms.
+  - Transitive axiom dependency: `own_ex_exclusive` (via `pmt_pillar_sound`
+    → `no_oob_trap_for_well_typed_strong` → `LiveMirrorInvariant`), the
+    documented residual axiom of the PMT pillar.
