@@ -2752,78 +2752,71 @@ fn convert_node_to_statement_with_externs(
         NodePayload::StateInit(s) => {
             eprintln!(
                 "[vuma] PMT state lowering: StateInit(layout={}) at node {} \
-                 -> extern call __vuma_state_init__{}",
+                 -> ScgStatement::PmtOp(StateInit) [inlined as IRInstr::Alloc; \
+                 FFI Wave 1 task C — no extern call]",
                 s.layout_name,
                 node_id.as_u64(),
-                s.layout_name
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: Some(node_var(node_id, "state")),
-                func: format!("__vuma_state_init__{}", s.layout_name),
-                args: vec![],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::StateInit {
+                    dst: node_var(node_id, "state"),
+                    layout_name: s.layout_name.clone(),
+                },
+            )))
         }
         NodePayload::StateRead(r) => {
             eprintln!(
                 "[vuma] PMT state lowering: StateRead({}.{}) at node {} \
-                 -> extern call __vuma_state_read__{}__{}",
+                 -> ScgStatement::PmtOp(StateRead) [inlined as IRInstr::Load; \
+                 FFI Wave 1 task C — no extern call]",
                 r.layout_name,
                 r.field_name,
                 node_id.as_u64(),
-                r.layout_name,
-                r.field_name
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: Some(node_var(node_id, "val")),
-                func: format!("__vuma_state_read__{}__{}", r.layout_name, r.field_name),
-                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::StateRead {
+                    dst: node_var(node_id, "val"),
+                    src: resolve_df_input(node_id, 0, edge_idx, scg),
+                    layout_name: r.layout_name.clone(),
+                    field_name: r.field_name.clone(),
+                },
+            )))
         }
         NodePayload::StateWrite(w) => {
             eprintln!(
                 "[vuma] PMT state lowering: StateWrite({}.{}) at node {} \
-                 -> extern call __vuma_state_write__{}__{}",
+                 -> ScgStatement::PmtOp(StateWrite) [inlined as IRInstr::Store; \
+                 FFI Wave 1 task C — no extern call]",
                 w.layout_name,
                 w.field_name,
                 node_id.as_u64(),
-                w.layout_name,
-                w.field_name
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: None,
-                func: format!("__vuma_state_write__{}__{}", w.layout_name, w.field_name),
-                args: vec![
-                    resolve_df_input(node_id, 0, edge_idx, scg),
-                    resolve_df_input(node_id, 1, edge_idx, scg),
-                ],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::StateWrite {
+                    ptr: resolve_df_input(node_id, 0, edge_idx, scg),
+                    val: resolve_df_input(node_id, 1, edge_idx, scg),
+                    layout_name: w.layout_name.clone(),
+                    field_name: w.field_name.clone(),
+                },
+            )))
         }
         NodePayload::StateTransform(t) => {
             eprintln!(
                 "[vuma] PMT state lowering: StateTransform({}->{}) at node {} \
-                 -> extern call __vuma_state_transform__{}_to_{}",
+                 -> ScgStatement::PmtOp(StateTransform) [inlined as IRInstr::Transform; \
+                 FFI Wave 1 task C — no extern call]",
                 t.input_layout,
                 t.output_layout,
                 node_id.as_u64(),
-                t.input_layout,
-                t.output_layout
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: Some(node_var(node_id, "state")),
-                func: format!(
-                    "__vuma_state_transform__{}_to_{}",
-                    t.input_layout, t.output_layout
-                ),
-                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::StateTransform {
+                    dst: node_var(node_id, "state"),
+                    src: resolve_df_input(node_id, 0, edge_idx, scg),
+                    from_layout: t.input_layout.clone(),
+                    to_layout: t.output_layout.clone(),
+                },
+            )))
         }
         NodePayload::ForeignConsume(fc) => {
             // Linearity marker — lowers to no IR instruction (mirrors
@@ -2846,70 +2839,67 @@ fn convert_node_to_statement_with_externs(
         NodePayload::ArenaNew(_a) => {
             eprintln!(
                 "[vuma] PMT state lowering: ArenaNew at node {} \
-                 -> extern call __vuma_arena_new",
-                node_id.as_u64()
+                 -> ScgStatement::PmtOp(ArenaNew) [inlined as IRInstr::Alloc; \
+                 FFI Wave 1 task C — no extern call]",
+                node_id.as_u64(),
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: Some(node_var(node_id, "arena")),
-                func: "__vuma_arena_new".to_string(),
-                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::ArenaNew {
+                    dst: node_var(node_id, "arena"),
+                    capacity: resolve_df_input(node_id, 0, edge_idx, scg),
+                },
+            )))
         }
         NodePayload::ArenaAlloc(a) => {
             // ArenaAlloc has two logical outputs (updated arena + new
             // state).  At the SCG level we model this as a single
-            // `Call` returning the new state pointer; the arena is
-            // treated as in-place mutated (matching the AST-bridge
-            // semantics at pipeline.rs:10585 where the bump offset is
-            // updated via `Store` and the arena pointer is returned
-            // unchanged).
+            // `PmtOp::ArenaAlloc` returning the new state pointer; the
+            // arena is treated as in-place mutated (matching the
+            // AST-bridge semantics at pipeline.rs:10585 where the bump
+            // offset is updated via `Store` and the arena pointer is
+            // returned unchanged).
             eprintln!(
                 "[vuma] PMT state lowering: ArenaAlloc(layout={}) at node {} \
-                 -> extern call __vuma_arena_alloc__{}",
+                 -> ScgStatement::PmtOp(ArenaAlloc) [inlined as IRInstr::Alloc; \
+                 FFI Wave 1 task C — no extern call]",
                 a.layout_name,
                 node_id.as_u64(),
-                a.layout_name
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: Some(node_var(node_id, "state")),
-                func: format!("__vuma_arena_alloc__{}", a.layout_name),
-                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::ArenaAlloc {
+                    dst: node_var(node_id, "state"),
+                    arena: resolve_df_input(node_id, 0, edge_idx, scg),
+                    layout_name: a.layout_name.clone(),
+                },
+            )))
         }
         NodePayload::ArenaGrow(_a) => {
             eprintln!(
                 "[vuma] PMT state lowering: ArenaGrow at node {} \
-                 -> extern call __vuma_arena_grow",
-                node_id.as_u64()
+                 -> ScgStatement::PmtOp(ArenaGrow) [inlined as IRInstr::Alloc; \
+                 FFI Wave 1 task C — no extern call]",
+                node_id.as_u64(),
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: Some(node_var(node_id, "arena")),
-                func: "__vuma_arena_grow".to_string(),
-                args: vec![
-                    resolve_df_input(node_id, 0, edge_idx, scg),
-                    resolve_df_input(node_id, 1, edge_idx, scg),
-                ],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::ArenaGrow {
+                    dst: node_var(node_id, "arena"),
+                    arena: resolve_df_input(node_id, 0, edge_idx, scg),
+                    min_capacity: resolve_df_input(node_id, 1, edge_idx, scg),
+                },
+            )))
         }
         NodePayload::ArenaFree(_a) => {
             eprintln!(
                 "[vuma] PMT state lowering: ArenaFree at node {} \
-                 -> extern call __vuma_arena_free",
-                node_id.as_u64()
+                 -> ScgStatement::PmtOp(ArenaFree) [inlined as IRInstr::Free; \
+                 FFI Wave 1 task C — no extern call]",
+                node_id.as_u64(),
             );
-            single(Some(ScgStatement::Call(CallNode {
-                dst: None,
-                func: "__vuma_arena_free".to_string(),
-                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
-                is_extern: true,
-                reassigns: None,
-            })))
+            single(Some(ScgStatement::PmtOp(
+                vuma_codegen::scg_to_ir::PmtOpStmt::ArenaFree {
+                    ptr: resolve_df_input(node_id, 0, edge_idx, scg),
+                },
+            )))
         }
 
         // Channel operations.  Lower the SCG-side NodePayload
@@ -8968,17 +8958,19 @@ mod tests {
     /// `StateTransform` / `ForeignConsume` / `ArenaNew` / `ArenaAlloc` /
     /// `ArenaGrow` / `ArenaFree` nodes (the previous `Vec::new()` stub).
     ///
-    /// Each variant should now lower to a real `ScgStatement::Call`
-    /// (or `ScgStatement::ForeignConsume` for the linearity marker)
-    /// targeting a layout-mangled extern helper symbol.  This test
-    /// constructs a minimal SCG per variant and asserts the lowering
-    /// produces exactly one statement of the expected shape.
+    /// Each variant now (FFI Wave 1 task C) lowers to a
+    /// `ScgStatement::PmtOp(...)` (or `ScgStatement::ForeignConsume` for the
+    /// linearity marker) — replacing the former `__vuma_state_*` /
+    /// `__vuma_arena_*` extern calls.  This test constructs a minimal SCG
+    /// per variant and asserts the lowering produces exactly one statement
+    /// of the expected shape.
     #[test]
     fn test_pmt_state_node_lowering_is_total() {
         use vuma_scg::node::{
             ArenaAllocNode, ArenaFreeNode, ArenaGrowNode, ArenaNewNode, ForeignConsumeNode,
             ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
         };
+        use vuma_codegen::scg_to_ir::PmtOpStmt;
 
         let pp = ProgramPoint {
             file: None,
@@ -8997,7 +8989,7 @@ mod tests {
             convert_node_to_statement_with_externs(id, node_data, &edge_idx, &scg, &externs)
         };
 
-        // StateInit -> Call __vuma_state_init__<Layout>
+        // StateInit -> PmtOp(StateInit) [inlined as IRInstr::Alloc]
         let stmts = lower_one(
             NodePayload::StateInit(StateInitNode {
                 layout_name: "Point".to_string(),
@@ -9011,16 +9003,14 @@ mod tests {
             "StateInit must lower to exactly one statement"
         );
         match &stmts[0] {
-            ScgStatement::Call(c) => {
-                assert_eq!(c.func, "__vuma_state_init__Point");
-                assert!(c.is_extern, "StateInit call must be extern");
-                assert_eq!(c.args.len(), 0, "StateInit takes no args");
-                assert!(c.dst.is_some(), "StateInit must produce a dst");
+            ScgStatement::PmtOp(PmtOpStmt::StateInit { dst, layout_name }) => {
+                assert!(!dst.is_empty(), "StateInit must produce a dst");
+                assert_eq!(layout_name, "Point");
             }
-            other => panic!("StateInit lowered to {:?}, expected Call", other),
+            other => panic!("StateInit lowered to {:?}, expected PmtOp(StateInit)", other),
         }
 
-        // StateRead -> Call __vuma_state_read__<L>__<f>
+        // StateRead -> PmtOp(StateRead) [inlined as IRInstr::Load]
         let stmts = lower_one(
             NodePayload::StateRead(StateReadNode {
                 state_vreg: 0,
@@ -9036,15 +9026,15 @@ mod tests {
             "StateRead must lower to exactly one statement"
         );
         match &stmts[0] {
-            ScgStatement::Call(c) => {
-                assert_eq!(c.func, "__vuma_state_read__Point__x");
-                assert!(c.is_extern);
-                assert_eq!(c.args.len(), 1, "StateRead takes 1 arg (state ptr)");
+            ScgStatement::PmtOp(PmtOpStmt::StateRead { dst, layout_name, field_name, .. }) => {
+                assert!(!dst.is_empty(), "StateRead must produce a dst");
+                assert_eq!(layout_name, "Point");
+                assert_eq!(field_name, "x");
             }
-            other => panic!("StateRead lowered to {:?}, expected Call", other),
+            other => panic!("StateRead lowered to {:?}, expected PmtOp(StateRead)", other),
         }
 
-        // StateWrite -> Call __vuma_state_write__<L>__<f>
+        // StateWrite -> PmtOp(StateWrite) [inlined as IRInstr::Store]
         let stmts = lower_one(
             NodePayload::StateWrite(StateWriteNode {
                 state_vreg: 0,
@@ -9056,15 +9046,14 @@ mod tests {
         );
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            ScgStatement::Call(c) => {
-                assert_eq!(c.func, "__vuma_state_write__Point__x");
-                assert!(c.dst.is_none(), "StateWrite produces no dst");
-                assert_eq!(c.args.len(), 2, "StateWrite takes 2 args (ptr + value)");
+            ScgStatement::PmtOp(PmtOpStmt::StateWrite { layout_name, field_name, .. }) => {
+                assert_eq!(layout_name, "Point");
+                assert_eq!(field_name, "x");
             }
-            other => panic!("StateWrite lowered to {:?}, expected Call", other),
+            other => panic!("StateWrite lowered to {:?}, expected PmtOp(StateWrite)", other),
         }
 
-        // StateTransform -> Call __vuma_state_transform__<in>_to_<out>
+        // StateTransform -> PmtOp(StateTransform) [inlined as IRInstr::Transform]
         let stmts = lower_one(
             NodePayload::StateTransform(StateTransformNode {
                 input_vreg: 0,
@@ -9076,10 +9065,11 @@ mod tests {
         );
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            ScgStatement::Call(c) => {
-                assert_eq!(c.func, "__vuma_state_transform__Bytes_to_Point");
+            ScgStatement::PmtOp(PmtOpStmt::StateTransform { from_layout, to_layout, .. }) => {
+                assert_eq!(from_layout, "Bytes");
+                assert_eq!(to_layout, "Point");
             }
-            other => panic!("StateTransform lowered to {:?}, expected Call", other),
+            other => panic!("StateTransform lowered to {:?}, expected PmtOp(StateTransform)", other),
         }
 
         // ForeignConsume -> ScgStatement::ForeignConsume marker
@@ -9101,7 +9091,7 @@ mod tests {
             ),
         }
 
-        // ArenaNew -> Call __vuma_arena_new
+        // ArenaNew -> PmtOp(ArenaNew) [inlined as IRInstr::Alloc]
         let stmts = lower_one(
             NodePayload::ArenaNew(ArenaNewNode {
                 capacity_vreg: 0,
@@ -9111,11 +9101,11 @@ mod tests {
         );
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            ScgStatement::Call(c) => assert_eq!(c.func, "__vuma_arena_new"),
-            other => panic!("ArenaNew lowered to {:?}, expected Call", other),
+            ScgStatement::PmtOp(PmtOpStmt::ArenaNew { .. }) => {}
+            other => panic!("ArenaNew lowered to {:?}, expected PmtOp(ArenaNew)", other),
         }
 
-        // ArenaAlloc -> Call __vuma_arena_alloc__<Layout>
+        // ArenaAlloc -> PmtOp(ArenaAlloc) [inlined as IRInstr::Alloc]
         let stmts = lower_one(
             NodePayload::ArenaAlloc(ArenaAllocNode {
                 arena_vreg: 0,
@@ -9127,11 +9117,13 @@ mod tests {
         );
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            ScgStatement::Call(c) => assert_eq!(c.func, "__vuma_arena_alloc__Node"),
-            other => panic!("ArenaAlloc lowered to {:?}, expected Call", other),
+            ScgStatement::PmtOp(PmtOpStmt::ArenaAlloc { layout_name, .. }) => {
+                assert_eq!(layout_name, "Node");
+            }
+            other => panic!("ArenaAlloc lowered to {:?}, expected PmtOp(ArenaAlloc)", other),
         }
 
-        // ArenaGrow -> Call __vuma_arena_grow
+        // ArenaGrow -> PmtOp(ArenaGrow) [inlined as IRInstr::Alloc]
         let stmts = lower_one(
             NodePayload::ArenaGrow(ArenaGrowNode {
                 arena_vreg: 0,
@@ -9142,22 +9134,19 @@ mod tests {
         );
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            ScgStatement::Call(c) => assert_eq!(c.func, "__vuma_arena_grow"),
-            other => panic!("ArenaGrow lowered to {:?}, expected Call", other),
+            ScgStatement::PmtOp(PmtOpStmt::ArenaGrow { .. }) => {}
+            other => panic!("ArenaGrow lowered to {:?}, expected PmtOp(ArenaGrow)", other),
         }
 
-        // ArenaFree -> Call __vuma_arena_free
+        // ArenaFree -> PmtOp(ArenaFree) [inlined as IRInstr::Free]
         let stmts = lower_one(
             NodePayload::ArenaFree(ArenaFreeNode { arena_vreg: 0 }),
             NodeType::ArenaFree,
         );
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            ScgStatement::Call(c) => {
-                assert_eq!(c.func, "__vuma_arena_free");
-                assert!(c.dst.is_none(), "ArenaFree produces no dst");
-            }
-            other => panic!("ArenaFree lowered to {:?}, expected Call", other),
+            ScgStatement::PmtOp(PmtOpStmt::ArenaFree { .. }) => {}
+            other => panic!("ArenaFree lowered to {:?}, expected PmtOp(ArenaFree)", other),
         }
     }
 

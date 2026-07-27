@@ -3527,7 +3527,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // replacements): backend lowering not yet implemented on x86_32;
                 // emit no bytes (x86_64 is the canonical path).
                 | IRInstr::BulkCopy { .. }
-                | IRInstr::BulkFill { .. } => Vec::new(),
+                | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => Vec::new(),
                 // ── CallIndirect (driver_call) ──
                 // Lower an indirect call: load args into stack (i386 ABI:
                 // args pushed right-to-left), load func_ptr into EAX,
