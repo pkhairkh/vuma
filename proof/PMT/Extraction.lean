@@ -172,15 +172,21 @@ the Rust-side `HashMap.get()` → default behavior).
 directly C-marshallable. We export it directly.
 -/
 
-/-- Helper: reconstruct a `String → Layout` function from a list of
-(var, layout) pairs. Unknown vars map to `emptyLayout` (size 1, no
-fields). This mirrors the Rust-side pattern where `HashMap.get()`
-returning `None` is treated as a default empty layout. -/
+/-- Helper: reconstruct a `String → Option Layout` function from a list of
+(var, layout) pairs. Unknown vars map to `none` (mirrors Rust's
+`HashMap.get()` returning `None`). This is the Option-based env model
+introduced by Wave 1 task IVE-1-C gap 3. -/
 def layout_env_from_list (env_list : List (String × PMT.Layout))
-    (var : String) : PMT.Layout :=
-  match env_list.lookup var with
-  | some layout => layout
-  | none => PMT.emptyLayout
+    (var : String) : Option PMT.Layout :=
+  env_list.lookup var
+
+/-- Helper: reconstruct a `String → Option (List (Field × String))` function
+from a list of (var, field_types) pairs. Unknown vars map to `none`.
+This carries the declared field types needed by the type-matching check
+(Wave 1 task IVE-1-C gap 1, 2). -/
+def field_types_env_from_list (ft_list : List (String × List (PMT.Field × String)))
+    (var : String) : Option (List (PMT.Field × String)) :=
+  ft_list.lookup var
 
 /-- `@[export lean_verify_transform]` — extracted form of
 `PMT.IVE.Soundness.verify_transform`. Takes a `StateTransform` and
@@ -196,29 +202,34 @@ def leanVerifyTransform (t : PMT.IVE.Soundness.StateTransform) :
 
 /-- `@[export lean_verify_state_reads]` — extracted form of
 `PMT.IVE.Soundness.verify_state_reads`. Takes a list of (var, layout)
-pairs (the env) and a list of `StateRead` (var + field), returns
-`true` iff every read passes (i.e., the verification list is all
-`valid = true`). The Rust FFI marshals the env as a `lean_object*`
-(list of pairs) and the reads as a `lean_object*` (list of structs). -/
+pairs (the env), a list of (var, field_types) pairs, and a list of
+`StateRead` (var + field + expected_type), returns `true` iff every
+read passes (i.e., the verification list is all `valid = true`).
+The Rust FFI marshals each list as a `lean_object*`. -/
 @[export lean_verify_state_reads]
 def leanVerifyStateReads
     (env_list : List (String × PMT.Layout))
+    (ft_list : List (String × List (PMT.Field × String)))
     (reads : List PMT.IVE.Soundness.StateRead) : Bool :=
   let env := layout_env_from_list env_list
-  let results := PMT.IVE.Soundness.verify_state_reads env reads
+  let fts := field_types_env_from_list ft_list
+  let results := PMT.IVE.Soundness.verify_state_reads env fts reads
   results.all (fun r => r.valid)
 
 /-- `@[export lean_verify_state_writes]` — extracted form of
 `PMT.IVE.Soundness.verify_state_writes`. Takes a list of (var, layout)
-pairs, a list of consumed var names, and a list of `StateWrite`
-(var + field), returns `true` iff every write passes. -/
+pairs, a list of (var, field_types) pairs, a list of consumed var names,
+and a list of `StateWrite` (var + field + value_type + after_consume),
+returns `true` iff every write passes. -/
 @[export lean_verify_state_writes]
 def leanVerifyStateWrites
     (env_list : List (String × PMT.Layout))
+    (ft_list : List (String × List (PMT.Field × String)))
     (consumed : List String)
     (writes : List PMT.IVE.Soundness.StateWrite) : Bool :=
   let env := layout_env_from_list env_list
-  let results := PMT.IVE.Soundness.verify_state_writes env consumed writes
+  let fts := field_types_env_from_list ft_list
+  let results := PMT.IVE.Soundness.verify_state_writes env fts consumed writes
   results.all (fun r => r.valid)
 
 /-- Soundness bridge for the extracted `lean_verify_transform`:
