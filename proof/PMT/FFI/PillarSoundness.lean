@@ -234,6 +234,12 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         | channel_recv_result _ _ _ _ => exact trivial
         | stark_proof _ _ _ => exact trivial
         | call_indirect a b' => exact absurd ⟨a, b', rfl⟩ hci
+        -- 2 bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill`
+        -- are opaque memory writes (memcpy/memset replacements).
+        -- Neither is a `.call` nor a `.call_indirect`, so the match's
+        -- `_` arm reduces to `True` — provable by `trivial`.
+        | bulk_copy _ _ _ => exact trivial
+        | bulk_fill _ _ _ => exact trivial
   -- Conjunct 2: if a call name is in syscall_callees, then it's the
   -- toString of some SyscallName in the allowlist (by definition of
   -- syscall_callees as the image of allowlist under toString).
