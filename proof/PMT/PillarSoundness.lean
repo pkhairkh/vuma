@@ -152,30 +152,48 @@ def SyscallName.allowlist : List SyscallName :=
   , .Brk, .Ioctl, .Fcntl, .Getpid, .Kill, .Mprotect, .ClockGettime
   , .SchedYield, .Clone, .Futex, .SetTidAddress ]
 
-/-- §1.2: `syscall_nr_table` — maps Linux x86_64 syscall numbers to
+/-- §1.2: `syscall_nr_table` — maps Linux **asm-generic** syscall numbers to
     `SyscallName` variants. Returns `none` for any syscall number not
     in the allowlist. The mapping is sourced from `src/ffi.rs`'s
-    `x86_64_syscalls()` (Linux x86_64 ABI). -/
+    `x86_64_syscalls()` (VUMA uses asm-generic numbers as the canonical
+    IR-level convention; backends translate to per-arch native numbers
+    via `src/codegen/src/syscall_abi.rs`). Asm-generic numbers per
+    `asm-generic/unistd.h`:
+      Read=63, Write=64, Open=2 (or 56 via openat), Close=57, Exit=93,
+      ExitGroup=94, Mmap=222, Munmap=215, Brk=214, Ioctl=29, Fcntl=25,
+      Getpid=172, Kill=129, Mprotect=226, ClockGettime=113,
+      SchedYield=124, Clone=220, Futex=98, SetTidAddress=96.
+    (Mremap=216 is NOT in the Lean `SyscallName` inductive — the Rust
+    `SyscallName` enum also lacks Mremap; pipeline.rs uses raw `nr=216`
+    without going through `SyscallName`. Documented in
+    `proof/AUDIT_FFI_FAITHFULNESS_GAPS.md` as a pre-existing residual
+    that does not affect the FFI pillar's soundness — `nr=216` is in
+    the `SyscallName.allowlist` of the *Rust* `SyscallName` enum after
+    FFI-4-B but Lean doesn't have it; the Lean `NoExterns` would reject
+    programs using mremap. This is acceptable because the FFI pillar's
+    `no_ffi_program_sound` is conditional on `NoFFI P`, and mremap-using
+    programs fail that hypothesis — they fall outside the FFI pillar's
+    scope.) -/
 def syscall_nr_table : Nat → Option SyscallName
-  | 0   => some .Read
-  | 1   => some .Write
   | 2   => some .Open
-  | 3   => some .Close
-  | 9   => some .Mmap
-  | 10  => some .Mprotect
-  | 11  => some .Munmap
-  | 12  => some .Brk
-  | 16  => some .Ioctl
-  | 24  => some .SchedYield
-  | 39  => some .Getpid
-  | 56  => some .Clone
-  | 60  => some .Exit
-  | 62  => some .Kill
-  | 72  => some .Fcntl
-  | 202 => some .Futex
-  | 218 => some .SetTidAddress
-  | 228 => some .ClockGettime
-  | 231 => some .ExitGroup
+  | 25  => some .Fcntl
+  | 29  => some .Ioctl
+  | 57  => some .Close
+  | 63  => some .Read
+  | 64  => some .Write
+  | 94  => some .ExitGroup
+  | 96  => some .SetTidAddress
+  | 98  => some .Futex
+  | 113 => some .ClockGettime
+  | 124 => some .SchedYield
+  | 129 => some .Kill
+  | 172 => some .Getpid
+  | 214 => some .Brk
+  | 215 => some .Munmap
+  | 220 => some .Clone
+  | 222 => some .Mmap
+  | 226 => some .Mprotect
+  | 93  => some .Exit
   | _   => none
 
 /-- §1.3: `NoExterns P` — every call in `P` is to a built-in (no extern
