@@ -327,4 +327,170 @@ theorem lean_verify_transform_sound
   have h_sound := PMT.IVE.Soundness.verify_transform_sound layouts t.input_layout t.output_layout hcheck
   exact ⟨h_sound.1, h_sound.2.1⟩
 
+/-! ## §9. Flattened primitive FFI wrappers (Wave 4-A)
+
+The 7 exports in §§1,8 carry Lean-only types in FFI-crossing positions
+(`BitVec 64`, `Field`, `Layout`, `List String`, `LayoutRegistry`,
+`List (String × LayoutInfo)`, `List StateRead`, `List StateWrite`,
+`StateTransform`). Through `@[export]` these become opaque
+`lean_object*` arguments that Rust can only build by linking the full
+Lean runtime (`lean_ctor` / `lean_alloc`). To keep Rust free of arbitrary
+Lean-runtime construction (FFI_BRIDGE_PLAN.md §1, option ii), we add
+**flattened primitive wrappers** that accept only C-compatible scalar
+types — `Bool`, `UInt64` (unboxed `uint64_t`), and `String` (a single
+`lean_object*` Rust builds via `lean_mk_string`) — and reconstruct the
+Lean structures internally.
+
+Variable-length inputs (lists of records) are passed as newline /
+tab-delimited `String` payloads:
+  • `consumed` (List String)            : vars joined by `\n`.
+  • registry (List (String × LayoutInfo)): one layout header
+    `name \t total_size \t field_count` followed by `field_count`
+    field lines `fname \t offset \t size \t type_name`.
+  • reads   (List StateRead)            : one line `var \t field_name \t expected_type`.
+  • writes  (List StateWrite)           : one line
+    `var \t field_name \t value_type \t after_consume` with
+    `after_consume ∈ {"0","1"}`.
+
+The original `@[export]`s in §§1,8 are RETAINED (not removed): Rust
+callers that do link `lean_runtime` may still pass boxed objects, while
+these `_prim` wrappers are the recommended C-marshallable entry points
+that need no `lean_ctor`/`lean_alloc` on the Rust side.
+-/
+
+/-- Split a string on `\n`, dropping empty lines. `"" → []`. -/
+def splitLines (s : String) : List String :=
+  (s.splitOn "\n").filter (fun l => l != "")
+
+/-- Parse a `Nat` from a string, defaulting to 0 on failure. -/
+def parseNat (s : String) : Nat :=
+  s.toNat?.getD 0
+
+/-- Parse a single `FieldInfo` line `name \t offset \t size \t type_name`.
+Malformed lines decode to an all-empty/zero FieldInfo. -/
+def parseFieldInfo (line : String) : PMT.IVE.Soundness.FieldInfo :=
+  match line.splitOn "\t" with
+  | [n, o, sz, tn] =>
+    { name := n, offset := parseNat o, size := parseNat sz, type_name := tn }
+  | _ => { name := "", offset := 0, size := 0, type_name := "" }
+
+/-- Parse a registry payload into `List (String × LayoutInfo)`.
+Format: a layout header `name \t total_size \t field_count` followed by
+`field_count` field lines. Malformed headers are skipped.
+
+Structurally recursive on a Nat fuel bound (the input line count) so that
+Lean's structural-recursion checker accepts it without a termination
+proof: each iteration consumes one header line, and the fuel strictly
+decreases. -/
+def parseRegistryAux : Nat → List String → List (String × PMT.IVE.Soundness.LayoutInfo)
+  | 0, _ => []
+  | _ + 1, [] => []
+  | k + 1, hdr :: rest =>
+    match hdr.splitOn "\t" with
+    | [name, ts, fc] =>
+      let n := parseNat fc
+      let fields := (rest.take n).map parseFieldInfo
+      let info : PMT.IVE.Soundness.LayoutInfo :=
+        { name := name, total_size := parseNat ts, fields := fields }
+      (name, info) :: parseRegistryAux k (rest.drop n)
+    | _ => parseRegistryAux k rest
+
+/-- Parse a registry payload string (see §9 format). -/
+def parseRegistry (s : String) : List (String × PMT.IVE.Soundness.LayoutInfo) :=
+  let lines := splitLines s
+  parseRegistryAux lines.length lines
+
+/-- Parse a single `StateRead` line `var \t field_name \t expected_type`. -/
+def parseStateRead (line : String) : PMT.IVE.Soundness.StateRead :=
+  match line.splitOn "\t" with
+  | [v, fn, et] => { var := v, field_name := fn, expected_type := et }
+  | _ => { var := "", field_name := "", expected_type := "" }
+
+/-- Parse a reads payload string into `List StateRead`. -/
+def parseReads (s : String) : List PMT.IVE.Soundness.StateRead :=
+  (splitLines s).map parseStateRead
+
+/-- Parse a Bool token: "1" or "true" → true, else false. -/
+def parseBoolField (s : String) : Bool :=
+  s = "1" ∨ s = "true"
+
+/-- Parse a single `StateWrite` line
+`var \t field_name \t value_type \t after_consume`. -/
+def parseStateWrite (line : String) : PMT.IVE.Soundness.StateWrite :=
+  match line.splitOn "\t" with
+  | [v, fn, vt, ac] =>
+    { var := v, field_name := fn, value_type := vt, after_consume := parseBoolField ac }
+  | _ => { var := "", field_name := "", value_type := "", after_consume := false }
+
+/-- Parse a writes payload string into `List StateWrite`. -/
+def parseWrites (s : String) : List PMT.IVE.Soundness.StateWrite :=
+  (splitLines s).map parseStateWrite
+
+/-- `@[export lean_verified_capacity_check_prim]` — primitive-signature
+wrapper for `verified_capacity_check`. Takes three unboxed `UInt64`
+(Rust `u64`) and converts to `BitVec 64` internally. C ABI:
+`(uint64_t, uint64_t, uint64_t) -> uint8_t`. -/
+@[export lean_verified_capacity_check_prim]
+def leanVerifiedCapacityCheckPrim (used size capacity : UInt64) : Bool :=
+  verified_capacity_check (BitVec.ofNat 64 used.toNat)
+    (BitVec.ofNat 64 size.toNat) (BitVec.ofNat 64 capacity.toNat)
+
+/-- `@[export lean_verified_field_bounds_check_prim]` — primitive-signature
+wrapper. Takes `offset size total_size : UInt64` and rebuilds a minimal
+`Field` / `Layout` internally (only the three numeric fields affect the
+`offset + size ≤ total_size` check). C ABI:
+`(uint64_t, uint64_t, uint64_t) -> uint8_t`. -/
+@[export lean_verified_field_bounds_check_prim]
+def leanVerifiedFieldBoundsCheckPrim (offset size total_size : UInt64) : Bool :=
+  let f : Field := { name := "", offset := offset.toNat, size := size.toNat, type_name := "" }
+  let l : Layout := { name := "", total_size := total_size.toNat, fields := [] }
+  verified_field_bounds_check f l
+
+/-- `@[export lean_verified_linearity_check_prim]` — primitive-signature
+wrapper. `consumed` is a `\n`-joined list of already-consumed var names
+(empty string ⇒ no consumed vars). C ABI:
+`(lean_object*, lean_object*) -> uint8_t`. -/
+@[export lean_verified_linearity_check_prim]
+def leanVerifiedLinearityCheckPrim (var consumed : String) : Bool :=
+  verified_linearity_check var (splitLines consumed)
+
+/-- `@[export lean_verified_pmt_check_prim]` — primitive-signature wrapper
+composing the three checks. Takes 5 `UInt64` + `var` + `consumed` and
+rebuilds `Field` / `Layout` / consumed-list internally. C ABI:
+`(uint64_t ×5, lean_object*, lean_object*) -> uint8_t`. -/
+@[export lean_verified_pmt_check_prim]
+def leanVerifiedPmtCheckPrim
+    (used capacity offset size total_size : UInt64)
+    (var consumed : String) : Bool :=
+  let f : Field := { name := "", offset := offset.toNat, size := size.toNat, type_name := "" }
+  let l : Layout := { name := "", total_size := total_size.toNat, fields := [] }
+  verified_pmt_check used.toNat capacity.toNat f l var (splitLines consumed)
+
+/-- `@[export lean_verify_transform_prim]` — primitive-signature wrapper
+for `leanVerifyTransform`. `registry` is the serialized registry payload
+(see §9 format); `input_layout` / `output_layout` are layout names. The
+registry function is reconstructed via `layout_env_from_list_faith`. C ABI:
+`(lean_object*, lean_object*, lean_object*) -> uint8_t`. -/
+@[export lean_verify_transform_prim]
+def leanVerifyTransformPrim (registry input_layout output_layout : String) : Bool :=
+  let layouts : PMT.IVE.Soundness.LayoutRegistry :=
+    layout_env_from_list_faith (parseRegistry registry)
+  let t : PMT.IVE.Soundness.StateTransform :=
+    { input_layout := input_layout, output_layout := output_layout }
+  leanVerifyTransform layouts t
+
+/-- `@[export lean_verify_state_reads_prim]` — primitive-signature wrapper
+for `leanVerifyStateReads`. `registry` and `reads` are serialized
+payloads. C ABI: `(lean_object*, lean_object*) -> uint8_t`. -/
+@[export lean_verify_state_reads_prim]
+def leanVerifyStateReadsPrim (registry reads : String) : Bool :=
+  leanVerifyStateReads (parseRegistry registry) (parseReads reads)
+
+/-- `@[export lean_verify_state_writes_prim]` — primitive-signature wrapper
+for `leanVerifyStateWrites`. `registry`, `consumed`, `writes` are
+serialized payloads. C ABI: `(lean_object*, lean_object*, lean_object*) -> uint8_t`. -/
+@[export lean_verify_state_writes_prim]
+def leanVerifyStateWritesPrim (registry consumed writes : String) : Bool :=
+  leanVerifyStateWrites (parseRegistry registry) (splitLines consumed) (parseWrites writes)
+
 end PMT.Extraction

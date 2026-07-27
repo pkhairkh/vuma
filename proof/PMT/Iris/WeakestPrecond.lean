@@ -46,30 +46,34 @@ encodes its safety precondition and postcondition obligation:
 
 **Key constructs**
 
-  - `wp`             — the weakest-precondition predicate (DEFINITION,
+  - `wp`                  — the weakest-precondition predicate (DEFINITION,
     sorry-free).
-  - `wp_monotone`    — monotonicity: stronger postcondition ⟹ weaker wp.
-  - `wp_frame`       — frame rule: `wp e {Φ} ∗ R ⟹ wp e {λ v, Φ v ∗ R}`.
-  - `wp_bind`        — bind rule: `wp (bind e1 e2) {Φ} ⟹
-                       wp e1 {λ v, wp (e2 v) {Φ}}`.
-  - `wp_value`       — value rule: `wp (pure value) {Φ} ⟹ Φ value`.
-  - `wp_soundness`   — soundness: if `wp e {True}` holds for every step
-    of a program, execution is safe (ok or canonical trap).
+  - `wp_monotone`         — monotonicity: stronger postcondition ⟹ weaker wp.
+                           GENUINELY PROVEN (Wave 2-B).
+  - `wp_frame_vacuous`    — ∧-frame rule (plain conjunction). GENUINELY
+                           PROVEN for the ∧ version; renamed `_vacuous`
+                           because the genuine ∗-frame rule (separating
+                           conjunction with `SepGenuine` disjointness,
+                           Wave 1-D) requires a heap-indexed `wp`,
+                           deferred to PMT-1-G.
+  - `wp_bind`             — bind rule. GENUINELY PROVEN.
+  - `wp_value`            — value rule: `wp (pure value) {Φ} ⟹ ∃ v, Φ v`.
+                           GENUINELY PROVEN (weakened to existence; the
+                           full `Φ v` form needs an `Expr.val` constructor).
+  - `wp_soundness_vacuous` — soundness. VACUOUS: `hwp` reduces to
+                           `True ∧ True`; renamed `_vacuous`. The genuine
+                           soundness bridge requires the full Iris heap
+                           model, deferred to PMT-1-G.
 
-**Sorries.** The `wp` DEFINITION is sorry-free. Of the five derived
-lemmas (`wp_monotone`, `wp_frame`, `wp_bind`, `wp_value`,
-`wp_soundness`), `wp_soundness` is closed by direct induction
-on `prog`, mirroring `pmt_soundness`'s case-split on `step s i`'s
-outcome — `hwp` is vacuous (it reduces to `True` for every step), so
-the conclusion's canonical-trap-code guarantee holds unconditionally.
-The remaining four lemmas (`wp_monotone`, `wp_frame`, `wp_bind`,
-`wp_value`) are stated with their full Iris shape but their proofs are
-`sorry`-stubbed; closing them requires the full Iris heap model and a
-step-indexed fixpoint, which are out of scope here. The theorem
-*statements* are the contribution: they pin down the Iris proof rules
-the VUMA project must eventually discharge. This matches the posture of
-`pmt-iris-spec.md` §7 (statements given; proofs deferred to the Iris
-embedding).
+**Proof status (Wave 2-B audit).** The `wp` DEFINITION is sorry-free.
+NO `sorry`/`admit` appears anywhere in this file. Of the five derived
+lemmas, `wp_monotone`, `wp_value`, and `wp_bind` are GENUINELY PROVEN
+(non-vacuous — their proofs use the hypothesis meaningfully).
+`wp_frame_vacuous` proves the ∧-frame rule genuinely but is renamed
+because the genuine ∗-frame rule requires a heap-indexed `wp` (the
+current `wp` is `WpState → Prop`, not `Heap → Prop`), which is beyond
+the scope of this file. `wp_soundness_vacuous` is vacuous: the
+hypothesis `hwp` is definitionally `True ∧ True` for every step.
 
 **References.**
   - `docs/architecture/pmt-iris-spec.md` §7 (wp).
@@ -122,7 +126,7 @@ structure WpState where
   arena : Arena
   live  : String → Liveness
 
-/-! ## §7.2. The `wp` definition (sorry-free) -/
+/-! ## §7.2. The `wp` definition -/
 
 /-- `wp e {Φ} s` — the weakest precondition for `e` to execute safely
     from state `s` and produce a value satisfying `Φ`.
@@ -134,8 +138,9 @@ structure WpState where
     step indices; here the recursion is collapsed because the underlying
     `PMT.Soundness.step` is structurally recursive and total.
 
-    The DEFINITION is sorry-free; derived lemmas below may use `sorry`
-    for their proofs (their statements are the contribution). -/
+    The DEFINITION is sorry-free; derived lemmas below are genuinely
+    proven where the simplified encoding permits (see the Wave 2-B
+    proof-status audit in the module docstring). -/
 def wp (e : Expr) (Φ : Postcond) (s : WpState) : Prop :=
   match e with
   | Expr.alloc l =>
@@ -161,14 +166,20 @@ def wp (e : Expr) (Φ : Postcond) (s : WpState) : Prop :=
     -- `Val.unit`. Used as the placeholder for `wp_value` and `wp_bind`.
     True ∧ Φ Val.unit
 
-/-! ## §7.3. Iris reasoning rules (statements; proofs sorry-stubbed) -/
+/-! ## §7.3. Iris reasoning rules -/
 
 /-- `wp` is monotonic in the postcondition: a stronger postcondition
     yields a weaker (easier-to-discharge) `wp`.
 
         (∀ v, Φ₁ v → Φ₂ v)  ⊢  wp e {Φ₁} -∗ wp e {Φ₂}.
 
-    This is the Iris rule `wp_mono`. -/
+    This is the Iris rule `wp_mono`.
+
+    GENUINELY PROVEN (Wave 2-B): the proof case-splits on `e`, preserves
+    the safety conjunct (which is Φ-independent), and transports the
+    postcondition via `himpl`. Non-vacuous — for `Expr.alloc l` the
+    safety conjunct `s.arena.used + l.total_size ≤ s.arena.capacity` is
+    real and preserved. -/
 theorem wp_monotone (e : Expr) (Φ₁ Φ₂ : Postcond) (s : WpState)
     (himpl : ∀ v, Φ₁ v → Φ₂ v) :
     wp e Φ₁ s → wp e Φ₂ s := by
@@ -182,14 +193,27 @@ theorem wp_monotone (e : Expr) (Φ₁ Φ₂ : Postcond) (s : WpState)
     obtain ⟨hsafe, hφ1⟩ := hwp
     exact ⟨hsafe, himpl _ hφ1⟩
 
-/-- Frame rule for `wp`: a resource `R` framed around `wp e {Φ}` is
-    preserved across execution, yielding `wp e {λ v, Φ v ∗ R}`.
+/-- ∧-Frame rule for `wp` (RENAMED `wp_frame_vacuous`): a resource `R`
+    framed around `wp e {Φ}` is preserved across execution, yielding
+    `wp e {λ v, Φ v ∧ R}`.
 
-        wp e {Φ} ∗ R  ⊢  wp e {λ v, Φ v ∗ R}.
+        wp e {Φ} ∧ R  ⊢  wp e {λ v, Φ v ∧ R}.
 
-    This is the Iris rule `wp_frame_step` (the step-indexed version,
-    framed across the whole computation). -/
-theorem wp_frame (e : Expr) (Φ : Postcond) (R : Prop) (s : WpState)
+    This proof is GENUINE for the ∧ (plain-conjunction) version — it
+    preserves the safety conjunct and threads `R` through unchanged.
+    However, it is RENAMED `_vacuous` because the genuine Iris ∗-frame
+    rule
+
+        wp e {Φ} ∗ R  ⊢  wp e {λ v, Φ v ∗ R}
+
+    (separating conjunction with disjointness, using `SepGenuine` from
+    Wave 1-D) requires `wp` to be `Heap → Prop` (so the heap can be
+    split into disjoint sub-heaps). The current `wp` is
+    `WpState → Prop` — it has no heap parameter — so the ∗-frame rule
+    cannot even be STATED without re-parameterising `wp`. The genuine
+    ∗-frame rule requires Iris step-indexing and a heap-indexed `wp`,
+    deferred to PMT-1-G. -/
+theorem wp_frame_vacuous (e : Expr) (Φ : Postcond) (R : Prop) (s : WpState)
     (hwp : wp e Φ s) (hr : R) :
     wp e (fun v => Φ v ∧ R) s := by
   -- The frame `R` is an unrelated `Prop` carried through unchanged: in
@@ -250,7 +274,11 @@ theorem wp_bind (e1 : Expr) (e2 : Val → Expr) (Φ : Postcond) (s : WpState)
     from the expression; in this simplified encoding we use
     `Expr.transform` as the placeholder, which always returns `Val.unit`,
     so we can only commit to existence (`∃ v, Φ v`), not identity
-    (`Φ v`). -/
+    (`Φ v`).
+
+    GENUINELY PROVEN (Wave 2-B): `wp (Expr.transform) Φ s` reduces to
+    `True ∧ Φ Val.unit`; the proof extracts `Φ Val.unit` and supplies
+    `Val.unit` as the witness. Non-vacuous. -/
 theorem wp_value (Φ : Postcond) (s : WpState)
     (hwp : wp (Expr.transform) Φ s) :
     ∃ v, Φ v := by
@@ -259,20 +287,25 @@ theorem wp_value (Φ : Postcond) (s : WpState)
   obtain ⟨_, hφ⟩ := hwp
   exact ⟨Val.unit, hφ⟩
 
-/-! ## §7.4. wp soundness (defers to `pmt_soundness`) -/
+/-! ## §7.4. wp soundness (vacuous — see `wp_soundness_vacuous`) -/
 
-/-- **Soundness.** If `wp (Expr.transform) {True}` holds at every step
-    of a program (i.e. each step is "safe" in the wp sense), then
-    executing the program from `s` either succeeds (`Result.ok _`) or
-    traps with one of the three canonical PMT exit codes (1 = arena
+/-- **Soundness (VACUOUS — renamed `wp_soundness_vacuous`).** If
+    `wp (Expr.transform) {True}` holds at every step of a program,
+    then executing the program from `s` either succeeds (`Result.ok _`)
+    or traps with one of the three canonical PMT exit codes (1 = arena
     overflow, 134 = OOB, 135 = UAF).
 
-    This is the wp-level restatement of `PMT.Soundness.pmt_soundness`
-    (which is sorry-free). The bridge — `wp` *implies* the
-    `pmt_soundness` hypotheses (`CapacityInvariant`, `WF_Layout`,
-    liveness) — is left for the Iris embedding; the statement here
-    fixes the shape of that bridge. -/
-theorem wp_soundness (prog : Program) (s : ExecState)
+    This proof is vacuous (reduces to `True ∧ True`):
+    `wp (Expr.transform) (fun _ => True) _` is definitionally
+    `True ∧ (fun _ => True) Val.unit = True ∧ True`, so `hwp` is
+    satisfied by `trivial` for every step. The conclusion holds
+    unconditionally (`exec` is total and only produces canonical trap
+    codes), but the wp hypothesis contributes NOTHING — it cannot
+    recover the `CapacityInvariant`/`WF_Layout`/liveness hypotheses
+    that `pmt_soundness` needs. The genuine soundness bridge — `wp`
+    *implies* the `pmt_soundness` hypotheses — requires the full Iris
+    heap model, deferred to PMT-1-G. -/
+theorem wp_soundness_vacuous (prog : Program) (s : ExecState)
     (hwp : ∀ step ∈ prog,
       wp (Expr.transform) (fun _ => True) ⟨s.arena, s.live⟩) :
     ∃ r, exec prog s = r
@@ -292,7 +325,7 @@ theorem wp_soundness (prog : Program) (s : ExecState)
   -- non-vacuous `CapacityInvariant`/`WF_Layout`/liveness hypotheses. Since
   -- the simplified `wp` here collapses those hypotheses to `True` (cf. the
   -- `wp` definition above), the wp-to-Hoare bridge cannot recover them, and
-  -- `wp_soundness` is correspondingly limited to the canonical-trap-code
+  -- `wp_soundness_vacuous` is correspondingly limited to the canonical-trap-code
   -- guarantee. The proof proceeds by induction on `prog`, mirroring
   -- `pmt_soundness`'s case-split on `step s i`'s outcome.
   induction prog generalizing s with

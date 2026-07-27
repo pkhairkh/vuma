@@ -3283,11 +3283,14 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("ffi_scratch_pop_frame".to_string(), code));
     }
 
-    // __ffi_fallback_stub: return 0 (xor eax, eax; ret).
+    // __ffi_fallback_stub: TRAP (ud2 -> SIGILL).
+    //   Unresolved externs in ET_EXEC mode are a build-time bug. The binary
+    //   traps at runtime (`ud2` -> SIGILL on x86) rather than silently
+    //   returning 0. Round 7 verified the old `xor eax,eax; ret` behavior
+    //   was unsound: it turned "missing symbol" into "no-op success".
     {
         let mut code = Vec::new();
-        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
-        code.extend(encode_ret());
+        code.extend_from_slice(&[0x0F, 0x0B]); // ud2 -> SIGILL (trap, not return 0)
         stubs.push(("__ffi_fallback_stub".to_string(), code));
     }
 
@@ -3692,8 +3695,8 @@ impl Backend for X86_32Backend {
                             .copy_from_slice(&resolved.to_le_bytes());
                     } else {
                         // External symbol — patch the CALL to point at
-                        // __ffi_fallback_stub (xor eax, eax; ret → returns 0)
-                        // instead of leaving it as 0 (which would crash).
+                        // __ffi_fallback_stub (ud2 → SIGILL trap) instead of
+                        // leaving it as 0 (which would jump to text vaddr 0).
                         if let Some(&fallback_off) = func_offsets.get("__ffi_fallback_stub") {
                             let current_val = i32::from_le_bytes([
                                 all_code[abs_offset],

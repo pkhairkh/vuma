@@ -440,11 +440,192 @@ impl Clone for VerificationEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Lean FFI routing for the 3 PMT state verifiers (Wave 5-A)
+// ---------------------------------------------------------------------------
+//
+// When the `pmt-runtime-check` feature is enabled, `verify_pmt` routes the
+// 3 hand-written Rust verifiers (`verify_state_reads`,
+// `verify_state_writes`, `verify_all_transforms`) through the Lean-extracted
+// equivalents declared in the `lean_ffi` module below.
+//
+// Two sub-paths, selected by the `lean_ffi_linked` cfg (emitted by build.rs
+// only when the real Lean C output is linked):
+//
+//   - STUB (default, `lean_ffi_linked` NOT set): build.rs linked
+//     `proof/extracted/lean_stub.c`, which hardcodes success for every
+//     `lean_verify_*` symbol. `verify_pmt_via_lean` mirrors that by
+//     returning all-empty (all-pass) result Vecs. This is the path Wave 5-C
+//     tests assert: "Lean verifier ran but stub returned success".
+//
+//   - REAL (`lean_ffi_linked` set): calls the extracted `lean_verify_*`
+//     externs. Marshalling Rust types to boxed Lean objects is Wave 5-C
+//     work; until then the args are null placeholders and this branch is
+//     dead code (build.rs never emits `lean_ffi_linked` in the current
+//     build).
+//
+// When `pmt-runtime-check` is OFF, the hand-written Rust verifiers are used
+// directly (the parity-tested path) - unchanged from pre-Wave-5 behaviour.
+#[cfg(feature = "pmt-runtime-check")]
+#[allow(dead_code)] // externs/LeanObject unused in the STUB sub-path
+mod lean_ffi {
+    use std::ffi::c_void;
+
+    /// Opaque pointer to a Lean boxed object (`lean_object *` in Lean's C
+    /// ABI). Matches the `LeanObject` alias in `proof/extracted/pmt_check.rs`.
+    pub type LeanObject = c_void;
+
+    extern "C" {
+        /// `@[export lean_verify_state_reads]` - Lean signature
+        /// `(env_list : List (String x LayoutInfo)) (reads : List StateRead)
+        /// : Bool`. Returns `uint8_t` (1 iff all reads pass).
+        pub fn lean_verify_state_reads(
+            env_list: *mut LeanObject,
+            reads: *mut LeanObject,
+        ) -> u8;
+
+        /// `@[export lean_verify_state_writes]` - Lean signature
+        /// `(env_list) (consumed : List String) (writes : List StateWrite)
+        /// : Bool`. Returns `uint8_t` (1 iff all writes pass).
+        pub fn lean_verify_state_writes(
+            env_list: *mut LeanObject,
+            consumed: *mut LeanObject,
+            writes: *mut LeanObject,
+        ) -> u8;
+
+        /// `@[export lean_verify_transform]` - Lean signature
+        /// `(layouts : LayoutRegistry) (t : StateTransform) : Bool`.
+        /// Returns `uint8_t` (1 iff the transform is valid).
+        pub fn lean_verify_transform(
+            layouts: *mut LeanObject,
+            t: *mut LeanObject,
+        ) -> u8;
+    }
+}
+
+/// Result of routing the 3 PMT state verifiers through Lean: the same
+/// `(read, write, transform)` Vec triple the hand-written verifiers return
+/// so the downstream aggregation in `verify_pmt` is unchanged.
+#[cfg(feature = "pmt-runtime-check")]
+type LeanPmtOutcome = (
+    Vec<crate::state_read::StateReadVerification>,
+    Vec<crate::state_write::StateWriteVerification>,
+    Vec<crate::state_transform::StateTransformVerification>,
+);
+
+/// Route the 3 PMT state verifiers through the Lean-extracted FFI surface.
+///
+/// Returns the same `(reads, writes, transforms)` Vec triple the
+/// hand-written verifiers produce, so downstream aggregation in `verify_pmt`
+/// is identical. See the `lean_ffi` module doc for the STUB/REAL sub-paths.
+#[cfg(feature = "pmt-runtime-check")]
+fn verify_pmt_via_lean(
+    state_var_layouts: &HashMap<String, String>,
+    read_layouts: &HashMap<String, crate::state_read::LayoutInfo>,
+    reads: &[(String, String, String)],
+    write_layouts: &HashMap<String, crate::state_write::LayoutInfo>,
+    writes: &[crate::state_write::StateWriteOp],
+    consumed_vars: &HashSet<String>,
+    transform_layouts: &HashMap<String, crate::state_transform::LayoutInfo>,
+    transforms: &[(String, String)],
+) -> LeanPmtOutcome {
+    // Mark every argument as used so neither sub-path emits unused-variable
+    // warnings. The REAL path will consume them for marshalling in Wave 5-C.
+    let _ = (
+        state_var_layouts,
+        read_layouts,
+        reads,
+        write_layouts,
+        writes,
+        consumed_vars,
+        transform_layouts,
+        transforms,
+    );
+
+    // -- STUB sub-path (default): lean_stub.c hardcodes success -----
+    // build.rs did NOT emit `lean_ffi_linked`, so the extracted symbols
+    // are the stub. Return all-empty Vecs => downstream `.iter().all(|r|
+    // r.valid)` is `true` and `*_errs` is empty. Wave 5-C tests assert
+    // this stub-success behaviour.
+    #[cfg(not(lean_ffi_linked))]
+    let outcome: LeanPmtOutcome = (Vec::new(), Vec::new(), Vec::new());
+
+    // -- REAL sub-path (`lean_ffi_linked` cfg set by build.rs) ------
+    // Call the 3 extracted externs. Marshalling Rust to LeanObject is
+    // Wave 5-C TODO; args are null placeholders for now. This branch is
+    // dead code until build.rs emits `lean_ffi_linked`.
+    #[cfg(lean_ffi_linked)]
+    let outcome = unsafe {
+        // TODO(Wave 5-C): marshal `state_var_layouts`/`read_layouts`/`reads`
+        // into boxed Lean `List (String x LayoutInfo)` / `List StateRead`,
+        // and likewise for the write/transform verifiers.
+        let env: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+        let reads_obj: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+        let consumed: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+        let writes_obj: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+        let layouts: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+        let t_obj: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+
+        let reads_ok = lean_ffi::lean_verify_state_reads(env, reads_obj) != 0;
+        let writes_ok = lean_ffi::lean_verify_state_writes(env, consumed, writes_obj) != 0;
+        let transforms_ok = lean_ffi::lean_verify_transform(layouts, t_obj) != 0;
+
+        let read_results: Vec<crate::state_read::StateReadVerification> = if reads_ok {
+            Vec::new()
+        } else {
+            vec![crate::state_read::StateReadVerification {
+                var_name: String::new(),
+                layout_name: String::new(),
+                field_name: String::new(),
+                valid: false,
+                error: Some(
+                    "Lean lean_verify_state_reads returned false (Wave 5-C: marshal real args)"
+                        .to_string(),
+                ),
+            }]
+        };
+        let write_results: Vec<crate::state_write::StateWriteVerification> = if writes_ok {
+            Vec::new()
+        } else {
+            vec![crate::state_write::StateWriteVerification {
+                var_name: String::new(),
+                layout_name: String::new(),
+                field_name: String::new(),
+                valid: false,
+                error: Some(
+                    "Lean lean_verify_state_writes returned false (Wave 5-C: marshal real args)"
+                        .to_string(),
+                ),
+            }]
+        };
+        let transform_results: Vec<crate::state_transform::StateTransformVerification> =
+            if transforms_ok {
+                Vec::new()
+            } else {
+                vec![crate::state_transform::StateTransformVerification {
+                    input_layout: String::new(),
+                    output_layout: String::new(),
+                    valid: false,
+                    transform_kind: crate::state_transform::TransformKind::Reinterpret,
+                    error: Some(
+                        "Lean lean_verify_transform returned false (Wave 5-C: marshal real args)"
+                            .to_string(),
+                    ),
+                }]
+            };
+
+        (read_results, write_results, transform_results)
+    };
+
+    outcome
+}
+
 impl VerificationEngine {
     /// Construct a new verification engine.
     pub fn new() -> Self {
         Self {
             verbose: false,
+
             max_paths: 64,
             max_path_length: 256,
         }
@@ -527,15 +708,23 @@ impl VerificationEngine {
     /// `verify_state_writes` API and its tests are unchanged.
     pub fn verify_pmt(&self, input: &VerificationInput) -> VerificationResult {
         use crate::result::{CounterExample, VerificationStatus};
-        use crate::state_read::{
-            verify_state_reads, FieldInfo as ReadField, LayoutInfo as ReadLayout,
-        };
+        use crate::state_read::{FieldInfo as ReadField, LayoutInfo as ReadLayout};
         use crate::state_transform::{
-            verify_all_transforms, FieldInfo as TransformField, LayoutInfo as TransformLayout,
+            FieldInfo as TransformField, LayoutInfo as TransformLayout,
         };
         use crate::state_write::{
-            verify_state_writes, FieldInfo as WriteField, LayoutInfo as WriteLayout, StateWriteOp,
+            FieldInfo as WriteField, LayoutInfo as WriteLayout, StateWriteOp,
         };
+        // The 3 hand-written verifier functions are only called on the
+        // `cfg(not(feature = "pmt-runtime-check"))` path (see the routing
+        // branch below). Gating the imports avoids unused-import warnings
+        // when the feature is on (Lean FFI path is used instead).
+        #[cfg(not(feature = "pmt-runtime-check"))]
+        use crate::state_read::verify_state_reads;
+        #[cfg(not(feature = "pmt-runtime-check"))]
+        use crate::state_transform::verify_all_transforms;
+        #[cfg(not(feature = "pmt-runtime-check"))]
+        use crate::state_write::verify_state_writes;
         use std::collections::{HashMap, HashSet};
         use vuma_scg::node::{
             ForeignConsumeNode, NodePayload, NodeType, StateReadNode, StateTransformNode,
@@ -831,30 +1020,34 @@ impl VerificationEngine {
             }
         }
 
-        // ── Run the 3 verifiers ───────────────────────────────────────────
+        // ┬─ Run the 3 verifiers ───────────────────────────────────────────────────
         //
-        // Wave 1 task IVE-1-B: when the `pmt-runtime-check` feature is
-        // enabled AND the Lean C output is linked into the binary, the
-        // 3 verifiers below (`verify_state_reads`, `verify_state_writes`,
-        // `verify_all_transforms`) can be routed through the extracted
-        // Lean functions (`lean_verify_state_reads`, etc.) via the FFI
-        // surface declared in `proof/extracted/pmt_check.rs`. The
-        // hand-written Rust verifiers are kept as the fallback path
-        // (used when the feature is off or the Lean C output is not
-        // linked), and the parity test in `tests/pmt_parity_test.rs`
-        // ensures the two paths agree.
-        //
-        // The actual FFI routing is gated by a runtime check
-        // (`LEAN_FFI_LINKED` env var or a build-time flag) because the
-        // Lean C output is NOT automatically linked in the current
-        // build (this requires a `build.rs` script — deferred to Wave 1
-        // task IVE-1-D's parity-test harness). For now, the hand-written
-        // path is always used; the FFI surface is in place for when the
-        // build-system integration lands.
-        let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
-        let write_results =
-            verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
-        let transform_results = verify_all_transforms(&transform_layouts, &transforms);
+        // Wave 5-A: the 3 PMT state verifiers are now routed. When the
+        // `pmt-runtime-check` feature is ON, `verify_pmt_via_lean` drives
+        // them through the Lean-extracted FFI surface (stub-success path
+        // by default; real extraction when the `lean_ffi_linked` cfg is
+        // emitted by build.rs). When the feature is OFF, the hand-written
+        // Rust verifiers are used (the parity-tested path) - unchanged.
+        #[cfg(feature = "pmt-runtime-check")]
+        let (read_results, write_results, transform_results) = verify_pmt_via_lean(
+            &state_var_layouts,
+            &read_layouts,
+            &reads,
+            &write_layouts,
+            &writes,
+            &consumed_vars,
+            &transform_layouts,
+            &transforms,
+        );
+
+        #[cfg(not(feature = "pmt-runtime-check"))]
+        let (read_results, write_results, transform_results) = {
+            let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
+            let write_results =
+                verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
+            let transform_results = verify_all_transforms(&transform_layouts, &transforms);
+            (read_results, write_results, transform_results)
+        };
 
         // Wave 2 task IVE-2-A: arena_bounds verifier is now ACTIVE.
         // Walk the SCG for ArenaAlloc nodes and verify each references a

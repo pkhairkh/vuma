@@ -103,26 +103,89 @@ mod lean_ffi {
     /// struct, etc.). Matches Lean 4.21's `lean_object*` type.
     pub type LeanObject = std::ffi::c_void;
 
+    // ─────────────────────────────────────────────────────────────
+    // Group A — `@[export lean_verified_*]` wrappers (functions 1-4).
+    // Per the FFI docstrings in `proof/PMT/Extraction.lean` §1-§4,
+    // every argument is a boxed `lean_object*` (Lean's C ABI boxes
+    // `BitVec 64`, `Nat`, `Field`, `Layout`, `String`, `List α`); the
+    // `Bool` return is marshalled as `uint8_t` (0 = false, 1 = true).
+    // Wave 4-A may later add Lean-side unboxing wrappers exposing
+    // primitive C signatures; until then these externs match the
+    // *current* `@[export]`'d signatures exactly (all `lean_object*`,
+    // return `u8`).
+    // ─────────────────────────────────────────────────────────────
     extern "C" {
-        /// `@[export lean_verify_transform]` from `proof/PMT/Extraction.lean`.
-        /// Takes a boxed `StateTransform` (struct of String × String ×
-        /// Layout × Layout × TransformKind), returns `uint8_t` (the
-        /// `valid` field; 0 = false, 1 = true).
-        pub fn lean_verify_transform(t: *mut LeanObject) -> u8;
+        /// `@[export lean_verified_capacity_check]` — Lean signature
+        /// `(used size capacity : BitVec 64) : Bool`. FFI docstring:
+        /// `lean_verified_capacity_check(lean_object*, lean_object*,
+        /// lean_object*) -> uint8_t`.
+        pub fn lean_verified_capacity_check(
+            used: *mut LeanObject,
+            size: *mut LeanObject,
+            capacity: *mut LeanObject,
+        ) -> u8;
 
-        /// `@[export lean_verify_state_reads]` from `proof/PMT/Extraction.lean`.
-        /// Takes a boxed `List (String × Layout)` (the env) and a boxed
-        /// `List StateRead` (the reads), returns `uint8_t` (1 iff all
-        /// reads pass).
+        /// `@[export lean_verified_field_bounds_check]` — Lean signature
+        /// `(f : Field) (layout : Layout) : Bool`. FFI docstring:
+        /// `lean_verified_field_bounds_check(lean_object*,
+        /// lean_object*) -> uint8_t`.
+        pub fn lean_verified_field_bounds_check(
+            f: *mut LeanObject,
+            layout: *mut LeanObject,
+        ) -> u8;
+
+        /// `@[export lean_verified_linearity_check]` — Lean signature
+        /// `(var : String) (consumed : List String) : Bool`. FFI
+        /// docstring: `lean_verified_linearity_check(lean_object*,
+        /// lean_object*) -> uint8_t`.
+        pub fn lean_verified_linearity_check(
+            var: *mut LeanObject,
+            consumed: *mut LeanObject,
+        ) -> u8;
+
+        /// `@[export lean_verified_pmt_check]` — Lean signature
+        /// `(used capacity : Nat) (f : Field) (layout : Layout)
+        /// (var : String) (consumed : List String) : Bool`. FFI
+        /// docstring: six `lean_object*` arguments (used, capacity, f,
+        /// layout, var, consumed) returning `uint8_t`.
+        pub fn lean_verified_pmt_check(
+            used: *mut LeanObject,
+            capacity: *mut LeanObject,
+            f: *mut LeanObject,
+            layout: *mut LeanObject,
+            var: *mut LeanObject,
+            consumed: *mut LeanObject,
+        ) -> u8;
+
+        // ─────────────────────────────────────────────────────────
+        // Group B — IVE state verifiers carrying complex Lean structs
+        // (functions 5-7). All arguments are opaque boxed
+        // `lean_object*`; the `Bool` return is `uint8_t`.
+        // ─────────────────────────────────────────────────────────
+
+        /// `@[export lean_verify_transform]` — Lean signature
+        /// `(layouts : LayoutRegistry) (t : StateTransform) : Bool`.
+        /// Two boxed `lean_object*` args, returns `uint8_t` (the
+        /// `valid` field; 0 = false, 1 = true).
+        pub fn lean_verify_transform(
+            layouts: *mut LeanObject,
+            t: *mut LeanObject,
+        ) -> u8;
+
+        /// `@[export lean_verify_state_reads]` — Lean signature
+        /// `(env_list : List (String × LayoutInfo))
+        /// (reads : List StateRead) : Bool`. Two boxed `lean_object*`
+        /// args, returns `uint8_t` (1 iff all reads pass).
         pub fn lean_verify_state_reads(
             env_list: *mut LeanObject,
             reads: *mut LeanObject,
         ) -> u8;
 
-        /// `@[export lean_verify_state_writes]` from `proof/PMT/Extraction.lean`.
-        /// Takes a boxed `List (String × Layout)` (env), a boxed
-        /// `List String` (consumed), and a boxed `List StateWrite`
-        /// (writes), returns `uint8_t` (1 iff all writes pass).
+        /// `@[export lean_verify_state_writes]` — Lean signature
+        /// `(env_list : List (String × LayoutInfo))
+        /// (consumed : List String) (writes : List StateWrite) : Bool`.
+        /// Three boxed `lean_object*` args, returns `uint8_t` (1 iff
+        /// all writes pass).
         pub fn lean_verify_state_writes(
             env_list: *mut LeanObject,
             consumed: *mut LeanObject,
@@ -130,23 +193,72 @@ mod lean_ffi {
         ) -> u8;
     }
 
-    /// Rust-side wrapper for `lean_verify_transform`. Returns `true` iff
-    /// the extracted Lean function accepts the transform.
-    ///
-    /// # Safety
-    /// The caller must ensure the Lean C output is linked and the
-    /// `StateTransform` argument is properly marshalled. This function
-    /// is only called when the `pmt-runtime-check` feature is enabled
-    /// AND the Lean C output is linked into the binary.
+    // ─────────────────────────────────────────────────────────────
+    // Rust-side safe-bool wrappers. Each dereferences the extern
+    // (returning `u8`) and normalises to `bool` via `!= 0`.
+    //
+    // # Safety (all wrappers)
+    // The caller must ensure (a) the Lean C backend output
+    // (`proof/.lake/build/.../PMT/Extraction.c`) is linked into the
+    // binary, AND (b) every `*mut LeanObject` argument was constructed
+    // by the Wave 4 `marshal` submodule (or Lean runtime) with the
+    // exact boxed representation Lean expects. These are only invoked
+    // when `feature = "pmt-runtime-check"` is on AND the
+    // `lean_ffi_linked` cfg is set (Wave 5 build.rs).
+    // ─────────────────────────────────────────────────────────────
+
+    /// Wrapper for `lean_verified_capacity_check`.
     #[inline]
-    pub unsafe fn call_lean_verify_transform(t: *mut LeanObject) -> bool {
-        unsafe { lean_verify_transform(t) != 0 }
+    pub unsafe fn call_lean_verified_capacity_check(
+        used: *mut LeanObject,
+        size: *mut LeanObject,
+        capacity: *mut LeanObject,
+    ) -> bool {
+        unsafe { lean_verified_capacity_check(used, size, capacity) != 0 }
     }
 
-    /// Rust-side wrapper for `lean_verify_state_reads`.
-    ///
-    /// # Safety
-    /// Same caveats as `call_lean_verify_transform`.
+    /// Wrapper for `lean_verified_field_bounds_check`.
+    #[inline]
+    pub unsafe fn call_lean_verified_field_bounds_check(
+        f: *mut LeanObject,
+        layout: *mut LeanObject,
+    ) -> bool {
+        unsafe { lean_verified_field_bounds_check(f, layout) != 0 }
+    }
+
+    /// Wrapper for `lean_verified_linearity_check`.
+    #[inline]
+    pub unsafe fn call_lean_verified_linearity_check(
+        var: *mut LeanObject,
+        consumed: *mut LeanObject,
+    ) -> bool {
+        unsafe { lean_verified_linearity_check(var, consumed) != 0 }
+    }
+
+    /// Wrapper for `lean_verified_pmt_check`.
+    #[inline]
+    pub unsafe fn call_lean_verified_pmt_check(
+        used: *mut LeanObject,
+        capacity: *mut LeanObject,
+        f: *mut LeanObject,
+        layout: *mut LeanObject,
+        var: *mut LeanObject,
+        consumed: *mut LeanObject,
+    ) -> bool {
+        unsafe { lean_verified_pmt_check(used, capacity, f, layout, var, consumed) != 0 }
+    }
+
+    /// Wrapper for `lean_verify_transform` — takes the boxed
+    /// `LayoutRegistry` and boxed `StateTransform`.
+    #[inline]
+    pub unsafe fn call_lean_verify_transform(
+        layouts: *mut LeanObject,
+        t: *mut LeanObject,
+    ) -> bool {
+        unsafe { lean_verify_transform(layouts, t) != 0 }
+    }
+
+    /// Wrapper for `lean_verify_state_reads`.
     #[inline]
     pub unsafe fn call_lean_verify_state_reads(
         env_list: *mut LeanObject,
@@ -155,10 +267,7 @@ mod lean_ffi {
         unsafe { lean_verify_state_reads(env_list, reads) != 0 }
     }
 
-    /// Rust-side wrapper for `lean_verify_state_writes`.
-    ///
-    /// # Safety
-    /// Same caveats as `call_lean_verify_transform`.
+    /// Wrapper for `lean_verify_state_writes`.
     #[inline]
     pub unsafe fn call_lean_verify_state_writes(
         env_list: *mut LeanObject,

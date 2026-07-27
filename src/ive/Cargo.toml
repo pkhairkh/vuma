@@ -17,3 +17,11 @@ vuma-codegen.workspace = true
 # serde/serde_json removed in Wave 43 — all IVE types now rely on hand-written
 # Debug + Clone derives only; no JSON serialization is performed inside this
 # crate.
+
+[features]
+default = []
+# Activates the Lean↔Rust FFI routing in src/ive/src/verification.rs.
+# When off (default), the IVE pipeline uses hand-written Rust verifiers.
+# When on, the call site dispatches to verify_pmt_via_lean (stub or real
+# Lean depending on the lean_ffi_linked cfg emitted by build.rs).
+pmt-runtime-check = []

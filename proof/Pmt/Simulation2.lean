@@ -22,6 +22,18 @@ Both proofs are by `intro`, beta-reduction of the post-state environment
 lambda (via `show`), and a `split` on the decidable equality `z = src`/`z = dst`.
 The negative branch is contradictory (`z = z` is `rfl`) and is closed by
 `simp at hneg`. No placeholders, no `axiom`.
+
+**Scope vs `Simulation.lean` (audit 3-C).** The two modules are
+*complementary*, not overlapping: `Simulation.lean` owns `sim_alloc`; this
+module owns `sim_free` and `sim_read`. There are no shared theorem names or
+statements, so they are kept side-by-side rather than merged. The
+Rust/Lean model definitions (`USize`, `Ptr`, `Arena`, `Env`, `LeanArena`,
+`LeanEnv`, `sim_state`) are re-pasted here — not `import`ed from
+`Simulation.lean` — so this file is self-contained; consequently the two
+modules must **not** be co-imported into one Lean module (duplicate
+declarations). Neither is currently in the `Pmt` root import graph; build
+them explicitly with `lake build Pmt.Simulation Pmt.Simulation2` to check
+them in isolation.
 -/
 
 namespace Pmt

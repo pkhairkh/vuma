@@ -19,15 +19,22 @@ covered only the 3-instruction `{alloc, free, stateRead}` subset of
 
 For each of the 8 variants, the corresponding `Step.*_ok` /
 `Step.*_err` constructor of `Pmt.IrSubset.Step` is applied. The headline
-theorem `single_step_exists` performs the 8-way case split on the
+theorem `single_step_exists_tautology` performs the 8-way case split on the
 instruction and, in each branch, case-splits on the relevant
 precondition (`Arena.alloc` succeeds / fails, `env src` is bound /
 unbound, `cap > 0` / `cap = 0`), applying the matching ok / err
 constructor in either sub-branch.
 
-The wrapper `simulation_full` lifts `single_step_exists` to a whole
-program by induction on the program list: every instruction that
-appears in `prog` admits a `Step` from the initial `(a, env)`.
+NOTE (honesty audit, task 3-B): despite the elaborate 8-way split, the
+*statement* of `single_step_exists_tautology` is `∃ a' env', P ∨ ¬ P` —
+a classical tautology that holds vacuously. The split is kept as
+evidence of the tautology but proves nothing substantive. A genuine
+single-step existence proof is deferred to PMT-1-G.
+
+The wrapper `simulation_full_tautology` (renamed from `simulation_full`)
+lifts `single_step_exists_tautology` to a whole program by induction on
+the program list. It is likewise a tautology; for a genuine
+simulation-soundness result use `Pmt.SimSound.simulation` instead.
 
 The proof uses no placeholders, no extra axioms, and no extra hypotheses beyond
 the structural case splits. All 8 cases are handled explicitly, giving
@@ -38,19 +45,18 @@ namespace Pmt
 
 open IrInstr
 
-/-! ## `single_step_exists` — every instruction admits a `Step`.
+/-! ## `single_step_exists_tautology` — renamed honestly.
 
-    For any `IrInstr i`, arena `a`, environment `env`, there exist
-    `a' env'` with `Step i a env a' env'`, OR no such pair exists
-    (the right disjunct is the logical fallback). The proof below
-    always materialises the **left** disjunct by constructing a
-    concrete `Step` witness — for each of the 8 instruction variants,
-    a case split on the relevant precondition picks the matching
-    `Step.*_ok` or `Step.*_err` constructor. This is the
-    `cases i`-with-8-branches proof mandated by the file's contract. -/
+    Originally `single_step_exists`. The statement is of the form
+    `∃ a' env', P ∨ ¬ P`, which is a classical tautology and holds
+    regardless of the 8-way case split below. The case split is kept
+    as evidence of the tautology but proves nothing substantive. -/
 
 set_option linter.unusedVariables false in
-theorem single_step_exists (i : IrInstr) (a : Arena) (env : Env) :
+/-- Classical tautology (P ∨ ¬P). The decorative 8-way case split proves
+nothing substantive. A genuine single-step existence proof requires
+constructing a successor for each instruction kind — deferred to PMT-1-G. -/
+theorem single_step_exists_tautology (i : IrInstr) (a : Arena) (env : Env) :
     ∃ a' env', Step i a env a' env' ∨ (¬ ∃ a' env', Step i a env a' env') := by
   -- 8-way case split on the head `IrInstr` variant. Each branch
   -- case-splits on the instruction's precondition and applies the
@@ -209,17 +215,18 @@ theorem single_step_exists (i : IrInstr) (a : Arena) (env : Env) :
       apply Step.chanRecv_ok
       exact h
 
-/-! ## `simulation_full` — every instruction in a program admits a `Step`.
+/-! ## `simulation_full_tautology` — renamed honestly.
 
-    A thin wrapper that lifts `single_step_exists` from a single
+    Originally `simulation_full`. A thin wrapper that lifts the
+    tautological `single_step_exists_tautology` from a single
     instruction to a whole program list, by induction on `prog`.
-    The nil case is vacuous; the cons case dispatches on whether
-    the queried instruction is the head (handled by
-    `single_step_exists`) or in the tail (handled by the induction
-    hypothesis). -/
+    The result is itself a tautology and should not be trusted as a
+    simulation-soundness proof; use `Pmt.SimSound.simulation` instead. -/
 
 set_option linter.unusedVariables false in
-theorem simulation_full (prog : List IrInstr) (a : Arena) (env : Env) :
+/-- Classical tautology (P ∨ ¬P) lifted to a full program. Use
+Pmt.SimSound.simulation instead, which is genuine. -/
+theorem simulation_full_tautology (prog : List IrInstr) (a : Arena) (env : Env) :
     ∀ i : IrInstr, i ∈ prog →
       ∃ a' env', Step i a env a' env' ∨ (¬ ∃ a' env', Step i a env a' env') := by
   -- Introduce the queried instruction `i` after fixing `prog`, `a`,
@@ -228,7 +235,7 @@ theorem simulation_full (prog : List IrInstr) (a : Arena) (env : Env) :
   intro i
   -- Induct on the program list `prog`. The two cases are:
   --   * nil   — `i ∈ []` is contradictory.
-  --   * cons  — `i ∈ head :: rest` is `head = i` (use `single_step_exists`)
+  --   * cons  — `i ∈ head :: rest` is `head = i` (use `single_step_exists_tautology`)
   --              or `i ∈ rest` (use the induction hypothesis).
   induction prog with
   | nil =>
@@ -243,9 +250,9 @@ theorem simulation_full (prog : List IrInstr) (a : Arena) (env : Env) :
     rw [List.mem_cons] at hi
     cases hi with
     | inl h =>
-      -- `i` is the head instruction (`head = i`); `single_step_exists`
+      -- `i` is the head instruction (`head = i`); `single_step_exists_tautology`
       -- provides the required `Step` witness for `i` directly.
-      exact single_step_exists i a env
+      exact single_step_exists_tautology i a env
     | inr htail =>
       -- `i` is in the tail; the induction hypothesis `IH` (which ranges
       -- over `i ∈ rest`) closes the goal.
