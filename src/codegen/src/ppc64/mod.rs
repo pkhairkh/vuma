@@ -4671,7 +4671,12 @@ impl Backend for PPC64Backend {
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                     // StarkProof — stub (Call-form builtin is the active path).
-                    | IRInstr::StarkProof { .. } => Vec::new(),
+                    | IRInstr::StarkProof { .. }
+                    // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+                    // replacements): backend lowering not yet implemented on ppc64;
+                    // emit no bytes (x86_64 is the canonical path).
+                    | IRInstr::BulkCopy { .. }
+                    | IRInstr::BulkFill { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic

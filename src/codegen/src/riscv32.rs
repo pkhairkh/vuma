@@ -8388,7 +8388,12 @@ impl Backend for RiscV32Backend {
                     IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
                     | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
                     // StarkProof — stub (Call-form builtin is the active path).
-                    | IRInstr::StarkProof { .. } => Vec::new(),
+                    | IRInstr::StarkProof { .. }
+                    // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+                    // replacements): backend lowering not yet implemented on riscv32;
+                    // emit no bytes (x86_64 is the canonical path).
+                    | IRInstr::BulkCopy { .. }
+                    | IRInstr::BulkFill { .. } => Vec::new(),
                 };
 
                 if !encoded.is_empty() {
@@ -8500,6 +8505,10 @@ impl Backend for RiscV32Backend {
                         // zk-STARK proof generation.
                         IRInstr::StarkProof { .. } => "stark_prove",
                         IRInstr::CallIndirect { .. } => "call_indirect",
+                        // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+                        // replacements; backend lowering not yet implemented on riscv32).
+                        IRInstr::BulkCopy { .. } => "bulk_copy",
+                        IRInstr::BulkFill { .. } => "bulk_fill",
                     };
 
                     // For FP Cast instructions, populate reads/writes with

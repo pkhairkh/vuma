@@ -4215,7 +4215,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } => {}
+        | IRInstr::StarkProof { .. }
+        // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+        // replacements): backend lowering not yet implemented on wasm32;
+        // emit nothing (x86_64 is the canonical path).
+        | IRInstr::BulkCopy { .. }
+        | IRInstr::BulkFill { .. } => {}
 
         IRInstr::CallIndirect { dst, func_ptr, args } => {
             // Indirect call through a function pointer (table slot index on
