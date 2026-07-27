@@ -226,9 +226,10 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
        (b : IRBlock) (_hb : b ∈ f.blocks)
        (i : PmtInstr) (_hi : i ∈ b.instructions),
       match i with
-      | .call name _ =>
-        name ∈ NoExterns.builtin_callees ∨
-        name ∈ syscall_callees
+      | .call _ name _ is_extern =>
+        -- PMT-FAITH-6-B: 4 args (dst, func, args, is_extern)
+        (name ∈ NoExterns.builtin_callees ∨
+         name ∈ syscall_callees) ∧ is_extern = false
       | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A
       | _ => True)
     ∧ -- (2) Every `.syscall nr _ _` instruction in `P` carries a
@@ -267,9 +268,12 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
     -- The match desugars: for .call, return `Or.inl h`; for
     -- .call_indirect, return `h` (which is `False`); for everything
     -- else, return `trivial`.
-    by_cases hcall : ∃ name args, i = .call name args
-    · obtain ⟨name, args, rfl⟩ := hcall
-      exact Or.inl h
+    by_cases hcall : ∃ dst name args is_extern, i = .call dst name args is_extern  -- PMT-FAITH-6-B: 4 args
+    · obtain ⟨dst, name, args, is_extern, rfl⟩ := hcall  -- PMT-FAITH-6-B
+      -- h : (name ∈ builtin_callees ∧ is_extern = false)  [from NoExterns]
+      -- goal: (name ∈ builtin_callees ∨ name ∈ syscall_callees) ∧ is_extern = false
+      obtain ⟨hname, hextern⟩ := h
+      exact ⟨Or.inl hname, hextern⟩
     · by_cases hci : ∃ a b c, i = .call_indirect a b c  -- PMT-FAITH-6-A
       · obtain ⟨a, b, c, rfl⟩ := hci  -- PMT-FAITH-6-A: 3 args
         exact h
@@ -282,7 +286,7 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         | store _ _ _ _ => exact trivial
         | free _ => exact trivial
         | transform_layouts _ _ _ _ => exact trivial  -- PMT-FAITH-5-A: sole Transform variant
-        | call name args => exact absurd ⟨name, args, rfl⟩ hcall
+        | call dst name args is_extern => exact absurd ⟨dst, name, args, is_extern, rfl⟩ hcall  -- PMT-FAITH-6-B
         | ret _ => exact trivial
         | bin_op _ _ _ _ _ => exact trivial
         | unary_op _ _ _ _ => exact trivial
