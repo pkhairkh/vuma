@@ -19,8 +19,8 @@ For each claim in the FFI spec, I verified:
 | 1 | **HIGH** | 5 active extern calls remain in `src/pipeline.rs` AST-bridge path: `mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow` | "No foreign function calls in VUMA (No-FFI path)" |
 | 2 | **HIGH** | Lean `SyscallName` allowlist has 6 syscalls; Rust `SyscallName` enum has 16+ | "6 syscalls routed through IRInstr::Syscall" |
 | 3 | **HIGH** | Lean `NoExterns` predicate does NOT check `.syscall` instructions | `ffi_pillar_sound` Conjunct 2 is vacuously true |
-| 4 | **HIGH** | Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions) | Lean cannot model programs using memcpy/memset replacements — **CLOSED by FFI-3-A** |
-| 5 | **HIGH** | Lean `PmtInstr.transform` signature differs from Rust `IRInstr::Transform` | Lean `transform` ≠ Rust `Transform` (different fields) |
+| 4 | **HIGH** | ~~Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions)~~ **CLOSED by FFI-3-A** | Lean cannot model programs using memcpy/memset replacements |
+| 5 | **HIGH** | ~~Lean `PmtInstr.transform` signature differs from Rust `IRInstr::Transform`~~ **CLOSED by FFI-3-B** | Lean `transform` ≠ Rust `Transform` (different fields) — distinct variants now coexist
 | 6 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims "zero active extern block declarations" | Audit report inaccuracy |
 | 7 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims `is_extern: true` is only for user-source `extern "C"` blocks | Audit report inaccuracy |
 | 8 | **LOW** | `__vuma_state_*` / `__vuma_arena_*` prefix-guard in `x86_64/mod.rs:4343-4353` is dead code | Cleanup needed |
@@ -108,7 +108,7 @@ The `no_ffi_program_sound` theorem's hypothesis `P : IRProgram` requires a Lean 
 
 ---
 
-## Gap #5 — Lean PmtInstr.transform signature differs from Rust IRInstr.Transform (HIGH)
+## Gap #5 — Lean PmtInstr.transform signature differs from Rust IRInstr.Transform (HIGH) — **CLOSED by FFI-3-B**
 
 **Claim** (from spec):
 > "StateTransform → IRInstr::Transform (NEW variant)"
@@ -126,6 +126,8 @@ The Lean model never received the FFI-1-C `Transform` variant. The pre-existing 
 **Implication**: Same as Gap #4 — Lean cannot represent programs using `IRInstr::Transform`, so `no_ffi_program_sound` cannot be applied to them.
 
 **Fix**: Add a new `PmtInstr.transform_layouts : IRValue → IRValue → String → String → PmtInstr` (or rename the existing `transform` and add a new one) to mirror the Rust `Transform`.
+
+**Status (FFI-3-B, closed)**: Added `PmtInstr.transform_layouts : IRValue → IRValue → String → String → PmtInstr` to `proof/PMT/PmtInstr.lean` — a field-for-field mirror of Rust `IRInstr::Transform { dst: IRValue, src: IRValue, from_layout: String, to_layout: String }` (4 fields, same order). The pre-existing `PmtInstr.transform : String → String → Layout → PmtInstr` (PMT-1-A) was left UNTOUCHED — it remains a distinct variant for the single-layout state transform (`__vuma_state_transform`). Added `.effect = .none`, `.well_typed = True`, `.to_steps = []` arms (the Rust lowering is a pointer copy with no PMT arena state interaction). Added `PmtInstr.to_steps_transform_layouts` reflection lemma (closes by `rfl`), and added case arms in the two exhaustive `cases i with` blocks in `proof/PMT/ExecFunction.lean` (`to_steps_preserves_WF_Layout` §1.8 and `to_steps_op_transform` §1.9) and in the exhaustive `cases i with` block of `ffi_pillar_sound` in `proof/PMT/FFI/PillarSoundness.lean`. `lake build` PASS, 108/108 steps, zero new sorries.
 
 ---
 
