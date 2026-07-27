@@ -94,27 +94,34 @@ The 211 `is_extern` references are in:
   - `src/codegen/src/scg_to_ir.rs` — same, IR pattern matching.
   - `src/codegen/src/backend.rs` — same, IR pattern matching.
 
-These are not active extern calls; they are references to the `is_extern` field of `IRInstr::Call` (which is still part of the IR for compatibility but is no longer set to `true` for any PMT/arena op after FFI-1-C). The `is_extern: true` value is now only used for explicit `extern "C" { fn ... }` blocks in user VUMA source — the 8 PMT/arena ops no longer set it.
+These are not active extern calls; they are references to the `is_extern` field of `IRInstr::Call` (which is still part of the IR for compatibility but is no longer set to `true` for any PMT/arena op after FFI-1-C).
+
+After FFI-5-B (which closed Gap #1 by re-routing the 4 compiler-emitted syscalls `mmap`/`mprotect`/`mremap`/`munmap` from `CallNode { is_extern: true }` to `SyscallCallNode`), the `is_extern: true` value is set in `src/pipeline.rs` for exactly three residual cases:
+  - `__arena_overflow` (arena-overflow trap) — in `NoExterns.builtin_callees` (added by FFI-5-A), so `NoExterns` accepts it as a built-in. The codegen layer emits a per-backend trap stub (every backend has its own `__arena_overflow` stub); it never reaches the backend's extern-call resolution as a real foreign call.
+  - `AtomicLoad` / `AtomicStore` / `AtomicCas` — compiler-emitted, but intercepted by `scg_to_ir.rs::lower_call` and re-emitted as `IRInstr::AtomicLoad/Store/Cas`. They never reach the backend as extern calls.
+  - user-source `extern "C" { fn ... }` blocks — the legitimate residual extern surface that the FFI pillar explicitly permits (the `is_extern` field exists precisely to flag these).
 
 ```
 $ grep -rn "__vuma_state_\|__vuma_arena_" src/ --include="*.rs" | wc -l
 27
 ```
 
-All 27 `__vuma_state_*` / `__vuma_arena_*` references are in **comments/docstrings** (e.g. `/// Replaces the former __vuma_state_* / __vuma_arena_* extern calls`) or in the runtime `pmt_ops.rs` reference implementations (deprecated per FFI-1-C, kept as documentation of the runtime semantics). Only 2 active non-comment refs remain:
-  - `src/codegen/src/x86_64/mod.rs:4345-4346` — the prefix-guard that suppresses the unresolved-extern warning for `__vuma_state_*` / `__vuma_arena_*` symbols (harmless — these symbols are no longer emitted, so the guard is a no-op at runtime).
+All `__vuma_state_*` / `__vuma_arena_*` references are in **comments/docstrings** (e.g. `/// Replaces the former __vuma_state_* / __vuma_arena_* extern calls`) describing the pre-FFI-1-C design. FFI-7-A removed the last active non-comment reference (the prefix-guard at `src/codegen/src/x86_64/mod.rs:~4345` that downgraded the unresolved-extern warning for these symbols — dead code since FFI-1-C, which inlined the PMT/arena ops as IR instructions and stopped emitting these symbols). After FFI-7-A there are **zero** active non-comment references to `__vuma_state_*` / `__vuma_arena_*` in `src/`.
 
 ```
 $ grep -rn 'extern "C"' src/ --include="*.rs" | wc -l
 63
 ```
 
-The 63 `extern "C"` references are:
+The `extern "C"` references are:
   - Doc comments describing the original FFI design (e.g. `//! extern "C" { ... }` block syntax in `src/ffi.rs`).
   - `pub unsafe extern "C" fn` declarations in `src/codegen/src/runtime/vuma_context.rs` (the C-API accessors — these are Rust functions EXPORTED with C ABI, not extern calls; they are the runtime's C-compatible API surface, not foreign calls).
-  - `pub unsafe extern "C-unwind" fn` declarations in `src/codegen/src/runtime/pmt_ops.rs` (deprecated reference implementations, kept as documentation — not invoked by the codegen pipeline after FFI-1-C).
+  - `pub unsafe extern "C" fn` declarations in `src/codegen/src/runtime/arena_verified.rs` and related runtime modules (arena allocator API exported for runtime callers).
+  - `extern "C" { fn ... }` block declarations emitted from user VUMA source (the legitimate residual extern surface that the FFI pillar explicitly permits — these flow through `CallNode { is_extern: true }` and reach the backend, where `__ffi_fallback_stub` resolves them in standalone ET_EXEC mode).
 
-There are **zero** active `extern "C" { fn ... }` extern block declarations remaining in `src/` for VUMA's own use. The only externals remaining are the syscall ABI (routed through `IRInstr::Syscall`, documented as residual TCB).
+There are **zero** active `extern "C" { fn ... }` extern block declarations remaining in `src/` for VUMA's *own* compiler-emitted code (compiler-internal externs were closed by FFI-1-C for PMT/arena ops and FFI-5-B for the 4 syscalls). The only residual externs are: (a) the syscall ABI (routed through `IRInstr::Syscall`, documented as residual TCB), (b) `__arena_overflow` (in `NoExterns.builtin_callees`, emitted as a per-backend trap stub, never reaches the extern-call resolver), (c) `__oob_trap` (a codegen-emitted stub on every backend, never a Rust `extern` block declaration), and (d) user-source `extern "C" { fn ... }` blocks (the FFI-permitted residual).
+
+`__oob_trap` note (Gap #10 closure, FFI-7-A): `__oob_trap` is **not** a Rust function — it is a codegen-emitted stub on every one of the 19 backends (e.g. `xor eax, eax; ret` on x86_64, `MOVEQ #134, D0; TRAP #0` on m68k, etc.). The earlier audit text claiming "`__oob_trap` is used by codegen Transform lowering" was incorrect: the `IRInstr::Transform` lowering in `src/codegen/src/x86_64/stack_slot_isel.rs:4417-4428` does a simple pointer copy (`load src → Rax → store dst`) with no trap call. `__oob_trap` is genuinely emitted only by `inject_bounds_check_ir` (in `src/codegen/src/memory_safety.rs`) before bounded memory accesses — not by the Transform lowering. The deleted `src/codegen/src/runtime/pmt_ops.rs` file (FFI-7-A) had a Rust `__oob_trap` mirror that was never linked into production binaries (every backend emits its own stub); it is now gone.
 
 ## Self-check (per FFI orchestrator spec)
 
@@ -128,6 +135,7 @@ There are **zero** active `extern "C" { fn ... }` extern block declarations rema
 - [x] Final `lake build` from clean passes with zero FFI-scope warnings.
 - [x] Final `grep -rn "sorry" proof/PMT/FFI/ proof/PMT/NoFFI.lean | wc -l` = 0 (actual tactics; 3 matches in docstrings only).
 - [x] Final `grep -rn "^axiom" proof/PMT/FFI/ proof/PMT/NoFFI.lean | wc -l` = 0.
+- [x] Wave 7 task A (FFI-7-A) complete; dead code cleanup: `src/codegen/src/runtime/pmt_ops.rs` deleted (8 deprecated PMT/arena reference functions + Rust `__oob_trap` mirror), `__vuma_state_*` / `__vuma_arena_*` prefix-guard removed from `src/codegen/src/x86_64/mod.rs` relocation patching site. `cargo build --release` PASS, `cargo test -p vuma-codegen --lib` PASS (test count drops by 6 from 1294 to 1288 as the 6 `pmt_ops` unit tests are removed with the file), `lake build` PASS. Faithfulness gaps #6, #7, #8, #9, #10 (audit report inaccuracies + dead code) — all CLOSED by FFI-7-A.
 
 ## Conclusion
 
