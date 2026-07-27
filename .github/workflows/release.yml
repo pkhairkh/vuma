@@ -124,7 +124,7 @@ jobs:
     if: github.event_name == 'push'
     steps:
       - name: Wait for lean-rust-parity workflow
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { data } = await github.rest.actions.listWorkflowRuns({
