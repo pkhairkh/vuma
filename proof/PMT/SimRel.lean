@@ -181,13 +181,19 @@ aligning the advancement, discharging `haligned`. -/
 def aligned_alloc (a : Arena) (l : Layout) : Arena :=
   { a with used := a.used + align8_nat l.total_size }
 
-/-- §2: Instruction simulation relation.
-`instr_sim lean_instr rust_instr` holds when the Lean PmtInstr
-corresponds to a Rust IRInstr. The relation is partial — not all
-Rust IRInstr variants have a Lean counterpart (only the PMT-relevant
-subset does). -/
+/-- §2: Per-instruction simulation relation.
+
+**PMT-FAITH-5-B (honest docstring):** This relation is INTRA-LEAN — it relates
+two `PmtInstr` values (Lean-to-Lean), NOT a Lean `PmtInstr` to a Rust `IRInstr`.
+The two types are different (`PmtInstr` is the Lean model; `IRInstr` is the Rust
+enum in `src/codegen/src/ir.rs`), so a true cross-language simulation would need
+a projection/encoding function. The cross-language bridge is instead via the
+Extraction parity test (`tests/pmt_parity_test.rs`), which empirically verifies
+that the extracted Lean checkers match the Rust hand-translations. A formal
+cross-language proof would require modeling the Rust `pipeline::compile` pipeline
+in Lean — out of scope for PMT-Faith (documented as residual TCB). -/
 def instr_sim (lean : PmtInstr) (rust : PmtInstr) : Prop :=
-  lean = rust  -- trivial for now; a future refinement will distinguish cases
+  lean = rust  -- intra-Lean structural equality (NOT cross-language)
 
 /-- §3: Block simulation relation. -/
 def block_sim (lean : IRBlock) (rust : IRBlock) : Prop :=
@@ -430,7 +436,7 @@ future-proofing — they are unused by the proof (which relies only on
 `exec`'s structure) but will be needed by a stronger composition that
 delivers the `fu ≤ capacity` capacity-preservation half (as
 `full_simulation_strong` §10 does). -/
-theorem full_simulation
+theorem lean_internal_soundness
     (lean_prog rust_prog : IRProgram)
     (env : String → Layout)
     (_hprog : program_sim lean_prog rust_prog)
@@ -488,7 +494,7 @@ lift theorem. Combine with the per-step `WF_Layout` (from
 meet `pmt_soundness_strong`'s `hstep` precondition. Apply
 `pmt_soundness_strong` to obtain the result `r` and the
 capacity-preservation / canonical-trap disjunction. -/
-theorem full_simulation_strong
+theorem lean_internal_soundness_strong
     (lean_prog rust_prog : IRProgram)
     (env : String → Layout)
     (initial_var : String)
