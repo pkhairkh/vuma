@@ -180,6 +180,90 @@ fn lean_verify_state_writes(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// IVE-1-C v2 verifiers (with type-match, Option env, after_consume)
+// ─────────────────────────────────────────────────────────────────────
+//
+// These mirror the updated Lean definitions after Wave 1 task IVE-1-C
+// closed the 8 soundness gaps. The v1 functions above are retained for
+// backward compatibility with the v1 parity tests.
+
+/// Hand-translated from Lean v2: `PMT.IVE.Soundness.verify_state_reads`
+/// (post-IVE-1-C). Returns true iff every read accesses a registered,
+/// in-bounds, type-matched field. `env` maps var name → Option Layout
+/// (None for unknown vars, mirroring Rust's HashMap.get() → None).
+/// `ft_env` maps var name → Option (List (Field, type_name)).
+fn lean_verify_state_reads_v2(
+    env: &[(&str, Layout)],
+    ft_env: &[(&str, Vec<(Field, &str)>)],
+    reads: &[(&str, Field, &str)],
+) -> bool {
+    reads.iter().all(|(var, f, expected_type)| {
+        // Look up var in env; none → fail (gap 3, 8).
+        let layout = match env.iter().find(|(name, _)| *name == *var) {
+            Some((_, l)) => l,
+            None => return false,
+        };
+        // Check field is registered (matches by offset + size).
+        let registered = layout.fields.iter().any(|g| g.offset == f.offset && g.size == f.size);
+        if !registered { return false; }
+        // Check field is in bounds.
+        let in_bounds = lean_field_bounds_check(f.offset, f.size, layout.total_size);
+        if !in_bounds { return false; }
+        // Gap 1: type match — look up declared type in ft_env.
+        let fts = match ft_env.iter().find(|(name, _)| *name == *var) {
+            Some((_, fts)) => fts,
+            None => return false,  // no field_types → type check fails
+        };
+        let declared_type = fts.iter()
+            .find(|(g, _)| g.offset == f.offset && g.size == f.size)
+            .map(|(_, ty)| *ty);
+        match declared_type {
+            Some(dt) => dt == *expected_type,
+            None => false,
+        }
+    })
+}
+
+/// Hand-translated from Lean v2: `PMT.IVE.Soundness.verify_state_writes`
+/// (post-IVE-1-C). Returns true iff every write is to a live variable
+/// (gap 4: both after_consume=false AND not in consumed) with a registered,
+/// in-bounds, type-matched field (gap 2).
+fn lean_verify_state_writes_v2(
+    env: &[(&str, Layout)],
+    ft_env: &[(&str, Vec<(Field, &str)>)],
+    consumed: &[&str],
+    writes: &[(&str, Field, &str, bool)],  // (var, field, value_type, after_consume)
+) -> bool {
+    writes.iter().all(|(var, f, value_type, after_consume)| {
+        // Gap 4: linearity — after_consume must be false AND var not in consumed.
+        if *after_consume { return false; }
+        if consumed.iter().any(|c| *c == *var) { return false; }
+        // Look up var in env; none → fail (gap 3, 8).
+        let layout = match env.iter().find(|(name, _)| *name == *var) {
+            Some((_, l)) => l,
+            None => return false,
+        };
+        // Check field is registered and in bounds.
+        let registered = layout.fields.iter().any(|g| g.offset == f.offset && g.size == f.size);
+        if !registered { return false; }
+        let in_bounds = lean_field_bounds_check(f.offset, f.size, layout.total_size);
+        if !in_bounds { return false; }
+        // Gap 2: type match — look up declared type in ft_env.
+        let fts = match ft_env.iter().find(|(name, _)| *name == *var) {
+            Some((_, fts)) => fts,
+            None => return false,
+        };
+        let declared_type = fts.iter()
+            .find(|(g, _)| g.offset == f.offset && g.size == f.size)
+            .map(|(_, ty)| *ty);
+        match declared_type {
+            Some(dt) => dt == *value_type,
+            None => false,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +491,160 @@ mod tests {
         let consumed = vec!["y"];
         let writes = vec![("x", f), ("y", f)];  // x passes, y fails (consumed)
         assert_eq!(lean_verify_state_writes(&env, &consumed, &writes), false);
+    }
+
+    // ─── IVE-1-C gap-closure parity tests ───────────────────────────
+    //
+    // These tests verify the 8 soundness gaps closed by Wave 1 task IVE-1-C:
+    //   Gap 1: StateReads type-match (expected_type vs declared type).
+    //   Gap 2: StateWrites type-match (value_type vs declared type).
+    //   Gap 3: HashMap-lookup-vs-total-function (Option env, none = not found).
+    //   Gap 4: after_consume vs consumed_vars (both checked separately).
+    //   Gap 5: ForeignConsume modelled (consumed ++ foreign_consumes).
+    //   Gaps 6, 7: Copy/Reinterpret accept any pair (documented, WF_Layout required).
+    //   Gap 8: Layout-not-found (subsumed by gap 3's Option model).
+
+    // --- Gap 3 + 8: Option env (var not found → fail) ---
+
+    #[test]
+    fn parity_verify_state_reads_option_env_var_not_found() {
+        // Gap 3 + 8: env returns none for unknown var → verification fails.
+        // Lean: verify_state_reads (fun _ => none) _ [⟨"x", ⟨0,4⟩, "u32"⟩] → valid = false.
+        let f = Field { offset: 0, size: 4 };
+        let reads = vec![("x", f, "u32")];
+        let env: Vec<(&str, Layout)> = vec![];  // empty env → all vars unknown
+        let ft_env: Vec<(&str, Vec<(Field, &str)>)> = vec![];
+        assert_eq!(lean_verify_state_reads_v2(&env, &ft_env, &reads), false);
+    }
+
+    #[test]
+    fn parity_verify_state_writes_option_env_var_not_found() {
+        // Gap 3 + 8: env returns none for unknown var → verification fails.
+        let f = Field { offset: 0, size: 4 };
+        let writes = vec![("x", f, "u32", false)];
+        let env: Vec<(&str, Layout)> = vec![];
+        let ft_env: Vec<(&str, Vec<(Field, &str)>)> = vec![];
+        let consumed: Vec<&str> = vec![];
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), false);
+    }
+
+    // --- Gap 1: StateReads type-match ---
+
+    #[test]
+    fn parity_verify_state_reads_type_match_pass() {
+        // Gap 1: field's declared type matches expected_type → pass.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u32")])];
+        let reads = vec![("x", f, "u32")];  // expected_type = "u32" matches declared "u32"
+        assert_eq!(lean_verify_state_reads_v2(&env, &ft_env, &reads), true);
+    }
+
+    #[test]
+    fn parity_verify_state_reads_type_match_fail() {
+        // Gap 1: field's declared type does NOT match expected_type → fail.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u64")])];  // declared type is "u64"
+        let reads = vec![("x", f, "u32")];  // but read expects "u32" → mismatch
+        assert_eq!(lean_verify_state_reads_v2(&env, &ft_env, &reads), false);
+    }
+
+    #[test]
+    fn parity_verify_state_reads_type_match_field_types_missing() {
+        // Gap 1 + 3: field_types returns none for unknown var → type check fails.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env: Vec<(&str, Vec<(Field, &str)>)> = vec![];  // no field_types for "x"
+        let reads = vec![("x", f, "u32")];
+        assert_eq!(lean_verify_state_reads_v2(&env, &ft_env, &reads), false);
+    }
+
+    // --- Gap 2: StateWrites type-match ---
+
+    #[test]
+    fn parity_verify_state_writes_type_match_pass() {
+        // Gap 2: field's declared type matches value_type → pass.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u32")])];
+        let consumed: Vec<&str> = vec![];
+        let writes = vec![("x", f, "u32", false)];  // value_type = "u32", after_consume = false
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), true);
+    }
+
+    #[test]
+    fn parity_verify_state_writes_type_match_fail() {
+        // Gap 2: declared type "u64" ≠ value_type "u32" → fail.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u64")])];
+        let consumed: Vec<&str> = vec![];
+        let writes = vec![("x", f, "u32", false)];
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), false);
+    }
+
+    // --- Gap 4: after_consume vs consumed_vars ---
+
+    #[test]
+    fn parity_verify_state_writes_after_consume_true_fails() {
+        // Gap 4: after_consume = true → fail (even if var not in consumed set).
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u32")])];
+        let consumed: Vec<&str> = vec![];  // var NOT in consumed set
+        let writes = vec![("x", f, "u32", true)];  // but after_consume = true → fail
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), false);
+    }
+
+    #[test]
+    fn parity_verify_state_writes_after_consume_false_consumed_true_fails() {
+        // Gap 4: after_consume = false BUT var in consumed set → fail.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u32")])];
+        let consumed = vec!["x"];  // var IS in consumed set
+        let writes = vec![("x", f, "u32", false)];  // after_consume = false, but consumed → fail
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), false);
+    }
+
+    #[test]
+    fn parity_verify_state_writes_both_checks_false_passes() {
+        // Gap 4: after_consume = false AND var not in consumed → pass (linearity ok).
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l)];
+        let ft_env = vec![("x", vec![(f, "u32")])];
+        let consumed: Vec<&str> = vec![];
+        let writes = vec![("x", f, "u32", false)];
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), true);
+    }
+
+    // --- Gap 5: ForeignConsume (consumed ++ foreign_consumes) ---
+
+    #[test]
+    fn parity_verify_state_writes_foreign_consume_merged() {
+        // Gap 5: when foreign_consumes is merged into consumed, writes to
+        // foreign-consumed vars also fail. This mirrors Rust's production
+        // path where VerificationEngine::verify_pmt accumulates BOTH
+        // StateTransform and ForeignConsume kills into consumed_vars.
+        let f = Field { offset: 0, size: 4 };
+        let l = Layout { total_size: 16, fields: vec![f] };
+        let env = vec![("x", l.clone()), ("y", l)];
+        let ft_env = vec![("x", vec![(f, "u32")]), ("y", vec![(f, "u32")])];
+        // "y" was foreign-consumed; merge into consumed set.
+        let foreign_consumes = vec!["y"];
+        let mut consumed = vec!["z"];
+        consumed.extend(foreign_consumes.iter().copied());
+        let writes = vec![("x", f, "u32", false), ("y", f, "u32", false)];
+        // x passes, y fails (in merged consumed set).
+        assert_eq!(lean_verify_state_writes_v2(&env, &ft_env, &consumed, &writes), false);
     }
 }
