@@ -15,11 +15,9 @@
 //! There are two bridges from a common parser AST:
 //!   * AST → semantic SCG : `vuma_parser::AstToScg`              (IVE input)
 //!   * AST → codegen  SCG : `vuma::pipeline::bridge_ast_to_codegen_scg` (binary producer)
-//! plus a DEPRECATED semantic-SCG → codegen-SCG bridge
-//!   * SCG  → codegen  SCG : `vuma::pipeline::bridge_scg_to_codegen`
-//! which was abandoned (segfaults / infinite loops; see
-//! `src/pipeline.rs:4892-4911`) but is retained because binaries / tests
-//! still import it.
+//! The deprecated semantic-SCG → codegen-SCG bridge
+//! (`bridge_scg_to_codegen`) has been removed; the canonical path is now
+//! exclusively the AST→codegen bridge above.
 //!
 //! These tests are REGRESSION TRIPWIRES: they pin the CURRENT divergence
 //! and fail loudly if it widens OR narrows without an explicit code
