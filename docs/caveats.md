@@ -404,3 +404,103 @@ is APPEND-ONLY: no pre-existing line in this file was edited to add it.
   gate is "dormant due to a pre-existing parser gap" — STALE per row 1
   above. Editing existing §2 lines is out-of-scope for Wave 0 task C
   (caveats.md edits are APPEND-ONLY). Wave 1 or later may amend §2.
+
+## 11. PMT Wave 2 Audit Results (PMT-2-A Baseline) — APPEND-ONLY
+
+> **Audit date:** PMT Wave 2 task A (PMT-2-A), baseline audit run on `main`
+> HEAD `9f5fbd43` (PMT Wave 1 task G1 partial — HeapModel.lean in place;
+> PMT-1-G2 deferred).
+>
+> **Audit report:** `proof/AUDIT_PMT.md` (full report). This section is
+> a brief summary; the full audit report lives in the file above.
+
+PMT-2-A is an **independent baseline audit** of the PMT codedomain
+(`proof/PMT/`, excluding `proof/PMT/IVE/` which is IVE's codedomain and has
+its own audit). It was run because IVE-1-A and FFI-1-D are not yet on `main`,
+so PMT-1-G2 (which removes the residual axiom and proves the pillar theorem)
+remains deferred.
+
+### Findings
+
+- **`sorry` audit:** 0 actual proof-term sorries in `proof/PMT/`
+  (excl. IVE). The high raw grep count (91 hits) is entirely prose —
+  docstrings, module headers, and inline comments describing proofs as
+  "sorry-free". Filtering with a Perl-regex negative-lookahead pattern
+  (`(:=\s*sorry(?!\w|-)|\|\s*sorry(?!\w|-)|by\s+sorry(?!\w|-)|^\s*sorry(?!\w|-)\s*$)`)
+  to exclude "sorry-free" / "sorry-backed" word-boundary matches confirms
+  the count is 0.
+- **`admit` audit:** 0 actual proof-term admits. The 7 raw grep hits are
+  English prose using "admit" as a verb ("admits arenas", "smallest arena
+  that still admits an overflow demo").
+- **`axiom` audit:** Exactly **1 axiom** in `proof/PMT/` (excl. IVE) —
+  `own_ex_exclusive` at `LiveMirrorInvariant.lean:127`. **This is a KNOWN
+  RESIDUAL**, NOT a regression:
+  - PMT-1-G1 (Wave 1, Batch 2 part 1) was **partial**: it created
+    `proof/PMT/Iris/HeapModel.lean` (342 lines) with the non-degenerate
+    foundation (`Heap`, `Ex α`, `RealOwn γ v`, `ex_exclusive`,
+    `real_own_exclusive`, `own_ex_exclusive_derived` — all sorry-free and
+    axiom-free), but did NOT modify `LiveMirrorInvariant.lean` to remove
+    the existing `own_ex_exclusive` axiom.
+  - Removing the axiom requires redefining `Own` (in
+    `CapBndInvariant.lean`) to wrap `RealOwn`, which cascades through all
+    Iris structures (`CapBndInv`, `ArenaRes`, `LiveMirrorInv`,
+    `GuardInvariant`, `FractionalPerm`).
+  - This invasive change is **deferred to PMT-1-G2**, which is gated on
+    IVE-1-A (computable `WF_Layout`) + FFI-1-D (No-FFI theorem) landing on
+    `main`.
+  - **Informational:** The axiom count in `proof/PMT/IVE/` is **also 0**,
+    so the entire `proof/PMT/` tree contains exactly 1 axiom total.
+- **`lake build`:** PASS. All default targets (`PMT`, `Pmt`, `check-pmt`)
+  and all transitively-imported modules built without error. (Clean build
+  skipped per task instructions; the regular `lake build` is sufficient
+  for the baseline audit.)
+- **`cargo build --release`:** PASS (`Finished release profile [optimized]
+  target(s) in 49.96s`). Single pre-existing warning (`unused variable:
+  align` in `src/codegen/src/runtime/arena_verified.rs:44:31`) is NOT in
+  the PMT codedomain.
+- **Residual warnings:** 21 pre-existing lints, all non-sorry:
+  - 12 `List.get!` deprecation warnings (6 in `PMT/SimRel.lean`, 6 in
+    `PMT/IRLemmas.lean`).
+  - 4 `constructorNameAsVariable` lints in `PMT/Iris/Composition.lean`
+    (local variable `live` resembles `PMT.Liveness.live`).
+  - 5 `unusedVariables` lints in `PMT/Iris/FractionalPerm.lean`.
+  - **0 `sorry` warnings.**
+- **Pillar theorem:** `pmt_pillar_sound` is **NOT YET PROVEN** — no
+  references anywhere in `proof/PMT/`; the file
+  `proof/PMT/PillarSoundness.lean` does not exist. Deferred to PMT-1-G2
+  (gated on IVE-1-A + FFI-1-D).
+- **Coverage:** 35/35 `IRInstr` variants modeled in `PmtInstr.lean` (7
+  Memory + 12 Pure-arithmetic + 3 Control-flow + 3 Atomic + 10
+  Channel/special). Non-degenerate simulation (`full_simulation`,
+  `full_simulation_strong`, PMT-1-E) in place. Faithful arena model
+  (`arena_sim`, 9 gaps closed, PMT-1-F) in place. HeapModel foundation
+  (PMT-1-G1 partial) in place.
+
+### Staleness in §10 (deferred to PMT-2-B)
+
+§10 "Documented TODOs (`sorry`) in Lean Proofs" above is **STALE**: it claims
+6 open `sorry`s in `proof/PMT/Iris/{WeakestPrecond,FractionalPerm,ArenaRes}.lean`,
+but the actual count is **0**. The PMT-2-A audit confirmed via filtered grep
+that all 6 previously-listed sorries have been closed (PMT-1-A through
+PMT-1-F removed them). Editing the existing §10 text is **out-of-scope for
+PMT-2-A** (caveats.md edits are APPEND-ONLY). The full refresh of §10 will be
+performed by PMT-2-B (docs update) once PMT-1-G2 lands and the residual
+`own_ex_exclusive` axiom is removed.
+
+### Verdict
+
+The PMT codedomain is **sorry-free and admit-free** at the baseline. It
+contains **exactly 1 known-residual axiom** (`own_ex_exclusive`) whose
+removal is **deferred to PMT-1-G2** (gated on IVE-1-A + FFI-1-D). No
+regression has been introduced by Waves 0/0.5/1 through PMT-1-G1 partial.
+
+| Audit dimension | Expected | Actual | Status |
+|-----------------|---------:|-------:|--------|
+| Actual `sorry` proof terms | 0 | 0 | PASS |
+| Actual `admit` proof terms | 0 | 0 | PASS |
+| Top-level `axiom`s (excl. IVE) | 1 (known residual) | 1 (`own_ex_exclusive` @ `LiveMirrorInvariant.lean:127`) | PASS (known) |
+| `lake build` | PASS | PASS | PASS |
+| `cargo build --release` | PASS | PASS (1 pre-existing warning, not PMT) | PASS |
+| Sorry warnings | 0 | 0 | PASS |
+| `pmt_pillar_sound` theorem | NOT YET PROVEN | NOT YET PROVEN (deferred to PMT-1-G2) | as expected |
+| `PmtInstr` coverage | 35/35 | 35/35 | PASS |
