@@ -173,7 +173,8 @@ theorem no_ffi_after_removal (P : IRProgram) :
                 (b : IRBlock) (_hb : b ∈ f.blocks)
                 (i : PmtInstr) (_hi : i ∈ b.instructions),
       match i with
-      | .call name _ => name ∈ NoExterns.builtin_callees
+      | .call _ name _ is_extern => name ∈ NoExterns.builtin_callees ∧ is_extern = false
+        -- PMT-FAITH-6-B: check name + is_extern = false (closes FAITH-2-F)
       | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A: 3 args now
       | .syscall nr _ _ =>
         ∃ sn, syscall_nr_table nr = some sn ∧ sn ∈ SyscallName.allowlist

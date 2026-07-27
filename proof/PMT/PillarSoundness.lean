@@ -231,7 +231,10 @@ def NoExterns (P : IRProgram) : Prop :=
      (b : IRBlock) (_hb : b ∈ f.blocks)
      (i : PmtInstr) (_hi : i ∈ b.instructions),
     match i with
-    | .call name _ => name ∈ builtin_callees
+    | .call _ name _ is_extern => name ∈ builtin_callees ∧ is_extern = false
+      -- PMT-FAITH-6-B: check BOTH name ∈ builtin_callees AND is_extern = false.
+      -- Rust's Call has a separate is_extern flag that could disagree with the
+      -- name-based check; NoExterns now requires both (closes FAITH-2-F).
     | .call_indirect _ _ _ => False  -- indirect calls are never No-FFI (PMT-FAITH-6-A: 3 args now)
     | .syscall nr _ _ =>
       -- FFI-4-A (Gap #3 closure): the syscall number must map (via
