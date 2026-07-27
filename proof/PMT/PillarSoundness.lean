@@ -228,6 +228,80 @@ theorem pmt_pillar_sound
     rw [hr_exec]
     exact hno_oob r hr_exec
 
+/-! ## §2.5. Strengthened pillar theorem: also excludes UAF trap (135) (PMT-3-B) -/
+
+/-- §2.5: **`pmt_pillar_sound_no_uaf`** — the strengthened PMT pillar
+    theorem that additionally excludes the UAF trap (exit code 135).
+
+    For any VUMA program `P` with no extern calls (`h_no_externs`)
+    that is well-typed at the IR level (`h_well_typed`) and whose
+    flattened program satisfies `DataflowOk` and `CapacityInvariant`,
+    the Lean execution of `P`'s flattened program is memory-safe:
+
+      1. **Termination totality** — `exec` produces some result.
+      2. **Capacity preservation** — on success, the final bump
+         pointer is within the arena's capacity.
+      3. **No OOB trap** — exit code 134 never occurs.
+      4. **No UAF trap** — exit code 135 never occurs.
+
+    The UAF exclusion (conjunct 4) is the PMT-3-B strengthening. It
+    uses `no_uaf_trap_for_well_typed_strong` (PMT.WellTypedStrong §7.5),
+    which mirrors `no_oob_trap_for_well_typed_strong` but excludes
+    exit 135 instead of 134. The key insight: the `hstep` liveness
+    hypothesis gives `s.live i.in_var = .live` for every step, which
+    directly contradicts the UAF guard `s.live i.in_var = .dead`.
+
+    **Remaining limitation.** The arena-overflow trap (exit code 1) is
+    NOT excluded by this theorem. Excluding it requires an additional
+    "total allocation fits in capacity" hypothesis that is out of
+    scope for PMT-3-B. See `pmt_pillar_sound_full` (§3, deferred) for
+    the target statement.
+
+    **Axiom audit.** Same as `pmt_pillar_sound`: uses one residual
+    non-standard axiom `own_ex_exclusive` (transitively via
+    `no_oob_trap_for_well_typed_strong`). -/
+theorem pmt_pillar_sound_no_uaf
+    (P : IRProgram) (env : String → Layout) (initial_var : String)
+    (initial_state : ExecState)
+    (h_no_externs : NoExterns P)
+    (h_well_typed : P.well_typed env)
+    (h_dataflow : DataflowOk (P.to_program) initial_var)
+    (hcap : CapacityInvariant initial_state.arena)
+    (hinit : initial_state.live initial_var = Liveness.live)
+    (hstep_live : ∀ st : Step, st ∈ P.to_program →
+                   initial_state.live st.in_var = Liveness.live) :
+    (∃ r, exec P.to_program initial_state = r)
+    ∧ (match exec P.to_program initial_state with
+       | Result.ok final_used => final_used ≤ initial_state.arena.capacity
+       | Result.trap _ => True)
+    ∧ exec P.to_program initial_state ≠ Result.trap 134
+    ∧ exec P.to_program initial_state ≠ Result.trap 135 := by
+  -- (1)+(2)+(3) from `pmt_pillar_sound`.
+  obtain ⟨h_total, h_cap, h_no_oob⟩ :=
+    pmt_pillar_sound P env initial_var initial_state
+      h_no_externs h_well_typed h_dataflow hcap hinit hstep_live
+  -- (4) No UAF trap from `no_uaf_trap_for_well_typed_strong`.
+  have hwf_strong : WellTypedStrong P.to_program initial_var :=
+    IRProgram.well_typed.to_program_well_typed_strong P env initial_var
+      h_well_typed h_dataflow
+  have hwf : WellTyped P.to_program :=
+    well_typed_strong_implies_well_typed P.to_program initial_var hwf_strong
+  have hwf_layout : ∀ st : Step, st ∈ P.to_program → WF_Layout st.layout :=
+    fun st hst => hwf.left st hst
+  have hstep : ∀ st : Step, st ∈ P.to_program →
+                WF_Layout st.layout ∧ initial_state.live st.in_var = Liveness.live :=
+    fun st hst => ⟨hwf_layout st hst, hstep_live st hst⟩
+  have hno_uaf : ∀ r', exec P.to_program initial_state = r' →
+                  r' ≠ Result.trap 135 :=
+    no_uaf_trap_for_well_typed_strong P.to_program initial_var
+      hwf_strong initial_state hstep hcap hinit
+  -- Assemble the four conjuncts.
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · exact h_total
+  · exact h_cap
+  · exact h_no_oob
+  · exact hno_uaf _ rfl
+
 /-! ## §3. The full pillar theorem (deferred to a follow-up wave) -/
 
 /- §3: `pmt_pillar_sound_full` — the **full** PMT pillar theorem,
