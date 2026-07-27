@@ -642,6 +642,182 @@ type LeanPmtOutcome = (
     Vec<crate::state_transform::StateTransformVerification>,
 );
 
+// ─────────────────────────────────────────────────────────────────────
+// §9 serializers (VERIF-MARSHAL). Adapted from tests/pmt_parity_test.rs
+// serializers for the production data types. Only compiled under
+// `lean_ffi_linked` (the REAL sub-path); the STUB sub-path never invokes
+// them. Each emits the newline/tab-delimited string payloads the Lean
+// `_prim` parsers in proof/PMT/Extraction.lean consume (§9 format):
+//   • registry   : `name \t total_size \t field_count` + field lines
+//                  `fname \t offset \t size \t type_name`
+//   • reads      : `var \t field_name \t expected_type`
+//   • writes     : `var \t field_name \t value_type \t 0|1`
+//   • consumed   : vars joined by `\n`
+//
+// CRITICAL: the Lean `env` model for reads/writes is `String → Option
+// LayoutInfo` keyed by VARIABLE name (`env r.var` / `env w.var` — see
+// StateReads.lean / StateWrites.lean), whereas the transform `_prim`
+// looks up layouts by LAYOUT name (`layouts input_layout`). The merged
+// registry therefore contains BOTH:
+//   1. var-keyed entries — each (var, layout_name) in `state_var_layouts`
+//      resolved to its LayoutInfo so reads/writes env lookups succeed;
+//   2. layout-name-keyed entries — every layout in the 3 layout maps so
+//      transform lookups by name succeed.
+// `List.lookup` returns the first match, so a pathological collision
+// (var name == layout name) prefers the var-keyed entry; in practice
+// variable and layout names are disjoint.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Abstraction over the three identical-shape `LayoutInfo` structs
+/// (state_read / state_write / state_transform) so one serializer can
+/// traverse all three layout maps. All are in the `ive` crate, so a
+/// local trait impl satisfies the orphan rules.
+#[cfg(lean_ffi_linked)]
+trait IveLayoutSer {
+    fn total_size(&self) -> u64;
+    fn fields_ser(&self) -> Vec<(String, u64, u64, String)>;
+}
+
+#[cfg(lean_ffi_linked)]
+impl IveLayoutSer for crate::state_read::LayoutInfo {
+    fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    fn fields_ser(&self) -> Vec<(String, u64, u64, String)> {
+        self.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.offset, f.size, f.type_name.clone()))
+            .collect()
+    }
+}
+
+#[cfg(lean_ffi_linked)]
+impl IveLayoutSer for crate::state_write::LayoutInfo {
+    fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    fn fields_ser(&self) -> Vec<(String, u64, u64, String)> {
+        self.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.offset, f.size, f.type_name.clone()))
+            .collect()
+    }
+}
+
+#[cfg(lean_ffi_linked)]
+impl IveLayoutSer for crate::state_transform::LayoutInfo {
+    fn total_size(&self) -> u64 {
+        self.total_size
+    }
+    fn fields_ser(&self) -> Vec<(String, u64, u64, String)> {
+        self.fields
+            .iter()
+            .map(|f| (f.name.clone(), f.offset, f.size, f.type_name.clone()))
+            .collect()
+    }
+}
+
+/// Append one layout entry (header + field lines) in §9 format.
+#[cfg(lean_ffi_linked)]
+fn push_ive_layout_entry(
+    s: &mut String,
+    name: &str,
+    total_size: u64,
+    fields: &[(String, u64, u64, String)],
+) {
+    s.push_str(&format!("{}\t{}\t{}\n", name, total_size, fields.len()));
+    for (fname, offset, size, type_name) in fields {
+        s.push_str(&format!("{}\t{}\t{}\t{}\n", fname, offset, size, type_name));
+    }
+}
+
+/// Serialize the merged registry (var-keyed + layout-name-keyed entries)
+/// from the var→layout-name map and the 3 layout maps. See the
+/// `IveLayoutSer` block above for the env-keying rationale.
+#[cfg(lean_ffi_linked)]
+fn serialize_ive_registry(
+    state_var_layouts: &HashMap<String, String>,
+    read_layouts: &HashMap<String, crate::state_read::LayoutInfo>,
+    write_layouts: &HashMap<String, crate::state_write::LayoutInfo>,
+    transform_layouts: &HashMap<String, crate::state_transform::LayoutInfo>,
+) -> String {
+    let mut s = String::new();
+
+    // (1) Var-keyed entries: resolve var → layout_name → LayoutInfo so
+    // Lean's `env r.var` / `env w.var` lookups succeed. Prefer
+    // read_layouts, then write_layouts, then transform_layouts (the
+    // LayoutInfo shape is identical across all three).
+    for (var, layout_name) in state_var_layouts {
+        if let Some(l) = read_layouts.get(layout_name) {
+            push_ive_layout_entry(&mut s, var, l.total_size(), &l.fields_ser());
+        } else if let Some(l) = write_layouts.get(layout_name) {
+            push_ive_layout_entry(&mut s, var, l.total_size(), &l.fields_ser());
+        } else if let Some(l) = transform_layouts.get(layout_name) {
+            push_ive_layout_entry(&mut s, var, l.total_size(), &l.fields_ser());
+        }
+        // If layout_name is absent from all 3 maps, skip: Lean's env
+        // lookup returns `none` and the read/write is reported invalid
+        // ("variable not state-typed"), matching the Rust hand-verifier.
+    }
+
+    // (2) Layout-name-keyed entries: every layout in the 3 maps, so the
+    // transform `_prim` can look up `input_layout` / `output_layout` by
+    // name. Duplicate names across maps re-serialize harmlessly
+    // (identical shape); a name equal to a variable name is shadowed by
+    // the var entry above (pathological, see header comment).
+    for (name, l) in read_layouts {
+        push_ive_layout_entry(&mut s, name, l.total_size(), &l.fields_ser());
+    }
+    for (name, l) in write_layouts {
+        push_ive_layout_entry(&mut s, name, l.total_size(), &l.fields_ser());
+    }
+    for (name, l) in transform_layouts {
+        push_ive_layout_entry(&mut s, name, l.total_size(), &l.fields_ser());
+    }
+
+    s
+}
+
+/// Serialize reads as `var \t field_name \t expected_type` lines.
+#[cfg(lean_ffi_linked)]
+fn serialize_ive_reads(reads: &[(String, String, String)]) -> String {
+    let mut s = String::new();
+    for (var, field, expected_type) in reads {
+        s.push_str(&format!("{}\t{}\t{}\n", var, field, expected_type));
+    }
+    s
+}
+
+/// Serialize writes as `var \t field_name \t value_type \t 0|1` lines.
+/// `after_consume` maps to "1" (true) / "0" (false), matching Lean's
+/// `parseBoolField` ("1" or "true" → true).
+#[cfg(lean_ffi_linked)]
+fn serialize_ive_writes(writes: &[crate::state_write::StateWriteOp]) -> String {
+    let mut s = String::new();
+    for w in writes {
+        let ac = if w.after_consume { "1" } else { "0" };
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            w.var_name, w.field_name, w.value_type, ac
+        ));
+    }
+    s
+}
+
+/// Serialize consumed var names joined by `\n` (Lean `splitLines` drops
+/// empty lines, so an empty set yields `""` → `[]`). Sorted for
+/// determinism (HashSet iteration order is randomized).
+#[cfg(lean_ffi_linked)]
+fn serialize_ive_consumed(consumed_vars: &HashSet<String>) -> String {
+    let mut names: Vec<&String> = consumed_vars.iter().collect();
+    names.sort();
+    names
+        .iter()
+        .map(|n| n.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Route the 3 PMT state verifiers through the Lean-extracted FFI surface.
 ///
 /// Returns the same `(reads, writes, transforms)` Vec triple the
@@ -658,8 +834,9 @@ fn verify_pmt_via_lean(
     transform_layouts: &HashMap<String, crate::state_transform::LayoutInfo>,
     transforms: &[(String, String)],
 ) -> Result<LeanPmtOutcome, String> {
-    // Mark every argument as used so neither sub-path emits unused-variable
-    // warnings. The REAL path will consume them for marshalling in Wave 5-C.
+    // Mark every argument as used so the STUB sub-path (which does not
+    // touch them) emits no unused-variable warnings. The REAL sub-path
+    // below consumes all 8 for §9 marshalling (VERIF-MARSHAL).
     let _ = (
         state_var_layouts,
         read_layouts,
@@ -695,32 +872,65 @@ fn verify_pmt_via_lean(
     // the §9 serialization format internally. `lean_ffi::init()` above
     // has already initialized the Lean runtime.
     //
-    // TODO(VERIF-SIGSEGV-FIX follow-up / Wave 5-C): marshal the real
-    // IVE pipeline data (`state_var_layouts`, `read_layouts`, `reads`,
-    // `write_layouts`, `writes`, `consumed_vars`, `transform_layouts`,
-    // `transforms`) into the §9 string format the `_prim` parsers
-    // expect. For now MINIMAL marshalling is used: every data arg is an
-    // empty Lean `String`, and the transform `kind` is `"copy"`
-    // (verification.rs has no TransformKind context here — it is only
-    // checking validity). This proves the FFI path does NOT SIGSEGV;
-    // the returned `u8` may be wrong (Lean sees empty data) but the
-    // point is NO CRASH.
+    // VERIF-MARSHAL: the 8 IVE pipeline inputs are now fully marshalled
+    // into the §9 string format the `_prim` parsers expect (see the
+    // `serialize_ive_*` helpers above), so the returned `u8` reflects
+    // the real program data rather than empty placeholders.
     #[cfg(lean_ffi_linked)]
-    let outcome = unsafe {
-        let registry: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
-        let reads_obj: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
-        let consumed: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
-        let writes_obj: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
-        let input_layout: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
-        let output_layout: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
-        let kind: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("copy");
+    let outcome = {
+        // Build the merged §9 registry (var-keyed + layout-name-keyed)
+        // and the reads / writes / consumed payloads.
+        let registry_str = serialize_ive_registry(
+            state_var_layouts,
+            read_layouts,
+            write_layouts,
+            transform_layouts,
+        );
+        let reads_str = serialize_ive_reads(reads);
+        let writes_str = serialize_ive_writes(writes);
+        let consumed_str = serialize_ive_consumed(consumed_vars);
 
-        let reads_ok = lean_ffi::lean_verify_state_reads_prim(registry, reads_obj) != 0;
+        // Box each payload as a Lean `String` via lean_mk_string.
+        //
+        // TODO(VERIF-MARSHAL ownership): `str_to_lean` returns a
+        // `*mut LeanObject` whose refcount is NOT decremented (no
+        // `lean_dec`), so every call leaks one Lean String. Acceptable
+        // for a verification pass that runs at most once per IVE
+        // pipeline; a long-running driver that re-verifies many
+        // programs would accrue unbounded growth. Proper fix: wrap each
+        // pointer in a newtype that calls `lean_dec` on Drop (requires
+        // declaring `lean_dec` in the `lean_ffi` extern block). `reg`
+        // is reused across all 3 verifier calls; the per-transform
+        // `in_lean` / `out_lean` leak once each.
+        let reg = lean_ffi::str_to_lean(&registry_str);
+        let rds = lean_ffi::str_to_lean(&reads_str);
+        let wrt = lean_ffi::str_to_lean(&writes_str);
+        let con = lean_ffi::str_to_lean(&consumed_str);
+
+        let reads_ok =
+            unsafe { lean_ffi::lean_verify_state_reads_prim(reg, rds) != 0 };
         let writes_ok =
-            lean_ffi::lean_verify_state_writes_prim(registry, consumed, writes_obj) != 0;
-        let transforms_ok =
-            lean_ffi::lean_verify_transform_prim(registry, input_layout, output_layout, kind) != 0;
+            unsafe { lean_ffi::lean_verify_state_writes_prim(reg, con, wrt) != 0 };
 
+        // Transforms: the `_prim` looks up input/output layouts BY NAME
+        // in the registry and applies the kind-specific check.
+        // verification.rs has no TransformKind context here, so pass
+        // "copy" (the permissive default — Copy accepts any layout
+        // pair, mirroring verify_transform when no structural
+        // constraint applies). `kind` is hoisted out of the loop to
+        // leak one Lean String instead of one per transform.
+        let kind_lean = lean_ffi::str_to_lean("copy");
+        let transforms_ok = transforms.iter().all(|(in_l, out_l)| {
+            let in_lean = lean_ffi::str_to_lean(in_l);
+            let out_lean = lean_ffi::str_to_lean(out_l);
+            unsafe { lean_ffi::lean_verify_transform_prim(reg, in_lean, out_lean, kind_lean) != 0 }
+        });
+
+        // The `_prim` wrappers return a single all-or-nothing Bool, not
+        // per-read/write/transform results, so on failure emit one
+        // summary error entry (matching the prior structure). Empty
+        // Vecs on success => downstream `.iter().all(|r| r.valid)` is
+        // true and `*_errs` is empty.
         let read_results: Vec<crate::state_read::StateReadVerification> = if reads_ok {
             Vec::new()
         } else {
@@ -729,10 +939,10 @@ fn verify_pmt_via_lean(
                 layout_name: String::new(),
                 field_name: String::new(),
                 valid: false,
-                error: Some(
-                    "Lean lean_verify_state_reads_prim returned false (VERIF-SIGSEGV-FIX: minimal marshalling — empty data)"
-                        .to_string(),
-                ),
+                error: Some(format!(
+                    "Lean lean_verify_state_reads_prim returned false ({} reads checked)",
+                    reads.len()
+                )),
             }]
         };
         let write_results: Vec<crate::state_write::StateWriteVerification> = if writes_ok {
@@ -743,10 +953,10 @@ fn verify_pmt_via_lean(
                 layout_name: String::new(),
                 field_name: String::new(),
                 valid: false,
-                error: Some(
-                    "Lean lean_verify_state_writes_prim returned false (VERIF-SIGSEGV-FIX: minimal marshalling — empty data)"
-                        .to_string(),
-                ),
+                error: Some(format!(
+                    "Lean lean_verify_state_writes_prim returned false ({} writes checked)",
+                    writes.len()
+                )),
             }]
         };
         let transform_results: Vec<crate::state_transform::StateTransformVerification> =
@@ -757,11 +967,11 @@ fn verify_pmt_via_lean(
                     input_layout: String::new(),
                     output_layout: String::new(),
                     valid: false,
-                    transform_kind: crate::state_transform::TransformKind::Reinterpret,
-                    error: Some(
-                        "Lean lean_verify_transform_prim returned false (VERIF-SIGSEGV-FIX: minimal marshalling — empty data)"
-                            .to_string(),
-                    ),
+                    transform_kind: crate::state_transform::TransformKind::Copy,
+                    error: Some(format!(
+                        "Lean lean_verify_transform_prim returned false for at least one of {} transforms (kind=copy)",
+                        transforms.len()
+                    )),
                 }]
             };
 
