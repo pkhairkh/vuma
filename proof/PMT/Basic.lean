@@ -41,14 +41,28 @@ structure Arena where
   used     : Nat
   deriving Repr
 
-/-- §1.2: A field is a (offset, size) pair inside a layout. -/
+/-- §1.2: A field is a (offset, size) pair inside a layout.
+
+**PMT-FAITH-6-C:** added `name` and `type_name` fields to bit-faithfully
+mirror Rust `FieldInfo { name, offset, size, type_name }` (state_read.rs:29-34).
+The previous Lean `Field` had only `{offset, size}` — dropped `name` (needed
+for field-name lookup) and `type_name` (needed for type-mismatch check).
+Closes FAITH-1-A. -/
 structure Field where
-  offset : Nat
-  size   : Nat
+  name      : String
+  offset    : Nat
+  size      : Nat
+  type_name : String
   deriving Repr
 
-/-- §1.2: A layout is a total size plus a list of fields. -/
+/-- §1.2: A layout is a total size plus a list of fields.
+
+**PMT-FAITH-6-C:** added `name` field to bit-faithfully mirror Rust
+`LayoutInfo { name, total_size, fields }` (state_read.rs:22-26). The
+previous Lean `Layout` had only `{total_size, fields}` — dropped `name`
+(needed for layout-not-found failure path). Closes FAITH-1-B. -/
 structure Layout where
+  name       : String
   total_size : Nat
   fields     : List Field
   deriving Repr
@@ -61,23 +75,39 @@ def WF_Arena (a : Arena) : Prop := a.used ≤ a.capacity
 def Disjoint (f₁ f₂ : Field) : Prop :=
   f₁.offset + f₁.size ≤ f₂.offset ∨ f₂.offset + f₂.size ≤ f₁.offset
 
-/-- §1.2: `WF_Layout l` — every field is in bounds and every pair of
-fields is disjoint. This is the pure-Coq lemma over `PmtLayoutSpec`
-mentioned in `pmt-iris-spec.md` §8 (TCB row "Provable"). -/
+/-- §1.2: `WF_Layout l` — every field is in bounds.
+
+**PMT-FAITH-6-C (closes FAITH-1-C/D):** the previous `WF_Layout` had THREE
+conjuncts: (1) per-field bounds, (2) pairwise disjointness, (3) size>0 ∨
+fields=[]. Rust's IVE (`verify_state_reads` state_read.rs:82) only checks
+conjunct (1) — conjuncts (2) and (3) were INVENTED by the Lean model,
+making the Lean hypothesis STRICTER than Rust's actual check. Per
+faithfulness rule 10, soundness-strengthening assumptions must be explicit
+hypotheses, not buried in the predicate. The disjointness and non-empty
+conjuncts are now SEPARATE predicates (`WF_Layout_Disjoint`,
+`WF_Layout_NonEmpty`) that callers must provide explicitly where needed. -/
 def WF_Layout (l : Layout) : Prop :=
   (∀ f : Field, f ∈ l.fields → f.offset + f.size ≤ l.total_size)
-  ∧ (∀ f₁ f₂ : Field, f₁ ∈ l.fields → f₂ ∈ l.fields → f₁ ≠ f₂ → Disjoint f₁ f₂)
-  ∧ (0 < l.total_size ∨ l.fields = [])
+
+/-- §1.2 (PMT-FAITH-6-C): `WF_Layout_Disjoint l` — every pair of distinct
+fields is disjoint. This is a Lean-side STRENGTHENING assumption (Rust's
+IVE does NOT enforce disjointness). Callers that need this must provide it
+as an explicit hypothesis. -/
+def WF_Layout_Disjoint (l : Layout) : Prop :=
+  ∀ f₁ f₂ : Field, f₁ ∈ l.fields → f₂ ∈ l.fields → f₁ ≠ f₂ → Disjoint f₁ f₂
+
+/-- §1.2 (PMT-FAITH-6-C): `WF_Layout_NonEmpty l` — `0 < total_size ∨
+fields = []`. This is a Lean-side sanity check (Rust's IVE does NOT enforce
+it). Callers that need this must provide it as an explicit hypothesis. -/
+def WF_Layout_NonEmpty (l : Layout) : Prop :=
+  0 < l.total_size ∨ l.fields = []
 
 /-- The empty (unit-sized) layout is well-formed. -/
-def emptyLayout : Layout := ⟨1, []⟩
+def emptyLayout : Layout := ⟨"empty", 1, []⟩
 
 theorem WF_Layout_empty : WF_Layout emptyLayout := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · intro _ h; cases h
-  · intros _ _ h₁ h₂ _; cases h₁
-  · exact Or.inl (by decide)
+  intro _ h; cases h
 
 /-! ## §2. Capacity Preservation Invariant -/
 
