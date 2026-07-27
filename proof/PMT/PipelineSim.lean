@@ -43,21 +43,22 @@ hypothesis makes the theorem's true content (a restatement of
 `pmt_soundness` / `no_oob_trap_for_well_typed_strong`) explicit.
 
 The `PipelineSpec` structure and `exec_satisfies_pipeline_spec` theorem
-are KEPT intact below — they are the scaffolding PMT-1-G will strengthen
-into a real pipeline-conformance theorem. Their docstrings are updated to
-flag the current degeneracy (`compiled_matches_exec` is `rfl`) and to point
-at PMT-1-G as the deferral point.
+are retained below. As of Wave 1-B, the `compiled_matches_exec` field
+has been strengthened from the degenerate `rfl` tautology
+(`exec prog s = exec prog s`) to the universal form of `pmt_soundness`
+(`∀ r, exec prog s = r → safe s r`), discharged non-trivially by
+`pmt_soundness`. The Rust-side parity half remains deferred to PMT-1-G.
 
-### What this module actually proves (post-PMT-0-C)
+### What this module actually proves (post-Wave-1-B)
 
-1. `PipelineSpec prog s` — a structure capturing what `src/pipeline.rs::
-   compile` *will eventually* be required to produce (once PMT-1-G lands).
-   Today, its `compiled_matches_exec` field is `exec prog s = exec prog s`
-   (a `rfl` tautology); its `safe` field is the real content (delegates to
-   `pmt_soundness`).
+1. `PipelineSpec prog s` — a structure with a single field
+   `compiled_matches_exec : ∀ r, exec prog s = r → safe s r`, the
+   universal form of `pmt_soundness`. (Pre-Wave-1-B this was the `rfl`
+   tautology `exec prog s = exec prog s`; the separate `safe` field has
+   been removed as it is now subsumed.)
 2. `exec_satisfies_pipeline_spec` — Lean's own `exec` already meets
-   `PipelineSpec`. The `compiled_matches_exec` conjunct is `rfl`; the
-   `safe` conjunct is `pmt_soundness`.
+   `PipelineSpec`. The `compiled_matches_exec` field is discharged by
+   `pmt_soundness` (sorry-free).
 3. `pmt_soundness_restate` (was `pipeline_compile_sound`) — a direct
    restatement of `pmt_soundness`, in the un-existentialled `match` form.
    Sorry-free; no Rust-side hypothesis.
@@ -74,8 +75,17 @@ References:
 
 namespace PMT
 
-/-- The Rust `pipeline::compile` specification (SCAFFOLDING — PMT-1-G will
-strengthen).
+/-- Safety predicate for an execution result: on success the final
+bump pointer is within the arena capacity; on trap the exit code is
+canonical (1 = arena_overflow, 134 = oob, 135 = uaf). This is the
+property that `pmt_soundness` proves existentially and that
+`PipelineSpec.compiled_matches_exec` requires universally. -/
+def safe (s : ExecState) (r : Result) : Prop :=
+  match r with
+  | Result.ok final_used => final_used ≤ s.arena.capacity
+  | Result.trap code => code = 1 ∨ code = 134 ∨ code = 135
+
+/-- The Rust `pipeline::compile` specification.
 
 This is what `pipeline::compile` (in `src/pipeline.rs`) *will eventually*
 be required to produce, once Wave 1 PMT-1-G lands: given a well-typed
@@ -83,51 +93,40 @@ program, it produces a binary whose observable behavior matches Lean's
 `exec`, and which is safe (canonical trap codes 1, 134, 135 only; never
 undefined behavior).
 
-**Current degeneracy (Wave 0):** the `compiled_matches_exec` field is
-`exec prog s = exec prog s`, a `rfl` tautology — it carries no Rust-side
-information until PMT-1-G replaces it with a non-`rfl` parity obligation.
-The `safe` field is the only field with non-trivial content today; it
-delegates to `pmt_soundness`.
+**Wave 1-B strengthening:** the `compiled_matches_exec` field is now
+`∀ r, exec prog s = r → safe s r` — the universal form of
+`pmt_soundness`. It is discharged non-trivially by `pmt_soundness`
+(sorry-free) in `exec_satisfies_pipeline_spec`. This replaces the
+pre-Wave-1-B `rfl` tautology (`exec prog s = exec prog s`). The old
+`safe` field (a weaker, `True`-on-success version) has been removed as
+it is now subsumed by `compiled_matches_exec`.
 
-The two conjuncts are:
-  - `compiled_matches_exec`: the compiled binary's observable behavior
-    matches Lean `exec` (identity for now — `rfl`; refinement is via the
-    Lean-side `exec`, which is the executable specification). PMT-1-G
-    will replace this with a real Lean↔Rust parity statement.
-  - `safe`: under `WellTyped` and `CapacityInvariant`, the binary's
-    result satisfies PMT safety (canonical traps only; on success the
-    bump pointer is within capacity).
-
-The pre-PMT-0-C theorems `pipeline_compile_sound` and
-`pipeline_compile_no_oob` took a `hconforms : PipelineSpec prog s`
-hypothesis advertising this structure as the CompCert-style
-translation-validation obligation. That hypothesis was unused in the
-proof bodies (which delegated directly to `pmt_soundness` /
-`no_oob_trap_for_well_typed_strong`); PMT-0-C removed it and renamed
-both theorems accordingly (see file header). -/
+The Rust-side half — discharging `PipelineSpec` for the actual
+`pipeline::compile` output — remains the work of Wave 1 PMT-1-G
+(extraction + parity testing). -/
 structure PipelineSpec (prog : Program) (s : ExecState) : Prop where
-  /-- The compiled binary's observable behavior matches Lean `exec`.
-  Identity for now (`rfl`); refinement is via the Lean-side `exec`, which
-  is the executable specification. PMT-1-G will replace this with a real
-  Lean↔Rust parity statement. -/
-  compiled_matches_exec : exec prog s = exec prog s
-  /-- If the program is well-typed and the arena is capacity-bounded,
-  the binary's result satisfies PMT safety (canonical traps only). -/
-  safe : WellTyped prog → CapacityInvariant s.arena →
-    match exec prog s with
-    | Result.ok _ => True
-    | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135
+  /-- Every result `r` that `exec prog s` can produce is safe: on
+  success the final bump pointer is within capacity; on trap the exit
+  code is canonical (1, 134, or 135). This is the universal form of
+  `pmt_soundness` (which states the same existentially) and is
+  discharged by `pmt_soundness` in `exec_satisfies_pipeline_spec`.
+  Pre-Wave-1-B this field was the `rfl` tautology
+  `exec prog s = exec prog s`; PMT-1-G will eventually replace it with
+  a real Lean↔Rust parity statement. -/
+  compiled_matches_exec : ∀ r, exec prog s = r → safe s r
 
 /-- The Lean `exec` satisfies the `PipelineSpec` (Lean-side half of the
 simulation; PMT-1-G will supply the Rust-side half).
 
 This is the Lean-side half: Lean's own execution already meets the
 specification that the Rust `pipeline::compile` *will eventually* claim
-to meet. The `compiled_matches_exec` conjunct is `rfl` (degenerate — see
-`PipelineSpec` docstring); the `safe` conjunct is the real content and
-delegates to `pmt_soundness` (sorry-free). The Rust-side half — discharging
-`PipelineSpec` for the actual `pipeline::compile` output — is the work of
-Wave 1 PMT-1-G (extraction + parity testing). -/
+to meet. The `compiled_matches_exec` field is discharged by
+`pmt_soundness` (sorry-free): `pmt_soundness` provides a witness `r'`
+with `exec prog s = r'` and `safe s r'`; since `exec prog s = r` (the
+field's hypothesis), `r = r'` and `safe s r` follows. The Rust-side
+half — discharging `PipelineSpec` for the actual `pipeline::compile`
+output — remains the work of Wave 1 PMT-1-G (extraction + parity
+testing). -/
 theorem exec_satisfies_pipeline_spec
     (prog : Program) (s : ExecState)
     (hwf : WellTyped prog)
@@ -135,16 +134,15 @@ theorem exec_satisfies_pipeline_spec
               WF_Layout st.layout ∧ s.live st.in_var = Liveness.live)
     (hcap : CapacityInvariant s.arena) :
     PipelineSpec prog s := by
-  refine ⟨rfl, ?_⟩
-  intro _ _
-  -- Delegate to `pmt_soundness` (sorry-free).
-  obtain ⟨r, hr, hvalid⟩ := pmt_soundness prog hwf s hstep hcap
-  -- Rewrite the goal's `exec prog s` to the witness `r`.
-  rw [hr]
-  -- Case on `r` to reduce the match.
-  cases r with
-  | ok _ => trivial
-  | trap _ => exact hvalid
+  refine ⟨?_⟩
+  intro r hr
+  -- Delegate to `pmt_soundness` (sorry-free): it gives a witness `r'`
+  -- with `exec prog s = r'` and `safe s r'`.
+  obtain ⟨r', hr', hsafe⟩ := pmt_soundness prog hwf s hstep hcap
+  -- From `hr : exec prog s = r` and `hr' : exec prog s = r'` we get `r = r'`.
+  rw [hr] at hr'   -- hr' : r = r'
+  rw [hr']         -- goal `safe s r` becomes `safe s r'`
+  exact hsafe
 
 /-- `pmt_soundness` restated in un-existentialled `match` form (was
 `pipeline_compile_sound`).

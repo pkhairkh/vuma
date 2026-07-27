@@ -1,4 +1,5 @@
 import PMT.Basic
+import PMT.Iris.SepGenuine
 
 /-!
 ## Iris-style `[cap_bnd]` Named Invariant

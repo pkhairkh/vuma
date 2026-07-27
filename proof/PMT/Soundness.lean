@@ -95,7 +95,7 @@ placeholder `Step`s are discharged by the existing
 added to the theorem signature. A full channel-concurrency /
 proof-verification / syscall-ABI semantics is out of scope for PMT-1-D
 and is not modeled here; the structural mirror suffices for
-`instr_sim` / `block_sim` traversal in `PMT.SimRel`.
+`instr_sim_intra_lean` / `block_sim` traversal in `PMT.SimRel`.
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /

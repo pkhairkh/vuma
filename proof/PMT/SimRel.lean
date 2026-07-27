@@ -12,7 +12,7 @@ and preservation lemmas.
 
 The simulation relation has three layers:
   1. `arena_sim` — RawArena (Lean) ↔ Arena (Rust)
-  2. `instr_sim` — PmtInstr (Lean) ↔ IRInstr (Rust)
+  2. `instr_sim_intra_lean` — PmtInstr (Lean) ↔ PmtInstr (Lean) [INTRA-LEAN]
   3. `program_sim` — IRProgram (Lean) ↔ IRProgram (Rust)
 
 Each layer is a relation (Prop-valued) plus a set of lemmas proving:
@@ -181,18 +181,10 @@ aligning the advancement, discharging `haligned`. -/
 def aligned_alloc (a : Arena) (l : Layout) : Arena :=
   { a with used := a.used + align8_nat l.total_size }
 
-/-- §2: Per-instruction simulation relation.
-
-**PMT-FAITH-5-B (honest docstring):** This relation is INTRA-LEAN — it relates
-two `PmtInstr` values (Lean-to-Lean), NOT a Lean `PmtInstr` to a Rust `IRInstr`.
-The two types are different (`PmtInstr` is the Lean model; `IRInstr` is the Rust
-enum in `src/codegen/src/ir.rs`), so a true cross-language simulation would need
-a projection/encoding function. The cross-language bridge is instead via the
-Extraction parity test (`tests/pmt_parity_test.rs`), which empirically verifies
-that the extracted Lean checkers match the Rust hand-translations. A formal
-cross-language proof would require modeling the Rust `pipeline::compile` pipeline
-in Lean — out of scope for PMT-Faith (documented as residual TCB). -/
-def instr_sim (lean : PmtInstr) (rust : PmtInstr) : Prop :=
+/-- INTRA-LEAN reflexive relation: lean = rust where both args are PmtInstr.
+A true cross-language simulation relation is out of scope (documented as
+residual TCB). Do not cite as a Lean↔Rust bridge. -/
+def instr_sim_intra_lean (lean : PmtInstr) (rust : PmtInstr) : Prop :=
   lean = rust  -- intra-Lean structural equality (NOT cross-language)
 
 /-- §3: Block simulation relation. -/
@@ -200,7 +192,7 @@ def block_sim (lean : IRBlock) (rust : IRBlock) : Prop :=
   lean.label = rust.label
   ∧ lean.instructions.length = rust.instructions.length
   ∧ ∀ i : Nat, i < lean.instructions.length →
-      instr_sim (lean.instructions.get! i) (rust.instructions.get! i)
+      instr_sim_intra_lean (lean.instructions.get! i) (rust.instructions.get! i)
   ∧ lean.terminator = rust.terminator
 
 /-- §4: Function simulation relation. -/
@@ -408,35 +400,11 @@ theorem exec_canonical_or_ok (prog : Program) (s : ExecState) :
       simp only [exec, h]
       exact ih s'
 
-/-- §9: Full simulation theorem (CLOSED NON-DEGENERATELY — PMT-1-E).
-
-If `program_sim lean_prog rust_prog` and `lean_prog` is well-typed,
-then executing `lean_prog.to_program` (the real IR-to-Program
-flattening from `PMT.ExecFunction` §4) on `lean_state` yields a result
-`r` that is either `Result.ok _` (trivially satisfying the
-postcondition) or `Result.trap c` where `c` is one of the three
-canonical exit codes (1, 134, 135).
-
-**Non-degeneracy (PMT-1-E).** The prior version of this theorem was
-DEGENERATE — it exploited the stub `IRProgram.first_function_body := []`
-to make `exec lean_prog.first_function_body lean_state = exec [] _ =
-Result.ok _` trivially satisfy the postcondition (`True` for `.ok`).
-This revision DELETES the stub and invokes the real
-`IRProgram.to_program` flattening. The postcondition is now discharged
-by `exec_canonical_or_ok` (§8.5 above), which proves by induction on
-the program that `exec` is total and only traps with canonical codes.
-The non-degeneracy precondition `hnonempty : live_vars ≠ []` ensures
-the theorem is compatible with at least one variable being live at
-some program point (in contrast to the prior vacuous `state_sim _ _ []`
-which forced ALL variables dead).
-
-**Hypotheses.** `hprog` (program_sim), `hwf` (well-typedness), `hstate`
-(state_sim), and `hnonempty` (live_vars non-empty) are kept as
-future-proofing — they are unused by the proof (which relies only on
-`exec`'s structure) but will be needed by a stronger composition that
-delivers the `fu ≤ capacity` capacity-preservation half (as
-`full_simulation_strong` §10 does). -/
-theorem lean_internal_soundness
+/-- This theorem proves exec totality and canonical-trapping, NOT a
+Lean↔Rust simulation. The simulation hypotheses (program_sim, well_typed,
+state_sim) are unused scaffolding. The Lean↔Rust bridge is deferred to
+PMT-1-G. -/
+theorem lean_exec_total_and_canonical
     (lean_prog rust_prog : IRProgram)
     (env : String → Layout)
     (_hprog : program_sim lean_prog rust_prog)

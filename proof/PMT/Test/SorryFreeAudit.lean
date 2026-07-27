@@ -72,10 +72,10 @@ namespace PMT.Test.SorryFreeAudit
 -- Lean and Rust states that satisfy the simulation relation.
 #check @PMT.initial_state_sim
 
--- `lean_internal_soundness` is the top-level INTRA-LEAN soundness theorem
--- (renamed from `full_simulation` in PMT-FAITH-5-B). It runs Lean `exec` on
+-- `lean_exec_total_and_canonical` proves exec totality + canonical-trapping
+-- (renamed from `lean_internal_soundness` in PMT-1-C). It runs Lean `exec` on
 -- Lean `IRProgram.to_program` — it does NOT simulate Rust execution.
-#check @PMT.lean_internal_soundness
+#check @PMT.lean_exec_total_and_canonical
 
 -- `lean_internal_soundness_strong` is the strengthened version
 -- (renamed from `full_simulation_strong`).

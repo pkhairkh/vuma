@@ -17,7 +17,7 @@ The flattening is structural:
     The 3 control-flow `PmtInstr` variants added in PMT-1-B (`phi`, `branch`,
     `cond_branch`) likewise flatten to `[]`: their semantics are resolved at
     the CFG level (`PmtInstr.successor_labels` in `PMT.IRProgram` §6.5), not
-    as `Step`s. They are kept in the model so that `instr_sim` /
+    as `Step`s. They are kept in the model so that `instr_sim_intra_lean` /
     `block_sim` traversal in `PMT.SimRel` can carry them through structurally.
   - The 3 atomic `PmtInstr` variants added in PMT-1-C (`atomic_load`,
     `atomic_store`, `atomic_cas`) likewise flatten to `[]`: under PMT's
