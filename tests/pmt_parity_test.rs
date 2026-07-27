@@ -154,39 +154,67 @@ fn lean_wf_layout_bool(l: &Layout) -> bool {
 mod lean_ffi {
     use std::ffi::c_void;
 
-    /// Opaque pointer to a Lean boxed object (`lean_object *`). Matches
-    /// `LeanObject` in `src/ive/src/verification.rs::lean_ffi`.
     pub type LeanObject = c_void;
 
-    // The Lean extraction archive (real or stub) is compiled by
-    // build.rs into `liblean_extraction.a` and its OUT_DIR is
-    // passed as a linker search path. Integration-test binaries
-    // do not inherit the `cargo:rustc-link-lib` directive, so we
-    // attach `#[link]` here to pull the archive in directly when
-    // any extern in this block is referenced (feature ON only).
     #[link(name = "lean_extraction", kind = "static")]
     extern "C" {
-        /// `@[export lean_verify_transform]` — Lean signature
-        /// `(layouts : LayoutRegistry) (t : StateTransform) : Bool`.
         pub fn lean_verify_transform(layouts: *mut LeanObject, t: *mut LeanObject) -> u8;
+        pub fn lean_verify_state_reads(env_list: *mut LeanObject, reads: *mut LeanObject) -> u8;
+        pub fn lean_verify_state_writes(env_list: *mut LeanObject, consumed: *mut LeanObject, writes: *mut LeanObject) -> u8;
 
-        /// `@[export lean_verify_state_reads]` — Lean signature
-        /// `(env_list : List (String × LayoutInfo)) (reads : List StateRead)
-        /// : Bool`.
-        pub fn lean_verify_state_reads(
-            env_list: *mut LeanObject,
-            reads: *mut LeanObject,
-        ) -> u8;
+        // _prim wrappers (String-based, C-marshallable) — parse §9 format internally
+        pub fn lean_verify_transform_prim(registry: *mut LeanObject, input_layout: *mut LeanObject, output_layout: *mut LeanObject) -> u8;
+        pub fn lean_verify_state_reads_prim(registry: *mut LeanObject, reads: *mut LeanObject) -> u8;
+        pub fn lean_verify_state_writes_prim(registry: *mut LeanObject, consumed: *mut LeanObject, writes: *mut LeanObject) -> u8;
 
-        /// `@[export lean_verify_state_writes]` — Lean signature
-        /// `(env_list) (consumed : List String) (writes : List StateWrite)
-        /// : Bool`.
-        pub fn lean_verify_state_writes(
-            env_list: *mut LeanObject,
-            consumed: *mut LeanObject,
-            writes: *mut LeanObject,
-        ) -> u8;
+        #[cfg(lean_ffi_linked)]
+        pub fn lean_mk_string(s: *const std::ffi::c_char) -> *mut LeanObject;
     }
+
+    #[cfg(lean_ffi_linked)]
+    pub fn str_to_lean(s: &str) -> *mut LeanObject {
+        use std::ffi::CString;
+        let sanitized: String = s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+        let c_str = CString::new(sanitized).unwrap_or_else(|_| CString::new("").unwrap());
+        unsafe { lean_mk_string(c_str.as_ptr()) }
+    }
+
+    #[cfg(not(lean_ffi_linked))]
+    pub fn str_to_lean(_s: &str) -> *mut LeanObject { std::ptr::null_mut() }
+}
+
+// Serializers: Rust test data -> Lean section-9 string format
+fn field_name(f: &Field) -> String { format!("f_{}_{}", f.offset, f.size) }
+
+fn serialize_registry(env: &[(&str, Layout)]) -> String {
+    let mut s = String::new();
+    for (name, layout) in env {
+        s.push_str(&format!("{}\t{}\t{}\n", name, layout.total_size, layout.fields.len()));
+        for f in &layout.fields {
+            s.push_str(&format!("{}\t{}\t{}\tu64\n", field_name(f), f.offset, f.size));
+        }
+    }
+    s
+}
+
+fn serialize_reads(reads: &[(&str, Field)]) -> String {
+    let mut s = String::new();
+    for (var, f) in reads {
+        s.push_str(&format!("{}\t{}\t\n", var, field_name(f)));
+    }
+    s
+}
+
+fn serialize_writes(writes: &[(&str, Field)]) -> String {
+    let mut s = String::new();
+    for (var, f) in writes {
+        s.push_str(&format!("{}\t{}\tu64\t0\n", var, field_name(f)));
+    }
+    s
+}
+
+fn serialize_consumed(consumed: &[&str]) -> String {
+    consumed.join("\n")
 }
 
 // ─── verify_transform ───────────────────────────────────────────────
@@ -229,11 +257,20 @@ fn lean_verify_transform(
     out_layout: &Layout,
     kind: TransformKind,
 ) -> bool {
-    // TODO(Wave 5-C): marshal (in_layout, out_layout, kind) into boxed
-    // Lean `LayoutRegistry` + `StateTransform`. Null placeholders mirror
-    // the REAL sub-path in `src/ive/src/verification.rs`.
-    let _ = (in_layout, out_layout, kind);
-    unsafe { lean_ffi::lean_verify_transform(core::ptr::null_mut(), core::ptr::null_mut()) != 0 }
+    // Serialize both layouts into a registry, then call lean_verify_transform_prim
+    // with the registry + layout names. The kind is encoded by choosing the
+    // layout names: for Identity both names are "in", for Reinterpret "in"/"out",
+    // for Copy "in"/"out" (Copy accepts any pair).
+    let registry = serialize_registry(&[("in", in_layout.clone()), ("out", out_layout.clone())]);
+    let (in_name, out_name) = match kind {
+        TransformKind::Identity => ("in", "in"),
+        TransformKind::Reinterpret => ("in", "out"),
+        TransformKind::Copy => ("in", "out"),
+    };
+    let reg_lean = lean_ffi::str_to_lean(&registry);
+    let in_lean = lean_ffi::str_to_lean(in_name);
+    let out_lean = lean_ffi::str_to_lean(out_name);
+    unsafe { lean_ffi::lean_verify_transform_prim(reg_lean, in_lean, out_lean) != 0 }
 }
 
 #[cfg(not(feature = "pmt-runtime-check"))]
@@ -276,10 +313,9 @@ fn lean_verify_state_reads(
     env: &[(&str, Layout)],
     reads: &[(&str, Field)],
 ) -> bool {
-    // TODO(Wave 5-C): marshal env/reads into Lean `List (String ×
-    // LayoutInfo)` / `List StateRead`.
-    let _ = (env, reads);
-    unsafe { lean_ffi::lean_verify_state_reads(core::ptr::null_mut(), core::ptr::null_mut()) != 0 }
+    let reg = lean_ffi::str_to_lean(&serialize_registry(env));
+    let rds = lean_ffi::str_to_lean(&serialize_reads(reads));
+    unsafe { lean_ffi::lean_verify_state_reads_prim(reg, rds) != 0 }
 }
 
 #[cfg(not(feature = "pmt-runtime-check"))]
@@ -324,15 +360,10 @@ fn lean_verify_state_writes(
     consumed: &[&str],
     writes: &[(&str, Field)],
 ) -> bool {
-    // TODO(Wave 5-C): marshal env/consumed/writes into Lean lists.
-    let _ = (env, consumed, writes);
-    unsafe {
-        lean_ffi::lean_verify_state_writes(
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        ) != 0
-    }
+    let reg = lean_ffi::str_to_lean(&serialize_registry(env));
+    let con = lean_ffi::str_to_lean(&serialize_consumed(consumed));
+    let wrt = lean_ffi::str_to_lean(&serialize_writes(writes));
+    unsafe { lean_ffi::lean_verify_state_writes_prim(reg, con, wrt) != 0 }
 }
 
 #[cfg(not(feature = "pmt-runtime-check"))]
@@ -625,8 +656,6 @@ mod tests {
         let l = Layout { total_size: 16, fields: vec![f1, f2] };
         assert_eq!(lean_wf_layout_bool(&l), false);
     }
-
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_transform_identity_pass() {
         lean_init::ensure_init();
@@ -637,7 +666,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_transform_identity_fail_different_fields() {
         lean_init::ensure_init();
@@ -648,8 +676,6 @@ mod tests {
         let out_l = Layout { total_size: 16, fields: vec![f2] };
         assert_eq!(lean_verify_transform(&in_l, &out_l, TransformKind::Identity), false);
     }
-
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_transform_reinterpret_pass() {
         lean_init::ensure_init();
@@ -662,7 +688,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_transform_reinterpret_fail_size_mismatch() {
         lean_init::ensure_init();
@@ -673,8 +698,6 @@ mod tests {
         let out_l = Layout { total_size: 8, fields: vec![f2] };
         assert_eq!(lean_verify_transform(&in_l, &out_l, TransformKind::Reinterpret), false);
     }
-
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_transform_copy_pass_any() {
         lean_init::ensure_init();
@@ -687,7 +710,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_transform_rejects_ill_formed_in_layout() {
         lean_init::ensure_init();
@@ -697,8 +719,6 @@ mod tests {
         let out_l = Layout { total_size: 8, fields: vec![] };
         assert_eq!(lean_verify_transform(&in_l, &out_l, TransformKind::Copy), false);
     }
-
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_reads_pass() {
         lean_init::ensure_init();
@@ -711,7 +731,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_reads_fail_unregistered_field() {
         lean_init::ensure_init();
@@ -726,7 +745,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_reads_fail_out_of_bounds() {
         lean_init::ensure_init();
@@ -738,8 +756,6 @@ mod tests {
         let reads = vec![("x", f)];
         assert_eq!(lean_verify_state_reads(&env, &reads), false);
     }
-
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_writes_pass() {
         lean_init::ensure_init();
@@ -753,7 +769,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_writes_fail_consumed_var() {
         lean_init::ensure_init();
@@ -767,7 +782,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_writes_fail_unregistered_field() {
         lean_init::ensure_init();
@@ -782,7 +796,6 @@ mod tests {
     }
 
     #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
-    #[cfg_attr(lean_ffi_linked, ignore = "needs Rust→Lean String marshalling (lean_mk_string) — see Wave C-1 NEEDS_FOLLOWUP")]
     #[test]
     fn parity_verify_state_writes_mixed() {
         lean_init::ensure_init();

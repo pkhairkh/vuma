@@ -139,7 +139,6 @@ mod lean_ffi_prim {
 
 #[cfg(feature = "pmt-runtime-check")]
 mod lean_init {
-    #[cfg(lean_ffi_linked)]
     use std::ffi::c_void;
 
     /// Guards exactly-once execution of `initialize_PMT` across threads.
@@ -154,7 +153,19 @@ mod lean_init {
     #[cfg(lean_ffi_linked)]
     extern "C" {
         fn initialize_PMT(builtin: u8, w: *mut c_void) -> *mut c_void;
+        fn lean_mk_string(s: *const std::ffi::c_char) -> *mut c_void;
     }
+
+    #[cfg(lean_ffi_linked)]
+    pub fn str_to_lean(s: &str) -> *mut c_void {
+        use std::ffi::CString;
+        let sanitized: String = s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+        let c_str = CString::new(sanitized).unwrap_or_else(|_| CString::new("").unwrap());
+        unsafe { lean_mk_string(c_str.as_ptr()) }
+    }
+
+    #[cfg(not(lean_ffi_linked))]
+    pub fn str_to_lean(_s: &str) -> *mut c_void { std::ptr::null_mut() }
 
     /// Invoke `initialize_PMT` exactly once (thread-safe via `Once`) before
     /// any `_prim` extern call. Required on the real-Lean path so the Lean
@@ -204,24 +215,18 @@ mod smoke {
     /// with `lean_mk_string`-built empty Lean strings (Wave 6 TODO).
     #[test]
     #[cfg_attr(not(lean_ffi_linked), ignore = "stub-linked (lean_ffi_linked NOT set): asserts the linkage stub\'s hardcoded return, not a real Lean output. Run with `--ignored` to exercise the Rust->C ABI plumbing against the C-compiled stub. When real Lean is linked, this ignore is dropped and the test asserts the real Lean output.")]
-    // C-1: under real Lean this prim takes 2× boxed `lean_object*` (Lean
-    // `String`) args. The test currently passes NULL for both, which
-    // SIGSEGVs once `initialize_PMT` has run (the function dereferences
-    // the string headers). The `marshal` helpers in
-    // `proof/extracted/pmt_check.rs::lean_ffi::marshal` (which expose
-    // `lean_mk_string`) are NOT visible to this test crate — it does not
-    // `#[path]`-include pmt_check.rs (confirmed: no `#[path` in this
-    // file), so Option A (marshal empty strings) is not reachable
-    // without a larger refactor. Ignored under real Lean until String-
-    // marshalling wiring is exposed to the test harness (Wave 6 TODO).
-    #[cfg_attr(lean_ffi_linked, ignore = "needs String marshalling wiring (NULL lean_object* args SIGSEGV under real Lean)")]
+    // C-1: under real Lean this prim takes 2x boxed lean_object* (Lean
+    // String) args. We marshal empty Lean strings via lean_mk_string
+    // (exposed in the lean_init module above). Empty reads vacuously
+    // pass -> real Lean returns 1 (true).
     fn smoke_lean_verify_state_reads_prim() {
         // C-1: initialise the Lean runtime before any `_prim` call. Under
         // the stub (`lean_ffi_linked` NOT set) this is a no-op.
         lean_init::ensure_init();
 
-        let env: *mut c_void = std::ptr::null_mut();
-        let reads: *mut c_void = std::ptr::null_mut();
+        // Marshal empty Lean strings (real Lean) or null (stub).
+        let env: *mut c_void = lean_init::str_to_lean("");
+        let reads: *mut c_void = lean_init::str_to_lean("");
 
         // SAFETY: FFI call into the linked `liblean_extraction.a` symbol.
         // Under the stub the function ignores its arguments and returns a
