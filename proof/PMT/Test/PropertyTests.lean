@@ -25,59 +25,58 @@ All examples close without `sorry`.
 namespace PMT.Test.PropertyTests
 
 -- §1: Empty layout (zero total_size, no fields) is well-formed.
-example : WF_Layout ⟨0, []⟩ := by
+example : WF_Layout ⟨"layout", 0, []⟩ := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf; cases hf
-  · intros _ _ h₁ _ _; cases h₁
-  · exact Or.inr rfl
+  intro f hf; cases hf
 
 -- §2: Single-field layout is well-formed if the field fits in bounds.
-example : WF_Layout ⟨8, [⟨0, 8⟩]⟩ := by
+example : WF_Layout ⟨"layout", 8, [⟨"f", 0, 8, "i32"⟩]⟩ := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf
-    simp at hf
-    rcases hf with rfl
-    decide
-  · intros f₁ f₂ h₁ h₂ hne
-    simp at h₁ h₂
-    rcases h₁ with rfl
-    rcases h₂ with rfl
-    exact (hne rfl).elim
-  · exact Or.inl (by decide)
+  intro f hf
+  simp at hf
+  rcases hf with rfl
+  decide
 
--- §3: Two non-overlapping fields are well-formed.
-example : WF_Layout ⟨16, [⟨0, 4⟩, ⟨4, 4⟩]⟩ := by
-  unfold WF_Layout Disjoint
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf
-    simp at hf
-    rcases hf with rfl | rfl
-    · decide
-    · decide
-  · intros f₁ f₂ h₁ h₂ hne
-    simp at h₁ h₂
-    rcases h₁ with rfl | rfl
-    · rcases h₂ with rfl | rfl
-      · exact (hne rfl).elim
-      · left; decide
-    · rcases h₂ with rfl | rfl
-      · right; decide
-      · exact (hne rfl).elim
-  · exact Or.inl (by decide)
+-- §3: Two non-overlapping fields are well-formed (PMT-FAITH-6-C: WF_Layout
+-- is now 1 conjunct — field bounds only. Disjointness is a separate predicate.)
+example : WF_Layout ⟨"layout", 16, [⟨"f", 0, 4, "i32"⟩, ⟨"f", 4, 4, "i32"⟩]⟩ := by
+  unfold WF_Layout
+  intro f hf
+  simp at hf
+  rcases hf with rfl | rfl
+  · decide
+  · decide
 
--- §4: Overlapping fields are NOT well-formed.
-example : ¬ WF_Layout ⟨8, [⟨0, 4⟩, ⟨2, 4⟩]⟩ := by
+-- §3b: The same layout is also disjoint (separate predicate, PMT-FAITH-6-C).
+example : WF_Layout_Disjoint ⟨"layout", 16, [⟨"f", 0, 4, "i32"⟩, ⟨"f", 4, 4, "i32"⟩]⟩ := by
+  unfold WF_Layout_Disjoint
+  intros f₁ f₂ h₁ h₂ hne
+  simp at h₁ h₂
+  rcases h₁ with rfl | rfl
+  · rcases h₂ with rfl | rfl
+    · exact absurd rfl hne
+    · left; decide
+  · rcases h₂ with rfl | rfl
+    · right; decide
+    · exact absurd rfl hne
+
+-- §4: Overlapping fields ARE WF_Layout under the new 1-conjunct definition
+-- (Rust's IVE accepts overlapping fields — PMT-FAITH-6-C closes FAITH-1-C).
+-- They are NOT WF_Layout_Disjoint (the separate disjointness predicate).
+example : WF_Layout ⟨"layout", 8, [⟨"f", 0, 4, "i32"⟩, ⟨"f", 2, 4, "i32"⟩]⟩ := by
+  unfold WF_Layout
+  intro f hf
+  simp at hf
+  rcases hf with rfl | rfl
+  · decide
+  · decide
+
+example : ¬ WF_Layout_Disjoint ⟨"layout", 8, [⟨"f", 0, 4, "i32"⟩, ⟨"f", 2, 4, "i32"⟩]⟩ := by
   intro h
-  unfold WF_Layout at h
-  obtain ⟨h1, h2, h3⟩ := h
-  have h_ne : (⟨0, 4⟩ : Field) ≠ ⟨2, 4⟩ := by
-    intro heq
-    injection heq with h1 h2
-    omega
-  have h_contra : Disjoint ⟨0, 4⟩ ⟨2, 4⟩ :=
-    h2 ⟨0, 4⟩ ⟨2, 4⟩ (by simp) (by simp) h_ne
+  have h_ne : (⟨"f", 0, 4, "i32"⟩ : Field) ≠ ⟨"f", 2, 4, "i32"⟩ := by
+    intro heq; injection heq with _ h2; omega
+  have h_contra : Disjoint ⟨"f", 0, 4, "i32"⟩ ⟨"f", 2, 4, "i32"⟩ :=
+    h ⟨"f", 0, 4, "i32"⟩ ⟨"f", 2, 4, "i32"⟩ (by simp) (by simp) h_ne
   unfold Disjoint at h_contra
   simp at h_contra
 
@@ -118,8 +117,9 @@ example (used size capacity : Nat)
       omega
 
 -- §7: The verified_field_bounds_check matches the mathematical condition.
+-- PMT-FAITH-6-C: Field now has 4 fields, Layout has 3 fields.
 example (f_offset f_size layout_total : Nat) :
-    PMT.Extraction.verified_field_bounds_check ⟨f_offset, f_size⟩ ⟨layout_total, []⟩ = true
+    PMT.Extraction.verified_field_bounds_check ⟨"f", f_offset, f_size, "i32"⟩ ⟨"layout", layout_total, []⟩ = true
     ↔ f_offset + f_size ≤ layout_total := by
   unfold PMT.Extraction.verified_field_bounds_check
   simp
@@ -136,16 +136,16 @@ example (s : ExecState) (hcap : CapacityInvariant s.arena) :
 -- §9: pmt_soundness holds for a single-step program.
 example (s : ExecState)
     (hcap : CapacityInvariant s.arena)
-    (hwf : WF_Layout ⟨8, []⟩)
+    (hwf : WF_Layout ⟨"layout", 8, []⟩)
     (hlive : s.live "in" = Liveness.live)
     (_hfit : s.arena.used + 8 ≤ s.arena.capacity) :
-    ∃ r, exec [⟨"in", "out", ⟨8, []⟩, .transform⟩] s = r
+    ∃ r, exec [⟨"in", "out", ⟨"layout", 8, []⟩, .transform⟩] s = r
     ∧ (match r with
        | Result.ok fu => fu ≤ s.arena.capacity
        | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135) := by
   -- Per-step hypothesis for pmt_soundness: every step in the (singleton)
   -- program has a well-formed layout and a live input variable.
-  have hstep : ∀ st : Step, st ∈ [⟨"in", "out", ⟨8, []⟩, .transform⟩] →
+  have hstep : ∀ st : Step, st ∈ [⟨"in", "out", ⟨"layout", 8, []⟩, .transform⟩] →
                 WF_Layout st.layout ∧ s.live st.in_var = Liveness.live := by
     intro st hst
     simp at hst
@@ -153,7 +153,7 @@ example (s : ExecState)
     exact ⟨hwf, hlive⟩
   -- WellTypedness of the singleton program: layout WF (via `hwf`),
   -- plus name-uniqueness for `in_var` and `out_var` (each appears once).
-  have hwf_prog : WellTyped [⟨"in", "out", ⟨8, []⟩, .transform⟩] := by
+  have hwf_prog : WellTyped [⟨"in", "out", ⟨"layout", 8, []⟩, .transform⟩] := by
     unfold WellTyped
     refine ⟨?_, ?_, ?_⟩
     · intro st hst; simp at hst; rcases hst with rfl; exact hwf

@@ -86,7 +86,7 @@ The 35 `PmtInstr` variants fall into five groups:
     - `call_indirect` — like `.call` but with an indirect
       (register-resident) target. `effect = .none`,
       `well_typed = True`, `to_steps = args.map (fun v =>
-      ⟨v, v, ⟨1, []⟩, .transform⟩)` (mirrors `.call`).
+      ⟨v, v, ⟨"step", 1, []⟩, .transform⟩)` (mirrors `.call`).
     - `syscall` — **opaque-effect model**: syscalls are out-of-scope
       for PMT (no arena state interaction). `effect = .none`,
       `well_typed = True`, `to_steps = []`.
@@ -128,12 +128,12 @@ The 10 channel/special variants (PMT-1-D) are structured as follows:
 computation, out-of-band IVE capability effects, opaque proof
 verification, or out-of-scope syscalls, none of which interact with
 PMT's arena state). The 10th variant, `call_indirect`, flattens to
-`args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)` — exactly mirroring
+`args.map (fun v => ⟨v, v, ⟨"step", 1, []⟩, .transform⟩)` — exactly mirroring
 `.call` (placeholder self-loop steps per argument vreg). The 9
 `[]`-flattening variants cannot perturb the name-uniqueness conjuncts
 of `WellTyped` (a `Step`-free instruction introduces no `in_var` /
 `out_var`). The `call_indirect` variant contributes one placeholder
-`Step` per argument vreg (carrying the `⟨1, []⟩` layout, well-formed
+`Step` per argument vreg (carrying the `⟨"step", 1, []⟩` layout, well-formed
 by `WF_Layout_empty`); its name-uniqueness obligation is discharged
 by the existing `IRFunction.in_vars_unique` / `out_vars_unique`
 conjuncts in `IRFunction.well_typed`, exactly as for `.call`. The
@@ -467,7 +467,7 @@ not as a PMT arena region. Hence `effect = .none`,
 
 **Call-indirect model (PMT-1-D).** `call_indirect` is like `.call`
 but with an indirect (register-resident) target. The task brief
-prescribes `to_steps = args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)`,
+prescribes `to_steps = args.map (fun v => ⟨v, v, ⟨"step", 1, []⟩, .transform⟩)`,
 identical to `.call`; this requires `args : List String` (each `v`
 populates a `Step.in_var` / `out_var`), so we model the variant as
 `String → List String → PmtInstr` (func_ptr name, arg vreg names).
@@ -839,7 +839,7 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   --    verifier; no PMT `Step` interaction (no `WF_Layout` check).
   --  * `call_indirect` — like `.call`, no per-instruction `WF_Layout`
   --    obligation (the per-argument placeholder `Step`s carry
-  --    `⟨1, []⟩`, well-formed by `WF_Layout_empty`).
+  --    `⟨"step", 1, []⟩`, well-formed by `WF_Layout_empty`).
   --  * `syscall` — opaque effect, out-of-scope for PMT; no `WF_Layout`
   --    check.
   | .vector_op _ _ _ _ _ _ => True
@@ -898,16 +898,16 @@ Mapping rationale (mirrors the IVE-from-IR traversal in W2-A §6):
       The `WellTyped` name-uniqueness check is satisfied because `out`
       appears exactly once as `in_var` and once as `out_var` in this step
       — the filter counts each step once.)
-  - `load in_var out _ _` → 1 step: `⟨in_var, out, ⟨1, []⟩⟩`
+  - `load in_var out _ _` → 1 step: `⟨in_var, out, ⟨"step", 1, []⟩⟩`
       (reads `in_var`, produces `out`; size 1 is a placeholder — a future
       refinement will use the IRType to compute the actual byte size.)
-  - `store in_var _ _ _`  → 1 step: `⟨in_var, in_var, ⟨1, []⟩⟩`
+  - `store in_var _ _ _`  → 1 step: `⟨in_var, in_var, ⟨"step", 1, []⟩⟩`
       (writes through `in_var` without producing a new region.)
-  - `free in_var`         → 1 step: `⟨in_var, in_var, ⟨1, []⟩⟩`
+  - `free in_var`         → 1 step: `⟨in_var, in_var, ⟨"step", 1, []⟩⟩`
       (frees `in_var`; marked as both reader and writer for liveness.)
   - `transform in_var out layout` → 1 step: `⟨in_var, out, layout⟩`
       (consumes `in_var`, produces `out` with the given layout.)
-  - `call _ args`         → `args.map (fun v => ⟨v, v, ⟨1, []⟩⟩)`
+  - `call _ args`         → `args.map (fun v => ⟨v, v, ⟨"step", 1, []⟩⟩)`
       (each argument variable becomes a self-loop step; placeholder
       until call semantics are modeled.)
   - `ret _`               → `[]`
@@ -921,9 +921,9 @@ Mapping rationale (mirrors the IVE-from-IR traversal in W2-A §6):
 def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   match i with
   | .alloc out layout => [⟨out, out, layout, .transform⟩]
-  | .load in_var out _ _ => [⟨in_var, out, ⟨1, []⟩, .transform⟩]
-  | .store in_var _ _ _ => [⟨in_var, in_var, ⟨1, []⟩, .transform⟩]
-  | .free in_var => [⟨in_var, in_var, ⟨1, []⟩, .transform⟩]
+  | .load in_var out _ _ => [⟨in_var, out, ⟨"step", 1, []⟩, .transform⟩]
+  | .store in_var _ _ _ => [⟨in_var, in_var, ⟨"step", 1, []⟩, .transform⟩]
+  | .free in_var => [⟨in_var, in_var, ⟨"step", 1, []⟩, .transform⟩]
   | .transform_layouts _ _ _ _ => []  -- PMT-FAITH-5-A: pointer copy, no Step.
   | .call _ _ _ _ => []  -- PMT-FAITH-6-B: 4 args; emit [] (FAITH-2-L gap, args are IRValue not String)
   | .ret _ => []
@@ -961,7 +961,7 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   --  * `stark_proof` — proof verification is opaque (delegated to the
   --    verifier); no `Step`s.
   --  * `call_indirect` — mirrors `.call`: each argument vreg becomes a
-  --    placeholder self-loop `Step` (`⟨v, v, ⟨1, []⟩, .transform⟩`).
+  --    placeholder self-loop `Step` (`⟨v, v, ⟨"step", 1, []⟩, .transform⟩`).
   --  * `syscall` — opaque effect, out-of-scope for PMT; no `Step`s.
   | .vector_op _ _ _ _ _ _ => []
   | .channel_open _ _ => []

@@ -227,7 +227,7 @@ def state_sim (lean : ExecState) (raw : RawArena) (live_vars : List String) : Pr
 /-- §7: Preservation lemma (CLOSED — `haligned` DISCHARGED, PMT-1-F gap #7).
 
 If `arena_sim lean raw` and `raw_alloc raw size = .ok raw'`,
-then `∃ lean', aligned_alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw'`.
+then `∃ lean', aligned_alloc lean ⟨"alloc", size, []⟩ = lean' ∧ arena_sim lean' raw'`.
 
 **PMT-1-F gap #7 (haligned DISCHARGED).** The prior version of this
 theorem required the precondition `haligned : size % 8 = 0` to bridge
@@ -249,7 +249,7 @@ theorem arena_sim_preserved_by_alloc
     (raw' : RawArena)
     (hraw : raw_alloc raw size = Except.ok raw')
     (_hfit : lean.used + align8_nat size ≤ lean.capacity) :
-    ∃ lean', aligned_alloc lean ⟨size, []⟩ = lean' ∧ arena_sim lean' raw' := by
+    ∃ lean', aligned_alloc lean ⟨"alloc", size, []⟩ = lean' ∧ arena_sim lean' raw' := by
   -- Extract components of `hsim` (9 conjuncts of the faithful `arena_sim`).
   have hbase    : lean.base = raw.base              := hsim.1
   have hcap     : lean.capacity = raw.capacity       := hsim.2.1
@@ -279,8 +279,8 @@ theorem arena_sim_preserved_by_alloc
         exact hval.symm
       subst hsuccess
       -- Witness: `lean' = { lean with used := lean.used + align8_nat size }`.
-      -- `aligned_alloc lean ⟨size, []⟩ = { lean with used := lean.used + align8_nat size }`
-      -- definitionally (`align8_nat ⟨size, []⟩.total_size = align8_nat size`).
+      -- `aligned_alloc lean ⟨"alloc", size, []⟩ = { lean with used := lean.used + align8_nat size }`
+      -- definitionally (`align8_nat ⟨"alloc", size, []⟩.total_size = align8_nat size`).
       refine ⟨{ lean with used := lean.used + align8_nat size }, rfl, ?_⟩
       -- Prove `arena_sim lean' raw'` field-by-field (9 faithful conjuncts).
       -- After `subst hsuccess`, `raw'` is `{ raw with offset := ... }`, so

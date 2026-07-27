@@ -299,7 +299,7 @@ private theorem no_oob_trap_aux
               exact this
             -- `WF_Layout` ⇒ `f.offset + f.size ≤ i.layout.total_size`.
             have h_f_bound : f.offset + f.size ≤ i.layout.total_size :=
-              hwf_i.1 f h_f_in
+              hwf_i f h_f_in  -- PMT-FAITH-6-C: WF_Layout is now 1 conjunct
             omega
           · -- `h_step : .ok s = .error .oob` — constructor mismatch.
             rw [if_neg h_oob] at h_step
