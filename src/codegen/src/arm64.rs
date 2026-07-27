@@ -4830,7 +4830,7 @@ impl InstructionSelector {
             // lower to a NEON copy loop).  Emit nothing — x86_64 is the
             // canonical path; aarch64 can be added when needed.
             | IRInstr::BulkCopy { .. }
-            | IRInstr::BulkFill { .. } => {}
+            | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => {}
         }
         Ok(())
     }

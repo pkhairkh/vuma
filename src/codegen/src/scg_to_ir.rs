@@ -429,6 +429,21 @@ pub enum ScgStatement {
     /// `ControlNode::If` on `err_dst == 0` dispatches to the Ok / Err arms.
     /// Lowers to [`IRInstr::ChannelRecvResult`].
     ChannelRecvResult(ChannelRecvResultStmt),
+    /// PMT/arena op — first-class IR-level PMT/arena primitive.
+    ///
+    /// Replaces the 8 `__vuma_state_*` / `__vuma_arena_*` extern calls
+    /// that were emitted by `pipeline.rs`'s FFI section before FFI Wave 1
+    /// task C.  Each variant lowers to the corresponding `IRInstr`:
+    ///
+    ///   - `StateInit`     → `IRInstr::Alloc`
+    ///   - `StateRead`     → `IRInstr::Load`
+    ///   - `StateWrite`    → `IRInstr::Store`
+    ///   - `StateTransform`→ `IRInstr::Transform`
+    ///   - `ArenaNew`      → `IRInstr::Alloc`
+    ///   - `ArenaAlloc`    → `IRInstr::Alloc`
+    ///   - `ArenaGrow`     → `IRInstr::Alloc`
+    ///   - `ArenaFree`     → `IRInstr::Free`
+    PmtOp(PmtOpStmt),
 }
 
 /// A foreign-consume marker. Marks `state_var` as consumed by a
@@ -515,6 +530,108 @@ pub struct ChannelRecvResultStmt {
     pub err_dst: String,
     /// Message type (selects backend load width + type_hash for protocol check).
     pub ty: ScgType,
+}
+
+// ── PMT/arena op statements (FFI Wave 1 task C) ──────────────
+
+/// PMT/arena op — one of 8 variants replacing the former
+/// `__vuma_state_*` / `__vuma_arena_*` extern calls.
+///
+/// Each variant carries the operands needed to lower to the corresponding
+/// `IRInstr` (Alloc/Load/Store/Transform/Free). The 8 variants mirror the
+/// 8 `NodePayload` arms in `pipeline.rs`'s FFI section (StateInit /
+/// StateRead / StateWrite / StateTransform / ArenaNew / ArenaAlloc /
+/// ArenaGrow / ArenaFree).
+///
+/// # Layout-size placeholder
+///
+/// For `StateInit` / `ArenaNew` / `ArenaAlloc` / `ArenaGrow`, the size in
+/// bytes is not known at this layer (it requires the BD `LayoutRegistry`,
+/// which is not plumbed through the SCG→IR bridge). The `IRInstr::Alloc`
+/// is emitted with `size: 0` as a placeholder; the runtime `__oob_trap`
+/// mechanism (in `pmt_ops.rs`) provides the actual bounds check, and the
+/// Lean model reasons about the abstract `alloc` constructor without
+/// depending on the concrete size.
+#[derive(Debug, Clone)]
+pub enum PmtOpStmt {
+    /// `StateInit(layout)` → allocate state buffer of `layout`'s size.
+    /// Lowers to `IRInstr::Alloc`.
+    StateInit {
+        /// Destination variable name (receives the state pointer).
+        dst: String,
+        /// Layout name (for diagnostics + Lean model reasoning).
+        layout_name: String,
+    },
+    /// `StateRead(state, layout, field)` → reads a field from the state.
+    /// Lowers to `IRInstr::Load`.
+    StateRead {
+        /// Destination variable name (receives the loaded value).
+        dst: String,
+        /// Source state pointer expression.
+        src: ScgExpr,
+        /// Layout name (for diagnostics).
+        layout_name: String,
+        /// Field name (for diagnostics).
+        field_name: String,
+    },
+    /// `StateWrite(state, val, layout, field)` → writes a value to a state field.
+    /// Lowers to `IRInstr::Store`.
+    StateWrite {
+        /// State pointer expression.
+        ptr: ScgExpr,
+        /// Value expression to store.
+        val: ScgExpr,
+        /// Layout name (for diagnostics).
+        layout_name: String,
+        /// Field name (for diagnostics).
+        field_name: String,
+    },
+    /// `StateTransform(state, from_layout, to_layout)` → reinterprets a
+    /// state buffer as another layout.  Lowers to `IRInstr::Transform`.
+    StateTransform {
+        /// Destination variable name (receives the reinterpreted pointer).
+        dst: String,
+        /// Source state pointer expression.
+        src: ScgExpr,
+        /// Source layout name (for runtime check + Lean model).
+        from_layout: String,
+        /// Target layout name (for runtime check + Lean model).
+        to_layout: String,
+    },
+    /// `ArenaNew(capacity)` → allocates a fresh arena region.
+    /// Lowers to `IRInstr::Alloc`.
+    ArenaNew {
+        /// Destination variable name (receives the arena pointer).
+        dst: String,
+        /// Capacity expression (bytes).
+        capacity: ScgExpr,
+    },
+    /// `ArenaAlloc(arena, layout)` → bump-allocates within the arena.
+    /// Lowers to `IRInstr::Alloc` (semantically a sub-region allocation).
+    ArenaAlloc {
+        /// Destination variable name (receives the allocated pointer).
+        dst: String,
+        /// Arena pointer expression.
+        arena: ScgExpr,
+        /// Layout name (for diagnostics + Lean model).
+        layout_name: String,
+    },
+    /// `ArenaGrow(arena, min_capacity)` → grows the arena's capacity.
+    /// Lowers to `IRInstr::Alloc` (semantically: allocate a new larger region).
+    ArenaGrow {
+        /// Destination variable name (receives the grown arena pointer).
+        dst: String,
+        /// Arena pointer expression.
+        arena: ScgExpr,
+        /// Minimum capacity expression (bytes).
+        min_capacity: ScgExpr,
+    },
+    /// `ArenaFree(arena)` → deallocates the arena.
+    /// Lowers to `IRInstr::Free`.
+    ArenaFree {
+        /// Arena pointer expression.
+        ptr: ScgExpr,
+    },
 }
 
 /// Control-flow node.
@@ -1725,6 +1842,11 @@ impl IRBuilder {
             // branches on err_dst == 0 to dispatch the Ok / Err arms.
             ScgStatement::ChannelRecvResult(crr) => {
                 self.lower_channel_recv_result(crr, ir_func, names)?;
+            }
+            // PMT/arena op (FFI Wave 1 task C) — lowers to the
+            // corresponding IRInstr (Alloc/Load/Store/Transform/Free).
+            ScgStatement::PmtOp(op) => {
+                self.lower_pmt_op(op, ir_func, names)?;
             }
         }
         Ok(())
@@ -5002,6 +5124,137 @@ impl IRBuilder {
         Ok(())
     }
 
+    /// Lower a PMT/arena op statement to its corresponding IR instruction.
+    ///
+    /// Replaces the former `__vuma_state_*` / `__vuma_arena_*` extern calls
+    /// (FFI Wave 1 task C — No-FFI closure). Each variant lowers to a
+    /// first-class IR instruction that the Lean model can reason about:
+    ///
+    ///   - `StateInit(layout)`     → `IRInstr::Alloc` (allocate state buffer)
+    ///   - `StateRead(src,layout,field)`  → `IRInstr::Load` (read field from state)
+    ///   - `StateWrite(ptr,val,layout,field)` → `IRInstr::Store` (write field)
+    ///   - `StateTransform(dst,src,from,to)` → `IRInstr::Transform`
+    ///   - `ArenaNew(dst,cap)`     → `IRInstr::Alloc` (allocate arena region)
+    ///   - `ArenaAlloc(dst,arena,layout)` → `IRInstr::Alloc` (sub-region alloc)
+    ///   - `ArenaGrow(dst,arena,cap)`    → `IRInstr::Alloc` (new larger region)
+    ///   - `ArenaFree(ptr)`        → `IRInstr::Free` (deallocate)
+    ///
+    /// # Layout-size placeholder
+    ///
+    /// The `Alloc` variants use `size: 0` as a placeholder — the BD
+    /// `LayoutRegistry` is not plumbed through the SCG→IR bridge at this
+    /// layer. The runtime `__oob_trap` mechanism (in `pmt_ops.rs`) provides
+    /// the actual bounds check; the Lean model reasons about the abstract
+    /// `alloc` constructor without depending on the concrete size.
+    fn lower_pmt_op(
+        &mut self,
+        op: &PmtOpStmt,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        use PmtOpStmt as P;
+        match op {
+            // StateInit(layout) → Alloc(size=0 placeholder)
+            P::StateInit { dst, layout_name } => {
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+                ir_func.current_block().push(IRInstruction::Alloc {
+                    dst: IRValue::Register(dst_vreg),
+                    size: 0, // placeholder — BD LayoutRegistry not plumbed here
+                });
+                let _ = layout_name; // diagnostic only
+                Ok(())
+            }
+            // StateRead(src, layout, field) → Load(offset=0 placeholder)
+            P::StateRead { dst, src, layout_name, field_name } => {
+                let addr = self.resolve_expr(src, names, ir_func)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+                ir_func.current_block().push(IRInstruction::Load {
+                    dst: IRValue::Register(dst_vreg),
+                    addr,
+                    offset: 0, // placeholder — BD field offset not plumbed here
+                    ty: IRType::I64,
+                });
+                let _ = (layout_name, field_name); // diagnostic only
+                Ok(())
+            }
+            // StateWrite(ptr, val, layout, field) → Store(offset=0 placeholder)
+            P::StateWrite { ptr, val, layout_name, field_name } => {
+                let addr = self.resolve_expr(ptr, names, ir_func)?;
+                let value = self.resolve_expr(val, names, ir_func)?;
+                ir_func.current_block().push(IRInstruction::Store {
+                    value,
+                    addr,
+                    offset: 0, // placeholder — BD field offset not plumbed here
+                    ty: IRType::I64,
+                });
+                let _ = (layout_name, field_name); // diagnostic only
+                Ok(())
+            }
+            // StateTransform(dst, src, from_layout, to_layout) → Transform
+            P::StateTransform { dst, src, from_layout, to_layout } => {
+                let src_val = self.resolve_expr(src, names, ir_func)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+                ir_func.current_block().push(IRInstruction::Transform {
+                    dst: IRValue::Register(dst_vreg),
+                    src: src_val,
+                    from_layout: from_layout.clone(),
+                    to_layout: to_layout.clone(),
+                });
+                Ok(())
+            }
+            // ArenaNew(dst, capacity) → Alloc(size=0 placeholder)
+            P::ArenaNew { dst, capacity } => {
+                let _ = self.resolve_expr(capacity, names, ir_func)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+                ir_func.current_block().push(IRInstruction::Alloc {
+                    dst: IRValue::Register(dst_vreg),
+                    size: 0, // placeholder — capacity not plumbed to Alloc.size
+                });
+                Ok(())
+            }
+            // ArenaAlloc(dst, arena, layout) → Alloc(size=0 placeholder)
+            P::ArenaAlloc { dst, arena, layout_name } => {
+                let _ = self.resolve_expr(arena, names, ir_func)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+                ir_func.current_block().push(IRInstruction::Alloc {
+                    dst: IRValue::Register(dst_vreg),
+                    size: 0, // placeholder — BD LayoutRegistry not plumbed here
+                });
+                let _ = layout_name; // diagnostic only
+                Ok(())
+            }
+            // ArenaGrow(dst, arena, min_capacity) → Alloc(size=0 placeholder)
+            P::ArenaGrow { dst, arena, min_capacity } => {
+                let _ = self.resolve_expr(arena, names, ir_func)?;
+                let _ = self.resolve_expr(min_capacity, names, ir_func)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+                names.insert(dst.clone(), dst_vreg);
+                ir_func.current_block().push(IRInstruction::Alloc {
+                    dst: IRValue::Register(dst_vreg),
+                    size: 0, // placeholder — grow semantics: allocate new larger region
+                });
+                Ok(())
+            }
+            // ArenaFree(ptr) → Free
+            P::ArenaFree { ptr } => {
+                let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
+                ir_func.current_block().push(IRInstruction::Free { ptr: ptr_val });
+                Ok(())
+            }
+        }
+    }
+
     // =======================================================================
     // Helpers
     // =======================================================================
@@ -5664,6 +5917,35 @@ impl IRBuilder {
                 defs.insert(crr.dst.clone());
                 defs.insert(crr.err_dst.clone());
                 Self::expr_uses(&crr.channel, &mut uses);
+            }
+            // PMT/arena op (FFI Wave 1 task C) — defs/uses mirror the
+            // underlying IRInstr (Alloc defines dst; Load defines dst and
+            // uses src; Store uses ptr+val; Transform defines dst, uses src;
+            // Free uses ptr). Approximate by recording the dst (if any)
+            // and using the operand expressions.
+            ScgStatement::PmtOp(op) => {
+                use PmtOpStmt as P;
+                match op {
+                    P::StateInit { dst, .. } | P::ArenaNew { dst, .. }
+                    | P::ArenaAlloc { dst, .. } | P::ArenaGrow { dst, .. } => {
+                        defs.insert(dst.clone());
+                    }
+                    P::StateRead { dst, src, .. } => {
+                        defs.insert(dst.clone());
+                        Self::expr_uses(src, &mut uses);
+                    }
+                    P::StateWrite { ptr, val, .. } => {
+                        Self::expr_uses(ptr, &mut uses);
+                        Self::expr_uses(val, &mut uses);
+                    }
+                    P::StateTransform { dst, src, .. } => {
+                        defs.insert(dst.clone());
+                        Self::expr_uses(src, &mut uses);
+                    }
+                    P::ArenaFree { ptr } => {
+                        Self::expr_uses(ptr, &mut uses);
+                    }
+                }
             }
         }
 

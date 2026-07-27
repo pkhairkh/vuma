@@ -9935,7 +9935,7 @@ impl Backend for RiscV64Backend {
                     // replacements): backend lowering not yet implemented on riscv64;
                     // emit no bytes (x86_64 is the canonical path).
                     | IRInstr::BulkCopy { .. }
-                    | IRInstr::BulkFill { .. } => Vec::new(),
+                    | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => Vec::new(),
 
                     // CallIndirect — indirect call through func_ptr.
                     // riscv64 codegen: load args into a0-a5, load func_ptr
@@ -10074,7 +10074,7 @@ impl Backend for RiscV64Backend {
                         // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
                         // replacements; backend lowering not yet implemented on riscv64).
                         IRInstr::BulkCopy { .. } => "bulk_copy",
-                        IRInstr::BulkFill { .. } => "bulk_fill",
+                        IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => "bulk_fill",
                     };
 
                     // For FP Cast instructions, populate reads/writes with

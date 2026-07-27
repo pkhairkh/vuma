@@ -9568,7 +9568,8 @@ impl Backend for Arm32Backend {
                 // replacements): backend lowering not yet implemented on arm32;
                 // emit no bytes (x86_64 is the canonical path).
                 | crate::ir::IRInstr::BulkCopy { .. }
-                | crate::ir::IRInstr::BulkFill { .. } => Vec::new(),
+                | crate::ir::IRInstr::BulkFill { .. }
+                | crate::ir::IRInstr::Transform { .. } => Vec::new(),
 
                 // CallIndirect — indirect call through func_ptr.
                 // arm32 codegen: load args into r0-r3, load func_ptr into
