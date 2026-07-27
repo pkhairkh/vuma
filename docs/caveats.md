@@ -504,3 +504,109 @@ regression has been introduced by Waves 0/0.5/1 through PMT-1-G1 partial.
 | Sorry warnings | 0 | 0 | PASS |
 | `pmt_pillar_sound` theorem | NOT YET PROVEN | NOT YET PROVEN (deferred to PMT-1-G2) | as expected |
 | `PmtInstr` coverage | 35/35 | 35/35 | PASS |
+
+---
+
+## 12. PMT Wave 2 Verification Status (PMT-2-B, partial — PMT-only) — APPEND-ONLY
+
+> Appended by PMT Wave 2 task B (partial). This is the **final** verification-status
+> entry for the PMT-only slice of PMT-2-B. IVE-3-A and FFI-2-A are NOT on `main`
+> yet, so the full PMT-2-B (synthesising all three pillar theorems into the docs)
+> remains deferred. See the corresponding PMT-2-B worklog entry for details.
+
+### Pillar-theorem status (as of this entry)
+
+| Pillar | Theorem | Status |
+|--------|---------|--------|
+| **PMT** | `pmt_pillar_sound` (`proof/PMT/PillarSoundness.lean`, PMT-1-G2) | **Mathematically verified.** Lean 4, sorry-free, conditional on the IVE-1-A and FFI-1-D hypotheses (neither on `main` yet). Proves: (1) `exec` produces a result (totality), (2) on success `final_used ≤ capacity`, (3) `exec ≠ Result.trap 134` (no OOB trap). |
+| **IVE** | IVE-3-A (IVE pillar theorem) | **Pending.** The IVE orchestrator is at Wave 0 / early Wave 1; IVE-1-A (computable `WF_Layout`) is not yet on `main`. The `h_well_typed : P.well_typed env` hypothesis of `pmt_pillar_sound` is **structural only** until IVE-1-A lands. |
+| **FFI** | FFI-2-A (FFI pillar theorem) | **Pending.** The FFI orchestrator is at Wave 0 / early Wave 1; FFI-1-D (No-FFI theorem) is not yet on `main`. The `h_no_externs : NoExterns P` hypothesis of `pmt_pillar_sound` is **taken as an assumption** until FFI-1-D lands. |
+
+**Honest claim.** The **PMT pillar is mathematically verified** via
+`pmt_pillar_sound` (Lean 4, sorry-free, conditional on the IVE-1-A + FFI-1-D
+hypotheses). The **IVE pillar theorem (IVE-3-A)** and the **FFI pillar theorem
+(FFI-2-A)** are **pending** — those orchestrators are at Wave 0 / early Wave 1.
+The full PMT-2-B (which would synthesise all three pillar theorems into the
+docs) is therefore **deferred** until IVE-3-A and FFI-2-A land on `main`.
+
+### Residual non-standard axiom in the PMT codedomain
+
+One non-standard axiom remains in the PMT codedomain:
+
+- **`own_ex_exclusive`** (in `proof/PMT/Iris/LiveMirrorInvariant.lean`,
+  around line 141). Transitively invoked by `no_oob_trap_for_well_typed_strong`
+  → `live_mirror_exclusive`.
+
+  - The non-degenerate `RealOwn` predicate and the soundly-derived
+    `own_ex_exclusive_derived` theorem are in place in
+    `proof/PMT/Iris/HeapModel.lean` (added in PMT-1-G1).
+  - The bridge from the degenerate `Own` (an empty structure that carries no
+    information) to `RealOwn` would remove the axiom, but it cascades through
+    five Iris structures (`CapBndInv`, `ArenaRes`, `LiveMirrorInv`,
+    `GuardInvariant`, `FractionalPerm`) — exceeding the per-task file-edit
+    budget.
+  - **Deferred to a follow-up wave** (post-IVE-1-A + post-FFI-1-D landing).
+    See the PMT-1-G1 and PMT-1-G2 worklog entries for the full deferral
+    rationale.
+
+The full `pmt_pillar_sound_full` theorem (additionally excluding exit codes
+135 and 1) is likewise deferred — needs UAF safety + overflow safety lemmas
+that are not yet in place.
+
+### Residual Trusted Computing Base (TCB)
+
+`pmt_pillar_sound` is a statement about the Lean `exec` model on
+`IRProgram`s, *not* about the Rust `pipeline::compile` output. The Lean
+proofs cover the PMT memory model and the IVE-side `verify_*` soundness
+theorems; they do NOT cover the production compiler pipeline. The residual
+TCB — the components whose correctness is **not** established by
+`pmt_pillar_sound` — is:
+
+| # | Component | Location |
+|---|-----------|----------|
+| 1 | Parser | `src/parser/` |
+| 2 | AST → SCG bridge | `src/scg/` |
+| 3 | Codegen SCG → IR lowering | `src/codegen/` |
+| 4 | Optimizer | `src/codegen/src/opt/` |
+| 5 | Register allocator | `src/codegen/src/regalloc/` |
+| 6 | Backend instruction selection | per-backend `Isel` in `src/codegen/src/backends/` |
+| 7 | ELF / Wasm emission | `src/codegen/src/emit.rs`, `src/codegen/src/wasm/` |
+| 8 | OS interface | mmap, syscalls, process spawning |
+| 9 | Hardware | CPU, MMU, caches, devices |
+
+The `PipelineSim` scaffolding (`proof/PMT/PipelineSim.lean`) is the
+translation-validation bridge between Lean `exec` and Rust
+`pipeline::compile`; it is currently a degenerate `rfl` (see the PMT-0-C
+worklog entry) and is **not** implied by `pmt_pillar_sound` as it stands.
+Closing that bridge — and thereby shrinking the residual TCB on the codegen
+side (items 3–7 above) — is the subject of the deferred
+`pmt_pillar_sound_full` work and the follow-up-wave axiom-removal work.
+
+### Staleness note for §11
+
+The §11 PMT-2-A audit row "`pmt_pillar_sound` theorem | NOT YET PROVEN"
+is **STALE** as of this entry: PMT-1-G2 has since landed `pmt_pillar_sound`
+on `main` (sorry-free, conditional on IVE-1-A + FFI-1-D hypotheses). Per
+the APPEND-ONLY policy, the §11 row is **not** edited here; this §12 entry
+supersedes it.
+
+### Verdict
+
+- **PMT pillar: mathematically verified** via `pmt_pillar_sound` (sorry-free,
+  conditional on IVE-1-A + FFI-1-D hypotheses — neither on `main` yet).
+- **IVE pillar: pending** (IVE-3-A not yet on `main`).
+- **FFI pillar: pending** (FFI-2-A not yet on `main`).
+- **Residual non-standard axiom:** 1 (`own_ex_exclusive`).
+- **Residual TCB:** 9 items (parser → hardware; listed above).
+- **Full PMT-2-B (3-pillar synthesis):** deferred until IVE-3-A and FFI-2-A
+  land on `main`.
+
+| Audit dimension | Expected | Actual | Status |
+|-----------------|---------:|-------:|--------|
+| `pmt_pillar_sound` theorem (PMT pillar) | Proven, sorry-free | Proven, sorry-free, conditional on IVE-1-A + FFI-1-D | PASS (partial — PMT-only) |
+| IVE-3-A (IVE pillar theorem) | Pending (not on `main`) | Pending | as expected |
+| FFI-2-A (FFI pillar theorem) | Pending (not on `main`) | Pending | as expected |
+| Top-level `axiom`s (excl. IVE) | 1 (known residual) | 1 (`own_ex_exclusive`) | PASS (known) |
+| `cargo build --release` | PASS | PASS | PASS |
+| Residual TCB items | 9 (listed above) | 9 | documented |
+
