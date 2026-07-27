@@ -206,7 +206,7 @@ The four inductives below mirror the eponymous Rust enums in
 They are pure tag types: `PmtInstr.well_typed` does not inspect them
 (the arithmetic `PmtInstr` variants are all `True`-well-typed), so the
 Lean variants are present solely to faithfully mirror the Rust IR shape
-for `instr_sim` / `block_sim` traversal in `PMT.SimRel`. -/
+for `instr_sim_intra_lean` / `block_sim` traversal in `PMT.SimRel`. -/
 
 /-- §3.1: Binary operator kind — mirror of Rust `BinOpKind`.
 Covers arithmetic, bitwise, shift, rotate, and comparison sub-kinds. -/
@@ -283,7 +283,7 @@ forward-compatibility annotation: under PMT's single-threaded
 soundness model, the ordering is *never inspected* by `PmtInstr.effect`,
 `PmtInstr.well_typed`, or `PmtInstr.to_steps` (all three treat the
 atomic variants identically regardless of `ordering`'s value). The
-enum is present in the Lean model so that `instr_sim` / `block_sim`
+enum is present in the Lean model so that `instr_sim_intra_lean` / `block_sim`
 traversal in `PMT.SimRel` can carry the ordering through structurally
 for any future concurrent extension.
 
@@ -321,7 +321,7 @@ soundness model, `vector_op` is a pure register-to-register computation
 (`effect = .none`, `well_typed = True`, `to_steps = []`), and the
 `op`/`lanes`/`elem_size` fields are *never inspected* by `effect`,
 `well_typed`, or `to_steps`. The enum is present in the Lean model so
-that `instr_sim` / `block_sim` traversal in `PMT.SimRel` can carry the
+that `instr_sim_intra_lean` / `block_sim` traversal in `PMT.SimRel` can carry the
 op-kind through structurally for any future SIMD-aware extension. -/
 
 /-- §3.6: SIMD lane-wise arithmetic kind — mirror of Rust `VectorOpKind`

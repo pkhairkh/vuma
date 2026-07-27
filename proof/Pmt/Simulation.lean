@@ -14,6 +14,17 @@ would exceed the arena's `capacity`, or the underlying `USize.add` overflows.
 Everything lives in `namespace Pmt` (to avoid clashing with Lean's built-in
 `USize`). The proof uses no extra assumptions and no placeholders, and discharges its
 case-split with `unfold`, `by_cases`, `if_pos`/`if_neg`, and `omega`.
+
+**Scope vs `Simulation2.lean` (audit 3-C).** The two modules are
+*complementary*, not overlapping: this module owns `sim_alloc`; the companion
+`Pmt.Simulation2` owns `sim_free` and `sim_read`. There are no shared theorem
+names or statements, so they are kept side-by-side rather than merged.
+`Simulation2.lean` re-pastes the `USize`/`Ptr`/`Arena`/`Env`/`LeanArena`/
+`LeanEnv`/`sim_state` definitions to remain self-contained, so the two modules
+must **not** be `import`ed into the same Lean module (that would raise
+duplicate-declaration errors). Accordingly, neither module is currently in the
+`Pmt` root import graph (`Pmt.lean`); build them explicitly with
+`lake build Pmt.Simulation Pmt.Simulation2` when checking them in isolation.
 -/
 
 namespace Pmt

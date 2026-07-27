@@ -3777,16 +3777,18 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("ffi_scratch_pop_frame".to_string(), code));
     }
 
-    // __ffi_fallback_stub() -> i64
-    //   The FFI return-0 fallback for truly unknown externs (e.g. C library
-    //   functions like sqlite3_close that are not syscalls and not linked).
-    //   Returns 0 (xor eax, eax; ret). This matches the aarch64 backend's
-    //   ffi_stub behavior. Standalone ET_EXEC binaries with no linker step
-    //   use this instead of crashing (jump to address 0).
+    // __ffi_fallback_stub() -> !  (trap)
+    //   Unresolved externs in ET_EXEC mode are a build-time bug. The binary
+    //   traps at runtime (`ud2` -> SIGILL on x86) rather than silently
+    //   returning 0. Round 7 verified the old `xor eax,eax; ret` behavior
+    //   was unsound: it turned "missing symbol" into "no-op success",
+    //   masking link errors and handing callers a 0 (a plausible success
+    //   code) from any unresolved call. `ud2` (0x0F 0x0B) is the x86
+    //   undefined-instruction trap; it raises SIGILL immediately so the
+    //   unresolved-extern bug is observable instead of silent.
     {
         let mut code = Vec::new();
-        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax)); // return 0
-        code.extend(encode_ret());
+        code.extend_from_slice(&[0x0F, 0x0B]); // ud2 -> SIGILL (trap, not return 0)
         stubs.push(("__ffi_fallback_stub".to_string(), code));
     }
 
@@ -4324,9 +4326,10 @@ impl Backend for X86_64Backend {
                     } else {
                         // External symbol — but this is an ET_EXEC static ELF
                         // with no linker step. Patch the BL to point at the
-                        // __ffi_fallback_stub (xor eax, eax; ret → returns 0)
-                        // instead of leaving it as 0 (which would crash).
-                        // This matches the aarch64 backend's ffi_stub behavior.
+                        // __ffi_fallback_stub (ud2 → SIGILL trap) instead of
+                        // leaving it as 0 (which would jump into text vaddr 0).
+                        // The trap makes the unresolved-extern build bug
+                        // observable; see the stub definition above.
                         if let Some(&fallback_off) = func_offsets.get("__ffi_fallback_stub") {
                             let current_val = i32::from_le_bytes([
                                 all_code[abs_offset],

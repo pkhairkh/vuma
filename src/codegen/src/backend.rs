@@ -3207,8 +3207,8 @@ impl Backend for AArch64Backend {
         // SVC #0         — offset 12
 
         let start_stub_size: usize = 20; // 5 × 4-byte instructions (LDR X0, ADD X1, BL, MOV X8, SVC)
-        let ffi_stub_size: usize = 8; // MOV X0, #0; RET (2 × 4 bytes)
-        let _ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
+        let ffi_stub_size: usize = 8; // BRK #1; BRK #1 (trap, 2 × 4 bytes — see stub emission below)
+        let _ffi_stub_offset: usize = start_stub_size; // FFI fallback trap stub right after _start
 
         // ── Build runtime I/O code ──
         // print_hex: X0 = value to print as 8 hex digits to stdout
@@ -3867,8 +3867,8 @@ impl Backend for AArch64Backend {
         //         MOV X8, #93         ; sys_exit_group
         //         SVC #0              ; syscall
         let start_stub_size: usize = 20; // 5 × 4-byte instructions
-        let ffi_stub_size: usize = 8; // MOV X0, #0; RET (2 × 4 bytes)
-        let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
+        let ffi_stub_size: usize = 8; // BRK #1; BRK #1 (trap, 2 × 4 bytes — see stub emission below)
+        let ffi_stub_offset: usize = start_stub_size; // FFI fallback trap stub right after _start
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
         // LDR X0, [SP] — load argc from stack pointer
@@ -3910,10 +3910,22 @@ impl Backend for AArch64Backend {
             start_stub[8..12].copy_from_slice(&bl_word.to_le_bytes());
         }
 
-        // ── Add FFI return-0 stub ──
+        // ── Add FFI fallback stub (BRK #1 trap, not return-0) ──
+        //   Unresolved externs in ET_EXEC mode are a build-time bug. The
+        //   binary traps at runtime (brk / SIGTRAP on aarch64) rather than
+        //   silently returning 0. Round 7 verified the old return-0 behavior
+        //   was unsound: it turned "missing symbol" into "no-op success",
+        //   masking link errors and handing callers a 0 (a plausible success
+        //   code) from any unresolved call. `brk #1` (0xD4200020) is the
+        //   AArch64 breakpoint trap; it raises SIGTRAP immediately so the
+        //   unresolved-extern bug is observable instead of silent. The second
+        //   `brk #1` is unreachable padding that preserves the 8-byte
+        //   `ffi_stub_size` slot reserved by the offset layout (functions
+        //   start at `start_stub_size + ffi_stub_size`); control flow enters
+        //   at the first word and traps before reaching the second.
         let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
-        ffi_stub.extend_from_slice(&0xD2800000u32.to_le_bytes()); // MOV X0, #0
-        ffi_stub.extend_from_slice(&0xD65F03C0u32.to_le_bytes()); // RET
+        ffi_stub.extend_from_slice(&0xD4200020u32.to_le_bytes()); // BRK #1 -> SIGTRAP (trap, not return 0)
+        ffi_stub.extend_from_slice(&0xD4200020u32.to_le_bytes()); // BRK #1 (unreachable; preserves 8-byte slot)
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
@@ -4066,8 +4078,10 @@ impl Backend for AArch64Backend {
                     } else {
                         // External symbol — record the name for the .symtab
                         // appendix (so the system linker can resolve it) and
-                        // point the BL at the FFI return-0 stub as a runtime
-                        // fallback so the emitted binary is still executable.
+                        // point the BL at the FFI fallback trap stub so the
+                        // binary traps (BRK #1 / SIGTRAP) at runtime if the
+                        // linker leaves it unresolved, rather than silently
+                        // returning 0.
                         if !external_symbols.contains(&reloc.symbol) {
                             external_symbols.push(reloc.symbol.clone());
                         }

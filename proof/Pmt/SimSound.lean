@@ -15,6 +15,21 @@ on success.
 
 The proof proceeds by induction on the Lean program, analysing each
 constructor of `LeanStep` (`alloc` / `free` / `read`) in the cons case.
+
+**CANONICAL**: This is the canonical simulation theorem for the Pmt
+pipeline — see the `Canonical Simulation Theorem` note below.
+-/
+
+/-! ## Canonical Simulation Theorem
+
+This module contains the GENUINE simulation theorem `simulation` (line ~114),
+which uses a non-tautological contrapositive with real induction.
+
+PREFERRED over `Pmt.SimSound2.lean`: the successor module's
+`single_step_exists` and `simulation_full` are `P ∨ ¬P` tautologies
+(see Round 7 verification NEW_FINDINGS 3-D). Use this module instead.
+
+TODO: extend scope from 3 instructions to 8 to match SimSound2's coverage.
 -/
 
 namespace Pmt

@@ -1,6 +1,7 @@
 import PMT.Basic
 import PMT.Field
 import PMT.Iris.CapBndInvariant
+import PMT.Iris.SepGenuine
 
 /-!
 ## Iris-style `[live_mirror]` Named Invariant
@@ -231,5 +232,50 @@ theorem live_mirror_exclusive (γ : GhostName) (var : String)
   have hagree : Liveness.live = Liveness.dead :=
     own_ex_exclusive γ Liveness.live Liveness.dead h_live.ghost h_dead.ghost
   exact live_ne_dead hagree
+
+/-- **Wave 2-D.** Genuine-Sep counterpart of `live_mirror_exclusive`:
+    if a heap `h` splits — via the genuine disjoint-domains
+    `SepGenuine.Sep` (Wave 1-D) — into two sub-heaps carrying
+    `[live_mirror]` invariants at the SAME ghost name `γ` but with
+    DIFFERENT liveness values (`live` on the left sub-heap, `dead` on
+    the right), then the split is contradictory.
+
+    Parallel to `live_mirror_exclusive` (above), but stated on the REAL
+    separating conjunction `PMT.Iris.GenuineSep.Sep` rather than the
+    degenerate AND-Sep of `CapBndInvariant.lean`. Two halves combine:
+
+      1. Heap-model half (Wave 1-D's genuine `Sep`): the sub-heaps
+         `h1`, `h2` are DISJOINT (`h1.disjoint h2`) and merge to `h`.
+      2. Ghost-state half (this file's `live_mirror_exclusive`): two
+         `LiveMirrorInv`s at the same `γ` with conflicting liveness
+         values violate the `Ex` RA's exclusivity principle.
+
+    The contradiction comes from the GHOST-state half — `live_ne_dead`
+    after `own_ex_exclusive` — so the heap disjointness is structurally
+    unused. This matches Iris's principle that the genuine `∗`'s
+    disjointness is the heap-model FRAME, while resource exclusivity is
+    the ghost-state CONTENT: when both sides share the same exclusive
+    ghost name, the resource contradiction subsumes the heap split.
+
+    `LiveMirrorInv` is `Prop`-valued (no heap index), so the `Sep`
+    predicates `P`, `Q` are the constant liftings
+    `fun _h => LiveMirrorInv γ var b`. The theorem is PROVEN (not a
+    TODO) by reducing to `live_mirror_exclusive` after destructuring
+    the genuine `Sep` into its disjoint sub-heaps. -/
+theorem live_mirror_sep_genuine (γ : GhostName) (var : String)
+    (h : GenuineSep.Heap)
+    (H : GenuineSep.Sep
+          (fun _h1 => LiveMirrorInv γ var Liveness.live)
+          (fun _h2 => LiveMirrorInv γ var Liveness.dead)
+          h) :
+    False := by
+  -- Destructure the genuine `Sep`: disjoint sub-heaps `h1`, `h2`
+  -- carrying the two conflicting `[live_mirror]` invariants.
+  obtain ⟨_h1, _h2, hp, hq, _hd, _hu⟩ := H
+  -- The contradiction is the ghost-state exclusivity (same as
+  -- `live_mirror_exclusive`); the heap disjointness `_hd` is the
+  -- frame that the genuine `∗` enforces but the Ex exclusivity makes
+  -- redundant here when both sides share the same `γ`.
+  exact live_mirror_exclusive γ var hp hq
 
 end PMT.Iris
