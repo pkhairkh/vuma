@@ -2389,7 +2389,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // replacements): backend lowering not yet implemented on
                 // loongarch64; emit no bytes (x86_64 is the canonical path).
                 | IRInstr::BulkCopy { .. }
-                | IRInstr::BulkFill { .. } => Vec::new(),
+                | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => Vec::new(),
                 // ── CallIndirect (driver_call) ──
                 // Lower an indirect call: load args into $a0-$a5, load the
                 // function pointer into a scratch register, then `jirl $ra,

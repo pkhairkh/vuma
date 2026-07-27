@@ -2046,7 +2046,7 @@ fn emit_instr(
         // replacements): backend lowering not yet implemented on alpha;
         // emit nothing (x86_64 is the canonical path).
         | IRInstr::BulkCopy { .. }
-        | IRInstr::BulkFill { .. } => {}
+        | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => {}
     }
 }
 

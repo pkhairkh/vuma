@@ -331,6 +331,14 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             val: sv(val),
             len: sv(len),
         },
+        // Transform (FFI Wave 1 task C) — substitute both vregs
+        // (dst, src). Layout names are not vregs and are passed through.
+        IRInstr::Transform { dst, src, from_layout, to_layout } => IRInstr::Transform {
+            dst: sv(dst),
+            src: sv(src),
+            from_layout: from_layout.clone(),
+            to_layout: to_layout.clone(),
+        },
     }
 }
 

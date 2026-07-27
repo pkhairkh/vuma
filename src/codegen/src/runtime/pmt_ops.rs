@@ -1,6 +1,22 @@
 //! pmt_ops.rs — Rust-side reference implementations of the 8 PMT/arena
 //! externs that VUMA's codegen emits with layout-mangled names.
 //!
+//! # DEPRECATED (FFI Wave 1 task C)
+//!
+//! As of FFI Wave 1 task C (No-FFI closure), `src/pipeline.rs` no longer
+//! emits `__vuma_state_*` / `__vuma_arena_*` extern calls — PMT/arena ops
+//! are now inlined as first-class IR instructions via
+//! `ScgStatement::PmtOp(PmtOpStmt)` and lowered to `IRInstr::Alloc` /
+//! `IRInstr::Load` / `IRInstr::Store` / `IRInstr::Transform` /
+//! `IRInstr::Free`. The 8 functions in this module are kept as
+//! reference implementations of the runtime semantics (used by the
+//! `__oob_trap` mechanism and as documentation of the original
+//! stop-the-bleeding behavior from FFI-0-A), but they are no longer
+//! invoked by the codegen pipeline.
+//!
+//! The `__oob_trap` function (used by the codegen `Transform` lowering
+//! for runtime size-mismatch traps) is NOT deprecated.
+//!
 //! VUMA's pipeline (src/pipeline.rs) lowers StateInit / StateRead /
 //! StateWrite / StateTransform / ArenaNew / ArenaAlloc / ArenaGrow /
 //! ArenaFree nodes to `Call` nodes whose `func` field is one of:
@@ -171,6 +187,7 @@ fn lookup_meta(base: *const u8) -> ArenaMeta {
 /// frame and be caught by `#[should_panic]`. Production callers (C ABI)
 /// observe identical behavior — `__oob_trap` exits the process rather
 /// than unwinding in `cfg(not(test))` builds.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_state_init(capacity: u64) -> *mut u8 {
     // Pre-check the layout so we can return null on invalid capacity
     // (e.g. capacity=0 or near usize::MAX). On alloc failure (OOM),
@@ -209,6 +226,7 @@ pub unsafe extern "C-unwind" fn vuma_state_init(capacity: u64) -> *mut u8 {
 /// the arena's data region.
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_state_read(state: *const u8, offset: u64, size: u64) -> u64 {
     if state.is_null() {
         __oob_trap();
@@ -233,6 +251,7 @@ pub unsafe extern "C-unwind" fn vuma_state_read(state: *const u8, offset: u64, s
 /// the arena's data region.
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_state_write(state: *mut u8, offset: u64, size: u64, val: u64) {
     if state.is_null() {
         __oob_trap();
@@ -258,6 +277,7 @@ pub unsafe extern "C-unwind" fn vuma_state_write(state: *mut u8, offset: u64, si
 /// it, but it does return it).
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_state_transform(
     state: *mut u8,
     from_size: u64,
@@ -276,7 +296,9 @@ pub unsafe extern "C-unwind" fn vuma_state_transform(
 /// See [`vuma_state_init`].
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_arena_new(capacity: u64) -> *mut u8 {
+    #![allow(deprecated)]
     vuma_state_init(capacity)
 }
 
@@ -298,6 +320,7 @@ pub unsafe extern "C-unwind" fn vuma_arena_new(capacity: u64) -> *mut u8 {
 /// [`vuma_state_init`].
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_arena_alloc(arena: *mut u8, size: u64, align: u64) -> *mut u8 {
     if arena.is_null() {
         __oob_trap();
@@ -358,6 +381,7 @@ pub unsafe extern "C-unwind" fn vuma_arena_alloc(arena: *mut u8, size: u64, alig
 /// function does NOT do — see the caveat above).
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_arena_grow(arena: *mut u8, new_capacity: u64) -> *mut u8 {
     if arena.is_null() {
         __oob_trap();
@@ -400,6 +424,7 @@ pub unsafe extern "C-unwind" fn vuma_arena_grow(arena: *mut u8, new_capacity: u6
 /// already been freed. Use-after-free is undefined behavior.
 ///
 /// ABI note: `extern "C-unwind"` — see [`vuma_state_init`] for rationale.
+#[deprecated(note = "PMT/arena ops are now inlined as IR instructions (see FFI-1-C); kept as reference for the runtime semantics only. Will be removed in a future wave.")]
 pub unsafe extern "C-unwind" fn vuma_arena_free(arena: *mut u8) {
     if arena.is_null() {
         return;
