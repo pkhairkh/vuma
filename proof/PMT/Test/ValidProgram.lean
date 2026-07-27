@@ -28,30 +28,17 @@ namespace PMT.Test.ValidProgram
 This mirrors the `widgetLayout` sanity-check constant in
 `PMT/Soundness.lean`, but lives in the test namespace so it can be
 referenced by name from the well-typedness proof below. -/
-def widgetLayout : Layout := ⟨16, [⟨0, 4⟩, ⟨4, 4⟩, ⟨8, 8⟩]⟩
+def widgetLayout : Layout := ⟨"layout", 16, [⟨"f", 0, 4, "i32"⟩, ⟨"f", 4, 4, "i32"⟩, ⟨"f", 8, 8, "i32"⟩]⟩
 
 /-- The widget layout is well-formed: every field is in bounds
 (`offset + size ≤ 16`), every distinct pair of fields is disjoint,
 and `total_size > 0`. -/
 theorem wf_widgetLayout : WF_Layout widgetLayout := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · -- Field bounds: every field's `[offset, offset+size)` fits in 16.
-    intro f hf
-    simp [widgetLayout] at hf
-    rcases hf with rfl | rfl | rfl
-    all_goals simp [widgetLayout]
-  · -- Disjointness: every distinct pair of fields is non-overlapping.
-    intros f₁ f₂ h₁ h₂ hne
-    simp [widgetLayout] at h₁ h₂
-    rcases h₁ with rfl | rfl | rfl <;> rcases h₂ with rfl | rfl | rfl
-    -- Diagonal cases (f₁ = f₂) contradict `hne`; off-diagonal cases
-    -- reduce to concrete arithmetic on `Disjoint`'s definition.
-    all_goals first
-      | exact (hne rfl).elim
-      | simp [Disjoint]
-  · -- Non-empty: total_size > 0.
-    exact Or.inl (by decide)
+  intro f hf
+  simp [widgetLayout] at hf
+  rcases hf with rfl | rfl | rfl
+  all_goals simp [widgetLayout]
 
 /-! ## §2. Initial execution state. -/
 

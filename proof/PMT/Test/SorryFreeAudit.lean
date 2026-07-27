@@ -113,7 +113,7 @@ reduction is definitional: every guard in `step` (`live` check,
 capacity check) reduces via `DecidableEq Liveness`, `DecidableEq
 String`, and decidable `Nat` arithmetic, so `rfl` closes the goal. -/
 
-example : exec [⟨"a", "b", ⟨16, []⟩, .transform⟩, ⟨"b", "c", ⟨16, []⟩, .transform⟩]
+example : exec [⟨"a", "b", ⟨"layout", 16, []⟩, .transform⟩, ⟨"b", "c", ⟨"layout", 16, []⟩, .transform⟩]
   { arena := ⟨0, 1024, 0⟩, live := fun _ => Liveness.live } = Result.ok 32 := by
   rfl
 

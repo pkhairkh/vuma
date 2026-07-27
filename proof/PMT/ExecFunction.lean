@@ -34,13 +34,13 @@ The flattening is structural:
     of the 10 (their effects are either pure SIMD computation, out-of-band
     IVE capability effects, opaque proof verification, or out-of-scope
     syscalls — none of which interact with PMT's arena state). The 10th,
-    `call_indirect`, flattens to `args.map (fun v => ⟨v, v, ⟨1, []⟩,
+    `call_indirect`, flattens to `args.map (fun v => ⟨v, v, ⟨"step", 1, []⟩,
     .transform⟩)` — exactly mirroring `.call` (placeholder self-loop
     steps per argument vreg). The 9 `[]`-flattening variants contribute
     no `Step`s to `IRFunction.flat_steps` and therefore do not perturb
     the name-uniqueness conjuncts of `WellTyped`; the `call_indirect`
     variant contributes one placeholder `Step` per argument vreg
-    (carrying the `⟨1, []⟩` layout, well-formed by `WF_Layout_empty`),
+    (carrying the `⟨"step", 1, []⟩` layout, well-formed by `WF_Layout_empty`),
     and its name-uniqueness obligation is discharged by the existing
     `IRFunction.in_vars_unique` / `out_vars_unique` conjuncts in
     `IRFunction.well_typed`, exactly as for `.call`. The
@@ -106,20 +106,20 @@ theorem PmtInstr.to_steps_alloc (out : String) (layout : Layout) :
 /-- §1.3: `load` flattens to a singleton list with the placeholder layout. -/
 theorem PmtInstr.to_steps_load (in_var out : String) (offset : Nat) (ty : IRType) :
     PmtInstr.to_steps (.load in_var out offset ty)
-      = [⟨in_var, out, ⟨1, []⟩, .transform⟩] := by
+      = [⟨in_var, out, ⟨"step", 1, []⟩, .transform⟩] := by
   rfl
 
 /-- §1.4: `store` flattens to a singleton list with the placeholder layout. -/
 theorem PmtInstr.to_steps_store (in_var : String) (val : IRValue) (offset : Nat)
     (ty : IRType) :
     PmtInstr.to_steps (.store in_var val offset ty)
-      = [⟨in_var, in_var, ⟨1, []⟩, .transform⟩] := by
+      = [⟨in_var, in_var, ⟨"step", 1, []⟩, .transform⟩] := by
   rfl
 
 /-- §1.5: `free` flattens to a singleton list with the placeholder layout. -/
 theorem PmtInstr.to_steps_free (in_var : String) :
     PmtInstr.to_steps (.free in_var)
-      = [⟨in_var, in_var, ⟨1, []⟩, .transform⟩] := by
+      = [⟨in_var, in_var, ⟨"step", 1, []⟩, .transform⟩] := by
   rfl
 
 /-- §1.6a: `transform_layouts` (the SOLE Transform variant after PMT-FAITH-5-A)
@@ -297,7 +297,7 @@ Each of the 10 channel/special `PmtInstr` variants flattens as follows:
 are either pure SIMD computation, out-of-band IVE capability effects,
 opaque proof verification, or out-of-scope syscalls, none of which
 interact with PMT's arena state. The 10th, `call_indirect`, flattens to
-`args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)` — exactly mirroring
+`args.map (fun v => ⟨v, v, ⟨"step", 1, []⟩, .transform⟩)` — exactly mirroring
 `.call` (placeholder self-loop steps per argument vreg).
 
 The 10 lemmas below are each provable by `rfl` (the `PmtInstr.to_steps`
@@ -467,7 +467,7 @@ This is the per-instruction preservation lemma used to lift
 case-splits on the instruction constructor; the `alloc`/`transform`
 cases inherit `WF_Layout` directly from the per-instruction
 `well_typed` hypothesis, and the `load`/`store`/`free`/`call` cases
-use the placeholder layout `⟨1, []⟩ = emptyLayout`, whose
+use the placeholder layout `⟨"step", 1, []⟩ = emptyLayout`, whose
 well-formedness is `WF_Layout_empty` (`PMT.Basic`). -/
 theorem PmtInstr.to_steps_preserves_WF_Layout
     (i : PmtInstr) (env : String → Layout)
@@ -583,8 +583,8 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
   --    effects, opaque proof verification, or out-of-scope syscalls —
   --    none of which interact with PMT's arena state.
   --  * `call_indirect` mirrors `.call`: `to_steps` produces
-  --    `args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)`, each element
-  --    of which carries the well-formed placeholder layout `⟨1, []⟩`
+  --    `args.map (fun v => ⟨v, v, ⟨"step", 1, []⟩, .transform⟩)`, each element
+  --    of which carries the well-formed placeholder layout `⟨"step", 1, []⟩`
   --    (by `WF_Layout_empty`).
   | vector_op op lanes elem_size dst lhs rhs =>
     rw [PmtInstr.to_steps_vector_op] at hs
@@ -868,7 +868,7 @@ The full preservation theorem — "if `p.well_typed env` then
 `(p.to_program)` is `WellTyped`" — requires aligning the `Layout`
 assigned by `env` with the `Layout` embedded in each `PmtInstr` (e.g.
 `alloc out layout` uses `layout`, but `load`/`store`/`free` use a
-placeholder `⟨1, []⟩`). A future refinement will refine `to_steps` to consult `env`
+placeholder `⟨"step", 1, []⟩`). A future refinement will refine `to_steps` to consult `env`
 for the load/store/free layouts, at which point the full lemma below
 will be provable.
 
@@ -909,8 +909,8 @@ stated in `to_program_preserves_well_typed_full` below.
 from `IRBlock.well_typed` → `IRFunction.well_typed` →
 `IRProgram.well_typed`. The `alloc` and `transform` cases inherit
 `WF_Layout` directly (their `layout` field is the source). The
-`load`/`store`/`free`/`call` cases use placeholder layouts `⟨1, []⟩`
-that require either (a) showing `WF_Layout ⟨1, []⟩` directly (which
+`load`/`store`/`free`/`call` cases use placeholder layouts `⟨"step", 1, []⟩`
+that require either (a) showing `WF_Layout ⟨"step", 1, []⟩` directly (which
 holds — see `PMT.Basic.WF_Layout_empty` and the `0 < total_size ∨
 fields = []` disjunct), or (b) refining `to_steps` to consult `env`
 (planned). The lift through `IRBlock.to_steps` (`flatMap`) and

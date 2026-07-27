@@ -68,8 +68,9 @@ theorem wf_layout_implies_field_bounds
     (hwf : WF_Layout l)
     (hmem : f ∈ l.fields) :
     FieldBounds l f := by
-  -- `WF_Layout`'s first conjunct: ∀ f ∈ fields, f.offset + f.size ≤ total_size.
-  exact hwf.1 f hmem
+  -- PMT-FAITH-6-C: WF_Layout is now a single conjunct (per-field bounds).
+  -- The disjointness/size>0 conjuncts were moved to separate predicates.
+  exact hwf f hmem
 
 /-! ## §4. Linearity Invariant — State Consumption as Resource Transfer -/
 

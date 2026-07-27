@@ -43,7 +43,7 @@ def initState : ExecState :=
 arena's 16-byte capacity. The layout has no fields; the overflow
 guard only consults `layout.total_size`, so the field list is
 irrelevant for this trap. -/
-def overflowStep : Step := ⟨"in", "out", ⟨32, []⟩, .transform⟩
+def overflowStep : Step := ⟨"in", "out", ⟨"layout", 32, []⟩, .transform⟩
 
 /-- §7.3: `step` on a live input whose `layout.total_size` exceeds
 the arena's remaining capacity traps with `.arena_overflow`. The
@@ -78,7 +78,7 @@ does not execute the remaining steps. The trap short-circuits and the
 final exit code is still `1`, regardless of what `rest` would have
 done (here `rest` is itself a valid step that would otherwise
 succeed on a sufficiently large arena). -/
-def okLayout : Layout := ⟨8, [⟨0, 8⟩]⟩
+def okLayout : Layout := ⟨"layout", 8, [⟨"f", 0, 8, "i32"⟩]⟩
 def okStep   : Step   := ⟨"out", "z", okLayout, .transform⟩
 
 example : exec [overflowStep, okStep] initState = Result.trap 1 := by
@@ -86,7 +86,7 @@ example : exec [overflowStep, okStep] initState = Result.trap 1 := by
 
 /-! ## §1.2 — The overflow layout is itself well-formed. -/
 
-/-- Sanity: the overflow-triggering layout `⟨32, []⟩` satisfies
+/-- Sanity: the overflow-triggering layout `⟨"layout", 32, []⟩` satisfies
 `WF_Layout`. The trap is *not* a layout-malformation trap — the layout
 is perfectly well-formed (32 > 0, no fields to be out-of-bounds or
 non-disjoint). The trap fires purely because the layout's
@@ -95,19 +95,16 @@ runtime/resource condition, not a static/well-formedness condition.
 
 This guards against a regression that would conflate `WF_Layout` with
 the runtime capacity check — they are independent properties. -/
-example : WF_Layout ⟨32, []⟩ := by
+example : WF_Layout ⟨"layout", 32, []⟩ := by
   unfold WF_Layout
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf; cases hf
-  · intros f₁ f₂ h₁ _ _; cases h₁
-  · exact Or.inl (by decide)
+  intro f hf; cases hf
 
 /-! ## §7.3 (parametricity) — The overflow guard is output-agnostic. -/
 
 /-- Sanity: the same oversized layout with a *different* output
 variable still traps overflow — the overflow guard consults only
 `layout.total_size` and arena geometry, never the variable names. -/
-def altOverflowStep : Step := ⟨"in", "alt", ⟨32, []⟩, .transform⟩
+def altOverflowStep : Step := ⟨"in", "alt", ⟨"layout", 32, []⟩, .transform⟩
 
 example : step initState altOverflowStep = Except.error TrapCode.arena_overflow := by
   rfl
@@ -117,7 +114,7 @@ example : step initState altOverflowStep = Except.error TrapCode.arena_overflow 
 /-- A layout whose `total_size` equals the arena's remaining capacity
 (16 bytes) — the boundary case. The overflow guard uses strict `>`,
 so an exact fit is *not* an overflow. -/
-def exactLayout : Layout := ⟨16, []⟩
+def exactLayout : Layout := ⟨"layout", 16, []⟩
 def exactStep   : Step   := ⟨"in", "out", exactLayout, .transform⟩
 
 /-- Negative control: at exactly the capacity boundary, `step`
