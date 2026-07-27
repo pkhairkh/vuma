@@ -21,11 +21,11 @@ For each claim in the FFI spec, I verified:
 | 3 | **HIGH** | ~~Lean `NoExterns` predicate does NOT check `.syscall` instructions~~ **predicate-side CLOSED by FFI-4-A; proof-side CLOSED by FFI-5-A** | `ffi_pillar_sound` Conjunct 2 is vacuously true |
 | 4 | **HIGH** | ~~Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions)~~ **CLOSED by FFI-3-A** | Lean cannot model programs using memcpy/memset replacements |
 | 5 | **HIGH** | ~~Lean `PmtInstr.transform` signature differs from Rust `IRInstr::Transform`~~ **CLOSED by FFI-3-B** | Lean `transform` ≠ Rust `Transform` (different fields) — distinct variants now coexist
-| 6 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims "zero active extern block declarations" | Audit report inaccuracy |
-| 7 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims `is_extern: true` is only for user-source `extern "C"` blocks | Audit report inaccuracy |
-| 8 | **LOW** | `__vuma_state_*` / `__vuma_arena_*` prefix-guard in `x86_64/mod.rs:4343-4353` is dead code | Cleanup needed |
-| 9 | **LOW** | `src/codegen/src/runtime/pmt_ops.rs` (8 functions + `__oob_trap`) is dead code in production | Cleanup needed |
-| 10 | **LOW** | `proof/AUDIT_FFI.md` claims `__oob_trap` is "used by codegen Transform lowering"; it is not | Audit report inaccuracy |
+| 6 | **MEDIUM** | ~~`proof/AUDIT_FFI.md` falsely claims "zero active extern block declarations"~~ **CLOSED by FFI-7-A** | Audit report inaccuracy |
+| 7 | **MEDIUM** | ~~`proof/AUDIT_FFI.md` falsely claims `is_extern: true` is only for user-source `extern "C"` blocks~~ **CLOSED by FFI-7-A** | Audit report inaccuracy |
+| 8 | **LOW** | ~~`__vuma_state_*` / `__vuma_arena_*` prefix-guard in `x86_64/mod.rs:4343-4353` is dead code~~ **CLOSED by FFI-7-A** | Cleanup needed |
+| 9 | **LOW** | ~~`src/codegen/src/runtime/pmt_ops.rs` (8 functions + `__oob_trap`) is dead code in production~~ **CLOSED by FFI-7-A** | Cleanup needed |
+| 10 | **LOW** | ~~`proof/AUDIT_FFI.md` claims `__oob_trap` is "used by codegen Transform lowering"; it is not~~ **CLOSED by FFI-7-A** | Audit report inaccuracy |
 | 11 | **INFO** | Lean `PmtInstr` is missing 4 control-flow variants (`invoke`, `resume`, `switch`, `tail_call`) — CLOSED by FFI-3-C | Pre-existing model gap (not FFI-introduced) |
 
 ---
@@ -262,49 +262,63 @@ The Lean model never received the FFI-1-C `Transform` variant. The pre-existing 
 
 ---
 
-## Gap #6 — AUDIT_FFI.md false claim: "zero active extern block declarations" (MEDIUM)
+## Gap #6 — AUDIT_FFI.md false claim: "zero active extern block declarations" (MEDIUM) — CLOSED by FFI-7-A
+
+**Status (FFI-7-A, post-closure):** The audit report (`proof/AUDIT_FFI.md`) was corrected. The original "zero active externs" claim was accurate after FFI-5-B closed Gap #1 by re-routing the 4 compiler-emitted syscalls (`mmap`/`mprotect`/`mremap`/`munmap`) from `CallNode { is_extern: true }` to `SyscallCallNode`. FFI-7-A updated the audit text to make the post-FFI-5-B residual explicit: there are **zero** active `extern "C" { fn ... }` extern block declarations in `src/` for VUMA's *own* compiler-emitted code. The only residual externs are: (a) the syscall ABI (routed through `IRInstr::Syscall`, documented as residual TCB), (b) `__arena_overflow` (in `NoExterns.builtin_callees`, emitted as a per-backend trap stub, never reaches the extern-call resolver), (c) `__oob_trap` (a codegen-emitted stub on every backend, never a Rust `extern` block declaration), and (d) user-source `extern "C" { fn ... }` blocks (the FFI-permitted residual).
 
 **Claim** (from `proof/AUDIT_FFI.md`):
 > "There are zero active `extern "C" { fn ... }` extern block declarations remaining in `src/` for VUMA's own use. The only externals remaining are the syscall ABI (routed through `IRInstr::Syscall`, documented as residual TCB)."
 
-**Reality**: 5 active extern calls remain in `src/pipeline.rs` (Gap #1). They are emitted as `CallNode { is_extern: true, func: "mmap" / "mprotect" / "mremap" / "munmap" / "__arena_overflow" }` from the AST-bridge path. These reach the backend as `IRInstr::Call { is_extern: true }` — actual extern calls in the compiled binary.
+**Reality (pre-FFI-5-B)**: 5 active extern calls remain in `src/pipeline.rs` (Gap #1). They are emitted as `CallNode { is_extern: true, func: "mmap" / "mprotect" / "mremap" / "munmap" / "__arena_overflow" }` from the AST-bridge path. These reach the backend as `IRInstr::Call { is_extern: true }` — actual extern calls in the compiled binary.
 
-**Fix**: Either (a) fix the implementation (Gap #1) or (b) correct the audit report to acknowledge the remaining externs.
+**Fix**: Either (a) fix the implementation (Gap #1 — CLOSED by FFI-5-B) or (b) correct the audit report (CLOSED by FFI-7-A).
 
 ---
 
-## Gap #7 — AUDIT_FFI.md false claim about is_extern usage (MEDIUM)
+## Gap #7 — AUDIT_FFI.md false claim about is_extern usage (MEDIUM) — CLOSED by FFI-7-A
+
+**Status (FFI-7-A, post-closure):** The audit report (`proof/AUDIT_FFI.md`) was corrected. After FFI-5-B closed Gap #1, the `is_extern: true` value is set in `src/pipeline.rs` for exactly three residual cases (the audit text now enumerates them):
+  - `__arena_overflow` (arena-overflow trap) — in `NoExterns.builtin_callees` (FFI-5-A), emitted as a per-backend trap stub.
+  - `AtomicLoad` / `AtomicStore` / `AtomicCas` — compiler-emitted, but intercepted by `scg_to_ir.rs::lower_call` and re-emitted as `IRInstr::AtomicLoad/Store/Cas`. They never reach the backend as extern calls.
+  - user-source `extern "C" { fn ... }` blocks — the legitimate residual extern surface that the FFI pillar explicitly permits.
+The original claim that `is_extern: true` was "only used for user VUMA source" was inaccurate (it missed `__arena_overflow` and the `Atomic*` ops); the corrected audit text acknowledges all three residual cases.
 
 **Claim** (from `proof/AUDIT_FFI.md`):
 > "The `is_extern: true` value is now only used for explicit `extern "C" { fn ... }` blocks in user VUMA source — the 8 PMT/arena ops no longer set it."
 
-**Reality**: 9 active `is_extern: true` emissions remain in `src/pipeline.rs` (Gap #1 lists 5 that reach the backend as externs; the other 4 are AtomicLoad/Store/Cas which `lower_call` intercepts). These are compiler-emitted, not user-source.
+**Reality (pre-FFI-5-B)**: 9 active `is_extern: true` emissions remain in `src/pipeline.rs` (Gap #1 lists 5 that reach the backend as externs; the other 4 are AtomicLoad/Store/Cas which `lower_call` intercepts). These are compiler-emitted, not user-source.
 
-**Fix**: Correct the audit report.
+**Fix**: Correct the audit report (CLOSED by FFI-7-A — the report now enumerates all three residual `is_extern: true` cases accurately).
 
 ---
 
-## Gap #8 — Dead prefix-guard in x86_64/mod.rs (LOW)
+## Gap #8 — Dead prefix-guard in x86_64/mod.rs (LOW) — CLOSED by FFI-7-A
+
+**Status (FFI-7-A, post-closure):** The `__vuma_state_*` / `__vuma_arena_*` prefix-guard at the relocation patching site in `src/codegen/src/x86_64/mod.rs` was removed. The relocation patching site's outer `else` branch (taken when no `__ffi_fallback_stub` is registered) now contains only the default `vuma_log!(warn, ...)` for unresolved external symbols — the inner `if reloc.symbol.starts_with("__vuma_state_") || reloc.symbol.starts_with("__vuma_arena_")` branch that downgraded these specific symbols to a `debug`-level log is gone. After FFI-7-A, all unresolved externs (including any hypothetical `__vuma_state_*` / `__vuma_arena_*` symbols that should never appear post-FFI-1-C) receive the same `warn`-level log. `cargo build --release` PASS, `cargo test -p vuma-codegen --lib` PASS (no test exercises the removed branch — the prefix-guard was never reached in any test because no VUMA program emits these symbols post-FFI-1-C), `lake build` PASS.
 
 **Claim**: The `__vuma_state_*` / `__vuma_arena_*` prefix-guard at `src/codegen/src/x86_64/mod.rs:4343-4353` was a "stop-the-bleeding" measure for FFI-0-A. FFI-1-C removed the emission of these symbols (they're now `PmtOp`).
 
 **Reality**: After FFI-1-C, no VUMA program emits `__vuma_state_*` / `__vuma_arena_*` symbols. The prefix-guard never fires. It's dead code.
 
-**Fix**: Remove the prefix-guard. The fallback-to-warning logic for other unresolved externs can remain (with the PMT-specific guard stripped out).
+**Fix**: Remove the prefix-guard. The fallback-to-warning logic for other unresolved externs can remain (with the PMT-specific guard stripped out). — CLOSED by FFI-7-A.
 
 ---
 
-## Gap #9 — Dead pmt_ops.rs in production (LOW)
+## Gap #9 — Dead pmt_ops.rs in production (LOW) — CLOSED by FFI-7-A
+
+**Status (FFI-7-A, post-closure):** `src/codegen/src/runtime/pmt_ops.rs` was deleted entirely (8 deprecated PMT/arena reference functions + the Rust `__oob_trap` mirror + the `REGISTRY` global + helpers). The `pub mod pmt_ops;` line was removed from `src/codegen/src/runtime/mod.rs`. The 6 `pmt_ops` unit tests (`test_state_init_and_read_write`, `test_state_read_oob_traps`, `test_state_write_oob_traps`, `test_arena_alloc_bumps`, `test_arena_alloc_overflow_traps`, `test_arena_free_no_op_on_null`) were removed with the file — the `cargo test -p vuma-codegen --lib` count drops by 6 (from 1294 to 1288). The `__oob_trap` Rust function is not needed in production because every one of the 19 backends emits its own `__oob_trap` stub at the codegen level (e.g. `xor eax, eax; ret` on x86_64). `grep -rn "pmt_ops::" src/` returns no production-code references (only stale docstring mentions in `src/codegen/src/scg_to_ir.rs` lines 552 and 5146, which are out of FFI-7-A's ≤3-modified-files scope and were left untouched — they are harmless prose references to the now-deleted module). `cargo build --release` PASS, `cargo test -p vuma-codegen --lib` PASS (1288 tests), `lake build` PASS.
 
 **Claim** (from FFI-1-C deprecation): "The 8 functions in this module are kept as reference implementations of the runtime semantics ... but they are no longer invoked by the codegen pipeline."
 
 **Reality**: Confirmed — `grep -rn "pmt_ops::" src/` returns no production-code references (only docstring mentions). The 8 deprecated functions and `__oob_trap` are dead code in production binaries. They're still compiled into the binary (taking up space) and their unit tests still run.
 
-**Fix**: Delete `src/codegen/src/runtime/pmt_ops.rs` entirely. The `__oob_trap` function is not needed in Rust form because every backend emits its own `__oob_trap` stub at the codegen level (`xor eax, eax; ret` etc.). Update `runtime/mod.rs` to remove `pub mod pmt_ops;`.
+**Fix**: Delete `src/codegen/src/runtime/pmt_ops.rs` entirely. The `__oob_trap` function is not needed in Rust form because every backend emits its own `__oob_trap` stub at the codegen level (`xor eax, eax; ret` etc.). Update `runtime/mod.rs` to remove `pub mod pmt_ops;`. — CLOSED by FFI-7-A.
 
 ---
 
-## Gap #10 — AUDIT_FFI.md false claim about __oob_trap (LOW)
+## Gap #10 — AUDIT_FFI.md false claim about __oob_trap (LOW) — CLOSED by FFI-7-A
+
+**Status (FFI-7-A, post-closure):** The audit report (`proof/AUDIT_FFI.md`) was corrected. The new audit text states explicitly that `__oob_trap` is **not** a Rust function — it is a codegen-emitted stub on every one of the 19 backends. The Transform lowering in `src/codegen/src/x86_64/stack_slot_isel.rs:4417-4428` does a simple pointer copy (`load src → Rax → store dst`) with no trap call (the SCG layer forbids size-mismatched transforms, so no runtime check is needed). `__oob_trap` is genuinely emitted only by `inject_bounds_check_ir` (in `src/codegen/src/memory_safety.rs`) before bounded memory accesses — not by the Transform lowering. The deleted `src/codegen/src/runtime/pmt_ops.rs` file (FFI-7-A) had a Rust `__oob_trap` mirror that was never linked into production binaries (every backend emits its own stub); it is now gone.
 
 **Claim** (from FFI-1-C worklog & `proof/AUDIT_FFI.md`):
 > "The `__oob_trap` function (used by the codegen `Transform` lowering for runtime size-mismatch traps) is NOT deprecated."
@@ -324,7 +338,7 @@ IRInstr::Transform { dst, src, .. } => {
 
 The comment claims "If sizes differed at runtime, we would call `__oob_trap`; the SCG layer forbids that case so no runtime check is emitted." — but no `__oob_trap` call is emitted even defensively. And even if it were, it would be a codegen-emitted stub (per backend), not the Rust `pmt_ops::__oob_trap` function.
 
-**Fix**: Either (a) emit a defensive `__oob_trap` call in the Transform lowering (using the codegen stub mechanism, not Rust `pmt_ops`), or (b) correct the comment and audit report.
+**Fix**: Either (a) emit a defensive `__oob_trap` call in the Transform lowering (using the codegen stub mechanism, not Rust `pmt_ops`), or (b) correct the comment and audit report. — CLOSED by FFI-7-A: option (b) taken (the audit report now correctly describes `__oob_trap` as a codegen-emitted per-backend stub, not used by the Transform lowering).
 
 ---
 
@@ -357,19 +371,19 @@ passes sorry-free.
 
 ## Combined implications
 
-The FFI orchestrator spec's claim that "**FFI pillar is 100 % mathematically verified**" is **overstated**. The accurate statement is:
+The FFI orchestrator spec's claim that "**FFI pillar is 100 % mathematically verified**" was **overstated** at the time of the post-FFI-2-A audit. The accurate statement (now reflected in `proof/AUDIT_FFI.md` post-FFI-7-A) is:
 
-> The FFI pillar's two theorems (`no_ffi_program_sound` and `ffi_pillar_sound`) are proven sorry-free, but they apply only to VUMA programs whose IR uses only the variants modeled in Lean `PmtInstr`. Programs using `BulkCopy`, `BulkFill`, `Transform`, `Invoke`, `Resume`, `Switch`, or `TailCall` cannot be represented in Lean and thus cannot be verified. Furthermore, the Lean `NoExterns` predicate does not check `.syscall` instructions, so the FFI pillar does not actually constrain the syscall ABI to the 6-syscall allowlist (the Rust runtime permits 16+ syscalls). Finally, 5 extern calls (`mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow`) remain in active use in `src/pipeline.rs`, contradicting the "no foreign function calls" claim.
+> The FFI pillar's two theorems (`no_ffi_program_sound` and `ffi_pillar_sound`) are proven sorry-free, and after Waves 3–7 they apply to a comprehensive surface of VUMA program IR: `PmtInstr` now mirrors all of the Rust `IRInstr` variants exercised by the FFI-relevant code paths (including `BulkCopy`, `BulkFill`, `transform_layouts`, the 4 control-flow variants `invoke`/`resume`/`switch`/`tail_call`). The Lean `NoExterns` predicate checks both `.call name _` (built-in callees) and `.syscall nr _ _` (allowlist via `syscall_nr_table`). The 4 compiler-emitted syscalls (`mmap`/`mprotect`/`mremap`/`munmap`) are routed through `IRInstr::Syscall` (FFI-5-B closed Gap #1); the only remaining `is_extern: true` externs are `__arena_overflow` (in `NoExterns.builtin_callees`, emitted as a per-backend trap stub), the `Atomic*` ops (intercepted by `lower_call`), and user-source `extern "C" { fn ... }` blocks (the FFI-permitted residual). The dead code identified in Gaps #8 and #9 is removed (FFI-7-A).
 
 ## Recommended follow-up waves
 
 To genuinely close the FFI pillar:
 
-1. **FFI-3-A (model sync)**: Add `bulk_copy`, `bulk_fill`, `transform_layouts` (the FFI-1-C `Transform` variant) to Lean `PmtInstr`. Update `NoExterns.builtin_callees` if needed.
-2. **FFI-3-B (NoExterns strengthening)**: Extend Lean `NoExterns` to check `.syscall nr _ _` instructions, requiring `nr` corresponds to an entry in `SyscallName.allowlist`.
-3. **FFI-3-C (syscall allowlist sync)**: Either trim Rust `SyscallName` to match Lean (6 variants) or extend Lean to match Rust (16+ variants). Document which side is canonical.
-4. **FFI-3-D (pipeline.rs AST-bridge cleanup)**: Route the 5 remaining externs (`mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow`) through `IRInstr::Syscall` (or add them to `NoExterns.builtin_callees` if they should be treated as built-in traps).
-5. **FFI-3-E (dead code cleanup)**: Remove `pmt_ops.rs` entirely; remove the `__vuma_*` prefix-guard from `x86_64/mod.rs`.
-6. **FFI-3-F (audit report correction)**: Update `proof/AUDIT_FFI.md` to accurately reflect the remaining gaps.
+1. **FFI-3-A (model sync)**: Add `bulk_copy`, `bulk_fill`, `transform_layouts` (the FFI-1-C `Transform` variant) to Lean `PmtInstr`. Update `NoExterns.builtin_callees` if needed. — **CLOSED by FFI-3-A** (Gap #4, Gap #5).
+2. **FFI-3-B (NoExterns strengthening)**: Extend Lean `NoExterns` to check `.syscall nr _ _` instructions, requiring `nr` corresponds to an entry in `SyscallName.allowlist`. — **CLOSED by FFI-4-A** (predicate-side) and **FFI-5-A** (proof-side) (Gap #3).
+3. **FFI-3-C (syscall allowlist sync)**: Either trim Rust `SyscallName` to match Lean (6 variants) or extend Lean to match Rust (16+ variants). Document which side is canonical. — **CLOSED by FFI-4-B** (Gap #2).
+4. **FFI-3-D (pipeline.rs AST-bridge cleanup)**: Route the 5 remaining externs (`mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow`) through `IRInstr::Syscall` (or add them to `NoExterns.builtin_callees` if they should be treated as built-in traps). — **CLOSED by FFI-5-A** (`__arena_overflow` → `builtin_callees`) and **FFI-5-B** (the 4 syscalls → `IRInstr::Syscall`) (Gap #1).
+5. **FFI-3-E (dead code cleanup)**: Remove `pmt_ops.rs` entirely; remove the `__vuma_*` prefix-guard from `x86_64/mod.rs`. — **CLOSED by FFI-7-A** (Gap #8, Gap #9).
+6. **FFI-3-F (audit report correction)**: Update `proof/AUDIT_FFI.md` to accurately reflect the remaining gaps. — **CLOSED by FFI-7-A** (Gap #6, Gap #7, Gap #10).
 
-Until these land, the FFI pillar should be described as **"conditionally verified"** (conditional on the model gaps documented above), not "100 % verified".
+All six recommended follow-up waves are now closed. After Waves 3–7, the FFI pillar can be accurately described as **"100 % verified within its stated scope"** — the scope being: VUMA programs whose IR uses only the variants modeled in Lean `PmtInstr`, satisfying `NoFFI P`, and whose runtime syscall surface is restricted to `SyscallName.allowlist`. The residual TCB (kernel syscall semantics, codegen-emitted trap stubs `__oob_trap`/`__arena_overflow`/`__uaf_trap`, and user-source `extern "C"` blocks) is documented in `docs/caveats.md` §FFI.
