@@ -81,7 +81,7 @@ fn build_sha256d_like_scg() -> Scg {
         var_types: std::collections::HashMap::new(),
     }));
 
-    Scg { nodes }
+    Scg::new(nodes)
 }
 
 /// Run the SHA256d benchmark across all backends.

@@ -224,6 +224,51 @@ type PhiInfo = (usize, IRValue, Vec<(IRValue, String)>);
 pub struct Scg {
     /// Top-level nodes in the SCG.
     pub nodes: Vec<ScgNode>,
+    /// Typed-state METADATA recovered alongside the codegen SCG (Task 3-A).
+    ///
+    /// First-class metadata mirroring the `Vec<TypedStateMeta>` previously
+    /// returned as the second element of
+    /// [`vuma::pipeline::bridge_ast_to_codegen_scg_with_meta`]'s tuple. The
+    /// codegen SCG lowers typed-state ops to UNTYPED nodes, losing the
+    /// `layout_name` + typed-state kind; this field preserves that info so
+    /// the codegen SCG can be cross-checked against the semantic SCG without
+    /// changing the emitted binary.
+    ///
+    /// Populated by [`Scg::new_with_meta`]; left empty by [`Scg::new`] (which
+    /// tests / synthetic builders that don't care about typed-state metadata
+    /// still use).
+    pub typed_state_meta: Vec<TypedStateMeta>,
+}
+
+impl Scg {
+    /// Construct a new SCG from its top-level nodes with EMPTY typed-state
+    /// metadata.
+    ///
+    /// This is the canonical entry point for test/synthetic builders that
+    /// don't care about typed-state metadata. Production code that bridges
+    /// from the AST should use [`Scg::new_with_meta`] so the
+    /// `typed_state_meta` field is populated alongside the nodes.
+    pub fn new(nodes: Vec<ScgNode>) -> Self {
+        Self {
+            nodes,
+            typed_state_meta: Vec::new(),
+        }
+    }
+
+    /// Construct a new SCG from its top-level nodes AND the typed-state
+    /// metadata recovered from the AST (Task 3-A).
+    ///
+    /// This is the production entry point used by
+    /// [`vuma::pipeline::bridge_ast_to_codegen_scg_with_meta`]: it makes the
+    /// `TypedStateMeta` metadata first-class on the `Scg` itself rather than
+    /// a parallel tuple element, so downstream consumers (IVE verification,
+    /// `tests/scg_conformance.rs`) can read `scg.typed_state_meta` directly.
+    pub fn new_with_meta(nodes: Vec<ScgNode>, meta: Vec<TypedStateMeta>) -> Self {
+        Self {
+            nodes,
+            typed_state_meta: meta,
+        }
+    }
 }
 
 /// Typed-state METADATA recovered from (or attached alongside) a codegen SCG.
@@ -6076,7 +6121,7 @@ mod tests {
 
     /// Helper: build an Scg from a list of ScgNodes.
     fn scg_from_nodes(nodes: Vec<ScgNode>) -> Scg {
-        Scg { nodes }
+        Scg::new(nodes)
     }
 
     /// Helper: build a minimal function SCG.
@@ -7845,8 +7890,7 @@ mod tests {
     fn test_unknown_variable_returns_error() {
         // Build a minimal SCG with a function whose body references an
         // undefined variable in a Return statement.
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_unknown".to_string(),
                 params: vec![],
                 results: vec![ScgType::I32],
@@ -7854,8 +7898,7 @@ mod tests {
                     "undefined_var".to_string(),
                 )])],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })],);;
 
         let mut builder = IRBuilder::new();
         let result = builder.convert(&scg);
@@ -7880,8 +7923,7 @@ mod tests {
     /// also returns [`CodegenError::UnknownVariable`].
     #[test]
     fn test_unknown_variable_in_computation_returns_error() {
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_unknown_comp".to_string(),
                 params: vec![ScgParam {
                     name: "x".to_string(),
@@ -7897,8 +7939,7 @@ mod tests {
                     reassigns: None,
                 })],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })],);;
 
         let mut builder = IRBuilder::new();
         let result = builder.convert(&scg);

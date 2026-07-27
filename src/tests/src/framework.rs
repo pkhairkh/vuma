@@ -856,7 +856,7 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> CodegenScg 
         }
     }
 
-    CodegenScg { nodes }
+    CodegenScg::new(nodes)
 }
 
 /// Convert a parser type annotation to a codegen SCG type.

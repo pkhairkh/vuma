@@ -168,15 +168,13 @@ fn build_reference_program() -> Scg {
 
     body.push(ScgStatement::Return(vec![ScgExpr::Var("d".to_string())]));
 
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::U32],
             body,
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 #[cfg(test)]
