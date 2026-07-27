@@ -61,6 +61,7 @@ they mirror Rust's `consumed_vars: HashSet<String>` threaded through
 structure FullyVerified
     (env : String → Option PMT.Layout)
     (field_types : String → Option (List (PMT.Field × String)))
+    (layouts : LayoutRegistry)
     (consumed : List String)
     (foreign_consumes : List String)
     (reads : List StateRead)
@@ -68,7 +69,7 @@ structure FullyVerified
     (transforms : List StateTransform) : Prop where
   reads_ok      : ∀ v, v ∈ verify_state_reads env field_types reads → v.valid = true
   writes_ok     : ∀ v, v ∈ verify_state_writes env field_types consumed writes → v.valid = true
-  transforms_ok : ∀ t, t ∈ transforms → (verify_transform t).valid = true
+  transforms_ok : ∀ t, t ∈ transforms → (verify_transform_st layouts t).valid = true
 
 /-- Composition theorem: a fully-verified program satisfies all PMT
 memory-safety invariants.
@@ -103,13 +104,14 @@ simplification. -/
 theorem fully_verified_implies_pmt_invariants
     (env : String → Option PMT.Layout)
     (field_types : String → Option (List (PMT.Field × String)))
+    (layouts : LayoutRegistry)
     (consumed : List String)
     (foreign_consumes : List String)
     (reads : List StateRead)
     (writes : List StateWrite)
     (transforms : List StateTransform)
     (hwf_env : ∀ var, ∀ l, env var = some l → PMT.WF_Layout l)
-    (hfv : FullyVerified env field_types consumed foreign_consumes reads writes transforms) :
+    (hfv : FullyVerified env field_types layouts consumed foreign_consumes reads writes transforms) :
     -- All reads access registered, in-bounds, type-matched fields.
     (∀ r : StateRead, r ∈ reads →
       ∃ layout, env r.var = some layout
@@ -123,34 +125,26 @@ theorem fully_verified_implies_pmt_invariants
         ∧ w.f.offset + w.f.size ≤ layout.total_size
         ∧ (¬w.after_consume ∧ w.var ∉ consumed)
         ∧ ∃ fts, field_types w.var = some fts ∧ fieldTypeMatches fts w.f w.value_type = true)
-    -- All transforms have well-formed layouts.
+    -- All transforms have both layouts existing in the registry (faithful — Rust checks existence, NOT WF_Layout).
     ∧ (∀ t : StateTransform, t ∈ transforms →
-      PMT.WF_Layout t.in_layout ∧ PMT.WF_Layout t.out_layout) := by
+      (∃ in_info, layouts t.input_layout = some in_info)
+      ∧ (∃ out_info, layouts t.output_layout = some out_info)) := by
   refine ⟨?_, ?_, ?_⟩
   · -- Reads: delegate to `verify_state_reads_sound`.
-    -- verify_state_reads_sound returns:
-    --   ∀ r ∈ reads, (∃ layout, env ∧ reg ∧ bounds) ∧ (∃ fts, type_match)
-    -- We need: ∀ r ∈ reads, ∃ layout, env ∧ reg ∧ bounds ∧ (∃ fts, type_match)
-    -- This is a straightforward restructuring.
     intro r hr
     have h := verify_state_reads_sound env field_types reads hwf_env hfv.reads_ok r hr
     obtain ⟨⟨layout, h_env, h_reg, h_bounds⟩, fts, h_fts, h_tm⟩ := h
     exact ⟨layout, h_env, h_reg, h_bounds, fts, h_fts, h_tm⟩
   · -- Writes: delegate to `verify_state_writes_sound`.
-    -- Note: verify_state_writes_sound returns 3 conjuncts:
-    --   (∃ layout, …) ∧ (¬after_consume ∧ ∉ consumed) ∧ (∃ fts, …)
-    -- We need to merge them into the flat 6-conjunct form expected here.
     intro w hw
     have h := verify_state_writes_sound env field_types consumed writes hwf_env hfv.writes_ok w hw
-    -- h : (∃ layout, env w.var = some layout ∧ w.f ∈ layout.fields ∧ in_bounds)
-    --   ∧ (¬w.after_consume ∧ w.var ∉ consumed)
-    --   ∧ (∃ fts, field_types w.var = some fts ∧ fieldTypeMatches … = true)
     obtain ⟨⟨layout, h_env, h_reg, h_bounds⟩, ⟨h_ac, h_cons⟩, ⟨fts, h_fts, h_tm⟩⟩ := h
     exact ⟨layout, h_env, h_reg, h_bounds, ⟨h_ac, h_cons⟩, fts, h_fts, h_tm⟩
   · -- Transforms: delegate to `verify_transform_sound` per-transform.
+    -- Faithful: Rust checks layout existence, NOT WF_Layout.
     intro t ht
     have h := hfv.transforms_ok t ht
-    have h_sound := verify_transform_sound t h
+    have h_sound := verify_transform_sound layouts t.input_layout t.output_layout h
     exact ⟨h_sound.1, h_sound.2.1⟩
 
 /-- Corollary: a fully-verified program never traps with `.oob` or `.uaf`.
@@ -174,13 +168,14 @@ passing `consumed ++ foreign_consumes` as the `consumed` parameter to
 theorem fully_verified_no_memory_safety_traps
     (env : String → Option PMT.Layout)
     (field_types : String → Option (List (PMT.Field × String)))
+    (layouts : LayoutRegistry)
     (consumed : List String)
     (foreign_consumes : List String)
     (reads : List StateRead)
     (writes : List StateWrite)
     (transforms : List StateTransform)
     (hwf_env : ∀ var, ∀ l, env var = some l → PMT.WF_Layout l)
-    (hfv : FullyVerified env field_types consumed foreign_consumes reads writes transforms) :
+    (hfv : FullyVerified env field_types layouts consumed foreign_consumes reads writes transforms) :
     -- (1) No read traps with `.oob`.
     (∀ r : StateRead, r ∈ reads →
       ∃ layout, env r.var = some layout ∧ r.f.offset + r.f.size ≤ layout.total_size)
@@ -190,7 +185,7 @@ theorem fully_verified_no_memory_safety_traps
     ∧ (∀ w : StateWrite, w ∈ writes →
       ∃ layout, env w.var = some layout ∧ w.f.offset + w.f.size ≤ layout.total_size) := by
   have h := fully_verified_implies_pmt_invariants
-    env field_types consumed foreign_consumes reads writes transforms hwf_env hfv
+    env field_types layouts consumed foreign_consumes reads writes transforms hwf_env hfv
   refine ⟨?_, ?_, ?_⟩
   · -- (1) No read `.oob`: extract layout + bounds from the reads invariant.
     intro r hr
@@ -221,18 +216,19 @@ the no-UAF guarantee covers `foreign_consumes` too. -/
 theorem fully_verified_no_uaf_including_foreign_consumes
     (env : String → Option PMT.Layout)
     (field_types : String → Option (List (PMT.Field × String)))
+    (layouts : LayoutRegistry)
     (consumed : List String)
     (foreign_consumes : List String)
     (reads : List StateRead)
     (writes : List StateWrite)
     (transforms : List StateTransform)
     (hwf_env : ∀ var, ∀ l, env var = some l → PMT.WF_Layout l)
-    (hfv : FullyVerified env field_types consumed foreign_consumes reads writes transforms)
+    (hfv : FullyVerified env field_types layouts consumed foreign_consumes reads writes transforms)
     (h_merge : ∀ v, v ∈ foreign_consumes → v ∈ consumed) :
     ∀ w : StateWrite, w ∈ writes → (¬w.after_consume ∧ w.var ∉ consumed ∧ w.var ∉ foreign_consumes) := by
   intro w hw
   have h := fully_verified_no_memory_safety_traps
-    env field_types consumed foreign_consumes reads writes transforms hwf_env hfv
+    env field_types layouts consumed foreign_consumes reads writes transforms hwf_env hfv
   obtain ⟨_, h_no_uaf, _⟩ := h
   obtain ⟨h_ac, h_not_cons⟩ := h_no_uaf w hw
   refine ⟨h_ac, h_not_cons, ?_⟩
