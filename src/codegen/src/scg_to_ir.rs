@@ -226,6 +226,76 @@ pub struct Scg {
     pub nodes: Vec<ScgNode>,
 }
 
+/// Typed-state METADATA recovered from (or attached alongside) a codegen SCG.
+///
+/// The codegen SCG lowers typed-state ops (`state_new(L)`, `p.field` read /
+/// write, `transform` calls, `#[foreign_consume]` calls) to UNTYPED
+/// `AllocationNode` / `StructAccessNode` / `CallNode` / `ForeignConsumeStmt`
+/// statements, **losing** the `layout_name` + typed-state kind that the
+/// semantic SCG (`vuma-scg`) carries as dedicated `NodePayload` variants
+/// (`StateInit` / `StateRead` / `StateWrite` / `StateTransform` /
+/// `ForeignConsume`). See `PLAN_IVE_IR_DIVERGENCE.md` \u00a73.
+///
+/// This enum records that typed-state info as recoverable METADATA so the
+/// codegen SCG can be cross-checked against the semantic SCG **without**
+/// changing the emitted binary \u2014 the codegen lowering is untouched; only
+/// a parallel record of the typed-state ops is preserved. Produced by
+/// [`vuma::pipeline::extract_typed_state_meta_from_ast`] (an AST walk parallel
+/// to [`vuma::pipeline::bridge_ast_to_codegen_scg`]) and asserted by
+/// `tests/scg_conformance.rs`.
+///
+/// Task SCG-CLOSURE narrows the two-SCG divergence from "5 typed-state
+/// payloads LOST" to "0 lost \u2014 preserved as recoverable `TypedStateMeta`
+/// metadata", so IVE *could* verify the codegen SCG by replaying this
+/// metadata against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedStateMeta {
+    /// `let p = state_new(L)` \u2014 typed-state allocation. Mirrors the
+    /// semantic SCG's `StateInitNode`. `result_vreg` is a synthetic
+    /// per-program counter assigned in source order (mirrors the vreg the
+    /// semantic SCG would assign).
+    StateInit {
+        /// Layout name being initialized (e.g. `Point`).
+        layout_name: String,
+        /// Synthetic vreg index (source-order counter).
+        result_vreg: u32,
+    },
+    /// `let v = p.field` where `p : State<L>` \u2014 typed-state field read.
+    /// Mirrors `StateReadNode`.
+    StateRead {
+        /// The state variable being read.
+        var: String,
+        /// Layout name of the state.
+        layout_name: String,
+        /// Field being read.
+        field_name: String,
+    },
+    /// `p.field = expr` where `p : State<L>` \u2014 typed-state field write.
+    /// Mirrors `StateWriteNode`.
+    StateWrite {
+        /// The state variable being written.
+        var: String,
+        /// Layout name of the state.
+        layout_name: String,
+        /// Field being written.
+        field_name: String,
+    },
+    /// `let q = t(p)` for `transform t : L_in -> L_out` \u2014 typed-state
+    /// layout reinterpretation. Mirrors `StateTransformNode`.
+    StateTransform {
+        /// Source layout name.
+        input_layout: String,
+        /// Target layout name.
+        output_layout: String,
+    },
+    /// `consume(p)` / `#[foreign_consume]` close-call \u2014 linearity
+    /// marker. Mirrors `ForeignConsumeNode`.
+    ForeignConsume {
+        /// The state variable being consumed.
+        var: String,
+    },
+}
+
 /// A single node in the SCG.
 #[derive(Debug, Clone)]
 pub enum ScgNode {
