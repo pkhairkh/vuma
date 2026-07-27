@@ -4894,6 +4894,8 @@ fn find_operator(s: &str, op: &str) -> Option<usize> {
 /// `compile_dump`, `dump_ir`, `dump_codegen_scg` binaries and several test
 /// files in `src/tests/` still import it; new code should call
 /// `bridge_ast_to_codegen_scg` instead.
+// TODO: Safe to delete after no callers remain. All callers severed in Wave 4.
+#[deprecated(note = "Use bridge_ast_to_codegen_scg instead. This bridge produces segfaults/infinite loops on real CFGs.")]
 pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
     bridge_scg_to_codegen_with_externs(scg, &HashSet::new())
 }
@@ -4909,6 +4911,8 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
 /// (direct AST→codegen path) because the semantic-SCG → codegen-SCG path
 /// produced broken code (segfaults, infinite loops). This function is retained for the binaries / tests that still
 /// import it; new code should call `bridge_ast_to_codegen_scg` instead.
+// TODO: Safe to delete after no callers remain. All callers severed in Wave 4.
+#[deprecated(note = "Use bridge_ast_to_codegen_scg instead. This bridge produces segfaults/infinite loops on real CFGs.")]
 pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<String>) -> Scg {
     let edge_idx = EdgeIndex::build(scg);
     let mut consumed: HashSet<NodeId> = HashSet::new();

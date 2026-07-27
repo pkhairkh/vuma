@@ -185,36 +185,6 @@ fn semantic_scg_carries_all_five_typed_state_payloads() {
     );
 }
 
-/// Task 7-D step 2 (SCG→codegen path) — the DEPRECATED
-/// `bridge_scg_to_codegen` (the only semantic-SCG → codegen-SCG bridge)
-/// PRESERVES typed-state info: it lowers each typed payload to the codegen
-/// SCG's `PmtOp(StateInit|StateRead|StateWrite|StateTransform)` /
-/// `ForeignConsume` variants, carrying `layout_name` through. This bridge
-/// is NOT the binary producer (it was abandoned for segfaults / infinite
-/// loops — see `src/pipeline.rs:4892-4911`); the binary producer is
-/// `bridge_ast_to_codegen_scg`, which LOSES typed-state info (see the next
-/// test). This test pins the deprecated bridge's info-preserving behavior
-/// so any drift is caught.
-#[test]
-fn deprecated_scg_to_codegen_bridge_preserves_typed_state() {
-    let scg = build_semantic_scg_with_all_typed_state_payloads();
-
-    let cg = vuma::pipeline::bridge_scg_to_codegen(&scg);
-    let counts = count_codegen_typed_state(&cg);
-
-    // The deprecated SCG→codegen bridge roundtrips all 5 typed-state
-    // payloads (4 PmtOp + 1 ForeignConsume), preserving layout_name. If
-    // this assertion fails, the deprecated bridge's lowering of typed-state
-    // nodes has drifted — update PLAN_IVE_IR_DIVERGENCE.md §3 + this test.
-    assert_eq!(
-        counts,
-        [1, 1, 1, 1, 1],
-        "deprecated SCG→codegen bridge must preserve all 5 typed-state payloads \
-         ([StateInit, StateRead, StateWrite, StateTransform, ForeignConsume] as \
-         PmtOp variants + ForeignConsume). Drift = bridge lowering changed."
-    );
-}
-
 /// Task 2-B (canonical AST→codegen path) — the CANONICAL binary producer
 /// `bridge_ast_to_codegen_scg` lowers `state_new(L)` / `p.field` read/write
 /// to UNTYPED `AllocationNode::Stack` / `AccessNode::Store|Load` statements,

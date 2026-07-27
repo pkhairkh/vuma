@@ -1190,11 +1190,10 @@ fn compile_example_for_backend(
         let _ = run_scg_transforms(&mut scg, &config);
     }
 
-    // Step 4: Bridge vuma-scg SCG → codegen SCG
-    let codegen_scg = {
-        use vuma::pipeline::bridge_scg_to_codegen;
-        bridge_scg_to_codegen(&scg)
-    };
+    // Step 4: Bridge AST → codegen SCG. Uses the canonical
+    // `bridge_ast_to_codegen_scg` instead of the deprecated
+    // `bridge_scg_to_codegen` (which mis-lowers `state_new(...)`; Task 2-A).
+    let codegen_scg = vuma::pipeline::bridge_ast_to_codegen_scg(&ast);
 
     // Step 5: Lower codegen SCG → IR
     let ir_program = {

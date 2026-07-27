@@ -399,7 +399,7 @@ fn test_full_pipeline_sha256d_aarch64() {
     assert!(scg.node_count() > 0, "sha256d.vuma SCG should have nodes");
 
     // SCG → codegen-level SCG → IR → regalloc → encode for AArch64
-    let codegen_scg = vuma::pipeline::bridge_scg_to_codegen(&scg);
+    let codegen_scg = vuma::pipeline::bridge_ast_to_codegen_scg(&ast);
     let mut builder = IRBuilder::new();
     let ir_result = builder.build(&codegen_scg);
     assert!(
@@ -464,7 +464,11 @@ fn test_full_pipeline_sha256d_all_backends() {
     }
     let ast = parse_output.unwrap();
     let mut converter = AstToScg::new();
-    let scg = match converter.convert(&ast) {
+    // AST → SCG preflight (keeps the graceful skip-on-error behavior).
+    // The result is intentionally unused: the canonical bridge below performs
+    // its own AST → codegen-SCG lowering (Task 4-C severed the deprecated
+    // `bridge_scg_to_codegen` caller).
+    let _scg = match converter.convert(&ast) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Skipping sha256d all-backends test — SCG error: {}", e);
@@ -472,7 +476,7 @@ fn test_full_pipeline_sha256d_all_backends() {
         }
     };
 
-    let codegen_scg = vuma::pipeline::bridge_scg_to_codegen(&scg);
+    let codegen_scg = vuma::pipeline::bridge_ast_to_codegen_scg(&ast);
     let mut builder = IRBuilder::new();
     let ir_program = match builder.build(&codegen_scg) {
         Ok(ir) => ir,
