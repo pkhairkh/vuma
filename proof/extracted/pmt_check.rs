@@ -276,6 +276,104 @@ mod lean_ffi {
     ) -> bool {
         unsafe { lean_verify_state_writes(env_list, consumed, writes) != 0 }
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Marshalling submodule (A-2): convert Rust `&str` and unit
+    // values into the boxed `lean_object*` representation the
+    // `lean_verify_*` / `lean_verified_*` externs expect.
+    //
+    // `lean_mk_string` and `lean_box` are Lean 4 C-runtime symbols
+    // declared in `lean.h` and provided by `libleanrt.a`, which
+    // build.rs links (and bundles into `liblean_extraction.a`)
+    // whenever the real Lean -> C pipeline succeeds -- i.e. exactly
+    // when the `lean_ffi_linked` cfg is emitted. PMT-1-G wired that
+    // linkage; without these helpers the state-verifier `_prim`
+    // exports SIGSEGV because their boxed `lean_object*` args arrive
+    // as NULL.
+    //
+    // Stub path (`lean_ffi_linked` NOT set): the helpers compile to
+    // `null_mut()` so this file still type-checks. They are never
+    // invoked at runtime on that path -- `verification.rs` only calls
+    // the `lean_verify_*` externs under `#[cfg(lean_ffi_linked)]`,
+    // and the stub itself ignores its arguments.
+    // ─────────────────────────────────────────────────────────────
+    pub mod marshal {
+        use super::LeanObject;
+
+        // `c_char` / `CString` are only needed on the real-Lean path.
+        // Gating the import keeps the stub build warning-free.
+        #[cfg(lean_ffi_linked)]
+        use std::ffi::{c_char, CString};
+
+        // Lean runtime symbols (`lean.h`). Only declared when the real
+        // Lean runtime (`libleanrt.a`) is linked; the stub path does
+        // not provide them and must not reference them.
+        #[cfg(lean_ffi_linked)]
+        extern "C" {
+            /// `lean_mk_string(char const* s) -> lean_object*` -- boxes a
+            /// NUL-terminated C string into a Lean `String`.
+            pub fn lean_mk_string(s: *const c_char) -> *mut LeanObject;
+            /// `lean_box(size_t v) -> lean_object*` -- boxes a small
+            /// unboxed scalar. `lean_box(0)` is Lean's canonical
+            /// representation for `List.nil` / `Unit` / `Bool.false`.
+            pub fn lean_box(n: usize) -> *mut LeanObject;
+        }
+
+        /// Convert a Rust `&str` into a boxed Lean `String`.
+        ///
+        /// NUL bytes are not representable in a C string, so each is
+        /// replaced with `'?'` before passing through `CString`.
+        /// Ownership of the returned `lean_object*` follows Lean's
+        /// runtime conventions (refcount-1 if freshly allocated); the
+        /// caller must `lean_dec` once it is no longer needed -- the
+        /// extracted `lean_verify_*` functions take ownership of
+        /// their `lean_object*` args.
+        #[cfg(lean_ffi_linked)]
+        pub fn str_to_lean(s: &str) -> *mut LeanObject {
+            let sanitized: String = s.replace('\0', "?");
+            // `CString::new` cannot fail after NUL sanitisation.
+            let c_string =
+                CString::new(sanitized).expect("NUL bytes already stripped");
+            unsafe { lean_mk_string(c_string.as_ptr()) }
+        }
+
+        /// Boxed empty Lean `String`. Convenience over
+        /// `str_to_lean("")` but cheaper (no allocation of a Rust
+        /// `String`); uses the `lean_mk_string`-recognised empty C
+        /// string literal `"\0"` directly.
+        #[cfg(lean_ffi_linked)]
+        pub fn empty_lean_string() -> *mut LeanObject {
+            unsafe { lean_mk_string(b"\0".as_ptr() as *const c_char) }
+        }
+
+        /// Lean `List.nil` -- the canonical empty list, which Lean's
+        /// runtime represents as `lean_box(0)`.
+        #[cfg(lean_ffi_linked)]
+        pub fn empty_lean_list() -> *mut LeanObject {
+            unsafe { lean_box(0) }
+        }
+
+        // -- Stub variants (default build, no `lean_ffi_linked`) ----
+        // These keep the file compiling when the Lean runtime is not
+        // linked. They are dead code at runtime: `verification.rs`
+        // only calls the `lean_verify_*` externs (and hence these
+        // helpers) under `#[cfg(lean_ffi_linked)]`.
+
+        #[cfg(not(lean_ffi_linked))]
+        pub fn str_to_lean(_s: &str) -> *mut LeanObject {
+            std::ptr::null_mut()
+        }
+
+        #[cfg(not(lean_ffi_linked))]
+        pub fn empty_lean_string() -> *mut LeanObject {
+            std::ptr::null_mut()
+        }
+
+        #[cfg(not(lean_ffi_linked))]
+        pub fn empty_lean_list() -> *mut LeanObject {
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[cfg(test)]

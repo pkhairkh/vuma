@@ -10258,13 +10258,13 @@ impl Backend for RiscV64Backend {
         // ECALL             — 4 bytes
 
         let start_stub_size: usize = 20; // 5 × 4-byte instructions
-                                         // `ffi_stub` (li a0,0; ret) is appended right after _start in
+                                         // `ffi_stub` (ebreak; ebreak) is appended right after _start in
                                          // `all_code` (see below), so the first user function actually
                                          // starts at offset `start_stub_size + ffi_stub_size` in
                                          // `all_code`. We must account for this when computing function
                                          // offsets, otherwise the _start JAL jumps into the ffi_stub
-                                         // (li a0,0; ret) and every program returns exit code 0.
-        let ffi_stub_size: usize = 8; // li a0,0 (4) + ret (4)
+                                         // (ebreak; ebreak) and every program returns exit code 0.
+        let ffi_stub_size: usize = 8; // ebreak (4) + ebreak (4)
         let header_size: usize = start_stub_size + ffi_stub_size;
 
         // ── Build runtime I/O code ──
@@ -11822,12 +11822,14 @@ impl Backend for RiscV64Backend {
             start_stub[8..12].copy_from_slice(&patched_jal.encode());
         }
 
-        // ── Add return-0 stub for unresolved FFI calls ──
-        // li a0, 0 (addi a0, zero, 0) = 0x00000513
-        // ret (jalr zero, ra, 0) = 0x00008067
+        // ── Trap stub for unresolved FFI calls ──
+        // Unresolved externs in ET_EXEC mode are a build-time bug. The binary
+        // traps at runtime (ebreak / SIGTRAP on riscv64) rather than silently
+        // returning 0.
+        // ebreak (raises SIGTRAP) = 0x00100073
         let mut ffi_stub = Vec::with_capacity(8);
-        ffi_stub.extend_from_slice(&0x00000513u32.to_le_bytes()); // li a0, 0
-        ffi_stub.extend_from_slice(&0x00008067u32.to_le_bytes()); // ret
+        ffi_stub.extend_from_slice(&0x00100073u32.to_le_bytes()); // ebreak (SIGTRAP)
+        ffi_stub.extend_from_slice(&0x00100073u32.to_le_bytes()); // ebreak (unreachable padding)
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;

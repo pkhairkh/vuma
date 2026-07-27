@@ -9779,7 +9779,7 @@ impl Backend for Arm32Backend {
         // MOV r7, #1   — 4 bytes (sys_exit = 1 on ARM Linux)
         // SVC #0        — 4 bytes
         let start_stub_size: usize = 20; // 5 × 4-byte instructions
-        let ffi_stub_size: usize = 8; // MOV R0, #0; BX LR (2 × 4 bytes)
+        let ffi_stub_size: usize = 8; // UDF #0; UDF #0 (2 × 4 bytes)
         let ffi_stub_offset: usize = start_stub_size;
 
         // ── Build runtime I/O code ──
@@ -10830,10 +10830,12 @@ impl Backend for Arm32Backend {
             start_stub[8..12].copy_from_slice(&patched_bl);
         }
 
-        // ── Add FFI return-0 stub ──
+        // ── Add FFI trap stub ──
+        // Unresolved externs in ET_EXEC mode are a build-time bug. The binary
+        // traps at runtime (UDF / SIGILL on arm32) rather than silently returning 0.
         let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
-        ffi_stub.extend_from_slice(&0xE3A00000u32.to_le_bytes()); // MOV R0, #0
-        ffi_stub.extend_from_slice(&0xE12FFF1Eu32.to_le_bytes()); // BX LR
+        ffi_stub.extend_from_slice(&0xE7F000F0u32.to_le_bytes()); // UDF #0 — undefined instruction trap (SIGILL)
+        ffi_stub.extend_from_slice(&0xE7F000F0u32.to_le_bytes()); // UDF #0 (unreachable padding)
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
