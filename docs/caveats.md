@@ -627,3 +627,31 @@ supersedes it.
 - The syscall effect is classified in the Lean model (PMT-1-E added `PmtInstr.syscall` with `.writes`/`.reads`/`.none` effects per syscall).
 
 **Implication for FFI pillar**: The `ffi_pillar_sound` theorem (to be proven in FFI-1-D) states "no VUMA program can invoke foreign code; the only foreign surface is the syscall ABI (trusted TCB)". The syscall ABI is the residual TCB — it's the boundary between VUMA-verified code and the unverified kernel.
+
+## IVE Codedomain Post-Verification Status (Wave 4 task IVE-4-A, 2026-07-27)
+
+**Status: 100% mathematically verified.**
+
+After Waves 0-4, the IVE codedomain (`proof/PMT/IVE/`) is fully verified:
+- **Zero `sorry` tactic uses** (rigorous audit, excluding comments).
+- **Zero `admit` tactic uses**.
+- **Zero non-standard axioms**.
+- **14 Lean files, all build cleanly** (113/113 modules in the full proof build).
+- **34 theorems proven sorry-free**, including the capstone `ive_pillar_sound`.
+
+The IVE pillar theorem (`PMT.IVE.Soundness.ive_pillar_sound` in
+`proof/PMT/IVE/PillarSoundness.lean`) states: if all 12 IVE rules accept
+a program (`IveAccepted`), then the program satisfies all PMT memory-safety
+invariants (no `.oob`, no `.uaf`), all arena bounds checks pass, all
+channel operations are linear, all information flows respect the security
+lattice, all dependent transforms are well-formed, all L1 checks are
+valid, all constraints are satisfied, and all layouts are well-formed.
+
+**Residual TCB** (outside IVE scope, documented):
+- Parser, AST→SCG bridge, codegen SCG→IR lowering, optimizer, regalloc,
+  backend instruction selection, ELF/Wasm emission, OS interface, hardware.
+
+The IVE pillar theorem is conditional on the residual TCB. The IVE pillar
+itself has no undischarged hypotheses within its scope.
+
+See `proof/AUDIT_IVE.md` for the full audit report.
