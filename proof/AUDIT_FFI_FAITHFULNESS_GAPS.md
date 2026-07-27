@@ -19,7 +19,7 @@ For each claim in the FFI spec, I verified:
 | 1 | **HIGH** | 5 active extern calls remain in `src/pipeline.rs` AST-bridge path: `mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow` | "No foreign function calls in VUMA (No-FFI path)" |
 | 2 | **HIGH** | Lean `SyscallName` allowlist has 6 syscalls; Rust `SyscallName` enum has 16+ | "6 syscalls routed through IRInstr::Syscall" |
 | 3 | **HIGH** | Lean `NoExterns` predicate does NOT check `.syscall` instructions | `ffi_pillar_sound` Conjunct 2 is vacuously true |
-| 4 | **HIGH** | Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions) | Lean cannot model programs using memcpy/memset replacements |
+| 4 | **HIGH** | Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions) | Lean cannot model programs using memcpy/memset replacements — **CLOSED by FFI-3-A** |
 | 5 | **HIGH** | Lean `PmtInstr.transform` signature differs from Rust `IRInstr::Transform` | Lean `transform` ≠ Rust `Transform` (different fields) |
 | 6 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims "zero active extern block declarations" | Audit report inaccuracy |
 | 7 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims `is_extern: true` is only for user-source `extern "C"` blocks | Audit report inaccuracy |
@@ -91,7 +91,9 @@ The `ffi_pillar_sound` Conjunct 2 checks `.call name _` instructions where `name
 
 ---
 
-## Gap #4 — Lean PmtInstr missing BulkCopy/BulkFill (HIGH)
+## Gap #4 — Lean PmtInstr missing BulkCopy/BulkFill (HIGH) — CLOSED by FFI-3-A
+
+**Status**: **CLOSED by FFI-3-A**. Lean `PmtInstr` now has `bulk_copy : IRValue → IRValue → IRValue → PmtInstr` and `bulk_fill : IRValue → IRValue → IRValue → PmtInstr` variants, field-for-field mirrors of Rust `IRInstr::BulkCopy { dst, src, len }` and `IRInstr::BulkFill { dst, val, len }`. Both variants flatten to `[]` in `PmtInstr.to_steps` (opaque memory writes; no PMT arena interaction) — proven by `PmtInstr.to_steps_bulk_copy` and `PmtInstr.to_steps_bulk_fill` in `PMT/ExecFunction.lean`. The exhaustive `cases i with` blocks in `PMT/ExecFunction.lean` (§1.8, §1.9) and `PMT/FFI/PillarSoundness.lean` (§2) were updated with the 2 new arms. `lake build` passes with zero new sorries.
 
 **Claim** (from spec):
 > "memcpy → IRInstr::BulkCopy, memset → IRInstr::BulkFill"
