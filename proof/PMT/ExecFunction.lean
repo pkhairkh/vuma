@@ -122,21 +122,16 @@ theorem PmtInstr.to_steps_free (in_var : String) :
       = [⟨in_var, in_var, ⟨1, []⟩, .transform⟩] := by
   rfl
 
-/-- §1.6: `transform` flattens to a singleton list with the source layout. -/
-theorem PmtInstr.to_steps_transform (in_var out : String) (layout : Layout) :
-    PmtInstr.to_steps (.transform in_var out layout)
-      = [⟨in_var, out, layout, .transform⟩] := by
-  rfl
+/-- §1.6a: `transform_layouts` (the SOLE Transform variant after PMT-FAITH-5-A)
+flattens to `[]`.
 
-/-- §1.6a: `transform_layouts` (FFI-3-B addition) flattens to `[]`.
-
-Mirrors Rust `IRInstr::Transform` (FFI-1-C addition, lowered to a
+Mirrors Rust `IRInstr::Transform` (src/codegen/src/ir.rs:1978, lowered to a
 single `mov dst_storage, src_storage` in the x86_64 backend — see
 `src/codegen/src/x86_64/stack_slot_isel.rs:4419`). The lowering is a
 pointer copy with no PMT arena state interaction, so no `Step` is
-emitted. The pre-existing `PmtInstr.transform` (PMT-1-A) is a
-different instruction (single-layout state transform) that emits one
-`Step` — see `to_steps_transform` above. -/
+emitted. PMT-FAITH-5-A removed the unfaithful `PmtInstr.transform`
+variant (closes FAITH-2-C); `transform_layouts` is now the sole
+Transform variant, bit-faithful to Rust. -/
 theorem PmtInstr.to_steps_transform_layouts (dst src : IRValue)
     (from_layout to_layout : String) :
     PmtInstr.to_steps (.transform_layouts dst src from_layout to_layout) = [] := by
@@ -490,14 +485,8 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     rw [PmtInstr.to_steps_free, List.mem_singleton] at hs
     subst hs
     exact WF_Layout_empty
-  | transform in_var out layout =>
-    have hi' : WF_Layout layout ∧ WF_Layout (env in_var) := hi
-    obtain ⟨hwt_layout, _⟩ := hi'
-    rw [PmtInstr.to_steps_transform, List.mem_singleton] at hs
-    subst hs
-    exact hwt_layout
   | transform_layouts dst src from_layout to_layout =>
-    -- FFI-3-B: flattens to `[]`; membership hypothesis is vacuous.
+    -- PMT-FAITH-5-A: flattens to `[]`; membership hypothesis is vacuous.
     rw [PmtInstr.to_steps_transform_layouts] at hs
     simp at hs
   | call fn args =>
@@ -690,11 +679,8 @@ theorem PmtInstr.to_steps_op_transform
   | free in_var =>
     rw [PmtInstr.to_steps_free, List.mem_singleton] at hs
     subst hs; rfl
-  | transform in_var out layout =>
-    rw [PmtInstr.to_steps_transform, List.mem_singleton] at hs
-    subst hs; rfl
   | transform_layouts dst src from_layout to_layout =>
-    -- FFI-3-B: flattens to `[]`; membership hypothesis is vacuous.
+    -- PMT-FAITH-5-A: flattens to `[]`; membership hypothesis is vacuous.
     rw [PmtInstr.to_steps_transform_layouts] at hs
     simp at hs
   | call fn args =>

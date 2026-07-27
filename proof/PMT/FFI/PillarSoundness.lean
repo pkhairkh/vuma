@@ -203,8 +203,7 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         | load _ _ _ _ => exact trivial
         | store _ _ _ _ => exact trivial
         | free _ => exact trivial
-        | transform _ _ _ => exact trivial
-        | transform_layouts _ _ _ _ => exact trivial  -- FFI-3-B (Gap #5)
+        | transform_layouts _ _ _ _ => exact trivial  -- PMT-FAITH-5-A: sole Transform variant
         | call name args => exact absurd ⟨name, args, rfl⟩ hcall
         | ret _ => exact trivial
         | bin_op _ _ _ _ _ => exact trivial
