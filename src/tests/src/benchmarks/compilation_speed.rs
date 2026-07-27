@@ -94,15 +94,13 @@ fn build_program(stmt_count: usize) -> Scg {
         stmt_count - 1
     ))]));
 
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::U32],
             body,
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 use vuma_codegen::backend::BackendKind;

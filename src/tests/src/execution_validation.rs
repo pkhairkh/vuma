@@ -43,8 +43,7 @@ use vuma_codegen::{
 
 /// Build a minimal codegen SCG with a single `fn add(a, b) -> i64 { a + b }`.
 fn make_add_scg() -> Scg {
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "add".to_string(),
             params: vec![
                 ScgParam {
@@ -69,8 +68,7 @@ fn make_add_scg() -> Scg {
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 /// Compile an SCG to an ARM64 ELF binary.

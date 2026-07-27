@@ -467,8 +467,7 @@ fn compile_scg_to_binary(scg: &Scg, backend: &dyn Backend) -> Result<Vec<u8>, St
 // ===========================================================================
 
 fn make_add_scg() -> Scg {
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![
                 ScgParam {
@@ -493,8 +492,7 @@ fn make_add_scg() -> Scg {
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 // ===========================================================================

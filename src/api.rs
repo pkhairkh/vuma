@@ -48,6 +48,7 @@ use crate::pipeline::{self, CompileConfig, VerificationLevel};
 use vuma_ive::{
     verification::VerificationInput, InvariantAggregator, VerificationLevel as IveVerificationLevel,
 };
+use vuma_parser::Program as AstProgram;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VumaCompiler
@@ -226,8 +227,8 @@ impl VumaCompiler {
         // Run the front-end pipeline (parse through SCG transforms)
         let front_result = run_frontend(source, &self.config);
 
-        let (scg, mut diagnostics) = match front_result {
-            FrontendResult::Ok { scg, .. } => (scg, Vec::new()),
+        let (scg, ast, mut diagnostics) = match front_result {
+            FrontendResult::Ok { scg, ast, .. } => (scg, ast, Vec::new()),
             FrontendResult::Err { diagnostics } => {
                 return CompileResult {
                     success: false,
@@ -247,7 +248,7 @@ impl VumaCompiler {
         let scg_summary = Some(build_scg_summary(&scg));
 
         // Run target-specific codegen
-        let target_output = match run_backend_codegen(&scg, backend_kind) {
+        let target_output = match run_backend_codegen(&ast, &scg, backend_kind) {
             Ok(output) => Some(output),
             Err(diags) => {
                 diagnostics.extend(diags);
@@ -510,7 +511,7 @@ impl VumaCompiler {
         let front_result = run_frontend(source, &self.config);
 
         let (scg, pmt_layouts) = match front_result {
-            FrontendResult::Ok { scg, pmt_layouts } => (*scg, pmt_layouts),
+            FrontendResult::Ok { scg, pmt_layouts, .. } => (*scg, pmt_layouts),
             FrontendResult::Err { diagnostics } => {
                 let messages: Vec<String> = diagnostics.iter().map(|d| d.message.clone()).collect();
                 return VerificationReport {
@@ -1179,6 +1180,13 @@ impl fmt::Display for VerificationReport {
 enum FrontendResult {
     Ok {
         scg: Box<vuma_scg::SCG>,
+        /// Owned AST retained so the backend codegen bridge can run the
+        /// canonical `bridge_ast_to_codegen_scg` path. The AST is the
+        /// ground truth produced by the parser; carrying it through here
+        /// (in a `Box` to avoid a large stack move) severs the production
+        /// caller's dependence on the lossy `bridge_scg_to_codegen`
+        /// round-trip that previously reconstructed it from the SCG.
+        ast: Box<AstProgram>,
         /// (VUMA 2.0 PMT-only) Layout registry built from the AST's
         /// `Item::LayoutDef` items, used by `VerificationLevel::Pmt`
         /// to run the 3 state verifiers with full field offset/size info.
@@ -1286,12 +1294,14 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
 
     FrontendResult::Ok {
         scg: Box::new(scg),
+        ast: Box::new(ast),
         pmt_layouts,
     }
 }
 
 /// Run target-specific codegen using the Backend trait.
 fn run_backend_codegen(
+    ast: &AstProgram,
     scg: &vuma_scg::SCG,
     backend_kind: vuma_codegen::backend::BackendKind,
 ) -> Result<TargetOutput, Vec<VumaDiagnostic>> {
@@ -1299,8 +1309,12 @@ fn run_backend_codegen(
 
     use vuma_codegen::scg_to_ir::IRBuilder;
 
-    // Bridge SCG to codegen SCG
-    let codegen_scg = pipeline::bridge_scg_to_codegen(scg);
+    // Bridge AST -> codegen SCG (canonical path). The SCG is retained in
+    // the signature so the caller can build its `ScgSummary` from the
+    // same validated graph; it is intentionally unused by the bridge
+    // itself (the AST is the ground truth here).
+    let _ = scg;
+    let codegen_scg = pipeline::bridge_ast_to_codegen_scg(ast);
 
     // IR Lowering
     let mut ir_builder = IRBuilder::new();
