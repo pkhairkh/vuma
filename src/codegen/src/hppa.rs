@@ -5331,7 +5331,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
             // replacements): backend lowering not yet implemented on hppa;
             // emit nothing (x86_64 is the canonical path).
             | IRInstr::BulkCopy { .. }
-            | IRInstr::BulkFill { .. } => {}
+            | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => {}
                 }
         }
 

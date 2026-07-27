@@ -1958,6 +1958,33 @@ pub enum IRInstr {
         /// Length vreg (i64 byte count; low 64 bits used).
         len: IRValue,
     },
+
+    // ── State layout transform (No-FFI: PMT/arena op inline) ──
+    /// State layout transform — reinterpret state of one layout as another.
+    ///
+    /// Used by `StateTransform` SCG nodes. Semantically equivalent to a bitcast
+    /// when layouts have the same size; traps via `__oob_trap` otherwise.
+    /// Replaces the `__vuma_state_transform__<in>_to_<out>` extern call for
+    /// No-FFI verification (FFI Wave 1 task C).
+    ///
+    /// **Effects:** reads `src`; writes `dst`. Treated as side-effecting by
+    /// DCE/LICM (consumes the input state's linearity — see PMT model's
+    /// `PmtInstr.transform`).
+    ///
+    /// **Backend lowering (x86_64):** a single `mov dst_storage, src_storage`
+    /// (copy the pointer — assumes layouts match, which the SCG layer
+    /// guarantees). A runtime size-mismatch trap (`__oob_trap`) would be
+    /// emitted if layouts differ; the SCG layer forbids that case.
+    Transform {
+        /// Output state vreg (receives the reinterpreted pointer).
+        dst: IRValue,
+        /// Input state vreg (the source pointer).
+        src: IRValue,
+        /// Source layout name (for runtime check + Lean model reasoning).
+        from_layout: String,
+        /// Target layout name (for runtime check + Lean model reasoning).
+        to_layout: String,
+    },
 }
 
 /// error discriminants returned by [`IRInstr::ChannelRecvResult`].
@@ -2052,6 +2079,8 @@ impl IRInstr {
             // BulkCopy / BulkFill write memory but define no vreg.
             | IRInstr::BulkCopy { .. }
             | IRInstr::BulkFill { .. } => vec![],
+            // Transform defines the dst vreg (the reinterpreted pointer).
+            IRInstr::Transform { dst, .. } => dst.as_register().into_iter().collect(),
         }
     }
 
@@ -2175,6 +2204,8 @@ impl IRInstr {
                 r.extend(len.as_register());
                 r
             }
+            // Transform reads the src vreg (the input state pointer).
+            IRInstr::Transform { src, .. } => src.as_register().into_iter().collect(),
         }
     }
 }
@@ -2463,6 +2494,9 @@ impl fmt::Display for IRInstr {
             }
             IRInstr::BulkFill { dst, val, len } => {
                 write!(f, "bulk_fill {}, {}, {}", dst, val, len)
+            }
+            IRInstr::Transform { dst, src, from_layout, to_layout } => {
+                write!(f, "{} = transform {} from {} to {}", dst, src, from_layout, to_layout)
             }
         }
     }

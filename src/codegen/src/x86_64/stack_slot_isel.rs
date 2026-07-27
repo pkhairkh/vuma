@@ -4409,6 +4409,24 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     instr_opcode = Some("bulk_fill".to_string());
                     code
                 }
+
+                // Transform (state layout transform): the SCG layer guarantees
+                // from_layout.size == to_layout.size, so this is a pointer copy.
+                // Lowering: load src into RAX, store RAX into dst's stack slot.
+                // (Effectively `dst = src` — semantically a no-op reinterpretation.)
+                // If sizes differed at runtime, we would call __oob_trap; the
+                // SCG layer forbids that case so no runtime check is emitted.
+                IRInstr::Transform { dst, src, .. } => {
+                    let mut code = Vec::new();
+                    // Load src pointer → RAX
+                    code.extend(load_value(src, Gpr::Rax));
+                    // Store RAX → dst's stack slot.
+                    if let Some(dst_id) = dst.as_register() {
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                    }
+                    instr_opcode = Some("transform".to_string());
+                    code
+                }
             };
 
             if !encoded.is_empty() {

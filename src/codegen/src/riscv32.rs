@@ -8393,7 +8393,7 @@ impl Backend for RiscV32Backend {
                     // replacements): backend lowering not yet implemented on riscv32;
                     // emit no bytes (x86_64 is the canonical path).
                     | IRInstr::BulkCopy { .. }
-                    | IRInstr::BulkFill { .. } => Vec::new(),
+                    | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => Vec::new(),
                 };
 
                 if !encoded.is_empty() {
@@ -8508,7 +8508,7 @@ impl Backend for RiscV32Backend {
                         // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
                         // replacements; backend lowering not yet implemented on riscv32).
                         IRInstr::BulkCopy { .. } => "bulk_copy",
-                        IRInstr::BulkFill { .. } => "bulk_fill",
+                        IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => "bulk_fill",
                     };
 
                     // For FP Cast instructions, populate reads/writes with
