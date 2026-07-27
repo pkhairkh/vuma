@@ -1,5 +1,6 @@
 import PMT.PmtInstr
 import PMT.IRProgram
+import PMT.IVE.Soundness.WFLayoutBool
 
 /-!
 ## IVE Soundness — verify_transform
@@ -26,16 +27,30 @@ Per the IVE deep-read:
     is untracked. The simulation relation must model the kill on input
     vregs only.
 
-This module provides the `verify_transform` model. It
-uses `Classical.propDecidable` to obtain `Decidable` instances
-for `WF_Layout` and `Layout =` (both are `Prop`s over universally
-quantified `Field`s, which `PMT.Basic` does not derive `DecidableEq`
-for). This avoids introducing a second `DecidableEq Field` instance
-that would conflict with the one defined in
-`PMT.IVE.Soundness.StateReads` when the whole `PMT` library is
-linked together. The actual theorems close without `sorry` — the
-`decide P = true ↔ P` bridge via `decide_eq_true_eq` discharges
-both soundness goals directly.
+This module provides the `verify_transform` model. **As of IVE Wave 1
+task A** (`task/ive-1-a`), the spec uses the computable
+`wf_layout_bool` predicate (defined in
+`PMT.IVE.Soundness.WFLayoutBool`) in place of the `Prop`-valued
+`WF_Layout`. The well-formedness check is therefore constructively
+decidable — no `Classical.propDecidable` is required — and
+`verify_transform` is a plain `def` (not `noncomputable`). This
+unblocks extraction (IVE-1-B) and the Iris soundness layer (PMT-1-G).
+
+The `Decidable (verify_transform_spec t)` instance is provided
+explicitly below: it unfolds the spec, case-splits on `t.kind`, and
+in each branch the match reduces so `inferInstance` picks up the
+auto-derived `Decidable` for the resulting `And` form (composed of
+`instDecidableEqBool` for the `wf_layout_bool _ = true` conjuncts and
+`DecidableEq Layout` / `DecidableEq Nat` for the per-kind equality
+conjuncts).
+
+The soundness theorems close without `sorry`:
+`decide_eq_true_iff` bridges `decide (verify_transform_spec t) = true`
+to `verify_transform_spec t`, the And conjuncts are extracted with
+`obtain`, and `wf_layout_bool_iff_wf_layout` recovers `WF_Layout` from
+each `wf_layout_bool _ = true` conjunct. The third conjunct's match
+is left untouched (same form on both sides of the goal), so `exact h3`
+closes it directly — no case-split on `t.kind` is needed.
 -/
 
 namespace PMT.IVE.Soundness
@@ -76,7 +91,9 @@ structure StateTransformVerification where
   deriving Repr
 
 /-- The spec checked by `verify_transform`:
-  (1) both layouts are well-formed (`WF_Layout`),
+  (1) both layouts are well-formed (encoded as `wf_layout_bool _ = true`
+      so the spec is constructively decidable — see
+      `PMT.IVE.Soundness.WFLayoutBool`),
   (2) for `Identity`, layouts match (same `total_size` + same `fields`),
   (3) for `Reinterpret`, `total_size` matches (same byte budget,
       different fields),
@@ -87,33 +104,57 @@ This is the Lean rendering of the four Rust checks performed in
 `HashMap<String, LayoutInfo>` lookup, which is collapsed into the
 `WF_Layout` precondition via the caller-side `env : String → Layout`
 pattern — see `PMT.IVE.Soundness.StateReads` for the same
-simplification). -/
+simplification).
+
+Replacing `WF_Layout` with `wf_layout_bool _ = true` (vs. the original
+`WF_Layout _`) is the key change for IVE-1-A: it makes
+`Decidable (verify_transform_spec t)` derive from
+`instDecidableEqBool` (and `DecidableEq Layout` for the identity arm)
+instead of `Classical.propDecidable`, so
+`decide (verify_transform_spec t)` — and hence `verify_transform` —
+is computable and survives extraction to Rust. -/
 def verify_transform_spec (t : StateTransform) : Prop :=
-  WF_Layout t.in_layout
-  ∧ WF_Layout t.out_layout
+  wf_layout_bool t.in_layout = true
+  ∧ wf_layout_bool t.out_layout = true
   ∧ (match t.kind with
      | TransformKind.identity    => t.in_layout = t.out_layout
      | TransformKind.reinterpret => t.in_layout.total_size = t.out_layout.total_size
      | TransformKind.copy        => True)
 
-/-- The Lean model of IVE's `verify_transform`.
-Returns `valid=true` iff the spec holds. Marked `noncomputable` because
-the spec involves `WF_Layout` (a `Prop` with universal quantifiers
-over `Field`), whose `Decidable` instance is provided by
-`Classical.propDecidable` (not constructively computable in general).
-The actual Rust function uses a `HashMap`-based lookup to discharge
-the well-formedness check; this Lean model factors that into the
-`WF_Layout` predicate.
+/-- Constructive `Decidable` instance for `verify_transform_spec`.
 
-The `Decidable` instance is supplied explicitly via
-`@decide _ (Classical.propDecidable _)` rather than relying on instance
-search — `Classical.propDecidable` is a low-priority instance and is
-not always picked up automatically for `WF_Layout`'s universally
-quantified conjunction. -/
-noncomputable def verify_transform (t : StateTransform) :
+This is what replaces `Classical.propDecidable _` from the pre-Wave-1
+formulation. The proof unfolds the spec (exposing the `match t.kind`
+syntactically), case-splits on `t.kind`, and in each branch the match
+reduces so `inferInstance` picks up the auto-derived `Decidable` for
+the resulting `And` form. The per-arm decidability rests on:
+  - `instDecidableEqBool` for `wf_layout_bool _ = true`,
+  - `DecidableEq Layout` (added in `WFLayoutBool.lean`) for
+    `t.in_layout = t.out_layout` (identity arm),
+  - `instDecidableEqNat` for `t.in_layout.total_size = t.out_layout.total_size`
+    (reinterpret arm),
+  - `True` is decidable (copy arm).
+
+The instance is computable (no `Classical`), so `decide` reduces to
+a `Bool` and `verify_transform` below is a plain `def`. -/
+instance (t : StateTransform) : Decidable (verify_transform_spec t) := by
+  unfold verify_transform_spec
+  cases t.kind with
+  | identity    => exact inferInstance
+  | reinterpret => exact inferInstance
+  | copy        => exact inferInstance
+
+/-- The Lean model of IVE's `verify_transform`.
+Returns `valid=true` iff the spec holds.
+
+**Computable** (no `noncomputable`): the `Decidable` instance above is
+constructive (case-split on `t.kind`, no `Classical.propDecidable`),
+so `decide (verify_transform_spec t)` reduces to a `Bool` and this
+`def` survives extraction to Rust (unblocks IVE-1-B and PMT-1-G). -/
+def verify_transform (t : StateTransform) :
     StateTransformVerification :=
-  { valid := @decide (verify_transform_spec t) (Classical.propDecidable _),
-    error := if @decide (verify_transform_spec t) (Classical.propDecidable _)
+  { valid := decide (verify_transform_spec t),
+    error := if decide (verify_transform_spec t)
              then none
              else some "transform invalid" }
 
@@ -122,9 +163,15 @@ layouts are well-formed and the kind constraint holds.
 
 This is the Lean statement of "IVE's `verify_transform` is sound":
 acceptance implies well-formedness + compatibility. The proof bridges
-`(decide P) = true` to `P` via `decide_eq_true_eq`, then closes by
-definitional equality (`verify_transform_spec t` unfolds to the
-goal's conjunction form).
+`(decide P) = true` to `P` via `decide_eq_true_iff` (the constructive
+`Decidable` instance above comes from the spec's `Bool`-backed form,
+not `Classical.propDecidable`), then unfolds the spec and uses
+`wf_layout_bool_iff_wf_layout` to recover `WF_Layout` from each
+`wf_layout_bool _ = true` conjunct.
+
+The third conjunct (`match t.kind with ...`) has the same form in
+both `hspec` and the goal, so `exact h3` closes it directly — no
+case-split on `t.kind` is needed.
 
 **No `sorry`** — the theorem is closed. -/
 theorem verify_transform_sound
@@ -136,15 +183,29 @@ theorem verify_transform_sound
        | TransformKind.identity    => t.in_layout = t.out_layout
        | TransformKind.reinterpret => t.in_layout.total_size = t.out_layout.total_size
        | TransformKind.copy        => True) := by
+  -- `hverify` after `verify_transform` unfolds reduces to
+  -- `decide (verify_transform_spec t) = true`. The `Decidable` instance
+  -- is the constructive one above (no `Classical.propDecidable`).
   unfold verify_transform at hverify
-  -- `hverify : decide (verify_transform_spec t) = true`, where the
-  -- `Decidable` instance is `Classical.propDecidable _` (provided
-  -- explicitly in `verify_transform`). `decide_eq_true_eq.mp` then
-  -- extracts the propositional content; we pass the instance
-  -- explicitly via `@decide_eq_true_eq _ (Classical.propDecidable _)`
-  -- because instance search does not pick up `Classical.propDecidable`
-  -- for `WF_Layout`'s universally quantified conjunction.
-  exact (@decide_eq_true_eq _ (Classical.propDecidable _)).mp hverify
+  -- Bridge `(decide (verify_transform_spec t)) = true` to
+  -- `verify_transform_spec t` via `decide_eq_true_iff` (the `Iff`
+  -- form of `decide_eq_true_eq`).
+  have hspec : verify_transform_spec t :=
+    decide_eq_true_iff.mp hverify
+  -- `hspec : wf_layout_bool t.in_layout = true
+  --         ∧ wf_layout_bool t.out_layout = true
+  --         ∧ match t.kind with ...`
+  obtain ⟨h1, h2, h3⟩ := hspec
+  refine ⟨?_, ?_, ?_⟩
+  · -- `h1 : wf_layout_bool t.in_layout = true` → `WF_Layout t.in_layout`
+    -- via `wf_layout_bool_iff_wf_layout`.
+    exact (wf_layout_bool_iff_wf_layout t.in_layout).mp h1
+  · -- `h2 : wf_layout_bool t.out_layout = true` → `WF_Layout t.out_layout`.
+    exact (wf_layout_bool_iff_wf_layout t.out_layout).mp h2
+  · -- `h3 : match t.kind with ...` — same form as the goal's third
+    -- conjunct, so `exact h3` closes it directly. No case-split on
+    -- `t.kind` is needed (which would also work but is unnecessary).
+    exact h3
 
 /-- Corollary: `verify_transform` preserves layout well-formedness.
 This is the "no ill-formed layout slips through IVE's transform check"
