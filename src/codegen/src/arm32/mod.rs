@@ -9563,7 +9563,12 @@ impl Backend for Arm32Backend {
                     crate::ir::IRInstr::ChannelOpen { .. } | crate::ir::IRInstr::ChannelSend { .. }
                     | crate::ir::IRInstr::ChannelRecv { .. } | crate::ir::IRInstr::ChannelRecvTimeout { .. } | crate::ir::IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::ChannelClose { .. }
                 // StarkProof — stub (Call-form builtin is the active path).
-                | crate::ir::IRInstr::StarkProof { .. } => Vec::new(),
+                | crate::ir::IRInstr::StarkProof { .. }
+                // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+                // replacements): backend lowering not yet implemented on arm32;
+                // emit no bytes (x86_64 is the canonical path).
+                | crate::ir::IRInstr::BulkCopy { .. }
+                | crate::ir::IRInstr::BulkFill { .. } => Vec::new(),
 
                 // CallIndirect — indirect call through func_ptr.
                 // arm32 codegen: load args into r0-r3, load func_ptr into
