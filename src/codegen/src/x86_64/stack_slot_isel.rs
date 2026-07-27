@@ -4363,6 +4363,52 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     instr_opcode = Some("call_indirect".to_string());
                     code
                 }
+
+                // ── Bulk memory operations (No-FFI: libc memcpy / memset) ──
+                // These replace the libc `memcpy` / `memset` extern calls
+                // (FFI Wave 1 task A).  Both lower to a single x86_64 string
+                // instruction: REP MOVSB for memcpy, REP STOSB for memset.
+                // Caller-saved arg registers (RDI, RSI, RCX, RAX) are freely
+                // clobbered — no save/restore needed (mirrors the existing
+                // IRInstr::Call / IRInstr::Syscall emit pattern).
+                //
+                // BulkCopy (memcpy): RDI=dst, RSI=src, RCX=len, CLD, REP MOVSB.
+                IRInstr::BulkCopy { dst, src, len } => {
+                    let mut code = Vec::new();
+                    // Load dst pointer → RDI
+                    code.extend(load_value(dst, Gpr::Rdi));
+                    // Load src pointer → RSI
+                    code.extend(load_value(src, Gpr::Rsi));
+                    // Load byte count → RCX
+                    code.extend(load_value(len, Gpr::Rcx));
+                    // CLD (clear direction flag → forward copy) — 0xFC
+                    // (SystemV ABI guarantees DF=0 on entry, but be safe.)
+                    code.push(0xFC);
+                    // REP MOVSB — 0xF3 0xA4
+                    code.push(0xF3);
+                    code.push(0xA4);
+                    instr_opcode = Some("bulk_copy".to_string());
+                    code
+                }
+
+                // BulkFill (memset): RDI=dst, AL=val (low 8 bits), RCX=len,
+                // CLD, REP STOSB.
+                IRInstr::BulkFill { dst, val, len } => {
+                    let mut code = Vec::new();
+                    // Load dst pointer → RDI
+                    code.extend(load_value(dst, Gpr::Rdi));
+                    // Load fill value → RAX (REP STOSB reads AL = low 8 bits)
+                    code.extend(load_value(val, Gpr::Rax));
+                    // Load byte count → RCX
+                    code.extend(load_value(len, Gpr::Rcx));
+                    // CLD (clear direction flag → forward fill) — 0xFC
+                    code.push(0xFC);
+                    // REP STOSB — 0xF3 0xAA
+                    code.push(0xF3);
+                    code.push(0xAA);
+                    instr_opcode = Some("bulk_fill".to_string());
+                    code
+                }
             };
 
             if !encoded.is_empty() {

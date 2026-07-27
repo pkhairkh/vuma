@@ -1912,6 +1912,52 @@ pub enum IRInstr {
         /// Argument values.
         args: Vec<IRValue>,
     },
+
+    // ── Bulk memory operations (No-FFI: replace libc memcpy / memset) ──
+    /// Bulk memory copy (memcpy replacement) — copies `len` bytes from the
+    /// pointer in `src` to the pointer in `dst`.
+    ///
+    /// Semantically equivalent to the libc `memcpy` extern call when the
+    /// source and destination regions do not overlap.  Added by FFI Wave 1
+    /// task A so the IR (and the Lean PMT model) can reason about a bulk
+    /// copy as a single instruction instead of a `Load`+`Store` loop.
+    ///
+    /// **Effects:** reads `dst`, `src`, `len`; writes the memory region
+    /// `[dst, dst+len)`.  Defines no vreg.  Treated as side-effecting by
+    /// DCE/LICM (memory write).
+    ///
+    /// **Backend lowering (x86_64):** `CLD; REP MOVSB` with `RDI = dst`,
+    /// `RSI = src`, `RCX = len` — the canonical x86_64 lowering of memcpy.
+    BulkCopy {
+        /// Destination pointer vreg.
+        dst: IRValue,
+        /// Source pointer vreg.
+        src: IRValue,
+        /// Length vreg (i64 byte count; low 64 bits used).
+        len: IRValue,
+    },
+
+    /// Bulk memory fill (memset replacement) — fills `len` bytes at the
+    /// pointer in `dst` with the low 8 bits of `val`.
+    ///
+    /// Replaces the libc `memset` extern call for No-FFI verification.
+    /// Added by FFI Wave 1 task A alongside `BulkCopy`.
+    ///
+    /// **Effects:** reads `dst`, `val`, `len`; writes the memory region
+    /// `[dst, dst+len)`.  Defines no vreg.  Treated as side-effecting by
+    /// DCE/LICM (memory write).
+    ///
+    /// **Backend lowering (x86_64):** `CLD; REP STOSB` with `RDI = dst`,
+    /// `AL = val` (low 8 bits), `RCX = len` — the canonical x86_64
+    /// lowering of memset.
+    BulkFill {
+        /// Destination pointer vreg.
+        dst: IRValue,
+        /// Fill-byte vreg (i64; low 8 bits used as the fill byte).
+        val: IRValue,
+        /// Length vreg (i64 byte count; low 64 bits used).
+        len: IRValue,
+    },
 }
 
 /// error discriminants returned by [`IRInstr::ChannelRecvResult`].
@@ -2002,7 +2048,10 @@ impl IRInstr {
             | IRInstr::CondBranch { .. }
             | IRInstr::AtomicStore { .. }
             | IRInstr::ChannelSend { .. }
-            | IRInstr::ChannelClose { .. } => vec![],
+            | IRInstr::ChannelClose { .. }
+            // BulkCopy / BulkFill write memory but define no vreg.
+            | IRInstr::BulkCopy { .. }
+            | IRInstr::BulkFill { .. } => vec![],
         }
     }
 
@@ -2111,6 +2160,19 @@ impl IRInstr {
             IRInstr::CallIndirect { func_ptr, args, .. } => {
                 let mut r = func_ptr.as_register().into_iter().collect::<Vec<_>>();
                 r.extend(args.iter().flat_map(|a| a.as_register()));
+                r
+            }
+            // Bulk memory ops read all three pointer/length vregs.
+            IRInstr::BulkCopy { dst, src, len } => {
+                let mut r = dst.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(src.as_register());
+                r.extend(len.as_register());
+                r
+            }
+            IRInstr::BulkFill { dst, val, len } => {
+                let mut r = dst.as_register().into_iter().collect::<Vec<_>>();
+                r.extend(val.as_register());
+                r.extend(len.as_register());
                 r
             }
         }
@@ -2395,6 +2457,12 @@ impl fmt::Display for IRInstr {
                     ),
                     None => write!(f, "call_indirect {}({})", func_ptr, args_str.join(", ")),
                 }
+            }
+            IRInstr::BulkCopy { dst, src, len } => {
+                write!(f, "bulk_copy {}, {}, {}", dst, src, len)
+            }
+            IRInstr::BulkFill { dst, val, len } => {
+                write!(f, "bulk_fill {}, {}, {}", dst, val, len)
             }
         }
     }
