@@ -319,6 +319,18 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             func_ptr: sv(func_ptr),
             args: args.iter().map(sv).collect(),
         },
+        // BulkCopy / BulkFill (FFI Wave 1 task A) — substitute all three
+        // operand vregs (dst, src/val, len).
+        IRInstr::BulkCopy { dst, src, len } => IRInstr::BulkCopy {
+            dst: sv(dst),
+            src: sv(src),
+            len: sv(len),
+        },
+        IRInstr::BulkFill { dst, val, len } => IRInstr::BulkFill {
+            dst: sv(dst),
+            val: sv(val),
+            len: sv(len),
+        },
     }
 }
 

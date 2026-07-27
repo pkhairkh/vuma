@@ -458,6 +458,18 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                         sub(a, from, to);
                     }
                 }
+                // BulkCopy / BulkFill (FFI Wave 1 task A) — renumber all
+                // three operand vregs (dst, src/val, len).
+                IRInstr::BulkCopy { dst, src, len } => {
+                    sub(dst, from, to);
+                    sub(src, from, to);
+                    sub(len, from, to);
+                }
+                IRInstr::BulkFill { dst, val, len } => {
+                    sub(dst, from, to);
+                    sub(val, from, to);
+                    sub(len, from, to);
+                }
             }
         }
         match &mut block.terminator {

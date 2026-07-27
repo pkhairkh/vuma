@@ -2289,7 +2289,12 @@ impl Emitter {
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
             // StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } => {}
+            | IRInstr::StarkProof { .. }
+            // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+            // replacements): aarch64 backend lowering not yet implemented;
+            // emit nothing (x86_64 is the canonical path).
+            | IRInstr::BulkCopy { .. }
+            | IRInstr::BulkFill { .. } => {}
             // CallIndirect — indirect call through func_ptr vreg.
             // aarch64 codegen: load func_ptr into X16, BLR X16.
             IRInstr::CallIndirect { dst, func_ptr, args } => {
@@ -5639,7 +5644,12 @@ impl Emitter {
             }
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelClose { .. }
             // StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } => {}
+            | IRInstr::StarkProof { .. }
+            // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+            // replacements): aarch64 SS-mode lowering not yet implemented;
+            // emit nothing (x86_64 is the canonical path).
+            | IRInstr::BulkCopy { .. }
+            | IRInstr::BulkFill { .. } => {}
             // CallIndirect — indirect call through func_ptr vreg.
             // aarch64 SS-mode: load func_ptr into X16, BLR X16.
             IRInstr::CallIndirect { dst, func_ptr, args } => {
