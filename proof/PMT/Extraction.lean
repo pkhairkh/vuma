@@ -2,6 +2,9 @@ import PMT.Basic
 import PMT.Soundness
 import PMT.RawArena
 import PMT.WellTypedStrong
+import PMT.IVE.Soundness.StateReads
+import PMT.IVE.Soundness.StateWrites
+import PMT.IVE.Soundness.Transform
 
 /-! ## Extraction — Verified Bounds-Checking Logic (sorry-free)
 
@@ -143,6 +146,95 @@ def extraction_manifest : List String :=
   [ "verified_capacity_check",
     "verified_field_bounds_check",
     "verified_linearity_check",
-    "verified_pmt_check" ]
+    "verified_pmt_check",
+    "lean_verify_transform",
+    "lean_verify_state_reads",
+    "lean_verify_state_writes" ]
+
+/-! ## §8: IVE state-verifier exports (Wave 1 task IVE-1-B)
+
+The three IVE state verifiers (`verify_state_reads`, `verify_state_writes`,
+`verify_transform`) have sorry-free Lean soundness proofs
+(`PMT.IVE.Soundness.StateReads`, `StateWrites`, `Transform`).
+After IVE-1-A made `verify_transform` computable (no `noncomputable`,
+no `Classical.propDecidable`), all three are now eligible for `@[export]`
+extraction to Rust via Lean's C backend.
+
+The challenge: `verify_state_reads` and `verify_state_writes` take
+`env : String → Layout` (a function type), which is NOT directly
+C-marshallable. We export wrapper functions that take a list of
+`(var_name, layout)` pairs instead; the wrapper reconstructs the total
+function internally (returning `emptyLayout` for unknown vars, matching
+the Rust-side `HashMap.get()` → default behavior).
+
+`verify_transform` takes `StateTransform` (a structure with
+`String × String × Layout × Layout × TransformKind`), which IS
+directly C-marshallable. We export it directly.
+-/
+
+/-- Helper: reconstruct a `String → Layout` function from a list of
+(var, layout) pairs. Unknown vars map to `emptyLayout` (size 1, no
+fields). This mirrors the Rust-side pattern where `HashMap.get()`
+returning `None` is treated as a default empty layout. -/
+def layout_env_from_list (env_list : List (String × PMT.Layout))
+    (var : String) : PMT.Layout :=
+  match env_list.lookup var with
+  | some layout => layout
+  | none => PMT.emptyLayout
+
+/-- `@[export lean_verify_transform]` — extracted form of
+`PMT.IVE.Soundness.verify_transform`. Takes a `StateTransform` and
+returns a `StateTransformVerification` (a `Bool × Option String`
+structure). The Rust FFI marshals `StateTransform` as a struct of
+(offsets/sizes for the two layouts + a kind tag) and the return as
+`uint8_t` (the `valid` field; the `error` string is dropped on the
+FFI boundary since it's only diagnostic). -/
+@[export lean_verify_transform]
+def leanVerifyTransform (t : PMT.IVE.Soundness.StateTransform) :
+    Bool :=
+  (PMT.IVE.Soundness.verify_transform t).valid
+
+/-- `@[export lean_verify_state_reads]` — extracted form of
+`PMT.IVE.Soundness.verify_state_reads`. Takes a list of (var, layout)
+pairs (the env) and a list of `StateRead` (var + field), returns
+`true` iff every read passes (i.e., the verification list is all
+`valid = true`). The Rust FFI marshals the env as a `lean_object*`
+(list of pairs) and the reads as a `lean_object*` (list of structs). -/
+@[export lean_verify_state_reads]
+def leanVerifyStateReads
+    (env_list : List (String × PMT.Layout))
+    (reads : List PMT.IVE.Soundness.StateRead) : Bool :=
+  let env := layout_env_from_list env_list
+  let results := PMT.IVE.Soundness.verify_state_reads env reads
+  results.all (fun r => r.valid)
+
+/-- `@[export lean_verify_state_writes]` — extracted form of
+`PMT.IVE.Soundness.verify_state_writes`. Takes a list of (var, layout)
+pairs, a list of consumed var names, and a list of `StateWrite`
+(var + field), returns `true` iff every write passes. -/
+@[export lean_verify_state_writes]
+def leanVerifyStateWrites
+    (env_list : List (String × PMT.Layout))
+    (consumed : List String)
+    (writes : List PMT.IVE.Soundness.StateWrite) : Bool :=
+  let env := layout_env_from_list env_list
+  let results := PMT.IVE.Soundness.verify_state_writes env consumed writes
+  results.all (fun r => r.valid)
+
+/-- Soundness bridge for the extracted `lean_verify_transform`:
+if the extracted function returns `true`, then the propositional
+soundness theorem `verify_transform_sound` applies. -/
+theorem lean_verify_transform_sound
+    (t : PMT.IVE.Soundness.StateTransform)
+    (hcheck : leanVerifyTransform t = true) :
+    PMT.WF_Layout t.in_layout
+    ∧ PMT.WF_Layout t.out_layout
+    ∧ (match t.kind with
+       | PMT.IVE.Soundness.TransformKind.identity    => t.in_layout = t.out_layout
+       | PMT.IVE.Soundness.TransformKind.reinterpret => t.in_layout.total_size = t.out_layout.total_size
+       | PMT.IVE.Soundness.TransformKind.copy        => True) := by
+  unfold leanVerifyTransform at hcheck
+  -- hcheck : (verify_transform t).valid = true
+  exact PMT.IVE.Soundness.verify_transform_sound t hcheck
 
 end PMT.Extraction
