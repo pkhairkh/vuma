@@ -367,6 +367,40 @@ theorem PmtInstr.to_steps_syscall (nr : Nat) (args : List IRValue)
     PmtInstr.to_steps (.syscall nr args dst) = [] := by
   rfl
 
+/-! ## §1.7e: Bulk-memory variants (FFI-3-A) — `bulk_copy` / `bulk_fill`
+
+The 2 bulk-memory `PmtInstr` variants added by FFI-3-A (mirroring the
+Rust `IRInstr::BulkCopy` and `IRInstr::BulkFill` from FFI-1-A) both
+flatten to the empty `List Step`. They are opaque memory writes —
+memcpy/memset replacements that write to a raw pointer region
+`[dst, dst+len)`, not to a PMT arena region. Their underlying byte-level
+semantics is a runtime concern (x86_64 `CLD; REP MOVSB` for `bulk_copy`,
+`CLD; REP STOSB` for `bulk_fill`), not a PMT `Step` interaction.
+
+The 2 lemmas below are each provable by `rfl` (the `PmtInstr.to_steps`
+definition maps each bulk-memory constructor literally to `[]`). They
+feed the `cases i with` block of `PmtInstr.to_steps_preserves_WF_Layout`
+(§1.8) and `PmtInstr.to_steps_op_transform` (§1.9) so those proofs
+remain exhaustive over the enlarged `PmtInstr` inductive (37
+constructors: 7 memory + 12 arithmetic + 3 control-flow + 3 atomic +
+10 channel/special + 2 bulk-memory). -/
+
+/-- §1.7e.1: `bulk_copy` flattens to `[]` (opaque memory write — memcpy
+replacement; the underlying `REP MOVSB` byte copy is a runtime concern,
+not a PMT arena `Step`). Mirrors Rust `IRInstr::BulkCopy { dst, src,
+len }` field-for-field. -/
+theorem PmtInstr.to_steps_bulk_copy (dst src len : IRValue) :
+    PmtInstr.to_steps (.bulk_copy dst src len) = [] := by
+  rfl
+
+/-- §1.7e.2: `bulk_fill` flattens to `[]` (opaque memory write — memset
+replacement; the underlying `REP STOSB` byte fill is a runtime concern,
+not a PMT arena `Step`). Mirrors Rust `IRInstr::BulkFill { dst, val,
+len }` field-for-field. -/
+theorem PmtInstr.to_steps_bulk_fill (dst val len : IRValue) :
+    PmtInstr.to_steps (.bulk_fill dst val len) = [] := by
+  rfl
+
 /-- §1.8: Every `Step` produced by `PmtInstr.to_steps` carries a
 `WF_Layout` when the instruction is well-typed under `env`.
 
@@ -528,6 +562,18 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
   | syscall nr args dst =>
     rw [PmtInstr.to_steps_syscall] at hs
     simp at hs
+  -- 2 bulk-memory variants (FFI-3-A): each flattens to `[]`, so the
+  -- membership hypothesis `hs : s ∈ []` is vacuous. The per-instruction
+  -- `well_typed` predicate is `True` for both variants, so `hi` is
+  -- `trivial` and not consulted. Their effects are opaque memory writes
+  -- (memcpy/memset replacements) — they do not interact with PMT's
+  -- arena state.
+  | bulk_copy dst src len =>
+    rw [PmtInstr.to_steps_bulk_copy] at hs
+    simp at hs
+  | bulk_fill dst val len =>
+    rw [PmtInstr.to_steps_bulk_fill] at hs
+    simp at hs
 
 /-! ## §1.9: Every `Step` produced by `PmtInstr.to_steps` carries `op = .transform` (PMT-1-E)
 
@@ -659,6 +705,14 @@ theorem PmtInstr.to_steps_op_transform
     rfl
   | syscall nr args dst =>
     rw [PmtInstr.to_steps_syscall] at hs
+    simp at hs
+  -- 2 bulk-memory variants (FFI-3-A): each flattens to `[]`, so the
+  -- membership hypothesis `hs : s ∈ []` is vacuous.
+  | bulk_copy dst src len =>
+    rw [PmtInstr.to_steps_bulk_copy] at hs
+    simp at hs
+  | bulk_fill dst val len =>
+    rw [PmtInstr.to_steps_bulk_fill] at hs
     simp at hs
 
 /-! ## §2. Per-block flattening: `IRBlock.to_steps` -/
