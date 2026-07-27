@@ -189,16 +189,15 @@ def field_types_env_from_list (ft_list : List (String × List (PMT.Field × Stri
   ft_list.lookup var
 
 /-- `@[export lean_verify_transform]` — extracted form of
-`PMT.IVE.Soundness.verify_transform`. Takes a `StateTransform` and
-returns a `StateTransformVerification` (a `Bool × Option String`
-structure). The Rust FFI marshals `StateTransform` as a struct of
-(offsets/sizes for the two layouts + a kind tag) and the return as
-`uint8_t` (the `valid` field; the `error` string is dropped on the
-FFI boundary since it's only diagnostic). -/
+`PMT.IVE.Soundness.verify_transform`. Takes a `LayoutRegistry` (layout
+name → LayoutInfo lookup) and a `StateTransform` (pair of layout names),
+returns the `valid` Bool. Faithful to Rust's `verify_transform(layouts, input_layout, output_layout)`. -/
 @[export lean_verify_transform]
-def leanVerifyTransform (t : PMT.IVE.Soundness.StateTransform) :
+def leanVerifyTransform
+    (layouts : PMT.IVE.Soundness.LayoutRegistry)
+    (t : PMT.IVE.Soundness.StateTransform) :
     Bool :=
-  (PMT.IVE.Soundness.verify_transform t).valid
+  (PMT.IVE.Soundness.verify_transform_st layouts t).valid
 
 /-- `@[export lean_verify_state_reads]` — extracted form of
 `PMT.IVE.Soundness.verify_state_reads`. Takes a list of (var, layout)
@@ -234,18 +233,16 @@ def leanVerifyStateWrites
 
 /-- Soundness bridge for the extracted `lean_verify_transform`:
 if the extracted function returns `true`, then the propositional
-soundness theorem `verify_transform_sound` applies. -/
+soundness theorem `verify_transform_sound` applies. Faithful: concludes
+layout existence (NOT WF_Layout — Rust doesn't check it). -/
 theorem lean_verify_transform_sound
+    (layouts : PMT.IVE.Soundness.LayoutRegistry)
     (t : PMT.IVE.Soundness.StateTransform)
-    (hcheck : leanVerifyTransform t = true) :
-    PMT.WF_Layout t.in_layout
-    ∧ PMT.WF_Layout t.out_layout
-    ∧ (match t.kind with
-       | PMT.IVE.Soundness.TransformKind.identity    => t.in_layout = t.out_layout
-       | PMT.IVE.Soundness.TransformKind.reinterpret => t.in_layout.total_size = t.out_layout.total_size
-       | PMT.IVE.Soundness.TransformKind.copy        => True) := by
+    (hcheck : leanVerifyTransform layouts t = true) :
+    (∃ in_info, layouts t.input_layout = some in_info)
+    ∧ (∃ out_info, layouts t.output_layout = some out_info) := by
   unfold leanVerifyTransform at hcheck
-  -- hcheck : (verify_transform t).valid = true
-  exact PMT.IVE.Soundness.verify_transform_sound t hcheck
+  have h_sound := PMT.IVE.Soundness.verify_transform_sound layouts t.input_layout t.output_layout hcheck
+  exact ⟨h_sound.1, h_sound.2.1⟩
 
 end PMT.Extraction
