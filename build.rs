@@ -108,18 +108,25 @@ fn link_lean_ffi() {
         "cargo:rerun-if-changed={}",
         proof_dir.join("lakefile.toml").display()
     );
+    // The real-vs-stub gate reads LEAN_HOME, so cargo MUST re-run this
+    // script (and re-emit/clear `lean_ffi_linked`) whenever LEAN_HOME
+    // changes — otherwise a stale cfg from a prior LEAN_HOME-set build
+    // would persist into LEAN_HOME-unset builds (and vice versa), making
+    // the stub-default guarantee unreliable.
+    println!("cargo:rerun-if-env-changed=LEAN_HOME");
 
-    // Step 1+2: attempt the real `lake build` → `lean --emit-c` pipeline
-    // ONLY when `lake` is on PATH and `LEAN_HOME` is set. Best-effort: any
-    // failure falls through to the stub.
-    let lake_on_path = Command::new("lake")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    // Step 1+2: attempt the real Lean → C → archive pipeline ONLY when
+    // `LEAN_HOME` is explicitly set (PMT-1-G: the real archive activates
+    // solely on LEAN_HOME so the stub remains the default everywhere
+    // else). `lake` is NO LONGER required as a gate: try_real_lean_pipeline
+    // consumes the C IR already emitted by a prior `lake build` under
+    // proof/.lake/build/ir/, so the elan `lake` shim (which fails
+    // `--version` without a default toolchain configured) no longer blocks
+    // real linkage. Best-effort: any failure inside try_real_lean_pipeline
+    // falls through to the stub.
     let lean_home_set = env::var_os("LEAN_HOME").is_some();
 
-    if lake_on_path && lean_home_set {
+    if lean_home_set {
         match try_real_lean_pipeline(&proof_dir) {
             Ok(()) => {
                 // Real linkage succeeded; `lean_ffi_linked` cfg + env were
@@ -135,9 +142,7 @@ fn link_lean_ffi() {
         }
     } else {
         println!(
-            "cargo:warning=Lean FFI linkage skipped (lake={} LEAN_HOME={}) — using stub",
-            if lake_on_path { "present" } else { "absent" },
-            if lean_home_set { "set" } else { "unset" }
+            "cargo:warning=Lean FFI linkage skipped (LEAN_HOME unset) — using stub"
         );
     }
 
@@ -148,85 +153,270 @@ fn link_lean_ffi() {
     compile_stub(&stub_c);
 }
 
-/// Attempt the real `lake build` → `lean --emit-c` → `cc::Build` pipeline.
+/// Attempt the REAL Lean → C → static-archive pipeline using the Lean
+/// toolchain resolved from `LEAN_HOME` (or `lean` on PATH) and the C IR
+/// already emitted by `lake build` under `proof/.lake/build/ir/`.
 ///
-/// On success: compiles the emitted C into `liblean_extraction.a` and emits
+/// On success: compiles the emitted PMT C IR (plus the Lean runtime +
+/// library objects, bundled into the SAME archive) and emits
 /// `cargo:rustc-cfg=lean_ffi_linked` + `cargo:rustc-env=LEAN_FFI_LINKED=1`
 /// so `verification.rs` routes the 3 state verifiers through the extracted
 /// Lean functions.
 ///
 /// Returns `Err(msg)` on any failure so the caller can fall back to the
-/// stub. Never panics.
+/// stub (the caller wraps every `Err` in a `cargo:warning`). Never panics.
 #[cfg(feature = "pmt-runtime-check")]
 fn try_real_lean_pipeline(proof_dir: &Path) -> Result<(), String> {
-    // Step 1: `lake build` in proof/
-    let lake_build = Command::new("lake")
-        .arg("build")
-        .current_dir(proof_dir)
-        .output()
-        .map_err(|e| format!("spawn lake build: {e}"))?;
-    if !lake_build.status.success() {
+    // ── Step (a): locate the Lean toolchain home ────────────────────
+    // Prefer `LEAN_HOME` (elan toolchain dir, e.g.
+    // ~/.elan/toolchains/leanprover--lean4---v4.21.0). Fall back to
+    // `$(dirname $(which lean))/..` for non-elan prefix installs where
+    // `lean` is at `<prefix>/bin/lean` and the runtime at
+    // `<prefix>/lib/lean/`. (For elan the `which lean` heuristic resolves
+    // to ~/.elan, which does NOT hold lib/lean/, so `LEAN_HOME` is the
+    // reliable path there — the heuristic is best-effort.)
+    let lean_home: PathBuf = match env::var_os("LEAN_HOME") {
+        Some(v) => PathBuf::from(v),
+        None => {
+            let lean_exe = find_on_path("lean").ok_or_else(|| {
+                "LEAN_HOME unset and `lean` not found on PATH".to_string()
+            })?;
+            lean_exe
+                .parent()
+                .and_then(|p| p.parent())
+                .ok_or_else(|| {
+                    "could not resolve lean_home from `lean` executable path".to_string()
+                })?
+                .to_path_buf()
+        }
+    };
+
+    // ── Step (b)+(c): verify libleanrt.a and lean.h exist ───────────
+    let lean_lib_dir = lean_home.join("lib").join("lean");
+    let lean_inc_dir = lean_home.join("include").join("lean");
+    let leanrt_a = lean_lib_dir.join("libleanrt.a");
+    let lean_h = lean_inc_dir.join("lean.h");
+    if !leanrt_a.is_file() {
         return Err(format!(
-            "lake build exited {}: {}",
-            lake_build.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&lake_build.stderr)
+            "libleanrt.a not found at {} (LEAN_HOME={})",
+            leanrt_a.display(),
+            lean_home.display()
+        ));
+    }
+    if !lean_h.is_file() {
+        return Err(format!(
+            "lean.h not found at {} (LEAN_HOME={})",
+            lean_h.display(),
+            lean_home.display()
         ));
     }
 
-    // Step 2: `lean --emit-c` for Extraction.lean. The emitted C lands
-    // under proof/.lake/build/lib/PMT/Extraction.c (FFI_BRIDGE_PLAN §2).
-    let extraction_lean = proof_dir.join("PMT").join("Extraction.lean");
-    let emit_c = Command::new("lean")
-        .arg("--emit-c")
-        .arg(&extraction_lean)
-        .current_dir(proof_dir)
-        .output()
-        .map_err(|e| format!("spawn lean --emit-c: {e}"))?;
-    if !emit_c.status.success() {
+    // ── Verify the C IR emitted by `lake build` exists ──────────────
+    // `lake build` emits each module's C under proof/.lake/build/ir/
+    // <ModPath>.c (the IR directory, NOT .lake/build/lib/). We consume
+    // the already-emitted IR directly rather than re-running `lean
+    // --emit-c` here: re-emission is a `lake` concern, and re-running it
+    // in build.rs is slow + fragile. If the IR is stale/absent we fall
+    // back to the stub (Err) — re-run `lake build` in proof/ to refresh.
+    let ir_dir = proof_dir.join(".lake").join("build").join("ir");
+    let extraction_c = ir_dir.join("PMT").join("Extraction.c");
+    if !extraction_c.is_file() {
         return Err(format!(
-            "lean --emit-c exited {}: {}",
-            emit_c.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&emit_c.stderr)
+            "Extraction.c IR not found at {} — run `lake build` in proof/ first",
+            extraction_c.display()
         ));
     }
 
-    let emitted_c = proof_dir
-        .join(".lake")
-        .join("build")
-        .join("lib")
-        .join("PMT")
-        .join("Extraction.c");
-    if !emitted_c.exists() {
+    // ── Step (d): collect the PMT C IR files to compile ─────────────
+    // Extraction.c transitively imports the whole PMT module graph
+    // (Basic, Soundness, IVE/Soundness/*, Iris/*, …). Compile every PMT
+    // module .c under ir/PMT/ so the archive defines the full set of
+    // extracted Lean symbols the link may pull in. check_pmt.c (which
+    // defines `main`) lives at the ir/ ROOT and is excluded automatically
+    // by only descending into ir/PMT/. The root PMT.c (defines
+    // initialize_PMT, no main) is added too in case the FFI later wants
+    // to run module initializers.
+    let mut c_files: Vec<PathBuf> = Vec::new();
+    collect_c_files_recursive(&ir_dir.join("PMT"), &mut c_files)
+        .map_err(|e| format!("collecting PMT .c IR: {e}"))?;
+    if c_files.is_empty() {
+        return Err("no PMT/*.c IR files found to compile".to_string());
+    }
+    let root_pmt_c = ir_dir.join("PMT.c");
+    if root_pmt_c.is_file() {
+        c_files.push(root_pmt_c);
+    }
+    for cf in &c_files {
+        println!("cargo:rerun-if-changed={}", cf.display());
+    }
+
+    println!(
+        "cargo:warning=Lean FFI real pipeline: compiling {} PMT .c file(s) with Lean include {}",
+        c_files.len(),
+        lean_inc_dir.display()
+    );
+
+    // cc::Build compiles the .c files into liblean_extraction.a in OUT_DIR.
+    cc::Build::new()
+        .files(&c_files)
+        .include(lean_home.join("include"))
+        .include(&lean_inc_dir)
+        .warnings(false)
+        // Lean-emitted C is not warning-clean; silence the noisy categories
+        // the Lean header pragma already tries to suppress.
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-unused-but-set-variable")
+        .flag("-Wno-unused-label")
+        .flag("-Wno-unused-function")
+        .flag("-Wno-unused-variable")
+        .compile("lean_extraction");
+
+    // ── Bundle the Lean runtime + library objects into the same archive ─
+    // The integration test links ONLY `lean_extraction` (via a manual
+    // `#[link(name = "lean_extraction", kind = "static")]` in
+    // tests/pmt_runtime_ffi_smoke.rs): build-script `cargo:rustc-link-lib`
+    // directives do NOT reliably propagate to integration-test link lines
+    // (rlibs do not forward native link-libs to dependents — see the test's
+    // `#[link]` comment). To make that single archive SELF-SUFFICIENT, we
+    // extract the .o members of the Lean static libs and append them to
+    // liblean_extraction.a so every `lean_*` / `l_*` runtime symbol the PMT
+    // objects reference is satisfied from within the archive itself.
+    //
+    // libLeanc.a is intentionally SKIPPED: its single member (Leanc.o)
+    // defines `main` / `_lean_main`, which would clash with the test
+    // harness's own `main`. libInit/libStd are pure-C Lean library code;
+    // libleanrt/libleancpp are the C++ runtime (verified disjoint: 0
+    // overlapping defined symbols between leanrt and leancpp).
+    let out_dir = env::var("OUT_DIR").map_err(|_| "OUT_DIR unset".to_string())?;
+    let archive = PathBuf::from(&out_dir).join("liblean_extraction.a");
+    // Merge the Lean static libs INTO liblean_extraction.a via an `ar -M`
+    // MRI script (OPEN + ADDLIB + SAVE). ADDLIB copies every member
+    // directly archive-to-archive, which — unlike `ar x` into a flat dir
+    // then `ar rs` — does NOT lose objects that share a basename: libInit.a
+    // alone has 119 duplicate member names (Basic.o, Array.o, … from
+    // distinct modules), and a flat `ar x` lets later same-named members
+    // overwrite earlier ones on disk, dropping their symbols (empirically
+    // this left l_List_isEmpty___rarg / l_String_intercalate undefined at
+    // link time). MRI ADDLIB preserves all members.
+    //
+    // libLeanc.a is intentionally skipped: its single member (Leanc.o)
+    // defines `main` / `_lean_main`, which would clash with the test
+    // harness's own `main`. libInit/libStd are pure-C Lean library code;
+    // libleanrt/libleancpp are the C++ runtime (verified disjoint: 0
+    // overlapping defined symbols between leanrt and leancpp).
+    use std::io::Write as _;
+    let lean_toolchain_lib_dir = lean_home.join("lib");
+    let mut mri = String::new();
+    mri.push_str(&format!("OPEN {}\n", archive.display()));
+    // Lean library + runtime code (lib/lean): pure-C Lean module code
+    // (Init/Std) + the C++ runtime (leanrt/leancpp).
+    for lib_name in &["libInit.a", "libStd.a", "libleanrt.a", "libleancpp.a"] {
+        let lib_path = lean_lib_dir.join(lib_name);
+        if lib_path.is_file() {
+            mri.push_str(&format!("ADDLIB {}\n", lib_path.display()));
+        }
+    }
+    // C++ stdlib + GMP + unwind + libuv that libleanrt/libleancpp were
+    // built against (lib/, the toolchain root — NOT lib/lean). Crucially
+    // libleancpp was compiled with clang/libc++, so it references libc++ /
+    // libc++abi symbols (std::__1::*, __cxa_*), NOT libstdc++; linking
+    // -lstdc++ would NOT resolve them. Bundling the static archives makes
+    // liblean_extraction.a self-sufficient for these deps too.
+    for lib_name in &["libc++.a", "libc++abi.a", "libgmp.a", "libunwind.a", "libuv.a"] {
+        let lib_path = lean_toolchain_lib_dir.join(lib_name);
+        if lib_path.is_file() {
+            mri.push_str(&format!("ADDLIB {}\n", lib_path.display()));
+        }
+    }
+    mri.push_str("SAVE\nEND\n");
+    let mut mri_child = Command::new("ar")
+        .arg("-M")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn ar -M: {e}"))?;
+    {
+        let mut stdin = mri_child.stdin.take().ok_or_else(|| {
+            "ar -M stdin pipe unavailable".to_string()
+        })?;
+        stdin
+            .write_all(mri.as_bytes())
+            .map_err(|e| format!("write ar -M stdin: {e}"))?;
+        // Dropping `stdin` here signals EOF to `ar -M`.
+    }
+    let mri_out = mri_child
+        .wait_with_output()
+        .map_err(|e| format!("wait ar -M: {e}"))?;
+    if !mri_out.status.success() {
         return Err(format!(
-            "emitted C not found at {}",
-            emitted_c.display()
+            "ar -M (merge Lean libs) exited {}: {}",
+            mri_out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&mri_out.stderr)
         ));
     }
 
-    // Step 3: cc::Build to compile the emitted C into a static archive.
-    // NOTE: real extraction also requires linking `lean_runtime` objects
-    // (FFI_BRIDGE_PLAN §2.3). That wiring is intentionally NOT done here
-    // yet — when `lake`/`LEAN_HOME` are genuinely available this branch
-    // is reached, but a fully-linked real archive needs the runtime
-    // objects too. For now this returns Err on the runtime-object check
-    // so the stub path is taken until Wave 5 completes the runtime link.
-    let lean_runtime = proof_dir
-        .join(".lake")
-        .join("build")
-        .join("lib")
-        .join("lean_runtime");
-    if !lean_runtime.exists() {
-        return Err(format!(
-            "lean_runtime objects not found at {} (Wave 5 runtime-link TODO)",
-            lean_runtime.display()
-        ));
-    }
+    // ── Step (e): link directives ───────────────────────────────────
+    // Primary (per PMT-1-G spec): search <lean_home>/lib/lean and link
+    // libleanrt.a. The bundle above already inlines leanrt's objects into
+    // lean_extraction, so these are belt-and-suspenders — a backstop in
+    // case any runtime symbol was missed by the bundle, and harmless when
+    // the archive is already self-sufficient (the linker simply finds no
+    // remaining undefined leanrt symbols to satisfy).
+    println!("cargo:rustc-link-search=native={}", lean_lib_dir.display());
+    println!("cargo:rustc-link-lib=static=leanrt");
+    // No system-dylib directives are needed here: the C++ runtime
+    // (libc++/libc++abi — libleancpp was built with clang/libc++, NOT
+    // libstdc++), GMP, libunwind and libuv are all bundled INTO
+    // liblean_extraction.a above, so the archive is self-sufficient.
+    // POSIX libc/libpthread/libdl/libm are already on Rust's default link
+    // line. (cargo:rustc-link-lib directives do not propagate to
+    // integration-test link lines anyway — see tests/pmt_runtime_ffi_smoke.rs
+    // #[link] comment — which is exactly why the bundle is required: the
+    // test links ONLY lean_extraction, so it must carry every Lean-runtime
+    // dependency internally.)
 
-    cc::Build::new().file(&emitted_c).compile("lean_extraction");
-
-    // Signal to the Rust code that real Lean FFI is linked.
+    // ── Step (f): signal real Lean FFI linkage to the Rust code ─────
     println!("cargo:rustc-cfg=lean_ffi_linked");
     println!("cargo:rustc-env=LEAN_FFI_LINKED=1");
+    println!(
+        "cargo:warning=Lean FFI real pipeline SUCCEEDED: {} PMT .c files + bundled Lean runtime -> liblean_extraction.a (lean_ffi_linked emitted)",
+        c_files.len()
+    );
+    Ok(())
+}
+
+/// Search `$PATH` for an executable named `name`, returning its path.
+/// Used by `try_real_lean_pipeline` to locate `lean` when `LEAN_HOME` is
+/// unset (non-elan prefix installs).
+#[cfg(feature = "pmt-runtime-check")]
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Recursively collect every `*.c` under `dir` into `out`. Used by
+/// `try_real_lean_pipeline` to gather the PMT module C IR graph.
+#[cfg(feature = "pmt-runtime-check")]
+fn collect_c_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_c_files_recursive(&path, out)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("c") {
+            out.push(path);
+        }
+    }
     Ok(())
 }
 
