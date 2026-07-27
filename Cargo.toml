@@ -65,6 +65,11 @@ vuma-package.workspace = true
 bitflags = "2"
 
 [build-dependencies]
+# Used by build.rs to compile the Lean-extracted (or stub) C archive into
+# the vuma binary when the `pmt-runtime-check` feature is enabled. When the
+# feature is off, build.rs does not reference `cc`, but the dependency is
+# declared unconditionally so the feature path is buildable in one shot.
+cc = "1"
 
 [profile.release]
 opt-level = 3
