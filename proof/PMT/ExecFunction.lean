@@ -128,6 +128,20 @@ theorem PmtInstr.to_steps_transform (in_var out : String) (layout : Layout) :
       = [⟨in_var, out, layout, .transform⟩] := by
   rfl
 
+/-- §1.6a: `transform_layouts` (FFI-3-B addition) flattens to `[]`.
+
+Mirrors Rust `IRInstr::Transform` (FFI-1-C addition, lowered to a
+single `mov dst_storage, src_storage` in the x86_64 backend — see
+`src/codegen/src/x86_64/stack_slot_isel.rs:4419`). The lowering is a
+pointer copy with no PMT arena state interaction, so no `Step` is
+emitted. The pre-existing `PmtInstr.transform` (PMT-1-A) is a
+different instruction (single-layout state transform) that emits one
+`Step` — see `to_steps_transform` above. -/
+theorem PmtInstr.to_steps_transform_layouts (dst src : IRValue)
+    (from_layout to_layout : String) :
+    PmtInstr.to_steps (.transform_layouts dst src from_layout to_layout) = [] := by
+  rfl
+
 /-- §1.7: `call` flattens to one self-loop step per argument. -/
 theorem PmtInstr.to_steps_call (fn : String) (args : List String) :
     PmtInstr.to_steps (.call fn args)
@@ -440,6 +454,10 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     rw [PmtInstr.to_steps_transform, List.mem_singleton] at hs
     subst hs
     exact hwt_layout
+  | transform_layouts dst src from_layout to_layout =>
+    -- FFI-3-B: flattens to `[]`; membership hypothesis is vacuous.
+    rw [PmtInstr.to_steps_transform_layouts] at hs
+    simp at hs
   | call fn args =>
     rw [PmtInstr.to_steps_call, List.mem_map] at hs
     obtain ⟨v, _, rfl⟩ := hs
@@ -614,6 +632,10 @@ theorem PmtInstr.to_steps_op_transform
   | transform in_var out layout =>
     rw [PmtInstr.to_steps_transform, List.mem_singleton] at hs
     subst hs; rfl
+  | transform_layouts dst src from_layout to_layout =>
+    -- FFI-3-B: flattens to `[]`; membership hypothesis is vacuous.
+    rw [PmtInstr.to_steps_transform_layouts] at hs
+    simp at hs
   | call fn args =>
     rw [PmtInstr.to_steps_call, List.mem_map] at hs
     obtain ⟨v, _, rfl⟩ := hs
