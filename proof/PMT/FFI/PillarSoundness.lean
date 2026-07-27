@@ -43,16 +43,22 @@ trust). The `ffi_pillar_sound` theorem formalizes this:
                             name ∈ syscall_callees
                           | .call_indirect _ _ => False
                           | _ => True) ∧
-      -- Every syscall callee is in the syscall ABI allowlist.
+      -- Every syscall number maps (via syscall_nr_table) to a
+      -- SyscallName in the allowlist (FFI-5-A / Gap #3 proof-side
+      -- closure: previously this ranged over .call, which was vacuous
+      -- because syscalls appear as .syscall nr args dst, not .call).
       (∀ f hf b hb i hi, match i with
-                          | .call name _ =>
-                            name ∈ syscall_callees →
-                            name ∈ SyscallName.allowlist
+                          | .syscall nr _ _ =>
+                            ∃ sn, syscall_nr_table nr = some sn ∧
+                                   sn ∈ SyscallName.allowlist
                           | _ => True)
 
 The first conjunct says every call is either a built-in or a syscall
-(no other externs). The second conjunct says syscalls are restricted
-to the allowlist (the 6 named syscalls). Together they capture "no
+(no other externs). The second conjunct says every `IRInstr::Syscall`
+in `P` carries a syscall number `nr` that maps (via `syscall_nr_table`,
+mirroring `src/ffi.rs::x86_64_syscalls()`) to one of the 19 named
+syscalls in `SyscallName.allowlist` (the Rust `SyscallName` enum,
+mirrored variant-for-variant by FFI-4-B). Together they capture "no
 foreign code except the syscall ABI".
 
 ## Residual TCB
@@ -187,8 +193,15 @@ def syscall_callees : List String :=
     **Statement breakdown.**
       * Conjunct 1: every call instruction in `P` targets either a
         built-in or a syscall. No other externs.
-      * Conjunct 2: every syscall callee is in the `SyscallName.allowlist`
-        (one of the 19 permitted syscalls — full Rust mirror, FFI-4-B).
+      * Conjunct 2: every `.syscall nr _ _` instruction in `P`
+        carries a syscall number `nr` that maps (via `syscall_nr_table`)
+        to a `SyscallName` in `SyscallName.allowlist` (one of the 19
+        permitted syscalls — full Rust mirror, FFI-4-B). This is no
+        longer vacuously true (FFI-5-A / Gap #3 proof-side closure):
+        previously Conjunct 2 ranged over `.call name _` instructions
+        where `name ∈ syscall_callees`, but syscalls don't appear as
+        `.call` — they appear as `.syscall nr args dst` — so the
+        antecedent was never satisfied and Conjunct 2 held vacuously.
 
     **Proof.** By definition of `NoFFI P` (which is `NoExterns P`):
     the predicate's `match` arm for `.call name _` requires
@@ -198,9 +211,14 @@ def syscall_callees : List String :=
     primitive effect, not an extern — and thus do not appear as
     `PmtInstr.call` instructions in the model).
 
-    The second conjunct (syscall allowlist) holds trivially by the
-    definition of `syscall_callees` as the image of
-    `SyscallName.allowlist` under `toString`. -/
+    The second conjunct (syscall allowlist) holds directly by the
+    strengthened `NoExterns` (FFI-4-A / Gap #3 predicate-side
+    closure): the predicate's `.syscall nr _ _` match arm requires
+    precisely `∃ sn, syscall_nr_table nr = some sn ∧ sn ∈
+    SyscallName.allowlist`, which is exactly Conjunct 2's
+    conclusion. FFI-5-A's contribution is to align the proof-side
+    Conjunct 2's quantification with the predicate-side check
+    (Gap #3 proof-side closure). -/
 theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
     -- (1) Every call instruction in P targets either a built-in or a
     --     syscall callee. No other externs.
@@ -213,15 +231,27 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         name ∈ syscall_callees
       | .call_indirect _ _ => False
       | _ => True)
-    ∧ -- (2) Every syscall callee is in the SyscallName.allowlist.
+    ∧ -- (2) Every `.syscall nr _ _` instruction in `P` carries a
+      --     syscall number `nr` that maps (via `syscall_nr_table`, the
+      --     Linux x86_64 syscall-number table from
+      --     `src/ffi.rs::x86_64_syscalls()`) to a `SyscallName` in
+      --     `SyscallName.allowlist` (one of the 19 permitted syscalls
+      --     — full Rust mirror, FFI-4-B).
+      --
+      --     FFI-5-A / Gap #3 proof-side closure: previously Conjunct 2
+      --     ranged over `.call name _` instructions where
+      --     `name ∈ syscall_callees` — vacuously true because syscalls
+      --     don't appear as `.call`; they appear as `.syscall nr args dst`.
+      --     The strengthened `NoExterns` (FFI-4-A / Gap #3 predicate-side
+      --     closure) checks `.syscall`, and this Conjunct 2 now mirrors
+      --     that check exactly, so the proof projects `h_no_ffi` directly.
       (∀ (f : IRFunction) (_hf : f ∈ P.functions)
          (b : IRBlock) (_hb : b ∈ f.blocks)
          (i : PmtInstr) (_hi : i ∈ b.instructions),
         match i with
-        | .call name _ =>
-          name ∈ syscall_callees →
-          ∃ sn, sn ∈ SyscallName.allowlist ∧
-                 SyscallName.toString sn = name
+        | .syscall nr _ _ =>
+          ∃ sn, _root_.PMT.syscall_nr_table nr = some sn ∧
+                 sn ∈ _root_.PMT.SyscallName.allowlist
         | _ => True) := by
   -- Conjunct 1: NoFFI says every .call name _ has name ∈ builtin_callees.
   -- The left disjunct is therefore always available; the right
@@ -299,15 +329,21 @@ theorem ffi_pillar_sound (P : IRProgram) (h_no_ffi : NoFFI P) :
         | invoke _ _ _ _ _ => exact trivial
         | tail_call _ _ => exact trivial
         | resume _ => exact trivial
-  -- Conjunct 2: if a call name is in syscall_callees, then it's the
-  -- toString of some SyscallName in the allowlist (by definition of
-  -- syscall_callees as the image of allowlist under toString).
-  · cases i with
-    | call name _ =>
-      intro h_in
-      simp only [syscall_callees, List.mem_map, SyscallName.toString] at h_in
-      obtain ⟨sn, h_sn_in, h_eq⟩ := h_in
-      exact ⟨sn, h_sn_in, h_eq⟩
+  -- Conjunct 2 (FFI-5-A / Gap #3 proof-side closure): by the
+  -- strengthened `NoExterns` (FFI-4-A / Gap #3 predicate-side
+  -- closure), the `.syscall nr _ _` match arm of `NoExterns` requires
+  -- precisely `∃ sn, syscall_nr_table nr = some sn ∧ sn ∈
+  -- SyscallName.allowlist`. This is exactly Conjunct 2's conclusion
+  -- for `.syscall` instructions; for all other instructions, the
+  -- match's `_` arm reduces to `True`, provable by `trivial`.
+  --
+  -- Pre-FFI-5-A, Conjunct 2 ranged over `.call name _` (vacuously
+  -- true because syscalls don't appear as `.call`). The strengthened
+  -- `NoExterns` makes the non-vacuous `.syscall` form provable by
+  -- direct projection of `h_no_ffi`.
+  · have h := h_no_ffi f hf b hb i hi
+    cases i with
+    | syscall nr args dst => exact h
     | _ => exact trivial
 
 /-! ## §3. The FFI pillar implies NoFFI soundness -/
