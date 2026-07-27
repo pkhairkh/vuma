@@ -123,40 +123,60 @@ namespace PMT
     `SchedYield`, `Clone`, `Futex`, `SetTidAddress`) are NOT in the
     allowlist — FFI-4-B will add them when its branch lands. -/
 inductive SyscallName : Type
-  | Write    -- `write(fd, buf, count)` — Linux x86_64 nr = 1
-  | Read     -- `read(fd, buf, count)` — Linux x86_64 nr = 0
-  | Exit     -- `exit(code)` — Linux x86_64 nr = 60
-  | Mmap     -- `mmap(addr, len, prot, flags, fd, offset)` — nr = 9
-  | Munmap   -- `munmap(addr, len)` — Linux x86_64 nr = 11
-  | Brk      -- `brk(addr)` — Linux x86_64 nr = 12
+  | Read          -- `read(fd, buf, count)` — Linux x86_64 nr = 0
+  | Write         -- `write(fd, buf, count)` — Linux x86_64 nr = 1
+  | Open          -- `open(path, flags, mode)` — nr = 2
+  | Close         -- `close(fd)` — nr = 3
+  | Exit          -- `exit(code)` — Linux x86_64 nr = 60
+  | ExitGroup     -- `exit_group(code)` — nr = 231
+  | Mmap          -- `mmap(addr, len, prot, flags, fd, offset)` — nr = 9
+  | Munmap        -- `munmap(addr, len)` — Linux x86_64 nr = 11
+  | Brk           -- `brk(addr)` — Linux x86_64 nr = 12
+  | Ioctl         -- `ioctl(fd, request, ...)` — nr = 16
+  | Fcntl         -- `fcntl(fd, cmd, ...)` — nr = 72
+  | Getpid        -- `getpid()` — nr = 39
+  | Kill          -- `kill(pid, sig)` — nr = 62
+  | Mprotect      -- `mprotect(addr, len, prot)` — nr = 10
+  | ClockGettime  -- `clock_gettime(clk, tp)` — nr = 228
+  | SchedYield    -- `sched_yield()` — nr = 24
+  | Clone         -- `clone(...)` — nr = 56
+  | Futex         -- `futex(...)` — nr = 202
+  | SetTidAddress -- `set_tid_address(tidptr)` — nr = 218
   deriving DecidableEq, Repr
 
-/-- §1.1: `SyscallName.allowlist` — the closed set of 6 permitted
+/-- §1.1: `SyscallName.allowlist` — the closed set of 19 permitted
     syscalls (mirrors `PMT.FFI.SyscallName.allowlist` in
-    `PMT/FFI/PillarSoundness.lean`). -/
+    `PMT/FFI/PillarSoundness.lean` post-FFI-4-B). -/
 def SyscallName.allowlist : List SyscallName :=
-  [ .Write, .Read, .Exit, .Mmap, .Munmap, .Brk ]
+  [ .Read, .Write, .Open, .Close, .Exit, .ExitGroup, .Mmap, .Munmap
+  , .Brk, .Ioctl, .Fcntl, .Getpid, .Kill, .Mprotect, .ClockGettime
+  , .SchedYield, .Clone, .Futex, .SetTidAddress ]
 
 /-- §1.2: `syscall_nr_table` — maps Linux x86_64 syscall numbers to
     `SyscallName` variants. Returns `none` for any syscall number not
     in the allowlist. The mapping is sourced from `src/ffi.rs`'s
-    `x86_64_syscalls()` (Linux x86_64 ABI): `Read=0`, `Write=1`,
-    `Mmap=9`, `Munmap=11`, `Brk=12`, `Exit=60`.
-
-    Note: Linux x86_64 also assigns `Mprotect=10`, `ExitGroup=231`,
-    etc. to other Rust `SyscallName` variants — those numbers are
-    intentionally NOT in this table because the corresponding
-    `SyscallName` variants are not in the local 6-variant
-    `SyscallName` inductive above. FFI-4-B will add them when it
-    extends this inductive to 16+ variants. -/
+    `x86_64_syscalls()` (Linux x86_64 ABI). -/
 def syscall_nr_table : Nat → Option SyscallName
-  | 0  => some .Read
-  | 1  => some .Write
-  | 9  => some .Mmap
-  | 11 => some .Munmap
-  | 12 => some .Brk
-  | 60 => some .Exit
-  | _  => none
+  | 0   => some .Read
+  | 1   => some .Write
+  | 2   => some .Open
+  | 3   => some .Close
+  | 9   => some .Mmap
+  | 10  => some .Mprotect
+  | 11  => some .Munmap
+  | 12  => some .Brk
+  | 16  => some .Ioctl
+  | 24  => some .SchedYield
+  | 39  => some .Getpid
+  | 56  => some .Clone
+  | 60  => some .Exit
+  | 62  => some .Kill
+  | 72  => some .Fcntl
+  | 202 => some .Futex
+  | 218 => some .SetTidAddress
+  | 228 => some .ClockGettime
+  | 231 => some .ExitGroup
+  | _   => none
 
 /-- §1.3: `NoExterns P` — every call in `P` is to a built-in (no extern
     calls) AND every syscall in `P` is on the `SyscallName.allowlist`.
