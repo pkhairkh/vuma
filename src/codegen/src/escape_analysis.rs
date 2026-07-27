@@ -470,6 +470,12 @@ fn rename_vreg_everywhere(func: &mut IRFunction, from: u32, to: u32) {
                     sub(val, from, to);
                     sub(len, from, to);
                 }
+                // Transform (FFI Wave 1 task C) — renumber both vregs
+                // (dst receives the reinterpreted pointer; src is the input).
+                IRInstr::Transform { dst, src, .. } => {
+                    sub(dst, from, to);
+                    sub(src, from, to);
+                }
             }
         }
         match &mut block.terminator {

@@ -4220,7 +4220,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         // replacements): backend lowering not yet implemented on wasm32;
         // emit nothing (x86_64 is the canonical path).
         | IRInstr::BulkCopy { .. }
-        | IRInstr::BulkFill { .. } => {}
+        | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => {}
 
         IRInstr::CallIndirect { dst, func_ptr, args } => {
             // Indirect call through a function pointer (table slot index on

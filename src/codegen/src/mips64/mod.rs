@@ -3570,7 +3570,7 @@ fn mips64_allocate_registers_ss(
             // replacements): backend lowering not yet implemented on mips64;
             // emit nothing (x86_64 is the canonical path).
             | IRInstr::BulkCopy { .. }
-            | IRInstr::BulkFill { .. } => {}
+            | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => {}
             }
         }
     }

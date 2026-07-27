@@ -4676,7 +4676,7 @@ impl Backend for PPC64Backend {
                     // replacements): backend lowering not yet implemented on ppc64;
                     // emit no bytes (x86_64 is the canonical path).
                     | IRInstr::BulkCopy { .. }
-                    | IRInstr::BulkFill { .. } => Vec::new(),
+                    | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => Vec::new(),
                 };
                 current_byte_offset += encoded.len() as u64;
                 // Skip the wrapper push when encoded is empty. The atomic
