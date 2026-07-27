@@ -623,6 +623,47 @@ inductive PmtInstr where
     -- (no `Step`s emitted), `effect = .none`, `well_typed = True`.
     -- The underlying byte-fill semantics is a runtime concern (x86_64
     -- lowering: `CLD; REP STOSB`), not a PMT `Step`.
+  -- Control-flow variants II (4, FFI-3-C / Gap #11 closure) —
+  -- `effect = .none`, `to_steps = []`. These mirror the 4 Rust
+  -- `IRTerminator` variants (`Switch`, `Invoke`, `TailCall`, `Resume`)
+  -- used by exception-handling and tail-call-optimized programs.
+  -- Although Rust models these as `IRTerminator` (block terminators)
+  -- rather than `IRInstr`, the Lean `PmtInstr` already models
+  -- `branch` / `cond_branch` (also Rust control-flow constructs) as
+  -- `PmtInstr` variants — the precedent (PMT-1-B) is that any
+  -- control-flow construct reachable from a `PmtBlock` is mirrored
+  -- here so that the simulation relation / `no_ffi_program_sound`
+  -- argument can traverse IR functions whose body contains such
+  -- instructions. Each variant carries `effect = .none`,
+  -- `well_typed = True`, `to_steps = []` (control flow is resolved
+  -- at the CFG level, not as `Step`s — same precedent as `branch`).
+  -- Field-for-field mirror of Rust:
+  --   * `Switch { discr: IRValue, targets: Vec<(i64, String)>,
+  --               default: String }` — multi-way branch on a
+  --     discriminator value, with (value, label) pairs and a default.
+  --   * `Invoke { dst: Option<IRValue>, func: String, args: Vec<IRValue>,
+  --               normal: String, unwind: String }` — possibly-throwing
+  --     call with separate normal/unwind continuation labels.
+  --   * `TailCall { func: String, args: Vec<IRValue> }` — tail-call
+  --     (reuses the current stack frame).
+  --   * `Resume { value: IRValue }` — resume unwinding with an
+  --     exception value.
+  | switch     : IRValue → List (Int × String) → String → PmtInstr
+    -- Rust `IRTerminator::Switch { discr: IRValue,
+    --   targets: Vec<(i64, String)>, default: String }` (ir.rs:2800).
+    -- Mirrors Rust field-for-field: (discr, targets, default).
+  | invoke     : Option IRValue → String → List IRValue → String → String → PmtInstr
+    -- Rust `IRTerminator::Invoke { dst: Option<IRValue>, func: String,
+    --   args: Vec<IRValue>, normal: String, unwind: String }`
+    -- (ir.rs:2810). Mirrors Rust field-for-field:
+    -- (dst, func, args, normal, unwind).
+  | tail_call  : String → List IRValue → PmtInstr
+    -- Rust `IRTerminator::TailCall { func: String,
+    --   args: Vec<IRValue> }` (ir.rs:2823). Mirrors Rust
+    -- field-for-field: (func, args).
+  | resume     : IRValue → PmtInstr
+    -- Rust `IRTerminator::Resume { value: IRValue }` (ir.rs:2830).
+    -- Mirrors Rust field-for-field: (value).
   deriving Repr
 
 /-- §5: A PMT-relevant basic block — a list of PmtInstr. -/
@@ -719,6 +760,16 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   -- `REP MOVSB` / `REP STOSB`), not a PMT `Step`.
   | .bulk_copy _ _ _ => .none
   | .bulk_fill _ _ _ => .none
+  -- Control-flow variants II (4, FFI-3-C / Gap #11 closure):
+  -- `switch` / `invoke` / `tail_call` / `resume` are pure control-flow
+  -- constructs (mirrors of the Rust `IRTerminator` variants). Their
+  -- effect is to redirect execution between blocks (or unwind the
+  -- stack), modeled at the CFG level (`PmtInstr.successor_labels`),
+  -- not as PMT arena state — same precedent as `branch` / `cond_branch`.
+  | .switch _ _ _ => .none
+  | .invoke _ _ _ _ _ => .none
+  | .tail_call _ _ => .none
+  | .resume _ => .none
 
 /-- §10: WellTypedness for PmtInstr (per-instruction).
 This is the per-instruction check that IVE's `verify_state_reads` /
@@ -791,6 +842,13 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   -- region they denote is not tracked by the PMT arena).
   | .bulk_copy _ _ _ => True
   | .bulk_fill _ _ _ => True
+  -- Control-flow variants II (4, FFI-3-C / Gap #11 closure): pure
+  -- control flow, no arena involvement. Each reduces to `True` —
+  -- same precedent as `branch` / `cond_branch` / `phi` (PMT-1-B).
+  | .switch _ _ _ => True
+  | .invoke _ _ _ _ _ => True
+  | .tail_call _ _ => True
+  | .resume _ => True
 
 /-- §11: WellTypedness for a PmtBlock. -/
 def PmtBlock.well_typed (b : PmtBlock) (env : String → Layout) : Prop :=
@@ -907,5 +965,15 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   -- concern (x86_64 `REP MOVSB` / `REP STOSB`), not a PMT `Step`.
   | .bulk_copy _ _ _ => []
   | .bulk_fill _ _ _ => []
+  -- Control-flow variants II (4, FFI-3-C / Gap #11 closure):
+  -- `switch` / `invoke` / `tail_call` / `resume` are pure control-flow
+  -- constructs — their effect is to redirect execution between blocks
+  -- (or unwind the stack), modeled at the CFG level
+  -- (`PmtInstr.successor_labels`), not as `Step`s. Same precedent as
+  -- `branch` / `cond_branch` / `phi` (PMT-1-B): each flattens to `[]`.
+  | .switch _ _ _ => []
+  | .invoke _ _ _ _ _ => []
+  | .tail_call _ _ => []
+  | .resume _ => []
 
 end PMT

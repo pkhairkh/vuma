@@ -415,6 +415,48 @@ theorem PmtInstr.to_steps_bulk_fill (dst val len : IRValue) :
     PmtInstr.to_steps (.bulk_fill dst val len) = [] := by
   rfl
 
+/-! ## §1.7e. Reflection lemmas for the 4 control-flow variants II
+(FFI-3-C / Gap #11 closure)
+
+These 4 reflection lemmas state that `switch` / `invoke` / `tail_call` /
+`resume` — the 4 Rust `IRTerminator` control-flow variants mirrored as
+`PmtInstr` constructors — flatten to `[]` under `PmtInstr.to_steps`.
+Control flow is resolved at the CFG level (`PmtInstr.successor_labels`
+in `PMT.IRProgram`), not as PMT `Step`s — same precedent as the 3
+control-flow variants (PMT-1-B) covered by §1.7b above. They feed the
+`cases i with` block of `PmtInstr.to_steps_preserves_WF_Layout` (§1.8)
+so that the per-instruction `WF_Layout` preservation proof closes
+sorry-free on every `PmtInstr` constructor. Each lemma is `rfl`-closed
+because the corresponding arm of `PmtInstr.to_steps` reduces literally
+to `[]`. -/
+
+/-- §1.7e.1: `switch` flattens to `[]` (control flow resolved at the
+CFG level — discriminator dispatch is a runtime concern, not a PMT
+`Step`). -/
+theorem PmtInstr.to_steps_switch (discr : IRValue) (targets : List (Int × String))
+    (default : String) :
+    PmtInstr.to_steps (.switch discr targets default) = [] := by
+  rfl
+
+/-- §1.7e.2: `invoke` flattens to `[]` (control flow: the call /
+unwind dispatch is a runtime concern, not a PMT `Step`). -/
+theorem PmtInstr.to_steps_invoke (dst : Option IRValue) (func : String)
+    (args : List IRValue) (normal unwind : String) :
+    PmtInstr.to_steps (.invoke dst func args normal unwind) = [] := by
+  rfl
+
+/-- §1.7e.3: `tail_call` flattens to `[]` (control flow: the
+tail-transfer is a runtime concern, not a PMT `Step`). -/
+theorem PmtInstr.to_steps_tail_call (func : String) (args : List IRValue) :
+    PmtInstr.to_steps (.tail_call func args) = [] := by
+  rfl
+
+/-- §1.7e.4: `resume` flattens to `[]` (control flow: the unwind
+resume is a runtime concern, not a PMT `Step`). -/
+theorem PmtInstr.to_steps_resume (value : IRValue) :
+    PmtInstr.to_steps (.resume value) = [] := by
+  rfl
+
 /-- §1.8: Every `Step` produced by `PmtInstr.to_steps` carries a
 `WF_Layout` when the instruction is well-typed under `env`.
 
@@ -592,6 +634,25 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
   | bulk_fill dst val len =>
     rw [PmtInstr.to_steps_bulk_fill] at hs
     simp at hs
+  -- 4 control-flow variants II (FFI-3-C / Gap #11 closure):
+  -- `switch` / `invoke` / `tail_call` / `resume` each flatten to `[]`,
+  -- so the membership hypothesis `hs : s ∈ []` is vacuous. The
+  -- per-instruction `well_typed` predicate is `True` for all 4
+  -- variants, so `hi` is `trivial` and not consulted. Control flow is
+  -- resolved at the CFG level (`PmtInstr.successor_labels`), not as
+  -- `Step`s — same precedent as `branch` / `cond_branch` / `phi`.
+  | switch discr targets default =>
+    rw [PmtInstr.to_steps_switch] at hs
+    simp at hs
+  | invoke dst func args normal unwind =>
+    rw [PmtInstr.to_steps_invoke] at hs
+    simp at hs
+  | tail_call func args =>
+    rw [PmtInstr.to_steps_tail_call] at hs
+    simp at hs
+  | resume value =>
+    rw [PmtInstr.to_steps_resume] at hs
+    simp at hs
 
 /-! ## §1.9: Every `Step` produced by `PmtInstr.to_steps` carries `op = .transform` (PMT-1-E)
 
@@ -735,6 +796,23 @@ theorem PmtInstr.to_steps_op_transform
     simp at hs
   | bulk_fill dst val len =>
     rw [PmtInstr.to_steps_bulk_fill] at hs
+    simp at hs
+  -- 4 control-flow variants II (FFI-3-C / Gap #11 closure):
+  -- `switch` / `invoke` / `tail_call` / `resume` each flatten to `[]`,
+  -- so the membership hypothesis `hs : s ∈ []` is vacuous. Control
+  -- flow is resolved at the CFG level (`PmtInstr.successor_labels`),
+  -- not as `Step`s — same precedent as `branch` / `cond_branch` / `phi`.
+  | switch discr targets default =>
+    rw [PmtInstr.to_steps_switch] at hs
+    simp at hs
+  | invoke dst func args normal unwind =>
+    rw [PmtInstr.to_steps_invoke] at hs
+    simp at hs
+  | tail_call func args =>
+    rw [PmtInstr.to_steps_tail_call] at hs
+    simp at hs
+  | resume value =>
+    rw [PmtInstr.to_steps_resume] at hs
     simp at hs
 
 /-! ## §2. Per-block flattening: `IRBlock.to_steps` -/
