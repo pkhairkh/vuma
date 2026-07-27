@@ -137,6 +137,79 @@ theorem encode_liveness_inj {b₁ b₂ : Liveness}
     (h : encode_liveness b₁ = encode_liveness b₂) : b₁ = b₂ := by
   cases b₁ <;> cases b₂ <;> simp [encode_liveness] at h ⊢
 
+/-! ## §1½. Heap domain, disjointness, and disjoint union
+
+These are the separation-logic operations on `Heap` that the genuine
+separating conjunction (in `SepGenuine.lean`) needs. They were
+previously mirrored as LOCAL copies in `SepGenuine.lean` (Wave 1-D) to
+dodge an import cycle; Wave 2-A breaks that cycle and unifies them
+HERE as the single source of truth, so `SepGenuine` can import this
+module directly and delete its mirrors. -/
+
+/-- The empty heap: undefined at every address. -/
+def Heap.emp : Heap := fun _ => none
+
+/-- `Heap.dom h x` holds iff `h` is defined at address `x`. Represented
+    as a predicate (`Nat → Prop`) rather than a `Set` to avoid a Mathlib
+    dependency. -/
+def Heap.dom (h : Heap) (x : Nat) : Prop := h x ≠ none
+
+/-- Disjointness of two heap domains: no address is defined in both
+    `h1` and `h2`. -/
+def Heap.disjoint (h1 h2 : Heap) : Prop := ∀ x, ¬ (h1.dom x ∧ h2.dom x)
+
+/-- Pointwise disjoint union of two optional values: `some` wins on the
+    left, otherwise the right value is used. Factored out as a named
+    function (rather than an anonymous `match`) so that
+    `mergeOpt_comm` below has a clean return type without a literal
+    `match` that would over-generalise the disjointness hypothesis. -/
+def mergeOpt (a b : Option Val) : Option Val :=
+  match a, b with
+  | some v, _ => some v
+  | none,   v => v
+
+/-- Disjoint union of two heaps. At each address, the result is `h1`'s
+    value if `h1` is defined there, otherwise `h2`'s value. When `h1`,
+    `h2` are disjoint this is the true disjoint union (well-defined
+    regardless, but the disjoint case is what `Sep` requires). -/
+def Heap.merge (h1 h2 : Heap) : Heap := fun x => mergeOpt (h1 x) (h2 x)
+
+/-- `mergeOpt` is commutative on disjoint optional values: when `a`,
+    `b` are not both `some`, `mergeOpt a b = mergeOpt b a`. The proof is
+    a 4-way case split; the `some, some` case is ruled out by the
+    disjointness hypothesis `hd`. -/
+theorem mergeOpt_comm (a b : Option Val)
+    (hd : ¬ (a ≠ none ∧ b ≠ none)) : mergeOpt a b = mergeOpt b a := by
+  rcases a with _ | v <;> rcases b with _ | w
+  · rfl
+  · rfl
+  · rfl
+  · exfalso
+    apply hd
+    refine ⟨?_, ?_⟩ <;> (intro c; cases c)
+
+/-- `merge` is commutative on disjoint heaps: when `h1`, `h2` have
+    disjoint domains, `h1.merge h2 = h2.merge h1`. -/
+theorem Heap.merge_comm_of_disjoint (h1 h2 : Heap)
+    (hd : h1.disjoint h2) : h1.merge h2 = h2.merge h1 := by
+  funext x
+  unfold Heap.merge
+  exact mergeOpt_comm (h1 x) (h2 x) (hd x)
+
+/-- `emp` is a left unit for `merge`. -/
+theorem Heap.merge_emp_left (h : Heap) : Heap.emp.merge h = h := by
+  funext x
+  unfold Heap.merge Heap.emp
+  rfl
+
+/-- `emp` is a right unit for `merge`. -/
+theorem Heap.merge_emp_right (h : Heap) : h.merge Heap.emp = h := by
+  funext x
+  unfold Heap.merge Heap.emp
+  cases h x with
+  | none => rfl
+  | some _ => rfl
+
 /-! ## §2. The Ex resource algebra -/
 
 /-- The Ex resource algebra: `Ex α := Option α`. The carrier is
