@@ -24,9 +24,12 @@ After FFI Wave 1 tasks A/B/C (No-FFI closure):
 
   - 4 libc functions (`memcpy`, `memset`, `malloc`, `free`) replaced
     with verified VUMA builtins.
-  - 6 syscalls (`write`, `read`, `exit`, `mmap`, `munmap`, `brk`)
-    routed through `IRInstr::Syscall` (a primitive effect, part of
-    the TCB).
+  - 19 syscalls routed through `IRInstr::Syscall` (a primitive effect,
+    part of the TCB) — the full Rust `SyscallName` enum
+    (`src/ffi.rs:435–474`). FFI-4-B (Gap #2 closure) extended the
+    Lean `SyscallName` from the original 6-variant Wave-1 stub
+    (`write`, `read`, `exit`, `mmap`, `munmap`, `brk`) to the full
+    19-variant mirror of Rust.
   - 8 PMT/arena ops inlined as IR instructions (not externs).
 
 The only "foreign" surface that remains is the syscall ABI (kernel
@@ -64,10 +67,12 @@ The FFI pillar is conditional on the residual TCB documented in
 
 The syscall ABI is the residual TCB — it's the boundary between
 VUMA-verified code and the unverified kernel. VUMA does not verify
-the kernel's implementation of the 6 syscalls; it only verifies that
-VUMA programs invoke them with well-typed arguments and only via the
-`IRInstr::Syscall` builtin (which is modeled in the Lean `exec`
-semantics as a primitive effect).
+the kernel's implementation of the 19 permitted syscalls; it only
+verifies that VUMA programs invoke them with well-typed arguments
+and only via the `IRInstr::Syscall` builtin (which is modeled in
+the Lean `exec` semantics as a primitive effect). The full
+19-syscall allowlist mirrors `src/ffi.rs`'s `SyscallName` enum
+variant-for-variant (FFI-4-B / Gap #2 closure).
 
 ## Axiom audit
 
@@ -83,41 +88,84 @@ namespace PMT.FFI
 
 /-! ## §1. The syscall ABI allowlist -/
 
-/-- §1: `SyscallName` — the 6 Linux syscalls permitted by the No-FFI
-    design. These are the only foreign calls allowed in a post-FFI
-    VUMA program; they are routed through `IRInstr::Syscall` (a
-    primitive effect, part of the TCB).
+/-- §1: `SyscallName` — the 19 Linux syscalls admitted by the VUMA
+    syscall ABI. These are the only foreign calls allowed in a
+    post-FFI VUMA program; they are routed through `IRInstr::Syscall`
+    (a primitive effect, part of the TCB).
 
-    The allowlist mirrors `src/ffi.rs`'s `SyscallName` enum (FFI-1-B's
-    residual TCB contract). -/
+    **FFI-4-B / Gap #2 closure.** This inductive mirrors
+    `src/ffi.rs`'s `SyscallName` enum **variant-for-variant, in the
+    same order** (19 variants: Read, Write, Open, Close, Exit,
+    ExitGroup, Mmap, Munmap, Brk, Ioctl, Fcntl, Getpid, Kill,
+    Mprotect, ClockGettime, SchedYield, Clone, Futex, SetTidAddress).
+    Previously (FFI Wave 1) the Lean inductive carried only 6
+    variants (Write, Read, Exit, Mmap, Munmap, Brk) — a strict
+    undercount of the Rust enum, and the source of Gap #2. Each
+    variant below carries the same docstring as its Rust counterpart
+    in `src/ffi.rs` (lines 435–474) so the faithfulness contract is
+    self-documenting. The string mapping in `SyscallName.toString`
+    mirrors Rust's `impl fmt::Display for SyscallName`
+    (`src/ffi.rs:476–500`) exactly. -/
 inductive SyscallName : Type
-  | Write    -- `write(fd, buf, count)` — write to file descriptor
-  | Read     -- `read(fd, buf, count)` — read from file descriptor
-  | Exit     -- `exit(code)` — terminate the process
-  | Mmap     -- `mmap(addr, len, prot, flags, fd, offset)` — map memory
-  | Munmap   -- `munmap(addr, len)` — unmap memory
-  | Brk      -- `brk(addr)` — set program break
+  | Read          -- `read` — read from a file descriptor
+  | Write         -- `write` — write to a file descriptor
+  | Open          -- `open` — open a file
+  | Close         -- `close` — close a file descriptor
+  | Exit          -- `exit` — terminate the process
+  | ExitGroup     -- `exit_group` — exit all threads in the process
+  | Mmap          -- `mmap` — map memory
+  | Munmap        -- `munmap` — unmap memory
+  | Brk           -- `brk` — change data segment size
+  | Ioctl         -- `ioctl` — device control
+  | Fcntl         -- `fcntl` — file control
+  | Getpid        -- `getpid` — get process ID
+  | Kill          -- `kill` — send signal
+  | Mprotect      -- `mprotect` — set memory protection
+  | ClockGettime  -- `clock_gettime` — get time
+  | SchedYield    -- `sched_yield` — yield the CPU
+  | Clone         -- `clone` — create a new thread/process
+  | Futex         -- `futex` — fast userspace mutex
+  | SetTidAddress -- `set_tid_address` — set thread ID pointer
   deriving DecidableEq, Repr
 
 /-- §1.1: `SyscallName.allowlist` — the closed set of permitted
-    syscalls. -/
+    syscalls. Mirrors the full Rust `SyscallName` enum (FFI-4-B / Gap
+    #2 closure: previously 6 variants, now 19, matching Rust). -/
 def SyscallName.allowlist : List SyscallName :=
-  [ .Write, .Read, .Exit, .Mmap, .Munmap, .Brk ]
+  [ .Read, .Write, .Open, .Close, .Exit, .ExitGroup,
+    .Mmap, .Munmap, .Brk, .Ioctl, .Fcntl, .Getpid,
+    .Kill, .Mprotect, .ClockGettime, .SchedYield,
+    .Clone, .Futex, .SetTidAddress ]
 
 /-- §1.2: `SyscallName.toString` — string name for matching against
     `IRInstr::Syscall`'s `nr` field (which carries the syscall name
-    in the IR). -/
+    in the IR). Mirrors Rust's `impl fmt::Display for SyscallName`
+    (`src/ffi.rs:476–500`) variant-for-variant. -/
 def SyscallName.toString : SyscallName → String
-  | .Write  => "write"
-  | .Read   => "read"
-  | .Exit   => "exit"
-  | .Mmap   => "mmap"
-  | .Munmap => "munmap"
-  | .Brk    => "brk"
+  | .Read          => "read"
+  | .Write         => "write"
+  | .Open          => "open"
+  | .Close         => "close"
+  | .Exit          => "exit"
+  | .ExitGroup     => "exit_group"
+  | .Mmap          => "mmap"
+  | .Munmap        => "munmap"
+  | .Brk           => "brk"
+  | .Ioctl         => "ioctl"
+  | .Fcntl         => "fcntl"
+  | .Getpid        => "getpid"
+  | .Kill          => "kill"
+  | .Mprotect      => "mprotect"
+  | .ClockGettime  => "clock_gettime"
+  | .SchedYield    => "sched_yield"
+  | .Clone         => "clone"
+  | .Futex         => "futex"
+  | .SetTidAddress => "set_tid_address"
 
-/-- §1.3: `syscall_callees` — the string names of the 6 permitted
-    syscalls. Used to distinguish a syscall call from a built-in
-    call in `IRProgram`'s `PmtInstr.call` instructions. -/
+/-- §1.3: `syscall_callees` — the string names of the permitted
+    syscalls (19 as of FFI-4-B / Gap #2 closure; previously 6).
+    Auto-updates from `SyscallName.allowlist.map SyscallName.toString`
+    — no manual maintenance needed when the allowlist changes. -/
 def syscall_callees : List String :=
   SyscallName.allowlist.map SyscallName.toString
 
@@ -140,7 +188,7 @@ def syscall_callees : List String :=
       * Conjunct 1: every call instruction in `P` targets either a
         built-in or a syscall. No other externs.
       * Conjunct 2: every syscall callee is in the `SyscallName.allowlist`
-        (one of the 6 permitted syscalls).
+        (one of the 19 permitted syscalls — full Rust mirror, FFI-4-B).
 
     **Proof.** By definition of `NoFFI P` (which is `NoExterns P`):
     the predicate's `match` arm for `.call name _` requires
