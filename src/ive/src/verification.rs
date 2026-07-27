@@ -502,6 +502,52 @@ mod lean_ffi {
         ) -> u8;
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // `_prim` wrappers (VERIF-SIGSEGV-FIX). These are the String-based,
+    // C-marshallable exports that parse the §9 serialization format
+    // internally. Unlike the boxed `lean_verify_*` externs above — which
+    // SIGSEGV under real Lean when handed null `lean_object*` args (the
+    // PMT-1-G / VERIF-SIGSEGV-FIX failure) — the `_prim` wrappers accept
+    // Lean `String`s built via `lean_mk_string` / `str_to_lean`, so they
+    // are safe to call once `lean_ffi::init()` has run. Mirrors the FFI
+    // surface in `tests/pmt_parity_test.rs` and
+    // `proof/extracted/pmt_check.rs`. Declared unconditionally (matching
+    // the boxed externs); only INVOKED under `#[cfg(lean_ffi_linked)]`
+    // in `verify_pmt_via_lean` below. C links by symbol name, so the
+    // 4-arg `kind` variant added by the TRANSFORM-FIX subagent is
+    // compatible with the 3-arg stub definition on the STUB path (which
+    // is never called from here anyway).
+    // ─────────────────────────────────────────────────────────────
+    extern "C" {
+        /// `lean_verify_state_reads_prim(registry, reads) -> u8`.
+        /// `registry` / `reads` are boxed Lean `String`s in §9 format.
+        pub fn lean_verify_state_reads_prim(
+            registry: *mut LeanObject,
+            reads: *mut LeanObject,
+        ) -> u8;
+
+        /// `lean_verify_state_writes_prim(registry, consumed, writes)
+        /// -> u8`. All three args are boxed Lean `String`s in §9 format.
+        pub fn lean_verify_state_writes_prim(
+            registry: *mut LeanObject,
+            consumed: *mut LeanObject,
+            writes: *mut LeanObject,
+        ) -> u8;
+
+        /// `lean_verify_transform_prim(registry, input_layout,
+        /// output_layout, kind) -> u8`. `kind` is a boxed Lean `String`
+        /// ("copy" / "identity" / "reinterpret"). The `kind` parameter
+        /// is added by the TRANSFORM-FIX subagent; verification.rs
+        /// passes "copy" (no TransformKind context here — it is only
+        /// checking validity).
+        pub fn lean_verify_transform_prim(
+            registry: *mut LeanObject,
+            input_layout: *mut LeanObject,
+            output_layout: *mut LeanObject,
+            kind: *mut LeanObject,
+        ) -> u8;
+    }
+
     /// `initialize_PMT` — Lean module initializer exported by
     /// `proof/.lake/build/ir/PMT.c`. MUST be invoked exactly once before
     /// any `lean_verify_*` call: without it the Lean runtime is
@@ -514,6 +560,41 @@ mod lean_ffi {
     #[cfg(lean_ffi_linked)]
     extern "C" {
         fn initialize_PMT(builtin: u8, w: *mut LeanObject) -> *mut LeanObject;
+    }
+
+    /// `lean_mk_string` — Lean C-runtime symbol (`lean.h`) that boxes a
+    /// NUL-terminated C string into a Lean `String`. Only provided when
+    /// the real Lean runtime (`libleanrt.a`) is linked, i.e. under
+    /// `lean_ffi_linked` (the stub `lean_stub.c` does not export it).
+    /// Used by `str_to_lean` below to marshal Rust `&str` into the
+    /// boxed Lean `String` args the `_prim` wrappers expect.
+    #[cfg(lean_ffi_linked)]
+    extern "C" {
+        fn lean_mk_string(s: *const std::ffi::c_char) -> *mut LeanObject;
+    }
+
+    /// Convert a Rust `&str` into a boxed Lean `String` via
+    /// `lean_mk_string`. NUL bytes (not representable in a C string)
+    /// are replaced with `'?'`. Mirrors `str_to_lean` in
+    /// `tests/pmt_parity_test.rs`. Only meaningful under
+    /// `lean_ffi_linked`; the stub variant below is dead code at
+    /// runtime (the sole call site is gated on `lean_ffi_linked`).
+    #[cfg(lean_ffi_linked)]
+    pub fn str_to_lean(s: &str) -> *mut LeanObject {
+        use std::ffi::CString;
+        let sanitized: String =
+            s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+        let c_str =
+            CString::new(sanitized).unwrap_or_else(|_| CString::new("").unwrap());
+        unsafe { lean_mk_string(c_str.as_ptr()) }
+    }
+
+    /// Stub variant — never invoked at runtime (the only call site is
+    /// under `#[cfg(lean_ffi_linked)]`). Returns null so the file still
+    /// type-checks on the STUB sub-path.
+    #[cfg(not(lean_ffi_linked))]
+    pub fn str_to_lean(_s: &str) -> *mut LeanObject {
+        std::ptr::null_mut()
     }
 
     /// Guards exactly-once execution of `initialize_PMT` across threads.
@@ -606,24 +687,39 @@ fn verify_pmt_via_lean(
     #[cfg(lean_ffi_linked)]
     lean_ffi::init().map_err(|e| format!("Lean PMT module init failed: {e}"))?;
 
-    // Call the 3 extracted externs. Marshalling Rust to LeanObject is
-    // Wave 5-C TODO; args are null placeholders for now. This branch is
-    // dead code until build.rs emits `lean_ffi_linked`.
+    // Call the 3 extracted `_prim` wrappers (String-based,
+    // C-marshallable). Unlike the boxed `lean_verify_*` externs — which
+    // SIGSEGV under real Lean when handed null `lean_object*` args (the
+    // VERIF-SIGSEGV-FIX failure) — the `_prim` wrappers accept Lean
+    // `String`s built via `lean_mk_string` / `str_to_lean` and parse
+    // the §9 serialization format internally. `lean_ffi::init()` above
+    // has already initialized the Lean runtime.
+    //
+    // TODO(VERIF-SIGSEGV-FIX follow-up / Wave 5-C): marshal the real
+    // IVE pipeline data (`state_var_layouts`, `read_layouts`, `reads`,
+    // `write_layouts`, `writes`, `consumed_vars`, `transform_layouts`,
+    // `transforms`) into the §9 string format the `_prim` parsers
+    // expect. For now MINIMAL marshalling is used: every data arg is an
+    // empty Lean `String`, and the transform `kind` is `"copy"`
+    // (verification.rs has no TransformKind context here — it is only
+    // checking validity). This proves the FFI path does NOT SIGSEGV;
+    // the returned `u8` may be wrong (Lean sees empty data) but the
+    // point is NO CRASH.
     #[cfg(lean_ffi_linked)]
     let outcome = unsafe {
-        // TODO(Wave 5-C): marshal `state_var_layouts`/`read_layouts`/`reads`
-        // into boxed Lean `List (String x LayoutInfo)` / `List StateRead`,
-        // and likewise for the write/transform verifiers.
-        let env: *mut lean_ffi::LeanObject = core::ptr::null_mut();
-        let reads_obj: *mut lean_ffi::LeanObject = core::ptr::null_mut();
-        let consumed: *mut lean_ffi::LeanObject = core::ptr::null_mut();
-        let writes_obj: *mut lean_ffi::LeanObject = core::ptr::null_mut();
-        let layouts: *mut lean_ffi::LeanObject = core::ptr::null_mut();
-        let t_obj: *mut lean_ffi::LeanObject = core::ptr::null_mut();
+        let registry: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
+        let reads_obj: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
+        let consumed: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
+        let writes_obj: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
+        let input_layout: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
+        let output_layout: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("");
+        let kind: *mut lean_ffi::LeanObject = lean_ffi::str_to_lean("copy");
 
-        let reads_ok = lean_ffi::lean_verify_state_reads(env, reads_obj) != 0;
-        let writes_ok = lean_ffi::lean_verify_state_writes(env, consumed, writes_obj) != 0;
-        let transforms_ok = lean_ffi::lean_verify_transform(layouts, t_obj) != 0;
+        let reads_ok = lean_ffi::lean_verify_state_reads_prim(registry, reads_obj) != 0;
+        let writes_ok =
+            lean_ffi::lean_verify_state_writes_prim(registry, consumed, writes_obj) != 0;
+        let transforms_ok =
+            lean_ffi::lean_verify_transform_prim(registry, input_layout, output_layout, kind) != 0;
 
         let read_results: Vec<crate::state_read::StateReadVerification> = if reads_ok {
             Vec::new()
@@ -634,7 +730,7 @@ fn verify_pmt_via_lean(
                 field_name: String::new(),
                 valid: false,
                 error: Some(
-                    "Lean lean_verify_state_reads returned false (Wave 5-C: marshal real args)"
+                    "Lean lean_verify_state_reads_prim returned false (VERIF-SIGSEGV-FIX: minimal marshalling — empty data)"
                         .to_string(),
                 ),
             }]
@@ -648,7 +744,7 @@ fn verify_pmt_via_lean(
                 field_name: String::new(),
                 valid: false,
                 error: Some(
-                    "Lean lean_verify_state_writes returned false (Wave 5-C: marshal real args)"
+                    "Lean lean_verify_state_writes_prim returned false (VERIF-SIGSEGV-FIX: minimal marshalling — empty data)"
                         .to_string(),
                 ),
             }]
@@ -663,7 +759,7 @@ fn verify_pmt_via_lean(
                     valid: false,
                     transform_kind: crate::state_transform::TransformKind::Reinterpret,
                     error: Some(
-                        "Lean lean_verify_transform returned false (Wave 5-C: marshal real args)"
+                        "Lean lean_verify_transform_prim returned false (VERIF-SIGSEGV-FIX: minimal marshalling — empty data)"
                             .to_string(),
                     ),
                 }]

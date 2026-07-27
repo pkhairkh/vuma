@@ -468,16 +468,45 @@ def leanVerifiedPmtCheckPrim
 
 /-- `@[export lean_verify_transform_prim]` — primitive-signature wrapper
 for `leanVerifyTransform`. `registry` is the serialized registry payload
-(see §9 format); `input_layout` / `output_layout` are layout names. The
-registry function is reconstructed via `layout_env_from_list_faith`. C ABI:
-`(lean_object*, lean_object*, lean_object*) -> uint8_t`. -/
+(see §9 format); `input_layout` / `output_layout` are layout names; `kind`
+is the explicit transform kind ("identity" / "reinterpret" / "copy"). The
+registry function is reconstructed via `layout_env_from_list_faith`.
+
+Unlike `leanVerifyTransform` (which INFERS the kind from layout-name /
+total-size comparison and does NOT check `WF_Layout`), this wrapper takes
+an EXPLICIT `kind` and performs the well-formedness + kind-specific checks
+that mirror the Rust hand-translation `hand_verify_transform`
+(`lean_wf_layout_bool` + `TransformKind` match). This closes the three
+parity gaps where the inference-based path returned `valid = true`:
+  - Identity with different fields  -> must be `false`.
+  - Reinterpret with size mismatch  -> must be `false`.
+  - Ill-formed input layout         -> must be `false` (wf check).
+
+C ABI: `(lean_object*, lean_object*, lean_object*, lean_object*) -> uint8_t`. -/
 @[export lean_verify_transform_prim]
-def leanVerifyTransformPrim (registry input_layout output_layout : String) : Bool :=
+def leanVerifyTransformPrim (registry input_layout output_layout kind : String) : Bool :=
   let layouts : PMT.IVE.Soundness.LayoutRegistry :=
     layout_env_from_list_faith (parseRegistry registry)
-  let t : PMT.IVE.Soundness.StateTransform :=
-    { input_layout := input_layout, output_layout := output_layout }
-  leanVerifyTransform layouts t
+  -- Look up both layouts by name.
+  match layouts input_layout, layouts output_layout with
+  | some in_info, some out_info =>
+    -- wf_layout check (mirrors Rust `lean_wf_layout_bool` first conjunct:
+    -- every field is in bounds, i.e. offset + size <= total_size).
+    let in_wf := in_info.fields.all (fun f => f.offset + f.size <= in_info.total_size)
+    let out_wf := out_info.fields.all (fun f => f.offset + f.size <= out_info.total_size)
+    in_wf && out_wf &&
+    (match kind with
+     | "identity" =>
+       -- Identity: same field count + same fields (name, offset, size).
+       in_info.fields.length = out_info.fields.length &&
+       (List.zip in_info.fields out_info.fields).all
+         (fun (a, b) => a.name = b.name && a.offset = b.offset && a.size = b.size)
+     | "reinterpret" =>
+       -- Reinterpret: same total_size.
+       in_info.total_size = out_info.total_size
+     | "copy" => true
+     | _ => false)
+  | _, _ => false
 
 /-- `@[export lean_verify_state_reads_prim]` — primitive-signature wrapper
 for `leanVerifyStateReads`. `registry` and `reads` are serialized
