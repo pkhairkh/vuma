@@ -582,6 +582,30 @@ inductive PmtInstr where
     -- Rust (ir.rs:1711): `Syscall { nr: u32, args: Vec<IRValue>,
     -- dst: Option<IRValue> }`. Syscalls are out-of-scope for PMT
     -- (no arena state interaction) — opaque effect, no `Step`s emitted.
+  | bulk_copy : IRValue → IRValue → IRValue → PmtInstr
+    -- Rust (ir.rs:1931): `BulkCopy { dst: IRValue, src: IRValue,
+    -- len: IRValue }`. Bulk memory copy (memcpy replacement, FFI-1-A).
+    -- Field-for-field mirror of the Rust variant — no abstraction,
+    -- no simplification: three IRValue operands in the exact order
+    -- (dst, src, len) the Rust enum uses. Effects: reads `dst`, `src`,
+    -- `len`; writes memory region `[dst, dst+len)`. Defines no vreg.
+    -- Modeled here as an opaque memory write that does not interact
+    -- with PMT's arena state — `to_steps = []` (no `Step`s emitted),
+    -- `effect = .none`, `well_typed = True`. The underlying byte-copy
+    -- semantics is a runtime concern (x86_64 lowering: `CLD; REP MOVSB`),
+    -- not a PMT `Step`.
+  | bulk_fill : IRValue → IRValue → IRValue → PmtInstr
+    -- Rust (ir.rs:1953): `BulkFill { dst: IRValue, val: IRValue,
+    -- len: IRValue }`. Bulk memory fill (memset replacement, FFI-1-A).
+    -- Field-for-field mirror of the Rust variant — no abstraction,
+    -- no simplification: three IRValue operands in the exact order
+    -- (dst, val, len) the Rust enum uses. Effects: reads `dst`, `val`,
+    -- `len`; writes memory region `[dst, dst+len)` with the low 8 bits
+    -- of `val`. Defines no vreg. Modeled here as an opaque memory write
+    -- that does not interact with PMT's arena state — `to_steps = []`
+    -- (no `Step`s emitted), `effect = .none`, `well_typed = True`.
+    -- The underlying byte-fill semantics is a runtime concern (x86_64
+    -- lowering: `CLD; REP STOSB`), not a PMT `Step`.
   deriving Repr
 
 /-- §5: A PMT-relevant basic block — a list of PmtInstr. -/
@@ -669,6 +693,14 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .stark_proof _ _ _ => .none
   | .call_indirect _ _ => .none
   | .syscall _ _ _ => .none
+  -- Bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill` are opaque
+  -- memory writes (memcpy/memset replacements). They write to a raw
+  -- pointer region `[dst, dst+len)`, not to a PMT arena region, so they
+  -- neither read from, write to, nor consume a state variable. Their
+  -- underlying byte-level semantics is a runtime concern (x86_64
+  -- `REP MOVSB` / `REP STOSB`), not a PMT `Step`.
+  | .bulk_copy _ _ _ => .none
+  | .bulk_fill _ _ _ => .none
 
 /-- §10: WellTypedness for PmtInstr (per-instruction).
 This is the per-instruction check that IVE's `verify_state_reads` /
@@ -734,6 +766,12 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .stark_proof _ _ _ => True
   | .call_indirect _ _ => True
   | .syscall _ _ _ => True
+  -- Bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill` write to a
+  -- raw pointer region, not a PMT arena region. No `WF_Layout` check
+  -- applies (the pointer / length IRValues are runtime concerns; the
+  -- region they denote is not tracked by the PMT arena).
+  | .bulk_copy _ _ _ => True
+  | .bulk_fill _ _ _ => True
 
 /-- §11: WellTypedness for a PmtBlock. -/
 def PmtBlock.well_typed (b : PmtBlock) (env : String → Layout) : Prop :=
@@ -842,5 +880,12 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .stark_proof _ _ _ => []
   | .call_indirect _ args => args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)
   | .syscall _ _ _ => []
+  -- Bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill` are opaque
+  -- memory writes (memcpy/memset replacements). They write to a raw
+  -- pointer region `[dst, dst+len)`, not to a PMT arena region, so they
+  -- emit no `Step`s. The underlying byte-level semantics is a runtime
+  -- concern (x86_64 `REP MOVSB` / `REP STOSB`), not a PMT `Step`.
+  | .bulk_copy _ _ _ => []
+  | .bulk_fill _ _ _ => []
 
 end PMT
