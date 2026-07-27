@@ -692,3 +692,14 @@ itself has no undischarged hypotheses within FFI scope.
   - Transitive axiom dependency: `own_ex_exclusive` (via `pmt_pillar_sound`
     → `no_oob_trap_for_well_typed_strong` → `LiveMirrorInvariant`), the
     documented residual axiom of the PMT pillar.
+
+## §FFI — Audit Report (FFI-2-A)
+
+The independent FFI-scope sorry/axiom audit is in `proof/AUDIT_FFI.md`.
+
+**Summary.**
+  - 0 `sorry` tactics in `proof/PMT/FFI/` and `proof/PMT/NoFFI.lean` (3 matches in docstrings only).
+  - 0 non-standard axioms in FFI scope.
+  - `lake build` from clean PASS with 108/108 steps green; zero FFI-scope warnings.
+  - 0 active `extern "C" { fn ... }` declarations for VUMA's own use (only the syscall ABI remains, routed through `IRInstr::Syscall` as residual TCB).
+  - 0 active `__vuma_state_*` / `__vuma_arena_*` extern emissions (27 references in comments/docstrings/deprecated-runtime only).
