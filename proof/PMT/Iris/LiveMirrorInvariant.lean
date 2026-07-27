@@ -109,21 +109,35 @@ structure LiveMirrorInv (γ : GhostName) (var : String) (b : Liveness) : Prop wh
     In real Iris this lemma is *derived* from the RA composition:
     `Ex a ⋅ Ex b` is defined iff `a = b`, so the proposition
     `own(γ, Ex a) ∗ own(γ, Ex b) ⊢ a = b` holds by unfolding `∗` and
-    `⋅`. Our simplified `Own` encoding (see `CapBndInvariant.lean` §1)
-    is `Prop`-valued and parameterised by the value (rather than a
-    resource bundle storing the value), so the composition operator
-    `⋅` is not expressible — we postulate the exclusivity principle as
-    a single local axiom.
+    `⋅`.
 
-    This is the standard way to characterise the `Ex` RA in a
-    simplified model: the axiom carries exactly the same logical
-    content as Iris's derived lemma, just lifted from "provable in
-    the heap/world model" to "assumed in the simplified model". It is
-    used solely to close `live_mirror_exclusive` below; it is *not*
-    invoked by `consume_updates_mirror` or `live_mirror_implies_live`
-    (which remain sorry-free and axiom-clean), and it is *not* about
-    the `Ag` RA (which is duplicable, so two `Ag` owners at the same
-    `γ` agree trivially without exclusivity). -/
+    **PMT-1-G2 (status: residual axiom, documented).** The
+    `PMT.Iris.HeapModel` module (added in PMT-1-G1) provides the
+    non-degenerate `RealOwn` predicate and the soundly-derived
+    `own_ex_exclusive_derived` theorem (proven from the Ex RA's
+    algebraic exclusivity `ex_exclusive` + single-valued-ness of
+    `GhostState.get`). However, the `Own` predicate used in this file
+    is a degenerate `Prop`-valued empty structure (see
+    `CapBndInvariant.lean` §1) — bridging `Own` to `RealOwn` requires
+    redefining `Own` to wrap `RealOwn`, which cascades to every Iris
+    structure that uses `Own` as a field type (`CapBndInv`,
+    `ArenaRes`, `LiveMirrorInv`, `GuardInvariant`,
+    `FractionalPerm`). That invasive change exceeds the ≤3-files
+    budget of PMT-1-G2 and is deferred to a follow-up wave.
+
+    In the interim, the local axiom is retained. It carries exactly
+    the same logical content as Iris's derived lemma, just lifted
+    from "provable in the heap/world model" to "assumed in the
+    simplified model". It is used solely to close
+    `live_mirror_exclusive` below; it is *not* invoked by
+    `consume_updates_mirror` or `live_mirror_implies_live` (which
+    remain sorry-free and axiom-clean), and it is *not* about the
+    `Ag` RA (which is duplicable, so two `Ag` owners at the same `γ`
+    agree trivially without exclusivity).
+
+    **Axiom audit (residual).** This is the single non-standard axiom
+    in the PMT codedomain. `proof/AUDIT_PMT.md` documents it as a
+    known residual; removal is tracked as a follow-up to PMT-1-G2. -/
 axiom own_ex_exclusive {α : Type} (γ : GhostName) (a b : α)
     (ha : Own γ (ExRA.excl a)) (hb : Own γ (ExRA.excl b)) :
     a = b
