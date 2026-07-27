@@ -856,9 +856,25 @@ impl VerificationEngine {
             verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
         let transform_results = verify_all_transforms(&transform_layouts, &transforms);
 
+        // Wave 2 task IVE-2-A: arena_bounds verifier is now ACTIVE.
+        // Walk the SCG for ArenaAlloc nodes and verify each references a
+        // registered layout with total_size > 0 (and capacity check if the
+        // arena's capacity is known). The result is OR-ed into the overall
+        // verdict: if any arena-bounds check fails, the program is rejected.
+        use crate::arena_bounds::{self, LayoutSpec as ArenaLayoutSpec};
+        let arena_layouts: HashMap<String, ArenaLayoutSpec> = pmt_layouts
+            .iter()
+            .map(|(name, spec)| (name.clone(), ArenaLayoutSpec {
+                name: spec.name.clone(),
+                total_size: spec.total_size,
+            }))
+            .collect();
+        let arena_bounds_results = arena_bounds::verify_arena_bounds(&arena_layouts, scg);
+
         let read_ok = read_results.iter().all(|r| r.valid);
         let write_ok = write_results.iter().all(|r| r.valid);
         let transform_ok = transform_results.iter().all(|r| r.valid);
+        let arena_bounds_ok = arena_bounds_results.iter().all(|r| r.valid);
 
         let read_errs: Vec<String> = read_results
             .iter()
@@ -873,15 +889,21 @@ impl VerificationEngine {
             .filter_map(|r| r.error.clone())
             .collect();
 
+        let arena_bounds_errs: Vec<String> = arena_bounds_results
+            .iter()
+            .filter_map(|r| r.error.clone())
+            .collect();
+
         let all_errs: Vec<String> = read_errs
             .iter()
             .chain(write_errs.iter())
             .chain(transform_errs.iter())
+            .chain(arena_bounds_errs.iter())
             .cloned()
             .collect();
 
         let total_ops = reads.len() + writes.len() + transforms.len();
-        let all_ok = read_ok && write_ok && transform_ok;
+        let all_ok = read_ok && write_ok && transform_ok && arena_bounds_ok;
 
         if all_ok {
             VerificationResult::new(
