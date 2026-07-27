@@ -153,25 +153,45 @@ conjuncts in `IRFunction.well_typed`, exactly as for `.call`. The
 
 namespace PMT
 
-/-- §1: IRValue — operand type. Mirrors Rust `IRValue`.
-Rust: `IRValue = Register(u32) | Immediate(i64) | Address(u64) | Label(String)`.
-Lean: we use `Nat` for all numeric forms (simpler; simulation is by value). -/
+/-- §1: IRValue — operand type. Bit-faithful mirror of Rust `IRValue` (ir.rs:984-992).
+
+**PMT-FAITH-6-A:** changed from unbounded `Nat`/`Int` to bounded `BitVec`
+types matching Rust's `u32`/`i64`/`u64` bit-faithfully:
+  - `register : BitVec 32`  (Rust `Register(u32)`)
+  - `immediate : BitVec 64` (Rust `Immediate(i64)` — BitVec 64 models two's-complement i64)
+  - `address : BitVec 64`   (Rust `Address(u64)`)
+  - `label : String`        (Rust `Label(String)` — unchanged) -/
 inductive IRValue where
-  | register : Nat → IRValue       -- vreg ID
-  | immediate : Int → IRValue      -- constant
-  | address   : Nat → IRValue      -- memory address
-  | label     : String → IRValue   -- block label
+  | register : BitVec 32 → IRValue    -- vreg ID (Rust u32)
+  | immediate : BitVec 64 → IRValue   -- constant (Rust i64, modeled as BitVec 64 for two's-complement)
+  | address   : BitVec 64 → IRValue   -- memory address (Rust u64)
+  | label     : String → IRValue      -- block label
   deriving Repr, DecidableEq
 
-/-- §2: IRType — value type. Mirrors Rust `IRType` (subset). -/
+/-- §2: IRType — value type. Bit-faithful mirror of Rust `IRType` (ir.rs:40-110).
+
+**PMT-FAITH-6-A:** expanded from 7 to 14+ variants to match Rust bit-faithfully.
+Added: I8, I16, U8, U16, F32, F64, Func. Changed `struct` to carry
+`name : String` and `fields : List IRType` (matching Rust `Struct { name, fields }`).
+Added `array`, `taggedUnion`, `channel` variants. -/
 inductive IRType where
-  | i32   : IRType
-  | i64   : IRType
-  | u32   : IRType
-  | u64   : IRType
+  | i8   : IRType
+  | i16  : IRType
+  | i32  : IRType
+  | i64  : IRType
+  | u8   : IRType
+  | u16  : IRType
+  | u32  : IRType
+  | u64  : IRType
+  | f32  : IRType
+  | f64  : IRType
   | ptr   : IRType
   | void  : IRType
-  | struct : Layout → IRType       -- aggregate
+  | func  : IRType
+  | struct : String → List IRType → IRType       -- (name, fields) — matches Rust Struct { name, fields }
+  | array : IRType → Nat → IRType                -- (element, count) — matches Rust Array { element, count }
+  | taggedUnion : String → IRType → Nat → Nat → IRType  -- (name, tag_type, max_payload_size, variant_count)
+  | channel : IRType → IRType                    -- (elem_ty) — matches Rust Channel(Box<IRType>)
   deriving Repr
 
 /-! ## §3. Op-kind tags (mirrors of Rust enums used by the arithmetic variants)
@@ -492,7 +512,7 @@ inductive PmtInstr where
     -- variant. The Lean model now has ONE Transform variant matching Rust
     -- bit-faithfully (closes FAITH-2-C).
   | call        : String → List String → PmtInstr             -- (builtin_name, arg_vars)
-  | ret         : IRValue → PmtInstr                          -- (return value)
+  | ret         : List IRValue → PmtInstr                      -- (return values) — PMT-FAITH-6-A: List, matches Rust Ret { values: Vec<IRValue> }
   -- Pure-arithmetic variants (12, PMT-1-A) — `effect = .none`, `to_steps = []`
   | bin_op      : BinOpKind → IRValue → IRValue → IRValue → IRType → PmtInstr
     -- Rust `BinOp { op, dst, lhs, rhs, ty }`
@@ -579,14 +599,12 @@ inductive PmtInstr where
     -- Rust (ir.rs:1886): `StarkProof { input: IRValue, dst: IRValue,
     -- constraints: Vec<u64> }`. Proof verification is an opaque effect
     -- delegated to the verifier — no PMT `Step` interaction.
-  | call_indirect : String → List String → PmtInstr
-    -- Rust (ir.rs:1907): `CallIndirect { dst: Option<IRValue>,
-    -- func_ptr: IRValue, args: Vec<IRValue> }`.
-    -- Modeled here as `(func_ptr, arg_vars) : String × List String`
-    -- to mirror `.call : String → List String → PmtInstr` exactly
-    -- (the task brief prescribes `to_steps = args.map (fun v =>
-    -- ⟨v, v, ⟨1, []⟩, .transform⟩)`, which requires `args : List
-    -- String` so each `v` can populate a `Step.in_var`/`out_var`).
+  | call_indirect : Option IRValue → IRValue → List IRValue → PmtInstr
+    -- PMT-FAITH-6-A: bit-faithful mirror of Rust (ir.rs:1907)
+    -- `CallIndirect { dst: Option<IRValue>, func_ptr: IRValue, args: Vec<IRValue> }`.
+    -- Previously abstracted to `(String, List String)` — that was unfaithful
+    -- (dropped dst, used String var-name instead of IRValue vreg). Now
+    -- bit-faithful: (dst, func_ptr, args) all as IRValue.
     -- `dst` (Option IRValue) and `func_ptr` (IRValue) are abstracted
     -- to the func-ptr's vreg name (a String) — faithful-but-simplified,
     -- same precedent as the arithmetic `ty : Option<IRType>` → `IRType`.
@@ -744,7 +762,7 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .channel_recv_timeout _ _ _ _ => .none
   | .channel_recv_result _ _ _ _ => .none
   | .stark_proof _ _ _ => .none
-  | .call_indirect _ _ => .none
+  | .call_indirect _ _ _ => .none
   | .syscall _ _ _ => .none
   -- Bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill` are opaque
   -- memory writes (memcpy/memset replacements). They write to a raw
@@ -826,7 +844,7 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .channel_recv_timeout _ _ _ _ => True
   | .channel_recv_result _ _ _ _ => True
   | .stark_proof _ _ _ => True
-  | .call_indirect _ _ => True
+  | .call_indirect _ _ _ => True
   | .syscall _ _ _ => True
   -- Bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill` write to a
   -- raw pointer region, not a PMT arena region. No `WF_Layout` check
@@ -947,7 +965,13 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .channel_recv_timeout _ _ _ _ => []
   | .channel_recv_result _ _ _ _ => []
   | .stark_proof _ _ _ => []
-  | .call_indirect _ args => args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)
+  | .call_indirect _ _ _ => []
+    -- PMT-FAITH-6-A: call_indirect now takes (Option IRValue, IRValue, List IRValue)
+    -- bit-faithfully. The previous to_steps emitted one Step per arg using
+    -- String var names — but args are now IRValue (no faithful IRValue→String
+    -- mapping exists; that's the FAITH-2-L gap). Emit [] (no Steps) and
+    -- document: call_indirect's per-arg liveness is not tracked at the PMT
+    -- Step level until FAITH-2-L closes the String-vs-IRValue abstraction.
   | .syscall _ _ _ => []
   -- Bulk-memory variants (FFI-3-A): `bulk_copy`/`bulk_fill` are opaque
   -- memory writes (memcpy/memset replacements). They write to a raw
