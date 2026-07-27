@@ -13,5 +13,4 @@ pub mod callback;
 pub mod ffi_scratch;
 #[cfg(feature = "pmt-runtime-check")]
 pub mod pmt_check;
-pub mod pmt_ops;
 pub mod vuma_context;
