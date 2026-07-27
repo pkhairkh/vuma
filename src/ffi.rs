@@ -1,20 +1,26 @@
 //! # Foreign Function Interface (FFI) for VUMA
 //!
-//! Provides the FFI infrastructure for calling external C functions and
-//! Linux syscalls from VUMA programs.
+//! Provides the FFI infrastructure for calling external C functions from
+//! VUMA programs.
 //!
 //! # Overview
 //!
 //! The FFI module handles:
 //!
 //! - **`extern "C"` block syntax** — declares external functions in VUMA source
-//! - **Syscall bindings** — Linux kernel interfaces: `write`, `read`, `exit`,
-//!   `mmap`, `munmap`, `brk`
 //! - **VUMA builtins (No-FFI)** — the legacy libc bindings (`memcpy`,
 //!   `memset`, `malloc`, `free`) have been replaced by verified VUMA IR
 //!   builtins (`IRInstr::BulkCopy`, `IRInstr::BulkFill`, `IRInstr::Alloc`,
 //!   `IRInstr::Free`) per the FFI Wave 1 No-FFI design — see
 //!   `src/codegen/src/ir.rs` and FFI-1-A in the worklog.
+//! - **Syscall ABI (residual TCB)** — the 6 Linux syscalls (`write`,
+//!   `read`, `exit`, `mmap`, `munmap`, `brk`) are no longer declared as
+//!   extern FFI bindings; they are routed through the VUMA
+//!   `IRInstr::Syscall` builtin (per FFI Wave 1 task B). Syscalls are
+//!   primitive effects that cross the user/kernel boundary; they are part
+//!   of the TCB (Trusted Computing Base), NOT foreign function calls.
+//!   The `SyscallName` enum below is the syscall ABI allowlist (residual
+//!   TCB contract). See `docs/caveats.md` §FFI for the TCB contract.
 //! - **Codegen support** — extern function calls emit relocations instead of
 //!   local `BL` instructions
 //!
@@ -22,14 +28,13 @@
 //!
 //! ```vuma
 //! extern "C" {
-//!     fn write(fd: i64, buf: Address, count: i64) -> i64;
-//!     fn read(fd: i64, buf: Address, count: i64) -> i64;
-//!     fn exit(code: i64);
+//!     fn some_user_declared_extern(x: i64) -> i64;
 //! }
 //!
 //! fn main() {
-//!     write(1, 0x400000, 13);
-//!     exit(0);
+//!     // Syscalls are emitted by the codegen as IRInstr::Syscall, not as
+//!     // extern calls — the kernel is trusted (residual TCB).
+//!     let n = 0;
 //! }
 //! ```
 
@@ -146,58 +151,27 @@ impl fmt::Display for ExternType {
 // Pre-defined binding tables
 // ---------------------------------------------------------------------------
 
-/// Returns the standard Linux syscall bindings as an `ExternBlock`.
-pub fn linux_syscall_bindings() -> ExternBlock {
-    ExternBlock {
-        convention: CallingConvention::C,
-        functions: vec![
-            ExternFn {
-                name: "write".to_string(),
-                param_types: vec![ExternType::I64, ExternType::Ptr, ExternType::I64],
-                return_type: Some(ExternType::I64),
-            },
-            ExternFn {
-                name: "read".to_string(),
-                param_types: vec![ExternType::I64, ExternType::Ptr, ExternType::I64],
-                return_type: Some(ExternType::I64),
-            },
-            ExternFn {
-                name: "exit".to_string(),
-                param_types: vec![ExternType::I64],
-                return_type: None,
-            },
-            ExternFn {
-                name: "mmap".to_string(),
-                param_types: vec![
-                    ExternType::Ptr, // addr
-                    ExternType::I64, // length
-                    ExternType::I64, // prot
-                    ExternType::I64, // flags
-                    ExternType::I64, // fd
-                    ExternType::I64, // offset
-                ],
-                return_type: Some(ExternType::Ptr),
-            },
-            ExternFn {
-                name: "munmap".to_string(),
-                param_types: vec![ExternType::Ptr, ExternType::I64],
-                return_type: Some(ExternType::I64),
-            },
-            ExternFn {
-                name: "brk".to_string(),
-                param_types: vec![ExternType::Ptr],
-                return_type: Some(ExternType::Ptr),
-            },
-        ],
-    }
-}
+// The legacy `linux_syscall_bindings()` function (which returned an
+// `ExternBlock` with 6 `ExternFn` entries for write/read/exit/mmap/munmap/brk)
+// was REMOVED by FFI Wave 1 task B — those syscalls are now routed through
+// the VUMA `IRInstr::Syscall` builtin (per the No-FFI design: syscalls are
+// primitive effects, part of the TCB, NOT foreign function calls). The
+// `SyscallName` enum below is the syscall ABI allowlist (residual TCB
+// contract). See `docs/caveats.md` §FFI for the TCB contract.
+//
+// The legacy `c_library_bindings()` function (memcpy/memset/malloc/free)
+// was removed earlier by FFI Wave 1 task A — those are now the VUMA IR
+// builtins `IRInstr::BulkCopy` / `IRInstr::BulkFill` / `IRInstr::Alloc` /
+// `IRInstr::Free`. See FFI-1-A in the worklog.
 
 // ---------------------------------------------------------------------------
 // ExternRegistry — tracks all known extern functions
 // ---------------------------------------------------------------------------
 
 /// Registry of all known extern functions, built from `extern` blocks
-/// in the source code and the built-in binding tables.
+/// in the source code. (No default bindings are registered: per the
+/// No-FFI design, syscalls route through `IRInstr::Syscall` and libc
+/// functions are VUMA IR builtins — there is no built-in extern surface.)
 #[derive(Debug, Clone, Default)]
 pub struct ExternRegistry {
     /// Map from function name to its extern declaration.
@@ -212,16 +186,22 @@ impl ExternRegistry {
         Self::default()
     }
 
-    /// Create a registry pre-populated with the Linux syscall bindings.
+    /// Create a registry with the default VUMA bindings.
     ///
-    /// The legacy libc bindings (`memcpy`, `memset`, `malloc`, `free`) have
-    /// been replaced by VUMA IR builtins (`IRInstr::BulkCopy`,
-    /// `IRInstr::BulkFill`, `IRInstr::Alloc`, `IRInstr::Free`) per the
-    /// FFI Wave 1 No-FFI design (see FFI-1-A in the worklog).
+    /// Per the No-FFI design (FFI Wave 1 tasks A and B), there are no
+    /// default extern bindings:
+    /// - The legacy libc bindings (`memcpy`, `memset`, `malloc`, `free`)
+    ///   are now VUMA IR builtins (`IRInstr::BulkCopy`, `IRInstr::BulkFill`,
+    ///   `IRInstr::Alloc`, `IRInstr::Free`) — see FFI-1-A.
+    /// - The 6 Linux syscalls (`write`, `read`, `exit`, `mmap`, `munmap`,
+    ///   `brk`) are now routed through the VUMA `IRInstr::Syscall` builtin
+    ///   — see FFI-1-B. Syscalls are primitive effects (part of the TCB),
+    ///   not foreign function calls.
+    ///
+    /// The returned registry is therefore empty; user-declared `extern "C"`
+    /// blocks are still registered via `register_block`.
     pub fn with_default_bindings() -> Self {
-        let mut registry = Self::new();
-        registry.register_block(&linux_syscall_bindings());
-        registry
+        Self::new()
     }
 
     /// Register all functions from an `extern` block.
@@ -834,17 +814,13 @@ fn riscv32_syscalls() -> HashMap<SyscallName, u64> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_linux_syscall_bindings() {
-        let bindings = linux_syscall_bindings();
-        assert_eq!(bindings.convention, CallingConvention::C);
-        assert!(bindings.functions.iter().any(|f| f.name == "write"));
-        assert!(bindings.functions.iter().any(|f| f.name == "read"));
-        assert!(bindings.functions.iter().any(|f| f.name == "exit"));
-        assert!(bindings.functions.iter().any(|f| f.name == "mmap"));
-        assert!(bindings.functions.iter().any(|f| f.name == "munmap"));
-        assert!(bindings.functions.iter().any(|f| f.name == "brk"));
-    }
+    // The legacy `test_linux_syscall_bindings` test was removed by FFI Wave 1
+    // task B — `linux_syscall_bindings()` was deleted because the 6 Linux
+    // syscalls (`write`, `read`, `exit`, `mmap`, `munmap`, `brk`) are now
+    // routed through the VUMA `IRInstr::Syscall` builtin (syscalls are
+    // primitive effects, part of the TCB — NOT foreign function calls).
+    // See `src/codegen/src/ir.rs` (`IRInstr::Syscall { nr, args, dst }`)
+    // and FFI-1-B in the worklog.
 
     // The legacy `test_c_library_bindings` test was removed by FFI Wave 1
     // task A — `c_library_bindings()` was deleted because `memcpy` /
@@ -854,11 +830,25 @@ mod tests {
 
     #[test]
     fn test_extern_registry() {
+        // Per the No-FFI design (FFI Wave 1 tasks A and B), there are NO
+        // default extern bindings — `with_default_bindings()` returns an
+        // empty registry. Syscalls route through `IRInstr::Syscall`; libc
+        // functions are VUMA IR builtins. User code declares its own
+        // `extern "C"` blocks (see `test_register_custom_extern_block`
+        // below for that path).
         let registry = ExternRegistry::with_default_bindings();
-        assert!(registry.is_extern("write"));
+        assert!(!registry.is_extern("write"));
+        assert!(!registry.is_extern("read"));
+        assert!(!registry.is_extern("exit"));
+        assert!(!registry.is_extern("mmap"));
+        assert!(!registry.is_extern("munmap"));
+        assert!(!registry.is_extern("brk"));
+        assert!(!registry.is_extern("memcpy"));
+        assert!(!registry.is_extern("malloc"));
         assert!(!registry.is_extern("my_local_fn"));
-        assert!(registry.needs_relocation("write"));
-        assert_eq!(registry.convention("write"), Some(CallingConvention::C));
+        assert!(!registry.needs_relocation("write"));
+        assert!(!registry.needs_relocation("mmap"));
+        assert_eq!(registry.function_names().len(), 0);
     }
 
     #[test]
