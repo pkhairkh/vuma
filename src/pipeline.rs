@@ -5718,9 +5718,18 @@ pub fn compile_with_path(
             // any PMT program that uses state ops.
             let pmt_layouts = build_pmt_layout_specs(&ast);
             let secret_vars = collect_secret_vars(&ast);
+            // (Task 3-B) Recover the codegen Scg's typed-state metadata
+            // (produced by `bridge_ast_to_codegen_scg_with_meta`, which
+            // walks the AST in parallel with the codegen-SCG bridge) and
+            // attach it so IVE's `verify_pmt` can run the
+            // `verify_typed_state_conformance` dual-derivation
+            // cross-check against the semantic SCG's `NodePayload`s.
+            let typed_state_meta =
+                bridge_ast_to_codegen_scg_with_meta(&ast).1;
             let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
                 .with_pmt_layouts(pmt_layouts)
-                .with_secret_vars(secret_vars);
+                .with_secret_vars(secret_vars)
+                .with_typed_state_meta(typed_state_meta);
             let result = aggregator.verify_all(&input);
             // Verification is a hard safety gate: if any invariant was
             // violated, refuse to emit code for the program.  This is
@@ -6806,13 +6815,22 @@ pub fn compile_modules(
     };
     let pmt_layouts = build_pmt_layout_specs(&merged_ast);
     let secret_vars = collect_secret_vars(&merged_ast);
+    // (Task 3-B) Recover the codegen Scg's typed-state metadata and
+    // attach it so IVE's `verify_pmt` can run the
+    // `verify_typed_state_conformance` dual-derivation cross-check
+    // against the semantic SCG's `NodePayload`s. (Stage 3 below
+    // re-bridges for the actual codegen Scg; the meta is cheap to
+    // re-derive here and keeps this site self-contained.)
+    let typed_state_meta =
+        bridge_ast_to_codegen_scg_with_meta(&merged_ast).1;
     let aggregator = InvariantAggregator::new()
         .with_level(IveVerificationLevel::Pmt)
         .with_max_paths(config.ive_max_paths)
         .with_max_path_length(config.ive_max_path_length);
     let ive_input = vuma_ive::verification::VerificationInput::from_scg(pmt_scg.clone())
         .with_pmt_layouts(pmt_layouts)
-        .with_secret_vars(secret_vars);
+        .with_secret_vars(secret_vars)
+        .with_typed_state_meta(typed_state_meta);
     let verification = aggregator.verify_all(&ive_input);
     timings.push((
         "ive-verification".to_string(),
@@ -9853,7 +9871,16 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
         }
     }
 
-    (Scg::new(nodes), program_meta)
+    // Task 3-A: populate `Scg::typed_state_meta` first-class (via
+    // `new_with_meta`) AND keep returning `program_meta` as the tuple's
+    // second element for backward compatibility with the existing
+    // `tests/scg_conformance.rs` destructuring (Task 3-C will drop the
+    // tuple and read `scg.typed_state_meta` directly). `TypedStateMeta:
+    // Clone` (derive on the enum) so cloning the Vec is cheap and safe.
+    (
+        Scg::new_with_meta(nodes, program_meta.clone()),
+        program_meta,
+    )
 }
 
 /// (Task 2-A) Thin wrapper around [`bridge_ast_to_codegen_scg_with_meta`]

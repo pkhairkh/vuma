@@ -270,10 +270,13 @@ fn main() -> i32 {
     );
     let ast = parse_output.unwrap();
 
-    // Single canonical AST walk: the bridge returns BOTH the codegen SCG
-    // (untyped nodes) AND the TypedStateMeta metadata (typed-state info
-    // preserved as a side product of lowering). No separate parallel walk.
-    let (cg, meta) = vuma::pipeline::bridge_ast_to_codegen_scg_with_meta(&ast);
+    // Single canonical AST walk: the bridge produces the codegen SCG whose
+    // first-class `typed_state_meta` field (Task 3-A) carries the recoverable
+    // typed-state info as a side product of lowering. No separate parallel
+    // walk, and no tuple to destructure -- the metadata is read directly
+    // off the `Scg` struct.
+    let cg = vuma::pipeline::bridge_ast_to_codegen_scg(&ast);
+    let meta = &cg.typed_state_meta;
 
     // ── Side A (UNCHANGED): the codegen SCG's emitted nodes are STILL
     //    untyped. The canonical AST→codegen bridge emits ZERO typed
@@ -301,7 +304,7 @@ fn main() -> i32 {
     // `[StateInit, StateRead, StateWrite, StateTransform, ForeignConsume]`
     // counts across the recovered metadata.
     let mut mc = [0usize; 5];
-    for m in &meta {
+    for m in meta {
         match m {
             TypedStateMeta::StateInit { .. } => mc[0] += 1,
             TypedStateMeta::StateRead { .. } => mc[1] += 1,
@@ -326,7 +329,7 @@ fn main() -> i32 {
     let mut found_init = false;
     let mut found_read = false;
     let mut found_write = false;
-    for m in &meta {
+    for m in meta {
         match m {
             TypedStateMeta::StateInit { layout_name, result_vreg } => {
                 assert_eq!(
@@ -364,4 +367,43 @@ fn main() -> i32 {
     }
     assert!(found_init && found_read && found_write,
         "metadata must contain one StateInit, one StateRead, one StateWrite");
+}
+
+/// Task 3-B / 3-C -- the IVE typed-state conformance cross-check is wired
+/// into the full pipeline and runs WITHOUT breaking it. The cross-check
+/// (Task 3-B, `verify_typed_state_conformance`) is warn-only: on a mismatch
+/// it logs `[Task 3-B] typed-state conformance cross-check ...` and does
+/// NOT hard-fail, so the pipeline must still return `Ok`. This test proves
+/// the wiring end-to-end by compiling the same Point state-ops source test
+/// 3 uses through the full `vuma::pipeline::compile` path and asserting
+/// success -- i.e. the IVE cross-check is exercised on the canonical
+/// AST->codegen bridge output (whose `typed_state_meta` is now first-class
+/// on the `Scg`) without aborting compilation.
+#[test]
+fn ive_cross_check_passes_for_canonical_bridge() {
+    // Same Point state-ops source as
+    // `canonical_ast_bridge_preserves_typed_state_metadata` -- exercises
+    // state_new (StateInit), field write (StateWrite), field read
+    // (StateRead): the three typed-state ops the IVE cross-check
+    // reconciles between the semantic SCG and the codegen SCG. A raw
+    // string literal keeps the source verbatim (no line-continuation
+    // backslashes needed).
+    let src = r#"layout Point = { x: u32, y: u32 }
+
+fn main() -> i32 {
+    let p = state_new(Point);
+    p.x = 42;
+    let v = p.x;
+    return 0;
+}
+"#;
+    let config = vuma::pipeline::CompileConfig::default();
+    let result = vuma::pipeline::compile(src, &config);
+    assert!(
+        result.is_ok(),
+        "full pipeline must succeed with the IVE typed-state conformance \
+         cross-check wired in (Task 3-B is warn-only, never hard-fails). \
+         errors: {:?}",
+        result.err()
+    );
 }

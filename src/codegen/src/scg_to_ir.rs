@@ -224,16 +224,50 @@ type PhiInfo = (usize, IRValue, Vec<(IRValue, String)>);
 pub struct Scg {
     /// Top-level nodes in the SCG.
     pub nodes: Vec<ScgNode>,
+    /// Typed-state METADATA recovered alongside the codegen SCG (Task 3-A).
+    ///
+    /// First-class metadata mirroring the `Vec<TypedStateMeta>` previously
+    /// returned as the second element of
+    /// [`vuma::pipeline::bridge_ast_to_codegen_scg_with_meta`]'s tuple. The
+    /// codegen SCG lowers typed-state ops to UNTYPED nodes, losing the
+    /// `layout_name` + typed-state kind; this field preserves that info so
+    /// the codegen SCG can be cross-checked against the semantic SCG without
+    /// changing the emitted binary.
+    ///
+    /// Populated by [`Scg::new_with_meta`]; left empty by [`Scg::new`] (which
+    /// tests / synthetic builders that don't care about typed-state metadata
+    /// still use).
+    pub typed_state_meta: Vec<TypedStateMeta>,
 }
 
 impl Scg {
-    /// Construct a new SCG from its top-level nodes.
+    /// Construct a new SCG from its top-level nodes with EMPTY typed-state
+    /// metadata.
     ///
-    /// This is the canonical entry point for building a codegen `Scg`;
-    /// future fields (e.g. `typed_state_meta`) will be initialized here so
-    /// that callers cannot forget to populate them.
+    /// This is the canonical entry point for test/synthetic builders that
+    /// don't care about typed-state metadata. Production code that bridges
+    /// from the AST should use [`Scg::new_with_meta`] so the
+    /// `typed_state_meta` field is populated alongside the nodes.
     pub fn new(nodes: Vec<ScgNode>) -> Self {
-        Self { nodes }
+        Self {
+            nodes,
+            typed_state_meta: Vec::new(),
+        }
+    }
+
+    /// Construct a new SCG from its top-level nodes AND the typed-state
+    /// metadata recovered from the AST (Task 3-A).
+    ///
+    /// This is the production entry point used by
+    /// [`vuma::pipeline::bridge_ast_to_codegen_scg_with_meta`]: it makes the
+    /// `TypedStateMeta` metadata first-class on the `Scg` itself rather than
+    /// a parallel tuple element, so downstream consumers (IVE verification,
+    /// `tests/scg_conformance.rs`) can read `scg.typed_state_meta` directly.
+    pub fn new_with_meta(nodes: Vec<ScgNode>, meta: Vec<TypedStateMeta>) -> Self {
+        Self {
+            nodes,
+            typed_state_meta: meta,
+        }
     }
 }
 
