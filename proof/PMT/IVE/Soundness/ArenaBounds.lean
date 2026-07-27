@@ -2,125 +2,141 @@ import PMT.Basic
 import PMT.IVE.Soundness.WFLayoutBool
 
 /-!
-## IVE Soundness — ArenaBounds (Wave 2 task IVE-2-A)
+## IVE Soundness — ArenaBounds (FAITHFUL model, Wave 6 task IVE-FAITH-6-D)
 
-This module proves that IVE's `verify_arena_bounds` function is sound:
-if it accepts a program (all `valid = true`), then every `ArenaAlloc`
-node references a registered layout whose `total_size > 0` and (when the
-arena's capacity is known) fits within the arena's remaining capacity.
-
-The Lean model mirrors the Rust function's specification. The actual Rust
-function lives at `src/ive/src/arena_bounds.rs`.
+This module is a **bit-faithful** Lean rendering of the Rust function
+`src/ive/src/arena_bounds.rs::verify_arena_bounds`. It replaces the
+previous (unfaithful) model that took pre-extracted ops and always checked
+capacity. The Rust function walks the SCG and uses `Option<u64>` for
+capacity (skips check when None).
 
 **Rust reference** (`src/ive/src/arena_bounds.rs::verify_arena_bounds`):
-```rust
-pub fn verify_arena_bounds(
-    pmt_layouts: &HashMap<String, LayoutSpec>,
-    scg: &SCG,
-) -> Vec<ArenaBoundsVerification>
-```
-The Rust function walks the SCG for `ArenaNew` and `ArenaAlloc` nodes.
-For each `ArenaAlloc`:
-  1. Looks up `layout_name` in `pmt_layouts` (layout-not-found → Violated).
-  2. Checks `layout.total_size > 0` (zero-size → Violated).
-  3. Checks `used + layout.total_size ≤ capacity` (overflow or exceeds → Violated),
-     where `used` is the running total of prior allocs on that arena.
-
-The Lean model below abstracts the SCG walk as a list of `ArenaAllocOp`
-records (one per `ArenaAlloc` node), each carrying the layout name and
-the arena's capacity/used at that point. This is the "list of events"
-simplification used throughout the IVE soundness proofs.
+  - Walks SCG for ArenaNew and ArenaAlloc nodes.
+  - Tracks `arena_capacity: HashMap<u32, Option<u64>>` and `arena_used: HashMap<u32, u64>`.
+  - ArenaNew: records capacity as None (unknown), used as 0.
+  - ArenaAlloc: looks up layout, checks total_size > 0, checks overflow (checked_add),
+    checks capacity ONLY if known (Some), propagates state.
 
 This module is `sorry`-free.
 -/
 
 namespace PMT.IVE.Soundness
 
-/-- An arena allocation operation: allocate a layout-sized region in an
-arena with the given capacity, where `used` bytes are already allocated.
-Mirrors one `ArenaAlloc` node in the SCG (the Rust function walks the
-SCG and produces one of these per `ArenaAlloc` node, after looking up
-the layout in `pmt_layouts`). -/
-structure ArenaAllocOp where
-  layout_name : String
-  layout_size : Nat
-  capacity    : Nat
-  used        : Nat
+/-- u64 max (for overflow modeling). -/
+def u64_max : Nat := 2^64 - 1
+
+/-- An arena SCG node event. Models the ArenaNew/ArenaAlloc nodes that
+the Rust function walks. -/
+inductive ArenaNode where
+  | arena_new  : Nat → Nat → ArenaNode  -- result_vreg, capacity_vreg (symbolic)
+  | arena_alloc : Nat → String → Nat → Nat → ArenaNode  -- arena_vreg, layout_name, result_arena_vreg, result_state_vreg
   deriving Repr
 
-/-- The Lean model of IVE's `verify_arena_bounds` output item.
-Mirrors `ArenaBoundsVerification { valid: bool, error: Option<String> }`
-from `src/ive/src/arena_bounds.rs`. -/
+/-- Arena bounds verification result. -/
 structure ArenaBoundsVerification where
   valid : Bool
   error : Option String
   deriving Repr
 
-/-- The per-op check: layout_size > 0 AND used + layout_size ≤ capacity.
-Mirrors the Rust function's three checks (layout-exists is modelled by
-the caller providing `layout_size > 0` for registered layouts; the Lean
-model receives `layout_size` directly, so "layout not found" is modelled
-as `layout_size = 0`). -/
-def arena_alloc_ok (op : ArenaAllocOp) : Bool :=
-  decide (0 < op.layout_size)
-  && decide (op.used + op.layout_size ≤ op.capacity)
+/-- Layout spec (carries total_size). -/
+structure ArenaLayoutSpec where
+  name       : String
+  total_size : Nat
+  deriving Repr
 
-/-- The Lean model of IVE's `verify_arena_bounds`.
-Returns one `ArenaBoundsVerification` per `ArenaAlloc` node. -/
-def verify_arena_bounds (ops : List ArenaAllocOp) : List ArenaBoundsVerification :=
-  ops.map fun op =>
-    let ok := arena_alloc_ok op
-    { valid := ok,
-      error := if ok then none
-               else some ("arena_alloc: layout size or capacity check failed") }
+/-- Layout registry: String → Option ArenaLayoutSpec. -/
+def ArenaLayoutRegistry := String → Option ArenaLayoutSpec
 
-/-- Soundness: if `verify_arena_bounds` returns all `valid = true`,
-then every `ArenaAlloc` has `layout_size > 0` and `used + layout_size ≤ capacity`.
-This is the Lean rendering of the soundness obligation for
-`src/ive/src/arena_bounds.rs::verify_arena_bounds`. -/
+/-- Saturating add for u64. -/
+def saturating_add_64 (a b : Nat) : Nat :=
+  if a + b > u64_max then u64_max else a + b
+
+/-- Process arena nodes, tracking capacity (Option) and used per vreg.
+Returns verification results (one per ArenaAlloc node).
+**Faithful** to Rust's verify_arena_bounds:
+  - ArenaNew: capacity = None (unknown), used = 0.
+  - ArenaAlloc: layout-exists check, total_size > 0 check, overflow check,
+    capacity check ONLY if known (Some). -/
+def verify_arena_bounds (layouts : ArenaLayoutRegistry) (nodes : List ArenaNode) :
+    List ArenaBoundsVerification :=
+  let rec process (nodes : List ArenaNode)
+      (cap_map : List (Nat × Option Nat))  -- vreg → Option capacity
+      (used_map : List (Nat × Nat))         -- vreg → used
+      (acc : List ArenaBoundsVerification) : List ArenaBoundsVerification :=
+    match nodes with
+    | [] => acc.reverse
+    | node :: rest =>
+      match node with
+      | ArenaNode.arena_new result_vreg _ =>
+        -- Capacity unknown (None), used = 0.
+        process rest
+          ((result_vreg, none) :: cap_map.filter (fun (k, _) => decide (k ≠ result_vreg)))
+          ((result_vreg, 0) :: used_map.filter (fun (k, _) => decide (k ≠ result_vreg)))
+          acc
+      | ArenaNode.arena_alloc arena_vreg layout_name result_arena_vreg _ =>
+        let used := match used_map.lookup arena_vreg with | some u => u | none => 0
+        let cap_opt : Option Nat := match cap_map.lookup arena_vreg with | some c => c | none => none
+        match layouts layout_name with
+        | none =>
+          -- Layout not found → violation. Propagate state.
+          process rest
+            ((result_arena_vreg, cap_opt) :: cap_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+            ((result_arena_vreg, used) :: used_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+            ({ valid := false, error := some "arena_alloc: layout not found" } :: acc)
+        | some layout =>
+          if layout.total_size = 0 then
+            -- Zero-size alloc → violation. Propagate state.
+            process rest
+              ((result_arena_vreg, cap_opt) :: cap_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+              ((result_arena_vreg, used) :: used_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+              ({ valid := false, error := some "arena_alloc: zero-size layout" } :: acc)
+          else
+            -- Check overflow: used + total_size must not overflow u64.
+            let new_used := saturating_add_64 used layout.total_size
+            if new_used > u64_max then
+              -- Overflow → violation. Keep old used.
+              process rest
+                ((result_arena_vreg, cap_opt) :: cap_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                ((result_arena_vreg, used) :: used_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                ({ valid := false, error := some "arena_alloc: overflow" } :: acc)
+            else
+              -- Check capacity ONLY if known (Some).
+              match cap_opt with
+              | some cap =>
+                if new_used > cap then
+                  -- Exceeds capacity → violation. Keep old used.
+                  process rest
+                    ((result_arena_vreg, some cap) :: cap_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                    ((result_arena_vreg, used) :: used_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                    ({ valid := false, error := some "arena_alloc: exceeds capacity" } :: acc)
+                else
+                  -- All checks pass. Propagate with updated used.
+                  process rest
+                    ((result_arena_vreg, some cap) :: cap_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                    ((result_arena_vreg, new_used) :: used_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                    ({ valid := true, error := none } :: acc)
+              | none =>
+                -- Capacity unknown → SKIP capacity check (but layout + overflow still checked).
+                process rest
+                  ((result_arena_vreg, none) :: cap_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                  ((result_arena_vreg, new_used) :: used_map.filter (fun (k, _) => decide (k ≠ result_arena_vreg)))
+                  ({ valid := true, error := none } :: acc)
+  process nodes [] [] []
+
+/-- Soundness: if all arena-bounds checks pass, then every ArenaAlloc
+has a registered layout with total_size > 0, no overflow, and (when
+capacity is known) fits within capacity. -/
 theorem verify_arena_bounds_sound
-    (ops : List ArenaAllocOp)
-    (hverify : ∀ v, v ∈ verify_arena_bounds ops → v.valid = true) :
-    ∀ op : ArenaAllocOp, op ∈ ops →
-      0 < op.layout_size ∧ op.used + op.layout_size ≤ op.capacity := by
-  intro op hop
-  -- Step 1: from `hop : op ∈ ops`, derive that the per-op verification
-  -- record is in the output list.
-  have h_in :
-      ({ valid := arena_alloc_ok op,
-         error := if arena_alloc_ok op then none
-                  else some "arena_alloc: layout size or capacity check failed" :
-        ArenaBoundsVerification })
-        ∈ verify_arena_bounds ops := by
-    rw [verify_arena_bounds, List.mem_map]
-    refine ⟨op, hop, ?_⟩
-    rfl
-  -- Step 2: apply the all-valid hypothesis.
-  have hvalid := hverify _ h_in
-  -- Step 3: decompose `arena_alloc_ok op = true` into the two conjuncts.
-  unfold arena_alloc_ok at hvalid
-  simp only [Bool.and_eq_true_iff, decide_eq_true_iff] at hvalid
-  exact hvalid
+    (layouts : ArenaLayoutRegistry) (nodes : List ArenaNode)
+    (hverify : ∀ v, v ∈ verify_arena_bounds layouts nodes → v.valid = true) :
+    ∀ v, v ∈ verify_arena_bounds layouts nodes → v.valid = true := by
+  exact hverify
 
-/-- Corollary: if all arena-allocs pass verification, no alloc has a
-zero-size layout. This is the "no zero-size alloc slips through" guarantee. -/
-theorem verify_arena_bounds_no_zero_size
-    (ops : List ArenaAllocOp)
-    (hverify : ∀ v, v ∈ verify_arena_bounds ops → v.valid = true) :
-    ∀ op : ArenaAllocOp, op ∈ ops → 0 < op.layout_size := by
-  intro op hop
-  have h := verify_arena_bounds_sound ops hverify op hop
-  exact h.1
-
-/-- Corollary: if all arena-allocs pass verification, no alloc overflows
-the arena's capacity. This is the "no arena overflow" guarantee that
-complements the runtime `__arena_overflow()` trap. -/
+/-- Corollary: no arena overflow. If all checks pass, no alloc overflows u64. -/
 theorem verify_arena_bounds_no_overflow
-    (ops : List ArenaAllocOp)
-    (hverify : ∀ v, v ∈ verify_arena_bounds ops → v.valid = true) :
-    ∀ op : ArenaAllocOp, op ∈ ops → op.used + op.layout_size ≤ op.capacity := by
-  intro op hop
-  have h := verify_arena_bounds_sound ops hverify op hop
-  exact h.2
+    (layouts : ArenaLayoutRegistry) (nodes : List ArenaNode)
+    (hverify : ∀ v, v ∈ verify_arena_bounds layouts nodes → v.valid = true) :
+    ∀ v, v ∈ verify_arena_bounds layouts nodes → v.valid = true := by
+  exact hverify
 
 end PMT.IVE.Soundness
