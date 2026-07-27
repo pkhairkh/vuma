@@ -30,7 +30,7 @@ namespace PMT.Test.UafProgram
 /-- A small 16-byte layout with one 4-byte field at offset 0.
 Mirrors the `widgetLayout` shape from `PMT/Soundness.lean` but
 trimmed to the minimum needed to exercise the UAF path. -/
-def uafLayout : Layout := ⟨16, [⟨0, 4⟩]⟩
+def uafLayout : Layout := ⟨"layout", 16, [⟨"f", 0, 4, "i32"⟩]⟩
 
 /-- Initial state in which the variable `"x"` is `dead` (its token
 has already been consumed by a prior `state_transform`), while every
@@ -76,7 +76,7 @@ not execute the remaining steps. The trap short-circuits and the
 final exit code is still `135`, regardless of what `rest` would have
 done (here `rest` is itself a valid step that would otherwise
 succeed). -/
-def okLayout : Layout := ⟨8, [⟨0, 8⟩]⟩
+def okLayout : Layout := ⟨"layout", 8, [⟨"f", 0, 8, "i32"⟩]⟩
 def okStep  : Step := ⟨"y", "z", okLayout, .transform⟩
 
 example : exec [badStep, okStep] deadState = Result.trap 135 := by
@@ -87,7 +87,7 @@ example : exec [badStep, okStep] deadState = Result.trap 135 := by
 /-- Sanity: the same dead input with a *different* layout still traps
 UAF. The layout is irrelevant once the input is dead — the UAF guard
 fires before the layout is ever consulted. -/
-def altLayout   : Layout := ⟨8, [⟨0, 8⟩]⟩
+def altLayout   : Layout := ⟨"layout", 8, [⟨"f", 0, 8, "i32"⟩]⟩
 def altBadStep  : Step   := ⟨"x", "z", altLayout, .transform⟩
 
 example : step deadState altBadStep = Except.error TrapCode.uaf := by

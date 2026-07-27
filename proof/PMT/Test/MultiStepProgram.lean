@@ -38,16 +38,13 @@ open PMT
 
 /-- A simple 16-byte layout with no sub-fields. Well-formed because the
 total size is strictly positive and the field list is empty. -/
-def layout16 : Layout := ⟨16, []⟩
+def layout16 : Layout := ⟨"layout", 16, []⟩
 
 /-- `layout16` is well-formed: positive total size, no fields to
 overlap. Mirrors `WF_Layout_empty` (in `PMT.Basic`) but at size 16. -/
 example : WF_Layout layout16 := by
   unfold WF_Layout layout16
-  refine ⟨?_, ?_, ?_⟩
-  · intro f hf; cases hf
-  · intros _ _ h₁ _ _; cases h₁
-  · exact Or.inl (by decide)
+  intro f hf; cases hf
 
 /-! ## Initial execution state. -/
 

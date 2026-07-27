@@ -828,7 +828,7 @@ alignment gap discharged via the `haligned` precondition).
 
 This is the key simulation theorem: if `raw` simulates `abs`, then after a
 successful `raw_alloc raw (align8_nat size)`, there exists an `abs'` such that
-`alloc abs ⟨size, []⟩ = abs'` and `raw'` simulates `abs'`.
+`alloc abs ⟨"alloc", size, []⟩ = abs'` and `raw'` simulates `abs'`.
 
 **Closing strategy (mirroring the approach to the sibling
 `arena_sim_preserved_by_alloc` lemma in `SimRel.lean`)**: the abstract
@@ -856,7 +856,7 @@ theorem raw_alloc_simulates_alloc
     (_hfit : abs.used + size ≤ abs.capacity)
     (haligned : size % 8 = 0) :
     ∀ raw', raw_alloc raw (align8_nat size) = Except.ok raw' →
-      ∃ abs', alloc abs ⟨size, []⟩ = abs'
+      ∃ abs', alloc abs ⟨"alloc", size, []⟩ = abs'
         ∧ RawArena_simulates_Arena raw' abs' := by
   -- Extract components of `hsim` for field-by-field reasoning.
   have hbase  : raw.base = abs.base                    := hsim.1
@@ -891,7 +891,7 @@ theorem raw_alloc_simulates_alloc
       -- Collapse `align8_nat (align8_nat size) = align8_nat size = size`.
       rw [halign_size, halign_size]
       -- Witness: `abs' = { abs with used := abs.used + size }`.
-      -- `alloc abs ⟨size, []⟩ = { abs with used := abs.used + size }` definitionally.
+      -- `alloc abs ⟨"alloc", size, []⟩ = { abs with used := abs.used + size }` definitionally.
       refine ⟨{ abs with used := abs.used + size }, rfl, ?_⟩
       -- Prove `RawArena_simulates_Arena raw' abs'` field-by-field.
       unfold RawArena_simulates_Arena

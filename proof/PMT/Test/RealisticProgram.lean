@@ -189,7 +189,7 @@ Each of these is either vacuous (because `to_program = []`) or trivial
 
 /-- Dummy layout environment (values irrelevant — the flattened program
 is `[]`). -/
-def realisticEnv : String → Layout := fun _ => ⟨1, []⟩
+def realisticEnv : String → Layout := fun _ => ⟨"layout", 1, []⟩
 
 /-- The program is well-typed:
   * Every instruction in the block has `well_typed = True` (verified

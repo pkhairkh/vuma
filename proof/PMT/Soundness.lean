@@ -882,7 +882,7 @@ regression checks for the model itself.
 To run: uncomment the `#eval` lines, then `lean PMT/Soundness.lean`. -/
 
 -- A small valid program: allocate a Widget (size 16), then transform it.
-def widgetLayout : Layout := ⟨16, [⟨0, 4⟩, ⟨4, 4⟩, ⟨8, 8⟩]⟩
+def widgetLayout : Layout := ⟨"widget", 16, [⟨"a", 0, 4, "i32"⟩, ⟨"b", 4, 4, "i32"⟩, ⟨"c", 8, 8, "i64"⟩]⟩
 
 def initState : ExecState :=
   { arena := ⟨0, 1024, 0⟩,  -- base=0, capacity=1024, used=0
@@ -899,7 +899,7 @@ def prog1 : Program :=
 def smallArena : Arena := ⟨0, 16, 0⟩
 
 def overflowStep : Step :=
-  ⟨"in", "out", ⟨32, []⟩, .transform⟩
+  ⟨"in", "out", ⟨"overflow", 32, []⟩, .transform⟩
 
 -- #eval step { arena := smallArena, live := fun _ => Liveness.live } overflowStep
 -- Expected: Except.error TrapCode.arena_overflow
@@ -928,10 +928,10 @@ code in the Lean model (W3 gap 1.4). -/
 /-- A field that exceeds its layout's `total_size`: offset 8, size 8,
 but `total_size = 4`. The byte range `[8, 16)` lies entirely outside
 `[0, 4)`, so the bounds check trips. -/
-def oobField : Field := ⟨8, 8⟩
+def oobField : Field := ⟨"oob", 8, 8, "i64"⟩
 
 /-- A 4-byte layout (too small for `oobField`). -/
-def tinyLayout : Layout := ⟨4, [⟨0, 4⟩]⟩
+def tinyLayout : Layout := ⟨"tiny", 4, [⟨"a", 0, 4, "i32"⟩]⟩
 
 /-- `step` on a `field_access` op whose field exceeds the layout traps
 with `.oob` (exit 134). The reduction is definitional:
@@ -959,7 +959,7 @@ example : exec
 /-- Negative control: a `field_access` whose field fits inside the
 layout does NOT trap. `inBoundsField` (offset 0, size 4) fits inside
 `tinyLayout` (total_size 4), so `step` returns `.ok s` (no state change). -/
-def inBoundsField : Field := ⟨0, 4⟩
+def inBoundsField : Field := ⟨"inBounds", 0, 4, "i32"⟩
 
 example : (step initState
     { in_var := "in", out_var := "out", layout := tinyLayout,
