@@ -1101,7 +1101,12 @@ fn test_ffi_demo_compiles_x86_64() {
 // ===========================================================================
 
 /// Test: Verify that `ExternRegistry::with_default_bindings()` contains
-/// both Linux syscall and C library bindings.
+/// the Linux syscall bindings.
+///
+/// (FFI Wave 1 task A removed the legacy libc bindings — `memcpy`,
+/// `memset`, `malloc`, `free` are now VUMA IR builtins: `BulkCopy`,
+/// `BulkFill`, `Alloc`, `Free`.  See `src/codegen/src/ir.rs` and the
+/// FFI-1-A entry in the worklog.)
 #[test]
 fn test_extern_registry_default_bindings() {
     let registry = ExternRegistry::with_default_bindings();
@@ -1132,32 +1137,34 @@ fn test_extern_registry_default_bindings() {
         "default bindings should include 'brk'"
     );
 
-    // C library functions
+    // The legacy libc bindings (memcpy/memset/malloc/free) were removed by
+    // FFI Wave 1 task A — they are now VUMA IR builtins, not extern
+    // declarations.  Verify they are no longer registered.
     assert!(
-        registry.is_extern("memcpy"),
-        "default bindings should include 'memcpy'"
+        !registry.is_extern("memcpy"),
+        "memcpy should be a VUMA builtin (IRInstr::BulkCopy), not an extern"
     );
     assert!(
-        registry.is_extern("memset"),
-        "default bindings should include 'memset'"
+        !registry.is_extern("memset"),
+        "memset should be a VUMA builtin (IRInstr::BulkFill), not an extern"
     );
     assert!(
-        registry.is_extern("malloc"),
-        "default bindings should include 'malloc'"
+        !registry.is_extern("malloc"),
+        "malloc should be a VUMA builtin (IRInstr::Alloc), not an extern"
     );
     assert!(
-        registry.is_extern("free"),
-        "default bindings should include 'free'"
+        !registry.is_extern("free"),
+        "free should be a VUMA builtin (IRInstr::Free), not an extern"
     );
 
-    // All should need relocation
+    // Syscalls still need relocation.
     assert!(
         registry.needs_relocation("write"),
         "write should need relocation"
     );
     assert!(
-        registry.needs_relocation("malloc"),
-        "malloc should need relocation"
+        !registry.needs_relocation("malloc"),
+        "malloc is no longer an extern — should not need relocation"
     );
 }
 

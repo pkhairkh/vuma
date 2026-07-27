@@ -2248,7 +2248,12 @@ fn emit_instr(
         IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
         | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | IRInstr::ChannelClose { .. }
         // StarkProof — stub (Call-form builtin is the active path).
-        | IRInstr::StarkProof { .. } => {}
+        | IRInstr::StarkProof { .. }
+        // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+        // replacements): backend lowering not yet implemented on s390x;
+        // emit nothing (x86_64 is the canonical path).
+        | IRInstr::BulkCopy { .. }
+        | IRInstr::BulkFill { .. } => {}
     }
 }
 

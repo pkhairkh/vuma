@@ -4823,7 +4823,14 @@ impl InstructionSelector {
             IRInstr::ChannelOpen { .. } | IRInstr::ChannelSend { .. }
             | IRInstr::ChannelRecv { .. } | IRInstr::ChannelRecvTimeout { .. } | IRInstr::ChannelRecvResult { .. } | crate::ir::IRInstr::CallIndirect { .. } | IRInstr::ChannelClose { .. }
             // StarkProof — stub (Call-form builtin is the active path).
-            | IRInstr::StarkProof { .. } => {}
+            | IRInstr::StarkProof { .. }
+            // BulkCopy / BulkFill (FFI Wave 1 task A — libc memcpy/memset
+            // replacements): backend lowering not yet implemented on aarch64
+            // (ARMv8 has no single-instruction REP MOVSB equivalent; would
+            // lower to a NEON copy loop).  Emit nothing — x86_64 is the
+            // canonical path; aarch64 can be added when needed.
+            | IRInstr::BulkCopy { .. }
+            | IRInstr::BulkFill { .. } => {}
         }
         Ok(())
     }
