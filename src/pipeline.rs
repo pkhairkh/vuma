@@ -5138,7 +5138,7 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
         }));
     }
 
-    Scg { nodes: scg_nodes }
+    Scg::new(scg_nodes)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8669,8 +8669,7 @@ mod tests {
         let shr_dst = computations[0].dst.clone();
         let mut ir_body = stmts;
         ir_body.push(ScgStatement::Return(vec![ScgExpr::Var(shr_dst)]));
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_shr_signed".into(),
                 params: vec![ScgParam {
                     name: "x".into(),
@@ -8679,8 +8678,7 @@ mod tests {
                 results: vec![],
                 body: ir_body,
                 var_types: Default::default(),
-            })],
-        };
+            })]);
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).expect("IR build should succeed");
         let func = &program.functions[0];
@@ -8771,8 +8769,7 @@ mod tests {
         let shr_dst = computations[0].dst.clone();
         let mut ir_body = stmts;
         ir_body.push(ScgStatement::Return(vec![ScgExpr::Var(shr_dst)]));
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_shr_unsigned".into(),
                 params: vec![ScgParam {
                     name: "n".into(),
@@ -8781,8 +8778,7 @@ mod tests {
                 results: vec![],
                 body: ir_body,
                 var_types: Default::default(),
-            })],
-        };
+            })]);
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).expect("IR build should succeed");
         let func = &program.functions[0];
@@ -9808,7 +9804,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
         }
     }
 
-    Scg { nodes }
+    Scg::new(nodes)
 }
 
 /// Extract typed-state METADATA from a parser AST, parallel to

@@ -97,21 +97,18 @@ fn expected_output_format(kind: BackendKind) -> OutputFormat {
 
 /// Build a simple codegen-level SCG representing `fn main() -> i64 { return 42; }`.
 fn make_simple_codegen_scg() -> Scg {
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
             body: vec![ScgStatement::Return(vec![ScgExpr::Int(42)])],
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 /// Build an arithmetic codegen-level SCG: `fn main() -> i64 { return (10+20)*3-5; }`.
 fn make_arithmetic_codegen_scg() -> Scg {
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
@@ -143,8 +140,7 @@ fn make_arithmetic_codegen_scg() -> Scg {
                 ScgStatement::Return(vec![ScgExpr::Var("c".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 /// Run the full codegen pipeline (IR build → regalloc → encode) for a given backend.

@@ -75,8 +75,7 @@ fn compile_to_elf(scg: &Scg, config: &EmitConfig) -> Vec<u8> {
 /// - The function returns the result in X0 (AAPCS64)
 #[test]
 fn test_codegen_simple_add() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "add".to_string(),
             params: vec![
                 ScgParam {
@@ -101,8 +100,7 @@ fn test_codegen_simple_add() {
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let (ir_program, code_words) = compile_scg(&scg);
 
@@ -140,8 +138,7 @@ fn test_codegen_simple_add() {
 /// - ARM64 code adjusts the stack pointer (SUB SP, SP, #size)
 #[test]
 fn test_codegen_stack_allocation() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "with_stack".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
@@ -154,8 +151,7 @@ fn test_codegen_stack_allocation() {
                 ScgStatement::Return(vec![ScgExpr::Var("buf".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let (ir_program, code_words) = compile_scg(&scg);
 
@@ -199,8 +195,7 @@ fn test_codegen_stack_allocation() {
 /// - ARM64 code contains valid LDR and STR instruction encodings
 #[test]
 fn test_codegen_load_store() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "load_store".to_string(),
             params: vec![ScgParam {
                 name: "ptr".to_string(),
@@ -223,8 +218,7 @@ fn test_codegen_load_store() {
                 ScgStatement::Return(vec![ScgExpr::Var("val".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let (ir_program, code_words) = compile_scg(&scg);
 
@@ -256,8 +250,7 @@ fn test_codegen_load_store() {
 /// - ARM64 code contains CBNZ (conditional branch) instruction
 #[test]
 fn test_codegen_if_else() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "if_else".to_string(),
             params: vec![ScgParam {
                 name: "cond".to_string(),
@@ -287,8 +280,7 @@ fn test_codegen_if_else() {
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let (ir_program, code_words) = compile_scg(&scg);
 
@@ -327,8 +319,7 @@ fn test_codegen_if_else() {
 /// - ARM64 code has an unconditional branch (back-edge)
 #[test]
 fn test_codegen_loop() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "loop_test".to_string(),
             params: vec![],
             results: vec![ScgType::Void],
@@ -348,8 +339,7 @@ fn test_codegen_loop() {
                 ScgStatement::Return(vec![]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let (ir_program, code_words) = compile_scg(&scg);
 
@@ -384,8 +374,7 @@ fn test_codegen_loop() {
 /// - Arguments are moved into X0–X7 per AAPCS64
 #[test]
 fn test_codegen_function_call() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "caller".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
@@ -400,8 +389,7 @@ fn test_codegen_function_call() {
                 ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let (ir_program, code_words) = compile_scg(&scg);
 
@@ -430,8 +418,7 @@ fn test_codegen_function_call() {
 /// - Text section is non-empty
 #[test]
 fn test_codegen_multi_function_elf() {
-    let scg = Scg {
-        nodes: vec![
+    let scg = Scg::new(vec![
             ScgNode::Function(ScgFunction {
                 name: "main".to_string(),
                 params: vec![],
@@ -468,8 +455,7 @@ fn test_codegen_multi_function_elf() {
                 ],
                 var_types: std::collections::HashMap::new(),
             }),
-        ],
-    };
+        ]);
 
     let config = EmitConfig::linux_elf();
     let elf_bytes = compile_to_elf(&scg, &config);
@@ -558,8 +544,7 @@ fn test_codegen_type_system_calling_conv() {
 /// - Each word is 4 bytes and non-zero
 #[test]
 fn test_codegen_bare_metal_raw() {
-    let scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "_start".to_string(),
             params: vec![],
             results: vec![ScgType::Void],
@@ -575,8 +560,7 @@ fn test_codegen_bare_metal_raw() {
                 ScgStatement::Return(vec![]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     let mut builder = IRBuilder::new();
     let ir_program = builder.build(&scg).expect("IRBuilder should succeed");

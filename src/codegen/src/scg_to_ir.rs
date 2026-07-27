@@ -226,6 +226,17 @@ pub struct Scg {
     pub nodes: Vec<ScgNode>,
 }
 
+impl Scg {
+    /// Construct a new SCG from its top-level nodes.
+    ///
+    /// This is the canonical entry point for building a codegen `Scg`;
+    /// future fields (e.g. `typed_state_meta`) will be initialized here so
+    /// that callers cannot forget to populate them.
+    pub fn new(nodes: Vec<ScgNode>) -> Self {
+        Self { nodes }
+    }
+}
+
 /// Typed-state METADATA recovered from (or attached alongside) a codegen SCG.
 ///
 /// The codegen SCG lowers typed-state ops (`state_new(L)`, `p.field` read /
@@ -6076,7 +6087,7 @@ mod tests {
 
     /// Helper: build an Scg from a list of ScgNodes.
     fn scg_from_nodes(nodes: Vec<ScgNode>) -> Scg {
-        Scg { nodes }
+        Scg::new(nodes)
     }
 
     /// Helper: build a minimal function SCG.
@@ -7845,8 +7856,7 @@ mod tests {
     fn test_unknown_variable_returns_error() {
         // Build a minimal SCG with a function whose body references an
         // undefined variable in a Return statement.
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_unknown".to_string(),
                 params: vec![],
                 results: vec![ScgType::I32],
@@ -7854,8 +7864,7 @@ mod tests {
                     "undefined_var".to_string(),
                 )])],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })],);;
 
         let mut builder = IRBuilder::new();
         let result = builder.convert(&scg);
@@ -7880,8 +7889,7 @@ mod tests {
     /// also returns [`CodegenError::UnknownVariable`].
     #[test]
     fn test_unknown_variable_in_computation_returns_error() {
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_unknown_comp".to_string(),
                 params: vec![ScgParam {
                     name: "x".to_string(),
@@ -7897,8 +7905,7 @@ mod tests {
                     reassigns: None,
                 })],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })],);;
 
         let mut builder = IRBuilder::new();
         let result = builder.convert(&scg);

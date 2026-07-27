@@ -1032,8 +1032,7 @@ fn test_ffi_demo_compiles_x86_64() {
     assert!(scg_result.is_ok(), "ffi_demo AST → SCG should succeed");
 
     // Phase 3: Build a codegen-level SCG for the main function
-    let cg_scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let cg_scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
@@ -1057,8 +1056,7 @@ fn test_ffi_demo_compiles_x86_64() {
                 ScgStatement::Return(vec![ScgExpr::Int(0)]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     // Phase 4: Compile SCG → IR → x86_64 → ELF obj
     let mut builder = IRBuilder::new();
@@ -1310,8 +1308,7 @@ fn test_dwarf_debug_full_pipeline() {
         .expect("AST → SCG should succeed");
 
     // Build a codegen-level SCG
-    let cg_scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let cg_scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
@@ -1327,8 +1324,7 @@ fn test_dwarf_debug_full_pipeline() {
                 ScgStatement::Return(vec![ScgExpr::Var("x".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     // Compile through IR → ARM64 → ELF with debug info
     let mut builder = IRBuilder::new();
