@@ -96,3 +96,71 @@ uint8_t lean_verify_state_writes(lean_object *env_list,
     (void)env_list; (void)consumed; (void)writes;
     return 1;
 }
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Wave 5-C — `_prim` primitive-signature wrappers (Extraction.lean §9).
+ *
+ * Wave 4-A added 7 `@[export ..._prim]` wrappers with C-marshallable
+ * signatures (UInt64 unboxed; String stays boxed `lean_object*`). These
+ * stub definitions mirror the originals so behavioral FFI smoke tests
+ * (`tests/pmt_runtime_ffi_smoke.rs`) link and exercise the Rust→C ABI
+ * plumbing end-to-end against C-compiled (NOT Lean-computed) returns.
+ *
+ * Returns mirror the non-`_prim` siblings above: the four
+ * `verified_*_prim` capacity-style checks return 0 (fail-closed); the
+ * three `verify_*_prim` state verifiers return 1 (true). C ABI follows
+ * the Lean `@[export]` docstrings (UInt64 → uint64_t, String → boxed
+ * lean_object*, Bool → uint8_t).
+ * ───────────────────────────────────────────────────────────────────── */
+
+uint8_t lean_verified_capacity_check_prim(uint64_t used,
+                                          uint64_t size,
+                                          uint64_t capacity) {
+    (void)used; (void)size; (void)capacity;
+    return 0;
+}
+
+uint8_t lean_verified_field_bounds_check_prim(uint64_t offset,
+                                              uint64_t size,
+                                              uint64_t total_size) {
+    (void)offset; (void)size; (void)total_size;
+    return 0;
+}
+
+uint8_t lean_verified_linearity_check_prim(lean_object *var,
+                                           lean_object *consumed) {
+    (void)var; (void)consumed;
+    return 0;
+}
+
+uint8_t lean_verified_pmt_check_prim(uint64_t used,
+                                     uint64_t capacity,
+                                     uint64_t offset,
+                                     uint64_t size,
+                                     uint64_t total_size,
+                                     lean_object *var,
+                                     lean_object *consumed) {
+    (void)used; (void)capacity; (void)offset; (void)size;
+    (void)total_size; (void)var; (void)consumed;
+    return 0;
+}
+
+uint8_t lean_verify_transform_prim(lean_object *registry,
+                                   lean_object *input_layout,
+                                   lean_object *output_layout) {
+    (void)registry; (void)input_layout; (void)output_layout;
+    return 1;
+}
+
+uint8_t lean_verify_state_reads_prim(lean_object *registry,
+                                     lean_object *reads) {
+    (void)registry; (void)reads;
+    return 1;
+}
+
+uint8_t lean_verify_state_writes_prim(lean_object *registry,
+                                      lean_object *consumed,
+                                      lean_object *writes) {
+    (void)registry; (void)consumed; (void)writes;
+    return 1;
+}

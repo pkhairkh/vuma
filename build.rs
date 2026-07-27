@@ -36,6 +36,13 @@ fn main() {
     // ── rustc version detection (always runs) ──────────────────────────
     detect_rustc_version();
 
+    // Declare the `lean_ffi_linked` cfg (set conditionally inside
+    // `link_lean_ffi` when the real Lean→C pipeline succeeds) so rustc's
+    // `unexpected_cfgs` lint accepts it in all builds. Added in Wave 5-C
+    // because `tests/pmt_runtime_ffi_smoke.rs` references it via
+    // `#[cfg(lean_ffi_linked)]` / `#[cfg_attr(not(lean_ffi_linked), ...)]`.
+    println!("cargo::rustc-check-cfg=cfg(lean_ffi_linked)");
+
     println!("cargo:rerun-if-changed=build.rs");
 
     // ── Lean FFI linkage (only when the feature is on) ─────────────────

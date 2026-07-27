@@ -23,3 +23,12 @@ vuma-parser.workspace = true
 vuma-ive.workspace = true
 vuma-bd.workspace = true
 vuma-codegen.workspace = true
+
+# Forward the pmt-runtime-check feature to the codegen crate so
+# `cargo build -p vuma-core --features pmt-runtime-check` works without
+# having to build from the repo root. vuma-core itself has no cfg(feature)
+# gates yet; this entry exists purely for propagation symmetry. `default =
+# []` keeps the feature OFF by default (opt-in only).
+[features]
+default = []
+pmt-runtime-check = ["vuma-codegen/pmt-runtime-check"]

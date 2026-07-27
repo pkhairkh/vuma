@@ -20,8 +20,12 @@ vuma-scg.workspace = true
 # JSON format produced by `ProfileData::to_json` is unchanged.
 
 [features]
+default = []
 # pmt-runtime-check: when enabled, compiles the verified Lean-translated PMT
-# checkers from proof/extracted/pmt_check.rs into the runtime. The checkers
-# are NOT yet wired into arena.rs (future wave); this flag only gates module
-# compilation so downstream work can opt-in incrementally.
+# checkers (runtime/pmt_check.rs) and routes arena.rs::alloc_raw through
+# `verified_capacity_check` instead of the hand-written overflow guard.
+# The module is pure Rust (no `extern "C"` / no link-time deps), so it
+# compiles cleanly under `cargo check -p vuma-codegen --features
+# pmt-runtime-check` without the root build.rs C-archive linkage. `default
+# = []` keeps the feature OFF by default (opt-in only).
 pmt-runtime-check = []

@@ -95,5 +95,10 @@ strip = true
 
 # Forward the pmt-runtime-check feature to the codegen crate so
 # `cargo build --features pmt-runtime-check` works from the repo root.
+# `cc` is declared as a NON-optional [build-dependency] (see above), so no
+# `dep:cc` wiring is needed here -- the feature only forwards to the member
+# crate that actually gates cfg(feature) code. `default = []` keeps the
+# feature OFF by default (opt-in only).
 [features]
-pmt-runtime-check = ["vuma-codegen/pmt-runtime-check"]
+default = []
+pmt-runtime-check = ["vuma-codegen/pmt-runtime-check", "vuma-ive/pmt-runtime-check"]
