@@ -88,11 +88,34 @@ example (used size : Nat) (cap1 cap2 : Nat)
     used + size ≤ cap2 := by omega
 
 -- §6: The verified_capacity_check matches the mathematical condition.
-example (used size capacity : Nat) :
-    PMT.Extraction.verified_capacity_check used size capacity = true
+-- PMT-FAITH-5-C: now uses BitVec 64 (with boundedness hypothesis for lossless conversion).
+example (used size capacity : Nat)
+    (h_used : used < 2^64) (h_size : size < 2^64) (h_cap : capacity < 2^64)
+    (h_no_ovf : used + size < 2^64) :
+    PMT.Extraction.verified_capacity_check (BitVec.ofNat 64 used) (BitVec.ofNat 64 size) (BitVec.ofNat 64 capacity) = true
     ↔ used + size ≤ capacity := by
   unfold PMT.Extraction.verified_capacity_check
-  simp
+  rw [decide_eq_true_iff]
+  refine ⟨?_, ?_⟩
+  · -- Forward: check = true → used + size ≤ capacity
+    intro ⟨hnoovf, hsum⟩
+    have eq_used : (BitVec.ofNat 64 used).toNat = used := by rw [BitVec.toNat_ofNat]; omega
+    have eq_size : (BitVec.ofNat 64 size).toNat = size := by rw [BitVec.toNat_ofNat]; omega
+    have eq_cap : (BitVec.ofNat 64 capacity).toNat = capacity := by rw [BitVec.toNat_ofNat]; omega
+    have hsum_nat := BitVec.le_def.mp hsum
+    rw [BitVec.toNat_add, eq_used, eq_size] at hsum_nat
+    rw [eq_cap] at hsum_nat
+    -- hsum_nat : (used + size) % 2^64 ≤ capacity; under h_no_ovf, modulo is identity.
+    omega
+  · -- Backward: used + size ≤ capacity → check = true
+    intro hfit
+    refine ⟨?_, ?_⟩
+    · -- no_overflow: size ≤ usizeMax - used
+      rw [BitVec.le_def, BitVec.toNat_sub, BitVec.toNat_allOnes, BitVec.toNat_ofNat, BitVec.toNat_ofNat]
+      omega
+    · -- sum ≤ capacity
+      rw [BitVec.le_def, BitVec.toNat_add, BitVec.toNat_ofNat, BitVec.toNat_ofNat, BitVec.toNat_ofNat]
+      omega
 
 -- §7: The verified_field_bounds_check matches the mathematical condition.
 example (f_offset f_size layout_total : Nat) :
