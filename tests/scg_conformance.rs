@@ -25,7 +25,7 @@
 //! and fail loudly if it widens OR narrows without an explicit code
 //! change + `PLAN_IVE_IR_DIVERGENCE.md` revision.
 
-use vuma_codegen::scg_to_ir::{PmtOpStmt, Scg, ScgNode, ScgStatement};
+use vuma_codegen::scg_to_ir::{PmtOpStmt, Scg, ScgNode, ScgStatement, TypedStateMeta};
 use vuma_scg::{
     ForeignConsumeNode, NodePayload, NodeType, ProgramPoint, SCG, StateInitNode, StateReadNode,
     StateTransformNode, StateWriteNode,
@@ -218,12 +218,33 @@ fn deprecated_scg_to_codegen_bridge_preserves_typed_state() {
 /// Task 7-D step 2+3 (canonical AST→codegen path) — the CANONICAL binary
 /// producer `bridge_ast_to_codegen_scg` lowers `state_new(L)` / `p.field`
 /// read/write to UNTYPED `AllocationNode::Stack` / `AccessNode::Store|Load`
-/// statements, losing the `layout_name` + typed-state information. This is
-/// the Round 7 divergence: IVE verifies the typed semantic SCG, but the
-/// binary is produced from this UNTYPED codegen SCG. This test ASSERTS the
-/// divergence and fails if it narrows (bridge starts emitting typed
-/// `PmtOp` payloads) or the source stops parsing — both require an
-/// explicit code + `PLAN_IVE_IR_DIVERGENCE.md` update.
+/// statements, losing the `layout_name` + typed-state information **in the
+/// emitted codegen SCG nodes**. This is the Round 7 divergence: IVE verifies
+/// the typed semantic SCG, but the binary is produced from this UNTYPED
+/// codegen SCG.
+///
+/// **Task SCG-CLOSURE — divergence NARROWED.** The codegen SCG nodes are
+/// STILL untyped (the emitted binary is byte-identical), BUT the typed-state
+/// info is now PRESERVED as recoverable `TypedStateMeta` metadata via
+/// `vuma::pipeline::extract_typed_state_meta_from_ast` — a parallel AST walk
+/// that records one `TypedStateMeta` entry per typed-state op the bridge
+/// lowered away. So the divergence narrows from "5 typed-state payloads
+/// LOST" to "0 lost — preserved as `TypedStateMeta` metadata": IVE *could*
+/// replay this metadata against the codegen SCG to recover the typed-state
+/// view it verifies on the semantic SCG.
+///
+/// This test asserts BOTH sides of the narrowed divergence:
+///   * the codegen SCG's `PmtOp` typed-state counts are STILL 0 (the bridge
+///     still lowers to untyped Allocation/Access — binary unchanged); AND
+///   * the `TypedStateMeta` metadata recovers all 3 typed-state ops the
+///     Point source exercises (StateInit{Point}, StateWrite{p,Point,x},
+///     StateRead{p,Point,x}), with the `layout_name` preserved.
+///
+/// `StateTransform` + `ForeignConsume` are not exercised by this source
+/// (covered by `semantic_scg_carries_all_five_typed_state_payloads` for the
+/// full 5-kind shape). If the bridge starts emitting typed `PmtOp` payloads
+/// directly (divergence fully closed), flip the first block to assert
+/// preservation and update `PLAN_IVE_IR_DIVERGENCE.md` §3.
 #[test]
 fn canonical_ast_bridge_loses_typed_state_divergence_documented() {
     // Source exercises state_new (semantic StateInit), field write
@@ -255,18 +276,92 @@ fn main() -> i32 {
     let cg = vuma::pipeline::bridge_ast_to_codegen_scg(&ast);
     let counts = count_codegen_typed_state(&cg);
 
-    // DIVERGENCE DOCUMENTED (option b): the canonical AST→codegen bridge
-    // emits ZERO typed `PmtOp::StateInit|StateRead|StateWrite` payloads for
-    // user state_new / field ops — it lowers them to untyped
-    // `AllocationNode::Stack` / `AccessNode`. IVE verifies the typed
-    // semantic SCG; the binary is produced from this untyped codegen SCG.
-    //
-    // If any of counts[0..3] becomes nonzero, the bridge started
-    // preserving typed-state info (divergence NARROWED) — flip this test
-    // to assert preservation and update PLAN_IVE_IR_DIVERGENCE.md §3.
-    assert_eq!(counts[0], 0, "StateInit must lower to untyped Allocation (divergence)");
-    assert_eq!(counts[1], 0, "StateRead must lower to untyped Access/Load (divergence)");
-    assert_eq!(counts[2], 0, "StateWrite must lower to untyped Access/Store (divergence)");
+    // ── Side A (UNCHANGED): the codegen SCG's emitted nodes are STILL
+    //    untyped. The canonical AST→codegen bridge emits ZERO typed
+    //    `PmtOp::StateInit|StateRead|StateWrite` payloads for user
+    //    state_new / field ops — it lowers them to untyped
+    //    `AllocationNode::Stack` / `AccessNode`. The binary is byte-identical
+    //    to pre-SCG-CLOSURE. If any of counts[0..3] becomes nonzero, the
+    //    bridge started emitting typed payloads directly (divergence FULLY
+    //    closed at the node level) — flip this block to assert preservation
+    //    and update PLAN_IVE_IR_DIVERGENCE.md §3.
+    assert_eq!(counts[0], 0, "StateInit still lowers to untyped Allocation");
+    assert_eq!(counts[1], 0, "StateRead still lowers to untyped Access/Load");
+    assert_eq!(counts[2], 0, "StateWrite still lowers to untyped Access/Store");
     assert_eq!(counts[3], 0, "StateTransform not emitted by this source");
     assert_eq!(counts[4], 0, "ForeignConsume not emitted by this source");
+
+    // ── Side B (SCG-CLOSURE): the typed-state info is now PRESERVED as
+    //    recoverable `TypedStateMeta` metadata. The extractor walks the
+    //    SAME AST the bridge lowered and records one entry per typed-state
+    //    op the bridge lowered away — so the `layout_name` that Side A
+    //    lost at the node level is recovered here at the metadata level.
+    let meta = vuma::pipeline::extract_typed_state_meta_from_ast(&ast);
+
+    // `[StateInit, StateRead, StateWrite, StateTransform, ForeignConsume]`
+    // counts across the recovered metadata.
+    let mut mc = [0usize; 5];
+    for m in &meta {
+        match m {
+            TypedStateMeta::StateInit { .. } => mc[0] += 1,
+            TypedStateMeta::StateRead { .. } => mc[1] += 1,
+            TypedStateMeta::StateWrite { .. } => mc[2] += 1,
+            TypedStateMeta::StateTransform { .. } => mc[3] += 1,
+            TypedStateMeta::ForeignConsume { .. } => mc[4] += 1,
+        }
+    }
+    assert_eq!(
+        mc,
+        [1, 1, 1, 0, 0],
+        "TypedStateMeta must recover exactly the 3 typed-state ops the Point \
+         source exercises ([StateInit, StateRead, StateWrite] = [1,1,1]; \
+         StateTransform + ForeignConsume not exercised). If this fails, the \
+         extractor's typed-state recognition drifted from the bridge's."
+    );
+
+    // ── Side B (cont.): the recovered metadata carries the IVE-relevant
+    //    typed info (layout_name + field_name + result_vreg) that Side A
+    //    lost. Verify each entry's payload so the metadata is structurally
+    //    faithful to the semantic SCG's typed-state payloads.
+    let mut found_init = false;
+    let mut found_read = false;
+    let mut found_write = false;
+    for m in &meta {
+        match m {
+            TypedStateMeta::StateInit { layout_name, result_vreg } => {
+                assert_eq!(
+                    layout_name, "Point",
+                    "StateInit metadata must preserve the Point layout_name"
+                );
+                assert_eq!(
+                    *result_vreg, 0,
+                    "StateInit metadata's synthetic vreg must be 0 for the first state op"
+                );
+                found_init = true;
+            }
+            TypedStateMeta::StateRead { var, layout_name, field_name } => {
+                assert_eq!(var, "p", "StateRead metadata var must be p");
+                assert_eq!(
+                    layout_name, "Point",
+                    "StateRead metadata must preserve the Point layout_name"
+                );
+                assert_eq!(field_name, "x", "StateRead metadata field must be x");
+                found_read = true;
+            }
+            TypedStateMeta::StateWrite { var, layout_name, field_name } => {
+                assert_eq!(var, "p", "StateWrite metadata var must be p");
+                assert_eq!(
+                    layout_name, "Point",
+                    "StateWrite metadata must preserve the Point layout_name"
+                );
+                assert_eq!(field_name, "x", "StateWrite metadata field must be x");
+                found_write = true;
+            }
+            TypedStateMeta::StateTransform { .. } | TypedStateMeta::ForeignConsume { .. } => {
+                // Not exercised by this source — counted above.
+            }
+        }
+    }
+    assert!(found_init && found_read && found_write,
+        "metadata must contain one StateInit, one StateRead, one StateWrite");
 }
