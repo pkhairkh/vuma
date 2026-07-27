@@ -10,19 +10,21 @@ specification in `docs/architecture/pmt-iris-spec.md` (§5–§6) into
 plain Lean 4.
 
 **Scope.** This module defines:
-  * §5 — `state_read_requires_live`, `state_transform`,
+  * §5 — `linear_implies_accessible`, `state_transform`,
     `state_transform_kills_input` (the compile-time ghost-state half
-    of liveness; the runtime mirror `[live_mirror]` lands only when
-    `inject_liveness_check_ir` ships, per `pmt-fix-proposals.md`
-    Stage 6).
+    of liveness; the runtime mirror `[live_mirror]` is implemented by
+    `inject_liveness_check_ir` at `src/codegen/src/memory_safety.rs:1513`,
+    which HAS shipped — tombstone byte load + compare-to-0 + __uaf_trap).
   * §6 — `GuardPage`, `in_arena_below_guard` (trusted OS contract:
-    mmap `PROT_NONE` guard page semantics).
+    mmap `PROT_NONE` guard page semantics; faithful to the codegen-emitted
+    arena at `src/pipeline.rs:11565-11842`, NOT the testing mirror at
+    `arena.rs` which documents the guard page as a TODO).
 
 This module depends on the data model (`Arena`, `CapacityInvariant`)
 from `PMT.Basic` and the linearity primitives (`LinearToken`,
 `LinearResource`, `Accessible`, `Consumed`, `Liveness`) from
 `PMT.Field` (§4). It is in turn imported by `PMT.Soundness`, which
-uses `state_read_requires_live` as the runtime liveness precondition
+uses `linear_implies_accessible` as the runtime liveness precondition
 in `pmt_soundness`. All theorems close without `sorry`.
 
 **Build.** This module is part of the Lake package rooted at
@@ -37,11 +39,16 @@ namespace PMT
 
 /-! ## §5. Liveness — LIVE/DEAD as Ghost State (compile-time half) -/
 
-/-- §5: A `state_read`/`state_write` requires the variable to be LIVE.
-This is the ghost-state half of `state_read_requires_live`
-(`pmt-iris-spec.md` §5); the runtime mirror `[live_mirror]` lands only
-when `inject_liveness_check_ir` ships (`pmt-fix-proposals.md` Stage 6). -/
-theorem state_read_requires_live
+/-- §5 (PMT-FAITH-6-D, renamed): `linear_implies_accessible` — a linear
+resource implies the token is accessible.
+
+This is the ghost-state implication (Lean-side), NOT a Rust check. Rust's
+IVE does NOT check liveness on reads (`verify_state_reads` state_read.rs:44-129
+checks field bounds + type match only). Liveness is enforced on WRITES
+(compile-time, via `consumed_vars`) and at RUNTIME (tombstone byte, via
+`inject_liveness_check_ir` at memory_safety.rs:1513 — which HAS shipped).
+The Lean ghost-state half pairs with the runtime tombstone. -/
+theorem linear_implies_accessible
     (t : LinearToken)
     (hlive : LinearResource t) :
     Accessible t := by
@@ -79,6 +86,14 @@ theorem state_transform_kills_input
 Modeled as a pure fact: any access at `addr ≥ base + capacity` is
 *physically impossible* (MMU traps). This is in the TCB
 (`pmt-iris-spec.md` §8: "mmap PROT_NONE guard page semantics — Trusted").
+
+**PMT-FAITH-6-D (closes FAITH-1-E):** the Rust counterpart is the
+CODEGEN-EMITTED arena (`src/pipeline.rs:11565-11842`, which calls
+`mprotect(PROT_NONE)` to install the guard page), NOT the Rust-level
+testing arena (`src/codegen/src/runtime/arena.rs:14-21`, which documents
+the guard page as a TODO "INV-PMT-1"). The Lean `GuardPage` is faithful
+to the DEPLOYED arena (codegen path), not the testing mirror.
+
 Stated with `≤` (rather than `≥`) so `omega` sees the arithmetic
 without needing to unfold the `GE` notation. -/
 def GuardPage (a : Arena) (addr : Nat) : Prop := a.base + a.capacity ≤ addr
