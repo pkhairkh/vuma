@@ -478,24 +478,19 @@ inductive PmtInstr where
   | load        : String → String → Nat → IRType → PmtInstr   -- (in_var, out_var, offset, type)
   | store       : String → IRValue → Nat → IRType → PmtInstr  -- (in_var, value, offset, type)
   | free        : String → PmtInstr                           -- (in_var)
-  | transform   : String → String → Layout → PmtInstr         -- (in_var, out_var, layout)
   | transform_layouts : IRValue → IRValue → String → String → PmtInstr
-    -- FFI-3-B addition (Gap #5 closure). Mirrors Rust
-    -- `IRInstr::Transform` (FFI-1-C addition, `src/codegen/src/ir.rs:1978`):
+    -- PMT-FAITH-5-A: this is now the SOLE Transform variant, bit-faithfully
+    -- mirroring Rust `IRInstr::Transform` (src/codegen/src/ir.rs:1978):
     --   `Transform { dst: IRValue, src: IRValue, from_layout: String, to_layout: String }`.
     -- Field-for-field mirror: 4 fields, in this order — dst (IRValue),
     -- src (IRValue), from_layout (String), to_layout (String).
     --
-    -- DISTINCT from the pre-existing `PmtInstr.transform` (PMT-1-A
-    -- variant) directly above, which is a single-layout state
-    -- transform `(in_var, out_var, layout) : String × String × Layout`.
-    -- The pre-existing `transform` mirrors Rust's `__vuma_state_transform`
-    -- extern (now an inlined PMT op); the new `transform_layouts`
-    -- mirrors Rust's `IRInstr::Transform` (a two-layout pointer
-    -- reinterpretation lowered to a single `mov dst_storage,
-    -- src_storage` in the x86_64 backend — no PMT arena state
-    -- interaction, hence `effect = .none`, `well_typed = True`, and
-    -- `to_steps = []`).
+    -- The pre-existing unfaithful `PmtInstr.transform` (String → String → Layout)
+    -- was REMOVED in PMT-FAITH-5-A (closes FAITH-2-C CRITICAL gap). It modeled
+    -- Rust's `__vuma_state_transform` extern (the OLD pre-FFI-1-C calling
+    -- convention), which has been replaced by the inlined `IRInstr::Transform`
+    -- variant. The Lean model now has ONE Transform variant matching Rust
+    -- bit-faithfully (closes FAITH-2-C).
   | call        : String → List String → PmtInstr             -- (builtin_name, arg_vars)
   | ret         : IRValue → PmtInstr                          -- (return value)
   -- Pure-arithmetic variants (12, PMT-1-A) — `effect = .none`, `to_steps = []`
@@ -701,8 +696,7 @@ def PmtInstr.effect : PmtInstr → PmtEffect
   | .load in_var _ _ _ => .reads in_var
   | .store in_var _ _ _ => .reads in_var
   | .free in_var => .consumes in_var
-  | .transform in_var _ _ => .consumes in_var  -- NOTE: also writes out, but consumes dominates
-  | .transform_layouts _ _ _ _ => .none  -- FFI-3-B: pointer copy, no arena effect.
+  | .transform_layouts _ _ _ _ => .none  -- PMT-FAITH-5-A: pointer copy, no arena effect.
   | .call _ _ => .none
   | .ret _ => .none
   -- Pure-arithmetic variants (PMT-1-A): no state effect.
@@ -785,9 +779,7 @@ def PmtInstr.well_typed (i : PmtInstr) (layout_env : String → Layout) : Prop :
   | .load in_var _ _ _ => WF_Layout (layout_env in_var)
   | .store in_var _ _ _ => WF_Layout (layout_env in_var)
   | .free in_var => WF_Layout (layout_env in_var)
-  | .transform in_var _out layout =>
-      WF_Layout layout ∧ WF_Layout (layout_env in_var)
-  | .transform_layouts _ _ _ _ => True  -- FFI-3-B: pointer copy, no WF_Layout check.
+  | .transform_layouts _ _ _ _ => True  -- PMT-FAITH-5-A: pointer copy, no WF_Layout check.
   | .call _ _ => True
   | .ret _ => True
   -- Pure-arithmetic variants (PMT-1-A): pure computation, no arena involvement.
@@ -908,8 +900,7 @@ def PmtInstr.to_steps (i : PmtInstr) : List Step :=
   | .load in_var out _ _ => [⟨in_var, out, ⟨1, []⟩, .transform⟩]
   | .store in_var _ _ _ => [⟨in_var, in_var, ⟨1, []⟩, .transform⟩]
   | .free in_var => [⟨in_var, in_var, ⟨1, []⟩, .transform⟩]
-  | .transform in_var out layout => [⟨in_var, out, layout, .transform⟩]
-  | .transform_layouts _ _ _ _ => []  -- FFI-3-B: pointer copy, no Step.
+  | .transform_layouts _ _ _ _ => []  -- PMT-FAITH-5-A: pointer copy, no Step.
   | .call _ args => args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩)
   | .ret _ => []
   -- Pure-arithmetic variants (PMT-1-A): pure computation, no Steps emitted.

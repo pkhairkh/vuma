@@ -124,33 +124,20 @@ theorem well_typed_strong_implies_field_access
     (h : WellTypedStrong prog initial_var) :
     FieldAccessOk prog := h.2.2
 
-/-! ## §5. Bridge to `PmtInstr.well_typed`
+/-! ## §5. Bridge to `PmtInstr.well_typed` (REMOVED in PMT-FAITH-5-A)
 
-This bridge demonstrates that the strengthened `Step`-level predicate
-subsumes the per-instruction `PmtInstr.well_typed` check for the
-`transform` case — the only `PmtOp`-bearing case in the current `Step`
-model. When `Step` gains an `op` field, this bridge generalizes
-to all `PmtOp` variants. -/
+The previous bridge `Step.to_pmt_instr` + `step_wf_implies_pmt_instr_well_typed`
+constructed `PmtInstr.transform s.in_var s.out_var s.layout` from a `Step`.
+PMT-FAITH-5-A removed the unfaithful `PmtInstr.transform` variant (closes
+FAITH-2-C CRITICAL gap) — the faithful `transform_layouts` variant takes
+`IRValue → IRValue → String → String`, which does not match `Step`'s
+`String → String → Layout` fields. The String-vs-IRValue abstraction gap
+(FAITH-2-L) is scheduled for Wave 6; once closed, a new bridge can be
+constructed using the faithful variant. Until then, this bridge is removed
+(it was a demonstration, not in the critical path of `pmt_soundness`).
 
-/-- §5.1: Embed a `Step` as the corresponding `PmtInstr.transform`. -/
-def Step.to_pmt_instr (s : Step) : PmtInstr :=
-  PmtInstr.transform s.in_var s.out_var s.layout
-
-/-- §5.2: If `WF_Layout s.layout` and the layout environment agrees on
-`s.in_var`, then `s.to_pmt_instr.well_typed env` holds.
-
-This is the per-step lift of `WF_Layout` into `PmtInstr.well_typed`,
-connecting the strengthened `WellTypedStrong` predicate to the
-per-instruction check. -/
-theorem step_wf_implies_pmt_instr_well_typed
-    (s : Step) (env : String → Layout)
-    (henv : env s.in_var = s.layout)
-    (hwf : WF_Layout s.layout) :
-    s.to_pmt_instr.well_typed env := by
-  show WF_Layout s.layout ∧ WF_Layout (env s.in_var)
-  refine ⟨hwf, ?_⟩
-  rw [henv]
-  exact hwf
+The `WellTypedStrong` predicate and `pmt_soundness_strong` theorem are
+unaffected — they operate on `Step` directly, not via `to_pmt_instr`. -/
 
 /-! ## §6. Strengthened soundness theorem -/
 
