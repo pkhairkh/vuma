@@ -501,6 +501,54 @@ mod lean_ffi {
             t: *mut LeanObject,
         ) -> u8;
     }
+
+    /// `initialize_PMT` — Lean module initializer exported by
+    /// `proof/.lake/build/ir/PMT.c`. MUST be invoked exactly once before
+    /// any `lean_verify_*` call: without it the Lean runtime is
+    /// uninitialized and the verifiers SIGSEGV (the PMT-1-G smoke-test
+    /// failure). `builtin = 1` runs Lean's standard builtin initializers;
+    /// the second arg is Lean's reserved `lean_object*` (pass null). On
+    /// success it returns a non-null `lean_object*` (Lean's unit value);
+    /// null denotes failure. Gated on `lean_ffi_linked` because the
+    /// linkage stub (`lean_stub.c`) does not export this symbol.
+    #[cfg(lean_ffi_linked)]
+    extern "C" {
+        fn initialize_PMT(builtin: u8, w: *mut LeanObject) -> *mut LeanObject;
+    }
+
+    /// Guards exactly-once execution of `initialize_PMT` across threads.
+    #[cfg(lean_ffi_linked)]
+    static INIT: std::sync::Once = std::sync::Once::new();
+
+    /// Persisted outcome of the one-shot `initialize_PMT` call. `Once`
+    /// only runs the init closure a single time, so the result (null =>
+    /// failure) is recorded here for every subsequent `init()` caller.
+    #[cfg(lean_ffi_linked)]
+    static INIT_FAILED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Invoke `initialize_PMT` exactly once (thread-safe via `Once`)
+    /// before any Lean verifier FFI call. Returns `Ok(())` on success
+    /// (non-null return — Lean's unit value) or `Err` describing the
+    /// failure if the initializer returned null.
+    #[cfg(lean_ffi_linked)]
+    pub fn init() -> Result<(), String> {
+        INIT.call_once(|| {
+            // `builtin = 1` => run Lean's standard builtin initializers.
+            let res = unsafe { initialize_PMT(1, std::ptr::null_mut()) };
+            if res.is_null() {
+                INIT_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        if INIT_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(
+                "Lean module initializer initialize_PMT returned null (init failed)"
+                    .to_string(),
+            )
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Result of routing the 3 PMT state verifiers through Lean: the same
@@ -528,7 +576,7 @@ fn verify_pmt_via_lean(
     consumed_vars: &HashSet<String>,
     transform_layouts: &HashMap<String, crate::state_transform::LayoutInfo>,
     transforms: &[(String, String)],
-) -> LeanPmtOutcome {
+) -> Result<LeanPmtOutcome, String> {
     // Mark every argument as used so neither sub-path emits unused-variable
     // warnings. The REAL path will consume them for marshalling in Wave 5-C.
     let _ = (
@@ -551,6 +599,13 @@ fn verify_pmt_via_lean(
     let outcome: LeanPmtOutcome = (Vec::new(), Vec::new(), Vec::new());
 
     // -- REAL sub-path (`lean_ffi_linked` cfg set by build.rs) ------
+    // Initialize the Lean module exactly once BEFORE any verifier call.
+    // `initialize_PMT` sets up the Lean runtime; without it the
+    // `lean_verify_*` externs SIGSEGV (the PMT-1-G smoke-test failure).
+    // `init()` is a no-op after the first call (guarded by `Once`).
+    #[cfg(lean_ffi_linked)]
+    lean_ffi::init().map_err(|e| format!("Lean PMT module init failed: {e}"))?;
+
     // Call the 3 extracted externs. Marshalling Rust to LeanObject is
     // Wave 5-C TODO; args are null placeholders for now. This branch is
     // dead code until build.rs emits `lean_ffi_linked`.
@@ -617,7 +672,7 @@ fn verify_pmt_via_lean(
         (read_results, write_results, transform_results)
     };
 
-    outcome
+    Ok(outcome)
 }
 
 impl VerificationEngine {
@@ -1029,7 +1084,7 @@ impl VerificationEngine {
         // emitted by build.rs). When the feature is OFF, the hand-written
         // Rust verifiers are used (the parity-tested path) - unchanged.
         #[cfg(feature = "pmt-runtime-check")]
-        let (read_results, write_results, transform_results) = verify_pmt_via_lean(
+        let (read_results, write_results, transform_results) = match verify_pmt_via_lean(
             &state_var_layouts,
             &read_layouts,
             &reads,
@@ -1038,7 +1093,25 @@ impl VerificationEngine {
             &consumed_vars,
             &transform_layouts,
             &transforms,
-        );
+        ) {
+            Ok(triple) => triple,
+            Err(e) => {
+                // Lean module init failed (only reachable on the
+                // `lean_ffi_linked` real-Lean path). Surface it as a hard
+                // Violation rather than silently passing verification.
+                return VerificationResult::new(
+                    "pmt-state",
+                    VerificationStatus::Violated {
+                        counterexample: CounterExample::new(
+                            Vec::new(),
+                            default_program_point(),
+                            e.clone(),
+                        ),
+                    },
+                    e,
+                );
+            }
+        };
 
         #[cfg(not(feature = "pmt-runtime-check"))]
         let (read_results, write_results, transform_results) = {

@@ -3075,7 +3075,7 @@ impl Backend for S390XBackend {
         // LGFI R1, 1        — 6 bytes, offset 22 (sys_exit)
         // SVC 0             — 2 bytes, offset 28
         let start_stub_size: usize = 32; // LG(6)+LGR(4)+LGHI+AGR(8)+BRASL(6)+LGFI(6)+SVC(2)
-                                         // FFI return-0 stub: LGHI R2, 0 (4 bytes) + BR R14 (2 bytes) = 6 bytes.
+                                         // FFI trap stub: LGHI R1, -1 (4 bytes) + SVC 0 (2 bytes) = 6 bytes.
         let ffi_stub_size: usize = 6;
         let ffi_stub_offset: usize = start_stub_size;
 
@@ -3929,7 +3929,7 @@ impl Backend for S390XBackend {
             start_stub[brasl_offset_in_start + 2..brasl_offset_in_start + 6]
                 .copy_from_slice(&disp_be);
         } else {
-            // No main function — point BRASL to the FFI return-0 stub.
+            // No main function — point BRASL to the FFI trap stub.
             let brasl_abs = BASE_ADDR + text_offset + brasl_offset_in_start as u64;
             let ffi_abs = BASE_ADDR + text_offset + ffi_stub_offset as u64;
             let disp = ((ffi_abs as i64 - brasl_abs as i64) / 2) as i32;
@@ -3938,12 +3938,19 @@ impl Backend for S390XBackend {
                 .copy_from_slice(&disp_be);
         }
 
-        // ── Add FFI return-0 stub ──
+        // ── Add FFI trap stub ──
+        // Unresolved externs in ET_EXEC mode are a build-time bug. The binary
+        // traps at runtime (SIGILL on s390x) rather than silently returning 0.
+        //
+        // LGHI R1, -1 (4 bytes): load invalid syscall number into R1 (the
+        //   syscall-number register per the s390x Linux ABI).
+        // SVC 0    (2 bytes): invoke the kernel with an out-of-range syscall
+        //   number — raises SIGILL. This mirrors the Unreachable trap above.
         let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
-        // LGHI R2, 0 (return 0)
-        ffi_stub.extend_from_slice(&encode_lghi(Gpr::R2, 0));
-        // BR R14 (return)
-        ffi_stub.extend_from_slice(&encode_br(LR));
+        // LGHI R1, -1 (load invalid syscall number)
+        ffi_stub.extend_from_slice(&encode_lghi(Gpr::R1, -1i16));
+        // SVC 0 (raises SIGILL via invalid syscall number)
+        ffi_stub.extend_from_slice(&encode_svc(0));
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
