@@ -26,7 +26,7 @@ For each claim in the FFI spec, I verified:
 | 8 | **LOW** | `__vuma_state_*` / `__vuma_arena_*` prefix-guard in `x86_64/mod.rs:4343-4353` is dead code | Cleanup needed |
 | 9 | **LOW** | `src/codegen/src/runtime/pmt_ops.rs` (8 functions + `__oob_trap`) is dead code in production | Cleanup needed |
 | 10 | **LOW** | `proof/AUDIT_FFI.md` claims `__oob_trap` is "used by codegen Transform lowering"; it is not | Audit report inaccuracy |
-| 11 | **INFO** | Lean `PmtInstr` is missing 4 control-flow variants (`invoke`, `resume`, `switch`, `tail_call`) | Pre-existing model gap (not FFI-introduced) |
+| 11 | **INFO** | Lean `PmtInstr` is missing 4 control-flow variants (`invoke`, `resume`, `switch`, `tail_call`) — CLOSED by FFI-3-C | Pre-existing model gap (not FFI-introduced) |
 
 ---
 
@@ -197,7 +197,22 @@ The comment claims "If sizes differed at runtime, we would call `__oob_trap`; th
 
 ---
 
-## Gap #11 — Lean PmtInstr missing 4 control-flow variants (INFO)
+## Gap #11 — Lean PmtInstr missing 4 control-flow variants (INFO) — CLOSED by FFI-3-C
+
+**Status**: CLOSED by FFI-3-C. The 4 control-flow variants
+(`invoke`, `resume`, `switch`, `tail_call`) have been added to Lean
+`PmtInstr` as field-for-field mirrors of the Rust
+`IRTerminator::{Invoke, Resume, Switch, TailCall}` variants. Each
+new variant flattens to `[]` under `PmtInstr.to_steps` (control flow
+is resolved at the CFG level, not as PMT `Step`s — same precedent as
+`branch` / `cond_branch` / `phi` from PMT-1-B). `effect = .none`,
+`well_typed = True`. Reflection lemmas `to_steps_switch` /
+`to_steps_invoke` / `to_steps_tail_call` / `to_steps_resume` are
+`rfl`-closed; the exhaustive `cases i with` blocks in
+`PmtInstr.to_steps_preserves_WF_Layout` (§1.8),
+`PmtInstr.to_steps_op_transform` (§1.9), and `ffi_pillar_sound`
+Conjunct 1 (FFI-owned) all received the 4 new arms. `lake build`
+passes sorry-free.
 
 **Pre-existing gap** (not FFI-introduced):
 - Rust `IRInstr` has `Invoke`, `Resume`, `Switch`, `TailCall` variants (4 control-flow instructions, likely for exception handling and tail-call optimization).
