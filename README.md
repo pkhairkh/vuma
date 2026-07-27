@@ -17,11 +17,10 @@ and emitted as native object code (ELF) or WebAssembly. The compiler targets
 SPARC, LoongArch, Alpha, HPPA, M68K, and wasm32. Programs are modeled as
 **Programs as Memory Transformations (PMT)** — typed state transformations on
 a single backing arena — and verified against liveness, exclusivity, origin,
-interpretation, and cleanup invariants before code emission. The **PMT pillar
-theorem `pmt_pillar_sound` is machine-checked in Lean 4** (sorry-free,
-conditional on the IVE-1-A and FFI-1-D hypotheses — see §5 below); the IVE and
-FFI pillar theorems are pending (those orchestrators are at Wave 0 / early
-Wave 1).
+interpretation, and cleanup invariants before code emission. **All three
+VUMA pillar theorems are machine-checked in Lean 4** (sorry-free):
+`pmt_pillar_sound` (PMT), `ive_pillar_sound` (IVE), and
+`ffi_pillar_sound` + `no_ffi_program_sound` (FFI) — see §5 below.
 
 ---
 
@@ -126,31 +125,41 @@ The repository also ships reference material outside `docs/`:
 
 ## 5. Formal Verification (Lean 4)
 
-### 5.0 Verification Status (PMT Wave 2 — partial, PMT-only)
+### 5.0 Verification Status (PMT Wave 2 — full 3-pillar synthesis)
 
 | Pillar | Theorem | Status |
 |--------|---------|--------|
-| **PMT** | `pmt_pillar_sound` (`proof/PMT/PillarSoundness.lean`) | **Mathematically verified.** Lean 4, sorry-free, conditional on the IVE-1-A and FFI-1-D hypotheses. Proves: (1) execution produces a result (totality), (2) on success, `final_used ≤ capacity`, (3) execution never traps with the OOB code (134). |
-| **IVE** | IVE-3-A (IVE pillar theorem) | **Pending.** The IVE orchestrator is at Wave 0 / early Wave 1; IVE-1-A (computable `WF_Layout`) is not yet on `main`. Until IVE-1-A lands, the `h_well_typed : P.well_typed env` hypothesis of `pmt_pillar_sound` is structural only. |
-| **FFI** | FFI-2-A (FFI pillar theorem) | **Pending.** The FFI orchestrator is at Wave 0 / early Wave 1; FFI-1-D (No-FFI theorem) is not yet on `main`. Until FFI-1-D lands, the `h_no_externs : NoExterns P` hypothesis of `pmt_pillar_sound` is taken as an assumption. |
+| **PMT** | `pmt_pillar_sound` (`proof/PMT/PillarSoundness.lean`) | **Mathematically verified.** Lean 4, sorry-free. For any program `P` with `NoExterns P`, `P.well_typed env`, `DataflowOk`, and `CapacityInvariant`: (1) `exec` produces a result (totality), (2) on success `final_used ≤ capacity`, (3) `exec ≠ Result.trap 134` (no OOB trap). |
+| **IVE** | `ive_pillar_sound` (`proof/PMT/IVE/PillarSoundness.lean`) | **Mathematically verified.** Lean 4, sorry-free. If all 12 IVE rules accept a program (`IveAccepted`), then `FullyVerified` holds and all PMT memory-safety invariants follow (no `.oob`, no `.uaf`, arena bounds, channel linearity, info-flow lattice, dependent-transform well-formedness, L1L3 collapse, constraint satisfaction, layout consistency). |
+| **FFI** | `ffi_pillar_sound` (`proof/PMT/FFI/PillarSoundness.lean`) + `no_ffi_program_sound` (`proof/PMT/NoFFI.lean`) | **Mathematically verified.** Lean 4, sorry-free. `ffi_pillar_sound`: every call in a `NoFFI P` program targets a built-in or a syscall in the `SyscallName.allowlist` — no other externs. `no_ffi_program_sound`: a direct application of `pmt_pillar_sound` with `NoFFI P` (which is `NoExterns P`) as hypothesis — totality + capacity preservation + no OOB trap. |
 
-**Residual non-standard axiom in the PMT codedomain.** One non-standard
-axiom remains: `own_ex_exclusive` (in
-`proof/PMT/Iris/LiveMirrorInvariant.lean`, transitively invoked by
-`no_oob_trap_for_well_typed_strong` → `live_mirror_exclusive`). The
-non-degenerate `RealOwn` predicate and the soundly-derived
-`own_ex_exclusive_derived` theorem are in place in
-`proof/PMT/Iris/HeapModel.lean`; the bridge from the degenerate `Own` to
-`RealOwn` (which would remove the axiom) cascades through five Iris
-structures (`CapBndInv`, `ArenaRes`, `LiveMirrorInv`, `GuardInvariant`,
-`FractionalPerm`) and is **deferred to a follow-up wave**. The full
-`pmt_pillar_sound_full` theorem (additionally excluding exit codes 135
-and 1) is likewise deferred — needs UAF safety + overflow safety lemmas.
+**All three VUMA pillars (PMT, IVE, FFI) are mathematically verified via
+sorry-free Lean theorems:** `pmt_pillar_sound`, `ive_pillar_sound`,
+`ffi_pillar_sound` (+ `no_ffi_program_sound`). The IVE and FFI pillar
+theorems discharge the two cross-orchestrator hypotheses of
+`pmt_pillar_sound` (`h_well_typed` is made meaningful by IVE; `h_no_externs`
+is discharged by FFI's No-FFI discipline). Each pillar is verified within
+its own scope; the residual non-standard axiom and the residual TCB below
+apply to the *combined* result.
 
-**Residual Trusted Computing Base (TCB).** The Lean proofs cover the PMT
-memory model and the IVE-side `verify_*` soundness theorems; they do NOT
-cover the production compiler pipeline. The residual TCB — the components
-whose correctness is **not** established by `pmt_pillar_sound` — is:
+**Residual non-standard axiom.** One non-standard axiom remains in the
+PMT codedomain: `own_ex_exclusive` (in
+`proof/PMT/Iris/LiveMirrorInvariant.lean:141`, transitively invoked by
+`no_oob_trap_for_well_typed_strong` → `live_mirror_exclusive`).
+`proof/PMT/Iris/HeapModel.lean` provides the non-degenerate `RealOwn`
+predicate and the soundly-derived `own_ex_exclusive_derived` theorem for
+the `RealOwn` predicate; bridging the degenerate `Own` → `RealOwn` to
+remove the axiom cascades through five Iris structures (`CapBndInv`,
+`ArenaRes`, `LiveMirrorInv`, `GuardInvariant`, `FractionalPerm`) and is
+the **one remaining follow-up**. The IVE and FFI codedomains contribute
+no additional `sorry`s or non-standard axioms (see `proof/AUDIT_IVE.md`,
+`proof/AUDIT_FFI.md`).
+
+**Residual Trusted Computing Base (TCB).** The Lean pillar theorems
+cover the PMT memory model, the IVE-side `verify_*` soundness theorems,
+and the FFI-side no-foreign-call discipline; they do NOT cover the
+production compiler pipeline. The residual TCB — the components whose
+correctness is **not** established by the three pillar theorems — is:
 
 - Parser (`src/parser/`).
 - AST → SCG bridge (`src/scg/`).
@@ -159,33 +168,40 @@ whose correctness is **not** established by `pmt_pillar_sound` — is:
 - Register allocator (`src/codegen/src/regalloc/`).
 - Backend instruction selection (per-backend `Isel` in `src/codegen/src/backends/`).
 - ELF / Wasm emission (`src/codegen/src/emit.rs`, `src/codegen/src/wasm/`).
-- OS interface (mmap, syscalls, process spawning).
+- OS interface (mmap, syscalls — including the 6-syscall ABI allowlist
+  that is the only foreign surface remaining after FFI removal — process
+  spawning).
 - Hardware (CPU, MMU, caches, devices).
 
-`pmt_pillar_sound` is a statement about the Lean `exec` model on
+The pillar theorems are statements about the Lean `exec` model on
 `IRProgram`s, *not* about the Rust `pipeline::compile` output; the
 `PipelineSim` scaffolding (`proof/PMT/PipelineSim.lean`) is the
 translation-validation bridge between the two and is currently a
 degenerate `rfl` (see §5 module list below). Closing that bridge is the
 subject of the deferred `pmt_pillar_sound_full` work and the
-follow-up-wave axiom-removal work; it is **not** implied by
-`pmt_pillar_sound` as it currently stands.
+follow-up-wave axiom-removal work; it is **not** implied by the three
+pillar theorems as they currently stand.
+
+`pmt_pillar_sound_full` (additionally excluding exit codes 135 and 1 in
+addition to 134) is deferred to a follow-up wave — needs UAF safety +
+overflow safety lemmas that are not yet in place.
 
 VUMA ships a machine-checked formalization of its PMT (Programs as Memory
 Transformations) memory model in Lean 4. The proofs live in `proof/` and
 verify:
 
 - **PMT pillar theorem `pmt_pillar_sound`** (PMT-1-G2, sorry-free): for any
-  VUMA program `P` with `NoExterns P` (the FFI-1-D hypothesis) that is
-  well-typed at the IR level (`P.well_typed env`, made meaningful by the
-  IVE-1-A hypothesis) and whose flattened program satisfies `DataflowOk` and
+  VUMA program `P` with `NoExterns P` (the FFI-side hypothesis, discharged
+  by `ffi_pillar_sound` + `no_ffi_program_sound`) that is well-typed at
+  the IR level (`P.well_typed env`, made meaningful by `ive_pillar_sound`)
+  and whose flattened program satisfies `DataflowOk` and
   `CapacityInvariant`, the Lean `exec` of `P`'s flattened program is
   memory-safe — (1) produces a result (totality), (2) on success, the final
   bump pointer is within the arena's capacity, (3) the execution never traps
-  with the OOB code (134). **Conditional on the IVE-1-A and FFI-1-D
-  hypotheses**, which are NOT yet on `main` (IVE-3-A and FFI-2-A pillar
-  theorems pending). See §5.0 above for the residual axiom and the residual
-  TCB. — `proof/PMT/PillarSoundness.lean`.
+  with the OOB code (134). The IVE and FFI pillar theorems are now on
+  `main` (IVE Wave 3 task A commit `ee21602c`; FFI Wave 1 task D commit
+  `e9ed5c3b`); see §5.0 above for the full 3-pillar synthesis, the residual
+  axiom, and the residual TCB. — `proof/PMT/PillarSoundness.lean`.
 - **Capacity preservation**: arena allocation never exceeds capacity.
 - **Field-bounds safety**: field accesses stay within layout bounds.
 - **Linearity / no-UAF**: consumed state buffers cannot be reused.
@@ -299,7 +315,7 @@ analysis). Module inventory:
 | `proof/PMT/Field.lean` | FieldBounds, Linearity, LinearResource |
 | `proof/PMT/Liveness.lean` | `state_read_requires_live`, GuardPage |
 | `proof/PMT/Soundness.lean` | Step, WellTyped, `pmt_soundness` theorem (sorry-free) |
-| `proof/PMT/PillarSoundness.lean` | `NoExterns` predicate + **`pmt_pillar_sound` pillar theorem** (PMT-1-G2, sorry-free, conditional on IVE-1-A + FFI-1-D hypotheses) |
+| `proof/PMT/PillarSoundness.lean` | `NoExterns` predicate + **`pmt_pillar_sound` pillar theorem** (PMT-1-G2, sorry-free; IVE + FFI pillar hypotheses now discharged by `ive_pillar_sound` + `ffi_pillar_sound` / `no_ffi_program_sound`) |
 | `proof/PMT/RawArena.lean` | Faithful mirror of Rust `Arena` (pointers, alignment, lifecycle) |
 | `proof/PMT/PmtInstr.lean` | Lean mirror of PMT-relevant `IRInstr` subset |
 | `proof/PMT/IRProgram.lean` | Lean mirror of `IRProgram`/`IRFunction`/`IRBlock` |
@@ -319,7 +335,10 @@ analysis). Module inventory:
 | `proof/PMT/Iris/ArenaRes.lean` | Iris `ArenaRes` resource bundle (`[cap_bnd]` + bump-pointer ghost + cap-own) — `alloc_preserves_arena_res` |
 | `proof/PMT/Iris/FractionalPerm.lean` | Iris fractional permission `↦{q}` (q ∈ (0,1]) for partial field ownership |
 | `proof/PMT/Iris/WeakestPrecond.lean` | Iris `wp` calculus on PMT instructions (Hoare-triple machinery) |
-| `proof/PMT/IVE/Soundness/*.lean` | IVE soundness: `verify_transform_sound`, `verify_state_reads_sound`, `verify_state_writes_sound`, Composition (4 submodules) |
+| `proof/PMT/IVE/Soundness/*.lean` | IVE soundness: `verify_transform_sound`, `verify_state_reads_sound`, `verify_state_writes_sound`, Composition + 8 restored-verifier soundness theorems + `ive_pillar_sound` capstone (IVE Wave 3 task A; 14 submodules, all sorry-free) |
+| `proof/PMT/IVE/PillarSoundness.lean` | **`ive_pillar_sound` pillar theorem** — `IveAccepted` (all 12 IVE rules) ⇒ `FullyVerified` + all 9 PMT invariant conjuncts (no `.oob`, no `.uaf`, arena bounds, channel linearity, info-flow lattice, dependent-transform WF, L1L3 collapse, constraint satisfaction, layout consistency) |
+| `proof/PMT/FFI/PillarSoundness.lean` | **`ffi_pillar_sound` pillar theorem** — `NoFFI P` ⇒ every call targets a built-in or a syscall in `SyscallName.allowlist`; plus `ffi_pillar_implies_no_ffi_sound` bridge (FFI Wave 1 task D) |
+| `proof/PMT/NoFFI.lean` | `NoFFI` predicate (≡ `NoExterns`) + **`no_ffi_program_sound` theorem** — direct application of `pmt_pillar_sound` with `NoFFI P` (FFI Wave 1 task D) |
 | `proof/PMT/Extraction.lean` | Verified extraction of Rust capacity/field-bounds/linearity/PMT checkers |
 | `proof/PMT/ExtractionLemmas.lean` | Lemmas bridging Lean specs to the hand-translated Rust checkers (`src/codegen/src/runtime/pmt_check.rs`, parity-tested) |
 
