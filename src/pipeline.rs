@@ -9811,6 +9811,338 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     Scg { nodes }
 }
 
+/// Extract typed-state METADATA from a parser AST, parallel to
+/// [`bridge_ast_to_codegen_scg`].
+///
+/// The canonical AST→codegen bridge lowers typed-state ops
+/// (`state_new(L)`, `p.field` read/write, `transform` calls,
+/// `#[foreign_consume]` calls) to UNTYPED `AllocationNode` /
+/// `StructAccessNode` / `CallNode` / `ForeignConsumeStmt` statements,
+/// **losing** the `layout_name` + typed-state kind (see
+/// `PLAN_IVE_IR_DIVERGENCE.md` §3). This function re-walks the SAME AST and
+/// records one [`TypedStateMeta`] entry per typed-state op the bridge
+/// lowered away, so the typed-state info is PRESERVED as recoverable
+/// metadata instead of being lost.
+///
+/// This is the Task SCG-CLOSURE narrowing step: the codegen SCG's emitted
+/// nodes are unchanged (the binary is byte-identical), but the typed-state
+/// info is no longer structurally lost — IVE *could* replay this metadata
+/// against the codegen SCG to recover the typed-state view it verifies on
+/// the semantic SCG. The divergence narrows from "5 typed-state payloads
+/// LOST" to "0 lost — preserved as `TypedStateMeta` metadata".
+///
+/// Detection mirrors the bridge's own typed-state recognition:
+///   * `let p = state_new(L)`            → `StateInit { L, vreg }`
+///     (also registers `p → L` so subsequent `p.field` ops resolve).
+///   * `let v = p.field` (`p : State<L>`) → `StateRead { p, L, field }`
+///   * `p.field = expr`  (`p : State<L>`) → `StateWrite { p, L, field }`
+///   * `let q = t(p)` for `transform t : L_in -> L_out`
+///                                        → `StateTransform { L_in, L_out }`
+///   * call to a `#[foreign_consume]` extern with a `#[foreign(raw)]`
+///     state-typed arg                    → `ForeignConsume { arg }`
+///
+/// `StateTransform` + `ForeignConsume` are only emitted when the source
+/// actually exercises them (the `tests/scg_conformance.rs` Point fixture
+/// exercises only `StateInit` / `StateRead` / `StateWrite`).
+pub fn extract_typed_state_meta_from_ast(
+    program: &AstProgram,
+) -> Vec<vuma_codegen::scg_to_ir::TypedStateMeta> {
+    use vuma_parser::ast::{Expr, Item, Stmt};
+    use vuma_codegen::scg_to_ir::TypedStateMeta;
+
+    // ── Build the transform registry: name → (input_layout, output_layout).
+    //    A `transform t : L_in -> L_out` has its first param typed `State<L_in>`
+    //    and its return type `State<L_out>`. Both are resolved via
+    //    `extract_state_layout_name_from_ast` (the same helper the bridge uses).
+    let mut transform_registry: HashMap<String, (Option<String>, Option<String>)> =
+        HashMap::new();
+    for item in &program.items {
+        if let Item::TransformDef(td) = item {
+            let input_layout = td
+                .params
+                .first()
+                .and_then(|p| p.ty.as_ref())
+                .and_then(extract_state_layout_name_from_ast);
+            let output_layout = td
+                .return_type
+                .as_ref()
+                .and_then(extract_state_layout_name_from_ast);
+            transform_registry.insert(td.name.clone(), (input_layout, output_layout));
+        }
+    }
+
+    // ── Build the set of `#[foreign_consume]` extern fn names + the layout
+    //    decl registry (to gate on `#[foreign(raw)]`, mirroring
+    //    `emit_foreign_consume_markers`).
+    let extern_fn_decls = extract_extern_fn_decls_from_ast(program);
+    let layout_decls = extract_layout_decls_from_ast(program);
+    let foreign_consume_fns: HashSet<String> = extern_fn_decls
+        .iter()
+        .filter(|(_, decl)| {
+            let infos = attrs_to_attr_infos(&decl.attrs);
+            vuma_codegen::marshal::foreign_consume_field(&infos).is_some()
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut meta: Vec<TypedStateMeta> = Vec::new();
+    let mut next_vreg: u32 = 0;
+
+    // Per-function var → layout map (state-typed variables). Reset per
+    // function so cross-function name reuse doesn't bleed.
+    fn walk_stmts(
+        stmts: &[Stmt],
+        var_layouts: &mut HashMap<String, String>,
+        meta: &mut Vec<vuma_codegen::scg_to_ir::TypedStateMeta>,
+        next_vreg: &mut u32,
+        transform_registry: &HashMap<String, (Option<String>, Option<String>)>,
+        foreign_consume_fns: &HashSet<String>,
+        layout_decls: &HashMap<String, vuma_parser::ast::LayoutDef>,
+    ) {
+        use vuma_parser::ast::{AssignTarget, Expr, Stmt};
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let(let_stmt) => {
+                    // First scan the initializer for typed-state ops
+                    // (StateRead on a prior state var, transform calls,
+                    // foreign_consume calls).
+                    match &let_stmt.value {
+                        Expr::StateInit { layout_name, .. } => {
+                            var_layouts.insert(let_stmt.name.clone(), layout_name.clone());
+                            meta.push(vuma_codegen::scg_to_ir::TypedStateMeta::StateInit {
+                                layout_name: layout_name.clone(),
+                                result_vreg: *next_vreg,
+                            });
+                            *next_vreg += 1;
+                        }
+                        Expr::FieldAccess { expr, field, .. } => {
+                            if let Expr::Var { name: v, .. } = expr.as_ref() {
+                                if let Some(layout) = var_layouts.get(v).cloned() {
+                                    meta.push(
+                                        vuma_codegen::scg_to_ir::TypedStateMeta::StateRead {
+                                            var: v.clone(),
+                                            layout_name: layout,
+                                            field_name: field.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        Expr::Call { callee, args, .. } => {
+                            if let Expr::Var { name: fname, .. } = callee.as_ref() {
+                                // Transform call: `let q = t(p)`.
+                                if let Some((in_l, out_l)) = transform_registry.get(fname) {
+                                    if let (Some(il), Some(ol)) = (in_l, out_l) {
+                                        meta.push(
+                                            vuma_codegen::scg_to_ir::TypedStateMeta::StateTransform {
+                                                input_layout: il.clone(),
+                                                output_layout: ol.clone(),
+                                            },
+                                        );
+                                        if let Some(ol) = out_l {
+                                            var_layouts.insert(let_stmt.name.clone(), ol.clone());
+                                        }
+                                    }
+                                }
+                                // #[foreign_consume] call: `consume(p)`.
+                                if foreign_consume_fns.contains(fname) {
+                                    emit_foreign_consume_meta(
+                                        args,
+                                        var_layouts,
+                                        layout_decls,
+                                        meta,
+                                    );
+                                }
+                            }
+                        }
+                        Expr::StructInit { name, .. } => {
+                            // `let p = Point { x: 1, y: 2 }` where `Point`
+                            // is a layout — register `p → Point` (mirrors
+                            // the bridge's StructInit state registration).
+                            if layout_decls.contains_key(name) {
+                                var_layouts.insert(let_stmt.name.clone(), name.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                    // Explicit `: State<L>` annotation on the let (e.g.
+                    // `let c: State<L> = f(p, q);`) — register the var.
+                    if let Some(ty) = &let_stmt.ty {
+                        if let Some(layout) = extract_state_layout_name_from_ast(ty) {
+                            var_layouts.insert(let_stmt.name.clone(), layout);
+                        }
+                    }
+                }
+                Stmt::Assign(assign_stmt) => {
+                    // `p.field = expr` (parsed as DerefField target).
+                    if let AssignTarget::DerefField { expr, field, .. } = &assign_stmt.target {
+                        if let Expr::Var { name: v, .. } = expr.as_ref() {
+                            if let Some(layout) = var_layouts.get(v).cloned() {
+                                meta.push(vuma_codegen::scg_to_ir::TypedStateMeta::StateWrite {
+                                    var: v.clone(),
+                                    layout_name: layout,
+                                    field_name: field.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Stmt::TransformCall(ts) => {
+                    if let Some((in_l, out_l)) = transform_registry.get(&ts.transform_name) {
+                        if let (Some(il), Some(ol)) = (in_l, out_l) {
+                            meta.push(vuma_codegen::scg_to_ir::TypedStateMeta::StateTransform {
+                                input_layout: il.clone(),
+                                output_layout: ol.clone(),
+                            });
+                            var_layouts.insert(ts.dst.clone(), ol.clone());
+                        }
+                    }
+                }
+                Stmt::Expr(expr_stmt) => {
+                    // Bare `consume(p);` statement.
+                    if let Expr::Call { callee, args, .. } = &expr_stmt.expr {
+                        if let Expr::Var { name: fname, .. } = callee.as_ref() {
+                            if foreign_consume_fns.contains(fname) {
+                                emit_foreign_consume_meta(
+                                    args,
+                                    var_layouts,
+                                    layout_decls,
+                                    meta,
+                                );
+                            }
+                        }
+                    }
+                }
+                // ── Recurse into control-flow bodies so nested state ops
+                //    are also captured.
+                Stmt::If(if_stmt) => {
+                    walk_stmts(
+                        &if_stmt.then_block.statements,
+                        var_layouts,
+                        meta,
+                        next_vreg,
+                        transform_registry,
+                        foreign_consume_fns,
+                        layout_decls,
+                    );
+                    if let Some(else_block) = &if_stmt.else_block {
+                        walk_stmts(
+                            &else_block.statements,
+                            var_layouts,
+                            meta,
+                            next_vreg,
+                            transform_registry,
+                            foreign_consume_fns,
+                            layout_decls,
+                        );
+                    }
+                }
+                Stmt::While(w) => walk_stmts(
+                    &w.body.statements,
+                    var_layouts,
+                    meta,
+                    next_vreg,
+                    transform_registry,
+                    foreign_consume_fns,
+                    layout_decls,
+                ),
+                Stmt::For(f) => walk_stmts(
+                    &f.body.statements,
+                    var_layouts,
+                    meta,
+                    next_vreg,
+                    transform_registry,
+                    foreign_consume_fns,
+                    layout_decls,
+                ),
+                Stmt::Loop(l) => walk_stmts(
+                    &l.body.statements,
+                    var_layouts,
+                    meta,
+                    next_vreg,
+                    transform_registry,
+                    foreign_consume_fns,
+                    layout_decls,
+                ),
+                Stmt::UnsafeBlock { body, .. } => walk_stmts(
+                    &body.statements,
+                    var_layouts,
+                    meta,
+                    next_vreg,
+                    transform_registry,
+                    foreign_consume_fns,
+                    layout_decls,
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    /// Push `ForeignConsume` meta for each state-typed `Var` arg of a
+    /// `#[foreign_consume]` extern call whose layout is `#[foreign(raw)]`
+    /// — mirroring `emit_foreign_consume_markers` exactly.
+    fn emit_foreign_consume_meta(
+        args: &[Expr],
+        var_layouts: &HashMap<String, String>,
+        layout_decls: &HashMap<String, vuma_parser::ast::LayoutDef>,
+        meta: &mut Vec<vuma_codegen::scg_to_ir::TypedStateMeta>,
+    ) {
+        for arg in args {
+            if let Expr::Var { name: v, .. } = arg {
+                if let Some(layout_name) = var_layouts.get(v) {
+                    let is_foreign_raw = layout_decls
+                        .get(layout_name)
+                        .map(|ld| {
+                            let infos = attrs_to_attr_infos(&ld.attrs);
+                            vuma_codegen::marshal::foreign_layout_field(&infos).is_some()
+                        })
+                        .unwrap_or(false);
+                    if is_foreign_raw {
+                        meta.push(vuma_codegen::scg_to_ir::TypedStateMeta::ForeignConsume {
+                            var: v.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Walk every function + transform body. Transform bodies are walked
+    // too (their inner state ops are typed-state ops in their own right).
+    for item in &program.items {
+        let body_stmts: &[Stmt] = match item {
+            Item::FnDef(fd) => &fd.body.statements,
+            Item::TransformDef(td) => &td.body,
+            _ => continue,
+        };
+        let mut var_layouts: HashMap<String, String> = HashMap::new();
+        // Register state-typed params (e.g. `fn f(p: State<Point>)`).
+        let params: &[vuma_parser::ast::Param] = match item {
+            Item::FnDef(fd) => &fd.params,
+            Item::TransformDef(td) => &td.params,
+            _ => &[],
+        };
+        for p in params {
+            if let Some(ty) = &p.ty {
+                if let Some(layout) = extract_state_layout_name_from_ast(ty) {
+                    var_layouts.insert(p.name.clone(), layout);
+                }
+            }
+        }
+        walk_stmts(
+            body_stmts,
+            &mut var_layouts,
+            &mut meta,
+            &mut next_vreg,
+            &transform_registry,
+            &foreign_consume_fns,
+            &layout_decls,
+        );
+    }
+
+    meta
+}
+
 /// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter
 /// and the last expression result for implicit returns.
 pub struct BridgeCtx {

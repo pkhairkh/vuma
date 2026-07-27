@@ -466,6 +466,26 @@ def leanVerifiedPmtCheckPrim
   let l : Layout := { name := "", total_size := total_size.toNat, fields := [] }
   verified_pmt_check used.toNat capacity.toNat f l var (splitLines consumed)
 
+/-- Full wf_layout check matching Rust's `lean_wf_layout_bool` (3 conjuncts):
+  1. every field in bounds (offset + size ≤ total_size)
+  2. every distinct pair of fields disjoint (f1.end ≤ f2.offset OR f2.end ≤ f1.offset)
+  3. total_size > 0 OR fields is empty
+
+Field identity for the "skip same field" guard uses `name` comparison
+(names are unique within a layout); `FieldInfo` derives only `Repr`, so
+`BEq`/`DecidableEq` on the whole structure is not available. -/
+def wf_layout_bool (info : PMT.IVE.Soundness.LayoutInfo) : Bool :=
+  -- Conjunct 3: total_size > 0 or fields empty
+  (info.total_size > 0 || info.fields.isEmpty) &&
+  -- Conjunct 1: every field in bounds (offset + size ≤ total_size)
+  info.fields.all (fun f => f.offset + f.size <= info.total_size) &&
+  -- Conjunct 2: every distinct pair of fields disjoint
+  info.fields.all (fun f1 =>
+    info.fields.all (fun f2 =>
+      f1.name = f2.name ||                      -- same field, skip
+      f1.offset + f1.size <= f2.offset ||       -- f1 ends before f2 starts
+      f2.offset + f2.size <= f1.offset))        -- f2 ends before f1 starts
+
 /-- `@[export lean_verify_transform_prim]` — primitive-signature wrapper
 for `leanVerifyTransform`. `registry` is the serialized registry payload
 (see §9 format); `input_layout` / `output_layout` are layout names; `kind`
@@ -490,10 +510,10 @@ def leanVerifyTransformPrim (registry input_layout output_layout kind : String) 
   -- Look up both layouts by name.
   match layouts input_layout, layouts output_layout with
   | some in_info, some out_info =>
-    -- wf_layout check (mirrors Rust `lean_wf_layout_bool` first conjunct:
-    -- every field is in bounds, i.e. offset + size <= total_size).
-    let in_wf := in_info.fields.all (fun f => f.offset + f.size <= in_info.total_size)
-    let out_wf := out_info.fields.all (fun f => f.offset + f.size <= out_info.total_size)
+    -- wf_layout check (mirrors Rust `lean_wf_layout_bool` — all 3 conjuncts:
+    -- field bounds, pairwise disjointness, total_size>0/empty).
+    let in_wf := wf_layout_bool in_info
+    let out_wf := wf_layout_bool out_info
     in_wf && out_wf &&
     (match kind with
      | "identity" =>
