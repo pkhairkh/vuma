@@ -1,5 +1,5 @@
 //! Dump codegen SCG statements for a .vuma file.
-use vuma::pipeline::{bridge_scg_to_codegen, run_scg_transforms, CompileConfig};
+use vuma::pipeline::{bridge_ast_to_codegen_scg, run_scg_transforms, CompileConfig};
 use vuma_codegen::scg_to_ir::ScgStatement;
 use vuma_parser::{AstToScg, Parser};
 
@@ -55,7 +55,7 @@ fn main() {
         ..Default::default()
     };
     let _ = run_scg_transforms(&mut scg, &config);
-    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let codegen_scg = bridge_ast_to_codegen_scg(&ast);
 
     for node in &codegen_scg.nodes {
         if let vuma_codegen::scg_to_ir::ScgNode::Function(func) = node {

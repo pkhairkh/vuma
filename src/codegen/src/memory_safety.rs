@@ -1971,7 +1971,7 @@ mod tests {
 
     #[test]
     fn test_empty_scg_analysis() {
-        let scg = Scg { nodes: vec![] };
+        let scg = Scg::new(vec![]);
         let analyzer = MemorySafetyAnalyzer::with_defaults();
         let report = analyzer.analyze(&scg);
         assert!(report.is_clean());
@@ -1991,8 +1991,7 @@ mod tests {
         use crate::scg_to_ir::CallNode;
 
         // Create a function that allocates and frees twice
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_double_free".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2018,8 +2017,7 @@ mod tests {
                     }),
                 ],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         let analyzer = MemorySafetyAnalyzer::with_defaults();
         let report = analyzer.analyze(&scg);
@@ -2032,8 +2030,7 @@ mod tests {
     #[test]
     fn test_memory_leak_detection() {
         // Create a function that allocates but never frees
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_leak".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2043,8 +2040,7 @@ mod tests {
                     ty: ScgType::Ptr,
                 })],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         let analyzer = MemorySafetyAnalyzer::with_defaults();
         let report = analyzer.analyze(&scg);
@@ -2058,8 +2054,7 @@ mod tests {
         use crate::scg_to_ir::CallNode;
 
         // Create a function that frees then accesses
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_uaf".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2084,8 +2079,7 @@ mod tests {
                     }),
                 ],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         let analyzer = MemorySafetyAnalyzer::with_defaults();
         let report = analyzer.analyze(&scg);
@@ -2099,8 +2093,7 @@ mod tests {
         use crate::scg_to_ir::CallNode;
 
         // Create a function that allocates, uses, and properly frees
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_proper".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2125,8 +2118,7 @@ mod tests {
                     }),
                 ],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         let analyzer = MemorySafetyAnalyzer::with_defaults();
         let report = analyzer.analyze(&scg);
@@ -2141,8 +2133,7 @@ mod tests {
         // supplied, `find_bounds_check_sites_with_bounds` populates
         // `length_expr` for accesses whose `ptr` resolves to a known
         // allocation name.
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_bounds_with_table".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2169,8 +2160,7 @@ mod tests {
                     }),
                 ],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         // Backward-compat: empty table → all length_expr None.
         let empty_table: HashMap<String, u64> = HashMap::new();
@@ -2195,8 +2185,7 @@ mod tests {
         // the codegen SCG in place, inserting a `ComputationNode(UGe)` +
         // `ControlNode::If { __oob_trap }` pair BEFORE every Access whose
         // `ptr` resolves to a known allocation name.
-        let mut scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let mut scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_inject".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2214,8 +2203,7 @@ mod tests {
                     }),
                 ],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         let mut table: HashMap<String, u64> = HashMap::new();
         table.insert("arr".to_string(), 64);
@@ -2548,8 +2536,7 @@ mod tests {
         let mut sizes = HashMap::new();
         sizes.insert("arr".to_string(), 16u64);
 
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_classify".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2577,8 +2564,7 @@ mod tests {
                     }),
                 ],
                 var_types: HashMap::new(),
-            })],
-        };
+            })]);
 
         let mut scg = scg;
         inject_bounds_check_ir(&mut scg, &sizes);
@@ -2743,15 +2729,13 @@ mod tests {
                 ty: None,
             }),
         ];
-        Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_arena_alloc".to_string(),
                 params: vec![],
                 results: vec![],
                 body,
                 var_types: HashMap::new(),
-            })],
-        }
+            })])
     }
 
     #[test]
@@ -2774,8 +2758,7 @@ mod tests {
         // An SCG without `__arena_overflow` should produce an empty table.
         // This guards against false positives from unrelated `Add(Var, Var)`
         // computations.
-        let scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "no_arena".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2800,8 +2783,7 @@ mod tests {
                     }),
                 ],
                 var_types: HashMap::new(),
-            })],
-        };
+            })]);
         let table = build_arena_state_sizes(&scg);
         assert!(
             table.is_empty(),
@@ -2960,8 +2942,7 @@ mod tests {
     /// one `Call(__oob_trap, is_extern=true)`.
     #[test]
     fn test_negative_oob_store_triggers_oob_trap_injection() {
-        let mut scg = Scg {
-            nodes: vec![ScgNode::Function(ScgFunction {
+        let mut scg = Scg::new(vec![ScgNode::Function(ScgFunction {
                 name: "test_oob_store".to_string(),
                 params: vec![],
                 results: vec![],
@@ -2982,8 +2963,7 @@ mod tests {
                     }),
                 ],
                 var_types: std::collections::HashMap::new(),
-            })],
-        };
+            })]);
 
         let mut table: HashMap<String, u64> = HashMap::new();
         table.insert("buf".to_string(), 32);

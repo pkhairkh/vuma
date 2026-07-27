@@ -16,6 +16,7 @@
 use crate::result::VerificationResult;
 use std::collections::{HashMap, HashSet};
 use vuma_bd::descriptor::BD;
+use vuma_codegen::scg_to_ir::TypedStateMeta;
 use vuma_scg::graph::SCG;
 use vuma_scg::hash::type_hash;
 use vuma_scg::node::{ComputationKind, NodeId};
@@ -61,6 +62,22 @@ pub struct VerificationInput {
     /// `#[secret]` instead of relying on the substring match.
     /// See `docs/architecture/ive-fix-proposals.md` §8 for the rationale.
     pub secret_vars: HashSet<String>,
+    /// Typed-state metadata recovered from the codegen Scg (Task 2-A/3-B).
+    ///
+    /// Populated by the pipeline from
+    /// `vuma::pipeline::bridge_ast_to_codegen_scg_with_meta`, which walks
+    /// the parser AST in parallel with the codegen-SCG bridge and records
+    /// every typed-state op (`state_new`, `p.field` read/write, `transform`,
+    /// `#[foreign_consume]`) as a recoverable [`TypedStateMeta`] entry.
+    /// When non-empty, [`InvariantAggregator::verify_pmt`] runs the
+    /// dual-derivation `verify_typed_state_conformance` cross-check that
+    /// proves the semantic SCG's `NodePayload` typed-state ops agree with
+    /// this codegen-derived list. A disagreement surfaces a divergence
+    /// between the two SCG construction paths (semantic `parser::to_scg`
+    /// vs codegen `bridge_ast_to_codegen_scg`); per Task 3-B the
+    /// cross-check currently logs a WARNING rather than hard-failing so
+    /// existing programs keep building — see NEEDS_FOLLOWUP 3-B.
+    pub typed_state_meta: Vec<TypedStateMeta>,
 }
 
 /// A unified layout spec for PMT state verification.
@@ -307,6 +324,275 @@ pub fn verify_layout_field_list_consistency(
     mismatches
 }
 
+// ---------------------------------------------------------------------------
+// Typed-state conformance cross-check (Task 3-B)
+// ---------------------------------------------------------------------------
+//
+// The semantic SCG (`vuma-scg`) carries typed-state ops as dedicated
+// `NodePayload` variants (`StateInit` / `StateRead` / `StateWrite` /
+// `StateTransform` / `ForeignConsume`). The codegen Scg lowers those same
+// ops to UNTYPED `AllocationNode` / `StructAccessNode` / `CallNode` /
+// `ForeignConsumeStmt` statements, *losing* the layout/field/kind info —
+// but Task 2-A attaches a parallel `Vec<TypedStateMeta>` record alongside
+// the codegen Scg so that info is recoverable.
+//
+// The cross-check below is a DUAL-DERIVATION proof: it independently
+// extracts a normalized `(kind, layout, field)` multiset from
+//   (1) the semantic SCG's `NodePayload`s, and
+//   (2) the codegen Scg's `TypedStateMeta` list,
+// and compares them. A divergence signals that the two SCG construction
+// paths (`parser::to_scg` vs `bridge_ast_to_codegen_scg`) disagree on the
+// program's typed-state shape — the same class of bug the existing
+// `verify_layout_field_list_consistency` cross-check targets for layout
+// field lists.
+//
+// `vreg_or_var` is recorded for diagnostics only: the semantic SCG uses
+// numeric vregs (`u32`), while the codegen `TypedStateMeta` uses either a
+// synthetic source-order counter (`StateInit::result_vreg`) or a variable
+// name string (`StateRead`/`StateWrite`/`ForeignConsume::var`). The two
+// are NOT directly comparable, so equality is decided on `kind` +
+// `layout` + `field` only.
+
+/// The five typed-state op kinds, mirroring the semantic SCG's
+/// `NodePayload` variants and the codegen `TypedStateMeta` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TypedStateKind {
+    /// `let p = state_new(L)` — typed-state allocation.
+    StateInit,
+    /// `let v = p.field` — typed-state field read.
+    StateRead,
+    /// `p.field = expr` — typed-state field write.
+    StateWrite,
+    /// `let q = t(p)` — typed-state layout reinterpretation.
+    StateTransform,
+    /// `consume(p)` / `#[foreign_consume]` — linearity marker.
+    ForeignConsume,
+}
+
+/// A normalized `(kind, layout, field)` triple recovered from EITHER the
+/// semantic SCG's `NodePayload` typed-state ops OR the codegen Scg's
+/// [`TypedStateMeta`] list. Used by [`verify_typed_state_conformance`].
+///
+/// `vreg_or_var` carries the original vreg (semantic side, as a string) or
+/// variable name (codegen side) for diagnostics; it is NOT part of the
+/// equality comparison (see the module-level comment above).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedStateTriple {
+    /// Which typed-state op kind this triple came from.
+    pub kind: TypedStateKind,
+    /// Layout name. For `StateTransform` this is the *input* layout; the
+    /// output layout is encoded in `field` as `"->output_layout"` so a
+    /// divergent output layout surfaces as a field mismatch.
+    pub layout: String,
+    /// Field name. Empty for `StateInit` / `ForeignConsume` (no field).
+    /// For `StateTransform` this is `"->output_layout"`.
+    pub field: String,
+    /// Original vreg (semantic) or var string (codegen) — diagnostics only.
+    pub vreg_or_var: String,
+}
+
+/// Extract normalized [`TypedStateTriple`]s from the semantic SCG's
+/// `NodePayload` typed-state variants (derivation #1).
+fn extract_typed_state_triples_from_scg(scg: &SCG) -> Vec<TypedStateTriple> {
+    use vuma_scg::node::{NodePayload, StateInitNode};
+    let mut out = Vec::new();
+    for node in scg.nodes() {
+        match &node.payload {
+            NodePayload::StateInit(StateInitNode { layout_name, result_vreg }) => {
+                out.push(TypedStateTriple {
+                    kind: TypedStateKind::StateInit,
+                    layout: layout_name.clone(),
+                    field: String::new(),
+                    vreg_or_var: result_vreg.to_string(),
+                });
+            }
+            NodePayload::StateRead(r) => {
+                out.push(TypedStateTriple {
+                    kind: TypedStateKind::StateRead,
+                    layout: r.layout_name.clone(),
+                    field: r.field_name.clone(),
+                    vreg_or_var: r.state_vreg.to_string(),
+                });
+            }
+            NodePayload::StateWrite(w) => {
+                out.push(TypedStateTriple {
+                    kind: TypedStateKind::StateWrite,
+                    layout: w.layout_name.clone(),
+                    field: w.field_name.clone(),
+                    vreg_or_var: w.state_vreg.to_string(),
+                });
+            }
+            NodePayload::StateTransform(t) => {
+                // Key on the input layout; encode the output layout in the
+                // field slot so a divergent output layout is caught.
+                out.push(TypedStateTriple {
+                    kind: TypedStateKind::StateTransform,
+                    layout: t.input_layout.clone(),
+                    field: format!("->{}", t.output_layout),
+                    vreg_or_var: t.input_vreg.to_string(),
+                });
+            }
+            NodePayload::ForeignConsume(fc) => {
+                // NOTE: the codegen `TypedStateMeta::ForeignConsume` does
+                // NOT carry a layout_name (only `var`), so for this kind
+                // the cross-check is count-only — the semantic layout is
+                // recorded here for diagnostics but the comparison drops
+                // it (see `verify_typed_state_conformance`).
+                out.push(TypedStateTriple {
+                    kind: TypedStateKind::ForeignConsume,
+                    layout: fc.layout_name.clone(),
+                    field: String::new(),
+                    vreg_or_var: fc.input_vreg.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Extract normalized [`TypedStateTriple`]s from the codegen Scg's
+/// [`TypedStateMeta`] list (derivation #2).
+fn extract_typed_state_triples_from_codegen_meta(
+    meta: &[TypedStateMeta],
+) -> Vec<TypedStateTriple> {
+    meta.iter()
+        .map(|m| match m {
+            TypedStateMeta::StateInit { layout_name, result_vreg } => TypedStateTriple {
+                kind: TypedStateKind::StateInit,
+                layout: layout_name.clone(),
+                field: String::new(),
+                vreg_or_var: result_vreg.to_string(),
+            },
+            TypedStateMeta::StateRead { var, layout_name, field_name } => TypedStateTriple {
+                kind: TypedStateKind::StateRead,
+                layout: layout_name.clone(),
+                field: field_name.clone(),
+                vreg_or_var: var.clone(),
+            },
+            TypedStateMeta::StateWrite { var, layout_name, field_name } => TypedStateTriple {
+                kind: TypedStateKind::StateWrite,
+                layout: layout_name.clone(),
+                field: field_name.clone(),
+                vreg_or_var: var.clone(),
+            },
+            TypedStateMeta::StateTransform { input_layout, output_layout } => TypedStateTriple {
+                kind: TypedStateKind::StateTransform,
+                layout: input_layout.clone(),
+                field: format!("->{}", output_layout),
+                vreg_or_var: String::new(),
+            },
+            TypedStateMeta::ForeignConsume { var } => TypedStateTriple {
+                kind: TypedStateKind::ForeignConsume,
+                // Codegen does not carry a layout for ForeignConsume; the
+                // comparison handles this kind by count only.
+                layout: String::new(),
+                field: String::new(),
+                vreg_or_var: var.clone(),
+            },
+        })
+        .collect()
+}
+
+/// Dual-derivation cross-check (Task 3-B): prove the semantic SCG and the
+/// codegen Scg agree on typed-state info.
+///
+/// Walks the semantic SCG's `NodePayload` typed-state variants and
+/// normalizes each into a [`TypedStateTriple`] (derivation #1), then
+/// normalizes the codegen Scg's [`TypedStateMeta`] list into the same
+/// triple form (derivation #2). The two are compared by:
+/// - per-kind **count** (all five kinds), and
+/// - `(kind, layout, field)` **multiset** equality for the four kinds
+///   that carry comparable layout/field info (`StateInit`, `StateRead`,
+///   `StateWrite`, `StateTransform`). `ForeignConsume` is count-only
+///   because the codegen `TypedStateMeta::ForeignConsume` does not carry
+///   a layout name.
+///
+/// This mirrors the dual-derivation pattern of
+/// [`verify_layout_field_list_consistency`]: a divergence between the two
+/// independent derivations signals a bug in one of the two SCG
+/// construction paths (`parser::to_scg` for the semantic SCG,
+/// `bridge_ast_to_codegen_scg` for the codegen Scg).
+///
+/// Returns a list of mismatch descriptions (empty if the two sides agree).
+pub fn verify_typed_state_conformance(
+    scg: &SCG,
+    codegen_meta: &[TypedStateMeta],
+) -> Vec<String> {
+    let semantic_triples = extract_typed_state_triples_from_scg(scg);
+    let codegen_triples = extract_typed_state_triples_from_codegen_meta(codegen_meta);
+    let mut mismatches = Vec::new();
+
+    let all_kinds = [
+        TypedStateKind::StateInit,
+        TypedStateKind::StateRead,
+        TypedStateKind::StateWrite,
+        TypedStateKind::StateTransform,
+        TypedStateKind::ForeignConsume,
+    ];
+
+    // Per-kind count check (covers all five kinds, including the
+    // layout-less ForeignConsume).
+    for kind in all_kinds {
+        let scg_count = semantic_triples.iter().filter(|t| t.kind == kind).count();
+        let cg_count = codegen_triples.iter().filter(|t| t.kind == kind).count();
+        if scg_count != cg_count {
+            mismatches.push(format!(
+                "{:?}: count mismatch (semantic SCG={}, codegen Scg={})",
+                kind, scg_count, cg_count
+            ));
+        }
+    }
+
+    // (kind, layout, field) multiset check for the four layout-carrying
+    // kinds. ForeignConsume is excluded (codegen lacks layout); its count
+    // is already checked above.
+    let multiset_kinds: HashSet<TypedStateKind> = [
+        TypedStateKind::StateInit,
+        TypedStateKind::StateRead,
+        TypedStateKind::StateWrite,
+        TypedStateKind::StateTransform,
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    let mut scg_counts: HashMap<(TypedStateKind, String, String), usize> = HashMap::new();
+    for t in &semantic_triples {
+        if multiset_kinds.contains(&t.kind) {
+            *scg_counts
+                .entry((t.kind, t.layout.clone(), t.field.clone()))
+                .or_insert(0) += 1;
+        }
+    }
+    let mut cg_counts: HashMap<(TypedStateKind, String, String), usize> = HashMap::new();
+    for t in &codegen_triples {
+        if multiset_kinds.contains(&t.kind) {
+            *cg_counts
+                .entry((t.kind, t.layout.clone(), t.field.clone()))
+                .or_insert(0) += 1;
+        }
+    }
+
+    let mut all_keys: Vec<&(TypedStateKind, String, String)> =
+        scg_counts.keys().chain(cg_counts.keys()).collect();
+    // Tuples sort lexicographically when every element is `Ord`;
+    // `TypedStateKind` derives `Ord` for this purpose.
+    all_keys.sort();
+    for key in all_keys {
+        let sc = scg_counts.get(key).copied().unwrap_or(0);
+        let cc = cg_counts.get(key).copied().unwrap_or(0);
+        if sc != cc {
+            mismatches.push(format!(
+                "{:?} layout='{}' field='{}': occurrence count mismatch (semantic SCG={}, codegen Scg={})",
+                key.0, key.1, key.2, sc, cc
+            ));
+        }
+    }
+
+    mismatches
+}
+
 impl VerificationInput {
     /// Create verification input from an SCG (without pre-inferred BDs).
     pub fn from_scg(scg: SCG) -> Self {
@@ -315,6 +601,7 @@ impl VerificationInput {
             bd_map: None,
             pmt_layouts: None,
             secret_vars: HashSet::new(),
+            typed_state_meta: Vec::new(),
         }
     }
 
@@ -325,6 +612,7 @@ impl VerificationInput {
             bd_map: Some(bd_map),
             pmt_layouts: None,
             secret_vars: HashSet::new(),
+            typed_state_meta: Vec::new(),
         }
     }
 
@@ -343,6 +631,20 @@ impl VerificationInput {
     /// `docs/architecture/ive-fix-proposals.md` §8.
     pub fn with_secret_vars(mut self, vars: HashSet<String>) -> Self {
         self.secret_vars = vars;
+        self
+    }
+
+    /// Attach the typed-state metadata recovered from the codegen Scg
+    /// (Task 2-A/3-B). When non-empty, [`InvariantAggregator::verify_pmt`]
+    /// runs the `verify_typed_state_conformance` dual-derivation
+    /// cross-check comparing this codegen-derived list against the
+    /// semantic SCG's `NodePayload` typed-state ops.
+    ///
+    /// Produced by `vuma::pipeline::bridge_ast_to_codegen_scg_with_meta`
+    /// (the AST-walking bridge that records every typed-state op as a
+    /// recoverable [`TypedStateMeta`] entry alongside the codegen Scg).
+    pub fn with_typed_state_meta(mut self, meta: Vec<TypedStateMeta>) -> Self {
+        self.typed_state_meta = meta;
         self
     }
 
@@ -1377,6 +1679,55 @@ impl VerificationEngine {
                         ),
                     },
                     desc,
+                );
+            }
+        }
+
+        // ── Cross-check typed-state conformance (Task 3-B) ────────────────────────────────────────────────────────
+        //
+        // Dual-derivation proof that the semantic SCG's typed-state
+        // `NodePayload`s and the codegen Scg's `TypedStateMeta` list agree
+        // on per-kind counts and (layout, field) multisets. The codegen
+        // meta is attached via `VerificationInput::typed_state_meta`
+        // (populated by the pipeline from
+        // `bridge_ast_to_codegen_scg_with_meta`). A divergence surfaces a
+        // bug in one of the two SCG construction paths.
+        //
+        // IMPORTANT (Task 3-B): the cross-check currently logs a WARNING
+        // and does NOT hard-fail. This is intentional: the cross-check's
+        // value is in SURFACING divergences, and hard-failing on a real
+        // (pre-existing) divergence would break the build for programs
+        // that otherwise verify cleanly. Once divergences are resolved
+        // (NEEDS_FOLLOWUP 3-B), this can be promoted to a `Violated`
+        // result like the field-list cross-check above.
+        if !input.typed_state_meta.is_empty() {
+            let ts_mismatches =
+                verify_typed_state_conformance(scg, &input.typed_state_meta);
+            if !ts_mismatches.is_empty() {
+                for m in &ts_mismatches {
+                    vuma_log!(
+                        warn,
+                        "[Task 3-B] typed-state conformance cross-check \
+                         divergence: {}",
+                        m
+                    );
+                }
+                vuma_log!(
+                    warn,
+                    "[Task 3-B] semantic SCG and codegen Scg disagree on \
+                     typed-state info ({} mismatch(es), first: {}); \
+                     logging as WARNING per Task 3-B (not a hard fail). \
+                     See NEEDS_FOLLOWUP 3-B.",
+                    ts_mismatches.len(),
+                    ts_mismatches.first().unwrap()
+                );
+            } else {
+                vuma_log!(
+                    info,
+                    "[Task 3-B] typed-state conformance cross-check passed \
+                     (semantic SCG and codegen Scg agree on {} typed-state \
+                     op(s)).",
+                    input.typed_state_meta.len()
                 );
             }
         }

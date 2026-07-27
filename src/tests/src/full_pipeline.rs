@@ -371,8 +371,7 @@ fn test_full_pipeline_compile_to_elf() {
 
     // Phase 2: Build a codegen-level SCG that represents the same semantics
     // (allocate → compute → free) as a function
-    let cg_scg = Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    let cg_scg = Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::I64],
@@ -396,8 +395,7 @@ fn test_full_pipeline_compile_to_elf() {
                 ScgStatement::Return(vec![ScgExpr::Var("value".to_string())]),
             ],
             var_types: std::collections::HashMap::new(),
-        })],
-    };
+        })]);
 
     // Phase 3: Compile SCG → IR → ARM64 → ELF
     let mut builder = IRBuilder::new();

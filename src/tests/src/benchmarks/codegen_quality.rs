@@ -179,15 +179,13 @@ fn build_program_with_memory(size: usize) -> Scg {
 
     body.push(ScgStatement::Return(vec![ScgExpr::Var("buf".to_string())]));
 
-    Scg {
-        nodes: vec![ScgNode::Function(ScgFunction {
+    Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
             results: vec![ScgType::Ptr],
             body,
             var_types: std::collections::HashMap::new(),
-        })],
-    }
+        })])
 }
 
 #[cfg(test)]
