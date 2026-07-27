@@ -45,20 +45,34 @@ The actual extraction pipeline is implemented separately.
 
 namespace PMT.Extraction
 
-/-- §1: The verified capacity check.
-This is the Lean-side function that gets extracted to Rust.
-Mirrors `arena.rs::Arena::alloc`'s overflow check.
+/-! ## §1. The verified capacity check (PMT-FAITH-5-C: BitVec 64, bit-faithful)
+
+**PMT-FAITH-5-C (closes FAITH-4-D CRITICAL):** the previous Lean version used
+`Nat` arithmetic (no overflow), so `verified_capacity_check (2^64-1) 1 (2^64)`
+returned `true` while Rust's `checked_add` returns `false` on overflow. The
+fix uses `BitVec 64` arithmetic with an explicit no-overflow check (matching
+Rust's `checked_add` semantics bit-faithfully). The check is:
+  `verified_capacity_check used size capacity := no_overflow ∧ sum ≤ capacity`
+where `no_overflow := size ≤ usizeMax64 - used` (equivalent to
+`used.checked_add(size).is_some` in Rust) and `sum := used + size` (BitVec
+wrapping add, but the no_overflow guard ensures no wrap). -/
+
+/-- §1: The verified capacity check (bit-faithful to Rust `checked_add`).
+
+Mirrors `arena.rs::Arena::alloc`'s `checked_add` + `> capacity` pair. Uses
+`BitVec 64` to model Rust's `u64` overflow semantics bit-faithfully.
 
 FFI: `@[export lean_verified_capacity_check]` makes this callable
 from C/Rust as `lean_verified_capacity_check(lean_object*,
-lean_object*, lean_object*) -> uint8_t` (Lean `Bool` is `uint8_t`
-via the unboxed representation; `Nat` is `lean_object*`). The export
-name carries the `lean_` prefix because Lean 4.21 emits the export
-name verbatim as the C symbol (no auto-prefix); this matches the
-Rust FFI signatures in `proof/extracted/README.md` §Stage 2. -/
+lean_object*, lean_object*) -> uint8_t`. The three `BitVec 64` arguments
+are boxed `lean_object*` values. -/
 @[export lean_verified_capacity_check]
-def verified_capacity_check (used : Nat) (size : Nat) (capacity : Nat) : Bool :=
-  used + size ≤ capacity
+def verified_capacity_check (used size capacity : BitVec 64) : Bool :=
+  -- Mirrors Rust's `used.checked_add(size).map_or(false, |sum| sum <= capacity)`.
+  -- The no-overflow guard: `size ≤ usizeMax64 - used` iff `used + size` does
+  -- not wrap (where `usizeMax64 = BitVec.allOnes 64 = 2^64 - 1`).
+  -- Inlined (no `let`) for easier proof automation.
+  (size ≤ BitVec.allOnes 64 - used) ∧ (used + size ≤ capacity)
 
 /-- §2: The verified field-bounds check.
 Mirrors `memory_safety.rs::inject_bounds_check_ir`'s UGe check.
@@ -94,18 +108,49 @@ def verified_pmt_check
     (used capacity : Nat)
     (f : Field) (layout : Layout)
     (var : String) (consumed : List String) : Bool :=
-  verified_capacity_check used layout.total_size capacity
+  -- PMT-FAITH-5-C: convert Nat → BitVec 64 for the capacity check (matches
+  -- Rust's u64 overflow semantics). The conversion is lossy if used/capacity
+  -- ≥ 2^64, but Rust's arena runtime is 64-bit-biased (arena.rs:1), so this
+  -- matches the production target.
+  verified_capacity_check (BitVec.ofNat 64 used) (BitVec.ofNat 64 layout.total_size) (BitVec.ofNat 64 capacity)
   ∧ verified_field_bounds_check f layout
   ∧ verified_linearity_check var consumed
 
-/-- §5: Soundness — the verified checks are correct. -/
+/-- §5: Soundness — the verified checks are correct.
+
+    **PMT-FAITH-5-C:** `verified_capacity_check_correct` now operates over
+    `BitVec 64`. The conclusion is the integer-level bound
+    `used.toNat + size.toNat ≤ capacity.toNat` (which, combined with the
+    no-overflow guard, is equivalent to Rust's
+    `used.checked_add(size) = Some(sum) ∧ sum ≤ capacity`). -/
 theorem verified_capacity_check_correct
-    (used size capacity : Nat)
+    (used size capacity : BitVec 64)
     (hcheck : verified_capacity_check used size capacity = true) :
-    used + size ≤ capacity := by
+    -- The no-overflow guard ensures `used + size` does not wrap, so the
+    -- BitVec sum equals the integer sum. The conclusion is the integer bound.
+    size.toNat ≤ (BitVec.allOnes 64).toNat - used.toNat
+    ∧ (used + size).toNat ≤ capacity.toNat := by
   unfold verified_capacity_check at hcheck
-  simp at hcheck
-  exact hcheck
+  -- hcheck : decide (size ≤ BitVec.allOnes 64 - used ∧ used + size ≤ capacity) = true
+  rw [decide_eq_true_eq] at hcheck
+  obtain ⟨hnoovf, hsum⟩ := hcheck
+  refine ⟨?_, ?_⟩
+  · -- hnoovf : size ≤ BitVec.allOnes 64 - used
+    -- Unfold to toNat-level, then use omega with the allOnes bound.
+    have h1 : size.toNat ≤ (BitVec.allOnes 64 - used).toNat := BitVec.le_def.mp hnoovf
+    have h_allones : (BitVec.allOnes 64).toNat = 2^64 - 1 := BitVec.toNat_allOnes
+    have h_sub : (BitVec.allOnes 64 - used).toNat = 2^64 - 1 - used.toNat := by
+      rw [BitVec.toNat_sub, h_allones]
+      -- (2^64 - used.toNat + (2^64 - 1)) % 2^64 = 2^64 - 1 - used.toNat
+      have h_used : used.toNat < 2^64 := BitVec.isLt used
+      omega
+    rw [h_sub] at h1
+    -- Goal: size.toNat ≤ (BitVec.allOnes 64).toNat - used.toNat
+    -- h1 : size.toNat ≤ 2^64 - 1 - used.toNat
+    -- Substitute h_allones in the goal.
+    rw [h_allones]
+    exact h1
+  · exact BitVec.le_def.mp hsum
 
 theorem verified_field_bounds_check_correct
     (f : Field) (layout : Layout)
@@ -128,16 +173,53 @@ theorem verified_pmt_check_correct
     (used capacity : Nat)
     (f : Field) (layout : Layout)
     (var : String) (consumed : List String)
-    (hcheck : verified_pmt_check used capacity f layout var consumed = true) :
+    (hcheck : verified_pmt_check used capacity f layout var consumed = true)
+    -- PMT-FAITH-5-C: the capacity check now uses BitVec 64, so we need
+    -- boundedness hypotheses to ensure the Nat→BitVec conversion is lossless.
+    (h_used_bounded : used < 2^64)
+    (h_size_bounded : layout.total_size < 2^64)
+    (h_cap_bounded : capacity < 2^64) :
     used + layout.total_size ≤ capacity
     ∧ f.offset + f.size ≤ layout.total_size
     ∧ var ∉ consumed := by
   unfold verified_pmt_check at hcheck
-  simp at hcheck
+  -- hcheck : (verified_capacity_check (BitVec.ofNat 64 used) ... ∧ ...) = true
+  -- The conjunction is decidable, so it's wrapped in `decide`. Reduce.
+  rw [decide_eq_true_eq] at hcheck
+  obtain ⟨hcap, hrest⟩ := hcheck
+  obtain ⟨hfb, hlin⟩ := hrest
   refine ⟨?_, ?_, ?_⟩
-  · exact verified_capacity_check_correct _ _ _ hcheck.1
-  · exact verified_field_bounds_check_correct _ _ hcheck.2.1
-  · exact verified_linearity_check_correct _ _ hcheck.2.2
+  · -- Derive the Nat-level capacity bound from the BitVec-level check.
+    have hbv := verified_capacity_check_correct
+      (BitVec.ofNat 64 used) (BitVec.ofNat 64 layout.total_size) (BitVec.ofNat 64 capacity) hcap
+    -- hbv : (BitVec.ofNat 64 layout.total_size).toNat ≤ ... ∧ (used_bv + size_bv).toNat ≤ capacity_bv.toNat
+    -- Under the boundedness hypotheses, ofNat.toNat = identity, and the
+    -- no-overflow guard ensures the BitVec add doesn't wrap, so the BitVec
+    -- sum equals the Nat sum.
+    have h_used_eq : (BitVec.ofNat 64 used).toNat = used := by
+      rw [BitVec.toNat_ofNat]; omega
+    have h_size_eq : (BitVec.ofNat 64 layout.total_size).toNat = layout.total_size := by
+      rw [BitVec.toNat_ofNat]; omega
+    have h_cap_eq : (BitVec.ofNat 64 capacity).toNat = capacity := by
+      rw [BitVec.toNat_ofNat]; omega
+    -- The no-overflow conjunct: size_bv.toNat ≤ usizeMax - used_bv.toNat
+    -- ensures used + size < 2^64, so the BitVec add doesn't wrap, so
+    -- (used_bv + size_bv).toNat = used + size.
+    have h_no_overflow_nat : layout.total_size ≤ 2^64 - 1 - used := by
+      have := hbv.1
+      rw [h_size_eq, h_used_eq, BitVec.toNat_allOnes] at this
+      omega
+    have h_sum_eq : (BitVec.ofNat 64 used + BitVec.ofNat 64 layout.total_size).toNat = used + layout.total_size := by
+      rw [BitVec.toNat_add, h_used_eq, h_size_eq]
+      -- Goal: (used + layout.total_size) % 2^64 = used + layout.total_size
+      -- Under h_no_overflow_nat (used + size ≤ 2^64 - 1), the modulo is identity.
+      omega
+    -- Now derive used + layout.total_size ≤ capacity.
+    have hsum_cap := hbv.2
+    rw [h_sum_eq, h_cap_eq] at hsum_cap
+    exact hsum_cap
+  · exact verified_field_bounds_check_correct _ _ hfb
+  · exact verified_linearity_check_correct _ _ hlin
 
 /-- §7: Extraction manifest — the list of functions to extract.
 This is read by the extraction script to know which Lean
