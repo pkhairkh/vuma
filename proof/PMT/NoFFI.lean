@@ -138,7 +138,8 @@ theorem no_ffi_program_sound
     discipline. This is a *meta-level* claim: the FFI-removal
     transformation (replacing libc with builtins, routing syscalls
     through `IRInstr::Syscall`, inlining PMT/arena ops) eliminates
-    every `call` whose callee is not in `builtin_callees`.
+    every `call` whose callee is not in `builtin_callees`, AND every
+    `syscall` whose number is not in `SyscallName.allowlist`.
 
     The formal discharge of `NoFFI P` for a *specific* `P` would
     require a syntactic check on `P`'s instructions; that check is
@@ -149,10 +150,24 @@ theorem no_ffi_program_sound
         ∀ P, NoFFI P ↔ ∀ f b i, match i with
                                 | .call name _ => name ∈ builtin_callees
                                 | .call_indirect _ _ => False
+                                | .syscall nr _ _ =>
+                                  ∃ sn, syscall_nr_table nr = some sn
+                                      ∧ sn ∈ SyscallName.allowlist
                                 | _ => True
 
     The right-hand side is exactly the definition of `NoExterns`
-    (re-exported as `NoFFI`), so the biconditional holds by `rfl`. -/
+    (re-exported as `NoFFI`), so the biconditional holds by `rfl`.
+
+    **FFI-4-A strengthening (Gap #3 closure).** The `.syscall nr _ _`
+    arm is new in FFI-4-A — it requires the syscall number `nr` to
+    map (via `syscall_nr_table`) to a `SyscallName` in
+    `SyscallName.allowlist`. Previously the arm was absent and
+    `.syscall` fell through to the `_ => True` wildcard — a soundness
+    gap (Gap #3). The FFI-removal pipeline guarantees that every
+    emitted `syscall` instruction carries one of the 6 permitted
+    syscall numbers (Read=0, Write=1, Mmap=9, Munmap=11, Brk=12,
+    Exit=60 on Linux x86_64), so the strengthened biconditional
+    holds for every post-FFI-removal program. -/
 theorem no_ffi_after_removal (P : IRProgram) :
     NoFFI P ↔ ∀ (f : IRFunction) (_hf : f ∈ P.functions)
                 (b : IRBlock) (_hb : b ∈ f.blocks)
@@ -160,6 +175,8 @@ theorem no_ffi_after_removal (P : IRProgram) :
       match i with
       | .call name _ => name ∈ NoExterns.builtin_callees
       | .call_indirect _ _ => False
+      | .syscall nr _ _ =>
+        ∃ sn, syscall_nr_table nr = some sn ∧ sn ∈ SyscallName.allowlist
       | _ => True := by
   rfl
 
