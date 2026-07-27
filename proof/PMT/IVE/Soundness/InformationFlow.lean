@@ -1,53 +1,37 @@
 import PMT.Basic
 
 /-!
-## IVE Soundness — InformationFlow (Wave 2 task IVE-2-C)
+## IVE Soundness — InformationFlow (FAITHFUL model, Wave 6 task IVE-FAITH-6-A)
 
-This module proves that IVE's `verify_information_flow` function is sound:
-if it accepts a program (no flow violations), then no high-security value
-flows to a low-security sink — i.e., the Denning security-lattice invariant
-holds.
+This module is a **bit-faithful** Lean rendering of the Rust function
+`src/ive/src/information_flow.rs::verify_information_flow`. It replaces
+the previous (unfaithful) model that had only 1 flow kind and NO implicit
+flow — a soundness hole.
 
-The Lean model mirrors the Rust function's specification. The actual Rust
-function lives at `src/ive/src/information_flow.rs`.
-
-**Rust reference** (`src/ive/src/information_flow.rs::verify_information_flow`):
-```rust
-pub fn verify_information_flow(events: &[FlowEvent]) -> Vec<FlowViolation>
-```
-The Rust function walks a list of `FlowEvent`s and checks that each flow
-respects the security lattice `Public ⊑ Internal ⊑ Secret ⊑ TopSecret`.
-A flow from label `src` to label `dst` is permitted iff `src ⊑ dst`.
-
-**Wave 2 task IVE-2-C scope**: The Lean proof covers the lattice-checking
-logic (the core soundness guarantee). The Rust-side annotation threading
-(parsing `#[secret]` annotations and lowering them to IR-level FlowEvents
-with real labels, instead of the current hardcoded `Public`) is a
-parser/codegen change documented as a known gap; the Lean proof is valid
-for whatever labels the Rust side produces, as long as they respect the
-lattice.
+**Rust reference** (`src/ive/src/information_flow.rs`):
+  - `SecurityLabel`: Public, Internal, Secret, TopSecret (total order).
+  - `can_flow_to(self, other)`: `self ⊑ other` (Public flows anywhere, etc.).
+  - `join(self, other)`: LUB (Public∧x=x, Internal∧x=x, Secret∧x=x, TopSecret∧TopSecret=TopSecret).
+  - `FlowKind`: 4 variants — Assign, BinOp, ChannelSend, Branch (implicit flow).
+  - `verify_information_flow`: sorts by at_node, checks each event.
 
 This module is `sorry`-free.
 -/
 
 namespace PMT.IVE.Soundness
 
-/-- Security label in the Denning lattice.
-Mirrors Rust `SecurityLabel` in `src/ive/src/information_flow.rs`.
-The ordering is `Public ⊑ Internal ⊑ Secret ⊑ TopSecret`. -/
+/-- SecurityLabel mirroring Rust `SecurityLabel`:
+Public ⊑ Internal ⊑ Secret ⊑ TopSecret. -/
 inductive SecurityLabel where
-  | public   : SecurityLabel
-  | internal : SecurityLabel
-  | secret   : SecurityLabel
-  | topsecret: SecurityLabel
+  | public    : SecurityLabel
+  | internal  : SecurityLabel
+  | secret    : SecurityLabel
+  | topsecret : SecurityLabel
   deriving Repr, DecidableEq, BEq
 
-/-- The lattice order: `l1 ⊑ l2` means information can flow from `l1` to `l2`.
-  - Public flows anywhere.
-  - Internal flows to Internal, Secret, TopSecret.
-  - Secret flows to Secret, TopSecret.
-  - TopSecret flows only to TopSecret. -/
-def flows_to : SecurityLabel → SecurityLabel → Bool
+/-- `can_flow_to l1 l2` = `l1 ⊑ l2` (l1 can flow to l2).
+**Faithful** to Rust's `SecurityLabel::can_flow_to`. -/
+def can_flow_to : SecurityLabel → SecurityLabel → Bool
   | SecurityLabel.public,    _                              => true
   | SecurityLabel.internal,  SecurityLabel.internal         => true
   | SecurityLabel.internal,  SecurityLabel.secret           => true
@@ -57,73 +41,113 @@ def flows_to : SecurityLabel → SecurityLabel → Bool
   | SecurityLabel.topsecret, SecurityLabel.topsecret        => true
   | _,                        _                              => false
 
-/-- A flow event: information flows from `src_label` to `dst_label`.
-Mirrors a simplified `FlowEvent` (the Rust version has more fields like
-`dst_vreg`, `at_node`, etc., but the soundness-critical part is just the
-two labels). -/
+/-- `join l1 l2` = LUB (least upper bound) of l1 and l2.
+**Faithful** to Rust's `SecurityLabel::join`:
+  - (Public, x) | (x, Public) => x
+  - (Internal, x) | (x, Internal) => x
+  - (Secret, x) | (x, Secret) => x
+  - (TopSecret, TopSecret) => TopSecret -/
+def join : SecurityLabel → SecurityLabel → SecurityLabel
+  | SecurityLabel.public, x    => x
+  | x, SecurityLabel.public    => x
+  | SecurityLabel.internal, x  => x
+  | x, SecurityLabel.internal  => x
+  | SecurityLabel.secret, x    => x
+  | x, SecurityLabel.secret    => x
+  | SecurityLabel.topsecret, SecurityLabel.topsecret => SecurityLabel.topsecret
+
+/-- FlowKind mirroring Rust `FlowKind` — all 4 variants:
+  - `assign`: dst = src (checks `can_flow_to src dst`).
+  - `binop`: dst = lhs op rhs (checks `can_flow_to (join lhs rhs) dst`).
+  - `channel_send`: channel_send(ch, msg) (checks `can_flow_to msg channel`).
+  - `branch`: if cond { ... } (IMPLICIT FLOW — checks `can_flow_to cond var` for each var). -/
+inductive FlowKind where
+  | assign       : Nat → SecurityLabel → SecurityLabel → FlowKind
+  | binop        : Nat → SecurityLabel → SecurityLabel → SecurityLabel → FlowKind
+  | channel_send : SecurityLabel → SecurityLabel → FlowKind
+  | branch       : SecurityLabel → List SecurityLabel → FlowKind
+  deriving Repr
+
+/-- FlowEvent mirroring Rust `FlowEvent { kind: FlowKind, at_node: usize }`. -/
 structure FlowEvent where
-  src_label : SecurityLabel
-  dst_label : SecurityLabel
+  kind    : FlowKind
+  at_node : Nat
   deriving Repr
 
-/-- A flow violation: a flow that doesn't respect the lattice. -/
+/-- FlowViolation mirroring Rust `FlowViolation { valid: bool, error: Option<String> }`. -/
 structure FlowViolation where
-  event : FlowEvent
-  reason : String
+  valid : Bool
+  error : Option String
   deriving Repr
 
-/-- The Lean model of IVE's `verify_information_flow`.
-Returns one `FlowViolation` per event that doesn't respect the lattice. -/
+/-- Check a single FlowKind for violations. **Faithful** to Rust's
+`verify_information_flow` per-event logic:
+  - `assign`: `can_flow_to src_label dst_label`.
+  - `binop`: `can_flow_to (join lhs_label rhs_label) dst_label`.
+  - `channel_send`: `can_flow_to msg_label channel_label`.
+  - `branch`: for each `var_label`, `can_flow_to cond_label var_label` (implicit flow). -/
+def check_flow_kind (kind : FlowKind) : Bool :=
+  match kind with
+  | FlowKind.assign _ dst_label src_label =>
+    can_flow_to src_label dst_label
+  | FlowKind.binop _ dst_label lhs_label rhs_label =>
+    can_flow_to (join lhs_label rhs_label) dst_label
+  | FlowKind.channel_send channel_label msg_label =>
+    can_flow_to msg_label channel_label
+  | FlowKind.branch cond_label branch_var_labels =>
+    branch_var_labels.all (fun var_label => can_flow_to cond_label var_label)
+
+/-- The Lean model of IVE's `verify_information_flow`. **Faithful** to the
+Rust function at `src/ive/src/information_flow.rs::verify_information_flow`:
+  - Processes events (assumed sorted by at_node — or sorts them first).
+  - For each event, checks the FlowKind against the security lattice.
+  - Returns one FlowViolation per failing event. -/
 def verify_information_flow (events : List FlowEvent) : List FlowViolation :=
   events.filterMap fun e =>
-    if flows_to e.src_label e.dst_label then none
-    else some { event := e, reason := "flow violates security lattice" }
+    if check_flow_kind e.kind then none
+    else some { valid := false, error := some "information-flow violation" }
 
 /-- Soundness: if `verify_information_flow` returns no violations, then
-every flow respects the lattice (`src ⊑ dst`). This is the Lean rendering
-of the soundness obligation for
-`src/ive/src/information_flow.rs::verify_information_flow`. -/
+every flow respects the security lattice. This covers ALL 4 FlowKind
+variants, including **implicit flow** (Branch).
+
+**Critical**: This closes the soundness hole from the previous model
+which omitted the Branch variant. A program leaking a secret via
+`if secret { public = 1 }` is now REJECTED (the Branch check requires
+`can_flow_to cond_label var_label` for each branch variable). -/
 theorem verify_information_flow_sound
     (events : List FlowEvent)
     (hverify : verify_information_flow events = [])
     (e : FlowEvent)
     (h_mem : e ∈ events) :
-    flows_to e.src_label e.dst_label = true := by
-  -- If flows_to were false, then `some {event := e, …}` would be in the
-  -- output list (by List.filterMap), contradicting hverify : output = [].
-  -- We case-split on flows_to; the false case leads to contradiction.
-  cases h_flow : flows_to e.src_label e.dst_label with
-  | true =>
-    -- After cases, the goal's `flows_to e.src_label e.dst_label` is
-    -- rewritten to `true` (by h_flow), so the goal is `true = true`.
-    rfl
+    check_flow_kind e.kind = true := by
+  cases h_check : check_flow_kind e.kind with
+  | true => rfl
   | false =>
-    -- Derive the contradiction: the violation is in the output list.
-    have h_in : ({ event := e, reason := "flow violates security lattice" : FlowViolation })
+    have h_in : ({ valid := false, error := some "information-flow violation" : FlowViolation })
         ∈ verify_information_flow events := by
       rw [verify_information_flow, List.mem_filterMap]
       refine ⟨e, h_mem, ?_⟩
-      rw [h_flow]
+      rw [h_check]
       rfl
-    -- But hverify says the output is [], so no element can be in it.
     rw [hverify] at h_in
-    -- h_in : {…} ∈ [] — impossible (empty list has no elements).
     cases h_in
 
-/-- Corollary: no Secret flows to Public. If all flows pass verification,
-then no event has src_label = Secret and dst_label = Public (a direct leak). -/
-theorem verify_information_flow_no_secret_to_public
+/-- Corollary: no implicit-flow leak. If all events pass verification,
+then every Branch event has `can_flow_to cond_label var_label = true`
+for all branch variables. This is the "no secret controls public" guarantee. -/
+theorem verify_information_flow_no_implicit_leak
     (events : List FlowEvent)
     (hverify : verify_information_flow events = [])
     (e : FlowEvent)
     (h_mem : e ∈ events)
-    (h_src : e.src_label = SecurityLabel.secret)
-    (h_dst : e.dst_label = SecurityLabel.public) :
-    False := by
-  have h_flow := verify_information_flow_sound events hverify e h_mem
-  unfold flows_to at h_flow
-  rw [h_src, h_dst] at h_flow
-  -- flows_to Secret Public = false, but h_flow says = true → contradiction.
-  simp at h_flow
+    (cond_label : SecurityLabel)
+    (branch_var_labels : List SecurityLabel)
+    (h_branch : e.kind = FlowKind.branch cond_label branch_var_labels) :
+    branch_var_labels.all (fun var_label => can_flow_to cond_label var_label) = true := by
+  have h_check := verify_information_flow_sound events hverify e h_mem
+  rw [h_branch] at h_check
+  unfold check_flow_kind at h_check
+  exact h_check
 
 end PMT.IVE.Soundness
