@@ -17,7 +17,7 @@ For each claim in the FFI spec, I verified:
 | # | Severity | Gap | Affected claim |
 |---|----------|-----|----------------|
 | 1 | **HIGH** | 5 active extern calls remain in `src/pipeline.rs` AST-bridge path: `mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow` | "No foreign function calls in VUMA (No-FFI path)" |
-| 2 | **HIGH** | Lean `SyscallName` allowlist has 6 syscalls; Rust `SyscallName` enum has 16+ | "6 syscalls routed through IRInstr::Syscall" |
+| 2 | **HIGH** | ~~Lean `SyscallName` allowlist has 6 syscalls; Rust `SyscallName` enum has 16+~~ **CLOSED by FFI-4-B** | "6 syscalls routed through IRInstr::Syscall" |
 | 3 | **HIGH** | Lean `NoExterns` predicate does NOT check `.syscall` instructions | `ffi_pillar_sound` Conjunct 2 is vacuously true |
 | 4 | **HIGH** | ~~Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions)~~ **CLOSED by FFI-3-A** | Lean cannot model programs using memcpy/memset replacements |
 | 5 | **HIGH** | ~~Lean `PmtInstr.transform` signature differs from Rust `IRInstr::Transform`~~ **CLOSED by FFI-3-B** | Lean `transform` ≠ Rust `Transform` (different fields) — distinct variants now coexist
@@ -54,7 +54,35 @@ For each claim in the FFI spec, I verified:
 
 ---
 
-## Gap #2 — Lean vs Rust syscall allowlist mismatch (HIGH)
+## Gap #2 — Lean vs Rust syscall allowlist mismatch (HIGH) — CLOSED by FFI-4-B
+
+**Status (FFI-4-B, post-closure):** The Lean `inductive SyscallName` in
+`proof/PMT/FFI/PillarSoundness.lean` has been extended from 6 variants
+(`Write`, `Read`, `Exit`, `Mmap`, `Munmap`, `Brk`) to the full 19-variant
+mirror of Rust's `pub enum SyscallName` (`src/ffi.rs:435–474`):
+
+`Read`, `Write`, `Open`, `Close`, `Exit`, `ExitGroup`, `Mmap`, `Munmap`,
+`Brk`, `Ioctl`, `Fcntl`, `Getpid`, `Kill`, `Mprotect`, `ClockGettime`,
+`SchedYield`, `Clone`, `Futex`, `SetTidAddress` — same names, same order
+as the Rust enum (faithfulness invariant upheld). `SyscallName.allowlist`
+and `SyscallName.toString` updated to cover all 19 variants; the
+`toString` mapping mirrors Rust's `impl fmt::Display for SyscallName`
+(`src/ffi.rs:476–500`) variant-for-variant. `syscall_callees` is
+`SyscallName.allowlist.map SyscallName.toString` and therefore
+auto-updated. `lake build` PASS (108/108 steps), zero new sorries.
+
+**Coordination note (FFI-4-A merge):** FFI-4-A (parallel task) added a
+local 6-variant `PMT.SyscallName` stub in `proof/PMT/PillarSoundness.lean`
+plus a `syscall_nr_table : Nat → Option SyscallName` covering 6 syscall
+numbers. When `task/ffi-4-a` merges with `task/ffi-4-b`, that stub
+should either be (a) replaced by a reference to the extended
+`PMT.FFI.SyscallName` (requires import-graph refactor — currently
+`PMT.FFI.PillarSoundness` imports `PMT.PillarSoundness`, so the reverse
+import would be circular), or (b) extended in lockstep to 19 variants;
+and `syscall_nr_table` extended with the 13 additional x86_64 syscall
+numbers from `src/ffi.rs::x86_64_syscalls()` (`Open=2, Close=3,
+Mprotect=10, Ioctl=16, SchedYield=24, Clone=56, Kill=62, Fcntl=72,
+Futex=202, SetTidAddress=218, ClockGettime=228, ExitGroup=231`).
 
 **Claim** (from spec & `proof/AUDIT_FFI.md`):
 > "6 syscalls (write, read, exit, mmap, munmap, brk) routed through IRInstr::Syscall"
