@@ -27,12 +27,27 @@ theorem WF_Arena_eq_CapacityInvariant (a : Arena) :
 theorem emptyLayout_size : emptyLayout.total_size = 1 := by
   rfl
 
-/-- §5: verified_capacity_check with zero used always passes. -/
+/-- §5: verified_capacity_check with zero used always passes.
+
+**PMT-FAITH-5-C:** the check now uses BitVec 64; this lemma wraps the Nat
+args with `BitVec.ofNat 64` to match the bit-faithful signature. The
+boundedness hypotheses (`< 2^64`) ensure the Nat→BitVec conversion is
+lossless. -/
 theorem verified_capacity_check_zero_used (size capacity : Nat)
+    (h_size : size < 2^64) (h_cap : capacity < 2^64)
     (hfit : size ≤ capacity) :
-    PMT.Extraction.verified_capacity_check 0 size capacity = true := by
+    PMT.Extraction.verified_capacity_check (BitVec.ofNat 64 0) (BitVec.ofNat 64 size) (BitVec.ofNat 64 capacity) = true := by
   unfold PMT.Extraction.verified_capacity_check
-  simp [hfit]
+  rw [decide_eq_true_iff]
+  refine ⟨?_, ?_⟩
+  · -- no_overflow: size ≤ usizeMax - 0 = usizeMax
+    rw [BitVec.le_def, BitVec.toNat_sub, BitVec.toNat_allOnes, BitVec.toNat_ofNat,
+        BitVec.toNat_ofNat]
+    omega
+  · -- sum ≤ capacity: 0 + size = size ≤ capacity
+    rw [BitVec.le_def, BitVec.toNat_add, BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+        BitVec.toNat_ofNat]
+    omega
 
 /-- §6: Result.ok is not Result.trap. -/
 theorem Result_ok_ne_trap (n : Nat) (c : Nat) :
