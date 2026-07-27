@@ -606,6 +606,11 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::ChannelClose(_) => {}
                 // Fallible recv — no heap/stack allocation to track.
                 ScgStatement::ChannelRecvResult(_) => {}
+                // PMT/arena op (FFI Wave 1 task C) — the underlying
+                // IRInstr (Alloc/Load/Store/Transform/Free) is tracked
+                // separately by the existing IR-level analysis. No
+                // ScgStatement-level allocation to record here.
+                ScgStatement::PmtOp(_) => {}
             }
         }
     }
