@@ -98,9 +98,70 @@ namespace PMT
 
 /-! ## §1. The `NoExterns` predicate (No-FFI hypothesis) -/
 
-/-- §1: `NoExterns P` — every call in `P` is to a built-in (no extern
-    calls). This is the No-FFI discipline: after FFI removal
-    (FFI-1-D's territory), every VUMA program satisfies this.
+/-- §1: `SyscallName` — the 6 Linux syscalls permitted by the No-FFI
+    design (Linux x86_64 syscall numbers).
+
+    This is a LOCAL inductive stub defined inside `PMT.PillarSoundness`
+    because `PMT/FFI/PillarSoundness.lean` (which already defines
+    `PMT.FFI.SyscallName` with the same 6 variants) imports
+    `PMT.PillarSoundness` — so this module cannot import that one
+    (circular import). The two `SyscallName` types live in different
+    namespaces (`PMT.SyscallName` here vs. `PMT.FFI.SyscallName` there)
+    and are structurally identical at the 6-variant level.
+
+    **FFI-4-B coordination note.** FFI-4-B (running in parallel) is
+    extending `PMT.FFI.SyscallName` from 6 to 16+ variants to mirror
+    the Rust `SyscallName` enum (`src/ffi.rs:435`). When FFI-4-A and
+    FFI-4-B are merged together, this local 6-variant stub should be
+    either (a) replaced by a reference to the extended
+    `PMT.FFI.SyscallName` (refactoring the import graph so
+    `PMT.PillarSoundness` can see it), or (b) extended to match the
+    16-variant version. For now, the table below covers only the 6
+    syscalls documented in `docs/caveats.md` §FFI as the residual TCB;
+    the remaining 13 Rust variants (`Open`, `Close`, `ExitGroup`,
+    `Ioctl`, `Fcntl`, `Getpid`, `Kill`, `Mprotect`, `ClockGettime`,
+    `SchedYield`, `Clone`, `Futex`, `SetTidAddress`) are NOT in the
+    allowlist — FFI-4-B will add them when its branch lands. -/
+inductive SyscallName : Type
+  | Write    -- `write(fd, buf, count)` — Linux x86_64 nr = 1
+  | Read     -- `read(fd, buf, count)` — Linux x86_64 nr = 0
+  | Exit     -- `exit(code)` — Linux x86_64 nr = 60
+  | Mmap     -- `mmap(addr, len, prot, flags, fd, offset)` — nr = 9
+  | Munmap   -- `munmap(addr, len)` — Linux x86_64 nr = 11
+  | Brk      -- `brk(addr)` — Linux x86_64 nr = 12
+  deriving DecidableEq, Repr
+
+/-- §1.1: `SyscallName.allowlist` — the closed set of 6 permitted
+    syscalls (mirrors `PMT.FFI.SyscallName.allowlist` in
+    `PMT/FFI/PillarSoundness.lean`). -/
+def SyscallName.allowlist : List SyscallName :=
+  [ .Write, .Read, .Exit, .Mmap, .Munmap, .Brk ]
+
+/-- §1.2: `syscall_nr_table` — maps Linux x86_64 syscall numbers to
+    `SyscallName` variants. Returns `none` for any syscall number not
+    in the allowlist. The mapping is sourced from `src/ffi.rs`'s
+    `x86_64_syscalls()` (Linux x86_64 ABI): `Read=0`, `Write=1`,
+    `Mmap=9`, `Munmap=11`, `Brk=12`, `Exit=60`.
+
+    Note: Linux x86_64 also assigns `Mprotect=10`, `ExitGroup=231`,
+    etc. to other Rust `SyscallName` variants — those numbers are
+    intentionally NOT in this table because the corresponding
+    `SyscallName` variants are not in the local 6-variant
+    `SyscallName` inductive above. FFI-4-B will add them when it
+    extends this inductive to 16+ variants. -/
+def syscall_nr_table : Nat → Option SyscallName
+  | 0  => some .Read
+  | 1  => some .Write
+  | 9  => some .Mmap
+  | 11 => some .Munmap
+  | 12 => some .Brk
+  | 60 => some .Exit
+  | _  => none
+
+/-- §1.3: `NoExterns P` — every call in `P` is to a built-in (no extern
+    calls) AND every syscall in `P` is on the `SyscallName.allowlist`.
+    This is the No-FFI discipline: after FFI removal (FFI-1-D's
+    territory), every VUMA program satisfies this.
 
     The predicate checks each `PmtInstr.call` and `PmtInstr.call_indirect`
     in the program and ensures the callee is a known built-in (in the
@@ -108,9 +169,25 @@ namespace PMT
     Lean `exec` model directly; extern callees would require FFI,
     which is out of scope for the PMT pillar.
 
+    The predicate ALSO checks each `PmtInstr.syscall nr _ _` and
+    ensures `nr` corresponds (via `syscall_nr_table`) to a
+    `SyscallName` in `SyscallName.allowlist`. This closes FFI
+    faithfulness Gap #3 (`proof/AUDIT_FFI_FAITHFULNESS_GAPS.md`):
+    without this check, a program with `syscall(99, ...)` (an
+    arbitrary kernel syscall number) would satisfy `NoExterns`,
+    leaving the FFI pillar's "syscall ABI restricted to allowlist"
+    claim vacuously true.
+
     `NoExterns` is taken as an explicit hypothesis of `pmt_pillar_sound`
     below; when FFI-1-D lands on `main`, the hypothesis can be
-    discharged (every post-FFI-removal program satisfies `NoExterns`). -/
+    discharged (every post-FFI-removal program satisfies `NoExterns`).
+
+    **FFI-4-A strengthening (Gap #3 closure).** The `.syscall nr _ _`
+    match arm is new in FFI-4-A. Previously the predicate had only
+    three arms (`.call`, `.call_indirect`, `_ => True`), so `.syscall`
+    fell through to `True` — a soundness gap. The new arm requires
+    `nr` to map (via `syscall_nr_table`) to a `SyscallName` in
+    `SyscallName.allowlist`. -/
 def NoExterns (P : IRProgram) : Prop :=
   ∀ (f : IRFunction) (_hf : f ∈ P.functions)
      (b : IRBlock) (_hb : b ∈ f.blocks)
@@ -118,6 +195,13 @@ def NoExterns (P : IRProgram) : Prop :=
     match i with
     | .call name _ => name ∈ builtin_callees
     | .call_indirect _ _ => False  -- indirect calls are never No-FFI
+    | .syscall nr _ _ =>
+      -- FFI-4-A (Gap #3 closure): the syscall number must map (via
+      -- `syscall_nr_table`) to a `SyscallName` in the allowlist.
+      -- Without this arm, `.syscall` fell through to `True` and a
+      -- program with `syscall(99, ...)` (arbitrary kernel syscall)
+      -- would satisfy `NoExterns` — soundness gap.
+      ∃ sn, syscall_nr_table nr = some sn ∧ sn ∈ SyscallName.allowlist
     | _ => True
   where
     /-- Built-in callees — the closed set of functions dispatched by
