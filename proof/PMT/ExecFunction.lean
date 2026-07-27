@@ -59,11 +59,17 @@ for the proof strategy.
     `PMT.IRProgram` (program structure + `IRFunction.flat_steps` /
     `IRFunction.well_typed`), `PMT.Soundness` (`Step`, `Program`, `exec`,
     `WellTyped`), `PMT.SimRel` (uses `to_program` for the
-    `full_simulation_strong` theorem).
-  * `PMT/SimRel.lean` §"Stub helper": `IRProgram.first_function_body` is
-    the previous stub that this module supersedes (this module provides the
-    real flattening; SimRel's stub remains for backwards-compatibility
-    with the not-yet-proven `full_simulation` theorem).
+    `full_simulation` / `full_simulation_strong` theorems),
+    `PMT.WellTypedStrong` (uses `to_program_preserves_well_typed_full`
+    + `PmtInstr.to_steps_op_transform` to lift `IRProgram.well_typed`
+    all the way to `WellTypedStrong (p.to_program)`).
+  * **PMT-1-E.** The previous `IRProgram.first_function_body` STUB in
+    `PMT/SimRel.lean` (which always returned `[]`, closing
+    `full_simulation` trivially via `exec [] _ = Result.ok _`) has been
+    REMOVED. Both `full_simulation` and `full_simulation_strong` now
+    invoke the real `IRProgram.to_program` flattening defined here.
+    `PmtInstr.to_steps_op_transform` (§1.9 below) is added to support
+    the `FieldAccessOk` half of the `WellTypedStrong` lift.
 
 **Build.** This module is part of the Lake package rooted at
 `proof/lakefile.toml`. Build with `lake build` (or `make proof` /
@@ -519,6 +525,138 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     rw [PmtInstr.to_steps_call_indirect, List.mem_map] at hs
     obtain ⟨v, _, rfl⟩ := hs
     exact WF_Layout_empty
+  | syscall nr args dst =>
+    rw [PmtInstr.to_steps_syscall] at hs
+    simp at hs
+
+/-! ## §1.9: Every `Step` produced by `PmtInstr.to_steps` carries `op = .transform` (PMT-1-E)
+
+This is the per-instruction `op`-tag lemma used to lift `FieldAccessOk`
+(the third conjunct of `WellTypedStrong`) through `IRBlock.to_steps` and
+`IRFunction.to_program`. The proof mirrors `to_steps_preserves_WF_Layout`
+(§1.8): case-split on the 35 `PmtInstr` constructors; for each
+non-`[]`-flattening variant (`alloc`, `load`, `store`, `free`,
+`transform`, `call`, `call_indirect`) the produced `Step`s all carry
+`op = .transform` literally (by the corresponding reflection lemma); for
+each `[]`-flattening variant the membership hypothesis `s ∈ []` is
+vacuous.
+
+`FieldAccessOk` (defined in `PMT.WellTypedStrong`) requires that every
+`Step` whose `op = .field_access f` has `f ∈ s.layout.fields`. Since
+`to_steps` NEVER produces a `.field_access` op, `FieldAccessOk` holds
+trivially on any flattened `IRProgram.to_program`. This closes the
+"field-access safety" half of the `WellTypedStrong` lift from
+`IRProgram.well_typed` — see `IRProgram.well_typed.to_program_well_typed_strong`
+in `PMT/WellTypedStrong.lean`. -/
+
+theorem PmtInstr.to_steps_op_transform
+    (i : PmtInstr) (s : Step) (hs : s ∈ i.to_steps) :
+    s.op = PmtOp.transform := by
+  cases i with
+  | alloc out layout =>
+    rw [PmtInstr.to_steps_alloc, List.mem_singleton] at hs
+    subst hs; rfl
+  | load in_var out offset ty =>
+    rw [PmtInstr.to_steps_load, List.mem_singleton] at hs
+    subst hs; rfl
+  | store in_var val offset ty =>
+    rw [PmtInstr.to_steps_store, List.mem_singleton] at hs
+    subst hs; rfl
+  | free in_var =>
+    rw [PmtInstr.to_steps_free, List.mem_singleton] at hs
+    subst hs; rfl
+  | transform in_var out layout =>
+    rw [PmtInstr.to_steps_transform, List.mem_singleton] at hs
+    subst hs; rfl
+  | call fn args =>
+    rw [PmtInstr.to_steps_call, List.mem_map] at hs
+    obtain ⟨v, _, rfl⟩ := hs
+    rfl
+  | ret val =>
+    rw [PmtInstr.to_steps_ret] at hs
+    simp at hs
+  | bin_op op dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_bin_op] at hs
+    simp at hs
+  | unary_op op dst src ty =>
+    rw [PmtInstr.to_steps_unary_op] at hs
+    simp at hs
+  | cast k dst src from_ty to_ty =>
+    rw [PmtInstr.to_steps_cast] at hs
+    simp at hs
+  | add dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_add] at hs
+    simp at hs
+  | sub dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_sub] at hs
+    simp at hs
+  | mul dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_mul] at hs
+    simp at hs
+  | div dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_div] at hs
+    simp at hs
+  | cmp k dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_cmp] at hs
+    simp at hs
+  | select dst cond then_val else_val ty =>
+    rw [PmtInstr.to_steps_select] at hs
+    simp at hs
+  | ct_select dst cond then_val else_val ty =>
+    rw [PmtInstr.to_steps_ct_select] at hs
+    simp at hs
+  | ct_eq dst lhs rhs ty =>
+    rw [PmtInstr.to_steps_ct_eq] at hs
+    simp at hs
+  | get_address dst name =>
+    rw [PmtInstr.to_steps_get_address] at hs
+    simp at hs
+  | phi dst incoming =>
+    rw [PmtInstr.to_steps_phi] at hs
+    simp at hs
+  | branch target =>
+    rw [PmtInstr.to_steps_branch] at hs
+    simp at hs
+  | cond_branch cond true_target false_target =>
+    rw [PmtInstr.to_steps_cond_branch] at hs
+    simp at hs
+  | atomic_load dst addr ty ordering =>
+    rw [PmtInstr.to_steps_atomic_load] at hs
+    simp at hs
+  | atomic_store value addr ty ordering =>
+    rw [PmtInstr.to_steps_atomic_store] at hs
+    simp at hs
+  | atomic_cas dst addr expected desired ty success_order failure_order =>
+    rw [PmtInstr.to_steps_atomic_cas] at hs
+    simp at hs
+  | vector_op op lanes elem_size dst lhs rhs =>
+    rw [PmtInstr.to_steps_vector_op] at hs
+    simp at hs
+  | channel_open dst elem_ty =>
+    rw [PmtInstr.to_steps_channel_open] at hs
+    simp at hs
+  | channel_send ch msg ty =>
+    rw [PmtInstr.to_steps_channel_send] at hs
+    simp at hs
+  | channel_recv ch dst ty =>
+    rw [PmtInstr.to_steps_channel_recv] at hs
+    simp at hs
+  | channel_close ch =>
+    rw [PmtInstr.to_steps_channel_close] at hs
+    simp at hs
+  | channel_recv_timeout ch dst ty timeout_ms =>
+    rw [PmtInstr.to_steps_channel_recv_timeout] at hs
+    simp at hs
+  | channel_recv_result ch dst err_dst ty =>
+    rw [PmtInstr.to_steps_channel_recv_result] at hs
+    simp at hs
+  | stark_proof input dst constraints =>
+    rw [PmtInstr.to_steps_stark_proof] at hs
+    simp at hs
+  | call_indirect func_ptr args =>
+    rw [PmtInstr.to_steps_call_indirect, List.mem_map] at hs
+    obtain ⟨v, _, rfl⟩ := hs
+    rfl
   | syscall nr args dst =>
     rw [PmtInstr.to_steps_syscall] at hs
     simp at hs
