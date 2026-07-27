@@ -18,7 +18,7 @@ For each claim in the FFI spec, I verified:
 |---|----------|-----|----------------|
 | 1 | **HIGH** | 5 active extern calls remain in `src/pipeline.rs` AST-bridge path: `mmap`, `mprotect`, `mremap`, `munmap`, `__arena_overflow` | "No foreign function calls in VUMA (No-FFI path)" |
 | 2 | **HIGH** | ~~Lean `SyscallName` allowlist has 6 syscalls; Rust `SyscallName` enum has 16+~~ **CLOSED by FFI-4-B** | "6 syscalls routed through IRInstr::Syscall" |
-| 3 | **HIGH** | Lean `NoExterns` predicate does NOT check `.syscall` instructions | `ffi_pillar_sound` Conjunct 2 is vacuously true |
+| 3 | **HIGH** | ~~Lean `NoExterns` predicate does NOT check `.syscall` instructions~~ **CLOSED by FFI-4-A** | `ffi_pillar_sound` Conjunct 2 is vacuously true |
 | 4 | **HIGH** | ~~Lean `PmtInstr` is missing `bulk_copy`, `bulk_fill` (FFI-1-A additions)~~ **CLOSED by FFI-3-A** | Lean cannot model programs using memcpy/memset replacements |
 | 5 | **HIGH** | ~~Lean `PmtInstr.transform` signature differs from Rust `IRInstr::Transform`~~ **CLOSED by FFI-3-B** | Lean `transform` ≠ Rust `Transform` (different fields) — distinct variants now coexist
 | 6 | **MEDIUM** | `proof/AUDIT_FFI.md` falsely claims "zero active extern block declarations" | Audit report inaccuracy |
@@ -97,9 +97,13 @@ Futex=202, SetTidAddress=218, ClockGettime=228, ExitGroup=231`).
 
 ---
 
-## Gap #3 — Lean NoExterns does not check .syscall instructions (HIGH)
+## Gap #3 — Lean NoExterns does not check .syscall instructions (HIGH) — CLOSED by FFI-4-A
 
-**Claim**: `ffi_pillar_sound` Conjunct 2: "Every syscall callee is in the `SyscallName.allowlist`."
+**Status**: **CLOSED by FFI-4-A**. The Lean `NoExterns` predicate (in `proof/PMT/PillarSoundness.lean`) has been strengthened with a new `.syscall nr _ _` match arm requiring `∃ sn, syscall_nr_table nr = some sn ∧ sn ∈ SyscallName.allowlist`. A new local `SyscallName` inductive (6 variants: `Write`, `Read`, `Exit`, `Mmap`, `Munmap`, `Brk`), `SyscallName.allowlist`, and `syscall_nr_table : Nat → Option SyscallName` helper were added to `PMT/PillarSoundness.lean` — the table maps Linux x86_64 syscall numbers (`0↦Read, 1↦Write, 9↦Mmap, 11↦Munmap, 12↦Brk, 60↦Exit`) to variants. The `no_ffi_after_removal` biconditional in `proof/PMT/NoFFI.lean` was updated to mirror the strengthened `NoExterns` (also closed by `rfl`). `lake build` PASS with zero new sorries.
+
+**FFI-4-B coordination.** A parallel task (FFI-4-B) is extending `PMT.FFI.SyscallName` (in `proof/PMT/FFI/PillarSoundness.lean`) from 6 to 16+ variants to mirror the Rust `SyscallName` enum. To avoid a circular import (`PMT/FFI/PillarSoundness.lean` already imports `PMT.PillarSoundness`), FFI-4-A defines a LOCAL `PMT.SyscallName` inductive inside `PMT/PillarSoundness.lean` — structurally identical to the 6-variant `PMT.FFI.SyscallName` but in a different namespace. The local inductive's `syscall_nr_table` covers only the 6 syscalls in the current allowlist; the remaining 13 Rust variants (`Open`, `Close`, `ExitGroup`, `Ioctl`, `Fcntl`, `Getpid`, `Kill`, `Mprotect`, `ClockGettime`, `SchedYield`, `Clone`, `Futex`, `SetTidAddress`) are intentionally NOT in the table — FFI-4-B will add them when its branch lands and merges. At merge time the local stub should either be replaced by a reference to the extended `PMT.FFI.SyscallName` (with an import-graph refactor) or extended in lockstep to 16+ variants.
+
+**Claim** (pre-closure): `ffi_pillar_sound` Conjunct 2: "Every syscall callee is in the `SyscallName.allowlist`."
 
 **Reality**: The Lean `NoExterns` predicate's match arms are:
 ```lean
