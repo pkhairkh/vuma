@@ -55,16 +55,16 @@ open PMT.FFI
 
 A single function, single block, six instructions — each exercising
 one FFI-relevant `PmtInstr` variant. The block's terminator is
-`.ret [.immediate 0]` (return value 0). -/
+`.ret [.immediate (BitVec.ofNat 64 0)]` (return value 0). -/
 
 /-- A few dummy `IRValue` operands for the bulk-memory and syscall
 instructions. Their concrete values are irrelevant: `bulk_copy`,
 `bulk_fill`, `transform_layouts`, and `syscall` all have
 `well_typed = True` and `to_steps = []`, so the operand values never
 flow into a `Step`. -/
-def v0 : IRValue := .register 0
-def v1 : IRValue := .register 1
-def v2 : IRValue := .register 2
+def v0 : IRValue := .register (BitVec.ofNat 32 0)  -- PMT-FAITH-6-A: BitVec 32
+def v1 : IRValue := .register (BitVec.ofNat 32 1)  -- PMT-FAITH-6-A: BitVec 32
+def v2 : IRValue := .register (BitVec.ofNat 32 2)  -- PMT-FAITH-6-A: BitVec 32
 
 /-- The block's instruction list — six `PmtInstr`s, one per FFI-relevant
 variant. -/
@@ -72,16 +72,16 @@ def realisticBlock.instrs : List PmtInstr :=
   [ .bulk_copy v0 v1 v2
   , .bulk_fill v0 v1 v2
   , .transform_layouts v0 v1 "LayoutA" "LayoutB"
-  , .syscall 222 [v0, v1, v2, .immediate 0, .immediate (-1), .immediate 0] (some v0)
+  , .syscall 222 [v0, v1, v2, .immediate (BitVec.ofNat 64 0), .immediate (BitVec.ofInt 64 (-1)), .immediate (BitVec.ofNat 64 0)] (some v0)
   , .syscall 215 [v0, v1] none
-  , .call "__arena_overflow" []
+  , .call none "__arena_overflow" [] false  -- PMT-FAITH-6-B: 4 args (dst, func, args, is_extern)
   ]
 
 /-- The single block. -/
 def realisticBlock : IRBlock :=
   { label        := "entry"
   , instructions := realisticBlock.instrs
-  , terminator   := .ret [.immediate 0]
+  , terminator   := .ret [.immediate (BitVec.ofNat 64 0)]
   , predecessors := []
   , successors   := []
   }
@@ -162,24 +162,18 @@ theorem realistic_program_satisfies_NoFFI : NoFFI realistic_program := by
     · -- nr = 215 → .Munmap
       subst h_nr
       exact ⟨.Munmap, rfl, by decide⟩
-  | call name args =>
+  | call dst name args is_extern =>
     intro hi
-    -- Goal: name ∈ NoExterns.builtin_callees
-    have h_in : (PmtInstr.call name args) ∈ realisticBlock.instrs := hi
+    -- PMT-FAITH-6-B: 4 args. Goal: name ∈ NoExterns.builtin_callees ∧ is_extern = false
+    have h_in : (PmtInstr.call dst name args is_extern) ∈ realisticBlock.instrs := hi
     simp [realisticBlock, realisticBlock.instrs] at h_in
-    -- After simp, h_in is a single conjunction (the only .call in the
-    -- list is .call "__arena_overflow" [], so the impossible disjuncts
-    -- were removed and the matching equality was destructured):
-    --   name = "__arena_overflow" ∧ args = []
-    obtain ⟨h_name, _⟩ := h_in
-    -- Use Eq.subst (via ▸) to cast the decidable proof instead of
-    -- `subst` (which triggers a dependent-match kernel issue in the
-    -- NoExterns match's `.call` arm). The `change` first forces the
-    -- match to reduce to its `.call` arm body.
-    change name ∈ NoExterns.builtin_callees
-    rw [h_name]
-    decide
-  | call_indirect _ _ =>
+    obtain ⟨h_name, h_args, h_dst, h_extern⟩ := h_in
+    refine ⟨?_, ?_⟩
+    · change name ∈ NoExterns.builtin_callees
+      rw [h_args]  -- h_args : name = "__arena_overflow"
+      decide
+    · rw [h_extern]
+  | call_indirect _ _ _ =>
     intro hi
     -- Goal: False (NoExterns arm). .call_indirect is not in the list,
     -- so simp reduces hi to False and closes the goal.
@@ -335,10 +329,10 @@ theorem realistic_program_ffi_pillar_sound :
          (b : IRBlock) (_hb : b ∈ f.blocks)
          (i : PmtInstr) (_hi : i ∈ b.instructions),
         match i with
-        | .call name _ =>
-          name ∈ NoExterns.builtin_callees ∨
-          name ∈ syscall_callees
-        | .call_indirect _ _ => False
+        | .call _ name _ is_extern =>
+          (name ∈ NoExterns.builtin_callees ∨
+           name ∈ syscall_callees) ∧ is_extern = false  -- PMT-FAITH-6-B
+        | .call_indirect _ _ _ => False  -- PMT-FAITH-6-A
         | _ => True)
     ∧ (∀ (f : IRFunction) (_hf : f ∈ realistic_program.functions)
          (b : IRBlock) (_hb : b ∈ f.blocks)

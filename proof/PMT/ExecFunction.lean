@@ -137,10 +137,14 @@ theorem PmtInstr.to_steps_transform_layouts (dst src : IRValue)
     PmtInstr.to_steps (.transform_layouts dst src from_layout to_layout) = [] := by
   rfl
 
-/-- §1.7: `call` flattens to one self-loop step per argument. -/
-theorem PmtInstr.to_steps_call (fn : String) (args : List String) :
-    PmtInstr.to_steps (.call fn args)
-      = args.map (fun v => ⟨v, v, ⟨1, []⟩, .transform⟩) := by
+/-- §1.7: `call` flattens to `[]` (PMT-FAITH-6-B).
+
+Previously flattened to one self-loop Step per arg using String var names —
+but call now takes (Option IRValue, String, List IRValue, Bool) bit-faithfully,
+and there's no faithful IRValue→String mapping for Step.in_var (FAITH-2-L gap).
+Emit [] and document: per-arg liveness tracking deferred to FAITH-2-L closure. -/
+theorem PmtInstr.to_steps_call (dst : Option IRValue) (fn : String) (args : List IRValue) (is_extern : Bool) :
+    PmtInstr.to_steps (.call dst fn args is_extern) = [] := by
   rfl
 
 /-! ## §1.7a. Reflection lemmas for the 12 pure-arithmetic variants (PMT-1-A)
@@ -491,11 +495,11 @@ theorem PmtInstr.to_steps_preserves_WF_Layout
     -- PMT-FAITH-5-A: flattens to `[]`; membership hypothesis is vacuous.
     rw [PmtInstr.to_steps_transform_layouts] at hs
     simp at hs
-  | call fn args =>
-    rw [PmtInstr.to_steps_call, List.mem_map] at hs
-    obtain ⟨v, _, rfl⟩ := hs
-    exact WF_Layout_empty
-  | ret val =>
+  | call dst fn args is_extern =>
+    -- PMT-FAITH-6-B: flattens to []; membership hypothesis is vacuous.
+    rw [PmtInstr.to_steps_call] at hs
+    simp at hs
+  | ret vals =>
     rw [PmtInstr.to_steps_ret] at hs
     simp at hs
   -- 12 pure-arithmetic variants (PMT-1-A): each flattens to `[]`, so the
@@ -685,11 +689,11 @@ theorem PmtInstr.to_steps_op_transform
     -- PMT-FAITH-5-A: flattens to `[]`; membership hypothesis is vacuous.
     rw [PmtInstr.to_steps_transform_layouts] at hs
     simp at hs
-  | call fn args =>
-    rw [PmtInstr.to_steps_call, List.mem_map] at hs
-    obtain ⟨v, _, rfl⟩ := hs
-    rfl
-  | ret val =>
+  | call dst fn args is_extern =>
+    -- PMT-FAITH-6-B: flattens to []; membership hypothesis is vacuous.
+    rw [PmtInstr.to_steps_call] at hs
+    simp at hs
+  | ret vals =>
     rw [PmtInstr.to_steps_ret] at hs
     simp at hs
   | bin_op op dst lhs rhs ty =>
