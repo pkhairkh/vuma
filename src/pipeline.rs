@@ -11576,9 +11576,12 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             let arena_ptr = ctx.alloc_temp();
-            stmts.push(ScgStatement::Call(CallNode {
+            // FFI-5-B (Gap #1 closure): route mmap through IRInstr::Syscall
+            // (asm-generic nr=222 → native x86_64 nr=9 via syscall_abi::translate).
+            // Eliminates the last `is_extern: true` CallNode for mmap in this path.
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 222,
                 dst: Some(arena_ptr.clone()),
-                func: "mmap".to_string(),
                 args: vec![
                     ScgExpr::Int(0),         // addr = NULL
                     ScgExpr::Var(mmap_size), // length = capacity + 4096 (guard page)
@@ -11587,8 +11590,6 @@ pub fn flatten_expr(
                     ScgExpr::Int(-1),        // fd = -1
                     ScgExpr::Int(0),         // offset = 0
                 ],
-                is_extern: true,
-                reassigns: None,
             }));
             // mprotect(arena_ptr + capacity, 4096, PROT_NONE=0) — guard page.
             // Return value is ignored (stored to a temp, never checked) so a
@@ -11603,16 +11604,16 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             let _mprot_ret = ctx.alloc_temp();
-            stmts.push(ScgStatement::Call(CallNode {
+            // FFI-5-B (Gap #1 closure): route mprotect through IRInstr::Syscall
+            // (asm-generic nr=226 → native x86_64 nr=10 via syscall_abi::translate).
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 226,
                 dst: Some(_mprot_ret),
-                func: "mprotect".to_string(),
                 args: vec![
                     ScgExpr::Var(guard_addr),
                     ScgExpr::Int(4096), // size = one page
                     ScgExpr::Int(0),    // prot = PROT_NONE
                 ],
-                is_extern: true,
-                reassigns: None,
             }));
             // arena.base (offset 0) is already 0 (mmap zeroes the region).
             // Store arena.offset = 24 at [arena_ptr+8] via ComputationNode::Add
@@ -11809,17 +11810,17 @@ pub fn flatten_expr(
             }));
             // Call mremap(arena_ptr, capacity, min_capacity + 4096, MREMAP_MAYMOVE=1)
             let new_base = ctx.alloc_temp();
-            stmts.push(ScgStatement::Call(CallNode {
+            // FFI-5-B (Gap #1 closure): route mremap through IRInstr::Syscall
+            // (asm-generic nr=216 → native x86_64 nr=25 via syscall_abi::translate).
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 216,
                 dst: Some(new_base.clone()),
-                func: "mremap".to_string(),
                 args: vec![
                     arena_ptr,
                     ScgExpr::Var(cap_val),
                     ScgExpr::Var(new_map_size),
                     ScgExpr::Int(1),
                 ],
-                is_extern: true,
-                reassigns: None,
             }));
             // mprotect(new_base + min_capacity, 4096, PROT_NONE=0) — guard
             // page on the new tail. Return value ignored.
@@ -11833,16 +11834,16 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             let _mprot_ret = ctx.alloc_temp();
-            stmts.push(ScgStatement::Call(CallNode {
+            // FFI-5-B (Gap #1 closure): route mprotect through IRInstr::Syscall
+            // (asm-generic nr=226 → native x86_64 nr=10 via syscall_abi::translate).
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 226,
                 dst: Some(_mprot_ret),
-                func: "mprotect".to_string(),
                 args: vec![
                     ScgExpr::Var(guard_addr),
                     ScgExpr::Int(4096), // size = one page
                     ScgExpr::Int(0),    // prot = PROT_NONE
                 ],
-                is_extern: true,
-                reassigns: None,
             }));
             // Store min_capacity at [new_base+16]
             let cap_addr2 = ctx.alloc_temp();
@@ -11886,12 +11887,12 @@ pub fn flatten_expr(
                 ty: Some(vuma_codegen::ir::IRType::U64),
             }));
             // Call munmap(arena_ptr, capacity)
-            stmts.push(ScgStatement::Call(CallNode {
+            // FFI-5-B (Gap #1 closure): route munmap through IRInstr::Syscall
+            // (asm-generic nr=215 → native x86_64 nr=11 via syscall_abi::translate).
+            stmts.push(ScgStatement::Syscall(SyscallCallNode {
+                nr: 215,
                 dst: None,
-                func: "munmap".to_string(),
                 args: vec![arena_ptr, ScgExpr::Var(cap_val)],
-                is_extern: true,
-                reassigns: None,
             }));
             ScgExpr::Int(0)
         }
