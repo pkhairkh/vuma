@@ -200,9 +200,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install elan (Lean toolchain)
-        uses: oravirt/elan-action@v2
-        with:
-          lean-version: leanprover/lean4:v4.21.0
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain leanprover/lean4:v4.21.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Build proofs
         run: cd proof && lake build
