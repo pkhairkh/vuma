@@ -3,223 +3,218 @@ import PMT.IRProgram
 import PMT.IVE.Soundness.WFLayoutBool
 
 /-!
-## IVE Soundness — verify_transform
+## IVE Soundness — verify_transform (FAITHFUL model, Wave 5 task IVE-FAITH-5-A)
 
-This module proves that IVE's `verify_transform` function is sound:
-if it accepts a transform (valid=true), then both the input and output
-layouts are well-formed and compatible.
+This module is a **bit-faithful** Lean rendering of the Rust function
+`src/ive/src/state_transform.rs::verify_transform`. It replaces the
+previous (unfaithful) model that took `Layout` structs and checked
+`WF_Layout`. The Rust function does NOT check `WF_Layout`; it checks
+layout-existence (by name) and infers the transform kind from name/size
+comparison.
 
-The Lean model mirrors the Rust function's specification. The actual
-Rust function lives at `src/ive/src/state_transform.rs:57`.
+**Rust reference** (`src/ive/src/state_transform.rs::verify_transform`):
+```rust
+pub fn verify_transform(
+    layouts: &HashMap<String, LayoutInfo>,
+    input_layout: &str,
+    output_layout: &str,
+) -> StateTransformVerification
+```
 
-Per the IVE deep-read:
-  - The Rust `verify_transform` (`src/ive/src/state_transform.rs:57`)
-    takes `&HashMap<String, LayoutInfo>` + a transform op, returns
-    `StateTransformVerification`.
-  - It classifies the transform (Identity/Reinterpret/Copy) and
-    validates both layouts exist.
-  - The "kill old state" semantics is NOT in IVE itself — it lives in
-    `VerificationEngine::verify_pmt` at `verification.rs:474-506`,
-    where `StateTransform` and `ForeignConsume` insert the input vreg
-    into `consumed_vars`. There is no "produce new state" — the
-    output side of `StateTransform` is recorded only as the
-    `(input_layout, output_layout)` pair; the new state's vreg/name
-    is untracked. The simulation relation must model the kill on input
-    vregs only.
+**Rust logic** (faithfully mirrored below):
+  1. Look up `input_layout` by NAME in `layouts` (not-found → invalid, kind=Copy).
+  2. Look up `output_layout` by NAME (not-found → invalid, kind=Copy).
+  3. If `input_layout == output_layout` (STRING equality) → Identity, valid.
+  4. If `in_info.total_size == out_info.total_size` → Reinterpret, valid.
+  5. Otherwise → Copy, valid.
+  - Does NOT check `WF_Layout` for either layout.
 
-This module provides the `verify_transform` model. **As of IVE Wave 1
-task A** (`task/ive-1-a`), the spec uses the computable
-`wf_layout_bool` predicate (defined in
-`PMT.IVE.Soundness.WFLayoutBool`) in place of the `Prop`-valued
-`WF_Layout`. The well-formedness check is therefore constructively
-decidable — no `Classical.propDecidable` is required — and
-`verify_transform` is a plain `def` (not `noncomputable`). This
-unblocks extraction (IVE-1-B) and the Iris soundness layer (PMT-1-G).
-
-The `Decidable (verify_transform_spec t)` instance is provided
-explicitly below: it unfolds the spec, case-splits on `t.kind`, and
-in each branch the match reduces so `inferInstance` picks up the
-auto-derived `Decidable` for the resulting `And` form (composed of
-`instDecidableEqBool` for the `wf_layout_bool _ = true` conjuncts and
-`DecidableEq Layout` / `DecidableEq Nat` for the per-kind equality
-conjuncts).
-
-The soundness theorems close without `sorry`:
-`decide_eq_true_iff` bridges `decide (verify_transform_spec t) = true`
-to `verify_transform_spec t`, the And conjuncts are extracted with
-`obtain`, and `wf_layout_bool_iff_wf_layout` recovers `WF_Layout` from
-each `wf_layout_bool _ = true` conjunct. The third conjunct's match
-is left untouched (same form on both sides of the goal), so `exact h3`
-closes it directly — no case-split on `t.kind` is needed.
+This module is `sorry`-free.
 -/
 
 namespace PMT.IVE.Soundness
 
-/-- Transform kind: mirrors Rust `TransformKind`
-(`src/ive/src/state_transform.rs`).
-  - `identity`   : same layout, just rename the variable.
-  - `reinterpret` : same bytes, different field structure.
-  - `copy`        : copy bytes to a new layout. -/
+/-- FieldInfo mirroring Rust `src/ive/src/state_transform.rs::FieldInfo`:
+`{name : String, offset : u64, size : u64, type_name : String}`. -/
+structure FieldInfo where
+  name      : String
+  offset    : Nat
+  size      : Nat
+  type_name : String
+  deriving Repr
+
+/-- LayoutInfo mirroring Rust `src/ive/src/state_transform.rs::LayoutInfo`:
+`{name : String, total_size : u64, fields : Vec<FieldInfo>}`. -/
+structure LayoutInfo where
+  name       : String
+  total_size : Nat
+  fields     : List FieldInfo
+  deriving Repr
+
+/-- A layout registry: maps layout names to LayoutInfo.
+Models Rust's `HashMap<String, LayoutInfo>`. -/
+def LayoutRegistry := String → Option LayoutInfo
+
+/-- TransformKind mirroring Rust `TransformKind` (Reinterpret, Copy, Identity). -/
 inductive TransformKind where
-  | identity    : TransformKind
   | reinterpret : TransformKind
   | copy        : TransformKind
+  | identity    : TransformKind
   deriving Repr
 
-/-- A state transform: consume `in_var`, produce `out_var`. Mirrors
-the Rust `StateTransform` node payload
-(`src/ive/src/verification.rs:474-506`), which synthesises a
-`"_state_{node_id}_{vreg}"` name for the input and records the
-`(input_layout, output_layout)` pair. The output vreg/name is
-untracked in the Rust code path (W2-D §5 finding 3); the Lean model
-carries `out_var` for documentation but does not impose a uniqueness
-constraint on it. -/
-structure StateTransform where
-  in_var     : String
-  out_var    : String
-  in_layout  : Layout
-  out_layout : Layout
-  kind       : TransformKind
-  deriving Repr
-
-/-- The Lean model of IVE's `verify_transform` output.
-Mirrors Rust `StateTransformVerification { valid, error }`
-(`src/ive/src/state_transform.rs:36-49`). -/
+/-- StateTransformVerification mirroring Rust `StateTransformVerification`:
+`{input_layout: String, output_layout: String, valid: bool, transform_kind: TransformKind, error: Option<String>}`. -/
 structure StateTransformVerification where
-  valid : Bool
-  error : Option String
+  input_layout   : String
+  output_layout  : String
+  valid          : Bool
+  transform_kind : TransformKind
+  error          : Option String
   deriving Repr
 
-/-- The spec checked by `verify_transform`:
-  (1) both layouts are well-formed (encoded as `wf_layout_bool _ = true`
-      so the spec is constructively decidable — see
-      `PMT.IVE.Soundness.WFLayoutBool`),
-  (2) for `Identity`, layouts match (same `total_size` + same `fields`),
-  (3) for `Reinterpret`, `total_size` matches (same byte budget,
-      different fields),
-  (4) for `Copy`, no constraint (any pair of layouts accepted).
+/-- A state transform: identified by a pair of layout names.
+Mirrors Rust's `&[(String, String)]` in `verify_all_transforms` — Rust does
+NOT have a `StateTransform` struct carrying Layout values; it uses layout
+NAME pairs. This structure is a named wrapper around the pair, for use in
+Composition.lean and Extraction.lean. -/
+structure StateTransform where
+  input_layout  : String
+  output_layout : String
+  deriving Repr
 
-This is the Lean rendering of the four Rust checks performed in
-`verify_transform` at `state_transform.rs:57` (modulo the
-`HashMap<String, LayoutInfo>` lookup, which is collapsed into the
-`WF_Layout` precondition via the caller-side `env : String → Layout`
-pattern — see `PMT.IVE.Soundness.StateReads` for the same
-simplification).
-
-Replacing `WF_Layout` with `wf_layout_bool _ = true` (vs. the original
-`WF_Layout _`) is the key change for IVE-1-A: it makes
-`Decidable (verify_transform_spec t)` derive from
-`instDecidableEqBool` (and `DecidableEq Layout` for the identity arm)
-instead of `Classical.propDecidable`, so
-`decide (verify_transform_spec t)` — and hence `verify_transform` —
-is computable and survives extraction to Rust. -/
-def verify_transform_spec (t : StateTransform) : Prop :=
-  wf_layout_bool t.in_layout = true
-  ∧ wf_layout_bool t.out_layout = true
-  ∧ (match t.kind with
-     | TransformKind.identity    => t.in_layout = t.out_layout
-     | TransformKind.reinterpret => t.in_layout.total_size = t.out_layout.total_size
-     | TransformKind.copy        => True)
-
-/-- Constructive `Decidable` instance for `verify_transform_spec`.
-
-This is what replaces `Classical.propDecidable _` from the pre-Wave-1
-formulation. The proof unfolds the spec (exposing the `match t.kind`
-syntactically), case-splits on `t.kind`, and in each branch the match
-reduces so `inferInstance` picks up the auto-derived `Decidable` for
-the resulting `And` form. The per-arm decidability rests on:
-  - `instDecidableEqBool` for `wf_layout_bool _ = true`,
-  - `DecidableEq Layout` (added in `WFLayoutBool.lean`) for
-    `t.in_layout = t.out_layout` (identity arm),
-  - `instDecidableEqNat` for `t.in_layout.total_size = t.out_layout.total_size`
-    (reinterpret arm),
-  - `True` is decidable (copy arm).
-
-The instance is computable (no `Classical`), so `decide` reduces to
-a `Bool` and `verify_transform` below is a plain `def`. -/
-instance (t : StateTransform) : Decidable (verify_transform_spec t) := by
-  unfold verify_transform_spec
-  cases t.kind with
-  | identity    => exact inferInstance
-  | reinterpret => exact inferInstance
-  | copy        => exact inferInstance
-
-/-- The Lean model of IVE's `verify_transform`.
-Returns `valid=true` iff the spec holds.
-
-**Computable** (no `noncomputable`): the `Decidable` instance above is
-constructive (case-split on `t.kind`, no `Classical.propDecidable`),
-so `decide (verify_transform_spec t)` reduces to a `Bool` and this
-`def` survives extraction to Rust (unblocks IVE-1-B and PMT-1-G). -/
-def verify_transform (t : StateTransform) :
+/-- The Lean model of IVE's `verify_transform`. **Faithful** to the Rust
+function at `src/ive/src/state_transform.rs::verify_transform`:
+  1. Look up `input_layout` by NAME (not-found → invalid, kind=Copy).
+  2. Look up `output_layout` by NAME (not-found → invalid, kind=Copy).
+  3. If `input_layout == output_layout` (STRING equality) → Identity, valid.
+  4. If `in_info.total_size == out_info.total_size` → Reinterpret, valid.
+  5. Otherwise → Copy, valid.
+  - Does NOT check `WF_Layout` (Rust doesn't). -/
+def verify_transform
+    (layouts : LayoutRegistry)
+    (input_layout output_layout : String) :
     StateTransformVerification :=
-  { valid := decide (verify_transform_spec t),
-    error := if decide (verify_transform_spec t)
-             then none
-             else some "transform invalid" }
+  match layouts input_layout with
+  | none =>
+    { input_layout := input_layout,
+      output_layout := output_layout,
+      valid := false,
+      transform_kind := TransformKind.copy,
+      error := some ("input layout '" ++ input_layout ++ "' not found") }
+  | some in_info =>
+    match layouts output_layout with
+    | none =>
+      { input_layout := input_layout,
+        output_layout := output_layout,
+        valid := false,
+        transform_kind := TransformKind.copy,
+        error := some ("output layout '" ++ output_layout ++ "' not found") }
+    | some out_info =>
+      -- Step 3: Identity (STRING equality, not structural Layout equality).
+      if input_layout = output_layout then
+        { input_layout := input_layout,
+          output_layout := output_layout,
+          valid := true,
+          transform_kind := TransformKind.identity,
+          error := none }
+      -- Step 4: Reinterpret (same total_size).
+      else if in_info.total_size = out_info.total_size then
+        { input_layout := input_layout,
+          output_layout := output_layout,
+          valid := true,
+          transform_kind := TransformKind.reinterpret,
+          error := none }
+      -- Step 5: Copy (different sizes — always valid).
+      else
+        { input_layout := input_layout,
+          output_layout := output_layout,
+          valid := true,
+          transform_kind := TransformKind.copy,
+          error := none }
 
-/-- Soundness: if `verify_transform` returns `valid=true`, then both
-layouts are well-formed and the kind constraint holds.
+/-- Convenience wrapper: verify a `StateTransform` (pair of layout names). -/
+def verify_transform_st (layouts : LayoutRegistry) (t : StateTransform) :
+    StateTransformVerification :=
+  verify_transform layouts t.input_layout t.output_layout
 
-This is the Lean statement of "IVE's `verify_transform` is sound":
-acceptance implies well-formedness + compatibility. The proof bridges
-`(decide P) = true` to `P` via `decide_eq_true_iff` (the constructive
-`Decidable` instance above comes from the spec's `Bool`-backed form,
-not `Classical.propDecidable`), then unfolds the spec and uses
-`wf_layout_bool_iff_wf_layout` to recover `WF_Layout` from each
-`wf_layout_bool _ = true` conjunct.
+/-- Verify all transforms in a list. Mirrors Rust's `verify_all_transforms`
+which takes `&[(String, String)]` and maps `verify_transform` over each pair. -/
+def verify_all_transforms (layouts : LayoutRegistry) (transforms : List StateTransform) :
+    List StateTransformVerification :=
+  transforms.map (verify_transform_st layouts)
 
-The third conjunct (`match t.kind with ...`) has the same form in
-both `hspec` and the goal, so `exact h3` closes it directly — no
-case-split on `t.kind` is needed.
+/-- Soundness: if `verify_transform` returns `valid = true`, then:
+  (1) The input layout exists in the registry.
+  (2) The output layout exists in the registry.
+  (3) The `transform_kind` is determined by the faithful rules:
+      - `identity` iff `input_layout = output_layout` (string equality).
+      - `reinterpret` iff names differ AND total_sizes match.
+      - `copy` iff names differ AND total_sizes differ.
 
-**No `sorry`** — the theorem is closed. -/
+This is the Lean rendering of the soundness obligation for
+`src/ive/src/state_transform.rs::verify_transform`. **No `WF_Layout`
+conclusion** — Rust does not check it. -/
 theorem verify_transform_sound
-    (t : StateTransform)
-    (hverify : (verify_transform t).valid = true) :
-    WF_Layout t.in_layout
-    ∧ WF_Layout t.out_layout
-    ∧ (match t.kind with
-       | TransformKind.identity    => t.in_layout = t.out_layout
-       | TransformKind.reinterpret => t.in_layout.total_size = t.out_layout.total_size
-       | TransformKind.copy        => True) := by
-  -- `hverify` after `verify_transform` unfolds reduces to
-  -- `decide (verify_transform_spec t) = true`. The `Decidable` instance
-  -- is the constructive one above (no `Classical.propDecidable`).
-  unfold verify_transform at hverify
-  -- Bridge `(decide (verify_transform_spec t)) = true` to
-  -- `verify_transform_spec t` via `decide_eq_true_iff` (the `Iff`
-  -- form of `decide_eq_true_eq`).
-  have hspec : verify_transform_spec t :=
-    decide_eq_true_iff.mp hverify
-  -- `hspec : wf_layout_bool t.in_layout = true
-  --         ∧ wf_layout_bool t.out_layout = true
-  --         ∧ match t.kind with ...`
-  obtain ⟨h1, h2, h3⟩ := hspec
-  refine ⟨?_, ?_, ?_⟩
-  · -- `h1 : wf_layout_bool t.in_layout = true` → `WF_Layout t.in_layout`
-    -- via `wf_layout_bool_iff_wf_layout`.
-    exact (wf_layout_bool_iff_wf_layout t.in_layout).mp h1
-  · -- `h2 : wf_layout_bool t.out_layout = true` → `WF_Layout t.out_layout`.
-    exact (wf_layout_bool_iff_wf_layout t.out_layout).mp h2
-  · -- `h3 : match t.kind with ...` — same form as the goal's third
-    -- conjunct, so `exact h3` closes it directly. No case-split on
-    -- `t.kind` is needed (which would also work but is unnecessary).
-    exact h3
-
-/-- Corollary: `verify_transform` preserves layout well-formedness.
-This is the "no ill-formed layout slips through IVE's transform check"
-guarantee, mirroring the Rust-side contract that `verify_transform`
-rejects transforms whose `input_layout` or `output_layout` is not in
-the `HashMap<String, LayoutInfo>` of registered layouts.
-
-**No `sorry`** — the corollary follows directly from
-`verify_transform_sound`. -/
-theorem verify_transform_preserves_wf
-    (t : StateTransform)
-    (hverify : (verify_transform t).valid = true) :
-    WF_Layout t.in_layout ∧ WF_Layout t.out_layout := by
-  have h := verify_transform_sound t hverify
-  exact ⟨h.1, h.2.1⟩
+    (layouts : LayoutRegistry)
+    (input_layout output_layout : String)
+    (hverify : (verify_transform layouts input_layout output_layout).valid = true) :
+    (∃ in_info, layouts input_layout = some in_info)
+    ∧ (∃ out_info, layouts output_layout = some out_info)
+    ∧ ((input_layout = output_layout
+        ∧ (verify_transform layouts input_layout output_layout).transform_kind = TransformKind.identity)
+      ∨ (∃ in_info out_info,
+          layouts input_layout = some in_info
+          ∧ layouts output_layout = some out_info
+          ∧ input_layout ≠ output_layout
+          ∧ in_info.total_size = out_info.total_size
+          ∧ (verify_transform layouts input_layout output_layout).transform_kind = TransformKind.reinterpret)
+      ∨ (∃ in_info out_info,
+          layouts input_layout = some in_info
+          ∧ layouts output_layout = some out_info
+          ∧ input_layout ≠ output_layout
+          ∧ in_info.total_size ≠ out_info.total_size
+          ∧ (verify_transform layouts input_layout output_layout).transform_kind = TransformKind.copy)) := by
+  by_cases h_in_none : layouts input_layout = none
+  · -- layouts input_layout = none → verify_transform returns valid=false → contradiction.
+    have h_val : (verify_transform layouts input_layout output_layout).valid = false := by
+      unfold verify_transform
+      rw [h_in_none]
+    rw [h_val] at hverify
+    exact absurd hverify (by decide : ¬ (false = true))
+  · obtain ⟨in_info, h_in'⟩ := Option.ne_none_iff_exists.mp h_in_none
+    have h_in : layouts input_layout = some in_info := h_in'.symm
+    by_cases h_out_none : layouts output_layout = none
+    · have h_val : (verify_transform layouts input_layout output_layout).valid = false := by
+        unfold verify_transform
+        rw [h_in, h_out_none]
+      rw [h_val] at hverify
+      exact absurd hverify (by decide : ¬ (false = true))
+    · obtain ⟨out_info, h_out'⟩ := Option.ne_none_iff_exists.mp h_out_none
+      have h_out : layouts output_layout = some out_info := h_out'.symm
+      by_cases h_eq : input_layout = output_layout
+      · -- Identity branch.
+        have h_kind : (verify_transform layouts input_layout output_layout).transform_kind = TransformKind.identity := by
+          unfold verify_transform
+          simp only [h_in, h_out, if_pos h_eq]
+        refine ⟨⟨in_info, h_in⟩, ⟨out_info, h_out⟩, ?_⟩
+        left
+        exact ⟨h_eq, h_kind⟩
+      · by_cases h_size : in_info.total_size = out_info.total_size
+        · -- Reinterpret branch.
+          have h_kind : (verify_transform layouts input_layout output_layout).transform_kind = TransformKind.reinterpret := by
+            unfold verify_transform
+            simp only [h_in, h_out, if_neg h_eq, if_pos h_size]
+          refine ⟨⟨in_info, h_in⟩, ⟨out_info, h_out⟩, ?_⟩
+          right
+          left
+          exact ⟨in_info, out_info, h_in, h_out, h_eq, h_size, h_kind⟩
+        · -- Copy branch.
+          have h_kind : (verify_transform layouts input_layout output_layout).transform_kind = TransformKind.copy := by
+            unfold verify_transform
+            simp only [h_in, h_out, if_neg h_eq, if_neg h_size]
+          refine ⟨⟨in_info, h_in⟩, ⟨out_info, h_out⟩, ?_⟩
+          right
+          right
+          exact ⟨in_info, out_info, h_in, h_out, h_eq, h_size, h_kind⟩
 
 end PMT.IVE.Soundness
