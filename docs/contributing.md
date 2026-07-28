@@ -214,7 +214,7 @@ A minimal PMT test:
 
 layout Point = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     let q = state_new(Point);
     p.x = 10;
@@ -444,7 +444,7 @@ The 6-step recipe (full version in
 4. **Re-declare every layout you consume, byte-identically.** VUMA has no
    `import` statement yet. The `LayoutRegistry` catches drift at compile
    time. Copy-paste from the canonical source — do not paraphrase.
-5. **Write a `fn main() -> i32` self-test.** Every kernel module ends with a
+5. **Write a `transform main() -> i32` self-test.** Every kernel module ends with a
    self-test that exercises the module's API surface. Use the convention
    `if <check N fails> { return N; }` so a future CI failure pinpoints the
    broken check by exit code.
@@ -495,7 +495,7 @@ layout InodeTable = {
     // ...
 }
 
-fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -521,7 +521,7 @@ A canonical pair of helpers for u64-in-`[u8; N]`:
 
 ```vuma
 // Read 8 bytes from tbl.field at byte offset `off` as a little-endian u64.
-fn unpack_u64_le(buf: [u8; 1024], off: u32) -> u64 {
+transform unpack_u64_le(buf: [u8; 1024], off: u32) -> u64 {
     let v: u64 = 0;
     let i = 0;
     while i < 8 {
@@ -534,7 +534,7 @@ fn unpack_u64_le(buf: [u8; 1024], off: u32) -> u64 {
 }
 
 // Write u64 `val` to tbl.field at byte offset `off` as little-endian.
-fn pack_u64_le(buf: [u8; 1024], off: u32, val: u64) {
+transform pack_u64_le(buf: [u8; 1024], off: u32, val: u64) {
     let i = 0;
     while i < 8 {
         let sh = i * 8;
@@ -572,11 +572,11 @@ the full convention.
 
 ### 6.7 Self-test requirements
 
-Every `.vuma` file in `womb/kernel/` ends with a `fn main() -> i32`
+Every `.vuma` file in `womb/kernel/` ends with a `transform main() -> i32`
 self-test that exercises the module's API surface. The convention:
 
 ```vuma
-fn main() -> i32 {
+transform main() -> i32 {
     // Test 1: <first check>
     if <check1 fails> { return 1; }
     // Test 2: <second check>
@@ -653,22 +653,22 @@ that populates it in place.
 
 ```vuma
 // DON'T (return-style — caller's field access silently returns 0):
-fn make_console() -> State<Console> {
+transform make_console() -> State<Console> {
     let c = state_new(Console);
     c.len = 0;
     return c;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     let c = make_console();
     c.len = c.len + 1;   // WARNING: unsupported FieldAccess
     return c.len as i32; // returns 0, not 1
 }
 
 // DO (init-style — caller's field access works):
-fn console_init(c: State<Console>) {
+transform console_init(c: State<Console>) {
     c.len = 0;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     let c = state_new(Console);
     console_init(c);
     c.len = c.len + 1;   // OK
@@ -736,10 +736,10 @@ callee that expects a raw pointer:
 
 ```vuma
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 layout Console = { buf: [u8; 256], len: u32 }
-fn console_flush(c: State<Console>) {
+transform console_flush(c: State<Console>) {
     let base = c as Address;
     let _n = write(1, base, c.len as i64);
     c.len = 0;
@@ -800,7 +800,7 @@ allocation sites).
 
 Unlike C, VUMA allows forward references to functions: a function can call
 another function declared later in the file. The parser does a two-pass scan
-(pass 1 collects all fn signatures into the symbol table, pass 2 resolves
+(pass 1 collects all transform signatures into the symbol table, pass 2 resolves
 call sites). Layouts, however, MUST be declared before the first function
 that uses them — the layout registry is single-pass.
 
@@ -823,7 +823,7 @@ that uses them — the layout registry is single-pass.
 7. No external dependencies added (`Cargo.lock` contains only `vuma-*`).
 8. New public API has a `///` doc comment and, where reasonable, a test.
 9. Bug-fix PRs include a regression test that fails before the fix.
-10. New kernel modules end with a `fn main() -> i32` self-test.
+10. New kernel modules end with a `transform main() -> i32` self-test.
 
 ### What CI runs
 

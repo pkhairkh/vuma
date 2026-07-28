@@ -180,18 +180,18 @@ declares:
 
 ```
     extern "C" {
-        fn write(fd: i64, buf: Address, count: i64) -> i64;
-        fn read(fd: i64, buf: Address, count: i64) -> i64;
-        fn exit(code: i64);
-        fn getpid() -> i64;
-        fn fork() -> i64;
-        fn waitpid(pid: i64, status: Address, options: i64) -> i64;
-        fn mmap(addr: Address, length: u64, prot: i32, flags: i32,
+        transform write(fd: i64, buf: Address, count: i64) -> i64;
+        transform read(fd: i64, buf: Address, count: i64) -> i64;
+        transform exit(code: i64);
+        transform getpid() -> i64;
+        transform fork() -> i64;
+        transform waitpid(pid: i64, status: Address, options: i64) -> i64;
+        transform mmap(addr: Address, length: u64, prot: i32, flags: i32,
                 fd: i32, offset: i64) -> Address;
-        fn munmap(addr: Address, length: u64) -> i64;
-        fn mremap(...) -> Address;
-        fn __vuma_argc() -> i64;
-        fn __vuma_argv() -> Address;
+        transform munmap(addr: Address, length: u64) -> i64;
+        transform mremap(...) -> Address;
+        transform __vuma_argc() -> i64;
+        transform __vuma_argv() -> Address;
     }
 ```
 
@@ -255,11 +255,11 @@ trap_exit pops. It declares:
 
 ```
     extern "C" {
-        fn idt_load(idt_ptr: Address);
-        fn irq_mask(irq: u8);
-        fn irq_unmask(irq: u8);
-        fn pic_eoi(irq: u8);
-        fn cr2_read() -> u64;
+        transform idt_load(idt_ptr: Address);
+        transform irq_mask(irq: u8);
+        transform irq_unmask(irq: u8);
+        transform pic_eoi(irq: u8);
+        transform cr2_read() -> u64;
     }
 ```
 
@@ -312,8 +312,8 @@ The extern declarations carry `#[borrow]`:
 
 ```
     extern "C" {
-        #[borrow] fn context_switch(prev: State<Task>, next: State<Task>);
-        fn cr3_write(val: u64);
+        #[borrow] transform context_switch(prev: State<Task>, next: State<Task>);
+        transform cr3_write(val: u64);
     }
 ```
 
@@ -338,12 +338,12 @@ the PTE is a single u64, just the bit-layout helpers operating on raw u64)
 and the field-access helpers:
 
 ```
-    fn pte_make(paddr: u64, flags: u64) -> u64;
-    fn pte_addr(pte: u64) -> u64;
-    fn pte_present(pte: u64) -> u8;
-    fn pte_writable(pte: u64) -> u8;
-    fn pte_user(pte: u64) -> u8;
-    fn pte_no_exec(pte: u64) -> u8;
+    transform pte_make(paddr: u64, flags: u64) -> u64;
+    transform pte_addr(pte: u64) -> u64;
+    transform pte_present(pte: u64) -> u8;
+    transform pte_writable(pte: u64) -> u8;
+    transform pte_user(pte: u64) -> u8;
+    transform pte_no_exec(pte: u64) -> u8;
 ```
 
 **Worked example (x86_64):** see `womb/kernel/arch/x86_64/pt.vuma`. The PTE
@@ -396,12 +396,12 @@ And declares:
 
 ```
     extern "C" {
-        #[borrow] fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
-        #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
-        fn tlb_flush();
-        fn invlpg(vaddr: u64);
-        fn cr3_read() -> u64;
-        fn cr3_write(val: u64);
+        #[borrow] transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+        #[borrow] transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+        transform tlb_flush();
+        transform invlpg(vaddr: u64);
+        transform cr3_read() -> u64;
+        transform cr3_write(val: u64);
     }
 ```
 
@@ -1016,12 +1016,12 @@ cannot "construct" a state inline — every state must be allocated with
 
 ```
     // DON'T (parse error — VUMA has no struct literal):
-    fn make_task(pid: u32) -> State<Task> {
+    transform make_task(pid: u32) -> State<Task> {
         return Task { pid: pid, state: 1, ... };
     }
 
     // DO (allocate-then-populate — init-style API):
-    fn make_task(tbl: State<ProcessTable>, pid: u32) {
+    transform make_task(tbl: State<ProcessTable>, pid: u32) {
         let idx = task_alloc(tbl);
         pt_set_pid(tbl, idx, pid);
         pt_set_state(tbl, idx, 1);
@@ -1089,16 +1089,16 @@ the extern declares `#[borrow]`:
 ```
     // DON'T (forgets #[borrow] — verifier failure on next pt access):
     extern "C" {
-        fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+        transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
     }
 
     // DO (#[borrow] keeps pt alive after the call):
     extern "C" {
-        #[borrow] fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+        #[borrow] transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
     }
 ```
 
-Only extern "C" calls need `#[borrow]` — regular VUMA fn calls track State
+Only extern "C" calls need `#[borrow]` — regular VUMA transform calls track State
 lifetimes automatically.
 
 ### Mixing positive and negative errno conventions
@@ -1147,7 +1147,7 @@ Before declaring the port complete, tick every box:
       `irq_unmask` / `pic_eoi` / `cr2_read` (or arch equivalents).
       `trap_frame_init` zeroes all fields. IVE Pass, self-test exits 0.
 - [ ] `switch.vuma` declares `Task` saved-register subset +
-      `#[borrow] fn context_switch(prev, next)` + address-space-switch
+      `#[borrow] transform context_switch(prev, next)` + address-space-switch
       extern. `task_init_for_switch` populates `rip`/`rsp`. IVE Pass,
       self-test exits 0.
 - [ ] `pt.vuma` declares `pte_make`/`pte_addr`/`pte_present`/`pte_writable`/

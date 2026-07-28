@@ -120,7 +120,7 @@ while IFS= read -r f; do
     if [[ "$rel" == "core.vuma" ]]; then
         continue
     fi
-    fn_count=$(grep -c '^fn ' "$f" 2>/dev/null || echo 0)
+    fn_count=$(grep -c '^transform ' "$f" 2>/dev/null || echo 0)
     line_count=$(wc -l < "$f" 2>/dev/null || echo 0)
     echo "| $rel | $fn_count | $line_count |" | tee -a "$REPORT"
 done < <(find "$WOMB_DIR" -name "*.vuma" | sort)

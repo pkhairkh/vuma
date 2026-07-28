@@ -137,19 +137,19 @@ def str_to_vuma_bytes(s):
 def gen_sha1_test(name, input_str, expected_hex):
     return f'''// Real KAT test: SHA-1("{input_str}")
 // Expected output (hex): {expected_hex}
-extern "C" {{ fn write(fd: i64, buf: Address, count: i64) -> i64; }}
+extern "C" {{ transform write(fd: i64, buf: Address, count: i64) -> i64; }}
 const MASK32: u32 = 4294967295;
-fn rotl32(x: u32, n: u32) -> u32 {{ return ((x << n) | (x >> (32 - n))) & MASK32; }}
-fn load_u32_be(ptr: Address, off: u32) -> u32 {{
+transform rotl32(x: u32, n: u32) -> u32 {{ return ((x << n) | (x >> (32 - n))) & MASK32; }}
+transform load_u32_be(ptr: Address, off: u32) -> u32 {{
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }}
-fn store_u32_be(ptr: Address, off: u32, val: u32) {{
+transform store_u32_be(ptr: Address, off: u32, val: u32) {{
     *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
 }}
-fn main() -> i32 {{
+transform main() -> i32 {{
     ctx = allocate(20);
     store_u32_be(ctx, 0, 1732584193);
     store_u32_be(ctx, 4, 4023233417);
@@ -205,19 +205,19 @@ fn main() -> i32 {{
 def gen_sha256_test(name, input_str, expected_hex):
     return f'''// Real KAT test: SHA-256("{input_str}")
 // Expected output (hex): {expected_hex}
-extern "C" {{ fn write(fd: i64, buf: Address, count: i64) -> i64; }}
+extern "C" {{ transform write(fd: i64, buf: Address, count: i64) -> i64; }}
 const MASK32: u32 = 4294967295;
-fn rotr32(x: u32, n: u32) -> u32 {{ return ((x >> n) | (x << (32 - n))) & MASK32; }}
-fn load_u32_be(ptr: Address, off: u32) -> u32 {{
+transform rotr32(x: u32, n: u32) -> u32 {{ return ((x >> n) | (x << (32 - n))) & MASK32; }}
+transform load_u32_be(ptr: Address, off: u32) -> u32 {{
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }}
-fn store_u32_be(ptr: Address, off: u32, val: u32) {{
+transform store_u32_be(ptr: Address, off: u32, val: u32) {{
     *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
 }}
-fn sha256_k(idx: u32) -> u32 {{
+transform sha256_k(idx: u32) -> u32 {{
     if idx == 0 {{ return 1116352408; }} if idx == 1 {{ return 1899447441; }}
     if idx == 2 {{ return 3049323471; }} if idx == 3 {{ return 3921009573; }}
     if idx == 4 {{ return 961987163; }} if idx == 5 {{ return 1508970993; }}
@@ -252,7 +252,7 @@ fn sha256_k(idx: u32) -> u32 {{
     if idx == 62 {{ return 3204031479; }} if idx == 63 {{ return 3329325298; }}
     return 0;
 }}
-fn sha256_compress(state: Address, block: Address) {{
+transform sha256_compress(state: Address, block: Address) {{
     w = allocate(256);
     i: u32 = 0;
     while i < 16 {{ store_u32_be(w, i*4, load_u32_be(block, i*4)); i = i + 1; }}
@@ -287,7 +287,7 @@ fn sha256_compress(state: Address, block: Address) {{
     store_u32_be(state,24,(load_u32_be(state,24)+g)&MASK32);
     store_u32_be(state,28,(load_u32_be(state,28)+h)&MASK32);
 }}
-fn main() -> i32 {{
+transform main() -> i32 {{
     state = allocate(32);
     store_u32_be(state,0,1779033703); store_u32_be(state,4,3144134277);
     store_u32_be(state,8,1013904242); store_u32_be(state,12,2773480762);
@@ -316,14 +316,14 @@ fn main() -> i32 {{
 def gen_crc32_test(name, input_str, expected_hex):
     return f'''// Real KAT test: CRC32("{input_str}")
 // Expected output (hex): {expected_hex}
-extern "C" {{ fn write(fd: i64, buf: Address, count: i64) -> i64; }}
+extern "C" {{ transform write(fd: i64, buf: Address, count: i64) -> i64; }}
 const POLY: u32 = 3988292384;
-fn crc32_table_entry(idx: u32) -> u32 {{
+transform crc32_table_entry(idx: u32) -> u32 {{
     crc: u32 = idx; i: u32 = 0;
     while i < 8 {{ if (crc&1)==1 {{ crc=(crc>>1)^POLY; }} else {{ crc=crc>>1; }} i=i+1; }}
     return crc;
 }}
-fn main() -> i32 {{
+transform main() -> i32 {{
     table = allocate(1024);
     i: u32 = 0;
     while i < 256 {{
@@ -356,8 +356,8 @@ def gen_base64_test(name, input_str, expected_hex):
     expected_ascii = bytes.fromhex(expected_hex).decode('ascii', errors='replace')
     return f'''// Real KAT test: Base64("{input_str}") = "{expected_ascii}"
 // Expected output (hex): {expected_hex}
-extern "C" {{ fn write(fd: i64, buf: Address, count: i64) -> i64; }}
-fn b64_char(idx: u32) -> u32 {{
+extern "C" {{ transform write(fd: i64, buf: Address, count: i64) -> i64; }}
+transform b64_char(idx: u32) -> u32 {{
     if idx < 26 {{ return idx + 65; }}
     if idx < 52 {{ return idx + 71; }}
     if idx < 62 {{ return idx - 4; }}
@@ -365,7 +365,7 @@ fn b64_char(idx: u32) -> u32 {{
     if idx == 63 {{ return 47; }}
     return 61;
 }}
-fn main() -> i32 {{
+transform main() -> i32 {{
     msg_len: u32 = {len(input_str)};
     {str_to_vuma_bytes(input_str) if input_str else "msg = allocate(1); *(msg + 0) = 0;"}
     out_len: u32 = ((msg_len + 2) / 3) * 4;
@@ -418,23 +418,23 @@ def gen_md5_test(name, input_str, expected_hex):
     
     return f'''// Real KAT test: MD5("{input_str}")
 // Expected output (hex): {expected_hex}
-extern "C" {{ fn write(fd: i64, buf: Address, count: i64) -> i64; }}
+extern "C" {{ transform write(fd: i64, buf: Address, count: i64) -> i64; }}
 const MASK32: u32 = 4294967295;
-fn rotl32(x: u32, n: u32) -> u32 {{ return ((x << n) | (x >> (32 - n))) & MASK32; }}
-fn load_u32_le(ptr: Address, off: u32) -> u32 {{
+transform rotl32(x: u32, n: u32) -> u32 {{ return ((x << n) | (x >> (32 - n))) & MASK32; }}
+transform load_u32_le(ptr: Address, off: u32) -> u32 {{
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }}
-fn store_u32_le(ptr: Address, off: u32, val: u32) {{
+transform store_u32_le(ptr: Address, off: u32, val: u32) {{
     *(ptr + off) = val & 255; *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255; *(ptr + off + 3) = (val >> 24) & 255;
 }}
-fn md5_k(idx: u32) -> u32 {{
+transform md5_k(idx: u32) -> u32 {{
 {k_code}
     return 0;
 }}
-fn md5_s(idx: u32) -> u32 {{
+transform md5_s(idx: u32) -> u32 {{
     if idx == 0 {{ return 7; }} if idx == 1 {{ return 12; }} if idx == 2 {{ return 17; }} if idx == 3 {{ return 22; }}
     if idx == 4 {{ return 7; }} if idx == 5 {{ return 12; }} if idx == 6 {{ return 17; }} if idx == 7 {{ return 22; }}
     if idx == 8 {{ return 7; }} if idx == 9 {{ return 12; }} if idx == 10 {{ return 17; }} if idx == 11 {{ return 22; }}
@@ -453,7 +453,7 @@ fn md5_s(idx: u32) -> u32 {{
     if idx == 60 {{ return 6; }} if idx == 61 {{ return 10; }} if idx == 62 {{ return 15; }} if idx == 63 {{ return 21; }}
     return 0;
 }}
-fn main() -> i32 {{
+transform main() -> i32 {{
     state = allocate(16);
     store_u32_le(state, 0, 1732584193);
     store_u32_le(state, 4, 4023233417);
@@ -504,14 +504,14 @@ def gen_chacha20_test():
     return r'''// Real KAT test: ChaCha20 block (RFC 8439 §2.3.2)
 // Expected: first 64 bytes of keystream
 // 76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 const MASK32: u32 = 4294967295;
-fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
-fn store_u32_le(ptr: Address, off: u32, val: u32) {
+transform rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+transform store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255; *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255; *(ptr + off + 3) = (val >> 24) & 255;
 }
-fn qr(a: u32, b: u32, c: u32, d: u32, out: Address) {
+transform qr(a: u32, b: u32, c: u32, d: u32, out: Address) {
     a = (a + b) & MASK32; d = d ^ a; d = rotl32(d, 16);
     c = (c + d) & MASK32; b = b ^ c; b = rotl32(b, 12);
     a = (a + b) & MASK32; d = d ^ a; d = rotl32(d, 8);
@@ -519,7 +519,7 @@ fn qr(a: u32, b: u32, c: u32, d: u32, out: Address) {
     store_u32_le(out, 0, a); store_u32_le(out, 4, b);
     store_u32_le(out, 8, c); store_u32_le(out, 12, d);
 }
-fn main() -> i32 {
+transform main() -> i32 {
     // State: "expand 32-byte k" || key(8) || counter(1) || nonce(3)
     state = allocate(64);
     store_u32_le(state, 0, 1634760805);  // "expa"

@@ -88,7 +88,7 @@ re-declares it from the canonical source).
 │                    switch.vuma + pt.vuma (4 files each — no            │
 │                    trampoline.vuma, no bootinfo.vuma)                  │
 │  ───────────────────────────────────────────────────────────────────── │
-│    extern "C" { fn write(...); fn mmap(...); fn context_switch(...); } │
+│    extern "C" { transform write(...); transform mmap(...); transform context_switch(...); } │
 │    Hosted: pre-registered Linux-syscall stubs in x86_64 backend.       │
 │    Bare-metal (K11+): real asm stubs registered in backend.            │
 │    Unregistered externs → __ffi_fallback_stub (xor eax,eax; ret).      │
@@ -139,13 +139,13 @@ per subsystem to `kmain()`.
                            │  populates argc/argv in BSS slot
                            ▼
                 ┌──────────────────────┐
-                │  fn main() -> i32    │   (womb/kernel/kernel.vuma)
+                │  transform main() -> i32    │   (womb/kernel/kernel.vuma)
                 │  return kmain();     │
                 └──────────┬───────────┘
                            │
                            ▼
                 ┌──────────────────────┐
-                │  fn kmain() -> i32   │   (womb/kernel/kernel.vuma —
+                │  transform kmain() -> i32   │   (womb/kernel/kernel.vuma —
                 │  c ← console_init()  │    inlined from the deleted
                 │  kmain_print_banner  │    kmain.vuma during CLEANUP-1)
                 │  return 0            │
@@ -247,7 +247,7 @@ subsystem. K11+ will eventually flip the codegen to propagate `State` through
 returns; until then, init-style is the canonical kernel convention.
 
 A historical data point: K3e's `syscall_args_from_frame` was originally
-written in return-style (`fn syscall_args_from_frame(tf) -> State<SyscallArgs>`).
+written in return-style (`transform syscall_args_from_frame(tf) -> State<SyscallArgs>`).
 The codegen emitted four `WARNING: unsupported FieldAccess (not state-typed)`
 diagnostics from `flatten_expr`, and the self-test exited 1 (the caller's
 `args.nr` access silently returned 0). The fix was to flip to init-style
@@ -268,7 +268,7 @@ per-program arena `___pmt_buffer`:
                   │    [ptr+0]   base address (== ptr itself)  │
                   │    [ptr+8]   current offset                │
                   │    [ptr+16]  capacity  (BootInfo.mem_size) │
-                  │    [ptr+24]  overflow-handler fn ptr       │
+                  │    [ptr+24]  overflow-handler transform ptr       │
                   ├────────────────────────────────────────────┤
                   │  State<Console>           (260 B)          │
                   ├────────────────────────────────────────────┤
@@ -377,12 +377,12 @@ compile time (the `LayoutRegistry` rejects conflicting field offsets).
 Per-arch `pt.vuma` exposes a uniform API:
 
 ```
-    fn pte_make(paddr: u64, flags: u64) -> u64;
-    fn pte_addr(pte: u64) -> u64;
-    fn pte_present(pte: u64) -> u8;   // x86_64 — "valid" on aarch64/riscv64
-    fn pte_writable(pte: u64) -> u8;  // x86_64 + riscv64
-    fn pte_user(pte: u64) -> u8;
-    fn pte_no_exec(pte: u64) -> u8;   // x86_64 + aarch64
+    transform pte_make(paddr: u64, flags: u64) -> u64;
+    transform pte_addr(pte: u64) -> u64;
+    transform pte_present(pte: u64) -> u8;   // x86_64 — "valid" on aarch64/riscv64
+    transform pte_writable(pte: u64) -> u8;  // x86_64 + riscv64
+    transform pte_user(pte: u64) -> u8;
+    transform pte_no_exec(pte: u64) -> u8;   // x86_64 + aarch64
 ```
 
 (Note: the field-name vocabulary differs slightly per arch — aarch64 exposes
@@ -406,7 +406,7 @@ bare-metal port you'd add `boot.S` instead. See
 
 The kernel's FFI surface is concentrated in `womb/kernel/arch/x86_64/trampoline.vuma`
 (hosted-mode syscalls) and the per-arch `*_trampoline.vuma` siblings. Every
-extern is declared as `extern "C" { fn name(args) -> ret; }`. The codegen
+extern is declared as `extern "C" { transform name(args) -> ret; }`. The codegen
 lowers each call site per the target ABI (SysV AMD64 on x86_64, AAPCS on
 aarch64, RV64GC on riscv64).
 
@@ -416,9 +416,9 @@ There are three idioms:
 
 ```
     extern "C" {
-        fn write(fd: i64, buf: Address, count: i64) -> i64;
-        fn exit(code: i64);
-        fn mmap(addr: Address, length: u64, prot: i32, flags: i32,
+        transform write(fd: i64, buf: Address, count: i64) -> i64;
+        transform exit(code: i64);
+        transform mmap(addr: Address, length: u64, prot: i32, flags: i32,
                 fd: i32, offset: i64) -> Address;
     }
 ```
@@ -434,9 +434,9 @@ NOT the asm-generic numbers; see §15 below). They run on the host Linux kernel.
 
 ```
     extern "C" {
-        fn halt();
-        fn wfi();
-        fn aesni_encrypt_block(key: Address, in: Address, out: Address);
+        transform halt();
+        transform wfi();
+        transform aesni_encrypt_block(key: Address, in: Address, out: Address);
     }
 ```
 
@@ -450,10 +450,10 @@ the backend's `build_runtime_syscall_stubs`.
 
 ```
     extern "C" {
-        fn write(fd: i64, buf: Address, count: i64) -> i64;
+        transform write(fd: i64, buf: Address, count: i64) -> i64;
     }
     layout Console = { buf: [u8; 256], len: u32 }
-    fn console_flush(c: State<Console>) {
+    transform console_flush(c: State<Console>) {
         let base = c as Address;
         let _n = write(1, base, c.len as i64);
         c.len = 0;
@@ -471,8 +471,8 @@ I/O traverses this one cast.
 
 ```
     extern "C" {
-        #[borrow] fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
-        #[borrow] fn context_switch(prev: State<Task>, next: State<Task>);
+        #[borrow] transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+        #[borrow] transform context_switch(prev: State<Task>, next: State<Task>);
     }
 ```
 
@@ -970,7 +970,7 @@ array** with pack/unpack helpers:
         ...
     }
 
-    fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+    transform inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
         let off = idx * 8;
         let v: u64 = 0;
         let i = 0;
@@ -1004,14 +1004,14 @@ and owns it).
 
 ```
     // DON'T (transform-on-local-state — sometimes trips verifier):
-    fn console_flush_local() {
+    transform console_flush_local() {
         let c = state_new(Console);
         let base = c as Address;       // transform on local State — risky
         let _n = write(1, base, c.len as i64);
     }
 
     // DO (transform-on-parameter — always safe):
-    fn console_flush(c: State<Console>) {
+    transform console_flush(c: State<Console>) {
         let base = c as Address;       // transform on parameter — OK
         let _n = write(1, base, c.len as i64);
         c.len = 0;
@@ -1036,12 +1036,12 @@ populated field-by-field. There is no way to "construct" a state inline:
 
 ```
     // DON'T (parse error — VUMA has no struct literal):
-    fn make_task(pid: u32) -> State<Task> {
+    transform make_task(pid: u32) -> State<Task> {
         return Task { pid: pid, state: 1, ... };
     }
 
     // DO (allocate-then-populate):
-    fn make_task(tbl: State<ProcessTable>, pid: u32) {
+    transform make_task(tbl: State<ProcessTable>, pid: u32) {
         let idx = task_alloc(tbl);
         pt_set_pid(tbl, idx, pid);
         pt_set_state(tbl, idx, 1);
@@ -1057,7 +1057,7 @@ allocation sites).
 
 Unlike C, VUMA allows forward references to functions: a function can call
 another function declared later in the file. The parser does a two-pass scan
-(pass 1 collects all fn signatures into the symbol table, pass 2 resolves
+(pass 1 collects all transform signatures into the symbol table, pass 2 resolves
 call sites). This is verified by `syscall/dispatch.vuma`'s self-test, which
 calls `syscall_table_set` before it is declared. Layouts, however, MUST be
 declared before the first function that uses them — the layout registry is
@@ -1287,7 +1287,7 @@ the order the codegen emits Alloc nodes during the SCG→IR lowering pass).
    arena_ptr + 0    base address (== arena_ptr itself)         8 B
    arena_ptr + 8    current bump offset                        8 B
    arena_ptr + 16   capacity  (BootInfo.mem_size = 16777216)   8 B
-   arena_ptr + 24   overflow-handler fn ptr                    8 B
+   arena_ptr + 24   overflow-handler transform ptr                    8 B
    ──────────────── ───────────────────────────────────────── ────────
    arena_ptr + 32   State<Console>          (console_init)     260 B
                     ├ buf: [u8; 256]                           256 B
@@ -1562,7 +1562,7 @@ specific expected exit codes, organized by the wave that introduced them:
         arithmetic/          arithmetic primitives
         bitwise/             bitwise ops
         control_flow/        if/while/for
-        functions/           fn calls + recursion
+        functions/           transform calls + recursion
         structs/             layout field access
         complex_stores/      multi-field stores
         concurrency/         (placeholder for K8 SMP tests)
@@ -1572,7 +1572,7 @@ specific expected exit codes, organized by the wave that introduced them:
         kernel_crypto/       sha256 KAT test
         linked_structures/   linked list / tree
         memory/              state_new + field access
-        multi_function/      cross-fn calls
+        multi_function/      cross-transform calls
         nested_loops/        nested loop nests
         pointers/            (no real pointer tests — PMT-forbidden)
         u32_arith/           u32 arithmetic
@@ -1591,11 +1591,11 @@ Run them all:
 
 ### 16.4 Per-module self-tests
 
-Every `.vuma` file in `womb/kernel/` ends with a `fn main() -> i32` self-test
+Every `.vuma` file in `womb/kernel/` ends with a `transform main() -> i32` self-test
 that exercises the module's API surface. The convention is:
 
 ```
-    fn main() -> i32 {
+    transform main() -> i32 {
         // Test 1: <first check>
         if <check1 fails> { return 1; }
         // Test 2: <second check>
