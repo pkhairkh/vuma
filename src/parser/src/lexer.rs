@@ -391,6 +391,19 @@ pub enum TokenKind {
     CtEq,
     /// `syscall` — direct syscall intrinsic
     Syscall,
+    /// `requires` — precondition contract clause (Pillar VI.1).
+    /// Appears between a `transform` signature and its body:
+    /// `transform foo(...) requires <expr> ensures <expr> { ... }`.
+    Requires,
+    /// `ensures` — postcondition contract clause (Pillar VI.1).
+    Ensures,
+    /// `prove` — proof-obligation block (Pillar II.3), replacing `unsafe`.
+    /// Syntax: `prove { require <expr>; <body> }`.
+    Prove,
+    /// `require` — proof obligation assertion inside a `prove` block
+    /// (Pillar II.3). Only a keyword inside `prove { … }`; outside, it
+    /// is an ordinary identifier.
+    Require,
     /// Format string literal: `f"..."`
     FormatStr,
     /// Rust-style macro invocation identifier ending with `!`
@@ -558,6 +571,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::CtSelect => write!(f, "'ct_select'"),
             TokenKind::CtEq => write!(f, "'ct_eq'"),
             TokenKind::Syscall => write!(f, "'syscall'"),
+            TokenKind::Requires => write!(f, "'requires'"),
+            TokenKind::Ensures => write!(f, "'ensures'"),
+            TokenKind::Prove => write!(f, "'prove'"),
+            TokenKind::Require => write!(f, "'require'"),
             TokenKind::FormatStr => write!(f, "format string"),
             TokenKind::MacroIdent => write!(f, "macro identifier"),
 
@@ -690,6 +707,12 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "ct_select" => Some(TokenKind::CtSelect),
         "ct_eq" => Some(TokenKind::CtEq),
         "syscall" => Some(TokenKind::Syscall),
+
+        // Source-level contracts (Pillar VI.1) + proof blocks (Pillar II.3)
+        "requires" => Some(TokenKind::Requires),
+        "ensures" => Some(TokenKind::Ensures),
+        "prove" => Some(TokenKind::Prove),
+        "require" => Some(TokenKind::Require),
 
         _ => None,
     }

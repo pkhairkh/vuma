@@ -480,6 +480,12 @@ impl<'src> Parser<'src> {
             None
         };
 
+        // Optional source-level contract (Pillar VI.1):
+        // `requires <expr> ensures <expr>` may appear in any order and
+        // any number of times between the where-clause and the body.
+        // Each clause contributes one expression to the appropriate Vec.
+        let contract = self.parse_contract()?;
+
         // For trait methods, we may have `;` instead of a body.
         // We create a synthetic empty block for required method signatures.
         let body = if self.at(TokenKind::LBrace) {
@@ -511,6 +517,7 @@ impl<'src> Parser<'src> {
             body,
             is_async,
             where_clause,
+            contract,
             span: Span::new(start, end),
         })
     }
@@ -648,6 +655,11 @@ impl<'src> Parser<'src> {
             None
         };
 
+        // Optional source-level contract (Pillar VI.1):
+        // `requires <expr> ensures <expr>` may appear in any order and
+        // any number of times between the signature and the body.
+        let contract = self.parse_contract()?;
+
         let body_block = self.parse_block()?;
 
         Ok(TransformDef {
@@ -655,6 +667,7 @@ impl<'src> Parser<'src> {
             params,
             return_type,
             body: body_block.statements,
+            contract,
             span: Span::new(start, self.current.span.end),
         })
     }
@@ -775,6 +788,47 @@ impl<'src> Parser<'src> {
             }
         }
         Ok(WhereClause { predicates })
+    }
+
+    /// Parse an optional source-level contract (Pillar VI.1).
+    ///
+    /// Appears between a `transform` signature (and optional where-clause)
+    /// and its body:
+    ///
+    /// ```text
+    /// transform foo(a: u32) -> u32
+    ///     requires a > 0
+    ///     ensures result > 0
+    /// { ... }
+    /// ```
+    ///
+    /// `requires` and `ensures` clauses may appear in any order and may
+    /// repeat; each occurrence contributes one expression to the
+    /// corresponding Vec. Returns `None` if neither keyword is present
+    /// (a contract-less transform). Stops at the first token that is not
+    /// `requires` or `ensures` (typically `{` for the body, or `;` for
+    /// a trait-method signature).
+    fn parse_contract(&mut self) -> Result<Option<Contract>, ParseError> {
+        let mut requires: Vec<Expr> = Vec::new();
+        let mut ensures: Vec<Expr> = Vec::new();
+        loop {
+            match self.current.kind {
+                TokenKind::Requires => {
+                    self.advance(); // consume 'requires'
+                    requires.push(self.parse_expr()?);
+                }
+                TokenKind::Ensures => {
+                    self.advance(); // consume 'ensures'
+                    ensures.push(self.parse_expr()?);
+                }
+                _ => break,
+            }
+        }
+        if requires.is_empty() && ensures.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Contract { requires, ensures }))
+        }
     }
 
     /// Parse generic parameter list `<T, U, ...>` with optional bounds.
@@ -3447,6 +3501,11 @@ impl<'src> Parser<'src> {
             // Used in `let x = if cond { a } else { b };`.
             TokenKind::If => self.parse_if_expr(),
 
+            // Proof-obligation block (Pillar II.3): `prove { require <expr>; <body> }`.
+            // Replaces `unsafe { … }`: the body executes only after every
+            // `require` clause is provably true at this program point.
+            TokenKind::Prove => self.parse_prove_block(),
+
             _ => Err(ParseError::unexpected(
                 format!("expected expression, found {}", self.current.kind),
                 self.current.span,
@@ -3496,6 +3555,53 @@ impl<'src> Parser<'src> {
             condition: Box::new(condition),
             then_block,
             else_block,
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Parse a proof-obligation block (Pillar II.3):
+    /// `prove { require <expr>; require <expr>; <body> }`.
+    ///
+    /// Replaces `unsafe { … }`. The `require` clauses are proof
+    /// obligations (each terminated by `;`) that the verifier (IVE)
+    /// must discharge before the body may execute. After the last
+    /// `require;`, the remaining expression is the body (the value of
+    /// the `prove` block). A `prove` block with zero `require` clauses
+    /// is permitted (equivalent to its body alone, but still carries
+    /// the `prove` marker for verifier bookkeeping).
+    ///
+    /// `require` is a keyword inside `prove { … }`; outside, it lexes
+    /// as a plain identifier (the lexer always emits `TokenKind::Require`,
+    /// but the parser only treats it as the proof-obligation keyword in
+    /// this position).
+    fn parse_prove_block(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current.span.start;
+        self.expect(TokenKind::Prove)?;
+        self.expect(TokenKind::LBrace)?;
+
+        // Zero or more `require <expr>;` clauses.
+        let mut requirements: Vec<Expr> = Vec::new();
+        while self.at(TokenKind::Require) {
+            self.advance(); // consume 'require'
+            let req = self.parse_expr()?;
+            self.expect(TokenKind::Semicolon)?;
+            requirements.push(req);
+        }
+
+        // The body is an expression. It is the value of the prove block.
+        // `cond { body }`-style ambiguity does NOT arise here because the
+        // body expression is the last form inside `prove { … }` and is
+        // followed by `}`, not `{` — but we still wrap with
+        // `with_no_struct_literal` to prevent `<expr> {` from being
+        // misparsed as a struct literal when the body itself is a
+        // block-bearing construct.
+        let body = self.with_no_struct_literal(|p| p.parse_expr())?;
+
+        self.expect(TokenKind::RBrace)?;
+        let end = self.current.span.end;
+        Ok(Expr::ProveBlock {
+            requirements,
+            body: Box::new(body),
             span: Span::new(start, end),
         })
     }
@@ -4393,6 +4499,7 @@ impl Expr {
             Expr::ArenaFree { span, .. } => *span,
             Expr::IfExpr { span, .. } => *span,
             Expr::Try { span, .. } => *span,
+            Expr::ProveBlock { span, .. } => *span,
         }
     }
 }

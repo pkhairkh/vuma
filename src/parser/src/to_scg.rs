@@ -827,6 +827,7 @@ impl AstToScg {
                     },
                     is_async: false,
                     where_clause: None,
+                    contract: td.contract.clone(),
                     span: td.span,
                 };
                 self.convert_fn_def(&fn_def, scg)
@@ -3748,6 +3749,19 @@ impl AstToScg {
             Expr::Try { expr, .. } => {
                 self.collect_uses(expr, uses);
             }
+            // `prove { require <expr>; …; <body> }` — uses come from
+            // each `require` clause and from the body expression.
+            // (Pillar II.3 — proof-obligation block, replaces `unsafe`.)
+            Expr::ProveBlock {
+                requirements,
+                body,
+                ..
+            } => {
+                for r in requirements {
+                    self.collect_uses(r, uses);
+                }
+                self.collect_uses(body, uses);
+            }
         }
     }
 
@@ -3954,6 +3968,9 @@ impl AstToScg {
             // into the inner `Result<T,E>` expression — precise `T` recovery
             // requires type information not yet tracked here).
             Expr::Try { expr, .. } => self.infer_expr_type(expr),
+            // `prove { …; <body> }` — the proof-obligation block's value
+            // is the value of its body. (Pillar II.3; replaces `unsafe`.)
+            Expr::ProveBlock { body, .. } => self.infer_expr_type(body),
         }
     }
 
@@ -4209,6 +4226,22 @@ impl AstToScg {
                 )
             }
             Expr::Try { expr, .. } => format!("{}?", self.expr_to_string(expr)),
+            // `prove { require <expr>; …; <body> }` (Pillar II.3)
+            Expr::ProveBlock {
+                requirements,
+                body,
+                ..
+            } => {
+                let reqs: Vec<String> = requirements
+                    .iter()
+                    .map(|r| format!("require {}", self.expr_to_string(r)))
+                    .collect();
+                if reqs.is_empty() {
+                    format!("prove {{ {} }}", self.expr_to_string(body))
+                } else {
+                    format!("prove {{ {}; {} }}", reqs.join("; "), self.expr_to_string(body))
+                }
+            }
         }
     }
 

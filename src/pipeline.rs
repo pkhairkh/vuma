@@ -5739,6 +5739,7 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
                     },
                     is_async: false,
                     where_clause: None,
+                    contract: td.contract.clone(),
                     span: td.span,
                 };
                 &synthesized

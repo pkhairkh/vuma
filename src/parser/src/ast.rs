@@ -160,8 +160,33 @@ pub struct FnDef {
     pub is_async: bool,
     /// Optional where clause.
     pub where_clause: Option<WhereClause>,
+    /// Optional source-level contract (Pillar VI.1):
+    /// `transform foo(...) requires <expr> ensures <expr> { ... }`.
+    /// `requires` clauses are preconditions checked at entry; `ensures`
+    /// clauses are postconditions checked at exit. `None` for ordinary
+    /// `transform` declarations without a contract.
+    pub contract: Option<Contract>,
     /// Source span.
     pub span: Span,
+}
+
+/// Source-level contract attached to a `transform` (Pillar VI.1).
+///
+/// A `Contract` is the syntactic surface for IVE discharge: each clause
+/// is a boolean expression over the transform's parameters (for `requires`)
+/// or parameters + return value (for `ensures`). The verifier (IVE pass)
+/// consumes these and emits proof obligations; the parser only captures
+/// the syntax.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Contract {
+    /// Precondition clauses — conjoined (logical AND). Evaluated at
+    /// function entry. Empty Vec means no preconditions.
+    pub requires: Vec<Expr>,
+    /// Postcondition clauses — conjoined (logical AND). Evaluated at
+    /// function exit. Empty Vec means no postconditions. May reference
+    /// the return value via `result` (a future convention; currently
+    /// parsed as an ordinary expression).
+    pub ensures: Vec<Expr>,
 }
 
 /// A single function parameter.
@@ -466,6 +491,11 @@ pub struct TransformDef {
     pub return_type: Option<Type>,
     /// Transform body — a sequence of statements.
     pub body: Vec<Stmt>,
+    /// Optional source-level contract (Pillar VI.1):
+    /// `transform foo(...) requires <expr> ensures <expr> { ... }`.
+    /// Mirrors `FnDef::contract`; copied across by the SCG bridge when
+    /// a `TransformDef` is lowered to an `FnDef`.
+    pub contract: Option<Contract>,
     /// Source span.
     pub span: Span,
 }
@@ -1346,6 +1376,34 @@ pub enum Expr {
         /// The `Result<T,E>` expression being unwrapped.
         expr: Box<Expr>,
         /// Source span (covers `expr` and the trailing `?`).
+        span: Span,
+    },
+    /// Proof-obligation block (Pillar II.3) — the replacement for `unsafe`.
+    ///
+    /// Syntax:
+    /// ```text
+    /// prove { require <expr>; require <expr>; <body> }
+    /// ```
+    ///
+    /// The `require` clauses are proof obligations that the verifier (IVE)
+    /// must discharge before the `body` may execute. The `body` is the
+    /// value of the block (an expression). Unlike `unsafe { … }`, which
+    /// is a statement that escapes the safety discipline, `prove { … }`
+    /// is an *expression* that *strengthens* it: the body runs only after
+    /// every `require` is provably true at this program point.
+    ///
+    /// The parser emits this variant; downstream lowering (SCG bridge /
+    /// IVE) consumes the `requirements` and emits proof-obligation nodes.
+    ProveBlock {
+        /// Proof obligations — each `require <expr>;` clause inside the
+        /// `prove` block. Conjoined (logical AND). May be empty (a proof
+        /// block with no obligations is equivalent to its body alone, but
+        /// still carries the `prove` marker for verifier bookkeeping).
+        requirements: Vec<Expr>,
+        /// The block's body — the expression whose evaluation is gated
+        /// by the proof obligations.
+        body: Box<Expr>,
+        /// Source span (covers `prove { … }`).
         span: Span,
     },
 }
