@@ -2093,7 +2093,88 @@ pub fn run_optimizations_with_target_and_inline_threshold(
     latency_table: &crate::target_desc::LatencyTable,
     inline_threshold: u32,
 ) -> IRProgram {
-    run_optimizations_inner(program, latency_table, None, inline_threshold)
+    // Wave 1-A: no linearity data at this entry point ⇒ `None` preserves the
+    // pre-Wave-1-A pipeline (provenance-only DCE).
+    run_optimizations_inner(program, latency_table, None, inline_threshold, None)
+}
+
+// ── Wave 1-A: linearity-aware pipeline entry points ──────────────────────
+// These mirror the existing target/threshold entry points but additionally
+// thread the IVE `LinearityReport::consumed_vregs` set into the inner
+// driver, switching DCE from provenance-only to linearity-directed mode.
+// The full compiler driver (src/pipeline.rs) will adopt the
+// `_with_linearity` variant once it obtains the `LinearityReport` from the
+// IVE; until then existing callers keep using the non-linearity entry
+// points and observe unchanged behaviour (`None` ⇒ provenance-only DCE).
+
+/// Run optimizations with the default latency table, default inline
+/// threshold, AND an IVE linearity report's consumed-vreg set.
+///
+/// `consumed_vregs` is `Some(&report.consumed_vregs)` when an IVE
+/// `LinearityReport` is available (proof-directed compilation path), or
+/// `None` to fall back to provenance-only DCE — identical to
+/// [`run_optimizations`].
+pub fn run_optimizations_with_linearity(
+    program: IRProgram,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRProgram {
+    run_optimizations_with_target_and_linearity(
+        program,
+        &crate::target_desc::LatencyTable::default_ooo(),
+        DEFAULT_INLINE_THRESHOLD,
+        consumed_vregs,
+    )
+}
+
+/// Run optimizations with a target-specific latency table, an explicit
+/// inline cost threshold, AND an IVE linearity report's consumed-vreg set.
+///
+/// This is the linearity-aware counterpart of
+/// [`run_optimizations_with_target_and_inline_threshold`]. When
+/// `consumed_vregs` is `Some`, DSE ([`dead_store_eliminate_with_linearity`])
+/// kills stores to linearly-consumed state vregs and
+/// [`dead_state_eliminate`] removes their full materialisation lifecycle;
+/// when `None`, behaviour is identical to the non-linearity variant.
+pub fn run_optimizations_with_target_and_linearity(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    inline_threshold: u32,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRProgram {
+    run_optimizations_inner(
+        program,
+        latency_table,
+        None,
+        inline_threshold,
+        consumed_vregs,
+    )
+}
+
+/// Run optimizations with PGO data, an explicit inline cost threshold, AND
+/// an IVE linearity report's consumed-vreg set (linearity-aware counterpart
+/// of [`run_optimizations_with_profile_and_inline_threshold`]).
+pub fn run_optimizations_with_profile_and_linearity(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    profile: &crate::egraph::ProfileData,
+    inline_threshold: u32,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRProgram {
+    if !profile.has_data() {
+        return run_optimizations_with_target_and_linearity(
+            program,
+            latency_table,
+            inline_threshold,
+            consumed_vregs,
+        );
+    }
+    run_optimizations_inner(
+        program,
+        latency_table,
+        Some(profile),
+        inline_threshold,
+        consumed_vregs,
+    )
 }
 
 /// Run optimizations with PGO data and an explicit inline cost threshold.
@@ -2110,7 +2191,9 @@ pub fn run_optimizations_with_profile_and_inline_threshold(
             inline_threshold,
         );
     }
-    run_optimizations_inner(program, latency_table, Some(profile), inline_threshold)
+    // Wave 1-A: no linearity data at this entry point ⇒ `None` preserves the
+    // pre-Wave-1-A pipeline (provenance-only DCE).
+    run_optimizations_inner(program, latency_table, Some(profile), inline_threshold, None)
 }
 
 /// Inner optimization driver shared by `run_optimizations_with_target` and
@@ -2120,11 +2203,25 @@ pub fn run_optimizations_with_profile_and_inline_threshold(
 /// `inline_threshold` is the per-callee cost budget — callees
 /// whose `function_inline_cost` ≤ threshold get inlined at their call
 /// sites. Plumbed in from `CompileConfig.inline_threshold`.
+///
+/// `consumed_vregs` (Wave 1-A) carries the IVE
+/// `LinearityReport::consumed_vregs` set — the bare vregs the IVE proved
+/// were linearly consumed by a `StateTransform` / `ForeignConsume` in the
+/// verified SCG. When `Some(set)`, the DSE pass
+/// ([`dead_store_eliminate_with_linearity`]) treats a `Store` whose address
+/// vreg is in `set` as dead, and [`dead_state_eliminate`] (run immediately
+/// after DCE) removes the full `Alloc`+`Store`+`Load` lifecycle of every
+/// consumed vreg. `None` ⇒ no linearity data ⇒ provenance-only DCE (the
+/// pre-Wave-1-A behaviour, identical to the old 2-arg
+/// [`dead_store_eliminate`]). The codegen crate does not (and need not)
+/// depend on `vuma_ive`: the report is reduced to its bare `HashSet<u32>`
+/// at the call boundary, keeping the IVE→codegen contract structural.
 fn run_optimizations_inner(
     mut program: IRProgram,
     latency_table: &crate::target_desc::LatencyTable,
     profile: Option<&crate::egraph::ProfileData>,
     inline_threshold: u32,
+    consumed_vregs: Option<&HashSet<u32>>,
 ) -> IRProgram {
     // Build a function lookup table (cloned to avoid borrow conflicts when
     // mutating program.functions).
@@ -2151,8 +2248,23 @@ fn run_optimizations_inner(
         let f = cse(f);
         let f = equality_saturation_with_cost(f, &cost_fn);
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
-        let f = dead_store_eliminate(f, &provenance);
+        // ── Wave 1-A: linearity-directed DSE ──────────────────────────
+        // Route the IVE `LinearityReport::consumed_vregs` set (if any)
+        // into DSE. `None` ⇒ provenance-only DCE (the pre-Wave-1-A
+        // behaviour, identical to the old 2-arg `dead_store_eliminate`).
+        let f = dead_store_eliminate_with_linearity(f, &provenance, consumed_vregs);
         let f = dead_code_eliminate(f);
+        // ── Wave 1-A: linearity-driven dead-state elimination ─────────
+        // With a verified `consumed_vregs` set, remove the full
+        // `Alloc`+`Store`+`Load` lifecycle of every linearly-consumed
+        // state vreg. `None` ⇒ no linearity data ⇒ skip (pre-Wave-1-A
+        // behaviour). `dead_state_eliminate` is a no-op on an empty set,
+        // so an empty report is cheap and safe.
+        let f = if let Some(consumed) = consumed_vregs {
+            dead_state_eliminate(f, consumed)
+        } else {
+            f
+        };
         // ── Inliner: ALWAYS enabled ──
         // Inlines small callees (threshold-gated) into callers. Required for
         // correctness of multi-function tests that rely on inlined calls.
