@@ -1,0 +1,60 @@
+// womb/lib/mem_helpers.vuma — Shared unaligned little-endian memory helpers.
+//
+// These store_*/load_* transforms are VUMA-native (not C FFI): they are built
+// entirely on top of the byte-granular __vuma_load_u8 / __vuma_store_u8 runtime
+// intrinsics. They were previously copy-pasted into every consumer file inside
+// an `extern "C"` block alongside the real C declarations, which (a) blurred
+// the line between genuine C FFI and VUMA-to-VUMA helpers and (b) meant the
+// same four bodies were duplicated across ~17 files.
+//
+// This module is the single source of truth. Consumers should:
+//
+//     import "../lib/mem_helpers.vuma"::{store_u64, load_u64, store_u32, load_u32};
+//
+// (select only the symbols they use). The `extern "C"` block below declares the
+// byte intrinsics the helpers depend on — these ARE real C runtime FFI and are
+// kept here so the module is self-contained when compiled standalone. When the
+// module is imported, only the named `transform` definitions are merged into the
+// importer (extern blocks are namespace directives, not definitions), so each
+// importer still relies on its own `__vuma_*` extern declarations for
+// resolution — which is exactly the existing contract.
+
+extern "C" {
+    transform __vuma_load_u8(addr: Address) -> u64;
+    transform __vuma_store_u8(addr: Address, val: u64);
+}
+
+// Store a 64-bit value, little-endian, unaligned.
+transform store_u64(ptr: Address, offset: u32, val: u64) {
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
+    __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
+    __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
+}
+
+// Load a 64-bit value, little-endian, unaligned.
+transform load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = __vuma_load_u8(ptr + offset); b1: u64 = __vuma_load_u8(ptr + offset + 1);
+    b2: u64 = __vuma_load_u8(ptr + offset + 2); b3: u64 = __vuma_load_u8(ptr + offset + 3);
+    b4: u64 = __vuma_load_u8(ptr + offset + 4); b5: u64 = __vuma_load_u8(ptr + offset + 5);
+    b6: u64 = __vuma_load_u8(ptr + offset + 6); b7: u64 = __vuma_load_u8(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+// Store a 32-bit value, little-endian, unaligned.
+transform store_u32(ptr: Address, offset: u32, val: u32) {
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
+}
+
+// Load a 32-bit value, little-endian, unaligned.
+transform load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = __vuma_load_u8(ptr + offset); b1: u32 = __vuma_load_u8(ptr + offset + 1);
+    b2: u32 = __vuma_load_u8(ptr + offset + 2); b3: u32 = __vuma_load_u8(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Store a 16-bit value, little-endian, unaligned.
+transform store_u16(ptr: Address, offset: u32, val: u32) {
+    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
+}
