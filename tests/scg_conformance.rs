@@ -375,3 +375,77 @@ fn main() -> i32 {
         result.err()
     );
 }
+
+/// Task 3-B — the IVE typed-state conformance cross-check is now a HARD
+/// gate (Task 3-A promoted the warn-only log to a `Violated` result). This
+/// test proves the gate actually REJECTS a program whose two typed-state
+/// derivations genuinely diverge: the semantic SCG carries a `StateInit`
+/// node for layout `Point`, while the codegen-derived `typed_state_meta`
+/// list claims a `StateInit` for a *different* layout (`MismatchedLayout`).
+/// The dual-derivation cross-check (`verify_typed_state_conformance`) must
+/// surface this disagreement as a hard `Violated` result from `verify_pmt`,
+/// mirroring the field-list cross-check.
+///
+/// NOTE on construction: the cross-check is gated on
+/// `!input.typed_state_meta.is_empty()` in `verify_pmt`, so an *empty*
+/// `typed_state_meta` would SKIP the check entirely rather than flag the
+/// divergence. A genuine, rejectable divergence therefore requires a
+/// NON-EMPTY meta that disagrees with the SCG — which is what this test
+/// builds. The SCG is kept to a single `StateInit` node (no reads/writes)
+/// so the upstream field-list cross-check has no `accessed_field_refs` to
+/// compare and cannot pre-empt the typed-state gate.
+#[test]
+fn ive_cross_check_rejects_divergent_program() {
+    use vuma_ive::{VerificationEngine, VerificationInput, VerificationStatus};
+
+    // Semantic SCG: exactly one typed-state op — `state_new(Point)`.
+    // No StateRead/StateWrite ⇒ `accessed_field_refs` stays empty ⇒ the
+    // upstream field-list cross-check is skipped, leaving the typed-state
+    // conformance cross-check as the gate that fires.
+    let mut scg = SCG::new();
+    let pp = ProgramPoint {
+        file: None,
+        line: None,
+        column: None,
+        offset: None,
+    };
+    scg.add_node(
+        NodeType::StateInit,
+        NodePayload::StateInit(StateInitNode {
+            layout_name: "Point".to_string(),
+            result_vreg: 0,
+        }),
+        pp,
+    );
+
+    // Codegen-derived typed-state meta that DISAGREES with the SCG: it
+    // claims a `StateInit` for a layout the semantic SCG never mentions.
+    // Both sides report one `StateInit` (so the per-kind COUNT matches),
+    // but the `(kind, layout, field)` multiset differs (`Point` vs
+    // `MismatchedLayout`) — a genuine divergence between the two SCG
+    // construction paths (semantic `parser::to_scg` vs codegen bridge).
+    let divergent_meta = vec![TypedStateMeta::StateInit {
+        layout_name: "MismatchedLayout".to_string(),
+        result_vreg: 99,
+    }];
+
+    let input = VerificationInput::from_scg(scg).with_typed_state_meta(divergent_meta);
+    let engine = VerificationEngine::new();
+    let result = engine.verify_pmt(&input);
+
+    assert!(
+        matches!(result.status, VerificationStatus::Violated { .. }),
+        "verify_pmt must return Violated when the codegen typed_state_meta \
+         disagrees with the semantic SCG's typed-state nodes (genuine \
+         divergence), got: {:?}",
+        result.status,
+    );
+    assert!(
+        result
+            .message
+            .contains("typed-state conformance cross-check failed"),
+        "violation message should mention the typed-state conformance \
+         cross-check, got: {}",
+        result.message,
+    );
+}

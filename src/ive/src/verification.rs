@@ -74,9 +74,9 @@ pub struct VerificationInput {
     /// proves the semantic SCG's `NodePayload` typed-state ops agree with
     /// this codegen-derived list. A disagreement surfaces a divergence
     /// between the two SCG construction paths (semantic `parser::to_scg`
-    /// vs codegen `bridge_ast_to_codegen_scg`); per Task 3-B the
-    /// cross-check currently logs a WARNING rather than hard-failing so
-    /// existing programs keep building — see NEEDS_FOLLOWUP 3-B.
+    /// vs codegen `bridge_ast_to_codegen_scg`) and is reported as a hard
+    /// `Violated` result by `InvariantAggregator::verify_pmt`, mirroring
+    /// the field-list cross-check.
     pub typed_state_meta: Vec<TypedStateMeta>,
 }
 
@@ -1683,7 +1683,7 @@ impl VerificationEngine {
             }
         }
 
-        // ── Cross-check typed-state conformance (Task 3-B) ────────────────────────────────────────────────────────
+        // ── Cross-check typed-state conformance (hard gate) ────────────────────────────────────────────────────
         //
         // Dual-derivation proof that the semantic SCG's typed-state
         // `NodePayload`s and the codegen Scg's `TypedStateMeta` list agree
@@ -1691,15 +1691,9 @@ impl VerificationEngine {
         // meta is attached via `VerificationInput::typed_state_meta`
         // (populated by the pipeline from
         // `bridge_ast_to_codegen_scg_with_meta`). A divergence surfaces a
-        // bug in one of the two SCG construction paths.
-        //
-        // IMPORTANT (Task 3-B): the cross-check currently logs a WARNING
-        // and does NOT hard-fail. This is intentional: the cross-check's
-        // value is in SURFACING divergences, and hard-failing on a real
-        // (pre-existing) divergence would break the build for programs
-        // that otherwise verify cleanly. Once divergences are resolved
-        // (NEEDS_FOLLOWUP 3-B), this can be promoted to a `Violated`
-        // result like the field-list cross-check above.
+        // bug in one of the two SCG construction paths and is treated as a
+        // hard `Violated` result, mirroring the field-list cross-check
+        // above.
         if !input.typed_state_meta.is_empty() {
             let ts_mismatches =
                 verify_typed_state_conformance(scg, &input.typed_state_meta);
@@ -1707,24 +1701,32 @@ impl VerificationEngine {
                 for m in &ts_mismatches {
                     vuma_log!(
                         warn,
-                        "[Task 3-B] typed-state conformance cross-check \
-                         divergence: {}",
+                        "typed-state conformance cross-check divergence: {}",
                         m
                     );
                 }
-                vuma_log!(
-                    warn,
-                    "[Task 3-B] semantic SCG and codegen Scg disagree on \
-                     typed-state info ({} mismatch(es), first: {}); \
-                     logging as WARNING per Task 3-B (not a hard fail). \
-                     See NEEDS_FOLLOWUP 3-B.",
+                let desc = format!(
+                    "pmt-state typed-state conformance cross-check failed: \
+                     {} mismatch(es) — semantic SCG and codegen Scg disagree \
+                     on typed-state op counts/layout/field (first: {})",
                     ts_mismatches.len(),
-                    ts_mismatches.first().unwrap()
+                    ts_mismatches.first().unwrap_or(&String::new())
+                );
+                return VerificationResult::new(
+                    "pmt-state",
+                    VerificationStatus::Violated {
+                        counterexample: CounterExample::new(
+                            Vec::new(),
+                            default_program_point(),
+                            desc.clone(),
+                        ),
+                    },
+                    desc,
                 );
             } else {
                 vuma_log!(
                     info,
-                    "[Task 3-B] typed-state conformance cross-check passed \
+                    "typed-state conformance cross-check passed \
                      (semantic SCG and codegen Scg agree on {} typed-state \
                      op(s)).",
                     input.typed_state_meta.len()
