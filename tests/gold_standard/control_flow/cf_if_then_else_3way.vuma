@@ -10,7 +10,7 @@
 // into 0. Mirrors the s4_cf_if_assign_simple convention.
 // Expected exit code: 30
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 10;

@@ -14,7 +14,7 @@ const HKDF_MAX_BLOCKS: u32 = 255;
 //   If salt is empty, a string of HashLen zero bytes is used as the salt.
 // ===========================================================================
 
-fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
+transform hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
     if salt_len == 0 {
         zeros = allocate(HKDF_HASH256_LEN);
         i: u32 = 0;
@@ -35,7 +35,7 @@ fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
 // L must be <= 255 * HashLen; this is the caller's responsibility.
 // ===========================================================================
 
-fn hkdf_expand_sha256(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32) {
+transform hkdf_expand_sha256(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32) {
     t = allocate(HKDF_HASH256_LEN);
     i: u32 = 0;
     while i < HKDF_HASH256_LEN { *(t + i) = 0; i = i + 1; }
@@ -75,7 +75,7 @@ fn hkdf_expand_sha256(prk: Address, info: Address, info_len: u32, okm: Address, 
 // HKDF-SHA256 (RFC 5869) — Extract + Expand in one call.
 // ===========================================================================
 
-fn hkdf_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
+transform hkdf_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
                info: Address, info_len: u32, okm: Address, okm_len: u32) {
     prk = allocate(HKDF_HASH256_LEN);
     hkdf_extract_sha256(salt, salt_len, ikm, ikm_len, prk);
@@ -87,7 +87,7 @@ fn hkdf_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
 // HKDF-Extract with SHA-512.
 // ===========================================================================
 
-fn hkdf_extract_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
+transform hkdf_extract_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
     if salt_len == 0 {
         zeros = allocate(HKDF_HASH512_LEN);
         i: u32 = 0;
@@ -103,7 +103,7 @@ fn hkdf_extract_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
 // HKDF-Expand with SHA-512.
 // ===========================================================================
 
-fn hkdf_expand_sha512(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32) {
+transform hkdf_expand_sha512(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32) {
     t = allocate(HKDF_HASH512_LEN);
     i: u32 = 0;
     while i < HKDF_HASH512_LEN { *(t + i) = 0; i = i + 1; }
@@ -142,7 +142,7 @@ fn hkdf_expand_sha512(prk: Address, info: Address, info_len: u32, okm: Address, 
 // HKDF-SHA512 (RFC 5869) — Extract + Expand in one call.
 // ===========================================================================
 
-fn hkdf_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
+transform hkdf_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
                info: Address, info_len: u32, okm: Address, okm_len: u32) {
     prk = allocate(HKDF_HASH512_LEN);
     hkdf_extract_sha512(salt, salt_len, ikm, ikm_len, prk);

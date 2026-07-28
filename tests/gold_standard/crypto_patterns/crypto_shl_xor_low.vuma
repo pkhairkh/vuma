@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s22_crypto_shl_mask_high (shl-then-mask,
 // value 0) and s24_crypto_shl_mask_low (shl-then-mask, value 48).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1;
     sh: u64 = 4;
     b: u64 = 5;           // 0x05

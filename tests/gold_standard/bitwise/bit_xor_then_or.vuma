@@ -6,7 +6,7 @@
 // workaround). Distinct from s6_bit_or_chain_3 (pure OR chain) and
 // s4_bit_xor3_chain (pure XOR chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;         // 0xF0
     b: u64 = 15;          // 0x0F
     c: u64 = 16;          // 0x10

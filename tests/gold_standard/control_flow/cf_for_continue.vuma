@@ -9,7 +9,7 @@
 //
 // Exposes: continue + for-body assignment propagation bugs.
 
-fn main() -> i32 {
+transform main() -> i32 {
     sum: u32 = 0;
     for i in 0..10 {
         if (i == 5) {

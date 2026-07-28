@@ -2,27 +2,27 @@
 // Tests u32 arithmetic with memory loads/stores and function calls
 // Expected: exit 79
 
-fn ch(x: u32, y: u32, z: u32) -> u32 {
+transform ch(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((!x) & z);
 }
 
-fn maj(x: u32, y: u32, z: u32) -> u32 {
+transform maj(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
-fn rotr(x: u32, n: u32) -> u32 {
+transform rotr(x: u32, n: u32) -> u32 {
     return (x >> n) | (x << (32 - n));
 }
 
-fn sigma0(x: u32) -> u32 {
+transform sigma0(x: u32) -> u32 {
     return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
 }
 
-fn sigma1(x: u32) -> u32 {
+transform sigma1(x: u32) -> u32 {
     return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
 }
 
-fn main() -> u64 {
+transform main() -> u64 {
     // Simulate one round of SHA-256 compression with known values
     h0: u32 = 0x6a09e667;
     h1: u32 = 0xbb67ae85;

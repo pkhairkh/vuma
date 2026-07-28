@@ -7,7 +7,7 @@
 // s70_edge_one_shl_two (4), s66_edge_zero_xor_max (255) and
 // s74_edge_max_xor_eight (247).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 20;
     r: u32 = a ^ b;        // 235

@@ -22,12 +22,12 @@ const B2B_IV7: u64 = 6620516959819538809;
 // BLAKE2b SIGMA table: 10 permutations of 16 message-word indices
 // (RFC 7693 Section 2.6). The 12 rounds index rows 0..9, then 0..1 again.
 
-fn rotr64(x: u64, n: u64) -> u64 {
+transform rotr64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x >> n) | (x << (64 - n));
 }
 
-fn load_u64_le(ptr: Address, off: u32) -> u64 {
+transform load_u64_le(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
@@ -36,7 +36,7 @@ fn load_u64_le(ptr: Address, off: u32) -> u64 {
          | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn store_u64_le(ptr: Address, off: u32, val: u64) {
+transform store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -47,14 +47,14 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn store_u32_le(ptr: Address, off: u32, val: u32) {
+transform store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
+transform load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -64,7 +64,7 @@ fn load_u32_le(ptr: Address, off: u32) -> u32 {
 
 // G primitive (RFC 7693 Section 3.1): mixes four work-vector words with two
 // message words. Operates in place on the work vector.
-fn blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) {
+transform blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) {
     va: u64 = load_u64_le(v, a * 8);
     vb: u64 = load_u64_le(v, b * 8);
     vc: u64 = load_u64_le(v, c * 8);
@@ -91,7 +91,7 @@ fn blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) {
 //   t_lo:   low 64 bits of the byte counter (incremented per 128-byte block)
 //   t_hi:   high 64 bits of the byte counter
 //   last:   1 if this is the final block (sets f[0])
-fn blake2b_compress(h: Address, block: Address, t_lo: u64, t_hi: u64, last: u32) {
+transform blake2b_compress(h: Address, block: Address, t_lo: u64, t_hi: u64, last: u32) {
     v = allocate(128);  // 16 x u64 work vector
 
     // v[0..7] = h[0..7]
@@ -189,7 +189,7 @@ fn blake2b_compress(h: Address, block: Address, t_lo: u64, t_hi: u64, last: u32)
 //   [ 84.. 87] digest_len output length in bytes (1..64)
 //   [ 88..215] buf[128]   partial block accumulator
 
-fn blake2b_init(ctx: Address, digest_len: u32) {
+transform blake2b_init(ctx: Address, digest_len: u32) {
     // h = IV with the first word XORed with the parameter block.
     // Parameter block (digest_len, key_len=0, fanout=1, depth=1):
     //   byte 0      digest_len
@@ -215,7 +215,7 @@ fn blake2b_init(ctx: Address, digest_len: u32) {
 }
 
 // Increment the 128-bit byte counter by `n`, carrying through both limbs.
-fn blake2b_add_bytes(ctx: Address, n: u64) {
+transform blake2b_add_bytes(ctx: Address, n: u64) {
     lo: u64 = load_u64_le(ctx, 64);
     hi: u64 = load_u64_le(ctx, 72);
     new_lo: u64 = lo + n;
@@ -224,7 +224,7 @@ fn blake2b_add_bytes(ctx: Address, n: u64) {
     store_u64_le(ctx, 72, hi);
 }
 
-fn blake2b_update(ctx: Address, data: Address, len: u32) {
+transform blake2b_update(ctx: Address, data: Address, len: u32) {
     buf_len: u32 = load_u32_le(ctx, 80);
     i: u32 = 0;
     while i < len {
@@ -244,7 +244,7 @@ fn blake2b_update(ctx: Address, data: Address, len: u32) {
 
 // Pad the final partial block with zeros, set the finalization flag, run the
 // last compression, and emit `digest_len` bytes of the chain value.
-fn blake2b_final(ctx: Address, out: Address) {
+transform blake2b_final(ctx: Address, out: Address) {
     buf_len: u32 = load_u32_le(ctx, 80);
     digest_len: u32 = load_u32_le(ctx, 84);
 
@@ -270,7 +270,7 @@ fn blake2b_final(ctx: Address, out: Address) {
 }
 
 // BLAKE2b oneshot — 512-bit (64-byte) output
-fn blake2b_oneshot(data: Address, len: u32, out: Address) {
+transform blake2b_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(216);
     blake2b_init(ctx, 64);
     blake2b_update(ctx, data, len);
@@ -279,7 +279,7 @@ fn blake2b_oneshot(data: Address, len: u32, out: Address) {
 }
 
 // BLAKE2b with 256-bit (32-byte) output
-fn blake2b_256(data: Address, len: u32, out: Address) {
+transform blake2b_256(data: Address, len: u32, out: Address) {
     ctx = allocate(216);
     blake2b_init(ctx, 32);
     blake2b_update(ctx, data, len);

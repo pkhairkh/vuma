@@ -5,7 +5,7 @@
 // s5_u32_add_then_shift (add-then-shift) and s6_u32_shift_left_3
 // (pure shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 1;
     sh: u32 = 5;
     x: u32 = 1;

@@ -18,7 +18,7 @@ layout SkBuffPool = {
     count: u32,
 }
 
-fn skb_pool_init(pool: State<SkBuffPool>) {
+transform skb_pool_init(pool: State<SkBuffPool>) {
     let i = 0;
     while i < 16 {
         pool.nexts[i] = (i + 1) as u8;
@@ -29,7 +29,7 @@ fn skb_pool_init(pool: State<SkBuffPool>) {
     pool.count = 0;
 }
 
-fn skb_alloc(pool: State<SkBuffPool>) -> u8 {
+transform skb_alloc(pool: State<SkBuffPool>) -> u8 {
     if pool.free_list == 255 {
         return 255;
     }
@@ -40,26 +40,26 @@ fn skb_alloc(pool: State<SkBuffPool>) -> u8 {
     return idx;
 }
 
-fn skb_free(pool: State<SkBuffPool>, idx: u8) {
+transform skb_free(pool: State<SkBuffPool>, idx: u8) {
     pool.nexts[idx as u32] = pool.free_list;
     pool.free_list = idx;
     pool.count = pool.count - 1;
 }
 
-fn skb_get_byte(pool: State<SkBuffPool>, idx: u8, offset: u32) -> u8 {
+transform skb_get_byte(pool: State<SkBuffPool>, idx: u8, offset: u32) -> u8 {
     return pool.data[(idx as u32) * 1514 + offset];
 }
 
-fn skb_set_byte(pool: State<SkBuffPool>, idx: u8, offset: u32, val: u8) {
+transform skb_set_byte(pool: State<SkBuffPool>, idx: u8, offset: u32, val: u8) {
     pool.data[(idx as u32) * 1514 + offset] = val;
 }
 
-fn skb_put(pool: State<SkBuffPool>, idx: u8, len: u16) -> u32 {
+transform skb_put(pool: State<SkBuffPool>, idx: u8, len: u16) -> u32 {
     let off = (idx as u32) * 1514;
     return off;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pool = state_new(SkBuffPool);
     skb_pool_init(pool);
     let s0 = skb_alloc(pool);

@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s22_crypto_or_xor_chain (or-then-xor,
 // value 83) and s24_crypto_xor_or_chain (xor-then-or-then-xor).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 85;          // 0x55
     b: u64 = 15;          // 0x0F
     c: u64 = 192;         // 0xC0

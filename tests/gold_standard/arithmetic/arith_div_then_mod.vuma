@@ -6,7 +6,7 @@
 // Tests both `div` and `mod` on the same operand, using distinct
 // intermediates. Distinct from s4_arith_div_chain (chain of divs).
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 80;
     d1: u32 = 5;
     d2: u32 = 7;

@@ -23,7 +23,7 @@
 // caller frees).
 // ===========================================================================
 
-fn p256_p() -> Address {
+transform p256_p() -> Address {
     // p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
     buf = allocate(32);
     *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
@@ -37,7 +37,7 @@ fn p256_p() -> Address {
     return buf;
 }
 
-fn p256_n() -> Address {
+transform p256_n() -> Address {
     // n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
     buf = allocate(32);
     *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
@@ -51,7 +51,7 @@ fn p256_n() -> Address {
     return buf;
 }
 
-fn p256_b() -> Address {
+transform p256_b() -> Address {
     // b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
     buf = allocate(32);
     *(buf +  0) =  90; *(buf +  1) = 198; *(buf +  2) =  53; *(buf +  3) = 216;
@@ -65,7 +65,7 @@ fn p256_b() -> Address {
     return buf;
 }
 
-fn p256_gx() -> Address {
+transform p256_gx() -> Address {
     buf = allocate(32);
     *(buf +  0) = 107; *(buf +  1) =  23; *(buf +  2) = 209; *(buf +  3) = 242;
     *(buf +  4) = 225; *(buf +  5) =  44; *(buf +  6) =  66; *(buf +  7) =  71;
@@ -78,7 +78,7 @@ fn p256_gx() -> Address {
     return buf;
 }
 
-fn p256_gy() -> Address {
+transform p256_gy() -> Address {
     buf = allocate(32);
     *(buf +  0) =  79; *(buf +  1) = 227; *(buf +  2) =  66; *(buf +  3) = 226;
     *(buf +  4) = 254; *(buf +  5) =  26; *(buf +  6) = 127; *(buf +  7) = 155;
@@ -95,7 +95,7 @@ fn p256_gy() -> Address {
 // Big-endian <-> little-endian byte swap for 32-byte field elements.
 // ===========================================================================
 
-fn swap_endian_32(dst: Address, src: Address) {
+transform swap_endian_32(dst: Address, src: Address) {
     i: u32 = 0;
     while i < 32 {
         *(dst + i) = *(src + 31 - i);
@@ -108,7 +108,7 @@ fn swap_endian_32(dst: Address, src: Address) {
 // Used by verify to reject bogus public keys.
 // ===========================================================================
 
-fn p256_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
+transform p256_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
     // y^2
     y_sq = allocate(32);
     bn256_mod_mul(y_sq, py, py, p_le);
@@ -146,7 +146,7 @@ fn p256_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u
 // slope = (3*x^2 + a) / (2*y) mod p
 // Rx = slope^2 - 2*x mod p
 // Ry = slope*(x - Rx) - y mod p
-fn p256_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
+transform p256_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
     // If P is the point at infinity, return infinity
     if bn256_is_zero(px) == 1 {
         if bn256_is_zero(py) == 1 {
@@ -198,7 +198,7 @@ fn p256_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: A
 
 // Point add: R = P + Q. Handles infinity inputs, equal points (doubles),
 // and additive inverses (returns infinity).
-fn p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
+transform p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
     if bn256_is_zero(px) == 1 {
         if bn256_is_zero(py) == 1 {
             bn256_copy(rx, qx);
@@ -254,7 +254,7 @@ fn p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Addres
 }
 
 // Scalar multiplication: R = k * P using double-and-add (MSB-first).
-fn p256_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
+transform p256_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
     bn256_zero(rx);
     bn256_zero(ry);
 
@@ -291,7 +291,7 @@ fn p256_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Addres
 // then derives the public key.
 // ===========================================================================
 
-fn ecdsa_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+transform ecdsa_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
     n_be = p256_n();
     n_le = allocate(32);
     swap_endian_32(n_le, n_be);
@@ -350,7 +350,7 @@ fn ecdsa_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Add
 //   k_le (32 bytes, little-endian) : nonce satisfying 1 <= k < n
 // ===========================================================================
 
-fn rfc6979_p256_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
+transform rfc6979_p256_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
     hlen: u32 = 32;
 
     // V = 0x01 * 32 ; K = 0x00 * 32
@@ -443,7 +443,7 @@ fn rfc6979_p256_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
 // Output: r, s (each 32 bytes, big-endian)
 // ===========================================================================
 
-fn ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
+transform ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
     h = allocate(32);
     sha256_oneshot(msg, msg_len, h);
 
@@ -518,7 +518,7 @@ fn ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addre
 // public keys that are not on the curve).
 // ===========================================================================
 
-fn ecdsa_p256_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
+transform ecdsa_p256_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
     n_be = p256_n();
     n_le = allocate(32);
     swap_endian_32(n_le, n_be);

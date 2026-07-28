@@ -5,7 +5,7 @@
 //
 // Workaround note: bitwise ops with an immediate RHS are silently dropped by
 // the current codegen, so all shift amounts are loaded into variables first.
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 1;
     s1: u64 = 2;
     s2: u64 = 2;

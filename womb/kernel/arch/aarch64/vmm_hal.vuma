@@ -149,9 +149,9 @@ layout PageTableEntry = { raw: u64 }
 // (root + idx * 8) itself; the externs are pure load/store at a u64.
 extern "C" {
     // Read an 8-byte PTE at physical address `addr`. Returns the raw u64.
-    fn pte_read(addr: u64) -> u64;
+    transform pte_read(addr: u64) -> u64;
     // Write an 8-byte PTE value `val` at physical address `addr`.
-    fn pte_write(addr: u64, val: u64);
+    transform pte_write(addr: u64, val: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ extern "C" {
 // walker calls this helper inline (DRY); the self-test calls it to verify
 // the bit-extraction math for a known vaddr.
 
-fn arm_idx(vaddr: u64, level: u32) -> u64 {
+transform arm_idx(vaddr: u64, level: u32) -> u64 {
     let sh = 12 + 9 * level;
     return (vaddr >> sh) & 511;
 }
@@ -192,7 +192,7 @@ fn arm_idx(vaddr: u64, level: u32) -> u64 {
 // intermediate level. The self-test therefore only verifies index
 // extraction + a no-crash call.
 
-fn arm_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
+transform arm_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
     let cur = root;
     let level = (levels as u32) - 1;
     while level > 0 {
@@ -227,7 +227,7 @@ fn arm_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
 //
 // Returns u64 (not State<T>) — no state-typedness propagation issue.
 
-fn arm_translate(root: u64, vaddr: u64) -> u64 {
+transform arm_translate(root: u64, vaddr: u64) -> u64 {
     let cur = root;
     let level = 3 as u32;
     while level > 0 {
@@ -267,7 +267,7 @@ fn arm_translate(root: u64, vaddr: u64) -> u64 {
 // Returns 0 on pass, 1..4 on the corresponding index-extraction failure,
 // 5 on the no-crash check.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Part 1: index extraction (the contract's required self-test) ───────
     let v = 20015998343868;  // 0x123456789ABC
     if arm_idx(v, 3) != 36 { return 1; }

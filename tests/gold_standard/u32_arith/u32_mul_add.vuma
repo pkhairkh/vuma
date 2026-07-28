@@ -3,7 +3,7 @@
 //
 // Multiplication followed by addition: 7 * 8 = 56, then 56 + 4 = 60.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 7;
     b: u32 = 8;
     c: u32 = 4;

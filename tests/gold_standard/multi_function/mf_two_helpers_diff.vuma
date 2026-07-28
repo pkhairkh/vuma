@@ -6,19 +6,19 @@
 // operations. Distinct from s10_mf_two_helpers_sum (add5/double) and
 // s6_mf_call_two_then_sum (half/third).
 
-fn add3(x: u32) -> u32 {
+transform add3(x: u32) -> u32 {
     c: u32 = 3;
     r: u32 = x + c;
     return r;
 }
 
-fn sub4(x: u32) -> u32 {
+transform sub4(x: u32) -> u32 {
     c: u32 = 4;
     r: u32 = x - c;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = add3(20);    // 23
     b: u32 = sub4(30);    // 26
     s: u32 = a + b;       // 49

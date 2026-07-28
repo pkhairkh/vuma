@@ -6,18 +6,18 @@
 // s5_mf_diff_op_funcs (different helpers) and s6_mf_pass_result
 // (square_then_inc, not sum_then_double).
 
-fn sum(a: u32, b: u32) -> u32 {
+transform sum(a: u32, b: u32) -> u32 {
     r: u32 = a + b;
     return r;
 }
 
-fn double(x: u32) -> u32 {
+transform double(x: u32) -> u32 {
     two: u32 = 2;
     r: u32 = x * two;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     s: u32 = sum(10, 15);   // 25
     d: u32 = double(s);     // 50
     return d;

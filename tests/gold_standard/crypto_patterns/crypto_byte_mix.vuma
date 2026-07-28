@@ -6,7 +6,7 @@
 // (0xCC). All operands loaded into variables to dodge the
 // immediate-RHS bitwise drop bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 171;    // 0xAB
     b: u64 = 205;    // 0xCD
     one: u64 = 1;

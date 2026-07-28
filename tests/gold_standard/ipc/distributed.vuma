@@ -16,7 +16,7 @@
 // and would fail this test.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     // Real TCP connect to 0.0.0.0:1 — this always fails because 0.0.0.0
     // is not a valid connect() destination and port 1 is closed.
     ch = channel_open_remote(0, 1);

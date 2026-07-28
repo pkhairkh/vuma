@@ -5,7 +5,7 @@
 // 11 * 8 = 88, 98 - 88 = 10). Sum = 24. Distinct from s5_arith_div_then_mod
 // (different dividend / divisors) and s4_arith_div_chain.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 98;
     d1: u32 = 7;
     d2: u32 = 11;

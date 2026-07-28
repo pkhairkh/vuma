@@ -138,14 +138,14 @@ const PKI_MAC_S2C: u32 = 5;
 // ===========================================================================
 
 // Length of a NUL-terminated string.
-fn ssh_strlen(s: Address) -> u32 {
+transform ssh_strlen(s: Address) -> u32 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return n;
 }
 
 // Write a 32-bit big-endian integer at `ptr`.
-fn ssh_put_u32_be(ptr: Address, val: u32) {
+transform ssh_put_u32_be(ptr: Address, val: u32) {
     *(ptr + 0) = (val >> 24) & 255;
     *(ptr + 1) = (val >> 16) & 255;
     *(ptr + 2) = (val >> 8) & 255;
@@ -154,7 +154,7 @@ fn ssh_put_u32_be(ptr: Address, val: u32) {
 }
 
 // Read a 32-bit big-endian integer from `ptr`.
-fn ssh_get_u32_be(ptr: Address) -> u32 {
+transform ssh_get_u32_be(ptr: Address) -> u32 {
     b0: u32 = *(ptr + 0);
     b1: u32 = *(ptr + 1);
     b2: u32 = *(ptr + 2);
@@ -164,7 +164,7 @@ fn ssh_get_u32_be(ptr: Address) -> u32 {
 
 // Append an SSH "string" (uint32 length || data) to `out` at offset `pos`.
 // Returns the new offset.
-fn ssh_write_string(out: Address, pos: u32, data: Address, len: u32) -> u32 {
+transform ssh_write_string(out: Address, pos: u32, data: Address, len: u32) -> u32 {
     ssh_put_u32_be(out + pos, len);
     p: u32 = pos + 4;
     i: u32 = 0;
@@ -173,14 +173,14 @@ fn ssh_write_string(out: Address, pos: u32, data: Address, len: u32) -> u32 {
 }
 
 // Append an SSH string built from a NUL-terminated C string.
-fn ssh_write_cstr_string(out: Address, pos: u32, s: Address) -> u32 {
+transform ssh_write_cstr_string(out: Address, pos: u32, s: Address) -> u32 {
     n: u32 = ssh_strlen(s);
     return ssh_write_string(out, pos, s, n);
 }
 
 // Encoded length (including the 4-byte length field) of an mpint given a
 // big-endian magnitude buffer.
-fn ssh_mpint_len(data: Address, len: u32) -> u32 {
+transform ssh_mpint_len(data: Address, len: u32) -> u32 {
     start: u32 = 0;
     done: u32 = 0;
     while start < len && done == 0 {
@@ -199,7 +199,7 @@ fn ssh_mpint_len(data: Address, len: u32) -> u32 {
 
 // Write an mpint at `out`+`pos` from a big-endian magnitude buffer.
 // Returns the new offset.
-fn ssh_write_mpint(out: Address, pos: u32, data: Address, len: u32) -> u32 {
+transform ssh_write_mpint(out: Address, pos: u32, data: Address, len: u32) -> u32 {
     start: u32 = 0;
     done: u32 = 0;
     while start < len && done == 0 {
@@ -229,7 +229,7 @@ fn ssh_write_mpint(out: Address, pos: u32, data: Address, len: u32) -> u32 {
 //                   Must not contain CR or LF per RFC 4253 §4.2.
 //   out:            output buffer (must hold 8 + strlen(client_version) + 2 bytes).
 //   Returns total bytes written.
-fn ssh_build_version_string(client_version: Address, out: Address) -> u32 {
+transform ssh_build_version_string(client_version: Address, out: Address) -> u32 {
     *(out + 0) = CHAR_S & 255;
     *(out + 1) = CHAR_S & 255;
     *(out + 2) = CHAR_H & 255;
@@ -257,7 +257,7 @@ fn ssh_build_version_string(client_version: Address, out: Address) -> u32 {
 //   version_out:  output buffer for the parsed version string (without CR/LF).
 //   Returns the length of the parsed version string on success, 0 on failure
 //   (no valid SSH-2.0 version line found).
-fn ssh_parse_version_string(data: Address, len: u32, version_out: Address) -> u32 {
+transform ssh_parse_version_string(data: Address, len: u32, version_out: Address) -> u32 {
     pos: u32 = 0;
     found: u32 = 0;
     start: u32 = 0;
@@ -344,7 +344,7 @@ fn ssh_parse_version_string(data: Address, len: u32, version_out: Address) -> u3
 // The language name-lists are fixed to "" (the empty string) as is standard
 // for the initial exchange. first_kex_packet_follows = 0 (false) and the
 // reserved uint32 = 0.
-fn ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorithms: Address, enc_algorithms: Address, mac_algorithms: Address, comp_algorithms: Address, out: Address) -> u32 {
+transform ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorithms: Address, enc_algorithms: Address, mac_algorithms: Address, comp_algorithms: Address, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_KEXINIT & 255;
     pos = pos + 1;
@@ -387,7 +387,7 @@ fn ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorit
 // Parse an SSH_MSG_KEXINIT payload (`buf` includes the type byte at offset 0)
 // into the `algorithms` structure (see ParsedKexInit layout above).
 // Returns 1 on success, 0 on malformed input.
-fn ssh_parse_kex_init(buf: Address, buf_len: u32, algorithms: Address) -> u32 {
+transform ssh_parse_kex_init(buf: Address, buf_len: u32, algorithms: Address) -> u32 {
     status: u32 = 1;
     pos: u32 = 0;
 
@@ -455,7 +455,7 @@ fn ssh_parse_kex_init(buf: Address, buf_len: u32, algorithms: Address) -> u32 {
 // is the least significant byte (0xFF) and byte 255 is the most significant
 // byte (0xFF). Each row of 8 bytes corresponds to one little-endian u64 limb
 // of the bn2048 representation (limb 0 = bytes 0..7 = least significant).
-fn ssh_dh_group14_prime(out: Address) {
+transform ssh_dh_group14_prime(out: Address) {
     // limb[0]  = 0xFFFFFFFFFFFFFFFF (least significant)
     *(out + 0) = 255; *(out + 1) = 255; *(out + 2) = 255; *(out + 3) = 255; *(out + 4) = 255; *(out + 5) = 255; *(out + 6) = 255; *(out + 7) = 255;
     // limb[1]  = 0x15728E5A8AACAA68
@@ -526,7 +526,7 @@ fn ssh_dh_group14_prime(out: Address) {
 // Convert a 256-byte little-endian bn2048 buffer to 256 big-endian bytes
 // (for mpint encoding on the wire). `be_out` receives the big-endian
 // magnitude: be_out[0] = MSB, be_out[255] = LSB.
-fn ssh_bn2048_to_be(bn: Address, be_out: Address) {
+transform ssh_bn2048_to_be(bn: Address, be_out: Address) {
     i: u32 = 0;
     while i < DH_GROUP14_BYTES {
         *(be_out + i) = *(bn + (DH_GROUP14_BYTES - 1) - i);
@@ -539,7 +539,7 @@ fn ssh_bn2048_to_be(bn: Address, be_out: Address) {
 // to a 256-byte little-endian bn2048 buffer. `be_len` is the length of the
 // big-endian input; if shorter than 256 bytes the high bytes of `bn` are
 // zero-filled. be[0] = MSB, be[be_len-1] = LSB.
-fn ssh_be_bytes_to_bn2048(be: Address, be_len: u32, bn: Address) {
+transform ssh_be_bytes_to_bn2048(be: Address, be_len: u32, bn: Address) {
     bn2048_zero(bn);
     i: u32 = 0;
     while i < be_len {
@@ -557,7 +557,7 @@ fn ssh_be_bytes_to_bn2048(be: Address, be_len: u32, bn: Address) {
 //   private_key: 256-byte LE bignum (caller's random private exponent x).
 //   public_out:  256-byte LE bignum (receives e = g^x mod p).
 // Returns 1 on success.
-fn ssh_dh_compute_public(private_key: Address, public_out: Address) -> u32 {
+transform ssh_dh_compute_public(private_key: Address, public_out: Address) -> u32 {
     p = allocate(DH_GROUP14_BYTES);
     g = allocate(DH_GROUP14_BYTES);
     ssh_dh_group14_prime(p);
@@ -574,7 +574,7 @@ fn ssh_dh_compute_public(private_key: Address, public_out: Address) -> u32 {
 //   server_pub:      256-byte LE bignum (server's public DH value f).
 //   shared_secret_out: 256-byte LE bignum (receives K = f^x mod p).
 // Returns 1 on success.
-fn ssh_dh_kex_init(client_key: Address, server_pub: Address, shared_secret_out: Address) -> u32 {
+transform ssh_dh_kex_init(client_key: Address, server_pub: Address, shared_secret_out: Address) -> u32 {
     p = allocate(DH_GROUP14_BYTES);
     ssh_dh_group14_prime(p);
     bn2048_mod_exp(shared_secret_out, server_pub, client_key, p);
@@ -588,7 +588,7 @@ fn ssh_dh_kex_init(client_key: Address, server_pub: Address, shared_secret_out: 
 //   e_len:    length of e (typically 256).
 //   out:      output buffer.
 //   Returns bytes written.
-fn ssh_build_kex_dh_init(e: Address, e_len: u32, out: Address) -> u32 {
+transform ssh_build_kex_dh_init(e: Address, e_len: u32, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_KEXDH_INIT & 255;
     pos = pos + 1;
@@ -608,7 +608,7 @@ fn ssh_build_kex_dh_init(e: Address, e_len: u32, out: Address) -> u32 {
 //   sig:          caller-allocated output buffer for H_sig (signature over H).
 //   sig_len:      address of a 4-byte cell; receives length of H_sig (BE u32).
 //   Returns 1 on success, 0 on malformed input.
-fn ssh_dh_kex_reply_parser(buf: Address, buf_len: u32, host_key: Address, host_key_len: Address, server_pubkey: Address, sp_len: Address, sig: Address, sig_len: Address) -> u32 {
+transform ssh_dh_kex_reply_parser(buf: Address, buf_len: u32, host_key: Address, host_key_len: Address, server_pubkey: Address, sp_len: Address, sig: Address, sig_len: Address) -> u32 {
     status: u32 = 1;
     pos: u32 = 0;
 
@@ -695,7 +695,7 @@ fn ssh_dh_kex_reply_parser(buf: Address, buf_len: u32, host_key: Address, host_k
 //   shared:                  big-endian magnitude of K.
 //   out:                     32-byte output buffer for H.
 //   Returns 1 on success.
-fn ssh_compute_exchange_hash(client_id: Address, server_id: Address, client_kex: Address, client_kex_len: u32, server_kex: Address, server_kex_len: u32, host_key: Address, host_key_len: u32, client_pubkey: Address, cp_len: u32, server_pubkey: Address, sp_len: u32, shared: Address, shared_len: u32, out: Address) -> u32 {
+transform ssh_compute_exchange_hash(client_id: Address, server_id: Address, client_kex: Address, client_kex_len: u32, server_kex: Address, server_kex_len: u32, host_key: Address, host_key_len: u32, client_pubkey: Address, cp_len: u32, server_pubkey: Address, sp_len: u32, shared: Address, shared_len: u32, out: Address) -> u32 {
     vc: u32 = ssh_strlen(client_id);
     vs: u32 = ssh_strlen(server_id);
     mpint_k_len: u32 = ssh_mpint_len(shared, shared_len);
@@ -737,7 +737,7 @@ fn ssh_compute_exchange_hash(client_id: Address, server_id: Address, client_kex:
 //   letter:                 ASCII code of the derivation letter (A-F).
 //   out:                    output buffer.
 //   out_len:                number of bytes to produce.
-fn ssh_derive_key_material(k_mpint: Address, k_mpint_len: u32, h: Address, session_id: Address, session_id_len: u32, letter: u32, out: Address, out_len: u32) {
+transform ssh_derive_key_material(k_mpint: Address, k_mpint_len: u32, h: Address, session_id: Address, session_id_len: u32, letter: u32, out: Address, out_len: u32) {
     produced: u32 = 0;
     round: u32 = 0;
     while produced < out_len {
@@ -795,7 +795,7 @@ fn ssh_derive_key_material(k_mpint: Address, k_mpint_len: u32, h: Address, sessi
 //   iv_c2s / iv_s2c:           16-byte output buffers (AES-256 IVs).
 //   enc_key_c2s / enc_key_s2c: 32-byte output buffers (AES-256 keys).
 //   mac_key_c2s / mac_key_s2c: 32-byte output buffers (HMAC-SHA-256 keys).
-fn ssh_derive_keys(shared_secret: Address, exchange_hash: Address, session_id: Address, iv_c2s: Address, iv_s2c: Address, enc_key_c2s: Address, enc_key_s2c: Address, mac_key_c2s: Address, mac_key_s2c: Address) {
+transform ssh_derive_keys(shared_secret: Address, exchange_hash: Address, session_id: Address, iv_c2s: Address, iv_s2c: Address, enc_key_c2s: Address, enc_key_s2c: Address, mac_key_c2s: Address, mac_key_s2c: Address) {
     // Convert the LE bn2048 shared secret to a big-endian magnitude for
     // mpint encoding, then write the mpint (with optional 0x00 prefix) once
     // and reuse it for every derivation letter.
@@ -833,7 +833,7 @@ fn ssh_derive_keys(shared_secret: Address, exchange_hash: Address, session_id: A
 // the carry propagates past byte 12; for full RFC 4344 compliance callers
 // may instead advance iv[0..11] by 1 per packet (one nonce per packet, with
 // the 32-bit block counter resetting to 0 internally).
-fn ssh_ctr_advance_iv(iv: Address, byte_len: u32) {
+transform ssh_ctr_advance_iv(iv: Address, byte_len: u32) {
     blocks: u32 = byte_len / AES_BLOCK_SIZE;
     rem: u32 = byte_len - (blocks * AES_BLOCK_SIZE);
     if rem != 0 { blocks = blocks + 1; }
@@ -870,7 +870,7 @@ fn ssh_ctr_advance_iv(iv: Address, byte_len: u32) {
 //   block_size, and is in [4, 255]. Padding bytes are set to zero; callers
 //   requiring randomised padding per RFC 4253 §6 SHOULD overwrite them before
 //   encryption.
-fn ssh_build_packet(payload: Address, payload_len: u32, block_size: u32, out: Address) -> u32 {
+transform ssh_build_packet(payload: Address, payload_len: u32, block_size: u32, out: Address) -> u32 {
     // padding length
     inner: u32 = 5 + payload_len;                    // packet_length field + padding_length byte + payload
     rem: u32 = inner - ((inner / block_size) * block_size);
@@ -902,7 +902,7 @@ fn ssh_build_packet(payload: Address, payload_len: u32, block_size: u32, out: Ad
 //
 // The MAC is not handled here; the caller verifies it separately via
 // ssh_compute_packet_mac before calling this function on the decrypted bytes.
-fn ssh_parse_packet(data: Address, len: u32, payload: Address, payload_len_out: Address) -> u32 {
+transform ssh_parse_packet(data: Address, len: u32, payload: Address, payload_len_out: Address) -> u32 {
     status: u32 = 1;
 
     if len < 5 { status = 0; }
@@ -943,7 +943,7 @@ fn ssh_parse_packet(data: Address, len: u32, payload: Address, payload_len_out: 
 //   data:     plaintext input bytes.
 //   data_len: length of data.
 //   out:      ciphertext output buffer (may equal data for in-place).
-fn ssh_encrypt_packet(key: Address, iv: Address, data: Address, data_len: u32, out: Address) {
+transform ssh_encrypt_packet(key: Address, iv: Address, data: Address, data_len: u32, out: Address) {
     aes256_ctr_crypt(data, data_len, key, iv, out);
     return;
 }
@@ -960,7 +960,7 @@ fn ssh_encrypt_packet(key: Address, iv: Address, data: Address, data_len: u32, o
 //                || payload || padding).
 //   packet_len:  length of packet_data.
 //   mac_out:     32-byte output buffer for the MAC tag.
-fn ssh_compute_packet_mac(mac_key: Address, sequence_no: u32, packet_data: Address, packet_len: u32, mac_out: Address) {
+transform ssh_compute_packet_mac(mac_key: Address, sequence_no: u32, packet_data: Address, packet_len: u32, mac_out: Address) {
     mac_input = allocate(4 + packet_len);
     ssh_put_u32_be(mac_input, sequence_no);
     i: u32 = 0;
@@ -983,7 +983,7 @@ fn ssh_compute_packet_mac(mac_key: Address, sequence_no: u32, packet_data: Addre
 // (e.g. the boolean + password for "password", or the algorithm + public key
 // + signature for "publickey") are NOT included and should be appended by the
 // caller as needed.
-fn ssh_build_userauth_request(username: Address, service: Address, method: Address, out: Address) -> u32 {
+transform ssh_build_userauth_request(username: Address, service: Address, method: Address, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_USERAUTH_REQUEST & 255;
     pos = pos + 1;
@@ -1005,7 +1005,7 @@ fn ssh_build_userauth_request(username: Address, service: Address, method: Addre
 //   Returns bytes written.
 //
 // The maximum packet size field is set to SSH_DEFAULT_MAX_PACKET (32768).
-fn ssh_build_channel_open(channel_type: Address, sender_channel: u32, window_size: u32, out: Address) -> u32 {
+transform ssh_build_channel_open(channel_type: Address, sender_channel: u32, window_size: u32, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_CHANNEL_OPEN & 255;
     pos = pos + 1;
@@ -1022,7 +1022,7 @@ fn ssh_build_channel_open(channel_type: Address, sender_channel: u32, window_siz
 //   data_len:  length of data.
 //   out:       output buffer.
 //   Returns bytes written.
-fn ssh_build_channel_data(channel: u32, data: Address, data_len: u32, out: Address) -> u32 {
+transform ssh_build_channel_data(channel: u32, data: Address, data_len: u32, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_CHANNEL_DATA & 255;
     pos = pos + 1;
@@ -1035,7 +1035,7 @@ fn ssh_build_channel_data(channel: u32, data: Address, data_len: u32, out: Addre
 //   channel: recipient channel.
 //   out:     output buffer.
 //   Returns bytes written.
-fn ssh_build_channel_close(channel: u32, out: Address) -> u32 {
+transform ssh_build_channel_close(channel: u32, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_CHANNEL_CLOSE & 255;
     pos = pos + 1;

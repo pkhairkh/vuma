@@ -6,11 +6,11 @@
 // because VUMA miscompiles nested call expressions used directly
 // inside arithmetic.
 
-fn ident(x: u32) -> u32 {
+transform ident(x: u32) -> u32 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = ident(1);
     b: u32 = ident(2);
     c: u32 = ident(3);

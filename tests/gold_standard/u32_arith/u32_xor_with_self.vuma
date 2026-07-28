@@ -5,7 +5,7 @@
 // same variable, loaded into a u32 first. Distinct from
 // s5_u32_xor_two_stages (two different XOR operands).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 123;
     r: u32 = v ^ v;
     return r;

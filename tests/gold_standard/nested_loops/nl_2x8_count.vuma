@@ -7,7 +7,7 @@
 // keeps count at 0. Distinct from s66_nl_2x7_count (14),
 // s62_nl_4x5_count (20) and s58_nl_2x3_count (6).
 // Expected exit code: 16
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..2 {
         for j in 0..8 {

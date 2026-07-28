@@ -7,7 +7,7 @@
 
 layout _L1 = { v: u32 }
 layout _L2 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let buf1 = state_new(_L1);
     let buf2 = state_new(_L2);
     buf1.v = 42;

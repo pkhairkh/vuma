@@ -6,12 +6,12 @@
 // that returns a function-local constant. Distinct from
 // s5_fn_return_constant (helper takes an unused parameter).
 
-fn get_const() -> u32 {
+transform get_const() -> u32 {
     c: u32 = 33;
     return c;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = get_const();
     return v;
 }

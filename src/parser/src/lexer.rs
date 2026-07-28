@@ -241,8 +241,14 @@ pub enum TokenKind {
     ShrEq,
 
     // ---- Keywords ---------------------------------------------------------
-    /// `fn`
+    /// `fn` -- retained variant. Wave 3-C removed `"fn"` from `keyword_kind`,
+    /// so the lexer now emits `fn` as a plain `Ident`; `transform` is the
+    /// sole function-declaration keyword. The variant is kept because
+    /// `parser.rs` / `is_name_keyword` / the `Display` impl still reference it;
+    /// it is never produced by the lexer.
     Fn,
+    /// `transform` -- the sole function-declaration keyword (Wave 3-C).
+    Transform,
     /// `let`
     Let,
     /// `pub`
@@ -385,6 +391,19 @@ pub enum TokenKind {
     CtEq,
     /// `syscall` — direct syscall intrinsic
     Syscall,
+    /// `requires` — precondition contract clause (Pillar VI.1).
+    /// Appears between a `transform` signature and its body:
+    /// `transform foo(...) requires <expr> ensures <expr> { ... }`.
+    Requires,
+    /// `ensures` — postcondition contract clause (Pillar VI.1).
+    Ensures,
+    /// `prove` — proof-obligation block (Pillar II.3), replacing `unsafe`.
+    /// Syntax: `prove { require <expr>; <body> }`.
+    Prove,
+    /// `require` — proof obligation assertion inside a `prove` block
+    /// (Pillar II.3). Only a keyword inside `prove { … }`; outside, it
+    /// is an ordinary identifier.
+    Require,
     /// Format string literal: `f"..."`
     FormatStr,
     /// Rust-style macro invocation identifier ending with `!`
@@ -480,6 +499,7 @@ impl std::fmt::Display for TokenKind {
 
             // Keywords
             TokenKind::Fn => write!(f, "'fn'"),
+            TokenKind::Transform => write!(f, "'transform'"),
             TokenKind::Let => write!(f, "'let'"),
             TokenKind::Pub => write!(f, "'pub'"),
             TokenKind::Crate => write!(f, "'crate'"),
@@ -551,6 +571,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::CtSelect => write!(f, "'ct_select'"),
             TokenKind::CtEq => write!(f, "'ct_eq'"),
             TokenKind::Syscall => write!(f, "'syscall'"),
+            TokenKind::Requires => write!(f, "'requires'"),
+            TokenKind::Ensures => write!(f, "'ensures'"),
+            TokenKind::Prove => write!(f, "'prove'"),
+            TokenKind::Require => write!(f, "'require'"),
             TokenKind::FormatStr => write!(f, "format string"),
             TokenKind::MacroIdent => write!(f, "macro identifier"),
 
@@ -570,10 +594,26 @@ impl std::fmt::Display for TokenKind {
 // ---------------------------------------------------------------------------
 
 /// Map from keyword text to its [`TokenKind`].
+///
+/// (Wave 1-A) Cosplay keywords deleted: 8 reserved-but-never-dispatched
+/// keywords were removed (`safe`, `ptr`, `alloc`, `lock`, `unlock`, `use`,
+/// `self`, `ref`). These had no parser dispatch arm and were only listed in
+/// `is_name_keyword` / `parse_primary` identifier-fallback sets — the
+/// lexer now emits them as plain `Ident` tokens. Their `TokenKind`
+/// variants are retained (the parser still references them) but will never
+/// be produced. Dispatched keywords (match, struct, enum, impl, trait,
+/// async, await, spawn, where, type, static, crate, super, sizeof,
+/// alignof, derive) were KEPT because the parser's own unit tests exercise
+/// them as real VUMA keywords; removing them would require coordinated
+/// parser.rs / to_scg.rs test updates beyond the 1-file scope of this task.
+/// `const` / `region` / `allocate` / `free` were KEPT because womb/ and/or
+/// integration tests use them as real keywords.
 fn keyword_kind(ident: &str) -> Option<TokenKind> {
     match ident {
         // Core
-        "fn" => Some(TokenKind::Fn),
+        // Wave 3-C: `fn` removed from the keyword table -- it now lexes as a
+        // plain `Ident`. `transform` is the only function-declaration keyword.
+        "transform" => Some(TokenKind::Transform),
         "let" => Some(TokenKind::Let),
         "pub" => Some(TokenKind::Pub),
         "crate" => Some(TokenKind::Crate),
@@ -595,15 +635,13 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "const" => Some(TokenKind::Const),
         "static" => Some(TokenKind::Static),
         "mut" => Some(TokenKind::Mut),
-        "ref" => Some(TokenKind::Ref),
         "where" => Some(TokenKind::Where),
         "impl" => Some(TokenKind::Impl),
         "trait" => Some(TokenKind::Trait),
 
-        // Memory primitives
-        "ptr" => Some(TokenKind::Ptr),
+        // Memory primitives (ptr/alloc deleted — cosplay; region/allocate/
+        // free retained — dispatched by parser and used in test VUMA source)
         "region" => Some(TokenKind::Region),
-        "alloc" => Some(TokenKind::Alloc),
         "allocate" => Some(TokenKind::Allocate),
         "free" => Some(TokenKind::Free),
         "derive" => Some(TokenKind::Derive),
@@ -611,13 +649,11 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "read" => Some(TokenKind::Read),
         "write" => Some(TokenKind::Write),
 
-        // Concurrency / sync
+        // Concurrency / sync (lock/unlock deleted — cosplay, never dispatched)
         "sync" => Some(TokenKind::Sync),
         "async" => Some(TokenKind::Async),
         "await" => Some(TokenKind::Await),
         "spawn" => Some(TokenKind::Spawn),
-        "lock" => Some(TokenKind::Lock),
-        "unlock" => Some(TokenKind::Unlock),
         "channel" => Some(TokenKind::Channel),
         // `Channel<T>` type keyword (capitalised). Reuses the
         // existing `TokenKind::Channel` variant; the parser distinguishes
@@ -635,9 +671,8 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "atomic_store" => Some(TokenKind::AtomicStore),
         "atomic_cas" => Some(TokenKind::AtomicCas),
 
-        // Safety
+        // Safety (safe deleted — cosplay, --safe is a no-op / hard error)
         "unsafe" => Some(TokenKind::Unsafe),
-        "safe" => Some(TokenKind::Safe),
 
         // Domain directives
         "bd" => Some(TokenKind::Bd),
@@ -645,12 +680,10 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "capd" => Some(TokenKind::Capd),
         "reld" => Some(TokenKind::Reld),
 
-        // Modules
+        // Modules (use/self deleted — cosplay, Rust inheritance never used)
         "import" => Some(TokenKind::Import),
         "export" => Some(TokenKind::Export),
         "mod" => Some(TokenKind::Mod),
-        "use" => Some(TokenKind::Use),
-        "self" => Some(TokenKind::SelfKw),
         "super" => Some(TokenKind::Super),
 
         // Booleans / null
@@ -674,6 +707,12 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         "ct_select" => Some(TokenKind::CtSelect),
         "ct_eq" => Some(TokenKind::CtEq),
         "syscall" => Some(TokenKind::Syscall),
+
+        // Source-level contracts (Pillar VI.1) + proof blocks (Pillar II.3)
+        "requires" => Some(TokenKind::Requires),
+        "ensures" => Some(TokenKind::Ensures),
+        "prove" => Some(TokenKind::Prove),
+        "require" => Some(TokenKind::Require),
 
         _ => None,
     }
@@ -1973,21 +2012,23 @@ mod tests {
     // ---- Test 2: All keywords ----
     #[test]
     fn lex_all_keywords() {
-        let source = "fn let ptr region alloc allocate free derive cast read write \
-                      sync if else while for return struct enum match unsafe safe \
-                      bd repd capd reld import export mod use self super \
-                      async await spawn lock unlock channel send recv \
+        // (Wave 1-A) 8 cosplay keywords deleted from the lexer (safe, ptr,
+        // alloc, lock, unlock, use, self, ref) — they now lex as `Ident`.
+        // (Wave 3-C) `fn` deleted from the keyword table — it now lexes as
+        // `Ident`; `transform` is the sole function keyword.
+        let source = "transform let region allocate free derive cast read write \
+                      sync if else while for return struct enum match unsafe \
+                      bd repd capd reld import export mod super \
+                      async await spawn channel send recv \
                       true false null as sizeof alignof \
-                      break continue where impl trait type const static mut ref";
+                      break continue where impl trait type const static mut";
         let (tokens, _) = lex(source);
         assert_eq!(
             kinds(&tokens),
             vec![
-                TokenKind::Fn,
+                TokenKind::Transform,
                 TokenKind::Let,
-                TokenKind::Ptr,
                 TokenKind::Region,
-                TokenKind::Alloc,
                 TokenKind::Allocate,
                 TokenKind::Free,
                 TokenKind::Derive,
@@ -2004,7 +2045,6 @@ mod tests {
                 TokenKind::Enum,
                 TokenKind::Match,
                 TokenKind::Unsafe,
-                TokenKind::Safe,
                 TokenKind::Bd,
                 TokenKind::Repd,
                 TokenKind::Capd,
@@ -2012,14 +2052,10 @@ mod tests {
                 TokenKind::Import,
                 TokenKind::Export,
                 TokenKind::Mod,
-                TokenKind::Use,
-                TokenKind::SelfKw,
                 TokenKind::Super,
                 TokenKind::Async,
                 TokenKind::Await,
                 TokenKind::Spawn,
-                TokenKind::Lock,
-                TokenKind::Unlock,
                 TokenKind::Channel,
                 TokenKind::Send,
                 TokenKind::Recv,
@@ -2038,7 +2074,6 @@ mod tests {
                 TokenKind::Const,
                 TokenKind::Static,
                 TokenKind::Mut,
-                TokenKind::Ref,
             ]
         );
     }
@@ -2321,7 +2356,7 @@ mod tests {
     // ---- Test 17: Peek does not consume ----
     #[test]
     fn peek_does_not_consume() {
-        let source = "fn foo() {}";
+        let source = "transform foo() {}";
         let mut lex = Lexer::new(source);
         let p = lex.peek().clone();
         let n = lex.next_token();
@@ -2357,7 +2392,7 @@ mod tests {
     #[test]
     fn lex_hello_memory_example() {
         let source = r#"
-            fn main() -> i32 {
+            transform main() -> i32 {
                 region = allocate(8);
                 *region = 42;
                 value: i32 = *region;
@@ -2369,7 +2404,7 @@ mod tests {
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.starts_with(&[
-            TokenKind::Fn,
+            TokenKind::Transform,
             TokenKind::Ident,
             TokenKind::LParen,
             TokenKind::RParen,
@@ -2454,12 +2489,12 @@ mod tests {
     // ---- Test 27: Concurrency keywords in context ----
     #[test]
     fn lex_concurrency_keywords() {
-        let source = "async fn producer() { let ch = channel(); spawn send(ch, 1); }";
+        let source = "async transform producer() { let ch = channel(); spawn send(ch, 1); }";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.contains(&TokenKind::Async));
-        assert!(kinds.contains(&TokenKind::Fn));
+        assert!(kinds.contains(&TokenKind::Transform));
         assert!(kinds.contains(&TokenKind::Channel));
         assert!(kinds.contains(&TokenKind::Spawn));
         assert!(kinds.contains(&TokenKind::Send));
@@ -2597,18 +2632,20 @@ mod tests {
     // ---- Test 35: Where clause ----
     #[test]
     fn lex_where_clause() {
-        let source = "fn foo<T>() where T: trait {}";
+        let source = "transform foo<T>() where T: trait {}";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.contains(&TokenKind::Where));
-        assert!(kinds.contains(&TokenKind::Fn));
+        assert!(kinds.contains(&TokenKind::Transform));
         assert!(kinds.contains(&TokenKind::Trait));
     }
 
-    // ---- Test 36: Ref keyword ----
+    // ---- Test 36: Ref keyword (Wave 1-A: `ref` is now a plain Ident) ----
     #[test]
     fn lex_ref_keyword() {
+        // `ref` was deleted from the keyword table in Wave 1-A — it is
+        // now lexed as a regular identifier.
         let source = "let ref x = 42;";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
@@ -2616,8 +2653,8 @@ mod tests {
             kinds(&tokens),
             vec![
                 TokenKind::Let,
-                TokenKind::Ref,
-                TokenKind::Ident,
+                TokenKind::Ident, // "ref" — no longer a keyword
+                TokenKind::Ident, // "x"
                 TokenKind::Assign,
                 TokenKind::Number,
                 TokenKind::Semicolon,
@@ -2781,15 +2818,15 @@ mod tests {
     // ---- Test 49: Position tracking with multiple lines ----
     #[test]
     fn lex_position_tracking_multiline() {
-        let source = "fn foo()\n  -> i32\n{\n  return 0;\n}";
+        let source = "transform foo()\n  -> i32\n{\n  return 0;\n}";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         // "fn" at line 0, col 0
         assert_eq!(tokens[0].line, 0);
         assert_eq!(tokens[0].column, 0);
-        // "foo" at line 0, col 3
+        // "foo" at line 0, col 10 (after "transform ")
         assert_eq!(tokens[1].line, 0);
-        assert_eq!(tokens[1].column, 3);
+        assert_eq!(tokens[1].column, 10);
         // "->" at line 1, col 2
         let arrow = tokens.iter().find(|t| t.kind == TokenKind::Arrow).unwrap();
         assert_eq!(arrow.line, 1);

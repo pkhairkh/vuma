@@ -7,7 +7,7 @@
 // variables first. Distinct from s18_crypto_shl_mask (different mask
 // value, non-zero result) and s14_crypto_shl_then_xor (shl-then-xor).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1;
     s: u64 = 3;
     m: u64 = 240;         // 0xF0

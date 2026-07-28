@@ -5,18 +5,18 @@
 // mul2(10) -> 20. Different operations in each helper. Distinct
 // from s4_mf_two_helpers (both helpers add).
 
-fn add3(x: u32) -> u32 {
+transform add3(x: u32) -> u32 {
     n: u32 = 3;
     r: u32 = x + n;
     return r;
 }
-fn mul2(x: u32) -> u32 {
+transform mul2(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x * n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = add3(7);   // 10
     b: u32 = mul2(a);   // 20
     return b;

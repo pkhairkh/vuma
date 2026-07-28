@@ -33,13 +33,13 @@
 //  12. Exit with the final state (0 = Closed = success).
 //
 // Expected exit code: 0
-fn fail() -> i64 {
+transform fail() -> i64 {
     return 1;
 }
-fn ok() -> i64 {
+transform ok() -> i64 {
     return 0;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     r = circuit_breaker_call(fail, 2);
     r = circuit_breaker_call(fail, 2);
     r = circuit_breaker_call(fail, 2);

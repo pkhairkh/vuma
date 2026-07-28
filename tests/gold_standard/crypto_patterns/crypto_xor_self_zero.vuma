@@ -6,7 +6,7 @@
 // s5_crypto_parity_xor (4-byte fold, nonzero result) and
 // s6_crypto_xor_pairs (two distinct operands).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 205;    // 0xCD
     r: u64 = v ^ v;  // 0
     return r;

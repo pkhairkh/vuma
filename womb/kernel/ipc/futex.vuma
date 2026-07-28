@@ -370,7 +370,7 @@
 //   sys_futex (init-style API — see "Why init-style?" in K4e's
 //   wait.vuma header for the codegen rationale: the current codegen
 //   does NOT propagate State-typedness through function return
-//   values, so `fn futex_new() -> State<FutexTable>` would produce
+//   values, so `transform futex_new() -> State<FutexTable>` would produce
 //   broken field-access code in callers). No externs are declared in
 //   this file (futex is pure-PM on the FutexTable — no syscalls, no
 //   context switch, no memory allocation, no actual atomic ops).
@@ -451,7 +451,7 @@
 // FUTEX_WAIT arm uses it to perform the "compare *uaddr with val" check
 // that real Linux futex(2) does via atomic load before sleeping.
 extern "C" {
-    fn __vuma_load_u32(addr: u64) -> u32;
+    transform __vuma_load_u32(addr: u64) -> u32;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -520,7 +520,7 @@ layout FutexTable = {
 // to read). The same per-array loop pattern is used by K7b's
 // signal_init (256-byte handlers loop) and K4a's pt_init (multi-array
 // init loops).
-fn futex_init(tbl: State<FutexTable>) {
+transform futex_init(tbl: State<FutexTable>) {
     // Zero all 64 entries: uaddr + wait_count per entry.
     let i = 0;
     while i < 64 {
@@ -552,7 +552,7 @@ fn futex_init(tbl: State<FutexTable>) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 8 bytes from
 // tbl.uaddrs[off..off+8]. No writes, no helper calls.
-fn futex_get_uaddr(tbl: State<FutexTable>, idx: u32) -> u64 {
+transform futex_get_uaddr(tbl: State<FutexTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -579,7 +579,7 @@ fn futex_get_uaddr(tbl: State<FutexTable>, idx: u32) -> u64 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 8 bytes into
 // tbl.uaddrs[off..off+8]. No reads, no helper calls.
-fn futex_set_uaddr(tbl: State<FutexTable>, idx: u32, val: u64) {
+transform futex_set_uaddr(tbl: State<FutexTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -604,7 +604,7 @@ fn futex_set_uaddr(tbl: State<FutexTable>, idx: u32, val: u64) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 4 bytes from
 // tbl.wait_counts[off..off+4]. No writes, no helper calls.
-fn futex_get_wait_count(tbl: State<FutexTable>, idx: u32) -> u32 {
+transform futex_get_wait_count(tbl: State<FutexTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -632,7 +632,7 @@ fn futex_get_wait_count(tbl: State<FutexTable>, idx: u32) -> u32 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 4 bytes into
 // tbl.wait_counts[off..off+4]. No reads, no helper calls.
-fn futex_set_wait_count(tbl: State<FutexTable>, idx: u32, val: u32) {
+transform futex_set_wait_count(tbl: State<FutexTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -669,7 +669,7 @@ fn futex_set_wait_count(tbl: State<FutexTable>, idx: u32, val: u32) {
 // each entry until match. No writes, no helper calls (other than the
 // futex_get_uaddr / futex_get_wait_count byte-pack helpers, which are
 // also pure reads).
-fn futex_find(tbl: State<FutexTable>, uaddr: u64) -> u32 {
+transform futex_find(tbl: State<FutexTable>, uaddr: u64) -> u32 {
     let i = 0;
     while i < 64 {
         if futex_get_uaddr(tbl, i) == uaddr {
@@ -710,7 +710,7 @@ fn futex_find(tbl: State<FutexTable>, uaddr: u64) -> u32 {
 // (via futex_find + the linear scan); writes uaddr into the claimed
 // slot (via futex_set_uaddr). No direct field writes — all access is
 // through the byte-pack/unpack helpers.
-fn futex_find_or_create(tbl: State<FutexTable>, uaddr: u64) -> u32 {
+transform futex_find_or_create(tbl: State<FutexTable>, uaddr: u64) -> u32 {
     let found = futex_find(tbl, uaddr);
     if found != 64 {
         return found;
@@ -779,7 +779,7 @@ fn futex_find_or_create(tbl: State<FutexTable>, uaddr: u64) -> u32 {
 // State<T> params: 1 (tbl). Reads + writes via the byte-pack/unpack
 // helpers + futex_find / futex_find_or_create. No direct field writes
 // — all access is through the helpers.
-fn sys_futex(tbl: State<FutexTable>, uaddr: u64, op: u32, val: u32) -> i64 {
+transform sys_futex(tbl: State<FutexTable>, uaddr: u64, op: u32, val: u32) -> i64 {
     if op == 0 {
         // FUTEX_WAIT.
         // Real futex(2) semantics: atomically load *uaddr and compare
@@ -883,7 +883,7 @@ fn sys_futex(tbl: State<FutexTable>, uaddr: u64, op: u32, val: u32) -> i64 {
 // "Decimal-constants discipline" and K3a's trap_trampoline.vuma for
 // the same rule).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(FutexTable);
     futex_init(tbl);
 

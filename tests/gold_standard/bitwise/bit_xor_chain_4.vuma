@@ -8,7 +8,7 @@
 // s5_crypto_parity_xor (4-byte incremental-nibble fold, crypto
 // category) and s4_bit_xor3_chain (3-way fold).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 17;    // 0x11
     b: u64 = 34;    // 0x22
     c: u64 = 68;    // 0x44

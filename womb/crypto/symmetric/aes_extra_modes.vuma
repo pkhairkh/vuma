@@ -35,14 +35,14 @@ const KWP_ICV: u32 = 0xA65959A6;     // RFC 5649 integrity check
 // Little-endian u32 store/load helpers.
 // ===========================================================================
 
-fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+transform store_u32_le_at(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+transform load_u32_le_at(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -50,14 +50,14 @@ fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn store_u32_be_at(ptr: Address, off: u32, val: u32) {
+transform store_u32_be_at(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = (val >> 24) & 255;
     *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255;
     *(ptr + off + 3) = val & 255;
 }
 
-fn load_u32_be_at(ptr: Address, off: u32) -> u32 {
+transform load_u32_be_at(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -87,7 +87,7 @@ fn load_u32_be_at(ptr: Address, off: u32) -> u32 {
 // Left-shift a 16-byte big-endian field element by 1 bit, reducing modulo
 // x^128 + x^7 + x^2 + x + 1 (constant 0x87 in the low byte). Used by both
 // CMAC subkey generation and XTS tweak updates in big-endian form.
-fn gf128_shl_be(x: Address) {
+transform gf128_shl_be(x: Address) {
     msb: u32 = *(x + 0) >> 7;   // top bit of the big-endian integer
     i: u32 = 0;
     while i < 15 {
@@ -104,7 +104,7 @@ fn gf128_shl_be(x: Address) {
 }
 
 // Generate CMAC subkeys K1 and K2 (each 16 bytes).
-fn cmac_gen_subkeys(key: Address, k1: Address, k2: Address) {
+transform cmac_gen_subkeys(key: Address, k1: Address, k2: Address) {
     zero_block = allocate(16);
     l = allocate(16);
     i: u32 = 0;
@@ -126,7 +126,7 @@ fn cmac_gen_subkeys(key: Address, k1: Address, k2: Address) {
 }
 
 // Compute AES-CMAC(key, msg[0..msg_len)) into out[0..16).
-fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
+transform aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
     k1 = allocate(16);
     k2 = allocate(16);
     cmac_gen_subkeys(key, k1, k2);
@@ -200,7 +200,7 @@ fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
 // Constant-time verification of an AES-CMAC tag. Returns 1 on match, 0
 // otherwise. Compares all 16 bytes and accumulates differences so that
 // the running time does not depend on the position of the first mismatch.
-fn aes_cmac_verify(key: Address, msg: Address, msg_len: u32, tag: Address) -> u32 {
+transform aes_cmac_verify(key: Address, msg: Address, msg_len: u32, tag: Address) -> u32 {
     computed = allocate(16);
     aes_cmac(key, msg, msg_len, computed);
 
@@ -242,13 +242,13 @@ fn aes_cmac_verify(key: Address, msg: Address, msg_len: u32, tag: Address) -> u3
 // ===========================================================================
 
 // XOR a 64-bit big-endian integer t into the 8 bytes of `a`.
-fn xor_u64_be(a: Address, t: u32) {
+transform xor_u64_be(a: Address, t: u32) {
     // t fits in 32 bits (max value 6n^2 = 6 * 255^2 ~ 390K << 2^32), so
     // only the low 4 bytes of the 8-byte word are perturbed.
     store_u32_be_at(a, 4, load_u32_be_at(a, 4) ^ t);
 }
 
-fn aes_kw_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
+transform aes_kw_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
     if pt_len < 16 { return 0; }
     if pt_len % 8 != 0 { return 0; }
     n: u32 = pt_len / 8;
@@ -303,7 +303,7 @@ fn aes_kw_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Addres
     return 8 + pt_len;
 }
 
-fn aes_kw_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+transform aes_kw_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
     if ct_len < 24 { return 0; }
     if ct_len % 8 != 0 { return 0; }
     n: u32 = (ct_len - 8) / 8;
@@ -396,7 +396,7 @@ fn aes_kw_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Addr
 //      last MLI bytes as the plaintext.
 // ===========================================================================
 
-fn aes_kwp_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
+transform aes_kwp_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
     if pt_len == 0 { return 0; }
 
     mli: u32 = pt_len;
@@ -426,7 +426,7 @@ fn aes_kwp_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Addre
     return wrapped_len;
 }
 
-fn aes_kwp_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+transform aes_kwp_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
     if ct_len < 24 { return 0; }
     if ct_len % 8 != 0 { return 0; }
 
@@ -496,7 +496,7 @@ fn aes_kwp_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Add
 
 // Multiply a 16-byte little-endian GF(2^128) element by 2, reducing
 // modulo x^128 + x^7 + x^2 + x + 1 (constant 0x87 in byte 0).
-fn xts_gf128_mul2_le(x: Address) {
+transform xts_gf128_mul2_le(x: Address) {
     msb: u32 = *(x + 15) >> 7;   // top bit of the little-endian integer
     i: u32 = 15;
     while i > 0 {
@@ -517,7 +517,7 @@ fn xts_gf128_mul2_le(x: Address) {
 // The per-block tweak α_i = α_0 * 2^i is recomputed from scratch here.
 // (For long data streams a faster incremental update is possible; this
 // implementation favours clarity over speed.)
-fn xts_block_crypt(in_block: Address, key1: Address, alpha: Address, encrypt: u32, out_block: Address) {
+transform xts_block_crypt(in_block: Address, key1: Address, alpha: Address, encrypt: u32, out_block: Address) {
     xored = allocate(16);
     i: u32 = 0;
     while i < 16 {
@@ -543,7 +543,7 @@ fn xts_block_crypt(in_block: Address, key1: Address, alpha: Address, encrypt: u3
 }
 
 // Compute α_i = α_0 * 2^i by i successive doublings in GF(2^128).
-fn xts_alpha_at(alpha0: Address, i: u32, out: Address) {
+transform xts_alpha_at(alpha0: Address, i: u32, out: Address) {
     j: u32 = 0;
     while j < 16 { *(out + j) = *(alpha0 + j); j = j + 1; }
     k: u32 = 0;
@@ -553,7 +553,7 @@ fn xts_alpha_at(alpha0: Address, i: u32, out: Address) {
     }
 }
 
-fn aes_xts_encrypt(data: Address, data_len: u32, key1: Address, key2: Address, tweak: Address, out: Address) -> u32 {
+transform aes_xts_encrypt(data: Address, data_len: u32, key1: Address, key2: Address, tweak: Address, out: Address) -> u32 {
     if data_len < 16 { return 0; }
 
     // α_0 = AES_enc(K2, T)
@@ -639,7 +639,7 @@ fn aes_xts_encrypt(data: Address, data_len: u32, key1: Address, key2: Address, t
     return data_len;
 }
 
-fn aes_xts_decrypt(data: Address, data_len: u32, key1: Address, key2: Address, tweak: Address, out: Address) -> u32 {
+transform aes_xts_decrypt(data: Address, data_len: u32, key1: Address, key2: Address, tweak: Address, out: Address) -> u32 {
     if data_len < 16 { return 0; }
 
     alpha0 = allocate(16);
@@ -763,7 +763,7 @@ fn aes_xts_decrypt(data: Address, data_len: u32, key1: Address, key2: Address, t
 // as a little-endian integer. This implementation processes the multiplier
 // H bit-by-bit, MSB-first within each byte (where "first" byte is byte 0,
 // the low byte of the little-endian integer).
-fn polyval_mul(x: Address, h: Address, out: Address) {
+transform polyval_mul(x: Address, h: Address, out: Address) {
     z = allocate(16);
     v = allocate(16);
     i: u32 = 0;
@@ -814,7 +814,7 @@ fn polyval_mul(x: Address, h: Address, out: Address) {
 }
 
 // Apply a 16-byte block to a running POLYVAL state: Y = POLYVAL_mul(Y XOR block, H).
-fn polyval_update(y: Address, block: Address, h: Address) {
+transform polyval_update(y: Address, block: Address, h: Address) {
     xored = allocate(16);
     i: u32 = 0;
     while i < 16 {
@@ -826,7 +826,7 @@ fn polyval_update(y: Address, block: Address, h: Address) {
 }
 
 // Derive auth_key (H) and enc_key (Ke) for AES-128-GCM-SIV.
-fn gcm_siv_derive_keys(key: Address, nonce: Address, auth_key: Address, enc_key: Address) {
+transform gcm_siv_derive_keys(key: Address, nonce: Address, auth_key: Address, enc_key: Address) {
     // Build input block: nonce[0..11] || be32(counter).
     input_block = allocate(16);
     i: u32 = 0;
@@ -839,7 +839,7 @@ fn gcm_siv_derive_keys(key: Address, nonce: Address, auth_key: Address, enc_key:
 }
 
 // Compute the SIV tag (16 bytes) from H, AAD, plaintext, and nonce.
-fn gcm_siv_compute_siv(auth_key: Address, nonce: Address, aad: Address, aad_len: u32, plaintext: Address, pt_len: u32, siv: Address) {
+transform gcm_siv_compute_siv(auth_key: Address, nonce: Address, aad: Address, aad_len: u32, plaintext: Address, pt_len: u32, siv: Address) {
     // Y = 0
     y = allocate(16);
     i: u32 = 0;
@@ -919,7 +919,7 @@ fn gcm_siv_compute_siv(auth_key: Address, nonce: Address, aad: Address, aad_len:
 // CTR encrypt/decrypt (same operation) using `enc_key` and the SIV as IV.
 // Counter occupies bytes [12..15] big-endian, starting from the value
 // already in the SIV (which is 0 after the masking step in normal use).
-fn gcm_siv_ctr(enc_key: Address, siv: Address, data: Address, data_len: u32, output: Address) {
+transform gcm_siv_ctr(enc_key: Address, siv: Address, data: Address, data_len: u32, output: Address) {
     counter_block = allocate(16);
     i: u32 = 0;
     while i < 16 { *(counter_block + i) = *(siv + i); i = i + 1; }
@@ -957,7 +957,7 @@ fn gcm_siv_ctr(enc_key: Address, siv: Address, data: Address, data_len: u32, out
     free(counter_block);
 }
 
-fn aes_gcm_siv_encrypt(key: Address, nonce: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
+transform aes_gcm_siv_encrypt(key: Address, nonce: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
     auth_key = allocate(16);
     enc_key = allocate(16);
     gcm_siv_derive_keys(key, nonce, auth_key, enc_key);
@@ -976,7 +976,7 @@ fn aes_gcm_siv_encrypt(key: Address, nonce: Address, plaintext: Address, pt_len:
     return pt_len;
 }
 
-fn aes_gcm_siv_decrypt(key: Address, nonce: Address, ciphertext: Address, ct_len: u32, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
+transform aes_gcm_siv_decrypt(key: Address, nonce: Address, ciphertext: Address, ct_len: u32, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
     auth_key = allocate(16);
     enc_key = allocate(16);
     gcm_siv_derive_keys(key, nonce, auth_key, enc_key);

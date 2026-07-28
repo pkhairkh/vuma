@@ -5,7 +5,7 @@
 // loaded into u32 variables first. Distinct from s4_u32_mod_then_mul
 // (mod-then-mul, reverse order) and s8_u32_mul_sub (mul-then-sub).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 7;
     b: u32 = 9;
     m: u32 = 10;

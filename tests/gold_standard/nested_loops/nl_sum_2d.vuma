@@ -5,7 +5,7 @@
 // NOW PASSING until the for-body assignment propagation bug is fixed.
 // Expected exit code: 10
 
-fn main() -> i32 {
+transform main() -> i32 {
     sum: u32 = 0;
     for i in 0..2 {
         for j in 0..5 {

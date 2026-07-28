@@ -141,7 +141,7 @@
 //   constant-time conditional-swap primitive (the `cswap(t, a, b)` that
 //   swaps a and b iff t=1, used in the Montgomery ladder for variable-
 //   base scalar multiplication) — K11+ would need to add a
-//   `fn cswap_u8(t: u8, a: State<Fe>, b: State<Fe>)` helper built on
+//   `transform cswap_u8(t: u8, a: State<Fe>, b: State<Fe>)` helper built on
 //   top of the existing atomic_cas primitive (womb/kernel/sync/spinlock.vuma).
 //
 // ── What W29S3 provides ─────────────────────────────────────────────────────
@@ -343,7 +343,7 @@ layout Ed25519Msg = {
 // K11 will replace this with the real key-derivation path
 // (SHA-512(seed) → clamp → scalar mult on Curve25519 — see
 // womb/crypto/ed25519.vuma:ed25519_keygen_for_real).
-fn ed25519_keygen(key: State<Ed25519Key>) {
+transform ed25519_keygen(key: State<Ed25519Key>) {
     let i = 0;
     while i < 32 {
         key.secret[i] = ((i * 7 + 13) % 256) as u8;
@@ -380,7 +380,7 @@ fn ed25519_keygen(key: State<Ed25519Key>) {
 // r = SHA-512(prefix || msg), compute R = r·B, compute
 // k = SHA-512(R || A || msg), compute S = (r + k · s) mod L, emit
 // sig = R || S (RFC 8032 §5.1.6).
-fn ed25519_sign(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) {
+transform ed25519_sign(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) {
     let i = 0;
     while i < 32 {
         // W29S3: mod-256 ADDITION (was XOR in K10d). Widen to u32
@@ -417,7 +417,7 @@ fn ed25519_sign(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed255
 // Curve25519 (RFC 8032 §5.1.7). The check is `S·B == R + k·A` —
 // equivalent to checking that the verifier reconstructs the same R
 // the signer committed to.
-fn ed25519_verify(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) -> u8 {
+transform ed25519_verify(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed25519Sig>) -> u8 {
     let i = 0;
     while i < 32 {
         // W29S3: check the first-half addition signature (was NOT
@@ -468,7 +468,7 @@ fn ed25519_verify(key: State<Ed25519Key>, msg: State<Ed25519Msg>, sig: State<Ed2
 //   real Ed25519 will produce a 64-byte R || S signature where every
 //   byte depends (via SHA-512 + curve arithmetic) on every bit of the
 //   secret + the message.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Keygen path ──
     let key = state_new(Ed25519Key);
     ed25519_keygen(key);

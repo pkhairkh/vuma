@@ -8,7 +8,7 @@
 // i+j) and s6_nl_2x2_count_diff (counts iterations, not sum i+j).
 // Expected exit code: 4
 
-fn main() -> i32 {
+transform main() -> i32 {
     acc: u32 = 0;
     for i in 0..2 {
         for j in 0..2 {

@@ -5,7 +5,7 @@
 //   C(2) = 4! / (2! * 3!) = 24 / (2 * 6) = 24 / 12 = 2
 // Straight-line code only.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 2;
     // Hard-coded factorials (no loops)
     factorial_2: u32 = 2;       // 2!

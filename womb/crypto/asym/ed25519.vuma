@@ -18,7 +18,7 @@
 // Curve constants (32-byte little-endian)
 // ===========================================================================
 
-fn ed25519_p() -> Address {
+transform ed25519_p() -> Address {
     // p = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED
     // LE: ED FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 7F
     buf = allocate(32);
@@ -29,7 +29,7 @@ fn ed25519_p() -> Address {
     return buf;
 }
 
-fn ed25519_l() -> Address {
+transform ed25519_l() -> Address {
     // L = 2^252 + 27742317777372353535851937790883648493
     //   = 0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
     // LE: ED D3 F5 5C 1A 63 12 58 D6 9C F7 A2 DE F9 DE 14
@@ -47,7 +47,7 @@ fn ed25519_l() -> Address {
 }
 
 // d = -121665/121666 mod p (precomputed LE bytes).
-fn ed25519_d() -> Address {
+transform ed25519_d() -> Address {
     buf = allocate(32);
     *(buf +  0) = 163; *(buf +  1) = 120; *(buf +  2) =  89; *(buf +  3) =  19;
     *(buf +  4) =  60; *(buf +  5) = 164; *(buf +  6) =  46; *(buf +  7) = 160;
@@ -61,7 +61,7 @@ fn ed25519_d() -> Address {
 }
 
 // sqrt(-1) mod p = 2^((p-1)/4) mod p (precomputed LE bytes for decompression).
-fn ed25519_sqrt_m1() -> Address {
+transform ed25519_sqrt_m1() -> Address {
     // 19681161336723050825442985873232810906779009870791404531190718613984590602334
     // LE bytes:
     buf = allocate(32);
@@ -77,7 +77,7 @@ fn ed25519_sqrt_m1() -> Address {
 }
 
 // Base point B (LE 32-byte x and y).
-fn ed25519_bx() -> Address {
+transform ed25519_bx() -> Address {
     buf = allocate(32);
     *(buf +  0) =  26; *(buf +  1) = 213; *(buf +  2) =  37; *(buf +  3) = 143;
     *(buf +  4) =  96; *(buf +  5) =  45; *(buf +  6) =  86; *(buf +  7) = 201;
@@ -90,7 +90,7 @@ fn ed25519_bx() -> Address {
     return buf;
 }
 
-fn ed25519_by() -> Address {
+transform ed25519_by() -> Address {
     buf = allocate(32);
     *(buf +  0) =  88; *(buf +  1) = 102; *(buf +  2) = 102; *(buf +  3) = 102;
     *(buf +  4) = 102; *(buf +  5) = 102; *(buf +  6) = 102; *(buf +  7) = 102;
@@ -111,7 +111,7 @@ fn ed25519_by() -> Address {
 // construction (each iteration keeps rem < L).
 // ===========================================================================
 
-fn ed25519_mod_l(r: Address, hash_64: Address) {
+transform ed25519_mod_l(r: Address, hash_64: Address) {
     L_le = ed25519_l();
 
     rem = allocate(64);
@@ -185,7 +185,7 @@ fn ed25519_mod_l(r: Address, hash_64: Address) {
 // All operations mod p. The same formula is used for doubling (P + P).
 // ===========================================================================
 
-fn ed25519_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Address, y2: Address, p_le: Address, d_le: Address) {
+transform ed25519_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Address, y2: Address, p_le: Address, d_le: Address) {
     // t1 = x1*y2 ; t2 = x2*y1 ; num_x = t1 + t2
     t1 = allocate(32);
     bn256_mod_mul(t1, x1, y2, p_le);
@@ -233,7 +233,7 @@ fn ed25519_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Add
 
 // Scalar multiplication: R = k * P using double-and-add (MSB-first).
 // Edwards doubling uses the same addition formula (P + P).
-fn ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address, d_le: Address) {
+transform ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address, d_le: Address) {
     // Identity element of twisted Edwards curve is (0, 1)
     bn256_zero(rx);
     *(rx + 0) = 0;
@@ -265,7 +265,7 @@ fn ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Add
 // The "sign" is the LSB of x (parity), placed in bit 255 of the encoding.
 // ===========================================================================
 
-fn ed25519_point_compress(out: Address, x_le: Address, y_le: Address) {
+transform ed25519_point_compress(out: Address, x_le: Address, y_le: Address) {
     i: u32 = 0;
     while i < 32 { *(out + i) = *(y_le + i); i = i + 1; }
     // Clear bit 255 then set it to the LSB of x
@@ -286,7 +286,7 @@ fn ed25519_point_compress(out: Address, x_le: Address, y_le: Address) {
 //   else: not a quadratic residue, return 0
 // ===========================================================================
 
-fn ed25519_recover_x(x_le: Address, y_le: Address, sign: u32, p_le: Address, d_le: Address) -> u32 {
+transform ed25519_recover_x(x_le: Address, y_le: Address, sign: u32, p_le: Address, d_le: Address) -> u32 {
     // y^2
     y_sq = allocate(32);
     bn256_mod_mul(y_sq, y_le, y_le, p_le);
@@ -368,7 +368,7 @@ fn ed25519_recover_x(x_le: Address, y_le: Address, sign: u32, p_le: Address, d_l
 // Returns 1 on success, 0 if the encoding is invalid.
 // ===========================================================================
 
-fn ed25519_point_decompress(x_le: Address, y_le: Address, enc: Address, p_le: Address, d_le: Address) -> u32 {
+transform ed25519_point_decompress(x_le: Address, y_le: Address, enc: Address, p_le: Address, d_le: Address) -> u32 {
     sign: u32 = (*(enc + 31) >> 7) & 1;
     // y = enc with high bit cleared, then reduce mod p (y < 2^255 < 2p)
     i: u32 = 0;
@@ -388,7 +388,7 @@ fn ed25519_point_decompress(x_le: Address, y_le: Address, enc: Address, p_le: Ad
 // return it — callers sign with ed25519_sign which redoes the expansion.
 // ===========================================================================
 
-fn ed25519_keygen(privkey: Address, pubkey: Address) {
+transform ed25519_keygen(privkey: Address, pubkey: Address) {
     h = allocate(64);
     sha512_oneshot(privkey, 32, h);
 
@@ -419,7 +419,7 @@ fn ed25519_keygen(privkey: Address, pubkey: Address) {
 //   sig     : 64-byte signature output (R || S)
 // ===========================================================================
 
-fn ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
+transform ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
     // 1. h = SHA-512(privkey) — 64 bytes
     h = allocate(64);
     sha512_oneshot(privkey, 32, h);
@@ -509,7 +509,7 @@ fn ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
 // Returns 1 if valid, 0 otherwise.
 // ===========================================================================
 
-fn ed25519_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
+transform ed25519_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
     p_le = ed25519_p();
     d_le = ed25519_d();
     l_le = ed25519_l();

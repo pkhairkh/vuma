@@ -7,7 +7,7 @@
 // from s70_edge_half_max_and_low (0), s66_edge_half_max_xor_
 // eleven (116) and s74_edge_max_and_two (2).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 127;
     b: u32 = 1;
     r: u32 = a ^ b;        // 126

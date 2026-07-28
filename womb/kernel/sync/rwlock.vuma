@@ -512,7 +512,7 @@ layout RwLock = {
 // at offset 12, but the same "make zero self-evident" convention
 // applies). The pre-W43 `_pad1` field (pure padding) is gone — replaced
 // by `waitq_count` (a real field with semantic purpose).
-fn rwlock_init(l: State<RwLock>) {
+transform rwlock_init(l: State<RwLock>) {
     l.readers = 0;
     l.writer = 0;
     l.write_waitq = 0;
@@ -583,7 +583,7 @@ fn rwlock_init(l: State<RwLock>) {
 //     terminates when the CAS succeeds (old == cur) — either on the
 //     first try (no contention) or after a few retries (other readers
 //     racing the CAS).
-fn rwlock_read_acquire(l: State<RwLock>) -> i32 {
+transform rwlock_read_acquire(l: State<RwLock>) -> i32 {
     // `success` is 0 until the CAS(cur → cur+1) succeeds (old == cur).
     let success = 0;
     while success == 0 {
@@ -747,7 +747,7 @@ fn rwlock_read_acquire(l: State<RwLock>) -> i32 {
 //   if readers dropped to 0. In the hosted single-threaded self-test,
 //   this branch is never taken (waitq_count stays at 0 because the
 //   slow path is never entered).
-fn rwlock_read_release(l: State<RwLock>) {
+transform rwlock_read_release(l: State<RwLock>) {
     // `success` is 0 until the CAS(cur → cur-1) succeeds (old == cur)
     // OR we hit the `cur == 0` defensive path.
     let success = 0;
@@ -866,7 +866,7 @@ fn rwlock_read_release(l: State<RwLock>) {
 // field is diagnostic-only and never bumped. W43's wait-queue
 // bookkeeping uses `waitq_count` (offset 12) instead — the unified
 // counter matching W16S1/W42 naming.
-fn rwlock_write_acquire(l: State<RwLock>) -> i32 {
+transform rwlock_write_acquire(l: State<RwLock>) -> i32 {
     // `success` is 0 until the CAS(0 → 1<<32) succeeds (old == 0).
     let success = 0;
     while success == 0 {
@@ -1036,7 +1036,7 @@ fn rwlock_write_acquire(l: State<RwLock>) -> i32 {
 // writer. In the hosted single-threaded self-test, this branch is
 // never taken (waitq_count stays at 0 because the slow path is never
 // entered).
-fn rwlock_write_release(l: State<RwLock>) {
+transform rwlock_write_release(l: State<RwLock>) {
     // atomic_store(addr, val): store `val` atomically to [addr].
     //   On x86_64 this is a plain MOV (already atomic for aligned
     //   accesses — no LOCK prefix needed for stores). Writes 0 to
@@ -1130,7 +1130,7 @@ fn rwlock_write_release(l: State<RwLock>) {
 //   - The `cur == 0` defensive path in read_release (would require a
 //     buggy caller releasing a read lock they don't hold).
 //   - Actual sleep_on / wake_one (hosted has no scheduler — K9 covers).
-fn main() -> i32 {
+transform main() -> i32 {
     let l = state_new(RwLock);
     rwlock_init(l);
     // Multiple readers — acquire twice. Both should succeed (readers

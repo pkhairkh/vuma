@@ -5,7 +5,7 @@
 // variables. Stresses the codegen's register/stack-slot allocation
 // for many simultaneously-live locals.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 2;
     c: u32 = 3;

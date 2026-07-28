@@ -5,7 +5,7 @@
 // operands loaded into u32 variables first. Distinct from
 // s14_u32_or_then_xor (OR-then-XOR) and s10_u32_mul_add (mul-then-add).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 5;
     b: u32 = 6;
     c: u32 = 51;          // 0x33

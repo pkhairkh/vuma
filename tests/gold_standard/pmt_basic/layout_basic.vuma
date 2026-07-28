@@ -2,7 +2,7 @@
 // Expected exit code: 0
 //
 // Parse-only smoke test: declares a `layout Point = { x: u32, y: u32 }`
-// and a `fn main` that returns 0. The layout is parsed into `Item::LayoutDef`
+// and a `transform main` that returns 0. The layout is parsed into `Item::LayoutDef`
 // but not yet lowered to SCG (A future pass does that). The key assertion is that
 // the parser accepts the new `layout` keyword form without error.
 //
@@ -13,6 +13,6 @@
 
 layout Point = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

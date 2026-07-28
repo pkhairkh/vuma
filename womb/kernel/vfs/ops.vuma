@@ -73,7 +73,7 @@
 // Unlike K6d's CharDevTable (32 slots, each a separate CharDevice) or
 // K5a's InodeTable (256 slots), VfsOps is a SINGLE struct per mounted
 // filesystem — one VfsOps per superblock. There is no slot indexing,
-// no parallel flat byte arrays, no pack/unpack loops. The 9 fn fields
+// no parallel flat byte arrays, no pack/unpack loops. The 9 transform fields
 // are stored as direct u64 layout fields, accessed via `ops.read_fn`
 // (single-state-field Load at the field's byte offset — same pattern
 // as host.vuma's `b.argc = ...` on State<BootInfo>). This is the
@@ -122,7 +122,7 @@
 // __call_indirect1 lowers to `mov rax, rdi; mov rdi, rsi; jmp rax`,
 // which would jump to address 0 (NULL deref → SIGSEGV) if called with
 // ptr == 0. The `if read_fn != 0` guard short-circuits before the
-// trampoline is reached, so a VfsOps with all-zero fn fields (a fresh
+// trampoline is reached, so a VfsOps with all-zero transform fields (a fresh
 // state_new(VfsOps) — zero-initialised by the ___pmt_buffer) safely
 // returns -ENOSYS for every dispatch wrapper instead of faulting.
 // Same safety property char.vuma's chardev_read documents
@@ -141,7 +141,7 @@
 // irq.vuma:276, signal.vuma:455, ipi.vuma:304, dispatch.vuma:226.
 //
 // The `ops` (State<VfsOps>) is preserved across the extern call
-// because it is passed as a regular VUMA-fn borrow, NOT as an extern
+// because it is passed as a regular VUMA-transform borrow, NOT as an extern
 // #[borrow] State<T> param (only extern #[borrow] State<T> params are
 // conservatively invalidated — see W5's dispatch.vuma for the same
 // reasoning). `buf`, `count`, and `pos` are part of the API signature
@@ -159,8 +159,8 @@
 // non-main function creates a stack-local Alloc that does NOT survive
 // the function return; see vfs_ops_tmpfs's header comment for the full
 // rationale). The State<VfsOps> handle is passed by reference to
-// vfs_ops_tmpfs (which populates the 9 fn fields) and to the vfs_ops_*
-// dispatch wrappers (which read the fn fields via single-state-field
+// vfs_ops_tmpfs (which populates the 9 transform fields) and to the vfs_ops_*
+// dispatch wrappers (which read the transform fields via single-state-field
 // Loads — no copy-out, no move semantics — VUMA's State<T> is a borrow
 // of the ___pmt_buffer slot). The `ops.read_fn = tmpfs_read_fn as u64`
 // syntax in vfs_ops_tmpfs is State-field self-update (lowered to a
@@ -178,7 +178,7 @@
 //              subtraction form avoids the lexer's negative-literal
 //              path; same K7e discipline as W40-W44, same value used
 //              by char.vuma:767, procfs.vuma:780, devfs.vuma:826).
-//     0      = initial fn-pointer value (state_new zero-fill — the
+//     0      = initial transform-pointer value (state_new zero-fill — the
 //              "no handler registered" sentinel that the read_fn != 0
 //              guard checks against).
 // All `0x...` mentions in this file are in doc-comments only.
@@ -227,7 +227,7 @@ extern "C" {
     // (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax). Same extern
     // declaration as char.vuma:232, procfs.vuma:283, trap.vuma:228,
     // irq.vuma:276, signal.vuma:455, ipi.vuma:304, dispatch.vuma:226.
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -245,7 +245,7 @@ extern "C" {
 // (no nested layouts, no separate inode/file ops split — K11+ may
 // split them when the dispatch layer grows per-op-type routing).
 //
-// Each fn field is a u64 holding either:
+// Each transform field is a u64 holding either:
 //   - 0  — no handler registered (hosted stub; the vfs_ops_* guard
 //          short-circuits to -ENOSYS before __call_indirect1 is reached).
 //   - <non-zero .text address> — the address of a VUMA function with
@@ -296,7 +296,7 @@ layout VfsOps = {
 // VfsOps. K11+ will replace these stubs with real tmpfs primitive
 // bodies (K5c's tmpfs_read / tmpfs_write / etc.) via VUMA's (future)
 // import mechanism OR a linker layer that selects the real-body
-// version of each fn name.
+// version of each transform name.
 //
 // The stub bodies are deliberately non-trivial in SIGNATURE only —
 // the body is `return 0;` (the simplest possible body that still
@@ -308,7 +308,7 @@ layout VfsOps = {
 // `-> u64` contract), which is what makes the stub callable via the
 // trampoline.
 //
-// Why 9 stubs and not just 1? Each VfsOps field is a distinct fn
+// Why 9 stubs and not just 1? Each VfsOps field is a distinct transform
 // pointer that K11+ will wire to a distinct tmpfs primitive
 // (tmpfs_read / tmpfs_write / tmpfs_stat / tmpfs_readdir / etc.).
 // Having 9 separate stubs (rather than reusing one stub for all 9
@@ -319,57 +319,57 @@ layout VfsOps = {
 // tmpfs_read_fn: read handler. K11+ will replace with K5c's
 // tmpfs_read(inode, buf, count, pos). Stub returns 0 (EOF / no bytes
 // read) — a real read would return the byte count transferred.
-fn tmpfs_read_fn(buf: u64) -> u64 {
+transform tmpfs_read_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_write_fn: write handler. K11+ will replace with K5c's
 // tmpfs_write. Stub returns 0 (no bytes written).
-fn tmpfs_write_fn(buf: u64) -> u64 {
+transform tmpfs_write_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_stat_fn: stat handler. K11+ will replace with a tmpfs_stat
 // that fills a struct kstat from the InodeTable. Stub returns 0
 // (success — POSIX stat returns 0 on success, -errno on failure).
-fn tmpfs_stat_fn(buf: u64) -> u64 {
+transform tmpfs_stat_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_readdir_fn: readdir handler. K11+ will replace with K5c's
 // tmpfs_readdir. Stub returns 0 (success).
-fn tmpfs_readdir_fn(buf: u64) -> u64 {
+transform tmpfs_readdir_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_unlink_fn: unlink handler. K11+ will replace with K5c's
 // tmpfs_unlink. Stub returns 0 (success).
-fn tmpfs_unlink_fn(buf: u64) -> u64 {
+transform tmpfs_unlink_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_open_fn: open handler. K11+ will replace with K5c's
 // tmpfs_open. Stub returns 0 (success — a real open would return a
 // file descriptor or 0 for the inode index).
-fn tmpfs_open_fn(buf: u64) -> u64 {
+transform tmpfs_open_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_mkdir_fn: mkdir handler. K11+ will replace with K5c's
 // tmpfs_mkdir. Stub returns 0 (success).
-fn tmpfs_mkdir_fn(buf: u64) -> u64 {
+transform tmpfs_mkdir_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_rename_fn: rename handler. K11+ will replace with K5c's
 // tmpfs_rename. Stub returns 0 (success).
-fn tmpfs_rename_fn(buf: u64) -> u64 {
+transform tmpfs_rename_fn(buf: u64) -> u64 {
     return 0;
 }
 
 // tmpfs_chmod_fn: chmod handler. K11+ will replace with K5c's
 // tmpfs_chmod. Stub returns 0 (success).
-fn tmpfs_chmod_fn(buf: u64) -> u64 {
+transform tmpfs_chmod_fn(buf: u64) -> u64 {
     return 0;
 }
 
@@ -400,7 +400,7 @@ fn tmpfs_chmod_fn(buf: u64) -> u64 {
 // The 9 `ops.<field> = tmpfs_*_fn as u64` assignments are State-field
 // Stores at the field's byte offset (0, 8, 16, 24, 32, 40, 48, 56, 64)
 // — same pattern as host.vuma's `b.argc = ac as u64` (host.vuma:82).
-// The `as u64` cast around each fn name is a no-op at the IR level
+// The `as u64` cast around each transform name is a no-op at the IR level
 // (Expr::Cast flattens to its inner Var), but it's there for source-
 // level clarity: the reader sees that the value being stored is a u64
 // (matching the field's u64 type).
@@ -412,7 +412,7 @@ fn tmpfs_chmod_fn(buf: u64) -> u64 {
 // the function return — the stack frame is popped on return, leaving
 // the State<VfsOps> pointer dangling (the caller reads freed stack
 // memory, which gets overwritten by subsequent function calls —
-// verified by test: a `fn factory() -> State<T> { let x = state_new(T);
+// verified by test: a `transform factory() -> State<T> { let x = state_new(T);
 // ...; return x; }` pattern produces garbage field values when the
 // caller makes any function call between the factory return and the
 // field read). The init-style API (caller allocates via state_new in
@@ -427,7 +427,7 @@ fn tmpfs_chmod_fn(buf: u64) -> u64 {
 // addresses) — the function populates + returns the same State<VfsOps>
 // it received, so the return value IS the populated VfsOps.
 
-fn vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
+transform vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
     ops.read_fn = tmpfs_read_fn as u64;
     ops.write_fn = tmpfs_write_fn as u64;
     ops.stat_fn = tmpfs_stat_fn as u64;
@@ -448,7 +448,7 @@ fn vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
 // descriptor to its per-superblock VfsOps (sys_read → fdtable lookup →
 // mount_get_ops → vfs_ops_read). The dispatch mirrors K6d's
 // chardev_read / chardev_write pattern (char.vuma:760-797) and K5g's
-// procfs_read pattern (procfs.vuma:745-781): fetch the fn pointer,
+// procfs_read pattern (procfs.vuma:745-781): fetch the transform pointer,
 // guard against 0 (no handler registered — hosted-mode stub), and
 // invoke the __call_indirect1 trampoline.
 //
@@ -467,7 +467,7 @@ fn vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
 // __call_indirect1").
 //
 // Return values:
-//   -ENOSYS (0 - 38)  — fn pointer == 0 (no handler registered; the
+//   -ENOSYS (0 - 38)  — transform pointer == 0 (no handler registered; the
 //                       hosted-mode stub guard fires before the
 //                       __call_indirect1 trampoline is reached). Same
 //                       errno value as char.vuma:767, procfs.vuma:780,
@@ -483,11 +483,11 @@ fn vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
 //                       write) or 0-on-success / -errno-on-failure
 //                       (stat / readdir).
 //
-// The fn == 0 guard is essential in hosted mode: __call_indirect1
+// The transform == 0 guard is essential in hosted mode: __call_indirect1
 // lowers to `mov rax, rdi; mov rdi, rsi; jmp rax`, which would jump
 // to address 0 (NULL deref → SIGSEGV) if called with ptr == 0. The
 // guard short-circuits before the stub is reached, so a VfsOps with
-// all-zero fn fields (a fresh state_new(VfsOps)) safely returns
+// all-zero transform fields (a fresh state_new(VfsOps)) safely returns
 // -ENOSYS for every dispatch wrapper instead of faulting — same
 // safety property char.vuma's chardev_read documents (char.vuma:751-
 // 755) and procfs.vuma's procfs_read documents (procfs.vuma:729-734).
@@ -496,7 +496,7 @@ fn vfs_ops_tmpfs(ops: State<VfsOps>) -> State<VfsOps> {
 // for the full contract. Returns i64 (bytes read or -errno) — matches
 // K5f's vfs_read return type (file_ops.vuma:24-29) so K7's sys_read
 // can propagate the value unchanged to userspace.
-fn vfs_ops_read(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 {
+transform vfs_ops_read(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 {
     let read_fn = ops.read_fn;
     if read_fn == 0 {
         return 0 - 38;  // -ENOSYS: no read handler registered
@@ -514,7 +514,7 @@ fn vfs_ops_read(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 {
 
 // vfs_ops_write: dispatch to ops.write_fn. Byte-identical to
 // vfs_ops_read except for the slot field (write_fn vs read_fn).
-fn vfs_ops_write(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 {
+transform vfs_ops_write(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 {
     let write_fn = ops.write_fn;
     if write_fn == 0 {
         return 0 - 38;  // -ENOSYS: no write handler registered
@@ -530,7 +530,7 @@ fn vfs_ops_write(ops: State<VfsOps>, buf: Address, count: u64, pos: u64) -> i64 
 // handler returning -errno, the low 32 bits preserve the negative
 // value because i64 → i32 truncation keeps the sign bit in the low
 // 32 bits for small magnitudes like -38).
-fn vfs_ops_stat(ops: State<VfsOps>, statbuf: Address) -> i32 {
+transform vfs_ops_stat(ops: State<VfsOps>, statbuf: Address) -> i32 {
     let stat_fn = ops.stat_fn;
     if stat_fn == 0 {
         return 0 - 38;  // -ENOSYS: no stat handler registered
@@ -545,7 +545,7 @@ fn vfs_ops_stat(ops: State<VfsOps>, statbuf: Address) -> i32 {
 // (readdir_fn vs stat_fn) and the extra `count: u32` parameter (kept
 // in the signature for K7+ sys_getdents wiring; unused in the W45
 // body — same chardev_read `buf, count` discipline).
-fn vfs_ops_readdir(ops: State<VfsOps>, buf: Address, count: u32) -> i32 {
+transform vfs_ops_readdir(ops: State<VfsOps>, buf: Address, count: u32) -> i32 {
     let readdir_fn = ops.readdir_fn;
     if readdir_fn == 0 {
         return 0 - 38;  // -ENOSYS: no readdir handler registered
@@ -560,7 +560,7 @@ fn vfs_ops_readdir(ops: State<VfsOps>, buf: Address, count: u32) -> i32 {
 // Two-phase verification:
 //
 // Phase A — populated VfsOps (tmpfs factory). Allocate a VfsOps via
-// vfs_ops_tmpfs(), verify the factory populated the fn fields with
+// vfs_ops_tmpfs(), verify the factory populated the transform fields with
 // real .text addresses ( DCE-preservation belt-and-suspenders
 // check), and exercise each dispatch wrapper to confirm the indirect
 // call is actually made and returns the stub's value (0) — NOT
@@ -570,7 +570,7 @@ fn vfs_ops_readdir(ops: State<VfsOps>, buf: Address, count: u32) -> i32 {
 // ran and returned).
 //
 // Phase B — zero-initialised VfsOps (no handlers). Allocate a fresh
-// state_new(VfsOps) (zero-filled by the ___pmt_buffer — all 9 fn
+// state_new(VfsOps) (zero-filled by the ___pmt_buffer — all 9 transform
 // fields are 0), verify read_fn == 0 (zero-fill invariant), and
 // exercise each dispatch wrapper to confirm the read_fn == 0 guard
 // short-circuits to -ENOSYS (0 - 38) BEFORE the __call_indirect1
@@ -583,12 +583,12 @@ fn vfs_ops_readdir(ops: State<VfsOps>, buf: Address, count: u32) -> i32 {
 // the self-test is pure (integer return codes only), matching
 // char.vuma and procfs.vuma's self-test discipline.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Phase A: populated VfsOps (tmpfs factory). ─────────────────────
 
     // Allocate a VfsOps via state_new (in main's ___pmt_buffer — the
     // init-style API), then populate it via vfs_ops_tmpfs(). The
-    // factory fills each of the 9 fn fields with the address of the
+    // factory fills each of the 9 transform fields with the address of the
     // corresponding tmpfs_*_fn stub (via `tmpfs_*_fn as u64` →
     // GetAddress → R_X86_64_64 reloc patched at link time with the
     // .text address). The two-step pattern (state_new in main +
@@ -653,7 +653,7 @@ fn main() -> i32 {
     // ── Phase B: zero-initialised VfsOps (no handlers). ────────────────
 
     // Allocate a fresh VfsOps via state_new — zero-filled by the
-    // ___pmt_buffer (all 9 fn fields are 0). This is the "no handlers
+    // ___pmt_buffer (all 9 transform fields are 0). This is the "no handlers
     // registered" state that a freshly-mounted filesystem with no
     // tmpfs_init / no chardev_register calls would have.
     let zero_ops = state_new(VfsOps);

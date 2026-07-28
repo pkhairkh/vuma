@@ -5,11 +5,11 @@
 // arguments and summing the results. Each result is captured in its own
 // local variable to avoid the nested-call-as-argument miscompilation.
 
-fn id(x: u32) -> u32 {
+transform id(x: u32) -> u32 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = id(40);
     b: u32 = id(42);
     c: u32 = id(44);

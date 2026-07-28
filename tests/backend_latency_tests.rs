@@ -180,7 +180,7 @@ fn wave10_proper_production_pipeline_uses_backend_table() {
     // doesn't break compilation for any ISA.
     use vuma::pipeline::{compile, CompileConfig, OptLevel};
 
-    let source = "fn main() -> i64 { return 42; }";
+    let source = "transform main() -> i64 { return 42; }";
     let config = CompileConfig {
         opt_level: OptLevel::O2,
         ..CompileConfig::default()

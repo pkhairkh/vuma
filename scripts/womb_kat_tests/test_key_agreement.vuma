@@ -2,4 +2,4 @@
 // Key agreement
 // Expected exit code: 42
 
-fn main() -> i32 { return (6*7)&255; }
+transform main() -> i32 { return (6*7)&255; }

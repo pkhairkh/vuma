@@ -36,7 +36,7 @@
 //   - An FDE covering this function's address range
 //   - Line-number entries mapping instructions to source lines below
 
-fn double_value(x: i32) -> i32 {
+transform double_value(x: i32) -> i32 {
     // IVE verifies: x is a valid function parameter (Liveness)
     // With --debug, this line maps to a DWARF line-number entry
     result: i32 = x + x;
@@ -50,7 +50,7 @@ fn double_value(x: i32) -> i32 {
 // demonstrating that the DWARF line program correctly maps both the
 // 'if' and 'else' branches back to their source lines.
 
-fn absolute_value(x: i32) -> i32 {
+transform absolute_value(x: i32) -> i32 {
     if x < 0 {
         // With --debug, this line is recorded in the line-number program
         return 0 - x;
@@ -74,7 +74,7 @@ struct Pair {
     b: i32,
 }
 
-fn pair_sum(p: Address) -> i32 {
+transform pair_sum(p: Address) -> i32 {
     // IVE verifies: p is live and correctly typed as Pair
     va: i32 = *(p + 0);
     vb: i32 = *(p + 4);
@@ -88,7 +88,7 @@ fn pair_sum(p: Address) -> i32 {
 // This function gets its own FDE and subprogram DIE.
 // The line-number program maps every instruction back to these lines.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // With --debug, local variables appear as DW_TAG_VARIABLE entries
     // in .debug_info with DW_AT_LOCATION expressions
     x: i32 = 21;

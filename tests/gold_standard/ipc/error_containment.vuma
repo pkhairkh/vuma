@@ -2,7 +2,7 @@
 // A child worker crashes (exit with non-zero), the parent detects via
 // wait_worker and handles the error gracefully.
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

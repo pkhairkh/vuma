@@ -71,7 +71,7 @@ fn workspace_root() -> std::path::PathBuf {
 // Helper: build a minimal IR function that calls an extern stub
 // ===========================================================================
 
-/// Build `fn main() -> i64 { return __vuma_argc(); }` — a minimal IR
+/// Build `transform main() -> i64 { return __vuma_argc(); }` — a minimal IR
 /// function whose only instruction is an extern call to `__vuma_argc`.
 /// The call generates an `R_X86_64_PLT32` relocation that `encode_program`
 /// resolves to the runtime stub's offset.
@@ -95,7 +95,7 @@ fn build_main_calling_argc() -> IRFunction {
     func
 }
 
-/// Build `fn main() -> i64 { return __vuma_argv(); }` — same as above but
+/// Build `transform main() -> i64 { return __vuma_argv(); }` — same as above but
 /// for `__vuma_argv`.
 fn build_main_calling_argv() -> IRFunction {
     let mut func = IRFunction::new("main");
@@ -217,11 +217,11 @@ fn test_wave47_bootstrap_source_uses_argv() {
 
     // ── The two runtime intrinsics must be declared as externs. ──
     assert!(
-        source.contains("fn __vuma_argc() -> i32"),
+        source.contains("transform __vuma_argc() -> i32"),
         "full_lexer.vuma must declare `fn __vuma_argc() -> i32` as an extern"
     );
     assert!(
-        source.contains("fn __vuma_argv() -> Address"),
+        source.contains("transform __vuma_argv() -> Address"),
         "full_lexer.vuma must declare `fn __vuma_argv() -> Address` as an extern"
     );
 

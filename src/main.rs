@@ -16,7 +16,7 @@
 //! - `vuma emit <isa> <file>` — Compile to specific ISA
 //! - `vuma disasm <file>` — Read binary and disassemble
 //! - `vuma verify <file>` — Run IVE 5-invariant verification
-//! - `vuma repl` — Interactive REPL (parse expr, print AST)
+//! - `vuma repl` — Interactive REPL (full VumaRepl: parse, SCG, MSG, verify)
 //! - `vuma lsp`  — Start Language Server (LSP) for IDE/LLM integration
 
 use std::fs;
@@ -81,12 +81,6 @@ struct Cli {
 
     /// Emit full ELF section headers in the output binary
     sections: bool,
-
-    /// Launch the interactive REPL (shorthand for `vuma repl`)
-    repl: bool,
-
-    /// Enable runtime memory safety checks (bounds checking, --safe mode)
-    safe: bool,
 
     /// Run performance benchmarks instead of compiling
     bench: bool,
@@ -534,7 +528,7 @@ fn print_usage() {
          \x20  disasm    Read a binary file and disassemble it\n\
          \x20  link      Link multiple .vuma files into a single ELF binary\n\
          \x20  verify    Run IVE PMT state verification\n\
-         \x20  repl      Interactive REPL: parse expressions and print AST\n\
+         \x20  repl      Interactive REPL (full VumaRepl: parse, SCG, MSG, verify)\n\
          \x20  lsp       Start the Language Server (LSP) for IDE/LLM integration\n\
          \x20  pkg       Package manager subcommands\n\
          \x20  help      Print this message or the help of the given subcommand(s)\n\n\
@@ -546,8 +540,6 @@ fn print_usage() {
          \x20      --strict-ive                   Promote the bv_verify advisory IVE verifier to a hard failure (linear-channel is always hard-fail as of Task 15-a)\n\
          \x20      --debug                        Include debug info in output (alias: --debug-info)\n\
          \x20      --sections                     Emit full ELF section headers in the output binary\n\
-         \x20      --repl                         Launch the interactive REPL (shorthand for `vuma repl`)\n\
-         \x20      --safe                         Enable runtime memory safety checks\n\
          \x20      --bench                        Run performance benchmarks instead of compiling\n\
          \x20      --max-expr-depth <N>           Maximum expression nesting depth [default: 1024]\n\
          \x20  -v, --verbose                     Enable verbose/debug logging\n\
@@ -603,8 +595,6 @@ where
         strict_ive: false,
         debug: false,
         sections: false,
-        repl: false,
-        safe: true, // `safe` is always on (--safe is a no-op)
         bench: false,
         verbose: false,
         quiet: false,
@@ -738,17 +728,22 @@ fn try_consume_global_flag(
             cli.sections = true;
             Ok(true)
         }
-        "--repl" => {
-            iter.next();
-            cli.repl = true;
-            Ok(true)
-        }
-        "--safe" => {
-            iter.next();
-            // No-op — `safe` is always `true`.
-            // Flag accepted for backwards compatibility.
-            Ok(true)
-        }
+        // VUMA 2.0: `--repl` flag is REMOVED — use `vuma repl` subcommand.
+        // The flag was redundant with the subcommand and dispatched to the
+        // same VumaRepl. Reject the flag with a hard error so callers get
+        // a clear migration message.
+        "--repl" => Err(ParseError::Msg(
+            "error: --repl has been removed; use `vuma repl` subcommand instead.".to_string(),
+        )),
+        // VUMA 2.0: `--safe` is REMOVED — runtime bounds checks are
+        // ALWAYS ON (memory-safety analysis is mandatory). Reject the
+        // flag with a hard error so callers get a clear migration
+        // message instead of a silent no-op.
+        "--safe" => Err(ParseError::Msg(
+            "error: --safe has been removed in VUMA 2.0; runtime bounds \
+                 checks are always on (memory-safety analysis is mandatory)."
+                .to_string(),
+        )),
         // VUMA 2.0: `--no-memory-safety` is REMOVED — memory-safety
         // analysis is mandatory. Reject the flag with a hard error.
         "--no-memory-safety" => Err(ParseError::Msg(
@@ -1562,7 +1557,9 @@ fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
         allow_inconclusive: cli.allow_inconclusive,
         strict_ive: cli.strict_ive,
         section_headers: cli.sections,
-        runtime_bounds_checks: cli.safe,
+        // VUMA 2.0: runtime bounds checks are ALWAYS ON (the `--safe`
+        // flag has been removed — memory-safety analysis is mandatory).
+        runtime_bounds_checks: true,
         max_expr_depth: cli.max_expr_depth,
         ..CompileConfig::default()
     }
@@ -2585,76 +2582,16 @@ fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
-/// `vuma repl` — Interactive REPL: parse expressions and print AST.
+/// `vuma repl` — Launch the full interactive VumaRepl.
+///
+/// Dispatches to `vuma_core::repl::VumaRepl::new().run()`, which provides
+/// the complete interactive shell: parse -> SCG -> MSG -> IVE verification,
+/// tab completion, command history, and `:help` / `:json` / `:quit`
+/// directives. The previous 70-line toy AST-dumper REPL was deleted in
+/// Wave 2-A in favour of this single canonical entry point.
 fn cmd_repl() -> Result<(), String> {
-    println!("VUMA REPL v0.1.0");
-    println!("Type VUMA expressions or statements. Enter ':quit' to exit, ':help' for help.");
-
-    let stdin = io::stdin();
-    let mut input = String::new();
-
-    loop {
-        print!("vuma> ");
-        io::stdout()
-            .flush()
-            .map_err(|e| format!("flush error: {}", e))?;
-
-        input.clear();
-        match stdin.read_line(&mut input) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(e) => return Err(format!("error reading input: {}", e)),
-        }
-
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed == ":quit" || trimmed == ":q" {
-            break;
-        }
-        if trimmed == ":help" || trimmed == ":h" {
-            println!("  :quit, :q   — Exit the REPL");
-            println!("  :help, :h   — Show this help");
-            println!("  <expr>      — Parse and display the AST");
-            println!("  <stmt>      — Parse and display the AST");
-            println!("  <program>   — Parse and display the full program AST");
-            continue;
-        }
-
-        // Try to parse as a full program first.
-        let mut parser = vuma_parser::Parser::new(trimmed);
-        let result = parser.parse_program();
-        if !result.has_errors() {
-            // Successfully parsed; display the AST.
-            let program = result.unwrap();
-            println!("{:#?}", program);
-            continue;
-        }
-        // Program parse had errors; try to parse as an expression via
-        // wrapping it in a dummy program context.
-        let program_errors = result.errors.clone();
-        // Since parse_expr is private, we re-parse as a minimal program.
-        let wrapped = format!("fn _repl_expr() {{ {} }}", trimmed);
-        let mut expr_parser = vuma_parser::Parser::new(&wrapped);
-        let expr_result = expr_parser.parse_program();
-        if !expr_result.has_errors() {
-            // Print the function body AST.
-            let program = expr_result.unwrap();
-            if let Some(item) = program.items.first() {
-                println!("{:#?}", item);
-            } else {
-                println!("{:#?}", program);
-            }
-        } else {
-            // Show the original parse errors.
-            for err in &program_errors {
-                eprintln!("parse error: {}", err);
-            }
-        }
-    }
-
-    Ok(())
+    let mut repl = vuma_core::repl::VumaRepl::new();
+    repl.run().map_err(|e| format!("REPL error: {e}"))
 }
 
 /// Start the VUMA Language Server (LSP) over stdin/stdout.
@@ -2924,7 +2861,7 @@ fn cmd_bench(_cli: &Cli) {
 
     for &line_count in &[10, 50, 100, 500] {
         // Generate a synthetic program of the given size
-        let mut source = String::from("fn main() {\n");
+        let mut source = String::from("transform main() {\n");
         for i in 0..line_count {
             source.push_str(&format!("    x{} = {} + {};\n", i, i, i + 1));
         }
@@ -3007,11 +2944,9 @@ fn cmd_bench(_cli: &Cli) {
         if let Some(program) = parse_result.value {
             let codegen_scg = bridge_ast_to_codegen_scg(&program);
 
-            let config = if _cli.safe {
-                vuma_codegen::MemorySafetyConfig::safe_mode()
-            } else {
-                vuma_codegen::MemorySafetyConfig::compile_time_only()
-            };
+            // VUMA 2.0: runtime bounds checks are ALWAYS ON (`--safe` has
+            // been removed — memory-safety analysis is mandatory).
+            let config = vuma_codegen::MemorySafetyConfig::safe_mode();
 
             let start = std::time::Instant::now();
             let analyzer = vuma_codegen::MemorySafetyAnalyzer::new(config);
@@ -3071,21 +3006,11 @@ fn main() {
         return;
     }
 
-    // Handle --repl flag: launch the full VumaRepl instead of subcommand.
-    if cli.repl {
-        let mut repl = vuma_core::repl::VumaRepl::new();
-        if let Err(e) = repl.run() {
-            eprintln!("REPL error: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     let command = match cli.command {
         Some(ref cmd) => cmd,
         None => {
-            // No subcommand and no --repl: print help.
-            eprintln!("No subcommand specified. Use `vuma --help` or `vuma --repl`.");
+            // No subcommand: print help.
+            eprintln!("No subcommand specified. Use `vuma --help` or `vuma repl`.");
             std::process::exit(1);
         }
     };
@@ -3411,11 +3336,14 @@ mod tests {
         }
     }
 
-    /// Test 10b: `vuma --repl` parses correctly.
+    /// Test 10b: `vuma --repl` is REJECTED (flag removed in Wave 2-A; use `vuma repl`).
     #[test]
-    fn test_repl_flag() {
-        let cli = parse_cli_from(["vuma", "--repl"]).unwrap();
-        assert!(cli.repl, "--repl flag should be true");
+    fn test_repl_flag_rejected() {
+        let result = parse_cli_from(["vuma", "--repl"]);
+        assert!(
+            result.is_err(),
+            "--repl flag must be rejected (removed in Wave 2-A; use `vuma repl`)"
+        );
     }
 
     /// Test 11: Global `--opt-level` flag works.
@@ -3480,6 +3408,17 @@ mod tests {
         assert!(
             result.is_err(),
             "--no-memory-safety must be rejected (removed in VUMA 2.0)"
+        );
+    }
+
+    /// Test 12e: `--safe` is rejected (removed in VUMA 2.0 — runtime bounds
+    /// checks are always on; the flag is no longer a recognized no-op).
+    #[test]
+    fn test_safe_flag_rejected() {
+        let result = parse_cli_from(["vuma", "--safe", "build", "hello.vuma"]);
+        assert!(
+            result.is_err(),
+            "--safe must be rejected (removed in VUMA 2.0; bounds checks are always on)"
         );
     }
 

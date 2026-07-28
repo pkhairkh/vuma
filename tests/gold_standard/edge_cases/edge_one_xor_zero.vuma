@@ -6,7 +6,7 @@
 // Distinct from s7/s8/s10_edge_zero_xor (0^0=0) and
 // s10_edge_max_xor_zero (255^0=255).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 0;
     r: u32 = a ^ b;

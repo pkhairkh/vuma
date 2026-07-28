@@ -20,7 +20,7 @@
 //! ```rust,ignore
 //! use vuma::llm_api::{VumaForLLM, LLMCompileResult};
 //!
-//! let source = "fn main() { x = 1 + 2; }";
+//! let source = "transform main() { x = 1 + 2; }";
 //!
 //! // Full compilation with structured result
 //! let result = VumaForLLM::compile(source);
@@ -73,7 +73,7 @@ impl VumaForLLM {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let result = VumaForLLM::compile("fn main() { x = 42; }");
+    /// let result = VumaForLLM::compile("transform main() { x = 42; }");
     /// println!("Success: {}", result.success);
     /// println!("Explanation: {}", result.explanation);
     /// ```
@@ -167,7 +167,7 @@ impl VumaForLLM {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let diags = VumaForLLM::check("fn main() { x = 1 + ; }");
+    /// let diags = VumaForLLM::check("transform main() { x = 1 + ; }");
     /// for d in &diags {
     ///     println!("[{}] {}", d.code, d.message);
     /// }
@@ -236,7 +236,7 @@ impl VumaForLLM {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let scg_json = VumaForLLM::analyze("fn main() { x = 1 + 2; }").unwrap();
+    /// let scg_json = VumaForLLM::analyze("transform main() { x = 1 + 2; }").unwrap();
     /// println!("{}", scg_json.to_string_pretty());
     /// ```
     pub fn analyze(source: &str) -> Result<JsonValue, String> {
@@ -277,7 +277,7 @@ impl VumaForLLM {
     /// # Example
     ///
     /// ```rust,ignore
-    /// match VumaForLLM::to_wasm("fn main() -> i32 { return 42; }") {
+    /// match VumaForLLM::to_wasm("transform main() -> i32 { return 42; }") {
     ///     Ok(wasm_bytes) => println!("Wasm binary: {} bytes", wasm_bytes.len()),
     ///     Err(diags) => println!("Errors: {:?}", diags),
     /// }
@@ -304,7 +304,7 @@ impl VumaForLLM {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let diags = VumaForLLM::check("fn 123bad() {}");
+    /// let diags = VumaForLLM::check("transform 123bad() {}");
     /// for d in &diags {
     ///     let explanation = VumaForLLM::explain_error(d);
     ///     println!("{}", explanation);
@@ -372,7 +372,7 @@ impl VumaForLLM {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let diags = VumaForLLM::check("fn main() { x = ; }");
+    /// let diags = VumaForLLM::check("transform main() { x = ; }");
     /// for d in &diags {
     ///     let fixes = VumaForLLM::suggest_fixes(d);
     ///     for fix in &fixes {
@@ -631,14 +631,14 @@ mod tests {
 
     #[test]
     fn test_llm_compile_simple() {
-        let result = VumaForLLM::compile("fn main() {}");
+        let result = VumaForLLM::compile("transform main() {}");
         assert!(result.success, "Simple compilation should succeed");
         assert!(!result.explanation.is_empty(), "Should have explanation");
     }
 
     #[test]
     fn test_llm_compile_invalid() {
-        let result = VumaForLLM::compile("fn 123bad() {}");
+        let result = VumaForLLM::compile("transform 123bad() {}");
         assert!(!result.success, "Invalid source should fail");
         assert!(!result.diagnostics.is_empty(), "Should have diagnostics");
         assert!(
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn test_llm_check_valid() {
-        let diags = VumaForLLM::check("fn main() {}");
+        let diags = VumaForLLM::check("transform main() {}");
         let errors: Vec<_> = diags
             .iter()
             .filter(|d| d.severity == crate::diagnostics::DiagnosticSeverity::Error)
@@ -659,13 +659,13 @@ mod tests {
 
     #[test]
     fn test_llm_check_invalid() {
-        let diags = VumaForLLM::check("fn 123bad() {}");
+        let diags = VumaForLLM::check("transform 123bad() {}");
         assert!(!diags.is_empty(), "Invalid source should have diagnostics");
     }
 
     #[test]
     fn test_llm_analyze() {
-        let result = VumaForLLM::analyze("fn main() { x = 1 + 2; }");
+        let result = VumaForLLM::analyze("transform main() { x = 1 + 2; }");
         assert!(result.is_ok(), "Analysis should succeed");
         let json = result.unwrap();
         assert!(json.is_object(), "Result should be a JSON object");
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_llm_explain_error() {
-        let diags = VumaForLLM::check("fn 123bad() {}");
+        let diags = VumaForLLM::check("transform 123bad() {}");
         if let Some(diag) = diags.first() {
             let explanation = VumaForLLM::explain_error(diag);
             assert!(!explanation.is_empty(), "Should have explanation");
@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_llm_suggest_fixes() {
-        let diags = VumaForLLM::check("fn 123bad() {}");
+        let diags = VumaForLLM::check("transform 123bad() {}");
         if let Some(diag) = diags.first() {
             let fixes = VumaForLLM::suggest_fixes(diag);
             assert!(!fixes.is_empty(), "Should have at least one suggestion");
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_llm_compile_result_has_explanation() {
-        let result = VumaForLLM::compile("fn main() {}");
+        let result = VumaForLLM::compile("transform main() {}");
         assert!(
             result.explanation.contains("succeeded") || result.explanation.contains("failed"),
             "Explanation should describe the outcome"
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_llm_binary_sizes_on_success() {
-        let result = VumaForLLM::compile("fn main() {}");
+        let result = VumaForLLM::compile("transform main() {}");
         if result.success {
             assert!(
                 result.binary_sizes.contains_key("aarch64-linux"),

@@ -169,11 +169,11 @@
 // pattern (K2a's pmm_init, K3d's trap_frame_init, K4a's pt_init — see
 // pmm.vuma's "Why init-style?" header for the codegen rationale: the
 // current codegen does NOT propagate State-typedness through function
-// return values, so `fn sched_new() -> State<Runqueue>` would produce
+// return values, so `transform sched_new() -> State<Runqueue>` would produce
 // broken field-access code in callers). All scheduler.vuma functions
 // take `rq: State<Runqueue>`, `tbl: State<ProcessTable>`, and/or
-// `tf: State<TrapFrame>` by regular VUMA-fn borrow (NOT extern #[borrow]
-// — VUMA fn calls don't need the attribute; only extern "C" calls do).
+// `tf: State<TrapFrame>` by regular VUMA-transform borrow (NOT extern #[borrow]
+// — VUMA transform calls don't need the attribute; only extern "C" calls do).
 //
 // State<T> params: per the contract's "Keep State<T> params to 1-2 per
 // function" rule, no function takes more than 2 State<T> params:
@@ -352,7 +352,7 @@ extern "C" {
     // sys_write (nr 1): write `count` bytes from `buf` to file descriptor
     // `fd`. SysV AMD64: RDI=fd, RSI=buf, RDX=count. Returns byte count or
     // -errno. Used by sched_dump + sched_write_u64 only.
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -366,7 +366,7 @@ extern "C" {
 
 // Read the u64 GPR at canonical slot `idx` from tf.gpr. 8-byte LE unpack
 // at byte offset `idx * 8`. Byte-identical to R2a's tf_get_gpr.
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -381,7 +381,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 
 // Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
 // at byte offset `idx * 8`. Byte-identical to R2a's tf_set_gpr.
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -396,7 +396,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // TrapFrame before the arch-specific trap-to-superset adapter (R2b/R2c/
 // R2d) populates the arch-specific fields, OR before the scheduler uses
 // it as a fresh save area. Byte-identical to R2a's tf_init.
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -420,19 +420,19 @@ fn tf_init(tf: State<TrapFrame>) {
 // here — K4d/K4e will re-declare them when they need them.
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
 // Read the u64 `vruntime` field of Task slot `idx` from
 // ProcessTable.vruntimes. 8-byte LE unpack loop (same pattern as K2a's
 // pool_get_base, R2a's tf_get_gpr).
-fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -447,7 +447,7 @@ fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
 
 // Write the u64 `vruntime` field of Task slot `idx` into
 // ProcessTable.vruntimes. 8-byte LE pack loop.
-fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -460,7 +460,7 @@ fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u64 `next` field of Task slot `idx` from ProcessTable.nexts.
 // The scheduler uses Task.next to thread the runqueue linked list.
-fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -474,7 +474,7 @@ fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Task slot `idx` into ProcessTable.nexts.
-fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -488,7 +488,7 @@ fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
 // Read the u64 `mm_root` field of Task slot `idx` from ProcessTable.mm_roots.
 // R4a+b overloads this slot as the SAVED PC during context switch — see
 // the file header "Saved-context overload" section.
-fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -503,7 +503,7 @@ fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 
 // Write the u64 `mm_root` field of Task slot `idx` into
 // ProcessTable.mm_roots. R4a+b sched_save_context writes tf.pc here.
-fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -516,7 +516,7 @@ fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u64 `fs_root` field of Task slot `idx` from ProcessTable.fs_roots.
 // R4a+b overloads this slot as the SAVED SP during context switch.
-fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -531,7 +531,7 @@ fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 
 // Write the u64 `fs_root` field of Task slot `idx` into
 // ProcessTable.fs_roots. R4a+b sched_save_context writes tf.sp here.
-fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -544,7 +544,7 @@ fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u64 `fds` field of Task slot `idx` from ProcessTable.fds.
 // R4a+b overloads this slot as the SAVED STATUS register during context switch.
-fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -559,7 +559,7 @@ fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
 
 // Write the u64 `fds` field of Task slot `idx` into ProcessTable.fds.
 // R4a+b sched_save_context writes tf.status here.
-fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -584,20 +584,20 @@ fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u8 `prio` field of Task slot `idx` from ProcessTable.prios.
 // Direct array index (no pack/unpack — u8 field). Byte-identical to K4a.
-fn pt_get_prio(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_prio(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.prios[idx];
 }
 
 // Write the u8 `prio` field of Task slot `idx` into ProcessTable.prios.
 // Direct array index. Byte-identical to K4a.
-fn pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.prios[idx] = val;
 }
 
 // Read the u32 `pid` field of Task slot `idx` from ProcessTable.pids.
 // 4-byte LE unpack loop (pids is [u8; 1024] = 256 × 4-byte u32 LE slots).
 // Byte-identical to K4a's pt_get_pid.
-fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -618,7 +618,7 @@ fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 // at boot before the first sched_enqueue. head = tail = 256 (empty
 // sentinel), count = 0, need_resched = 0 (no preemption requested until
 // sched_tick observes vruntime drift > PREEMPT_THRESHOLD).
-fn sched_init(rq: State<Runqueue>) {
+transform sched_init(rq: State<Runqueue>) {
     rq.head = 256;
     rq.tail = 256;
     rq.count = 0;
@@ -630,7 +630,7 @@ fn sched_init(rq: State<Runqueue>) {
 // tasks with equal vruntimes. Updates Task.next of the old tail to point
 // at the new task, and sets the new task's Task.next to 256 (end-of-list).
 // Bumps rq.count.
-fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
+transform sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
     if rq.head == 256 {
         rq.head = task_idx;
         rq.tail = task_idx;
@@ -651,7 +651,7 @@ fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
 // RUNNING (1), decrements rq.count, and returns its index.
 //
 // Returns 256 if the runqueue is empty.
-fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
+transform sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     if rq.head == 256 {
         return 256;
     }
@@ -699,7 +699,7 @@ fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
 // In hosted mode step 4 is a no-op; in bare-metal (K11) it loads next_tf's
 // GPRs into the CPU via the arch_load_context extern declared in the per-
 // arch switch.vuma file.
-fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
+transform schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     return sched_dequeue(rq, tbl);
 }
 
@@ -764,7 +764,7 @@ fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
 // use the same weighting formula, the relative ordering is consistent: a
 // high-prio task's vruntime grows slower, so it stays below the min longer,
 // so it's preempted less. Exactly CFS's intended behavior.
-fn sched_tick(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
+transform sched_tick(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32, delta: u64) {
     // Step 1: bump vruntime by the PRIORITY-WEIGHTED delta (W36).
     //   weight = 1024 / (prio + 1)        — high prio → large weight
     //   delta_weighted = delta * weight / 1024
@@ -810,7 +810,7 @@ fn sched_tick(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32, delt
 // otherwise. Pure State<T> field read — no pointer syntax.
 //
 // State<T> params: 1 (rq — read only).
-fn sched_check_resched(rq: State<Runqueue>) -> u32 {
+transform sched_check_resched(rq: State<Runqueue>) -> u32 {
     return rq.need_resched;
 }
 
@@ -823,7 +823,7 @@ fn sched_check_resched(rq: State<Runqueue>) -> u32 {
 // forever and every subsequent tick would re-trigger schedule().
 //
 // State<T> params: 1 (rq — write only).
-fn sched_clear_resched(rq: State<Runqueue>) {
+transform sched_clear_resched(rq: State<Runqueue>) {
     rq.need_resched = 0;
 }
 
@@ -831,7 +831,7 @@ fn sched_clear_resched(rq: State<Runqueue>) {
 // runqueue) and pick the next task to run (sched_dequeue). Returns the
 // next task's index (or 256 if the runqueue is now empty — but that
 // can't happen if `current` was just enqueued).
-fn sched_yield(rq: State<Runqueue>, tbl: State<ProcessTable>, current: u32) -> u32 {
+transform sched_yield(rq: State<Runqueue>, tbl: State<ProcessTable>, current: u32) -> u32 {
     sched_enqueue(rq, tbl, current);
     return sched_dequeue(rq, tbl);
 }
@@ -902,7 +902,7 @@ fn sched_yield(rq: State<Runqueue>, tbl: State<ProcessTable>, current: u32) -> u
 // PMT discipline: no `*ptr`/`&x`/`allocate`/`free`. Pure State<T> field
 // access (tbl.states[i], percpu.current_task, pt_get_vruntime,
 // pt_set_state). The function returns u32 (the picked task index).
-fn sys_sched_yield(tbl: State<ProcessTable>, percpu: State<PerCpu>) -> u32 {
+transform sys_sched_yield(tbl: State<ProcessTable>, percpu: State<PerCpu>) -> u32 {
     let current = percpu.current_task;
     // Enqueue self: mark current as READY (runnable).
     pt_set_state(tbl, current, 2);
@@ -960,7 +960,7 @@ fn sys_sched_yield(tbl: State<ProcessTable>, percpu: State<PerCpu>) -> u32 {
 //
 // PMT discipline: no `*ptr`/`&x`/`allocate`/`free`. Pure State<T> field
 // access via pt_get_prio / pt_set_prio.
-fn sys_nice(tbl: State<ProcessTable>, task_idx: u32, inc: i32) {
+transform sys_nice(tbl: State<ProcessTable>, task_idx: u32, inc: i32) {
     let cur = pt_get_prio(tbl, task_idx) as i32;
     let np = cur + inc;
     if np < 0 {
@@ -994,7 +994,7 @@ fn sys_nice(tbl: State<ProcessTable>, task_idx: u32, inc: i32) {
 //
 // State<T> locals: 1 (buf). No State<T> params (the function takes only
 // the u64 `n` — it doesn't read or write any persistent state).
-fn sched_write_u64(n: u64) {
+transform sched_write_u64(n: u64) {
     let buf = state_new(SchedBuf);
     if n == 0 {
         buf.data[0] = 48;  // '0'
@@ -1052,7 +1052,7 @@ fn sched_write_u64(n: u64) {
 //
 // State<T> params: 1 (tbl — read only). State<T> locals: 1 per
 // sched_write_u64 call (the SchedBuf). No `*ptr`/`&x`/`allocate`/`free`.
-fn sched_dump(tbl: State<ProcessTable>) {
+transform sched_dump(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
         let s = pt_get_state(tbl, i);
@@ -1110,7 +1110,7 @@ fn sched_dump(tbl: State<ProcessTable>) {
 // State<T> params: 2 (tbl + tf). Pure field-copies (3 pt_set_* calls,
 // each reading 1 scalar u64 from tf and writing it via 8-byte LE pack
 // into the parallel byte array). No `*ptr`/`&tf`/`allocate` anywhere.
-fn sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+transform sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
     pt_set_mm_root(tbl, task_idx, tf.pc);      // saved PC → mm_root
     pt_set_fs_root(tbl, task_idx, tf.sp);      // saved SP → fs_root
     pt_set_fds(tbl, task_idx, tf.status);      // saved status → fds
@@ -1124,7 +1124,7 @@ fn sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFra
 // State<T> params: 2 (tbl + tf). Pure field-copies (3 pt_get_* calls,
 // each reading 8-byte LE unpack from the parallel byte array and writing
 // it as a scalar u64 into tf).
-fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+transform sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
     tf.pc = pt_get_mm_root(tbl, task_idx);     // mm_root → saved PC
     tf.sp = pt_get_fs_root(tbl, task_idx);     // fs_root → saved SP
     tf.status = pt_get_fds(tbl, task_idx);     // fds → saved status
@@ -1163,7 +1163,7 @@ fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<Trap
 // vruntimes, 2000000 ns = 2 ms — a typical tick interval scaled up to
 // exceed the 1 ms threshold in one tick for test speed.)
 
-fn main() -> i32 {
+transform main() -> i32 {
     let rq = state_new(Runqueue);
     let tbl = state_new(ProcessTable);
     let tf = state_new(TrapFrame);

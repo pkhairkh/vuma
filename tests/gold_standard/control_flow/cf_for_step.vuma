@@ -4,7 +4,7 @@
 // (Task spec listed 25 but noted "(same as 14 but verify)"; #14 expects 45.
 // Correct semantic value is 45: sum of 0..9 = 45.)
 
-fn main() -> i32 {
+transform main() -> i32 {
     sum: u32 = 0;
     for i in 0..10 {
         sum = sum + i;

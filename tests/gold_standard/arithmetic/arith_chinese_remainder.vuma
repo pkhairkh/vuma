@@ -4,7 +4,7 @@
 // Solve x ≡ 2 (mod 3), x ≡ 3 (mod 5), x ≡ 2 (mod 7).
 // CRT gives x = 23 (mod 105). Brute-force search returns 23.
 
-fn main() -> i32 {
+transform main() -> i32 {
     three: u32 = 3;
     five: u32 = 5;
     seven: u32 = 7;

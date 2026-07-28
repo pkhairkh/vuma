@@ -6,7 +6,7 @@
 //
 // Exposes: for-body + nested-loop assignment propagation bugs.
 
-fn main() -> i32 {
+transform main() -> i32 {
     total: u32 = 0;
     for i in 0..10 {
         for j in 0..i {

@@ -1,6 +1,8 @@
 //! # Memory Safety Verification Module
 //!
-//! Compile-time and optional runtime memory safety checks for the VUMA compiler.
+//! Compile-time and runtime memory safety checks for the VUMA compiler.
+//!
+//! Runtime bounds checks are always enabled in VUMA 2.0 (mandatory).
 //!
 //! ## Checks Provided
 //!
@@ -9,19 +11,20 @@
 //! | 1  | Use-after-free     | E041  | Compile    | Value live after deallocation via SCG liveness       |
 //! | 2  | Double-free        | E042  | Compile    | Same allocation freed more than once                  |
 //! | 3  | Memory leak        | E043  | Compile    | Heap allocation with no matching free on exit paths   |
-//! | 4  | Bounds check       | E044  | Runtime    | Array index out-of-bounds (enabled by `--safe`)      |
+//! | 4  | Bounds check       | E044  | Runtime    | Array index out-of-bounds (always on — bounds checks are mandatory) |
 //! | 5  | Null deref         | E045  | Compile    | Dereference of pointer that may be null               |
 //! | 6  | Dangling pointer   | E046  | Compile    | Pointer to stack allocation that escapes its scope    |
 //! | 7  | Uninitialized read | E047  | Compile    | Read of allocation with no reaching write             |
-//! | 8  | Buffer overflow    | E048  | Runtime    | Write past allocation boundary (enabled by `--safe`)  |
+//! | 8  | Buffer overflow    | E048  | Runtime    | Write past allocation boundary (always on — bounds checks are mandatory) |
 //! | 9  | Use-after-scope    | E049  | Compile    | Access to stack variable after scope exit             |
 //! | 10 | Invalid free       | E050  | Compile    | Free of non-heap pointer or already-freed pointer     |
 //!
 //! ## Integration
 //!
 //! The module integrates with the SCG liveness analysis from `vuma-scg` and
-//! with the diagnostics system (error codes E041–E050).  The `--safe` CLI
-//! flag enables runtime bounds-checking instrumentation.
+//! with the diagnostics system (error codes E041–E050).  Runtime
+//! bounds-checking instrumentation is always enabled — bounds checks are
+//! mandatory in VUMA 2.0 (the legacy `--safe` flag has been removed).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -235,7 +238,8 @@ impl fmt::Display for MemorySafetyViolation {
 pub struct MemorySafetyConfig {
     /// Enable runtime bounds checking for array accesses.
     /// When enabled, the codegen inserts bounds-check instructions before
-    /// every array load/store.  This corresponds to the `--safe` CLI flag.
+    /// every array load/store.  Always enabled in VUMA 2.0 — bounds checks
+    /// are mandatory (the legacy `--safe` flag has been removed).
     pub runtime_bounds_checks: bool,
 
     /// Enable use-after-free detection at compile time.
@@ -272,8 +276,10 @@ impl Default for MemorySafetyConfig {
 }
 
 impl MemorySafetyConfig {
-    /// Configuration enabled by the `--safe` CLI flag.
-    /// Enables runtime bounds checks in addition to all compile-time checks.
+    /// Configuration with runtime bounds checks enabled (always on in
+    /// VUMA 2.0 — bounds checks are mandatory; the legacy `--safe` flag
+    /// has been removed).  Enables runtime bounds checks in addition to
+    /// all compile-time checks.
     pub fn safe_mode() -> Self {
         Self {
             runtime_bounds_checks: true,
@@ -1196,7 +1202,8 @@ fn inject_bounds_check_ir_in_place(
 // `AllocationNode::Stack`), `classify_pointer` returns `PointerKind::Wild`
 // and `inject_bounds_check_ir` skips the access — only a `warn` diagnostic
 // is logged. This leaves arena-allocated state buffers unbounded at
-// per-access granularity under `--safe`, which is the gap closed here.
+// per-access granularity under the always-on runtime bounds checks,
+// which is the gap closed here.
 //
 // Approach: scan the codegen SCG for the deterministic IR sequence emitted
 // by `arena_alloc` lowering and build a `state_ptr_name → layout_size`
@@ -2921,7 +2928,7 @@ mod tests {
 
     // ── Negative-path test ───────────────────────────────────────────
     //
-    // Memory-safety negative path with `--safe` (always on per PMT):
+    // Memory-safety negative path with always-on runtime bounds checks (mandatory per PMT):
     // an out-of-bounds WRITE (Store with offset) on a known-named
     // allocation must trigger `inject_bounds_check_ir` to insert the
     // `Computation(UGe) + Control(If { __oob_trap })` pair BEFORE the
@@ -2934,7 +2941,7 @@ mod tests {
     // `#[should_panic]`.
 
     /// An OOB Store (write with offset) on a known-named allocation
-    /// must trigger `__oob_trap` injection — the `--safe` runtime
+    /// must trigger `__oob_trap` injection — the always-on runtime bounds-check
     /// trap contract.  Body should grow from
     /// `[Allocation, Access(Store)]` (2 stmts) to
     /// `[Allocation, Computation(UGe), Control(If), Access(Store)]`

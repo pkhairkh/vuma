@@ -3,7 +3,7 @@
 //
 // 100 / 2 = 50.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u32 = 100;
     two: u32 = 2;
     halved: u32 = val / two;

@@ -34,7 +34,7 @@ const RC21: u64 = (1 << 63) | 32896;
 const RC22: u64 = 2147483649;
 const RC23: u64 = (1 << 63) | 2147516424;
 
-fn load_u64_le(ptr: Address, off: u32) -> u64 {
+transform load_u64_le(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
@@ -43,7 +43,7 @@ fn load_u64_le(ptr: Address, off: u32) -> u64 {
          | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn store_u64_le(ptr: Address, off: u32, val: u64) {
+transform store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -55,7 +55,7 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
 }
 
 // Rotate-left guarded against n==0 (64-n would shift by full word).
-fn rotl64(x: u64, n: u64) -> u64 {
+transform rotl64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x << n) | (x >> (64 - n));
 }
@@ -66,7 +66,7 @@ fn rotl64(x: u64, n: u64) -> u64 {
 // Each round performs Theta, Rho+Pi (combined), Chi, and Iota.
 // ===========================================================================
 
-fn keccak_f1600(state: Address) {
+transform keccak_f1600(state: Address) {
     round: u32 = 0;
     while round < 24 {
         // --- Theta ---
@@ -210,7 +210,7 @@ fn keccak_f1600(state: Address) {
 //   [208..375] buffer (168 bytes; large enough for the largest SHA-3/SHAKE rate)
 // ===========================================================================
 
-fn sha3_state_init(ctx: Address, rate: u32) {
+transform sha3_state_init(ctx: Address, rate: u32) {
     // Zero the full 376-byte context: state, rate/buf_len fields, and the
     // 168-byte buffer (so stale bytes never leak into the absorb step).
     i: u32 = 0;
@@ -225,15 +225,15 @@ fn sha3_state_init(ctx: Address, rate: u32) {
     *(ctx + 207) = 0;
 }
 
-fn sha3_state_get_rate(ctx: Address) -> u32 {
+transform sha3_state_get_rate(ctx: Address) -> u32 {
     return *(ctx + 200) | (*(ctx + 201) << 8) | (*(ctx + 202) << 16) | (*(ctx + 203) << 24);
 }
 
-fn sha3_state_get_buflen(ctx: Address) -> u32 {
+transform sha3_state_get_buflen(ctx: Address) -> u32 {
     return *(ctx + 204) | (*(ctx + 205) << 8) | (*(ctx + 206) << 16) | (*(ctx + 207) << 24);
 }
 
-fn sha3_state_set_buflen(ctx: Address, val: u32) {
+transform sha3_state_set_buflen(ctx: Address, val: u32) {
     *(ctx + 204) = val & 255;
     *(ctx + 205) = (val >> 8) & 255;
     *(ctx + 206) = (val >> 16) & 255;
@@ -241,7 +241,7 @@ fn sha3_state_set_buflen(ctx: Address, val: u32) {
 }
 
 // XOR a full rate-byte block from the buffer into the state and permute.
-fn sha3_absorb_block(ctx: Address) {
+transform sha3_absorb_block(ctx: Address) {
     rate: u32 = sha3_state_get_rate(ctx);
     i: u32 = 0;
     while i < rate {
@@ -260,7 +260,7 @@ fn sha3_absorb_block(ctx: Address) {
     }
 }
 
-fn sha3_state_update(ctx: Address, data: Address, len: u32) {
+transform sha3_state_update(ctx: Address, data: Address, len: u32) {
     rate: u32 = sha3_state_get_rate(ctx);
     buf_len: u32 = sha3_state_get_buflen(ctx);
     i: u32 = 0;
@@ -278,7 +278,7 @@ fn sha3_state_update(ctx: Address, data: Address, len: u32) {
 
 // Pad with pad10*1 + domain separator (0x06 for SHA-3, 0x1F for SHAKE),
 // absorb the final block, and permute so the state is ready for squeezing.
-fn sha3_state_pad(ctx: Address, domain_sep: u32) {
+transform sha3_state_pad(ctx: Address, domain_sep: u32) {
     rate: u32 = sha3_state_get_rate(ctx);
     buf_len: u32 = sha3_state_get_buflen(ctx);
 
@@ -299,7 +299,7 @@ fn sha3_state_pad(ctx: Address, domain_sep: u32) {
 }
 
 // Squeeze `out_len` bytes out of the sponge, permuting between rate-blocks.
-fn sha3_state_squeeze(ctx: Address, out: Address, out_len: u32) {
+transform sha3_state_squeeze(ctx: Address, out: Address, out_len: u32) {
     rate: u32 = sha3_state_get_rate(ctx);
     pos: u32 = 0;
     while pos < out_len {
@@ -320,20 +320,20 @@ fn sha3_state_squeeze(ctx: Address, out: Address, out_len: u32) {
 // SHA-3-256 (FIPS 202 Section 6.3.3): rate=136, output=32, domain_sep=0x06
 // ===========================================================================
 
-fn sha3_256_init(ctx: Address) {
+transform sha3_256_init(ctx: Address) {
     sha3_state_init(ctx, 136);
 }
 
-fn sha3_256_update(ctx: Address, data: Address, len: u32) {
+transform sha3_256_update(ctx: Address, data: Address, len: u32) {
     sha3_state_update(ctx, data, len);
 }
 
-fn sha3_256_final(ctx: Address, out: Address) {
+transform sha3_256_final(ctx: Address, out: Address) {
     sha3_state_pad(ctx, 6);
     sha3_state_squeeze(ctx, out, 32);
 }
 
-fn sha3_256_oneshot(data: Address, len: u32, out: Address) {
+transform sha3_256_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(376);
     sha3_256_init(ctx);
     sha3_256_update(ctx, data, len);
@@ -345,20 +345,20 @@ fn sha3_256_oneshot(data: Address, len: u32, out: Address) {
 // SHA-3-512 (FIPS 202 Section 6.3.5): rate=72, output=64, domain_sep=0x06
 // ===========================================================================
 
-fn sha3_512_init(ctx: Address) {
+transform sha3_512_init(ctx: Address) {
     sha3_state_init(ctx, 72);
 }
 
-fn sha3_512_update(ctx: Address, data: Address, len: u32) {
+transform sha3_512_update(ctx: Address, data: Address, len: u32) {
     sha3_state_update(ctx, data, len);
 }
 
-fn sha3_512_final(ctx: Address, out: Address) {
+transform sha3_512_final(ctx: Address, out: Address) {
     sha3_state_pad(ctx, 6);
     sha3_state_squeeze(ctx, out, 64);
 }
 
-fn sha3_512_oneshot(data: Address, len: u32, out: Address) {
+transform sha3_512_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(376);
     sha3_512_init(ctx);
     sha3_512_update(ctx, data, len);
@@ -370,22 +370,22 @@ fn sha3_512_oneshot(data: Address, len: u32, out: Address) {
 // SHAKE128 (FIPS 202 Section 6.3.1): rate=168, variable-length XOF, ds=0x1F
 // ===========================================================================
 
-fn shake128_init(ctx: Address) {
+transform shake128_init(ctx: Address) {
     sha3_state_init(ctx, 168);
 }
 
-fn shake128_update(ctx: Address, data: Address, len: u32) {
+transform shake128_update(ctx: Address, data: Address, len: u32) {
     sha3_state_update(ctx, data, len);
 }
 
 // squeeze performs the final pad-and-permute step and then squeezes out_len
 // bytes. The context cannot be used for further updates after squeeze.
-fn shake128_squeeze(ctx: Address, out: Address, out_len: u32) {
+transform shake128_squeeze(ctx: Address, out: Address, out_len: u32) {
     sha3_state_pad(ctx, 31);
     sha3_state_squeeze(ctx, out, out_len);
 }
 
-fn shake128(data: Address, len: u32, out: Address, out_len: u32) {
+transform shake128(data: Address, len: u32, out: Address, out_len: u32) {
     ctx = allocate(376);
     shake128_init(ctx);
     shake128_update(ctx, data, len);
@@ -397,20 +397,20 @@ fn shake128(data: Address, len: u32, out: Address, out_len: u32) {
 // SHAKE256 (FIPS 202 Section 6.3.2): rate=136, variable-length XOF, ds=0x1F
 // ===========================================================================
 
-fn shake256_init(ctx: Address) {
+transform shake256_init(ctx: Address) {
     sha3_state_init(ctx, 136);
 }
 
-fn shake256_update(ctx: Address, data: Address, len: u32) {
+transform shake256_update(ctx: Address, data: Address, len: u32) {
     sha3_state_update(ctx, data, len);
 }
 
-fn shake256_squeeze(ctx: Address, out: Address, out_len: u32) {
+transform shake256_squeeze(ctx: Address, out: Address, out_len: u32) {
     sha3_state_pad(ctx, 31);
     sha3_state_squeeze(ctx, out, out_len);
 }
 
-fn shake256(data: Address, len: u32, out: Address, out_len: u32) {
+transform shake256(data: Address, len: u32, out: Address, out_len: u32) {
     ctx = allocate(376);
     shake256_init(ctx);
     shake256_update(ctx, data, len);

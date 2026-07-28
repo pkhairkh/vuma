@@ -4,6 +4,6 @@
 // Edge case: smallest possible main — return literal 0. Verifies the
 // entry/exit path produces a clean 0 exit code with no spurious work.
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

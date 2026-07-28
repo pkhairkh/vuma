@@ -63,11 +63,11 @@ layout EncBuf = { data: [u8; 4] }
 // pointed to by `pos`. (Same convention as stdlib.vuma's strtol endptr.)
 // ===========================================================================
 
-fn utf8_load_pos(pos: State<PosBuf>) -> u32 {
+transform utf8_load_pos(pos: State<PosBuf>) -> u32 {
     return pos.v;
 }
 
-fn utf8_store_pos(pos: State<PosBuf>, val: u32) {
+transform utf8_store_pos(pos: State<PosBuf>, val: u32) {
     pos.v = val;
 }
 
@@ -78,7 +78,7 @@ fn utf8_store_pos(pos: State<PosBuf>, val: u32) {
 // Returns 1..4 based on the first byte of a UTF-8 sequence, or 0 if the
 // byte cannot start a valid sequence (i.e. a continuation byte 0x80-0xBF
 // or an invalid lead 0xF8-0xFF).
-fn utf8_char_len(byte: u32) -> u32 {
+transform utf8_char_len(byte: u32) -> u32 {
     b: u32 = byte & 255;
     if b < 128 { return 1; }       // 0xxxxxxx        (0x00-0x7F)
     if b < 192 { return 0; }       // 10xxxxxx        (continuation, no lead)
@@ -91,7 +91,7 @@ fn utf8_char_len(byte: u32) -> u32 {
 // Returns the length of the UTF-8 sequence at s[pos], bounded by `max`
 // bytes. Returns 0 if pos >= max, if the lead byte is invalid, or if the
 // sequence would extend past `max` (truncated).
-fn utf8_seq_len(s: Address, pos: u32, max: u32) -> u32 {
+transform utf8_seq_len(s: Address, pos: u32, max: u32) -> u32 {
     if pos >= max { return 0; }
     raw: u32 = *(s + pos);
     b: u32 = raw & 255;
@@ -108,7 +108,7 @@ fn utf8_seq_len(s: Address, pos: u32, max: u32) -> u32 {
 // Encodes a Unicode codepoint to UTF-8 bytes at `buf`. Returns the number
 // of bytes written (1..4), or 0 if the codepoint is invalid
 // (i.e. > U+10FFFF or in the surrogate range U+D800..U+DFFF).
-fn utf8_encode(cp: u32, buf: State<EncBuf>) -> u32 {
+transform utf8_encode(cp: u32, buf: State<EncBuf>) -> u32 {
     // Reject out-of-range and surrogate codepoints.
     if cp > 1114111 { return 0; }
     if cp >= 55296 { if cp <= 57343 { return 0; } }
@@ -151,7 +151,7 @@ fn utf8_encode(cp: u32, buf: State<EncBuf>) -> u32 {
 //   - overlong encoding (more bytes than necessary)
 //   - surrogate codepoint (U+D800..U+DFFF encoded as 3 bytes)
 //   - codepoint > U+10FFFF (encoded as 4 bytes)
-fn utf8_decode_safe(buf: Address, len: u32, pos: State<PosBuf>) -> u32 {
+transform utf8_decode_safe(buf: Address, len: u32, pos: State<PosBuf>) -> u32 {
     p: u32 = utf8_load_pos(pos);
     b0: u32 = 0;
     b1: u32 = 0;
@@ -248,7 +248,7 @@ fn utf8_decode_safe(buf: Address, len: u32, pos: State<PosBuf>) -> u32 {
 // Convenience wrapper: decodes one UTF-8 character without an explicit
 // upper bound. Suitable for null-terminated strings; callers must ensure
 // the buffer is well-formed or null-terminated to avoid runaway reads.
-fn utf8_decode(buf: Address, pos: State<PosBuf>) -> u32 {
+transform utf8_decode(buf: Address, pos: State<PosBuf>) -> u32 {
     return utf8_decode_safe(buf, 4294967295, pos);
 }
 
@@ -257,7 +257,7 @@ fn utf8_decode(buf: Address, pos: State<PosBuf>) -> u32 {
 // ===========================================================================
 
 // Counts the number of codepoints in a null-terminated UTF-8 string.
-fn utf8_strlen(s: Address) -> u32 {
+transform utf8_strlen(s: Address) -> u32 {
     count: u32 = 0;
     let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
@@ -275,7 +275,7 @@ fn utf8_strlen(s: Address) -> u32 {
 
 // Counts codepoints in the first `max_bytes` bytes of `s`. Stops early on
 // a null terminator.
-fn utf8_strlen_n(s: Address, max_bytes: u32) -> u32 {
+transform utf8_strlen_n(s: Address, max_bytes: u32) -> u32 {
     count: u32 = 0;
     let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
@@ -300,7 +300,7 @@ fn utf8_strlen_n(s: Address, max_bytes: u32) -> u32 {
 
 // Returns a pointer to the first occurrence of codepoint `cp` in `s`, or
 // 0 (null) if not found.
-fn utf8_strchr(s: Address, cp: u32) -> Address {
+transform utf8_strchr(s: Address, cp: u32) -> Address {
     let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     result: Address = 0;
@@ -326,7 +326,7 @@ fn utf8_strchr(s: Address, cp: u32) -> Address {
 // `start` from `src`, writing the UTF-8 bytes into `dst` (capacity
 // `dst_max` bytes). Returns the number of bytes written. Stops early if
 // `src` ends or `dst` fills.
-fn utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -> u32 {
+transform utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -> u32 {
     let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     i: u32 = 0;
@@ -373,7 +373,7 @@ fn utf8_substr(src: Address, start: u32, len: u32, dst: Address, dst_max: u32) -
 
 // Given a byte position `pos` in `s`, returns the byte position of the
 // start of the previous codepoint. Returns 0 if already at the start.
-fn utf8_prev_char(s: Address, pos: u32) -> u32 {
+transform utf8_prev_char(s: Address, pos: u32) -> u32 {
     if pos == 0 { return 0; }
     p: u32 = pos - 1;
     b: u32 = 0;
@@ -399,7 +399,7 @@ fn utf8_prev_char(s: Address, pos: u32) -> u32 {
 // Given a byte position `pos` in `s`, returns the byte position of the
 // start of the next codepoint. Returns `pos` unchanged if it points at a
 // null terminator.
-fn utf8_next_char(s: Address, pos: u32) -> u32 {
+transform utf8_next_char(s: Address, pos: u32) -> u32 {
     raw: u32 = *(s + pos);
     b: u32 = raw & 255;
     if b == 0 { return pos; }
@@ -410,7 +410,7 @@ fn utf8_next_char(s: Address, pos: u32) -> u32 {
 
 // Returns the codepoint at codepoint index `index` in `s`, or 0 if the
 // index is out of range.
-fn utf8_char_at(s: Address, index: u32) -> u32 {
+transform utf8_char_at(s: Address, index: u32) -> u32 {
     let pos_buf = state_new(PosBuf);
     utf8_store_pos(pos_buf, 0);
     i: u32 = 0;
@@ -442,7 +442,7 @@ fn utf8_char_at(s: Address, index: u32) -> u32 {
 // Returns 1 if the first `len` bytes of `s` are valid UTF-8, 0 otherwise.
 // Performs strict validation: rejects overlong forms, surrogates,
 // truncated sequences, invalid lead bytes, and invalid continuation bytes.
-fn utf8_validate(s: Address, len: u32) -> u32 {
+transform utf8_validate(s: Address, len: u32) -> u32 {
     i: u32 = 0;
     b0: u32 = 0;
     b1: u32 = 0;
@@ -494,7 +494,7 @@ fn utf8_validate(s: Address, len: u32) -> u32 {
 
 // Returns 1 if the UTF-8 sequence beginning at `buf` (within `len` bytes)
 // is a single valid codepoint, 0 otherwise.
-fn utf8_valid_char(buf: Address, len: u32) -> u32 {
+transform utf8_valid_char(buf: Address, len: u32) -> u32 {
     if len == 0 { return 0; }
     raw0: u32 = *(buf + 0);
     b0: u32 = raw0 & 255;
@@ -542,32 +542,32 @@ fn utf8_valid_char(buf: Address, len: u32) -> u32 {
 // ===========================================================================
 
 // ASCII uppercase to lowercase. Non-ASCII codepoints pass through.
-fn utf8_to_lower(cp: u32) -> u32 {
+transform utf8_to_lower(cp: u32) -> u32 {
     if cp >= 65 { if cp <= 90 { return cp + 32; } }   // 'A'-'Z' -> 'a'-'z'
     return cp;
 }
 
 // ASCII lowercase to uppercase. Non-ASCII codepoints pass through.
-fn utf8_to_upper(cp: u32) -> u32 {
+transform utf8_to_upper(cp: u32) -> u32 {
     if cp >= 97 { if cp <= 122 { return cp - 32; } }  // 'a'-'z' -> 'A'-'Z'
     return cp;
 }
 
 // 1 if cp is an ASCII alphabetic (A-Z, a-z), else 0.
-fn utf8_is_alpha(cp: u32) -> u32 {
+transform utf8_is_alpha(cp: u32) -> u32 {
     if cp >= 65 { if cp <= 90 { return 1; } }
     if cp >= 97 { if cp <= 122 { return 1; } }
     return 0;
 }
 
 // 1 if cp is an ASCII digit (0-9), else 0.
-fn utf8_is_digit(cp: u32) -> u32 {
+transform utf8_is_digit(cp: u32) -> u32 {
     if cp >= 48 { if cp <= 57 { return 1; } }
     return 0;
 }
 
 // 1 if cp is an ASCII whitespace character (space, tab, LF, CR, FF, VT).
-fn utf8_is_space(cp: u32) -> u32 {
+transform utf8_is_space(cp: u32) -> u32 {
     if cp == 32 { return 1; }   // space
     if cp == 9 { return 1; }    // tab
     if cp == 10 { return 1; }   // LF
@@ -578,7 +578,7 @@ fn utf8_is_space(cp: u32) -> u32 {
 }
 
 // 1 if cp is ASCII alphabetic or digit.
-fn utf8_is_alnum(cp: u32) -> u32 {
+transform utf8_is_alnum(cp: u32) -> u32 {
     a: u32 = utf8_is_alpha(cp);
     if a == 1 { return 1; }
     d: u32 = utf8_is_digit(cp);
@@ -588,7 +588,7 @@ fn utf8_is_alnum(cp: u32) -> u32 {
 
 // 1 if cp is a printable character: printable ASCII (32-126) or any
 // non-surrogate codepoint in 0xA0..0x10FFFF.
-fn utf8_is_print(cp: u32) -> u32 {
+transform utf8_is_print(cp: u32) -> u32 {
     if cp >= 32 { if cp <= 126 { return 1; } }
     if cp >= 55296 { if cp <= 57343 { return 0; } }  // exclude surrogates
     if cp >= 160 { if cp <= 1114111 { return 1; } }
@@ -596,7 +596,7 @@ fn utf8_is_print(cp: u32) -> u32 {
 }
 
 // 1 if cp is a control character: C0 (0-31), DEL (127), or C1 (128-159).
-fn utf8_is_control(cp: u32) -> u32 {
+transform utf8_is_control(cp: u32) -> u32 {
     if cp < 32 { return 1; }
     if cp == 127 { return 1; }
     if cp >= 128 { if cp <= 159 { return 1; } }
@@ -611,7 +611,7 @@ fn utf8_is_control(cp: u32) -> u32 {
 // re-encodes, and writes the result to `dst` (capacity `dst_max` bytes).
 // Stops at end of source or when `dst` would overflow. Returns bytes
 // written. Codepoints outside the ASCII range are copied unchanged.
-fn utf8_str_to_lower(s: Address, dst: Address, dst_max: u32) -> u32 {
+transform utf8_str_to_lower(s: Address, dst: Address, dst_max: u32) -> u32 {
     let pos_buf = state_new(PosBuf);
     let enc_buf = state_new(EncBuf);
     utf8_store_pos(pos_buf, 0);
@@ -650,7 +650,7 @@ fn utf8_str_to_lower(s: Address, dst: Address, dst_max: u32) -> u32 {
 }
 
 // Same as utf8_str_to_lower but applies ASCII uppercasing.
-fn utf8_str_to_upper(s: Address, dst: Address, dst_max: u32) -> u32 {
+transform utf8_str_to_upper(s: Address, dst: Address, dst_max: u32) -> u32 {
     let pos_buf = state_new(PosBuf);
     let enc_buf = state_new(EncBuf);
     utf8_store_pos(pos_buf, 0);
@@ -690,19 +690,19 @@ fn utf8_str_to_upper(s: Address, dst: Address, dst_max: u32) -> u32 {
 // ===========================================================================
 
 // 1 if cp is in the ASCII range (U+0000..U+007F).
-fn utf8_cp_is_ascii(cp: u32) -> u32 {
+transform utf8_cp_is_ascii(cp: u32) -> u32 {
     if cp <= 127 { return 1; }
     return 0;
 }
 
 // 1 if cp is in the Basic Multilingual Plane (U+0000..U+FFFF).
-fn utf8_cp_is_bmp(cp: u32) -> u32 {
+transform utf8_cp_is_bmp(cp: u32) -> u32 {
     if cp <= 65535 { return 1; }
     return 0;
 }
 
 // 1 if cp is in the supplementary planes (U+10000..U+10FFFF).
-fn utf8_cp_is_supplementary(cp: u32) -> u32 {
+transform utf8_cp_is_supplementary(cp: u32) -> u32 {
     if cp > 65535 { return 1; }
     return 0;
 }

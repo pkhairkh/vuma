@@ -7,7 +7,7 @@
 // s42_arith_div_then_mod (div-then-mod, 3) and s34_arith_mul_then_mod
 // (mul-then-mod, 4).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 40;
     b: u32 = 8;
     c: u32 = 4;

@@ -5,7 +5,7 @@
 // variables before any bitwise op; all stores use `*ptr = literal` (or the
 // `*ptr = variable + 0` workaround). Result lands in 0-255.
 // Distinct from s30_bit_xor_then_and (xor-then-and, 12) and s26_bit_shl_or_xor (shl-or-xor).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 51;           // 0x33
     b: u64 = 15;           // 0x0F
     c: u64 = 2;

@@ -5,13 +5,13 @@
 // single literal argument, addition. Distinct from s14_fn_one_arg_add
 // (add_one(41) = 42, +1) and s13_fn_inc_by (inc_by(x, 5) framing).
 
-fn inc2(x: u32) -> u32 {
+transform inc2(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x + n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = inc2(40);
     return v;
 }

@@ -119,39 +119,39 @@ const MASK32: u32 = 4294967295;
 // ────────────────────────────────────────────────────────────────────────────
 
 // Right-rotate a 32-bit word by n positions (1 <= n <= 31).
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & MASK32;
 }
 
 // Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)  [FIPS-180-4 §4.1.2]
 // (NOT x is computed as x XOR MASK32 — VUMA has no unary NOT on u32;
 // same idiom as womb/crypto/hash/sha256_sha224.vuma's ch32.)
-fn ch32(x: u32, y: u32, z: u32) -> u32 {
+transform ch32(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((x ^ MASK32) & z);
 }
 
 // Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)  [§4.1.2]
-fn maj32(x: u32, y: u32, z: u32) -> u32 {
+transform maj32(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
 // Big Sigma0(x) = ROTR^2(x) XOR ROTR^13(x) XOR ROTR^22(x)  [§4.1.2]
-fn bsig0_32(x: u32) -> u32 {
+transform bsig0_32(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
 // Big Sigma1(x) = ROTR^6(x) XOR ROTR^11(x) XOR ROTR^25(x)  [§4.1.2]
-fn bsig1_32(x: u32) -> u32 {
+transform bsig1_32(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
 // Small sigma0(x) = ROTR^7(x) XOR ROTR^18(x) XOR SHR^3(x)  [§4.1.2]
-fn ssig0_32(x: u32) -> u32 {
+transform ssig0_32(x: u32) -> u32 {
     return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
 }
 
 // Small sigma1(x) = ROTR^17(x) XOR ROTR^19(x) XOR SHR^10(x)  [§4.1.2]
-fn ssig1_32(x: u32) -> u32 {
+transform ssig1_32(x: u32) -> u32 {
     return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
 }
 
@@ -166,7 +166,7 @@ fn ssig1_32(x: u32) -> u32 {
 // aes.vuma's header note). K.k[i] is written as a u32 store (typed-
 // array scaling) so the 64 words land at byte offsets 0, 4, 8, ...,
 // 252 — ready for u32 load via K.k[i] in the round loop.
-fn sha256_load_k(K: State<Sha256K>) {
+transform sha256_load_k(K: State<Sha256K>) {
     K.k[0] = 1116352408;
     K.k[1] = 1899447441;
     K.k[2] = 3049323471;
@@ -240,7 +240,7 @@ fn sha256_load_k(K: State<Sha256K>) {
 // load_state_le: read 4 LE bytes from ctx.state[base..base+3] as a u32.
 // The state is stored little-endian (per sha256_init's IV seeding), so
 // byte 0 is the low byte and byte 3 is the high byte of each u32 word.
-fn load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
+transform load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
     let b0 = ctx.state[base] as u32;
     let b1 = ctx.state[base + 1] as u32;
     let b2 = ctx.state[base + 2] as u32;
@@ -253,7 +253,7 @@ fn load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
 // (mod 2^32). Used by sha256_compress's step 4 to add the post-round
 // working variables a..h back into ctx.state (FIPS-180-4 §6.2.2 step f:
 // H0 = a + H0, H1 = b + H1, ..., H7 = h + H7).
-fn add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
+transform add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
     let old = load_state_le(ctx, base);
     let acc = (val + old) & MASK32;
     ctx.state[base] = (acc & 255) as u8;
@@ -274,7 +274,7 @@ fn add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
 // ctx.state[0..31] (unchanged from W29S2), zeroes ctx.buf (implicit —
 // the caller's state_new zeroes fresh allocations, and update/final
 // only read buf[0..ctx.len]), and sets ctx.len = ctx.total = 0.
-fn sha256_init(ctx: State<Sha256Ctx>) {
+transform sha256_init(ctx: State<Sha256Ctx>) {
     // H0 = 0x6a09e667 = 1779033703 → LE bytes: 67 e6 09 6a.
     ctx.state[0] = 103; ctx.state[1] = 230; ctx.state[2] = 9; ctx.state[3] = 106;
     // H1 = 0xbb67ae85 = 3144134277 → LE: 85 ae 67 bb.
@@ -316,7 +316,7 @@ fn sha256_init(ctx: State<Sha256Ctx>) {
 //        d = c; c = b; b = a; a = (T1 + T2) mod 2^32.
 //   4. Fold a..h back into ctx.state (mod 2^32):
 //        H0 += a; H1 += b; ...; H7 += h.
-fn sha256_compress(ctx: State<Sha256Ctx>) {
+transform sha256_compress(ctx: State<Sha256Ctx>) {
     // Scratch buffers: 64-word message schedule + 64-word round-constants.
     let W = state_new(Sha256W);
     let K = state_new(Sha256K);
@@ -404,7 +404,7 @@ fn sha256_compress(ctx: State<Sha256Ctx>) {
 // soon as 64 bytes accumulate. (The ShaData layout caps a single call
 // at 64 bytes — callers hashing more than 64 bytes must split into
 // multiple update calls, the standard streaming-API shape.)
-fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
+transform sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
     let i = 0;
     while i < len {
         if ctx.len < 64 {
@@ -448,7 +448,7 @@ fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
 //   5. Serialize ctx.state as 8 big-endian u32 words into out.data
 //      (FIPS-180-4 §5.1.2: H0 high byte first, H0 low byte last, then
 //      H1, ..., H7).
-fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
+transform sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
     // Total message length in bits (FIPS-180-4 §5.1.1 length suffix).
     // ctx.total is u64 (bytes); * 8 yields the bit count. For the
     // self-test's max input (3 bytes), total_bits = 24 — fits in u64
@@ -546,7 +546,7 @@ fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
 // ctx.buf[0]) for the "a" input.
 //
 // Returns 0 on success, 1..19 on the 19 individual check failures.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Init + IV byte check (unchanged from W29S2) ──
     let ctx = state_new(Sha256Ctx);
     sha256_init(ctx);

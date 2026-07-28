@@ -7,7 +7,7 @@
 // from s14_bit_and_then_or (AND-then-OR only) and s13_bit_and_or_mix
 // (AND-OR mix without final XOR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 204;         // 0xCC
     b: u64 = 240;         // 0xF0
     c: u64 = 15;          // 0x0F

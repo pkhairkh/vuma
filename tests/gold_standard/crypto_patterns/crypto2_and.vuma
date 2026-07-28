@@ -6,7 +6,7 @@
 // because VUMA codegen drops bitwise ops with an immediate RHS.
 // 255 & 15 = 15.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 0xFF;
     b: u64 = 0x0F;
     c: u64 = a & b;       // 0xFF & 0x0F = 0x0F

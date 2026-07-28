@@ -5,21 +5,21 @@
 // each passing a different argument. caller_a passes 4, caller_b
 // passes 6; main sums their results: 4 + 6 = 10.
 
-fn shared(x: u32) -> u32 {
+transform shared(x: u32) -> u32 {
     return x;
 }
 
-fn caller_a() -> u32 {
+transform caller_a() -> u32 {
     v: u32 = shared(4);
     return v;
 }
 
-fn caller_b() -> u32 {
+transform caller_b() -> u32 {
     v: u32 = shared(6);
     return v;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = caller_a();
     b: u32 = caller_b();
     v: u32 = a + b;

@@ -8,7 +8,7 @@
 // payload value itself, which can legitimately be 0).
 //
 // Expected exit code: 77
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     result = channel_try_recv(ch);
     if result == 0 - 2 { return 77; }

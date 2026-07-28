@@ -6,7 +6,7 @@
 // s18_bit_shl_xor_shr (shl-xor-shr, three-stage) and s14_bit_shl_then_shr
 // (shl-then-shr, opposite direction).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 192;         // 0xC0
     s1: u64 = 4;
     s2: u64 = 3;

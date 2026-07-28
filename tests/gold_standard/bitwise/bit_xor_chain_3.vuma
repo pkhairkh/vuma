@@ -6,7 +6,7 @@
 // s10_bit_xor_then_or (two-way XOR then OR) and s4_bit_xor3_chain
 // (different operands).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 15;          // 0x0F
     b: u64 = 240;         // 0xF0
     c: u64 = 51;          // 0x33

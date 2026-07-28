@@ -5961,6 +5961,117 @@ impl IRBuilder {
     }
 
     // =======================================================================
+    // Try operator (`?`) lowering
+    // =======================================================================
+
+    /// Lower the `?` (try) operator: `expr?`.
+    ///
+    /// Semantics: evaluate `operand` (a `Result<T, E>` value), branch on its
+    /// discriminant tag — if `Ok`, extract the `T` payload and continue in the
+    /// current control flow; if `Err`, return `Err` from the enclosing function.
+    ///
+    /// The `Result` value follows the [`IRType::TaggedUnion`] layout
+    /// `[tag: u32, padding, payload: max_payload_size bytes]`, so the tag is
+    /// loaded at offset 0 and the (Ok/Err) payload at offset 8.
+    ///
+    /// Returns the IR value holding the unwrapped `Ok` payload, which the
+    /// caller binds to `ok_dst` (when given) and threads into the
+    /// continuation block.
+    ///
+    /// # Wiring status (Wave 9-A dependency)
+    ///
+    /// This lowering is implemented and unit-tested but **not yet wired**:
+    /// Wave 9-A must add `Expr::Try` to the parser AST, and the AST→SCG bridge
+    /// (`pipeline.rs::bridge_ast_to_codegen_scg_with_meta`) must route it via
+    /// `to_scg` into a `ScgStatement` that dispatches here. Until then this is
+    /// exercised only by tests. When the `Result` payload layout is opaque
+    /// (e.g. extern results), emit a call to the runtime helper
+    /// [`crate::ir::TRY_RUNTIME_HELPER`] (`__try`) instead of branching on the
+    /// discriminant.
+    pub fn lower_try(
+        &mut self,
+        operand: &ScgExpr,
+        ok_dst: Option<&str>,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<IRValue> {
+        // 1. Evaluate the operand → Result<T, E> value (a pointer to the
+        //    tagged union, per IRType::TaggedUnion layout).
+        let result_val = self.resolve_expr(operand, names, ir_func)?;
+
+        // 2. Load the discriminant tag at offset 0 (U32).
+        let tag_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::anonymous(tag_vreg));
+        ir_func.current_block().push(IRInstruction::Load {
+            dst: IRValue::Register(tag_vreg),
+            addr: result_val.clone(),
+            offset: 0,
+            ty: IRType::U32,
+        });
+
+        // 3. tag == 0 ⇒ Ok variant (discriminant 0 by convention).
+        let is_ok_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::anonymous(is_ok_vreg));
+        ir_func.current_block().push(IRInstruction::Cmp {
+            kind: CmpKind::Eq,
+            dst: IRValue::Register(is_ok_vreg),
+            lhs: IRValue::Register(tag_vreg),
+            rhs: IRValue::Immediate(0),
+            ty: Some(IRType::U32),
+        });
+
+        let ok_label = self.alloc_label("try_ok");
+        let err_label = self.alloc_label("try_err");
+
+        // 4. Branch: Ok → continue; Err → early return.
+        ir_func.current_block().push(IRInstruction::CondBranch {
+            cond: IRValue::Register(is_ok_vreg),
+            true_target: ok_label.clone(),
+            false_target: err_label.clone(),
+        });
+        ir_func.current_block().terminator = IRTerminator::Branch {
+            cond: IRValue::Register(is_ok_vreg),
+            true_block: ok_label.clone(),
+            false_block: err_label.clone(),
+        };
+
+        // 5. Err block: extract the Err payload (offset 8) and return it from
+        //    the function, propagating the error.
+        ir_func.append_block(&err_label);
+        let err_payload_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::anonymous(err_payload_vreg));
+        ir_func.current_block().push(IRInstruction::Load {
+            dst: IRValue::Register(err_payload_vreg),
+            addr: result_val.clone(),
+            offset: 8,
+            ty: IRType::U64,
+        });
+        ir_func.current_block().push(IRInstruction::Ret {
+            values: vec![IRValue::Register(err_payload_vreg)],
+        });
+        ir_func.current_block().terminator =
+            IRTerminator::Return(vec![IRValue::Register(err_payload_vreg)]);
+
+        // 6. Ok block: extract the Ok payload (offset 8) and continue.
+        ir_func.append_block(&ok_label);
+        let ok_vreg = self.alloc_vreg();
+        if let Some(name) = ok_dst {
+            ir_func.register_vreg(VirtualRegister::named(ok_vreg, name));
+            names.insert(name.to_string(), ok_vreg);
+        } else {
+            ir_func.register_vreg(VirtualRegister::anonymous(ok_vreg));
+        }
+        ir_func.current_block().push(IRInstruction::Load {
+            dst: IRValue::Register(ok_vreg),
+            addr: result_val,
+            offset: 8,
+            ty: IRType::U64,
+        });
+
+        Ok(IRValue::Register(ok_vreg))
+    }
+
+    // =======================================================================
     // Helpers
     // =======================================================================
 

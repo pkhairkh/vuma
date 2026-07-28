@@ -1,4 +1,4 @@
-// ffi_wave0/marshal_attr — #[marshal] on an extern fn param (parse-only)
+// ffi_wave0/marshal_attr — #[marshal] on an extern transform param (parse-only)
 // Expected exit code: 0
 //
 // Test: #[marshal] forces the scratchpad marshalling path even when
@@ -6,9 +6,9 @@
 // C-ownership).
 
 extern "C" {
-    fn open(#[marshal] path: Address, flags: i32) -> i32;
+    transform open(#[marshal] path: Address, flags: i32) -> i32;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

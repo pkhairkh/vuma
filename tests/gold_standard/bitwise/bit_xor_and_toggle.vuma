@@ -6,7 +6,7 @@
 // first. Distinct from s8_bit_xor_shr_combine (XOR-then-SHR) and
 // s9_bit_xor_then_and (XOR-then-AND, no final toggle).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 204;         // 0xCC
     b: u64 = 51;          // 0x33
     c: u64 = 170;         // 0xAA

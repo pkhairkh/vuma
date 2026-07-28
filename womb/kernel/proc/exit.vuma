@@ -62,8 +62,8 @@
 //
 // ── Init-style API ──────────────────────────────────────────────────────────
 // The K4d contract specifies the init-style signature:
-//     fn sys_exit(tbl, task_idx, code, zombie: State<ZombieTask>)
-// (NOT `fn sys_exit(tbl, task_idx, code) -> State<ZombieTask>` — VUMA
+//     transform sys_exit(tbl, task_idx, code, zombie: State<ZombieTask>)
+// (NOT `transform sys_exit(tbl, task_idx, code) -> State<ZombieTask>` — VUMA
 // does NOT propagate State-typedness through function return values
 // (K2a caveat, unchanged)). The caller allocates the ZombieTask via
 // `state_new(ZombieTask)` and passes it by reference to sys_exit, which
@@ -77,7 +77,7 @@
 // satisfied (exactly 2). Same discipline as K4b's sched_enqueue(rq, tbl,
 // task_idx) (2 State params + u32) and K4c's context_switch(prev, next)
 // (2 State params, both #[borrow] — but sys_exit doesn't need #[borrow]
-// because it's a regular VUMA fn, not an extern "C" call).
+// because it's a regular VUMA transform, not an extern "C" call).
 //
 // ── ProcessTable re-declaration ─────────────────────────────────────────────
 // VUMA has no `import` (Open Work §7), so this file re-declares the
@@ -111,7 +111,7 @@
 // ── Why init-style? ─────────────────────────────────────────────────────────
 // See "Init-style API" above — the K4d contract mandates the init-style
 // signature for sys_exit. All exit.vuma functions take their State<T>
-// params by regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls
+// params by regular VUMA-transform borrow (NOT extern #[borrow] — VUMA transform calls
 // don't need the attribute; only extern "C" calls do, and none of these
 // functions call any extern).
 //
@@ -232,14 +232,14 @@ layout ZombieTask = {
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
 // Re-declared byte-identically to K4a's task.vuma. sys_exit calls this
 // with val=4 (ZOMBIE) to mark the task as exited-but-not-reaped.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
@@ -247,7 +247,7 @@ fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
 // Re-declared byte-identically to K4a's task.vuma (4-byte little-endian
 // unpack loop — same pattern as K3e's syscall_table_get but with a 4-byte
 // loop bound for u32).
-fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -262,7 +262,7 @@ fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 
 // Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -278,7 +278,7 @@ fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 // to copy the exiting task's PPID into zombie.ppid (so K4e's waitpid
 // can scan for zombies by PPID — find all ZombieTask's whose ppid ==
 // the waiting parent's PID).
-fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -294,7 +294,7 @@ fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 // pt_get_vruntime / pt_set_vruntime (u64 8-byte LE pack/unpack).
 // Used by sys_exit to store the exit code in the vruntime field
 // (the canonical exit-code storage location — see sys_exit comments).
-fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -307,7 +307,7 @@ fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -330,7 +330,7 @@ fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
 // Idempotent. Re-declared byte-identically to K4a's task.vuma.
-fn pt_init(tbl: State<ProcessTable>) {
+transform pt_init(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
         pt_set_state(tbl, i, 0);
@@ -343,7 +343,7 @@ fn pt_init(tbl: State<ProcessTable>) {
 // (state = 2), assign PID = slot + 1 (so PID 0 is never handed out),
 // bump count, return the slot index. Returns 256 if the table is full.
 // Re-declared byte-identically to K4a's task.vuma.
-fn task_alloc(tbl: State<ProcessTable>) -> u32 {
+transform task_alloc(tbl: State<ProcessTable>) -> u32 {
     let i = 0;
     while i < 256 {
         if pt_get_state(tbl, i) == 0 {
@@ -456,7 +456,7 @@ transform sys_exit(tbl: State<ProcessTable>, task_idx: u32, code: i32, zombie: S
 // rationale, and K3a's trap_trampoline.vuma for the same rule applied
 // to vector=14 and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(ProcessTable);
     let zombie = state_new(ZombieTask);
     pt_init(tbl);

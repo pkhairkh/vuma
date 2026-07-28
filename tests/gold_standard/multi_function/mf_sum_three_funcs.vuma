@@ -3,17 +3,17 @@
 //
 // Three functions each return 5. main calls all three, sums results.
 
-fn g1() -> u32 {
+transform g1() -> u32 {
     return 5;
 }
-fn g2() -> u32 {
+transform g2() -> u32 {
     return 5;
 }
-fn g3() -> u32 {
+transform g3() -> u32 {
     return 5;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = g1();
     b: u32 = g2();
     c: u32 = g3();

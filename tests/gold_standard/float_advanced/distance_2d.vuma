@@ -9,7 +9,7 @@
 //   - f64 < comparison (convergence check)
 //   - floattoint (final truncation)
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: f64 = 3.0;
     y: f64 = 4.0;
     x2: f64 = x * x;   // 9.0

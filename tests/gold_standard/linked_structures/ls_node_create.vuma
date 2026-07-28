@@ -8,7 +8,7 @@
 
 layout Buf_node = { data: [u8; 16] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let node = state_new(Buf_node);
     node.data[0] = 42;
     val: u64 = node.data[0];

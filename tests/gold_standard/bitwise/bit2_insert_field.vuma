@@ -9,7 +9,7 @@
 // Workaround note: VUMA's `~` unary is silently dropped during SCG->IR
 // lowering, so NOT is computed via XOR with all-ones (0 - 1). All operands
 // are also loaded into variables first to avoid the immediate-RHS drop bug.
-fn main() -> i32 {
+transform main() -> i32 {
     base: u64 = 0x02;
     value: u64 = 10;
     shift: u64 = 2;

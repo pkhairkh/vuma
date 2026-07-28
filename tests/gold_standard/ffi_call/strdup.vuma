@@ -10,11 +10,11 @@
 layout Str = { data: [u8; 16], len: u64 }
 
 extern "C" {
-    fn strdup(s: Address) -> Address;
-    fn free(ptr: Address);
+    transform strdup(s: Address) -> Address;
+    transform free(ptr: Address);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Str);
     s.len = 5;
     s.data[0] = 104; // 'h'

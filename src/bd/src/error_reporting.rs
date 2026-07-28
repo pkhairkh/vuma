@@ -363,7 +363,7 @@ mod tests {
                 None,
             )),
         };
-        let source = "fn foo() {}\nlet x = 1\nx.field = 42";
+        let source = "transform foo() {}\nlet x = 1\nx.field = 42";
         let msg = format_bd_error(&error, source);
         assert!(msg.contains("CapD violation"));
         assert!(msg.contains("Write"));

@@ -6,7 +6,7 @@
 // s10_u32_add_chain_4 (4-add chain, no sub) and s7_u32_add_chain_4
 // (different vals).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 50;
     b: u32 = 30;
     c: u32 = 10;

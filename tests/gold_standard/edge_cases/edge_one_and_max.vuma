@@ -5,7 +5,7 @@
 // Distinct from s14_edge_xor_self (XOR cancellation) and
 // s10_edge_max_xor_zero (XOR with zero).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 255;
     r: u32 = a & b;       // 1

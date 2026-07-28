@@ -1,7 +1,7 @@
 // pmt_return_field.vuma — return a field from a state param
 // Expected exit code: 42
 //
-// `fn get_y(p: State<Point>) -> u32 { return p.y; }` — the callee reads
+// `transform get_y(p: State<Point>) -> u32 { return p.y; }` — the callee reads
 // the `y` field (offset 4) from the state-typed parameter. main
 // allocates a Point, sets p.y=42, calls get_y, returns the result.
 // Verifies that the state buffer pointer is correctly passed as a
@@ -9,7 +9,7 @@
 // offset (4 for y).
 //
 // This is the PMT analog of the pointer-based "deref a struct pointer
-// in a function" pattern: instead of `fn get_y(p: *Point) -> u32 {
+// in a function" pattern: instead of `transform get_y(p: *Point) -> u32 {
 // return (*p).y; }`, the parameter is typed `State<Point>` and the
 // field access is `p.y` — no dereference, no pointer arithmetic, no
 // aliasing.
@@ -23,11 +23,11 @@
 
 layout Point = { x: u32, y: u32 }
 
-fn get_y(p: State<Point>) -> u32 {
+transform get_y(p: State<Point>) -> u32 {
     return p.y;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     p.x = 5;
     p.y = 42;

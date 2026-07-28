@@ -6,7 +6,7 @@
 // into u64 variables first. Distinct from s18_bit_and_or_xor (and-or
 // prefix, different order) and s14_bit_xor_then_or (xor-or, two-stage).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;         // 0xF0
     b: u64 = 12;          // 0x0C
     c: u64 = 153;         // 0x99

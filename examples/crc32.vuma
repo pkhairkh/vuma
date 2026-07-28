@@ -16,7 +16,7 @@
 // Right-rotate a u32 by n bits
 // ===========================================================================
 
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;
 }
 
@@ -27,14 +27,14 @@ fn rotr32(x: u32, n: u32) -> u32 {
 // Table is stored as 256 × 4 = 1024 bytes in memory.
 // Each entry is a u32 stored in little-endian format.
 
-fn write_u32_le(buf: Address, offset: u64, val: u32) {
+transform write_u32_le(buf: Address, offset: u64, val: u32) {
     *(buf + offset) = val & 255;
     *(buf + offset + 1) = (val >> 8) & 255;
     *(buf + offset + 2) = (val >> 16) & 255;
     *(buf + offset + 3) = (val >> 24) & 255;
 }
 
-fn read_u32_le(buf: Address, offset: u64) -> u32 {
+transform read_u32_le(buf: Address, offset: u64) -> u32 {
     b0: u32 = *(buf + offset);
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
@@ -42,7 +42,7 @@ fn read_u32_le(buf: Address, offset: u64) -> u32 {
     return ((b3 << 24) | (b2 << 16) | (b1 << 8) | b0) & 4294967295;
 }
 
-fn build_crc_table(table: Address) {
+transform build_crc_table(table: Address) {
     // Polynomial: 0xEDB88320 (bit-reversed 0x04C11DB7)
     i: u64 = 0;
     while i < 256 {
@@ -69,7 +69,7 @@ fn build_crc_table(table: Address) {
 // of CRC, look up in table, shift CRC right 8 bits and XOR with table entry.
 // Final result is XORed with 0xFFFFFFFF.
 
-fn crc32_compute(table: Address, msg: Address, len: u64) -> u32 {
+transform crc32_compute(table: Address, msg: Address, len: u64) -> u32 {
     crc: u32 = 4294967295;   // 0xFFFFFFFF
     i: u64 = 0;
     while i < len {
@@ -90,7 +90,7 @@ fn crc32_compute(table: Address, msg: Address, len: u64) -> u32 {
 // Expected CRC32("123456789") = 0xCBF43926 = 3421780262
 // Exit code: low byte = 0x26 = 38
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate and build CRC table (256 × 4 = 1024 bytes)
     table = allocate(1024);
     build_crc_table(table);

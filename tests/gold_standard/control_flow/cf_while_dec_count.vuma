@@ -8,7 +8,7 @@
 // 0. Distinct from s5_cf_while_acc (acc accumulates 10s, count to 5).
 // Expected exit code: 6
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     count: u32 = 0;
     while i < 6 {

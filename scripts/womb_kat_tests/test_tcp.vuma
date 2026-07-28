@@ -2,4 +2,4 @@
 // TCP header
 // Expected exit code: 20
 
-fn main() -> i32 { return 20; }
+transform main() -> i32 { return 20; }

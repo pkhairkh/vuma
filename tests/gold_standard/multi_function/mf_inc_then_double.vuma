@@ -6,19 +6,19 @@
 // from s8_mf_call_chain_3 (3-helper chain) and s10_mf_two_helpers_sum
 // (two independent helpers, summed).
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     c: u32 = 1;
     r: u32 = x + c;
     return r;
 }
 
-fn double(x: u32) -> u32 {
+transform double(x: u32) -> u32 {
     c: u32 = 2;
     r: u32 = x * c;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = inc(10);     // 11
     b: u32 = double(a);   // 22
     return b;

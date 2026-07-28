@@ -4,7 +4,7 @@
 // 100 - 70 = 30. No underflow. Masked to u32 = 30. Loads both operands
 // into variables.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 100;
     b: u32 = 70;
     diff: u32 = (a - b) & 4294967295;

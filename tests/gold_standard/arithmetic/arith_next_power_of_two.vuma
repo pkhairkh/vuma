@@ -3,7 +3,7 @@
 //
 // next_pow2(50) = 64. Algorithm: decrement, set all lower bits, then add 1.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 50;
     one: u32 = 1;
     two: u32 = 2;

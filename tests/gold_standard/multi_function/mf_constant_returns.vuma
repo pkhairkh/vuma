@@ -4,17 +4,17 @@
 // Three functions each return a distinct constant; main calls all
 // three and returns their sum.
 
-fn f1() -> u32 {
+transform f1() -> u32 {
     return 10;
 }
-fn f2() -> u32 {
+transform f2() -> u32 {
     return 20;
 }
-fn f3() -> u32 {
+transform f3() -> u32 {
     return 30;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = f1();
     b: u32 = f2();
     c: u32 = f3();

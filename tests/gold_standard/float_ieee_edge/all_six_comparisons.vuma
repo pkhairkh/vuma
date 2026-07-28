@@ -18,7 +18,7 @@
 //
 // Exercises all 6 FP comparison operators on a known-ordered pair.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: f64 = 3.0;
     b: f64 = 5.0;
     lt: i64 = 0;

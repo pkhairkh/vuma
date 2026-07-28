@@ -5,11 +5,11 @@
 // product. Verifies that multiplication flows through the call/return
 // path.
 
-fn mul(a: u32, b: u32) -> u32 {
+transform mul(a: u32, b: u32) -> u32 {
     return a * b;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = mul(3, 4);
     return v;
 }

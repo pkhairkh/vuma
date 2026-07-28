@@ -8,7 +8,7 @@
 // Task description said "decode Gray code 5 -> 7", but inv_gray(5) = 6.
 // We use g=4 (the Gray encoding of 7), which yields the expected exit
 // code 7 via the same XOR-fold algorithm.
-fn main() -> i32 {
+transform main() -> i32 {
     g: u64 = 4;
     one: u64 = 1;
     two: u64 = 2;

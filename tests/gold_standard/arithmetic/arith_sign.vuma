@@ -5,7 +5,7 @@
 // u8 exit code) if n < 0. Here we use unsigned comparison and return 1 for
 // positive n.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: i32 = 42;
     zero: i32 = 0;
     one: i32 = 1;

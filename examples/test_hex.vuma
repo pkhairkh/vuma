@@ -1,5 +1,5 @@
 // Test program: print hex output to stdout
-fn main() -> i32 {
+transform main() -> i32 {
     // Create a small buffer with known bytes
     buf = allocate(4);
     *(buf + 0) = 0x4f;

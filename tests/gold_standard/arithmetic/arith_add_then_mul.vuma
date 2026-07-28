@@ -5,7 +5,7 @@
 // All operands loaded into u32 variables first. Distinct from
 // s5_arith_mul_then_add3 (mul-then-add) and s6_arith_sub_then_add.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 15;
     b: u32 = 25;
     c: u32 = 3;

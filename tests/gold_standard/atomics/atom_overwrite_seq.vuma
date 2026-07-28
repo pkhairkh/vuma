@@ -7,7 +7,7 @@
 // (two writes 30/150) and s9_atom_overwrite_load (two writes 20/200).
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let c = state_new(_L1);
     c.v = 15;
     c.v = 95;

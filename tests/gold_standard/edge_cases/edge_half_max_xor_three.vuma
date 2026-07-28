@@ -6,7 +6,7 @@
 // bitwise drop bug workaround). Distinct from s70_edge_half_max_
 // and_low (7), s69_edge_max_and_170 (170) and s66_edge_one_shl_
 // five (32).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 127;
     b: u32 = 3;
     r: u32 = a ^ b;        // 124

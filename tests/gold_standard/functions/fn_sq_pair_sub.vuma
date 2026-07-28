@@ -6,12 +6,12 @@
 // Distinct from s13_fn_square_diff (sq(10) - sq(4) = 84) and
 // s7_fn_square (single sq call).
 
-fn sq(x: u32) -> u32 {
+transform sq(x: u32) -> u32 {
     r: u32 = x * x;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = sq(8);       // 64
     b: u32 = sq(3);       // 9
     d: u32 = a - b;       // 55

@@ -8,7 +8,7 @@
 // With v = 21: sum1 = 21, sum2 = 21, total = 42. The modular reduction
 // is omitted because the inputs are tiny.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 21;
     sum1: u64 = 0;
     sum2: u64 = 0;

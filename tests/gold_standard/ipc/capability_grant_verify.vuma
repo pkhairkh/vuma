@@ -23,7 +23,7 @@
 // the received signature, and the child exits with the payload (42).
 //
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

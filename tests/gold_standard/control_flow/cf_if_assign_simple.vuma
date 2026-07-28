@@ -8,7 +8,7 @@
 // reintroduces the drop will turn this exit into 0.
 // Expected exit code: 10
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 10;

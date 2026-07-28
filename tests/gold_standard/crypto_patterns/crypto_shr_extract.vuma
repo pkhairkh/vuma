@@ -7,7 +7,7 @@
 // (high-nibble extract via >> 4 of 0xAB) and s14_crypto_low_nibble
 // (low-nibble via & 0x0F).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 60;          // 0x3C
     s: u64 = 2;
     r: u64 = v >> s;      // 0x0F = 15

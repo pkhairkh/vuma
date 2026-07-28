@@ -5,7 +5,7 @@
 // Workaround note: VUMA's `~` unary is silently dropped during SCG->IR
 // lowering, and the literal 0xFFFFFFFFFFFFFFFF has a high-bit-set parsing
 // bug. We compute all-ones as `0 - 1` and apply NOT via XOR with all-ones.
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 128;
     one: u64 = 1;
     seven: u64 = 7;

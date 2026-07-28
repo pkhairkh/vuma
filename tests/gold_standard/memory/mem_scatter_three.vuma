@@ -6,7 +6,7 @@
 // arithmetic and multi-load correctness.
 
 layout _L1 = { data: [u8; 24] }
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(_L1);
     buf.data[0] = 10;
     buf.data[8] = 20;

@@ -7,7 +7,7 @@
 // s42_arith_mul_add_div (mul-add-div, 25) and s38_arith_add_sub_mul
 // (add-sub-mul, 180).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 12;
     b: u32 = 7;
     c: u32 = 20;

@@ -262,16 +262,16 @@ fn test_wave48_bootstrap_has_helper_calls() {
 
     // ── The helpers themselves must be defined in the file. ──
     let helpers = [
-        "fn scg_new(",
-        "fn scg_add_node(",
-        "fn scg_connect(",
-        "fn scg_node_kind_for(",
-        "fn scg_walk_block(",
-        "fn bd_classify(",
-        "fn ive_bm_set(",
-        "fn ive_bm_get(",
-        "fn ive_bm_clear(",
-        "fn ive_op_is_def(",
+        "transform scg_new(",
+        "transform scg_add_node(",
+        "transform scg_connect(",
+        "transform scg_node_kind_for(",
+        "transform scg_walk_block(",
+        "transform bd_classify(",
+        "transform ive_bm_set(",
+        "transform ive_bm_get(",
+        "transform ive_bm_clear(",
+        "transform ive_op_is_def(",
     ];
     for h in &helpers {
         assert!(

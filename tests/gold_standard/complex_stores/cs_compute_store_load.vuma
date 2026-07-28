@@ -6,7 +6,7 @@
 
 layout Buf_buf = { data: [u8; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 20;
     b: u32 = 30;
     s: u32 = a + b;

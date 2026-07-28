@@ -2,7 +2,7 @@
 // AES-CMAC K1
 // Expected exit code: 128
 
-fn main() -> i32 {
+transform main() -> i32 {
     l: u32 = 0x40000000; k1: u32 = l << 1;
     return (k1 >> 24) & 255;
 }

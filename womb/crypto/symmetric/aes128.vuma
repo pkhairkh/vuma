@@ -9,7 +9,7 @@ const MASK32: u32 = 4294967295;
 // AES S-Box and Inverse S-Box (shared with aes256)
 // ===========================================================================
 
-fn sbox(idx: u32) -> u32 {
+transform sbox(idx: u32) -> u32 {
     if idx == 0 { return 0x63; }
     if idx == 1 { return 0x7C; }
     if idx == 2 { return 0x77; }
@@ -269,7 +269,7 @@ fn sbox(idx: u32) -> u32 {
 }
 
 // Inverse S-Box
-fn inv_sbox(idx: u32) -> u32 {
+transform inv_sbox(idx: u32) -> u32 {
     if idx == 0 { return 0x52; }
     if idx == 1 { return 0x09; }
     if idx == 2 { return 0x6A; }
@@ -528,7 +528,7 @@ fn inv_sbox(idx: u32) -> u32 {
     return 0x7D;
 }
 
-fn rcon(idx: u32) -> u32 {
+transform rcon(idx: u32) -> u32 {
     if idx == 1 { return 1; }
     if idx == 2 { return 2; }
     if idx == 3 { return 4; }
@@ -542,14 +542,14 @@ fn rcon(idx: u32) -> u32 {
     return 0;
 }
 
-fn xtime(a: u32) -> u32 {
+transform xtime(a: u32) -> u32 {
     hi: u32 = (a >> 7) & 1;
     result: u32 = (a << 1) & 255;
     if hi == 1 { result = result ^ 27; }
     return result;
 }
 
-fn gmul(a: u32, b: u32) -> u32 {
+transform gmul(a: u32, b: u32) -> u32 {
     result: u32 = 0;
     x: u32 = a;
     y: u32 = b;
@@ -567,7 +567,7 @@ fn gmul(a: u32, b: u32) -> u32 {
 // AES-128 Key Expansion (Nk=4, Nr=10, 176 bytes)
 // ===========================================================================
 
-fn aes128_key_expansion(key: Address, roundkeys: Address) {
+transform aes128_key_expansion(key: Address, roundkeys: Address) {
     i: u32 = 0;
     while i < 16 { *(roundkeys + i) = *(key + i); i = i + 1; }
 
@@ -605,7 +605,7 @@ fn aes128_key_expansion(key: Address, roundkeys: Address) {
 // AES-128 forward operations
 // ===========================================================================
 
-fn add_round_key(state: Address, roundkeys: Address, round: u32) {
+transform add_round_key(state: Address, roundkeys: Address, round: u32) {
     offset: u32 = round * 16;
     i: u32 = 0;
     while i < 16 {
@@ -614,17 +614,17 @@ fn add_round_key(state: Address, roundkeys: Address, round: u32) {
     }
 }
 
-fn sub_bytes(state: Address) {
+transform sub_bytes(state: Address) {
     i: u32 = 0;
     while i < 16 { *(state + i) = sbox(*(state + i)); i = i + 1; }
 }
 
-fn inv_sub_bytes(state: Address) {
+transform inv_sub_bytes(state: Address) {
     i: u32 = 0;
     while i < 16 { *(state + i) = inv_sbox(*(state + i)); i = i + 1; }
 }
 
-fn shift_rows(state: Address) {
+transform shift_rows(state: Address) {
     t: u32 = *(state + 1);
     *(state + 1) = *(state + 5); *(state + 5) = *(state + 9);
     *(state + 9) = *(state + 13); *(state + 13) = t;
@@ -634,7 +634,7 @@ fn shift_rows(state: Address) {
     *(state + 7) = *(state + 3); *(state + 3) = t;
 }
 
-fn inv_shift_rows(state: Address) {
+transform inv_shift_rows(state: Address) {
     t: u32 = *(state + 13);
     *(state + 13) = *(state + 9); *(state + 9) = *(state + 5);
     *(state + 5) = *(state + 1); *(state + 1) = t;
@@ -645,7 +645,7 @@ fn inv_shift_rows(state: Address) {
     *(state + 11) = *(state + 15); *(state + 15) = t;
 }
 
-fn mix_columns(state: Address) {
+transform mix_columns(state: Address) {
     c: u32 = 0;
     while c < 4 {
         s0: u32 = *(state + 4 * c); s1: u32 = *(state + 4 * c + 1);
@@ -658,7 +658,7 @@ fn mix_columns(state: Address) {
     }
 }
 
-fn inv_mix_columns(state: Address) {
+transform inv_mix_columns(state: Address) {
     c: u32 = 0;
     while c < 4 {
         s0: u32 = *(state + 4 * c); s1: u32 = *(state + 4 * c + 1);
@@ -675,7 +675,7 @@ fn inv_mix_columns(state: Address) {
 // AES-128 Encrypt block
 // ===========================================================================
 
-fn aes128_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
+transform aes128_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
     roundkeys = allocate(176);
     aes128_key_expansion(key, roundkeys);
 
@@ -708,7 +708,7 @@ fn aes128_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
 // AES-128 Decrypt block (inverse cipher)
 // ===========================================================================
 
-fn aes128_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
+transform aes128_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
     roundkeys = allocate(176);
     aes128_key_expansion(key, roundkeys);
 
@@ -744,7 +744,7 @@ fn aes128_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
 // AES-128-CBC encrypt/decrypt with PKCS#7 padding
 // ===========================================================================
 
-fn aes128_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes128_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     pad_byte: u32 = 16 - (pt_len % 16);
     if pad_byte == 0 { pad_byte = 16; }
     padded_len: u32 = pt_len + pad_byte;
@@ -782,7 +782,7 @@ fn aes128_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
     return padded_len;
 }
 
-fn aes128_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes128_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     prev = allocate(16);
     i: u32 = 0;
     while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
@@ -819,7 +819,7 @@ fn aes128_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Addres
 // AES-128-CTR (encrypt = decrypt)
 // ===========================================================================
 
-fn aes128_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+transform aes128_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
     counter_block = allocate(16);
     i: u32 = 0;
     while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }

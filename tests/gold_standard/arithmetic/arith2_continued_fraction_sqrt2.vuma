@@ -6,7 +6,7 @@
 // This test verifies 1 ≤ 2 < 4 and returns a0 = 1.
 // Straight-line code only.
 
-fn main() -> i32 {
+transform main() -> i32 {
     two: u32 = 2;
     four: u32 = 4;
     // floor(sqrt(2)) = 1 because 1*1 = 1 <= 2 < 4 = 2*2

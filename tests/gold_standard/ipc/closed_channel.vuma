@@ -1,6 +1,6 @@
 // closed_channel — Recv on closed channel returns -1
 // Expected exit code: 99
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     channel_close(ch);
     x = channel_recv(ch);

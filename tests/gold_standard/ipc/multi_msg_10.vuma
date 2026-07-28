@@ -1,7 +1,7 @@
 // multi_msg_10 — Send 10 messages, receive 10 in order
 // Sends 0..9 (sum = 0+1+2+...+9 = 45); child receives all 10 and exits with the sum.
 // Expected exit code: 45
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

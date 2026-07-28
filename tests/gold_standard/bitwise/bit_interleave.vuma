@@ -4,7 +4,7 @@
 // For inputs a=1, b=1: bit 0 of a goes to position 0, bit 0 of b goes to
 // position 1. Result = 0b11 = 3.
 //   result = (a & 1) | ((b & 1) << 1) = 1 | 2 = 3
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1;
     b: u64 = 1;
     one: u64 = 1;

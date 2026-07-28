@@ -20,7 +20,7 @@
 //   3. If pid > 0 AND denied == -4, both paths work correctly -> exit 1.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     pid = supervisor_call(39, 0);  // sys_getpid (allowed)
     denied = supervisor_call(999, 0);  // forbidden -> -4
     if pid > 0 {

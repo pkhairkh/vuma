@@ -18,7 +18,7 @@
 // Note: This is exponential-time; used here only for small values and
 // verification. The iterative version below is the practical one.
 
-fn fib_recursive(n: u32) -> u32 {
+transform fib_recursive(n: u32) -> u32 {
     if n == 0 { return 0; }
     if n == 1 { return 1; }
     return (fib_recursive(n - 1) + fib_recursive(n - 2)) & 4294967295;
@@ -30,7 +30,7 @@ fn fib_recursive(n: u32) -> u32 {
 // Uses two rolling variables instead of call-stack recursion.
 // This is the standard efficient approach for sequential Fibonacci.
 
-fn fib_iterative(n: u32) -> u32 {
+transform fib_iterative(n: u32) -> u32 {
     if n == 0 { return 0; }
     if n == 1 { return 1; }
     a: u32 = 0;
@@ -52,7 +52,7 @@ fn fib_iterative(n: u32) -> u32 {
 // fib(30) = 832040
 // Exit code: 832040 (fits in i32)
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 30;
 
     // Compute iteratively (fast)

@@ -64,7 +64,7 @@
 //   privkey_be   : 48-byte big-endian private scalar d
 //   pubkey_x_be  : 48-byte big-endian Qx (output)
 //   pubkey_y_be  : 48-byte big-endian Qy (output)
-fn ecdh_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+transform ecdh_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
     // Private scalar to little-endian limb form
     d_le = allocate(48);
     swap_endian_48(d_le, privkey_be);
@@ -103,7 +103,7 @@ fn ecdh_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Addr
 //   shared       : 48-byte big-endian x-coordinate of S = d*Q_peer (output)
 // Returns 1 on success, 0 if the resulting shared point is the point at
 // infinity (which signals an invalid peer key or active attack).
-fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: Address, shared: Address) -> u32 {
+transform ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: Address, shared: Address) -> u32 {
     // Convert inputs to little-endian
     d_le = allocate(48);
     swap_endian_48(d_le, privkey_be);
@@ -168,7 +168,7 @@ fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: A
 
 // Widen a prime_len-byte big-endian integer into a 256-byte little-endian
 // limb buffer (high bytes zero-filled). Used to feed bn2048_* routines.
-fn ka_be_to_le256(le_buf: Address, be_in: Address, len: u32) {
+transform ka_be_to_le256(le_buf: Address, be_in: Address, len: u32) {
     // Zero the whole 256-byte buffer first
     i: u32 = 0;
     while i < 256 { *(le_buf + i) = 0; i = i + 1; }
@@ -184,7 +184,7 @@ fn ka_be_to_le256(le_buf: Address, be_in: Address, len: u32) {
 
 // Narrow the low `len` bytes of a 256-byte little-endian limb buffer back into
 // a `len`-byte big-endian output.
-fn ka_le256_to_be(be_out: Address, le_buf: Address, len: u32) {
+transform ka_le256_to_be(be_out: Address, le_buf: Address, len: u32) {
     if len == 0 { return; }
     i: u32 = 0;
     while i < len {
@@ -194,7 +194,7 @@ fn ka_le256_to_be(be_out: Address, le_buf: Address, len: u32) {
 }
 
 // Copy `len` bytes verbatim (used to echo the private value into keypair[]).
-fn ka_copy_bytes(dst: Address, src: Address, len: u32) {
+transform ka_copy_bytes(dst: Address, src: Address, len: u32) {
     i: u32 = 0;
     while i < len {
         *(dst + i) = *(src + i);
@@ -211,7 +211,7 @@ fn ka_copy_bytes(dst: Address, src: Address, len: u32) {
 //   prime_len    : byte length of g, p, and the values (1..256)
 //   private_val  : prime_len-byte big-endian private exponent x
 // Returns 0 on success, nonzero on invalid prime_len.
-fn dh_generate(keypair: Address, generator: Address, prime: Address, prime_len: u32, private_val: Address) -> u32 {
+transform dh_generate(keypair: Address, generator: Address, prime: Address, prime_len: u32, private_val: Address) -> u32 {
     err: u32 = 0;
     if prime_len == 0 { err = 1; }
     if prime_len > 256 { err = 2; }
@@ -245,7 +245,7 @@ fn dh_generate(keypair: Address, generator: Address, prime: Address, prime_len: 
 //   prime_len : byte length (1..256)
 //   shared    : prime_len-byte big-endian shared secret = peer_pub^x mod p (out)
 // Returns 0 on success, nonzero on invalid prime_len.
-fn dh_shared_secret(priv: Address, peer_pub: Address, prime: Address, prime_len: u32, shared: Address) -> u32 {
+transform dh_shared_secret(priv: Address, peer_pub: Address, prime: Address, prime_len: u32, shared: Address) -> u32 {
     err: u32 = 0;
     if prime_len == 0 { err = 1; }
     if prime_len > 256 { err = 2; }
@@ -274,7 +274,7 @@ fn dh_shared_secret(priv: Address, peer_pub: Address, prime: Address, prime_len:
 //   p = 2^2048 - 2^1984 + {[2^1918 * e] + 560316} * 2^64 - 1
 // Returns a freshly allocated 256-byte buffer holding p in big-endian order.
 // The caller owns the buffer and must free() it.
-fn ffdhe2048_prime() -> Address {
+transform ffdhe2048_prime() -> Address {
     buf = allocate(256);
     *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255; *(buf + 4) = 255; *(buf + 5) = 255; *(buf + 6) = 255; *(buf + 7) = 255;
     *(buf + 8) = 173; *(buf + 9) = 248; *(buf + 10) = 84; *(buf + 11) = 88; *(buf + 12) = 162; *(buf + 13) = 187; *(buf + 14) = 74; *(buf + 15) = 154;
@@ -312,7 +312,7 @@ fn ffdhe2048_prime() -> Address {
 }
 
 // RFC 7919 ffdhe2048 generator. g = 2.
-fn ffdhe2048_generator() -> u32 {
+transform ffdhe2048_generator() -> u32 {
     return 2;
 }
 
@@ -320,7 +320,7 @@ fn ffdhe2048_generator() -> u32 {
 //   keypair     : output buffer, 512 bytes (256 public + 256 private)
 //   private_val : 256-byte big-endian private exponent x (caller-supplied)
 // Returns 0 on success.
-fn ffdhe2048_keygen(keypair: Address, private_val: Address) -> u32 {
+transform ffdhe2048_keygen(keypair: Address, private_val: Address) -> u32 {
     prime = ffdhe2048_prime();
     // Build the 256-byte big-endian representation of g = 2.
     g_buf = allocate(256);
@@ -337,7 +337,7 @@ fn ffdhe2048_keygen(keypair: Address, private_val: Address) -> u32 {
 //   peer_pub  : 256-byte big-endian peer public value
 //   shared    : 256-byte big-endian shared secret (output)
 // Returns 0 on success.
-fn ffdhe2048_shared_secret(priv: Address, peer_pub: Address, shared: Address) -> u32 {
+transform ffdhe2048_shared_secret(priv: Address, peer_pub: Address, shared: Address) -> u32 {
     prime = ffdhe2048_prime();
     rc: u32 = dh_shared_secret(priv, peer_pub, prime, 256, shared);
     free(prime);
@@ -371,7 +371,7 @@ fn ffdhe2048_shared_secret(priv: Address, peer_pub: Address, shared: Address) ->
 
 // ---- 56-byte little-endian load/store of a u64 limb ----------------------
 
-fn fe448_load_u64(ptr: Address, off: u32) -> u64 {
+transform fe448_load_u64(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
@@ -379,7 +379,7 @@ fn fe448_load_u64(ptr: Address, off: u32) -> u64 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn fe448_store_u64(ptr: Address, off: u32, val: u64) {
+transform fe448_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -392,22 +392,22 @@ fn fe448_store_u64(ptr: Address, off: u32, val: u64) {
 
 // ---- Basic field-element operations (7 x u64 limbs = 56 bytes) ------------
 
-fn fe448_zero(r: Address) {
+transform fe448_zero(r: Address) {
     i: u32 = 0;
     while i < 56 { *(r + i) = 0; i = i + 1; }
 }
 
-fn fe448_one(r: Address) {
+transform fe448_one(r: Address) {
     fe448_zero(r);
     *(r + 0) = 1;
 }
 
-fn fe448_copy(r: Address, a: Address) {
+transform fe448_copy(r: Address, a: Address) {
     i: u32 = 0;
     while i < 56 { *(r + i) = *(a + i); i = i + 1; }
 }
 
-fn fe448_is_zero(a: Address) -> u32 {
+transform fe448_is_zero(a: Address) -> u32 {
     i: u32 = 0;
     while i < 7 {
         if fe448_load_u64(a, i * 8) != 0 { return 0; }
@@ -417,7 +417,7 @@ fn fe448_is_zero(a: Address) -> u32 {
 }
 
 // Compare a and b: 1 if a>b, -1 if a<b, 0 if equal (most-significant limb first).
-fn fe448_cmp(a: Address, b: Address) -> i32 {
+transform fe448_cmp(a: Address, b: Address) -> i32 {
     i: u32 = 6;
     done: u32 = 0;
     while done == 0 {
@@ -432,7 +432,7 @@ fn fe448_cmp(a: Address, b: Address) -> i32 {
 }
 
 // r = a + b  (mod 2^448); returns the carry out of bit 448.
-fn fe448_add(r: Address, a: Address, b: Address) -> u32 {
+transform fe448_add(r: Address, a: Address, b: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < 7 {
@@ -455,7 +455,7 @@ fn fe448_add(r: Address, a: Address, b: Address) -> u32 {
 }
 
 // r = a - b  (mod 2^448); returns the borrow out of bit 448.
-fn fe448_sub(r: Address, a: Address, b: Address) -> u32 {
+transform fe448_sub(r: Address, a: Address, b: Address) -> u32 {
     borrow: u64 = 0;
     i: u32 = 0;
     while i < 7 {
@@ -478,7 +478,7 @@ fn fe448_sub(r: Address, a: Address, b: Address) -> u32 {
 }
 
 // r = a - val  (mod 2^448), val a small u64. Used to build p-2 for inversion.
-fn fe448_sub_small(r: Address, a: Address, val: u64) {
+transform fe448_sub_small(r: Address, a: Address, val: u64) {
     borrow: u64 = val;
     i: u32 = 0;
     while i < 7 {
@@ -494,7 +494,7 @@ fn fe448_sub_small(r: Address, a: Address, val: u64) {
 // r = (a + b) mod m   (assumes a, b < m). One conditional subtraction suffices
 // because a + b < 2m. When the raw add carries out of 448 bits, r holds
 // (a+b) - 2^448 which is < m, so r - m wraps (mod 2^448) to a + b - m.
-fn fe448_mod_add(r: Address, a: Address, b: Address, m: Address) {
+transform fe448_mod_add(r: Address, a: Address, b: Address, m: Address) {
     carry: u32 = fe448_add(r, a, b);
     if carry == 1 {
         fe448_sub(r, r, m);
@@ -507,7 +507,7 @@ fn fe448_mod_add(r: Address, a: Address, b: Address, m: Address) {
 
 // r = (a - b) mod m   (assumes a, b < m). If a < b, the raw sub borrows and
 // r holds (a - b) + 2^448; adding m (mod 2^448) yields a - b + m, in range.
-fn fe448_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+transform fe448_mod_sub(r: Address, a: Address, b: Address, m: Address) {
     borrow: u32 = fe448_sub(r, a, b);
     if borrow == 1 {
         fe448_add(r, r, m);
@@ -516,7 +516,7 @@ fn fe448_mod_sub(r: Address, a: Address, b: Address, m: Address) {
 
 // Bit extraction / bit-length (for square-and-multiply).
 
-fn fe448_get_bit(a: Address, bit: u32) -> u32 {
+transform fe448_get_bit(a: Address, bit: u32) -> u32 {
     limb: u32 = bit / 64;
     pos: u32 = bit % 64;
     if limb >= 7 { return 0; }
@@ -524,7 +524,7 @@ fn fe448_get_bit(a: Address, bit: u32) -> u32 {
     return (v >> pos) & 1;
 }
 
-fn fe448_bitlen(a: Address) -> u32 {
+transform fe448_bitlen(a: Address) -> u32 {
     i: u32 = 6;
     done: u32 = 0;
     while done == 0 {
@@ -546,7 +546,7 @@ fn fe448_bitlen(a: Address) -> u32 {
 // r = (a * b) mod m  via shift-and-add. The doubling step uses mod_add(temp,
 // temp, m) so the result stays correctly reduced even when 2*temp crosses the
 // 2^448 boundary (the generic lshift1+subtract shortcut is unsafe for that).
-fn fe448_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+transform fe448_mod_mul(r: Address, a: Address, b: Address, m: Address) {
     fe448_zero(r);
     temp = allocate(56);
     fe448_copy(temp, a);
@@ -565,7 +565,7 @@ fn fe448_mod_mul(r: Address, a: Address, b: Address, m: Address) {
 }
 
 // r = a^exp mod m  via square-and-multiply (MSB-first bit traversal).
-fn fe448_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+transform fe448_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
     fe448_zero(r);
     *(r + 0) = 1;  // r = 1
 
@@ -592,7 +592,7 @@ fn fe448_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
 
 // r = a^(-1) mod m  via Fermat's little theorem: a^(m-2) mod m.
 // Requires m to be prime (true for p = 2^448 - 2^224 - 1).
-fn fe448_mod_inv(r: Address, a: Address, m: Address) {
+transform fe448_mod_inv(r: Address, a: Address, m: Address) {
     exp = allocate(56);
     fe448_copy(exp, m);
     fe448_sub_small(exp, exp, 2);  // exp = m - 2
@@ -602,7 +602,7 @@ fn fe448_mod_inv(r: Address, a: Address, m: Address) {
 
 // Constant-time conditional swap of two 56-byte field elements.
 // swap == 1 -> exchange a and b; swap == 0 -> no-op. Branch-free.
-fn fe448_cswap(swap: u32, a: Address, b: Address) {
+transform fe448_cswap(swap: u32, a: Address, b: Address) {
     mask: u32 = 0;
     if swap == 1 { mask = 4294967295; }  // 0xFFFFFFFF
     i: u32 = 0;
@@ -617,7 +617,7 @@ fn fe448_cswap(swap: u32, a: Address, b: Address) {
 }
 
 // r = a * 39081 mod m   (a24 for Curve448). 39081 = 0x9891.
-fn fe448_mul_a24(r: Address, a: Address, m: Address) {
+transform fe448_mul_a24(r: Address, a: Address, m: Address) {
     b = allocate(56);
     fe448_zero(b);
     *(b + 0) = 145;  // 0x91
@@ -628,7 +628,7 @@ fn fe448_mul_a24(r: Address, a: Address, m: Address) {
 
 // Fill r with the X448 field prime p = 2^448 - 2^224 - 1 in little-endian:
 // all bytes 0xFF except byte 28 = 0xFE (bit 224 is the only clear bit).
-fn fe448_p448(r: Address) {
+transform fe448_p448(r: Address) {
     i: u32 = 0;
     while i < 56 { *(r + i) = 255; i = i + 1; }
     *(r + 28) = 254;  // 0xFE: clear bit 224
@@ -640,7 +640,7 @@ fn fe448_p448(r: Address) {
 //   scalar : 56-byte little-endian scalar  (clamped internally)
 //   point  : 56-byte little-endian u-coordinate of the input point
 // --------------------------------------------------------------------------
-fn x448_scalarmult(out: Address, scalar: Address, point: Address) {
+transform x448_scalarmult(out: Address, scalar: Address, point: Address) {
     // Field prime
     p = allocate(56);
     fe448_p448(p);
@@ -736,7 +736,7 @@ fn x448_scalarmult(out: Address, scalar: Address, point: Address) {
 //   privkey : 56-byte little-endian private scalar (clamped internally)
 //   pubkey  : 56-byte little-endian public u-coordinate = X448(privkey, 5)
 // The base point is u = 5 (RFC 7748).
-fn x448_keygen(privkey: Address, pubkey: Address) {
+transform x448_keygen(privkey: Address, pubkey: Address) {
     base = allocate(56);
     fe448_zero(base);
     *(base + 0) = 5;  // u = 5
@@ -750,7 +750,7 @@ fn x448_keygen(privkey: Address, pubkey: Address) {
 //   shared      : 56-byte little-endian shared secret = X448(privkey, peer_pubkey)
 // Returns 1 on success, 0 if the resulting shared secret is all-zero (low-order
 // point per RFC 7748 Section 6.1).
-fn x448_shared_secret(privkey: Address, peer_pubkey: Address, shared: Address) -> u32 {
+transform x448_shared_secret(privkey: Address, peer_pubkey: Address, shared: Address) -> u32 {
     x448_scalarmult(shared, privkey, peer_pubkey);
     if fe448_is_zero(shared) == 1 { return 0; }
     return 1;

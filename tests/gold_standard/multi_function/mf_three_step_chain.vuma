@@ -6,23 +6,23 @@
 // sub3(12) -> 9. Distinct from s14_mf_two_helpers_chain (two-helper chain)
 // and s11_mf_three_helpers_chain (three summed, not chained).
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     n: u32 = 1;
     r: u32 = x + n;
     return r;
 }
-fn dbl(x: u32) -> u32 {
+transform dbl(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x * n;
     return r;
 }
-fn sub3(x: u32) -> u32 {
+transform sub3(x: u32) -> u32 {
     n: u32 = 3;
     r: u32 = x - n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = inc(5);      // 6
     b: u32 = dbl(a);      // 12
     c: u32 = sub3(b);     // 9

@@ -114,13 +114,13 @@ const H6I: u64 = (1 << 63) | 6560669392235499431;
 const H7I: u64 = 5167115440072839076;
 
 // Rotate-right guarded against n==0 (64-n would shift by full word).
-fn rotr64(x: u64, n: u64) -> u64 {
+transform rotr64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x >> n) | (x << (64 - n));
 }
 
 // Load 8 bytes big-endian into a u64.
-fn load_u64_be(ptr: Address, off: u32) -> u64 {
+transform load_u64_be(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
@@ -130,7 +130,7 @@ fn load_u64_be(ptr: Address, off: u32) -> u64 {
 }
 
 // Store a u64 big-endian into 8 bytes.
-fn store_u64_be(ptr: Address, off: u32, val: u64) {
+transform store_u64_be(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = (val >> 56) & 255;
     *(ptr + off + 1) = (val >> 48) & 255;
     *(ptr + off + 2) = (val >> 40) & 255;
@@ -142,32 +142,32 @@ fn store_u64_be(ptr: Address, off: u32, val: u64) {
 }
 
 // Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)
-fn ch64(x: u64, y: u64, z: u64) -> u64 {
+transform ch64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ ((x ^ MASK64) & z);
 }
 
 // Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)
-fn maj64(x: u64, y: u64, z: u64) -> u64 {
+transform maj64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
 // Big Sigma0(x) = ROTR^28(x) XOR ROTR^34(x) XOR ROTR^39(x)
-fn big_sigma0_64(x: u64) -> u64 {
+transform big_sigma0_64(x: u64) -> u64 {
     return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
 }
 
 // Big Sigma1(x) = ROTR^14(x) XOR ROTR^18(x) XOR ROTR^41(x)
-fn big_sigma1_64(x: u64) -> u64 {
+transform big_sigma1_64(x: u64) -> u64 {
     return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
 }
 
 // Small sigma0(x) = ROTR^1(x) XOR ROTR^8(x) XOR SHR^7(x)
-fn small_sigma0_64(x: u64) -> u64 {
+transform small_sigma0_64(x: u64) -> u64 {
     return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7);
 }
 
 // Small sigma1(x) = ROTR^19(x) XOR ROTR^61(x) XOR SHR^6(x)
-fn small_sigma1_64(x: u64) -> u64 {
+transform small_sigma1_64(x: u64) -> u64 {
     return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6);
 }
 
@@ -177,7 +177,7 @@ fn small_sigma1_64(x: u64) -> u64 {
 //   [ 72.. 79] bit_hi    high 64 bits of total message length in bits
 //   [ 80.. 87] buf_len   bytes currently in the message buffer
 //   [ 88..215] buf[128]  partial block accumulator (1024-bit block)
-fn sha384_init(ctx: Address) {
+transform sha384_init(ctx: Address) {
     store_u64_be(ctx, 0,  H0I);
     store_u64_be(ctx, 8,  H1I);
     store_u64_be(ctx, 16, H2I);
@@ -196,7 +196,7 @@ fn sha384_init(ctx: Address) {
 // words, then mixes each round with K[i] and the working-state registers
 // a..h using the SHA-512 mixing functions. The compressed block is added
 // back into the running state H[0..7].
-fn sha384_compress(ctx: Address, block: Address) {
+transform sha384_compress(ctx: Address, block: Address) {
     a: u64 = load_u64_be(ctx, 0);
     b: u64 = load_u64_be(ctx, 8);
     c: u64 = load_u64_be(ctx, 16);
@@ -333,7 +333,7 @@ fn sha384_compress(ctx: Address, block: Address) {
 
 // Increment the 128-bit bit counter by `bits` (1 <= bits <= 1024), carrying
 // into the high 64-bit limb when the low limb wraps.
-fn sha384_add_bits(ctx: Address, bits: u64) {
+transform sha384_add_bits(ctx: Address, bits: u64) {
     lo: u64 = load_u64_be(ctx, 64);
     hi: u64 = load_u64_be(ctx, 72);
     new_lo: u64 = lo + bits;
@@ -344,7 +344,7 @@ fn sha384_add_bits(ctx: Address, bits: u64) {
 
 // Absorb `len` bytes of `data` into the context, compressing a full 128-byte
 // block each time the buffer fills.
-fn sha384_update(ctx: Address, data: Address, len: u32) {
+transform sha384_update(ctx: Address, data: Address, len: u32) {
     buf_len: u64 = load_u64_be(ctx, 80);
     i: u32 = 0;
     while i < len {
@@ -364,7 +364,7 @@ fn sha384_update(ctx: Address, data: Address, len: u32) {
 // run the final compression, and write the 48-byte digest to `out`.
 // Padding is: 0x80 bit, then zeros, then the 128-bit big-endian bit length
 // of the original message at the last 16 bytes of the final block.
-fn sha384_final(ctx: Address, out: Address) {
+transform sha384_final(ctx: Address, out: Address) {
     buf_len: u64 = load_u64_be(ctx, 80);
 
     // Account for the unprocessed buffered bytes in the bit counter
@@ -405,7 +405,7 @@ fn sha384_final(ctx: Address, out: Address) {
 
 // Convenience wrapper: initialise a fresh context, absorb `data`, finalise
 // into `out`, and free the context.
-fn sha384_oneshot(data: Address, len: u32, out: Address) {
+transform sha384_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(216);
     sha384_init(ctx);
     sha384_update(ctx, data, len);

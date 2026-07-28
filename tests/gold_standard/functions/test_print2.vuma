@@ -1,6 +1,6 @@
 // Simpler test: just print_int to verify runtime works
 // Expected exit code: 0
-fn main() -> i32 {
+transform main() -> i32 {
     print_int(42);
     print_int(255);
     print_int(0);

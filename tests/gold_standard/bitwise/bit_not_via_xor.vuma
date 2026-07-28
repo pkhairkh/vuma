@@ -6,7 +6,7 @@
 // operands loaded into variables first. Distinct from
 // s5_bit_xor_then_not (which cancels to 0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 85;      // 0x55
     b: u64 = 255;     // 0xFF
     r: u64 = a ^ b;   // 0xAA = 170

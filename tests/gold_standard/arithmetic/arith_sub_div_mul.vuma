@@ -6,7 +6,7 @@
 // variables first. Distinct from s10_arith_add_then_mul (add-then-mul)
 // and s9_arith_div_then_mul (div-then-mul, no leading subtract).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 90;
     b: u32 = 18;
     c: u32 = 8;

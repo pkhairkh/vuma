@@ -6,7 +6,7 @@
 // first. Distinct from s8_arith_mul_div_chain (mul-then-div) and
 // s9_arith_mod_then_add (mod-then-add).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 100;
     b: u32 = 30;
     c: u32 = 2;

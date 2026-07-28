@@ -6,7 +6,7 @@
 // bitwise drop bug workaround). Distinct from s9_bit_not_via_xor
 // (NOT-via-XOR only, no shift) and s13_bit_shr_then_and (shift-then-AND).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;         // 0xFF
     b: u64 = 85;          // 0x55
     sh: u64 = 2;

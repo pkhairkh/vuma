@@ -10,7 +10,7 @@
 // so we model the bool's truth value directly with sel = 1.)
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     b: bool = true;
     sel: u32 = 1;
     val_true: u32 = 42;

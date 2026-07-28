@@ -92,7 +92,7 @@
 // semantically identical — 128 bytes of byte-granular storage) sidesteps
 // the issue entirely. This matches the established VWK pattern:
 // K5g's procfs.vuma uses `[u8; 128]` for `read_fns` (16 × 8 bytes),
-// K6d's char.vuma uses `[u8; 256]` for its 5 fn-pointer arrays (32 × 8),
+// K6d's char.vuma uses `[u8; 256]` for its 5 transform-pointer arrays (32 × 8),
 // K7b's signal.vuma uses `[u8; 256]` instead of `[u64; 32]`, and K7c's
 // futex.vuma uses `[u8; 512]` instead of `[u64; 64]`. The byte-granular
 // accessors (devfs_get_read_fn / devfs_set_read_fn / devfs_get_write_fn
@@ -123,7 +123,7 @@
 // ── Hosted vs bare-metal dispatch ───────────────────────────────────────────
 // devfs is the second VWK filesystem whose READ/WRITE op is dispatched
 // via a per-entry function pointer (read_fn / write_fn). VUMA has no
-// first-class fn-ptr type and no `&function` syntax — there is no way
+// first-class transform-ptr type and no `&function` syntax — there is no way
 // to take the address of `devfs_console_write` in source. So in hosted
 // mode:
 //   - devfs_init stores read_fn / write_fn = 1 (a non-zero SENTINEL —
@@ -327,7 +327,7 @@ extern "C" {
     // .rodata literal address directly (no State<T> marshal) OR a u64
     // value cast to Address (e.g. `buf as Address` from a State<T>
     // borrow — though the W21S5 self-test passes a string literal).
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 
     // sys_read (nr 0): read up to `count` bytes from fd `fd` into `buf`.
     // Declared per the W21S5 task spec but UNUSED in the W21S5 body —
@@ -335,7 +335,7 @@ extern "C" {
     // will use `read(0, buf, count)` to read from stdin (the hosted-mode
     // "console input"), matching how devfs_console_write uses
     // `write(1, buf, count)` for stdout.
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -423,12 +423,12 @@ layout DevfsName = { data: [u8; 8] }
 // dentry_set_name_byte.
 
 // Read byte `off` (0..7) of slot `idx`'s name from DevfsData.names.
-fn devfs_get_name_byte(data: State<DevfsData>, idx: u32, off: u32) -> u8 {
+transform devfs_get_name_byte(data: State<DevfsData>, idx: u32, off: u32) -> u8 {
     return data.names[idx * 8 + off];
 }
 
 // Write byte `off` (0..7) of slot `idx`'s name into DevfsData.names.
-fn devfs_set_name_byte(data: State<DevfsData>, idx: u32, off: u32, val: u8) {
+transform devfs_set_name_byte(data: State<DevfsData>, idx: u32, off: u32, val: u8) {
     data.names[idx * 8 + off] = val;
 }
 
@@ -454,7 +454,7 @@ fn devfs_set_name_byte(data: State<DevfsData>, idx: u32, off: u32, val: u8) {
 
 // Read the u64 `read_fn` field of DevfsEntry slot `idx` from
 // DevfsData.read_fns.
-fn devfs_get_read_fn(data: State<DevfsData>, idx: u32) -> u64 {
+transform devfs_get_read_fn(data: State<DevfsData>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -469,7 +469,7 @@ fn devfs_get_read_fn(data: State<DevfsData>, idx: u32) -> u64 {
 
 // Write the u64 `read_fn` field of DevfsEntry slot `idx` into
 // DevfsData.read_fns.
-fn devfs_set_read_fn(data: State<DevfsData>, idx: u32, val: u64) {
+transform devfs_set_read_fn(data: State<DevfsData>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -482,7 +482,7 @@ fn devfs_set_read_fn(data: State<DevfsData>, idx: u32, val: u64) {
 
 // Read the u64 `write_fn` field of DevfsEntry slot `idx` from
 // DevfsData.write_fns.
-fn devfs_get_write_fn(data: State<DevfsData>, idx: u32) -> u64 {
+transform devfs_get_write_fn(data: State<DevfsData>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -497,7 +497,7 @@ fn devfs_get_write_fn(data: State<DevfsData>, idx: u32) -> u64 {
 
 // Write the u64 `write_fn` field of DevfsEntry slot `idx` into
 // DevfsData.write_fns.
-fn devfs_set_write_fn(data: State<DevfsData>, idx: u32, val: u64) {
+transform devfs_set_write_fn(data: State<DevfsData>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -518,12 +518,12 @@ fn devfs_set_write_fn(data: State<DevfsData>, idx: u32, val: u64) {
 // direct u8 indexing, no pack/unpack loop. The byte IS the value.
 
 // Read the u8 `used` flag of DevfsEntry slot `idx` from DevfsData.used.
-fn devfs_get_used(data: State<DevfsData>, idx: u32) -> u8 {
+transform devfs_get_used(data: State<DevfsData>, idx: u32) -> u8 {
     return data.used[idx];
 }
 
 // Write the u8 `used` flag of DevfsEntry slot `idx` into DevfsData.used.
-fn devfs_set_used(data: State<DevfsData>, idx: u32, val: u8) {
+transform devfs_set_used(data: State<DevfsData>, idx: u32, val: u8) {
     data.used[idx] = val;
 }
 
@@ -540,7 +540,7 @@ fn devfs_set_used(data: State<DevfsData>, idx: u32, val: u8) {
 // guarantees no slot will be read until devfs_register populates it).
 // Same pattern as K6d's cdev_table_init (char.vuma:573) and K5g's
 // procfs_data_init (procfs.vuma:506).
-fn devfs_data_init(data: State<DevfsData>) {
+transform devfs_data_init(data: State<DevfsData>) {
     let i = 0;
     while i < 16 {
         devfs_set_used(data, i, 0);
@@ -582,7 +582,7 @@ fn devfs_data_init(data: State<DevfsData>) {
 // same length and the same bytes. Byte-identical to K6d's
 // chardev_lookup_name (char.vuma:686-720), except the name width is 8
 // (vs. K6d's 16) and the slot count is 16 (vs. K6d's 32).
-fn devfs_find_by_name(data: State<DevfsData>, name: State<DevfsName>) -> u32 {
+transform devfs_find_by_name(data: State<DevfsData>, name: State<DevfsName>) -> u32 {
     let i = 0;
     while i < 16 {
         if devfs_get_used(data, i) == 1 {
@@ -647,7 +647,7 @@ fn devfs_find_by_name(data: State<DevfsData>, name: State<DevfsName>) -> u32 {
 // zero" (no handler → -ENOSYS). K11+ will pack real function-pointer
 // addresses here, and the sentinel check becomes "is there a real
 // handler" (any non-zero address).
-fn devfs_register(data: State<DevfsData>, name: State<DevfsName>, read_fn: u64, write_fn: u64) -> u32 {
+transform devfs_register(data: State<DevfsData>, name: State<DevfsName>, read_fn: u64, write_fn: u64) -> u32 {
     let i = 0;
     while i < 16 {
         if devfs_get_used(data, i) == 0 {
@@ -714,7 +714,7 @@ fn devfs_register(data: State<DevfsData>, name: State<DevfsName>, read_fn: u64, 
 // literals directly (e.g. `write(1, "devfs: console write ok\n", 24)`)
 // — lowers the literal to a .rodata address, passed as Address.
 
-fn devfs_init(data: State<DevfsData>) {
+transform devfs_init(data: State<DevfsData>) {
     devfs_data_init(data);
 
     // ── Entry 0: /dev/console (idx=0) → devfs_console_write ──────────
@@ -805,7 +805,7 @@ fn devfs_init(data: State<DevfsData>) {
 //       no indirect-call gadget, simpler generated code.
 //
 // The `data` (State<DevfsData>) is passed to devfs_get_write_fn (a
-// regular VUMA-fn borrow — no extern call invalidates it). The `buf`
+// regular VUMA-transform borrow — no extern call invalidates it). The `buf`
 // and `count` are forwarded to the matched handler. The handler's i64
 // return is returned to the caller (bytes written or negative errno).
 //
@@ -816,7 +816,7 @@ fn devfs_init(data: State<DevfsData>) {
 //                        devfs_null_write (bytes written or negative
 //                        errno).
 
-fn devfs_write(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64 {
+transform devfs_write(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64 {
     // Fetch the write_fn sentinel. In hosted mode this is 1 (devfs_init
     // stores 1 for slots with handlers — VUMA has no `&function` syntax,
     // so we use a non-zero sentinel). K11+ will pack real function-
@@ -867,7 +867,7 @@ fn devfs_write(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i6
 //   <handler result>   — the i64 returned by devfs_null_read (0 / EOF)
 //                        or devfs_zero_read (count).
 
-fn devfs_read(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64 {
+transform devfs_read(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64 {
     // Fetch the read_fn sentinel. /dev/console has read_fn = 0 in K5h
     // (no read handler — the guard short-circuits to -ENOSYS). /dev/null
     // and /dev/zero have read_fn = 1 (sentinel — handlers exist).
@@ -917,7 +917,7 @@ fn devfs_read(data: State<DevfsData>, idx: u32, buf: Address, count: u64) -> i64
 // 8733) OR a u64 value cast to Address. The self-test passes a string
 // literal; K7+ will pass the user-space buffer address from the trap
 // frame (sys_write → vfs_write → devfs_write → devfs_console_write).
-fn devfs_console_write(buf: Address, count: u64) -> i64 {
+transform devfs_console_write(buf: Address, count: u64) -> i64 {
     let n = write(1, buf, count as i64);
     return n;
 }
@@ -928,7 +928,7 @@ fn devfs_console_write(buf: Address, count: u64) -> i64 {
 // are discarded. The `buf` param is part of the API signature (matching
 // devfs_console_write) but is intentionally unused — PMT forbids
 // pointer deref, and /dev/null doesn't read the buffer contents anyway.
-fn devfs_null_write(buf: Address, count: u64) -> i64 {
+transform devfs_null_write(buf: Address, count: u64) -> i64 {
     return count as i64;
 }
 
@@ -937,7 +937,7 @@ fn devfs_null_write(buf: Address, count: u64) -> i64 {
 // of EOF"; reads return 0 bytes (EOF signal). The `buf` and `count`
 // params are part of the API signature but are intentionally unused —
 // there's nothing to read, so no buffer fill happens.
-fn devfs_null_read(buf: Address, count: u64) -> i64 {
+transform devfs_null_read(buf: Address, count: u64) -> i64 {
     // /dev/null is a data source of EOF — reads return 0 bytes. The
     // body invokes the `read` extern with count=0 to perform a
     // canonical 0-byte read, which returns 0 immediately per POSIX
@@ -974,7 +974,7 @@ fn devfs_null_read(buf: Address, count: u64) -> i64 {
 // The `buf` param is part of the API signature but is intentionally
 // unused in the K5h stub. The `count` param IS used (returned as the
 // byte count).
-fn devfs_zero_read(buf: Address, count: u64) -> i64 {
+transform devfs_zero_read(buf: Address, count: u64) -> i64 {
     return count as i64;
 }
 
@@ -1017,9 +1017,9 @@ fn devfs_zero_read(buf: Address, count: u64) -> i64 {
 // (check 7) also produces no output (devfs_null_write discards the
 // bytes).
 //
-// The fn-pointer sentinels (read_fn / write_fn) are 0 or 1 in this
+// The transform-pointer sentinels (read_fn / write_fn) are 0 or 1 in this
 // self-test (hosted mode — direct-switch dispatch on `idx`, NOT
-// __call_indirect1). K11+ will register real fn pointers with non-zero
+// __call_indirect1). K11+ will register real transform pointers with non-zero
 // addresses and the dispatch stays the same (the `write_fn != 0` /
 // `read_fn != 0` guard fires for any non-zero value, and the switch
 // invokes the matching handler).
@@ -1036,7 +1036,7 @@ fn devfs_zero_read(buf: Address, count: u64) -> i64 {
 // devfs_write ( lowers them to .rodata addresses) — this is
 // PMT-pure (no `&x`, no `*ptr`, no `allocate`, no `free`).
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate the DevfsData via state_new (zero-initialized by the
     // ___pmt_buffer). devfs_init re-initializes it explicitly via
     // devfs_data_init (idempotent — safe on a fresh table).

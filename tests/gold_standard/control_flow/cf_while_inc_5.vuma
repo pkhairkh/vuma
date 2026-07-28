@@ -9,7 +9,7 @@
 // s6_cf_while_dec_count (6 iterations, decrementing).
 // Expected exit code: 5
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     count: u32 = 0;
     while i < 5 {

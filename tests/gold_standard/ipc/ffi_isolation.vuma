@@ -2,7 +2,7 @@
 //
 // Exercises the process_call builtin, which marshals a cross-process function
 // call via a channel (send arg, recv result).  This is the runtime that backs
-// `extern "process" fn` declarations (recognized in scg_to_ir.rs as the
+// `extern "process" transform` declarations (recognized in scg_to_ir.rs as the
 // FfiEnvelope lowering path).
 //
 // The child acts as the isolated FFI server: it recv's an argument, doubles
@@ -12,7 +12,7 @@
 // payload, demonstrating process-level isolation.
 //
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

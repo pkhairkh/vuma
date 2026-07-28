@@ -5,7 +5,7 @@
 // keeps the low nibble = 2. All operands loaded into variables
 // first to dodge the immediate-RHS bitwise drop bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 200;
     sh: u64 = 2;
     mask: u64 = 15;                // 0x0F

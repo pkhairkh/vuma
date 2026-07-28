@@ -8,7 +8,7 @@
 // s7_cf_while_acc_5 (different loop body).
 // Expected exit code: 5
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     i: u32 = 0;
     while i < 5 {

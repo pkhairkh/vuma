@@ -13,7 +13,7 @@
 // cursor-movement + color state machine). K6d (womb/kernel/drivers/char.vuma)
 // provided the char device registry (chardev_register / chardev_lookup /
 // chardev_lookup_name — the parallel-flat-byte-array table of [name, major,
-// minor, 5 fn pointers] slots). K6e is the layer that aggregates them into
+// minor, 5 transform pointers] slots). K6e is the layer that aggregates them into
 // a single console interface: a 256-byte line buffer that flushes to the
 // UART (hosted: stdout via `write`; bare-metal K11: MMIO via uart_putc_*),
 // with a matching `read` path that pulls bytes from the UART (hosted: stdin
@@ -277,8 +277,8 @@
 // call — the Address is just a raw u64 pointer handed to the syscall.
 // This is the documented PMT "Borrowed read" pattern.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -325,7 +325,7 @@ layout ConsoleStr = { data: [u8; 256] }
 // console_putc will overwrite them in order). A defensive zeroing pass
 // would be 256 byte-stores for no observable benefit; skipped (same
 // rationale as K6b's tty_init, K5a's file_init, K4a's pt_init).
-fn console_init(c: State<Console>) {
+transform console_init(c: State<Console>) {
     c.uart_base = 1016;  // 0x3F8 (COM1) — QEMU 8250 default.
     c.len = 0;
     c.rows = 25;
@@ -345,7 +345,7 @@ fn console_init(c: State<Console>) {
 // The bounds check `c.len < 256` guards the store: if len is already 256
 // (shouldn't happen because we flush at 255, but defensive), the byte is
 // silently dropped — same K1 stub behavior.
-fn console_putc(c: State<Console>, ch: u8) {
+transform console_putc(c: State<Console>, ch: u8) {
     if c.len < 256 {
         c.buf[c.len] = ch;
         c.len = c.len + 1;
@@ -369,7 +369,7 @@ fn console_putc(c: State<Console>, ch: u8) {
 // the buffer fills up — console_puts itself doesn't flush. A caller that
 // wants the trailing bytes flushed (when the string doesn't end in a
 // newline) must call console_flush(c) explicitly after console_puts.
-fn console_puts(c: State<Console>, s: State<ConsoleStr>) {
+transform console_puts(c: State<Console>, s: State<ConsoleStr>) {
     let i = 0;
     while i < 256 {
         let ch = s.data[i];
@@ -409,7 +409,7 @@ fn console_puts(c: State<Console>, s: State<ConsoleStr>) {
 //
 // Return value of `write` is currently ignored — a later effort may add
 // error reporting (e.g. retry on EINTR, panic on EBADF).
-fn console_flush(c: State<Console>) {
+transform console_flush(c: State<Console>) {
     if c.len > 0 {
         // Copy to a separate buffer for the write call. `out as Address`
         // gives the address of out.data (at offset 0 of ConsoleStr) — the
@@ -447,7 +447,7 @@ fn console_flush(c: State<Console>) {
 // passing max > 256 would overflow the buffer — K6e doesn't bounds-check
 // `max`, matching the K6b tty_readline contract which also trusts the
 // caller).
-fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
+transform console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
     let n = read(0, buf as Address, max);
     return n;
 }
@@ -521,7 +521,7 @@ fn console_read(c: State<Console>, buf: State<ConsoleStr>, max: u64) -> i64 {
 // `let addr = buf as Address; write(1, addr, 5);` pattern is the same
 // PMT "Borrowed read" as console_flush (State<ConsoleStr> whose `data`
 // field IS at offset 0, so the cast yields the address of data[0]).
-fn console_set_fg(con: State<Console>, color: u8) {
+transform console_set_fg(con: State<Console>, color: u8) {
     let buf = state_new(ConsoleStr);
     let code = (color as u64) + 30;
     buf.data[0] = 27;                        // ESC
@@ -536,7 +536,7 @@ fn console_set_fg(con: State<Console>, color: u8) {
 // Set the background color. `color` is 0..7. Emits ESC[<color+40>m (5 bytes).
 // Same byte-by-byte build as console_set_fg, but with the +40 SGR base
 // instead of +30 (so the tens digit is '4' instead of '3').
-fn console_set_bg(con: State<Console>, color: u8) {
+transform console_set_bg(con: State<Console>, color: u8) {
     let buf = state_new(ConsoleStr);
     let code = (color as u64) + 40;
     buf.data[0] = 27;                        // ESC
@@ -554,7 +554,7 @@ fn console_set_bg(con: State<Console>, color: u8) {
 // handed to `write` as `buf: Address`. Same PMT "Borrowed read" pattern
 // as trap.vuma's `write(1, "*** KERNEL PANIC ***\n", 21)`. The `con`
 // parameter is unused (hosted path goes straight to fd 1 via `write`).
-fn console_set_bold(con: State<Console>) {
+transform console_set_bold(con: State<Console>) {
     write(1, "\x1b[1m", 4);
 }
 
@@ -564,7 +564,7 @@ fn console_set_bold(con: State<Console>) {
 // the next flush would leave the terminal in the colored/bold state —
 // callers should pair set/reset around the colored span (or call this at
 // process exit to restore the default terminal state).
-fn console_reset_color(con: State<Console>) {
+transform console_reset_color(con: State<Console>) {
     write(1, "\x1b[0m", 4);
 }
 
@@ -603,7 +603,7 @@ fn console_reset_color(con: State<Console>) {
 // run interactively (the trailing reset restores the default terminal
 // state), but doesn't affect the exit code.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let con = state_new(Console);
     console_init(con);
 

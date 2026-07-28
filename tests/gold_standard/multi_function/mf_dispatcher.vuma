@@ -5,14 +5,14 @@
 // a constant) and that main can return its result. helper computes
 // 6 * 7 = 42 and returns it.
 
-fn compute() -> u32 {
+transform compute() -> u32 {
     a: u32 = 6;
     b: u32 = 7;
     r: u32 = a * b;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = compute();
     return v;
 }

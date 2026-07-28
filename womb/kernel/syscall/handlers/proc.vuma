@@ -13,7 +13,7 @@
 //
 // ── Why direct extern dispatch (not the SyscallTable indirection)? ──────────
 // Same rationale as io.vuma's header: K3e's dispatch.vuma uses a stub
-// return because VUMA has no fn-pointer call today. K11 will register
+// return because VUMA has no transform-pointer call today. K11 will register
 // sys_getpid / sys_exit via syscall_register and wire up real dispatch.
 // For now, this file is self-testable: main() calls sys_getpid directly
 // to verify the path works end-to-end (sys_exit is exercised via a
@@ -35,22 +35,22 @@
 //
 // ── Why does sys_exit have a `return;` after exit(code)? ────────────────────
 // VUMA's type system requires all paths through a function to return a
-// value matching the declared return type. sys_exit is declared `fn
+// value matching the declared return type. sys_exit is declared `transform
 // sys_exit(code: i64)` (i.e. return type is unit/void — written as no
-// `-> T`). The `exit(code)` call is declared as `fn exit(code: i64)` in
+// `-> T`). The `exit(code)` call is declared as `transform exit(code: i64)` in
 // the extern block, with no return value (it never returns — the syscall
 // terminates the process). However, VUMA's parser doesn't model
 // "divergent functions" (functions that never return), so the call site
 // is treated as a regular call that DOES return. To satisfy the type
 // checker, the function body must end with an explicit `return;` — even
-// though that line is unreachable. Same pattern as any VUMA fn that
+// though that line is unreachable. Same pattern as any VUMA transform that
 // calls a divergent extern (e.g. K11's panic handler will have the same
 // shape: `panic(msg); return;`).
 //
 // ── Why does sys_getpid return i64, not u64? ───────────────────────────────
 // Linux's getpid returns pid_t (a positive int — process IDs are 1..4194304
 // on x86_64 Linux, well within int range). The host `getpid` extern is
-// declared `fn getpid() -> i64` (matches the C signature `pid_t getpid(void)`
+// declared `transform getpid() -> i64` (matches the C signature `pid_t getpid(void)`
 // where pid_t is `int`, sign-extended to 64 bits in the SysV AMD64 ABI).
 // sys_getpid passes the i64 straight through. The CALLER (K3e's
 // syscall_write_ret) writes the i64 return value into tf.rax (a u64 field
@@ -85,7 +85,7 @@
 // the same rationale).
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. The `extern "C" { fn exit, fn getpid }`
+// This file is self-contained. The `extern "C" { transform exit, transform getpid }`
 // declarations are byte-identical to:
 //   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
 //   - womb/kernel/hosted/host.vuma (K1a — host_exit wraps exit)
@@ -110,8 +110,8 @@
 // syscall terminates the process); getpid returns the PID in RAX.
 
 extern "C" {
-    fn exit(code: i64);
-    fn getpid() -> i64;
+    transform exit(code: i64);
+    transform getpid() -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ extern "C" {
 // read from a per-CPU current-task struct (K4's scheduler will maintain
 // it).
 
-fn sys_getpid() -> i64 {
+transform sys_getpid() -> i64 {
     return getpid();
 }
 
@@ -136,7 +136,7 @@ fn sys_getpid() -> i64 {
 // type checker (see "Why does sys_exit have a `return;` after exit(code)?"
 // in the file header).
 
-fn sys_exit(code: i64) {
+transform sys_exit(code: i64) {
     exit(code);
     return;  // unreachable, but VUMA needs a return
 }
@@ -160,7 +160,7 @@ fn sys_exit(code: i64) {
 // path (parse_int_radix width-extension subtleties — see womb/kernel/
 // arch/x86_64/pt.vuma header for the same rationale).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pid = sys_getpid();
     // PID should be > 0 (we're a running process).
     if pid <= 0 { return 1; }

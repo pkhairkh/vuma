@@ -7,7 +7,7 @@
 // s12_crypto_clear_high_nibble (clears the high nibble instead) and
 // s14_crypto_low_nibble (extracts the low nibble).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 205;         // 0xCD
     m: u64 = 240;         // 0xF0
     r: u64 = v & m;       // 0xC0 = 192

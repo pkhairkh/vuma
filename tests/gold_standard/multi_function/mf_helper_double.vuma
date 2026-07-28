@@ -6,13 +6,13 @@
 // s9_mf_one_helper_called_thrice (square called thrice) and
 // s10_mf_helper_returns_arg (identity helper).
 
-fn double(x: u32) -> u32 {
+transform double(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x * n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = double(20);
     return v;
 }

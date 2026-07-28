@@ -5,7 +5,7 @@
 // (15 ^ 9) = 6, (12 ^ 10) = 6, 6 ^ 6 = 0. Operands loaded into
 // variables first to dodge the immediate-RHS bitwise drop bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 15;
     b: u32 = 9;
     c: u32 = 12;

@@ -2,4 +2,4 @@
 // ML-KEM q
 // Expected exit code: 1
 
-fn main() -> i32 { return 3329 & 255; }
+transform main() -> i32 { return 3329 & 255; }

@@ -5,27 +5,27 @@
 // variables because VUMA miscompiles nested call expressions used
 // directly as arguments. The value 42 must pass through unchanged.
 
-fn l5(x: u32) -> u32 {
+transform l5(x: u32) -> u32 {
     return x;
 }
 
-fn l4(x: u32) -> u32 {
+transform l4(x: u32) -> u32 {
     return x;
 }
 
-fn l3(x: u32) -> u32 {
+transform l3(x: u32) -> u32 {
     return x;
 }
 
-fn l2(x: u32) -> u32 {
+transform l2(x: u32) -> u32 {
     return x;
 }
 
-fn l1(x: u32) -> u32 {
+transform l1(x: u32) -> u32 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = l1(42);
     b: u32 = l2(a);
     c: u32 = l3(b);

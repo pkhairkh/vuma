@@ -5,7 +5,7 @@
 // loaded into a variable because VUMA may drop bitwise ops with
 // an immediate RHS.
 
-fn main() -> i32 {
+transform main() -> i32 {
     one: u32 = 1;
     sh: u32 = 3;
     seven: u32 = 7;

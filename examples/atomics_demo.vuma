@@ -31,7 +31,7 @@
 // prior writes by this thread are visible before the store becomes
 // visible to other threads.
 
-fn demo_load_store() -> u64 {
+transform demo_load_store() -> u64 {
     // Allocate a memory cell for atomic operations
     // IVE verifies: cell is live after allocation (Liveness)
     cell = allocate(8);
@@ -62,7 +62,7 @@ fn demo_load_store() -> u64 {
 // IVE verifies: no data race between CAS and other atomic ops on the
 // same cell; the CAS is linearizable (appears instantaneous).
 
-fn demo_cas() -> u64 {
+transform demo_cas() -> u64 {
     cell = allocate(8);
     atomic_store(cell, 42);
 
@@ -104,31 +104,31 @@ struct Counter {
     value: AtomicU64,
 }
 
-fn counter_new() -> Address {
+transform counter_new() -> Address {
     c = allocate(8);
     *c = Counter { value: AtomicU64::new(0) };
     return c;
 }
 
-fn counter_increment(counter: Address) -> u64 {
+transform counter_increment(counter: Address) -> u64 {
     // fetch_add returns the OLD value (before increment)
     // IVE verifies: atomic RMW operation, no data race
     old = (*counter).value.fetch_add(1, Acquire);
     return old;
 }
 
-fn counter_decrement(counter: Address) -> u64 {
+transform counter_decrement(counter: Address) -> u64 {
     // fetch_sub returns the OLD value (before decrement)
     // IVE verifies: atomic RMW operation, no data race
     old = (*counter).value.fetch_sub(1, Release);
     return old;
 }
 
-fn counter_get(counter: Address) -> u64 {
+transform counter_get(counter: Address) -> u64 {
     return (*counter).value.load(Acquire);
 }
 
-fn demo_fetch_ops() -> u64 {
+transform demo_fetch_ops() -> u64 {
     counter = counter_new();
 
     // Increment 5 times
@@ -162,7 +162,7 @@ fn demo_fetch_ops() -> u64 {
 //   3. CAS from current → new
 //   4. If CAS fails (someone else changed it), retry
 
-fn demo_compare_exchange() -> u64 {
+transform demo_compare_exchange() -> u64 {
     cell = allocate(8);
     *cell = AtomicU64::new(10);
 
@@ -193,7 +193,7 @@ fn demo_compare_exchange() -> u64 {
 // ===========================================================================
 // Runs all four demos and returns a combined checksum.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Demo 1: load/store — expected: 100
     r1 = demo_load_store();
 

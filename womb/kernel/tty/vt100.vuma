@@ -256,7 +256,7 @@ layout Vt100State = {
 // (esc_len = 0 already guarantees no byte will be read from it; the next
 // escape sequence will overwrite them in order — same defensive-skip
 // pattern as K6b's tty_init not zeroing the ring buffer).
-fn vt100_init(s: State<Vt100State>) {
+transform vt100_init(s: State<Vt100State>) {
     s.row = 0;
     s.col = 0;
     s.fg = 7;   // white (default fg)
@@ -297,7 +297,7 @@ fn vt100_init(s: State<Vt100State>) {
 // The function returns void — callers that want to render the state can
 // read s.row / s.col / s.fg / s.bg after each call. K6c itself never
 // renders (no externs, no I/O — see the file header's "No externs" note).
-fn vt100_feed(s: State<Vt100State>, c: u8) {
+transform vt100_feed(s: State<Vt100State>, c: u8) {
     if s.esc == 0 {
         // ── NORMAL mode ────────────────────────────────────────────────────
         if c == 27 {
@@ -668,7 +668,7 @@ fn vt100_feed(s: State<Vt100State>, c: u8) {
 // literally 0" (also return 0, but conceptually different — in practice
 // both yield the same behavior in the caller, so the distinction is
 // informational only).
-fn vt100_parse_param(s: State<Vt100State>, param_idx: u32) -> u32 {
+transform vt100_parse_param(s: State<Vt100State>, param_idx: u32) -> u32 {
     let v: u32 = 0;
     let cur_param: u32 = 0;
     let i = 0;
@@ -713,7 +713,7 @@ fn vt100_parse_param(s: State<Vt100State>, param_idx: u32) -> u32 {
 // to know the actual parameter count to avoid spuriously dispatching a
 // non-existent trailing parameter as "0 = reset" (which would clobber
 // attributes set by earlier parameters in the same SGR sequence).
-fn vt100_param_count(s: State<Vt100State>) -> u32 {
+transform vt100_param_count(s: State<Vt100State>) -> u32 {
     if s.esc_len == 0 {
         return 0;
     }
@@ -746,7 +746,7 @@ fn vt100_param_count(s: State<Vt100State>) -> u32 {
 // PMT-pure: the row-shift is a byte-by-byte copy loop (no memmove / no
 // pointer arithmetic — same State<T> field-array pattern as kernel.vuma's
 // history-shift `h.cmds[s * 256 + k] = h.cmds[(s + 1) * 256 + k]`).
-fn vt100_scroll(s: State<Vt100State>) {
+transform vt100_scroll(s: State<Vt100State>) {
     // (a) Shift rows 1..24 up to rows 0..23 (24 rows copied).
     let r = 0;
     while r < 24 {
@@ -816,7 +816,7 @@ fn vt100_scroll(s: State<Vt100State>) {
 // All assertions return distinct non-zero codes (1..38) so a failure
 // pinpoints exactly which check failed. Exit 0 = all checks passed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Vt100State);
     vt100_init(s);
 

@@ -7,7 +7,7 @@
 // s5_u32_mask_high_nibble (ANDs to extract low nibble, not OR to
 // combine) and s6_u32_xor_with_self (XOR, not OR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     hi: u32 = 160;    // 0xA0
     lo: u32 = 11;     // 0x0B
     r: u32 = hi | lo; // 0xAB = 171

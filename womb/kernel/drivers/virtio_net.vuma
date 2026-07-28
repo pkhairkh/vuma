@@ -5,8 +5,8 @@
 // mode (K11), these are real MMIO reads/writes to the virtio device.
 
 extern "C" {
-    fn mmio_read32(addr: u64) -> u32;
-    fn mmio_write32(addr: u64, val: u32);
+    transform mmio_read32(addr: u64) -> u32;
+    transform mmio_write32(addr: u64, val: u32);
 }
 
 // virtio MMIO register layout (offsets from base address).
@@ -30,7 +30,7 @@ layout NetPacket = { data: [u8; 1514] }
 
 // Initialize the virtio-net device at `base`.
 // Returns 0 on success, -1 if magic doesn't match.
-fn virtio_net_init(base: u64) -> i64 {
+transform virtio_net_init(base: u64) -> i64 {
     let magic = mmio_read32(base);
     if magic != 195936478 {  // 0x74726976 = "virt"
         return 0 - 1;
@@ -46,16 +46,16 @@ fn virtio_net_init(base: u64) -> i64 {
 }
 
 // Receive a packet (simplified).
-fn virtio_net_rx(base: u64, buf: State<NetPacket>) -> i64 {
+transform virtio_net_rx(base: u64, buf: State<NetPacket>) -> i64 {
     return 0;
 }
 
 // Transmit a packet (simplified).
-fn virtio_net_tx(base: u64, buf: State<NetPacket>, len: u64) -> i64 {
+transform virtio_net_tx(base: u64, buf: State<NetPacket>, len: u64) -> i64 {
     return len as i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pkt = state_new(NetPacket);
     let tx_ret = virtio_net_tx(4026531840, pkt, 64);
     if tx_ret != 64 { return 1; }

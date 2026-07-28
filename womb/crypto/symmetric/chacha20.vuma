@@ -28,11 +28,11 @@ const CHACHA20_SIGMA_3: u32 = 1797285236;  // "te k"
 // 32-bit primitives: rotate-left and little-endian byte helpers.
 // ===========================================================================
 
-fn chacha20_rotl32(x: u32, n: u32) -> u32 {
+transform chacha20_rotl32(x: u32, n: u32) -> u32 {
     return ((x << n) | (x >> (32 - n))) & CHACHA20_MASK32;
 }
 
-fn chacha20_load_u32_le(ptr: Address, off: u32) -> u32 {
+transform chacha20_load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -40,7 +40,7 @@ fn chacha20_load_u32_le(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn chacha20_store_u32_le(ptr: Address, off: u32, val: u32) {
+transform chacha20_store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -56,7 +56,7 @@ fn chacha20_store_u32_le(ptr: Address, off: u32, val: u32) {
 // All additions are mod 2^32. Operates in place on the 16-word state.
 // ===========================================================================
 
-fn chacha20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
+transform chacha20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
     va: u32 = chacha20_load_u32_le(state, a * 4);
     vb: u32 = chacha20_load_u32_le(state, b * 4);
     vc: u32 = chacha20_load_u32_le(state, c * 4);
@@ -78,7 +78,7 @@ fn chacha20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
 }
 
 // One ChaCha20 double-round: column round + diagonal round.
-fn chacha20_double_round(state: Address) {
+transform chacha20_double_round(state: Address) {
     // Column round — QR on each column of the 4x4 state matrix.
     chacha20_qr(state, 0, 4, 8, 12);
     chacha20_qr(state, 1, 5, 9, 13);
@@ -98,7 +98,7 @@ fn chacha20_double_round(state: Address) {
 // and writes 64 bytes of keystream to `out`.
 // ===========================================================================
 
-fn chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
+transform chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
     state = allocate(64);   // 16 x u32 working state.
     initial = allocate(64); // snapshot of pre-round state for the final add.
 
@@ -160,7 +160,7 @@ fn chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
 // once per 64-byte block and starts at the caller-supplied `counter`.
 // ===========================================================================
 
-fn chacha20_encrypt(data: Address, data_len: u32, key: Address,
+transform chacha20_encrypt(data: Address, data_len: u32, key: Address,
                     nonce: Address, counter: u32, output: Address) -> u32 {
     pos: u32 = 0;
     ctr: u32 = counter;
@@ -190,7 +190,7 @@ fn chacha20_encrypt(data: Address, data_len: u32, key: Address,
 }
 
 // Decrypt is the same operation as encrypt for a stream cipher.
-fn chacha20_decrypt(data: Address, data_len: u32, key: Address,
+transform chacha20_decrypt(data: Address, data_len: u32, key: Address,
                     nonce: Address, counter: u32, output: Address) -> u32 {
     return chacha20_encrypt(data, data_len, key, nonce, counter, output);
 }
@@ -202,7 +202,7 @@ fn chacha20_decrypt(data: Address, data_len: u32, key: Address,
 // for stream-based protocols that XOR externally.
 // ===========================================================================
 
-fn chacha20_keystream(key: Address, nonce: Address, counter: u32,
+transform chacha20_keystream(key: Address, nonce: Address, counter: u32,
                       out: Address, out_len: u32) {
     zero = allocate(out_len);
     i: u32 = 0;
@@ -220,7 +220,7 @@ fn chacha20_keystream(key: Address, nonce: Address, counter: u32,
 // under the same key.
 // ===========================================================================
 
-fn chacha20_keygen(seed: Address, key_out: Address) {
+transform chacha20_keygen(seed: Address, key_out: Address) {
     i: u32 = 0;
     while i < CHACHA20_KEY_SIZE {
         *(key_out + i) = *(seed + i);

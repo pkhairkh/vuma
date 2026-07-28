@@ -6,13 +6,13 @@
 // Distinct from s13_fn_double_arg (mul by 2) and s13_fn_inc_by
 // (two args, add).
 
-fn dec(x: u32) -> u32 {
+transform dec(x: u32) -> u32 {
     one: u32 = 1;
     r: u32 = x - one;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = dec(50);
     return v;
 }

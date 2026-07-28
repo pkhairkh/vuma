@@ -15,10 +15,10 @@ layout Buffer = { len: u32, data: u64 }
 
 extern "C" {
     #[borrow]
-    fn state_size(buf: Address) -> i64;
+    transform state_size(buf: Address) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(Buffer);
     buf.len = 12;
     // Hypothetically: state_size(&buf) — buf is #[borrow], so preserved.

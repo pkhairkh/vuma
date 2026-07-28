@@ -4,7 +4,7 @@
 // Mix of multiplication and subtraction. 9 * 5 = 45, then 45 - 10 = 35.
 // All values within U8 range, straight-line code.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 9;
     b: u32 = 5;
     c: u32 = 10;

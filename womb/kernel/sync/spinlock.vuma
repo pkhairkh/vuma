@@ -184,8 +184,8 @@
 //
 // ── IRQ disable / restore (extern "C" stubs) ────────────────────────────────
 //   extern "C" {
-//       fn irq_disable() -> u64;      // returns previous IRQ state
-//       fn irq_restore(state: u64);   // restores previous IRQ state
+//       transform irq_disable() -> u64;      // returns previous IRQ state
+//       transform irq_restore(state: u64);   // restores previous IRQ state
 //   }
 //
 //   In hosted mode both resolve to __ffi_fallback_stub (returns 0 for
@@ -325,12 +325,12 @@ extern "C" {
     // IRQ state (the entire flags register — RFLAGS on x86_64, DAIF on
     // aarch64, MSTATUS on riscv64) so it can be restored by irq_restore.
     // Hosted stub: returns 0 (no IRQ state to save).
-    fn irq_disable() -> u64;
+    transform irq_disable() -> u64;
     // Restore the previous IRQ state saved by irq_disable. Used to
     // correctly handle nested spinlocks — if the outer context already
     // had IRQs disabled, irq_restore keeps them disabled (doesn't
     // re-enable). Hosted stub: no-op.
-    fn irq_restore(state: u64);
+    transform irq_restore(state: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -401,7 +401,7 @@ layout Spinlock = {
 // every field is a primitive u32 or u64, not a nested layout — see
 // "Why no FutexEntry layout?" in K7c's futex.vuma for the alternative
 // parallel-byte-array pattern that's used when fields are nested).
-fn spinlock_init(lock: State<Spinlock>) {
+transform spinlock_init(lock: State<Spinlock>) {
     lock.locked = 0;
     lock._pad0 = 0;
     lock.holder = 256;
@@ -444,7 +444,7 @@ fn spinlock_init(lock: State<Spinlock>) {
 //     we're already the holder (IRQs were disabled by the outer
 //     acquire and haven't been re-enabled yet — the outer acquire's
 //     irq_restore only happens at the matching release).
-fn spinlock_acquire(lock: State<Spinlock>, task_idx: u32) {
+transform spinlock_acquire(lock: State<Spinlock>, task_idx: u32) {
     // Check for recursive acquisition: if we're already the holder,
     // just bump depth and return. No CAS, no IRQ disable.
     if lock.holder == task_idx {
@@ -504,7 +504,7 @@ fn spinlock_acquire(lock: State<Spinlock>, task_idx: u32) {
 // failure (no error code). This is the K8a contract's stub error
 // behavior — a real kernel would either panic (kernel bug — releasing
 // a lock you don't hold) or return -EINVAL (user-space bug — same).
-fn spinlock_release(lock: State<Spinlock>, task_idx: u32) {
+transform spinlock_release(lock: State<Spinlock>, task_idx: u32) {
     // Check ownership. Not the holder → silent no-op (stub error).
     if lock.holder != task_idx {
         return;
@@ -560,7 +560,7 @@ fn spinlock_release(lock: State<Spinlock>, task_idx: u32) {
 //     covers this with bare-metal parity tests).
 //   - Actual SMP contention (only one CPU in hosted mode — K8e
 //     covers this with the SMP IPI test infrastructure).
-fn main() -> i32 {
+transform main() -> i32 {
     let lock = state_new(Spinlock);
     spinlock_init(lock);
     // Acquire as task 5.

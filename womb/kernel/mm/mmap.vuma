@@ -29,7 +29,7 @@
 // identically for all 19 backends.
 //
 // W35: the pre-W35 local no-op stub fns (pmm_alloc / pmm_free / vmm_map /
-// vmm_unmap) have been REMOVED. They are now forward-declared VUMA `fn`
+// vmm_unmap) have been REMOVED. They are now forward-declared VUMA `transform`
 // signatures (NOT extern "C") matching pmm.vuma / vmm.vuma's real
 // signatures. The `PageTable` layout is replaced by `VmmSpace` (R3b
 // root + levels + arch + _pad), and the call sites use vmm_map_page /
@@ -58,7 +58,7 @@
 // VUMA has no `import` (Open Work §7). pmm_alloc / pmm_free live in
 // womb/kernel/mm/pmm.vuma and vmm_map_page / vmm_unmap_page live in
 // womb/kernel/mm/vmm.vuma. To call them from this file, we re-declare
-// their signatures here as VUMA `fn` forward declarations (NOT extern
+// their signatures here as VUMA `transform` forward declarations (NOT extern
 // "C" — per the W35 task spec, pmm_alloc/vmm_map are VUMA functions).
 // In hosted mode (compile_dump on x86_64) the forward declarations
 // have empty bodies, so:
@@ -87,16 +87,16 @@
 // pool_set_base).
 //
 // ── sys_mmap as a transform (Fix 6) ─────────────────────────────────────────
-// sys_mmap is declared `transform` (not `fn`). Fix 1 (commit b183ecac) lifted
+// sys_mmap is declared `transform` (not `transform`). Fix 1 (commit b183ecac) lifted
 // the parser's old 1-State-param restriction on `transform`, so multi-param
-// transforms now lower to real codegen (same path as `fn`). The transform
+// transforms now lower to real codegen (same path as `transform`). The transform
 // keyword enables:
 //   - StateTransform verifier on the body
 //   - state_transform_elision if the transform is identity
 //   - Linear ownership semantics (the State<T> params are "consumed" by the
 //     transform — use-after-exit becomes a compile-time concept)
-// sys_mmap's signature is unchanged from the K2f `fn` form (same params, same
-// return type u64); only the leading `fn` keyword became `transform`. The
+// sys_mmap's signature is unchanged from the K2f `transform` form (same params, same
+// return type u64); only the leading `transform` keyword became `transform`. The
 // caller (self-test) calls it the same way — transforms are callable like
 // regular functions from the caller's perspective.
 //
@@ -157,7 +157,7 @@ layout VmmSpace = {
 // VUMA has no `import` (Open Work §7). pmm_alloc / pmm_free live in
 // womb/kernel/mm/pmm.vuma and vmm_map_page / vmm_unmap_page live in
 // womb/kernel/mm/vmm.vuma. To call them from this file we re-declare
-// their signatures here as VUMA `fn` forward declarations (NOT extern
+// their signatures here as VUMA `transform` forward declarations (NOT extern
 // "C" — per the W35 task spec, pmm_alloc/vmm_map are VUMA functions).
 //
 // In hosted mode these resolve to empty-body functions (pmm_alloc
@@ -169,10 +169,10 @@ layout VmmSpace = {
 // changes (same pattern as womb/kernel/tty/console.vuma re-declaring
 // its extern `write`).
 
-fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
-fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8);
-fn vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64);
-fn vmm_unmap_page(space: State<VmmSpace>, vaddr: u64);
+transform pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
+transform pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8);
+transform vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64);
+transform vmm_unmap_page(space: State<VmmSpace>, vaddr: u64);
 
 // ────────────────────────────────────────────────────────────────────────────
 // RegionTable layout (flat byte arrays — see "Why a flat byte-array
@@ -206,7 +206,7 @@ layout RegionTable = {
 // Byte-array pack/unpack helpers for RegionTable (u64 fields).
 // ────────────────────────────────────────────────────────────────────────────
 
-fn rt_get_vaddr(regions: State<RegionTable>, idx: u32) -> u64 {
+transform rt_get_vaddr(regions: State<RegionTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -220,7 +220,7 @@ fn rt_get_vaddr(regions: State<RegionTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn rt_set_vaddr(regions: State<RegionTable>, idx: u32, val: u64) {
+transform rt_set_vaddr(regions: State<RegionTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -232,7 +232,7 @@ fn rt_set_vaddr(regions: State<RegionTable>, idx: u32, val: u64) {
     }
 }
 
-fn rt_get_paddr(regions: State<RegionTable>, idx: u32) -> u64 {
+transform rt_get_paddr(regions: State<RegionTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -246,7 +246,7 @@ fn rt_get_paddr(regions: State<RegionTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn rt_set_paddr(regions: State<RegionTable>, idx: u32, val: u64) {
+transform rt_set_paddr(regions: State<RegionTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -258,7 +258,7 @@ fn rt_set_paddr(regions: State<RegionTable>, idx: u32, val: u64) {
     }
 }
 
-fn rt_get_len(regions: State<RegionTable>, idx: u32) -> u64 {
+transform rt_get_len(regions: State<RegionTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -272,7 +272,7 @@ fn rt_get_len(regions: State<RegionTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn rt_set_len(regions: State<RegionTable>, idx: u32, val: u64) {
+transform rt_set_len(regions: State<RegionTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -284,7 +284,7 @@ fn rt_set_len(regions: State<RegionTable>, idx: u32, val: u64) {
     }
 }
 
-fn rt_get_flags(regions: State<RegionTable>, idx: u32) -> u64 {
+transform rt_get_flags(regions: State<RegionTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -298,7 +298,7 @@ fn rt_get_flags(regions: State<RegionTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn rt_set_flags(regions: State<RegionTable>, idx: u32, val: u64) {
+transform rt_set_flags(regions: State<RegionTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -314,11 +314,11 @@ fn rt_set_flags(regions: State<RegionTable>, idx: u32, val: u64) {
 // Byte-array pack/unpack helpers for RegionTable (u8 used flag).
 // ────────────────────────────────────────────────────────────────────────────
 
-fn rt_get_used(regions: State<RegionTable>, idx: u32) -> u8 {
+transform rt_get_used(regions: State<RegionTable>, idx: u32) -> u8 {
     return regions.used[idx];
 }
 
-fn rt_set_used(regions: State<RegionTable>, idx: u32, val: u8) {
+transform rt_set_used(regions: State<RegionTable>, idx: u32, val: u8) {
     regions.used[idx] = val;
 }
 
@@ -334,7 +334,7 @@ fn rt_set_used(regions: State<RegionTable>, idx: u32, val: u8) {
 //
 // Init-style API: caller allocates `regions` via state_new(RegionTable),
 // passes by reference.
-fn rt_init(regions: State<RegionTable>) {
+transform rt_init(regions: State<RegionTable>) {
     let i = 0;
     while i < 64 {
         rt_set_used(regions, i, 0);
@@ -345,7 +345,7 @@ fn rt_init(regions: State<RegionTable>) {
 
 // Find the first free region slot (used == 0). Returns the slot index
 // (0..63), or 64 if the table is full.
-fn rt_find_free_slot(regions: State<RegionTable>) -> u32 {
+transform rt_find_free_slot(regions: State<RegionTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if rt_get_used(regions, i) == 0 {
@@ -358,7 +358,7 @@ fn rt_find_free_slot(regions: State<RegionTable>) -> u32 {
 
 // Find the region slot whose vaddr matches `addr` and is in use. Returns
 // the slot index (0..63), or 64 if not found.
-fn rt_find_by_vaddr(regions: State<RegionTable>, addr: u64) -> u32 {
+transform rt_find_by_vaddr(regions: State<RegionTable>, addr: u64) -> u32 {
     let i = 0;
     while i < 64 {
         if rt_get_used(regions, i) == 1 {
@@ -458,7 +458,7 @@ transform sys_mmap(
 // to match the real vmm.vuma::vmm_unmap_page signature. vmm_unmap is
 // renamed vmm_unmap_page.
 
-fn sys_munmap(
+transform sys_munmap(
     regions: State<RegionTable>,
     pmm_pool: State<FlatPool>,
     pmm: State<PmmState>,
@@ -519,7 +519,7 @@ fn sys_munmap(
 //
 // Returns 0 on pass.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let regions = state_new(RegionTable);
     rt_init(regions);
 

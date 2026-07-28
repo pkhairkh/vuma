@@ -9,7 +9,7 @@
 // With v = 41: a = 42, b = 42. The low byte of the result is 0x2A = 42.
 // The modular reduction and high 16 bits are omitted here for clarity.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 41;
     one: u64 = 1;
     mFF: u64 = 0xFF;

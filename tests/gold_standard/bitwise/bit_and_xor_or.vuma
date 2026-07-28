@@ -7,7 +7,7 @@
 // Distinct from s18_bit_and_or_xor (and-or, no xor middle) and
 // s14_bit_xor_then_or (xor-then-or, no leading and).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 204;         // 0xCC
     b: u64 = 15;          // 0x0F
     c: u64 = 240;         // 0xF0

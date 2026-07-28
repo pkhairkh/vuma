@@ -222,7 +222,7 @@ fn canonical_ast_bridge_preserves_typed_state_metadata() {
     let src = "\
 layout Point = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     p.x = 42;
     let v = p.x;
@@ -358,7 +358,7 @@ fn ive_cross_check_passes_for_canonical_bridge() {
     // backslashes needed).
     let src = r#"layout Point = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     p.x = 42;
     let v = p.x;

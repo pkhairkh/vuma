@@ -6,12 +6,12 @@
 // with different arguments, with both results kept distinct.
 // Distinct from s4_mf_shared_helper (caller_a/caller_b wrappers).
 
-fn square(x: u32) -> u32 {
+transform square(x: u32) -> u32 {
     r: u32 = x * x;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = square(4);
     b: u32 = square(7);
     s: u32 = a + b;

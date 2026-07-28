@@ -121,7 +121,7 @@
 // slab allocator's self-test only runs on x86_64 hosted mode.
 //
 // mmap/munmap are kept as a HOSTED-MODE FALLBACK for slab_init / kmalloc
-// growth: when pmm_alloc (re-declared below as a VUMA fn) returns 0 —
+// growth: when pmm_alloc (re-declared below as a VUMA transform) returns 0 —
 // which it does in hosted mode because the PMM is not wired — slab_init
 // falls back to mmap to obtain a real page from the host OS so the
 // self-test still passes. In K11 bare-metal mode pmm_alloc resolves to
@@ -135,9 +135,9 @@ extern "C" {
     //   fd    = -1, offset = 0  (anonymous)
     // Returns the base address of the mapped region, or MAP_FAILED (-1
     // cast to Address) on error.
-    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    transform mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
     // munmap(addr, length) — release the mapping. Returns 0 on success.
-    fn munmap(addr: Address, length: u64) -> i64;
+    transform munmap(addr: Address, length: u64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ extern "C" {
 // `slot_idx % slots_per_page` and the page index is `slot_idx / slots_per_page`.
 //
 // slab_init now calls pmm_alloc(pool, pmm, 0) for the FIRST page (per the
-// W35 task spec). In hosted mode pmm_alloc is a forward-declared VUMA fn
+// W35 task spec). In hosted mode pmm_alloc is a forward-declared VUMA transform
 // with an empty body (returns 0); slab_init then falls back to mmap so
 // the self-test still works. In K11 bare-metal mode pmm_alloc is the
 // real buddy allocator and the fallback is never taken.
@@ -171,7 +171,7 @@ extern "C" {
 // its State<T> param layouts byte-identically to pmm.vuma (a mismatch
 // would silently produce different field offsets in different
 // translation units). pmm_alloc itself is re-declared below as a VUMA
-// `fn` (NOT extern "C" — per the W35 task spec, pmm_alloc/vmm_map are
+// `transform` (NOT extern "C" — per the W35 task spec, pmm_alloc/vmm_map are
 // VUMA functions). In hosted mode the forward declaration has an empty
 // body (returns 0); in K11 bare-metal mode the linker resolves it
 // against womb/kernel/mm/pmm.vuma's real implementation.
@@ -191,12 +191,12 @@ layout PmmState = {
     free_pages: u64,
 }
 
-// pmm_alloc — forward-declared VUMA fn matching pmm.vuma's signature.
+// pmm_alloc — forward-declared VUMA transform matching pmm.vuma's signature.
 // Returns the physical address of a fresh 4 KB page (order 0), or 0 on
 // OOM. In hosted mode this is an empty body (returns 0); slab_init /
 // kmalloc growth fall back to mmap. In K11 bare-metal mode this resolves
 // to womb/kernel/mm/pmm.vuma::pmm_alloc (real buddy allocator).
-fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
+transform pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts (flat byte arrays per the K2f contract's REVISED SlabState).
@@ -265,7 +265,7 @@ layout SlabState = {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Read the u64 base address for slab `idx` from SlabState.bases.
-fn slab_get_base(slabs: State<SlabState>, idx: u32) -> u64 {
+transform slab_get_base(slabs: State<SlabState>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -280,7 +280,7 @@ fn slab_get_base(slabs: State<SlabState>, idx: u32) -> u64 {
 }
 
 // Write the u64 base address for slab `idx` into SlabState.bases.
-fn slab_set_base(slabs: State<SlabState>, idx: u32, val: u64) {
+transform slab_set_base(slabs: State<SlabState>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -297,7 +297,7 @@ fn slab_set_base(slabs: State<SlabState>, idx: u32, val: u64) {
 // n_slots, n_used, free_tops).
 // ────────────────────────────────────────────────────────────────────────────
 
-fn slab_get_slot_size(slabs: State<SlabState>, idx: u32) -> u32 {
+transform slab_get_slot_size(slabs: State<SlabState>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -311,7 +311,7 @@ fn slab_get_slot_size(slabs: State<SlabState>, idx: u32) -> u32 {
     return v;
 }
 
-fn slab_set_slot_size(slabs: State<SlabState>, idx: u32, val: u32) {
+transform slab_set_slot_size(slabs: State<SlabState>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -323,7 +323,7 @@ fn slab_set_slot_size(slabs: State<SlabState>, idx: u32, val: u32) {
     }
 }
 
-fn slab_get_free_head(slabs: State<SlabState>, idx: u32) -> u32 {
+transform slab_get_free_head(slabs: State<SlabState>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -337,7 +337,7 @@ fn slab_get_free_head(slabs: State<SlabState>, idx: u32) -> u32 {
     return v;
 }
 
-fn slab_set_free_head(slabs: State<SlabState>, idx: u32, val: u32) {
+transform slab_set_free_head(slabs: State<SlabState>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -349,7 +349,7 @@ fn slab_set_free_head(slabs: State<SlabState>, idx: u32, val: u32) {
     }
 }
 
-fn slab_get_n_slots(slabs: State<SlabState>, idx: u32) -> u32 {
+transform slab_get_n_slots(slabs: State<SlabState>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -363,7 +363,7 @@ fn slab_get_n_slots(slabs: State<SlabState>, idx: u32) -> u32 {
     return v;
 }
 
-fn slab_set_n_slots(slabs: State<SlabState>, idx: u32, val: u32) {
+transform slab_set_n_slots(slabs: State<SlabState>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -375,7 +375,7 @@ fn slab_set_n_slots(slabs: State<SlabState>, idx: u32, val: u32) {
     }
 }
 
-fn slab_get_n_used(slabs: State<SlabState>, idx: u32) -> u32 {
+transform slab_get_n_used(slabs: State<SlabState>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -389,7 +389,7 @@ fn slab_get_n_used(slabs: State<SlabState>, idx: u32) -> u32 {
     return v;
 }
 
-fn slab_set_n_used(slabs: State<SlabState>, idx: u32, val: u32) {
+transform slab_set_n_used(slabs: State<SlabState>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -401,7 +401,7 @@ fn slab_set_n_used(slabs: State<SlabState>, idx: u32, val: u32) {
     }
 }
 
-fn slab_get_free_top(slabs: State<SlabState>, idx: u32) -> u32 {
+transform slab_get_free_top(slabs: State<SlabState>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -415,7 +415,7 @@ fn slab_get_free_top(slabs: State<SlabState>, idx: u32) -> u32 {
     return v;
 }
 
-fn slab_set_free_top(slabs: State<SlabState>, idx: u32, val: u32) {
+transform slab_set_free_top(slabs: State<SlabState>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -431,11 +431,11 @@ fn slab_set_free_top(slabs: State<SlabState>, idx: u32, val: u32) {
 // Byte-array pack/unpack helpers — u8 fields (inited).
 // ────────────────────────────────────────────────────────────────────────────
 
-fn slab_get_inited(slabs: State<SlabState>, idx: u32) -> u8 {
+transform slab_get_inited(slabs: State<SlabState>, idx: u32) -> u8 {
     return slabs.inited[idx];
 }
 
-fn slab_set_inited(slabs: State<SlabState>, idx: u32, val: u8) {
+transform slab_set_inited(slabs: State<SlabState>, idx: u32, val: u8) {
     slabs.inited[idx] = val;
 }
 
@@ -446,7 +446,7 @@ fn slab_set_inited(slabs: State<SlabState>, idx: u32, val: u8) {
 // `slab_idx`'s page array starts at byte offset `slab_idx * 512`; page
 // `page_idx`'s base is at byte offset `slab_idx * 512 + page_idx * 8`.
 
-fn slab_get_page(slabs: State<SlabState>, slab_idx: u32, page_idx: u32) -> u64 {
+transform slab_get_page(slabs: State<SlabState>, slab_idx: u32, page_idx: u32) -> u64 {
     let off = slab_idx * 512 + page_idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -460,7 +460,7 @@ fn slab_get_page(slabs: State<SlabState>, slab_idx: u32, page_idx: u32) -> u64 {
     return v;
 }
 
-fn slab_set_page(slabs: State<SlabState>, slab_idx: u32, page_idx: u32, val: u64) {
+transform slab_set_page(slabs: State<SlabState>, slab_idx: u32, page_idx: u32, val: u64) {
     let off = slab_idx * 512 + page_idx * 8;
     let i = 0;
     while i < 8 {
@@ -476,7 +476,7 @@ fn slab_set_page(slabs: State<SlabState>, slab_idx: u32, page_idx: u32, val: u64
 // Byte-array pack/unpack helpers — u32 page_counts (W35).
 // ────────────────────────────────────────────────────────────────────────────
 
-fn slab_get_page_count(slabs: State<SlabState>, idx: u32) -> u32 {
+transform slab_get_page_count(slabs: State<SlabState>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -490,7 +490,7 @@ fn slab_get_page_count(slabs: State<SlabState>, idx: u32) -> u32 {
     return v;
 }
 
-fn slab_set_page_count(slabs: State<SlabState>, idx: u32, val: u32) {
+transform slab_set_page_count(slabs: State<SlabState>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -511,14 +511,14 @@ fn slab_set_page_count(slabs: State<SlabState>, idx: u32, val: u32) {
 // byte offset `slab_idx * 1024`; stack slot `stack_idx` is at byte offset
 // `slab_idx * 1024 + stack_idx * 2`.
 
-fn slab_free_stack_get(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32) -> u32 {
+transform slab_free_stack_get(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32) -> u32 {
     let off = slab_idx * 1024 + stack_idx * 2;
     let lo = slabs.free_stacks[off] as u32;
     let hi = slabs.free_stacks[off + 1] as u32;
     return lo + (hi << 8);
 }
 
-fn slab_free_stack_set(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32, val: u32) {
+transform slab_free_stack_set(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32, val: u32) {
     let off = slab_idx * 1024 + stack_idx * 2;
     let lo = val & 255;
     let hi = (val >> 8) & 255;
@@ -531,7 +531,7 @@ fn slab_free_stack_set(slabs: State<SlabState>, slab_idx: u32, stack_idx: u32, v
 // ────────────────────────────────────────────────────────────────────────────
 
 // Round up to the next power of 2 (minimum 8). Sizes > 2048 round up to 4096.
-fn kmalloc_roundup(size: u64) -> u32 {
+transform kmalloc_roundup(size: u64) -> u32 {
     let s = size;
     if s <= 8 { return 8; }
     if s <= 16 { return 16; }
@@ -545,7 +545,7 @@ fn kmalloc_roundup(size: u64) -> u32 {
 }
 
 // Get the slab index for a given size (0=8B, 1=16B, ..., 8=4096B).
-fn kmalloc_slab_idx(size: u64) -> u32 {
+transform kmalloc_slab_idx(size: u64) -> u32 {
     let s = kmalloc_roundup(size);
     let idx = 0;
     if s == 8 { idx = 0; }
@@ -561,7 +561,7 @@ fn kmalloc_slab_idx(size: u64) -> u32 {
 }
 
 // Get the slot size (in bytes) for a given slab index.
-fn slab_slot_size_for_idx(idx: u32) -> u32 {
+transform slab_slot_size_for_idx(idx: u32) -> u32 {
     if idx == 0 { return 8; }
     if idx == 1 { return 16; }
     if idx == 2 { return 32; }
@@ -588,7 +588,7 @@ fn slab_slot_size_for_idx(idx: u32) -> u32 {
 // passes by reference). The slab is initialized lazily — kmalloc calls
 // slab_init on the first allocation to each size class.
 
-fn slab_init(slabs: State<SlabState>, pool: State<FlatPool>, pmm: State<PmmState>, idx: u32) {
+transform slab_init(slabs: State<SlabState>, pool: State<FlatPool>, pmm: State<PmmState>, idx: u32) {
     let slot_size = slab_slot_size_for_idx(idx);
     // W35: obtain the first page via pmm_alloc (real buddy allocator in
     // K11 bare-metal mode; forward-declared empty-body stub returning 0
@@ -632,7 +632,7 @@ fn slab_init(slabs: State<SlabState>, pool: State<FlatPool>, pmm: State<PmmState
 // Init-style API: caller allocates `slabs`, `pool`, `pmm` via state_new,
 // passes by reference.
 
-fn kmalloc(slabs: State<SlabState>, pool: State<FlatPool>, pmm: State<PmmState>, size: u64) -> u64 {
+transform kmalloc(slabs: State<SlabState>, pool: State<FlatPool>, pmm: State<PmmState>, size: u64) -> u64 {
     let idx = kmalloc_slab_idx(size);
     // Lazy init.
     if slab_get_inited(slabs, idx) == 0 {
@@ -711,7 +711,7 @@ fn kmalloc(slabs: State<SlabState>, pool: State<FlatPool>, pmm: State<PmmState>,
 // Init-style API: caller allocates `slabs` via state_new(SlabState), passes
 // by reference.
 
-fn kfree(slabs: State<SlabState>, addr: u64) {
+transform kfree(slabs: State<SlabState>, addr: u64) {
     let i = 0;
     while i < 9 {
         if slab_get_inited(slabs, i) == 1 {
@@ -779,10 +779,10 @@ fn kfree(slabs: State<SlabState>, addr: u64) {
 // All paths exercise the lazy-init + bump + free-stack-reuse + dynamic-
 // growth code paths without crashes or PMT violations. Returns 0 on pass.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let slabs = state_new(SlabState);
     // W35: kmalloc now takes (slabs, pool, pmm) — pmm_alloc is a forward-
-    // declared VUMA fn (empty body in hosted mode, returns 0); slab_init
+    // declared VUMA transform (empty body in hosted mode, returns 0); slab_init
     // falls back to mmap so the self-test still works. state_new gives
     // uninitialised bytes; we don't call pmm_init because pmm_alloc is a
     // no-op stub in hosted mode and the pool/pmm state is never read by

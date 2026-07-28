@@ -12,7 +12,7 @@
 layout Arena = { base: u64, offset: u64, capacity: u64 }
 layout Widget = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let arena = arena_new(4096);
     let w = arena_alloc(arena, Widget);
     w.x = 100;

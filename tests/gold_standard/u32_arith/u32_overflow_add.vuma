@@ -3,7 +3,7 @@
 //
 // 4294967295 + 1 = 0x100000000. Masked to u32 = 0.
 
-fn main() -> i32 {
+transform main() -> i32 {
     max: u32 = 4294967295;
     one: u32 = 1;
     overflow: u32 = (max + one) & 4294967295;

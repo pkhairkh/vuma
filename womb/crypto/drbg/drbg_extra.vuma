@@ -22,7 +22,7 @@ const DRBG_RESEED_INTERVAL: u32 = 4294967295;
 // Common byte-level helpers
 // ===========================================================================
 
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
+transform load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -30,14 +30,14 @@ fn load_u32_le(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn store_u32_le(ptr: Address, off: u32, val: u32) {
+transform store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn memcpy(dst: Address, src: Address, n: u32) {
+transform memcpy(dst: Address, src: Address, n: u32) {
     i: u32 = 0;
     while i < n {
         *(dst + i) = *(src + i);
@@ -45,7 +45,7 @@ fn memcpy(dst: Address, src: Address, n: u32) {
     }
 }
 
-fn memset(dst: Address, val: u32, n: u32) {
+transform memset(dst: Address, val: u32, n: u32) {
     i: u32 = 0;
     while i < n {
         *(dst + i) = val & 255;
@@ -55,7 +55,7 @@ fn memset(dst: Address, val: u32, n: u32) {
 
 // Big-endian modular add: out = (a + b) mod 2^(8*n). Works in-place when
 // a == out or b == out. Carry never exceeds 1.
-fn add_be(a: Address, b: Address, n: u32, out: Address) {
+transform add_be(a: Address, b: Address, n: u32, out: Address) {
     carry: u32 = 0;
     i: u32 = n;
     while i > 0 {
@@ -70,7 +70,7 @@ fn add_be(a: Address, b: Address, n: u32, out: Address) {
 
 // Big-endian modular add of a small delta: out = (a + delta) mod 2^(8*n).
 // Works in-place when a == out. Callers always pass delta = 1.
-fn add_be_small(a: Address, delta: u32, n: u32, out: Address) {
+transform add_be_small(a: Address, delta: u32, n: u32, out: Address) {
     carry: u32 = delta;
     i: u32 = n;
     while i > 0 {
@@ -91,7 +91,7 @@ fn add_be_small(a: Address, delta: u32, n: u32, out: Address) {
 //   V = Hash(0x00 || seed_material)
 //   C = Hash(0x01 || V)
 //   reseed_counter = 1
-fn hash_drbg_init(state: Address, entropy: Address, entropy_len: u32,
+transform hash_drbg_init(state: Address, entropy: Address, entropy_len: u32,
                   nonce: Address, nonce_len: u32) {
     seed_len: u32 = entropy_len + nonce_len;
     seed = allocate(seed_len);
@@ -125,7 +125,7 @@ fn hash_drbg_init(state: Address, entropy: Address, entropy_len: u32,
 //     W = W || output
 //     data = (data + 1) mod 2^256
 //   return leftmost no_of_bytes of W
-fn hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
+transform hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
     data = allocate(32);
     memcpy(data, v_in, 32);
 
@@ -161,7 +161,7 @@ fn hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
 //   5. C = Hash(0x01 || V)
 //   6. reseed_counter = reseed_counter + 1
 //   Returns out_len on success, 0 if a reseed is required.
-fn hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
+transform hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
     rc: u32 = load_u32_le(state, STATE_RC_OFF);
     if rc > DRBG_RESEED_INTERVAL {
         return 0;
@@ -214,7 +214,7 @@ fn hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
 //   V = Hash(seed_material)
 //   C = Hash(0x01 || V)
 //   reseed_counter = 1
-fn hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
+transform hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
     sm_len: u32 = 1 + 32 + entropy_len;
     sm = allocate(sm_len);
     *(sm + 0) = 0;
@@ -247,7 +247,7 @@ fn hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
 //   K = leftmost 32 bytes of temp
 //   V = next 16 bytes of temp
 // K and V are modified in place through the supplied pointers.
-fn ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
+transform ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
     temp = allocate(SEEDLEN_CTR + 16);
     temp_len: u32 = 0;
     blk = allocate(16);
@@ -281,7 +281,7 @@ fn ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
 //   seed_material = entropy || nonce (padded/truncated to seedlen = 48)
 //   CTR_DRBG_Update(seed_material, K, V)
 //   reseed_counter = 1
-fn ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32,
+transform ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32,
                  nonce: Address, nonce_len: u32) {
     memset(state + STATE_VK_OFF, 0, 32);
     memset(state + CTR_V_OFF, 0, 16);
@@ -316,7 +316,7 @@ fn ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32,
 //   4. CTR_DRBG_Update(0x00 * seedlen, K, V)
 //   5. reseed_counter = reseed_counter + 1
 //   Returns out_len on success, 0 if a reseed is required.
-fn ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
+transform ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
     rc: u32 = load_u32_le(state, STATE_RC_OFF);
     if rc > DRBG_RESEED_INTERVAL {
         return 0;
@@ -357,7 +357,7 @@ fn ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
 //   seed_material = entropy (padded/truncated to seedlen = 48)
 //   CTR_DRBG_Update(seed_material, K, V)
 //   reseed_counter = 1
-fn ctr_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
+transform ctr_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
     pd = allocate(SEEDLEN_CTR);
     memset(pd, 0, SEEDLEN_CTR);
     copy_len: u32 = entropy_len;

@@ -5,7 +5,7 @@
 // Uses the standard XOR-fold parity algorithm (no loops):
 //   v ^= v>>32; v ^= v>>16; v ^= v>>8; v ^= v>>4; v ^= v>>2; v ^= v>>1
 //   parity = v & 1
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 0xFF;
     one: u64 = 1;
     two: u64 = 2;

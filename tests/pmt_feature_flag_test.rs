@@ -63,7 +63,7 @@ fn overflow_check_uses_verified_path() {
 ///
 /// ## Why `examples/minimal.vuma`
 ///
-/// Smallest example in the tree (79 bytes: `fn main() -> i32 { return 0; }`).
+/// Smallest example in the tree (79 bytes: `transform main() -> i32 { return 0; }`).
 /// It has no state ops, so `verify_pmt_via_lean` is invoked with empty
 /// reads/writes/transforms -- the stub returns all-pass, real Lean vacuously
 /// passes. Either way the FFI boundary is crossed without panicking, which

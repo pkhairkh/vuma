@@ -11,7 +11,7 @@ const BN256_BYTES: u32 = 32;
 // Byte-level memory helpers
 // ===========================================================================
 
-fn bn_load_u64(ptr: Address, off: u32) -> u64 {
+transform bn_load_u64(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);
     b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2);
@@ -24,7 +24,7 @@ fn bn_load_u64(ptr: Address, off: u32) -> u64 {
              | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn bn_store_u64(ptr: Address, off: u32, val: u64) {
+transform bn_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -35,17 +35,17 @@ fn bn_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn bn256_zero(a: Address) {
+transform bn256_zero(a: Address) {
     i: u32 = 0;
     while i < BN256_BYTES { *(a + i) = 0; i = i + 1; }
 }
 
-fn bn256_copy(r: Address, a: Address) {
+transform bn256_copy(r: Address, a: Address) {
     i: u32 = 0;
     while i < BN256_BYTES { *(r + i) = *(a + i); i = i + 1; }
 }
 
-fn bn256_set_u32(r: Address, v: u32) {
+transform bn256_set_u32(r: Address, v: u32) {
     bn256_zero(r);
     *(r + 0) = v & 255;
     *(r + 1) = (v >> 8) & 255;
@@ -53,7 +53,7 @@ fn bn256_set_u32(r: Address, v: u32) {
     *(r + 3) = (v >> 24) & 255;
 }
 
-fn bn256_is_zero(a: Address) -> u32 {
+transform bn256_is_zero(a: Address) -> u32 {
     i: u32 = 0;
     while i < BN256_LIMBS {
         if bn_load_u64(a, i * 8) != 0 { return 0; }
@@ -63,7 +63,7 @@ fn bn256_is_zero(a: Address) -> u32 {
 }
 
 // Three-way compare: returns 1 if a>b, -1 if a<b, 0 if equal.
-fn bn256_cmp(a: Address, b: Address) -> i32 {
+transform bn256_cmp(a: Address, b: Address) -> i32 {
     i: u32 = BN256_LIMBS - 1;
     while 1 == 1 {
         av: u64 = bn_load_u64(a, i * 8);
@@ -77,7 +77,7 @@ fn bn256_cmp(a: Address, b: Address) -> i32 {
 }
 
 // r = a + b. Returns carry-out (0 or 1).
-fn bn256_add(r: Address, a: Address, b: Address) -> u32 {
+transform bn256_add(r: Address, a: Address, b: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < BN256_LIMBS {
@@ -97,7 +97,7 @@ fn bn256_add(r: Address, a: Address, b: Address) -> u32 {
 }
 
 // r = a - b. Returns borrow-out (0 or 1).
-fn bn256_sub(r: Address, a: Address, b: Address) -> u32 {
+transform bn256_sub(r: Address, a: Address, b: Address) -> u32 {
     borrow: u64 = 0;
     i: u32 = 0;
     while i < BN256_LIMBS {
@@ -117,7 +117,7 @@ fn bn256_sub(r: Address, a: Address, b: Address) -> u32 {
 }
 
 // r = a + scalar (mod 2^256).
-fn bn256_add_u32(r: Address, a: Address, scalar: u32) {
+transform bn256_add_u32(r: Address, a: Address, scalar: u32) {
     carry: u64 = scalar;
     i: u32 = 0;
     while i < BN256_LIMBS {
@@ -130,7 +130,7 @@ fn bn256_add_u32(r: Address, a: Address, scalar: u32) {
 }
 
 // r = a << 1. Returns the bit shifted out (0 or 1).
-fn bn256_lshift1(r: Address, a: Address) -> u32 {
+transform bn256_lshift1(r: Address, a: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < BN256_LIMBS {
@@ -143,7 +143,7 @@ fn bn256_lshift1(r: Address, a: Address) -> u32 {
 }
 
 // r = a >> 1.
-fn bn256_rshift1(r: Address, a: Address) {
+transform bn256_rshift1(r: Address, a: Address) {
     i: u32 = BN256_LIMBS - 1;
     while i > 0 {
         hi: u64 = bn_load_u64(a, i * 8);
@@ -155,7 +155,7 @@ fn bn256_rshift1(r: Address, a: Address) {
     bn_store_u64(r, 0, v0 >> 1);
 }
 
-fn bn256_and(r: Address, a: Address, b: Address) {
+transform bn256_and(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < BN256_LIMBS {
         bn_store_u64(r, i * 8, bn_load_u64(a, i * 8) & bn_load_u64(b, i * 8));
@@ -163,7 +163,7 @@ fn bn256_and(r: Address, a: Address, b: Address) {
     }
 }
 
-fn bn256_or(r: Address, a: Address, b: Address) {
+transform bn256_or(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < BN256_LIMBS {
         bn_store_u64(r, i * 8, bn_load_u64(a, i * 8) | bn_load_u64(b, i * 8));
@@ -171,7 +171,7 @@ fn bn256_or(r: Address, a: Address, b: Address) {
     }
 }
 
-fn bn256_xor(r: Address, a: Address, b: Address) {
+transform bn256_xor(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < BN256_LIMBS {
         bn_store_u64(r, i * 8, bn_load_u64(a, i * 8) ^ bn_load_u64(b, i * 8));
@@ -179,7 +179,7 @@ fn bn256_xor(r: Address, a: Address, b: Address) {
     }
 }
 
-fn bn256_get_bit(a: Address, bit: u32) -> u32 {
+transform bn256_get_bit(a: Address, bit: u32) -> u32 {
     limb: u32 = bit / 64;
     pos: u32 = bit % 64;
     if limb >= BN256_LIMBS { return 0; }
@@ -187,7 +187,7 @@ fn bn256_get_bit(a: Address, bit: u32) -> u32 {
     return (v >> pos) & 1;
 }
 
-fn bn256_bitlen(a: Address) -> u32 {
+transform bn256_bitlen(a: Address) -> u32 {
     i: u32 = BN256_LIMBS - 1;
     while 1 == 1 {
         v: u64 = bn_load_u64(a, i * 8);
@@ -211,7 +211,7 @@ fn bn256_bitlen(a: Address) -> u32 {
 // 64 bits to *(hi_out + 0..7).
 // ===========================================================================
 
-fn bn_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
+transform bn_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
     a_lo: u64 = a & 4294967295;
     a_hi: u64 = a >> 32;
     b_lo: u64 = b & 4294967295;
@@ -244,7 +244,7 @@ fn bn_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
 // r must be 64 bytes (8 limbs). r may not alias a or b.
 // ===========================================================================
 
-fn bn256_mul_512(r: Address, a: Address, b: Address) {
+transform bn256_mul_512(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < 64 { *(r + i) = 0; i = i + 1; }
 
@@ -304,7 +304,7 @@ fn bn256_mul_512(r: Address, a: Address, b: Address) {
 //   remainder: 32 bytes (will be < divisor)
 // ===========================================================================
 
-fn bn256_divmod_512(dividend: Address, divisor: Address, quotient: Address, remainder: Address) {
+transform bn256_divmod_512(dividend: Address, divisor: Address, quotient: Address, remainder: Address) {
     i: u32 = 0;
     while i < 64 { *(quotient + i) = 0; i = i + 1; }
     bn256_zero(remainder);
@@ -337,7 +337,7 @@ fn bn256_divmod_512(dividend: Address, divisor: Address, quotient: Address, rema
 // Modular arithmetic (mod m), assumes a, b < m.
 // ===========================================================================
 
-fn bn256_mod_add(r: Address, a: Address, b: Address, m: Address) {
+transform bn256_mod_add(r: Address, a: Address, b: Address, m: Address) {
     carry: u32 = bn256_add(r, a, b);
     if carry == 1 {
         bn256_sub(r, r, m);
@@ -348,7 +348,7 @@ fn bn256_mod_add(r: Address, a: Address, b: Address, m: Address) {
     }
 }
 
-fn bn256_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+transform bn256_mod_sub(r: Address, a: Address, b: Address, m: Address) {
     borrow: u32 = bn256_sub(r, a, b);
     if borrow == 1 {
         bn256_add(r, r, m);
@@ -356,7 +356,7 @@ fn bn256_mod_sub(r: Address, a: Address, b: Address, m: Address) {
 }
 
 // r = (a * b) mod m. a, b assumed < m.
-fn bn256_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+transform bn256_mod_mul(r: Address, a: Address, b: Address, m: Address) {
     prod = allocate(64);
     quot = allocate(64);
     bn256_mul_512(prod, a, b);
@@ -366,7 +366,7 @@ fn bn256_mod_mul(r: Address, a: Address, b: Address, m: Address) {
 
 // r = a mod m for any 256-bit a. Reduces via 512/256 long division by
 // treating `a` as the low 256 bits of a zero-extended 512-bit dividend.
-fn bn256_mod(r: Address, a: Address, m: Address) {
+transform bn256_mod(r: Address, a: Address, m: Address) {
     prod = allocate(64);
     quot = allocate(64);
     i: u32 = 0;
@@ -380,7 +380,7 @@ fn bn256_mod(r: Address, a: Address, m: Address) {
 }
 
 // r = a^exp mod m via square-and-multiply (left-to-right, LSB-first scan).
-fn bn256_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+transform bn256_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
     bn256_zero(r);
     *(r + 0) = 1;  // r = 1
 
@@ -413,7 +413,7 @@ fn bn256_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
 // Binary GCD: r = gcd(a, b). Inputs are 256-bit unsigned.
 // ===========================================================================
 
-fn bn256_gcd(r: Address, a: Address, b: Address) {
+transform bn256_gcd(r: Address, a: Address, b: Address) {
     u = allocate(32);
     v = allocate(32);
     bn256_copy(u, a);
@@ -459,7 +459,7 @@ fn bn256_gcd(r: Address, a: Address, b: Address) {
 // and gcd(a, m) = 1. If gcd != 1 the result is undefined.
 // ===========================================================================
 
-fn bn256_mod_inv(r: Address, a: Address, m: Address) {
+transform bn256_mod_inv(r: Address, a: Address, m: Address) {
     u = allocate(32);
     v = allocate(32);
     x1 = allocate(32);

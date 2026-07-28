@@ -12,7 +12,7 @@
 
 layout Byte = { v: u8 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let b = state_new(Byte);
     b.v = 255;
     return b.v;

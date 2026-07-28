@@ -128,7 +128,7 @@ layout BootInfo = {
 // self-contained zeroing function — callers may pass a BootInfo that
 // was previously written to (e.g. by a failed prior init attempt); (b)
 // the loop documents the pad-region semantics for readers.
-fn bootinfo_init(bi: State<BootInfo>) {
+transform bootinfo_init(bi: State<BootInfo>) {
     bi.mem_start = 0;
     bi.mem_size = 0;
     bi.cmdline = 0;
@@ -165,7 +165,7 @@ fn bootinfo_init(bi: State<BootInfo>) {
 //   2: boot_type != 0 after bootinfo_init
 //   3: mem_start != 1048576 after the explicit write
 //   4: mem_size != 16777216 after the explicit write
-fn main() -> i32 {
+transform main() -> i32 {
     let bi = state_new(BootInfo);
     bootinfo_init(bi);
     if bi.mem_start != 0 { return 1; }

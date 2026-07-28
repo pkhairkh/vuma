@@ -554,7 +554,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
 ///   additional** codegen-opt-pass bug layered on top of the O0
 ///   bootstrap-pipeline failure.
 /// - The crash reproduces with **any** input file (verified with both
-///   `womb/lang/hello.vuma` and a minimal `fn main() -> i32 { return 7; }`
+///   `womb/lang/hello.vuma` and a minimal `transform main() -> i32 { return 7; }`
 ///   file), so it's not input-specific.
 /// - The host `vuma` compiler runs `womb/lang/hello.vuma` correctly
 ///   (prints `42`), so the crash is in the bootstrap's own pipeline

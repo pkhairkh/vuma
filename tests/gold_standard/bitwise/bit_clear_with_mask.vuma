@@ -5,7 +5,7 @@
 // Both operands are loaded into variables to dodge the immediate-RHS
 // bitwise drop bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;     // 0xFF
     m: u64 = 240;     // 0xF0
     r: u64 = a & m;   // 0xF0 = 240

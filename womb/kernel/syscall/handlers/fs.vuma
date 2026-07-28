@@ -24,7 +24,7 @@
 //
 // ── Handler signature: `(tf: Address) -> u64` ───────────────────────────────
 // Unlike the io/proc/mm siblings (whose handlers take individual scalar
-// args — e.g. `fn sys_write(fd, buf, count)`), this file's handlers take
+// args — e.g. `transform sys_write(fd, buf, count)`), this file's handlers take
 // a single `tf: Address` parameter that points at the canonical TrapFrame
 // buffer. The dispatcher (sibling dispatch.vuma's R4c surface) invokes
 // each handler via `__call_indirect1(handler, tf as Address)` — the
@@ -97,7 +97,7 @@
 // MMIO reads.
 //
 // `syscall_get_arg(tf, slot)` is the per-arch-agnostic wrapper:
-//     fn syscall_get_arg(tf: Address, slot: u32) -> u64 {
+//     transform syscall_get_arg(tf: Address, slot: u32) -> u64 {
 //         return __vuma_load_u64(tf + (slot * 8));
 //     }
 // The `slot * 8` byte offset matches the canonical GPR layout (each slot
@@ -169,7 +169,7 @@
 // applied to vector=14 and rip=4096).
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. The `extern "C" { fn open, fn close, ... }`
+// This file is self-contained. The `extern "C" { transform open, transform close, ... }`
 // declarations are byte-identical to:
 //   - womb/kernel/arch/x86_64/trampoline.vuma (K1a — same extern block)
 //   - womb/kernel/hosted/host.vuma (K1a — host_* wrappers around the
@@ -213,15 +213,15 @@
 // `Address` as a value type (no State<T> invalidation, no scratchpad
 // copy) — same as io.vuma's `write(fd, buf: Address, count)`.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn open(path: Address, flags: i32, mode: i32) -> i32;
-    fn close(fd: i32) -> i32;
-    fn read(fd: i32, buf: Address, count: i64) -> i64;
-    fn mkdir(path: Address, mode: u32) -> i32;
-    fn rmdir(path: Address) -> i32;
-    fn unlink(path: Address) -> i32;
-    fn chdir(path: Address) -> i32;
-    fn getcwd(buf: Address, size: u64) -> u64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform open(path: Address, flags: i32, mode: i32) -> i32;
+    transform close(fd: i32) -> i32;
+    transform read(fd: i32, buf: Address, count: i64) -> i64;
+    transform mkdir(path: Address, mode: u32) -> i32;
+    transform rmdir(path: Address) -> i32;
+    transform unlink(path: Address) -> i32;
+    transform chdir(path: Address) -> i32;
+    transform getcwd(buf: Address, size: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -246,7 +246,7 @@ extern "C" {
 // (each slot holds a full u64 register value — see dispatch.vuma's
 // "Canonical GPR slot mapping" header).
 extern "C" {
-    fn __vuma_load_u64(addr: u64) -> u64;
+    transform __vuma_load_u64(addr: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -283,7 +283,7 @@ extern "C" {
 // implicit Address→u64 conversion that makes `(c as Address) + 8` work
 // in womb/kernel/tty/console.vuma's documented "Hand-compute the
 // offset" pattern).
-fn syscall_get_arg(tf: Address, slot: u32) -> u64 {
+transform syscall_get_arg(tf: Address, slot: u32) -> u64 {
     return __vuma_load_u64(tf + (slot * 8));
 }
 
@@ -310,7 +310,7 @@ fn syscall_get_arg(tf: Address, slot: u32) -> u64 {
 //
 // The `fd as u64` return cast sign-extends the i32 result to u64 (see
 // the file header's "Return-value convention" section).
-fn sys_open_handler(tf: Address) -> u64 {
+transform sys_open_handler(tf: Address) -> u64 {
     let path = syscall_get_arg(tf, 1);
     let flags = syscall_get_arg(tf, 2);
     let mode = syscall_get_arg(tf, 3);
@@ -326,7 +326,7 @@ fn sys_open_handler(tf: Address) -> u64 {
 //
 // Slot reads:
 //   slot 1 (a0) = fd — the file descriptor to close
-fn sys_close_handler(tf: Address) -> u64 {
+transform sys_close_handler(tf: Address) -> u64 {
     let fd = syscall_get_arg(tf, 1);
     let ret = close(fd as i32);
     return ret as u64;
@@ -347,7 +347,7 @@ fn sys_close_handler(tf: Address) -> u64 {
 // bits (mode is a u32 per the extern signature, matching the Linux
 // mkdir signature `int mkdir(const char *, mode_t)` where mode_t is
 // `unsigned int`).
-fn sys_mkdir_handler(tf: Address) -> u64 {
+transform sys_mkdir_handler(tf: Address) -> u64 {
     let path = syscall_get_arg(tf, 1);
     let mode = syscall_get_arg(tf, 2);
     let ret = mkdir(path as Address, mode as u32);
@@ -363,7 +363,7 @@ fn sys_mkdir_handler(tf: Address) -> u64 {
 //
 // Slot reads:
 //   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
-fn sys_rmdir_handler(tf: Address) -> u64 {
+transform sys_rmdir_handler(tf: Address) -> u64 {
     let path = syscall_get_arg(tf, 1);
     let ret = rmdir(path as Address);
     return ret as u64;
@@ -379,7 +379,7 @@ fn sys_rmdir_handler(tf: Address) -> u64 {
 //
 // Slot reads:
 //   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
-fn sys_unlink_handler(tf: Address) -> u64 {
+transform sys_unlink_handler(tf: Address) -> u64 {
     let path = syscall_get_arg(tf, 1);
     let ret = unlink(path as Address);
     return ret as u64;
@@ -395,7 +395,7 @@ fn sys_unlink_handler(tf: Address) -> u64 {
 //
 // Slot reads:
 //   slot 1 (a0) = path — user-space pointer to NUL-terminated pathname
-fn sys_chdir_handler(tf: Address) -> u64 {
+transform sys_chdir_handler(tf: Address) -> u64 {
     let path = syscall_get_arg(tf, 1);
     let ret = chdir(path as Address);
     return ret as u64;
@@ -420,7 +420,7 @@ fn sys_chdir_handler(tf: Address) -> u64 {
 // Slot reads:
 //   slot 1 (a0) = buf  — user-space pointer to the output buffer
 //   slot 2 (a1) = size — size of the output buffer in bytes
-fn sys_getcwd_handler(tf: Address) -> u64 {
+transform sys_getcwd_handler(tf: Address) -> u64 {
     let buf = syscall_get_arg(tf, 1);
     let size = syscall_get_arg(tf, 2);
     let ret = getcwd(buf as Address, size);
@@ -493,7 +493,7 @@ layout SyscallArgs = {
 //   - sys_getcwd would invoke the real getcwd(2) on buf address 42 —
 //     returning -EFAULT.
 // The handler functions are still compiled + IVE-verified (the IVE
-// checks every fn in the SCG, not just ones reachable from main), so
+// checks every transform in the SCG, not just ones reachable from main), so
 // their compile-time correctness is verified without the runtime
 // syscall side-effects.
 //
@@ -507,7 +507,7 @@ layout SyscallArgs = {
 // rationale, and K3a's trap_trampoline.vuma for the same rule applied
 // to vector=14 and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tf = state_new(SyscallArgs);
     // Populate slots 1, 2, 3 with sentinel values.
     tf.a0 = 42;    // slot 1

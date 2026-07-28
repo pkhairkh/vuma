@@ -6,7 +6,7 @@
 // (immediate-RHS bitwise drop bug workaround). Distinct from
 // s94_edge_max_and_val (108), s90_edge_zero_or_val (22) and
 // s86_edge_zero_xor_high (250).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 0;            // 0x00
     b: u32 = 244;          // 0xF4
     r: u32 = a & b;        // 0x00 = 0

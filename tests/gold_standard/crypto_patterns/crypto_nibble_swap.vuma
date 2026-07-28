@@ -8,7 +8,7 @@
 // left by 4, and ORing the results. All masks and shift amounts are
 // loaded into named variables per the bitwise-immediate-RHS workaround.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 0xF0;
     four: u64 = 4;
     mLow: u64 = 0x0F;

@@ -10,7 +10,7 @@ const BN2048_BYTES: u32 = 256;
 // Byte-level memory helpers
 // ===========================================================================
 
-fn bn2048_load_u64(ptr: Address, off: u32) -> u64 {
+transform bn2048_load_u64(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);
     b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2);
@@ -23,7 +23,7 @@ fn bn2048_load_u64(ptr: Address, off: u32) -> u64 {
              | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn bn2048_store_u64(ptr: Address, off: u32, val: u64) {
+transform bn2048_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -34,17 +34,17 @@ fn bn2048_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn bn2048_zero(a: Address) {
+transform bn2048_zero(a: Address) {
     i: u32 = 0;
     while i < BN2048_BYTES { *(a + i) = 0; i = i + 1; }
 }
 
-fn bn2048_copy(r: Address, a: Address) {
+transform bn2048_copy(r: Address, a: Address) {
     i: u32 = 0;
     while i < BN2048_BYTES { *(r + i) = *(a + i); i = i + 1; }
 }
 
-fn bn2048_set_u32(r: Address, v: u32) {
+transform bn2048_set_u32(r: Address, v: u32) {
     bn2048_zero(r);
     *(r + 0) = v & 255;
     *(r + 1) = (v >> 8) & 255;
@@ -52,7 +52,7 @@ fn bn2048_set_u32(r: Address, v: u32) {
     *(r + 3) = (v >> 24) & 255;
 }
 
-fn bn2048_is_zero(a: Address) -> u32 {
+transform bn2048_is_zero(a: Address) -> u32 {
     i: u32 = 0;
     while i < BN2048_LIMBS {
         if bn2048_load_u64(a, i * 8) != 0 { return 0; }
@@ -62,7 +62,7 @@ fn bn2048_is_zero(a: Address) -> u32 {
 }
 
 // Three-way compare: 1 if a>b, -1 if a<b, 0 if equal.
-fn bn2048_cmp(a: Address, b: Address) -> i32 {
+transform bn2048_cmp(a: Address, b: Address) -> i32 {
     i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
         av: u64 = bn2048_load_u64(a, i * 8);
@@ -76,7 +76,7 @@ fn bn2048_cmp(a: Address, b: Address) -> i32 {
 }
 
 // r = a + b. Returns carry-out (0 or 1).
-fn bn2048_add(r: Address, a: Address, b: Address) -> u32 {
+transform bn2048_add(r: Address, a: Address, b: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < BN2048_LIMBS {
@@ -96,7 +96,7 @@ fn bn2048_add(r: Address, a: Address, b: Address) -> u32 {
 }
 
 // r = a - b. Returns borrow-out (0 or 1).
-fn bn2048_sub(r: Address, a: Address, b: Address) -> u32 {
+transform bn2048_sub(r: Address, a: Address, b: Address) -> u32 {
     borrow: u64 = 0;
     i: u32 = 0;
     while i < BN2048_LIMBS {
@@ -116,7 +116,7 @@ fn bn2048_sub(r: Address, a: Address, b: Address) -> u32 {
 }
 
 // r = a << 1. Returns the bit shifted out (0 or 1).
-fn bn2048_lshift1(r: Address, a: Address) -> u32 {
+transform bn2048_lshift1(r: Address, a: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < BN2048_LIMBS {
@@ -129,7 +129,7 @@ fn bn2048_lshift1(r: Address, a: Address) -> u32 {
 }
 
 // r = a >> 1.
-fn bn2048_rshift1(r: Address, a: Address) {
+transform bn2048_rshift1(r: Address, a: Address) {
     i: u32 = BN2048_LIMBS - 1;
     while i > 0 {
         hi: u64 = bn2048_load_u64(a, i * 8);
@@ -141,7 +141,7 @@ fn bn2048_rshift1(r: Address, a: Address) {
     bn2048_store_u64(r, 0, v0 >> 1);
 }
 
-fn bn2048_get_bit(a: Address, bit: u32) -> u32 {
+transform bn2048_get_bit(a: Address, bit: u32) -> u32 {
     limb: u32 = bit / 64;
     pos: u32 = bit % 64;
     if limb >= BN2048_LIMBS { return 0; }
@@ -149,7 +149,7 @@ fn bn2048_get_bit(a: Address, bit: u32) -> u32 {
     return (v >> pos) & 1;
 }
 
-fn bn2048_bitlen(a: Address) -> u32 {
+transform bn2048_bitlen(a: Address) -> u32 {
     i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
         v: u64 = bn2048_load_u64(a, i * 8);
@@ -171,7 +171,7 @@ fn bn2048_bitlen(a: Address) -> u32 {
 // 64x64 -> 128 multiplication helper (split into 32-bit halves).
 // ===========================================================================
 
-fn bn2048_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
+transform bn2048_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
     a_lo: u64 = a & 4294967295;
     a_hi: u64 = a >> 32;
     b_lo: u64 = b & 4294967295;
@@ -204,7 +204,7 @@ fn bn2048_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
 // r must be 512 bytes (64 limbs). r may not alias a or b.
 // ===========================================================================
 
-fn bn2048_mul_4096(r: Address, a: Address, b: Address) {
+transform bn2048_mul_4096(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < 512 { *(r + i) = 0; i = i + 1; }
 
@@ -262,7 +262,7 @@ fn bn2048_mul_4096(r: Address, a: Address, b: Address) {
 //   remainder: 256 bytes (will be < divisor)
 // ===========================================================================
 
-fn bn2048_divmod_4096(dividend: Address, divisor: Address, quotient: Address, remainder: Address) {
+transform bn2048_divmod_4096(dividend: Address, divisor: Address, quotient: Address, remainder: Address) {
     i: u32 = 0;
     while i < 512 { *(quotient + i) = 0; i = i + 1; }
     bn2048_zero(remainder);
@@ -293,7 +293,7 @@ fn bn2048_divmod_4096(dividend: Address, divisor: Address, quotient: Address, re
 // Modular arithmetic (mod m), assumes a, b < m.
 // ===========================================================================
 
-fn bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
+transform bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
     carry: u32 = bn2048_add(r, a, b);
     if carry == 1 {
         bn2048_sub(r, r, m);
@@ -304,7 +304,7 @@ fn bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
     }
 }
 
-fn bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+transform bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
     borrow: u32 = bn2048_sub(r, a, b);
     if borrow == 1 {
         bn2048_add(r, r, m);
@@ -313,7 +313,7 @@ fn bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
 
 // r = (a * b) mod m. Uses real schoolbook mul + 4096/2048 long division.
 // a, b assumed < m.
-fn bn2048_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+transform bn2048_mod_mul(r: Address, a: Address, b: Address, m: Address) {
     prod = allocate(512);
     quot = allocate(512);
     bn2048_mul_4096(prod, a, b);
@@ -322,7 +322,7 @@ fn bn2048_mod_mul(r: Address, a: Address, b: Address, m: Address) {
 }
 
 // r = a mod m for any 2048-bit a (zero-extends to 4096-bit dividend).
-fn bn2048_mod(r: Address, a: Address, m: Address) {
+transform bn2048_mod(r: Address, a: Address, m: Address) {
     prod = allocate(512);
     quot = allocate(512);
     i: u32 = 0;
@@ -336,7 +336,7 @@ fn bn2048_mod(r: Address, a: Address, m: Address) {
 }
 
 // r = a^exp mod m via square-and-multiply.
-fn bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+transform bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
     bn2048_zero(r);
     *(r + 0) = 1;  // r = 1
 
@@ -369,7 +369,7 @@ fn bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
 // Binary GCD: r = gcd(a, b). Inputs are 2048-bit unsigned.
 // ===========================================================================
 
-fn bn2048_gcd(r: Address, a: Address, b: Address) {
+transform bn2048_gcd(r: Address, a: Address, b: Address) {
     u = allocate(256);
     v = allocate(256);
     bn2048_copy(u, a);
@@ -413,7 +413,7 @@ fn bn2048_gcd(r: Address, a: Address, b: Address) {
 // Computes r = a^(-1) mod m. Requires m odd and gcd(a, m) = 1.
 // ===========================================================================
 
-fn bn2048_mod_inv(r: Address, a: Address, m: Address) {
+transform bn2048_mod_inv(r: Address, a: Address, m: Address) {
     u = allocate(256);
     v = allocate(256);
     x1 = allocate(256);
@@ -475,7 +475,7 @@ fn bn2048_mod_inv(r: Address, a: Address, m: Address) {
 
 // Compute R^2 mod m = 2^4096 mod m via 4096 doublings, reducing mod m after
 // each doubling.  r2_out receives the 256-byte result.  m must be odd and > 1.
-fn bn2048_mont_compute_r2(r2_out: Address, m: Address) {
+transform bn2048_mont_compute_r2(r2_out: Address, m: Address) {
     bn2048_set_u32(r2_out, 1);
     tmp = allocate(256);
     i: u32 = 0;
@@ -490,7 +490,7 @@ fn bn2048_mont_compute_r2(r2_out: Address, m: Address) {
 // Compute m_prime = -m^(-1) mod 2^64 via Newton iteration on the low limb
 // of m.  Only the low limb m[0] participates because (m * m') mod 2^64
 // depends solely on m[0] * m' mod 2^64.  m must be odd.  Returns m_prime.
-fn bn2048_mont_compute_m_prime(m: Address) -> u64 {
+transform bn2048_mont_compute_m_prime(m: Address) -> u64 {
     m0: u64 = bn2048_load_u64(m, 0);
     m_prime: u64 = 1;
     two: u64 = 2;
@@ -510,7 +510,7 @@ fn bn2048_mont_compute_m_prime(m: Address) -> u64 {
 // lives in limbs 32..64 (33 limbs, value < 2m).  A final conditional
 // subtraction by m brings the value below m and the low 32 limbs are stored
 // into result.  m_prime comes from bn2048_mont_compute_m_prime.
-fn bn2048_mont_reduce(result: Address, t: Address, t_len: u32, m: Address, m_prime: u64) {
+transform bn2048_mont_reduce(result: Address, t: Address, t_len: u32, m: Address, m_prime: u64) {
     n: u32 = 32;
     t_bytes: u32 = t_len * 8;
 
@@ -612,7 +612,7 @@ fn bn2048_mont_reduce(result: Address, t: Address, t_len: u32, m: Address, m_pri
 // Montgomery multiplication: r = a * b * R^(-1) mod m.
 // a and b are 256-byte operands (each < m).  r is the 256-byte result (< m).
 // m_prime is -m^(-1) mod 2^64 from bn2048_mont_compute_m_prime.
-fn bn2048_mont_mul(r: Address, a: Address, b: Address, m: Address, m_prime: u64) {
+transform bn2048_mont_mul(r: Address, a: Address, b: Address, m: Address, m_prime: u64) {
     // t = a * b (4096-bit, 64 limbs) plus one extra limb to absorb the
     // carry produced during Montgomery reduction (the reduced value can
     // reach 2m - 1 < 2^2049, which needs 33 result limbs).
@@ -625,13 +625,13 @@ fn bn2048_mont_mul(r: Address, a: Address, b: Address, m: Address, m_prime: u64)
 
 // Convert a from normal to Montgomery domain: r = a * R mod m.
 // Computed as bn2048_mont_mul(a, R2, m, m_prime) since a * R2 * R^(-1) = a * R.
-fn bn2048_mont_convert(r: Address, a: Address, m: Address, r2: Address, m_prime: u64) {
+transform bn2048_mont_convert(r: Address, a: Address, m: Address, r2: Address, m_prime: u64) {
     bn2048_mont_mul(r, a, r2, m, m_prime);
 }
 
 // Convert a from Montgomery to normal domain: r = a * R^(-1) mod m.
 // Computed as bn2048_mont_mul(a, 1, m, m_prime) since a * 1 * R^(-1) = a * R^(-1).
-fn bn2048_momt_revert(r: Address, a: Address, m: Address, m_prime: u64) {
+transform bn2048_momt_revert(r: Address, a: Address, m: Address, m_prime: u64) {
     one = allocate(256);
     bn2048_set_u32(one, 1);
     bn2048_mont_mul(r, a, one, m, m_prime);
@@ -641,7 +641,7 @@ fn bn2048_momt_revert(r: Address, a: Address, m: Address, m_prime: u64) {
 // Montgomery-based modular exponentiation: r = a^exp mod m.
 // m must be odd.  Uses square-and-multiply with Montgomery multiplication,
 // avoiding the 4096/2048 binary long division used by bn2048_mod_exp.
-fn bn2048_mod_exp_mont(r: Address, a: Address, exp: Address, m: Address) {
+transform bn2048_mod_exp_mont(r: Address, a: Address, exp: Address, m: Address) {
     // r2 = R^2 mod m
     r2 = allocate(256);
     bn2048_mont_compute_r2(r2, m);

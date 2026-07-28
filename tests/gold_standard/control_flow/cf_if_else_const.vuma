@@ -8,7 +8,7 @@
 // (different else value 99, same bug class).
 // Expected exit code: 42
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 42;

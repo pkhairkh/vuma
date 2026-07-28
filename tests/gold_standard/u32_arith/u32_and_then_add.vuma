@@ -6,7 +6,7 @@
 // workaround). Distinct from s26_u32_mul_then_xor (mul-then-xor, 15)
 // and s22_u32_and_then_shr (and-then-shr).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 170;          // 0xAA
     b: u32 = 15;           // 0x0F
     c: u32 = 100;

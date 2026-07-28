@@ -1,7 +1,7 @@
 // f64_div — f64 division: 20.0 / 4.0 = 5.0 -> floattoint = 5
 // Expected exit code: 5
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: f64 = 20.0;
     b: f64 = 4.0;
     quot: f64 = a / b;

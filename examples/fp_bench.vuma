@@ -10,7 +10,7 @@
 //   - inttofloat for loop-counter -> float conversion
 //   - Backend FP register pressure
 
-fn main() -> i32 {
+transform main() -> i32 {
     total: f64 = 0.0;
     i: i64 = 0;
     while i < 1000000 {

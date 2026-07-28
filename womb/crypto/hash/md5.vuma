@@ -18,18 +18,18 @@ const MD5_B0: u32 = 4023233417;   // 0xEFCDAB89
 const MD5_C0: u32 = 2562383102;   // 0x98BADCFE
 const MD5_D0: u32 = 271733878;    // 0x10325476
 
-fn rotl32(x: u32, n: u32) -> u32 {
+transform rotl32(x: u32, n: u32) -> u32 {
     if n == 0 { return x; }
     return ((x << n) | (x >> (32 - n))) & MASK32;
 }
 
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
+transform load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
 }
 
-fn store_u32_le(ptr: Address, off: u32, val: u32) {
+transform store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -37,7 +37,7 @@ fn store_u32_le(ptr: Address, off: u32, val: u32) {
 }
 
 // K table: K[i] = floor(2^32 * |sin(i+1)|) for i = 0..63 (RFC 1321 Section 3.4)
-fn md5_k(idx: u32) -> u32 {
+transform md5_k(idx: u32) -> u32 {
     if idx == 0  { return 3614090360; }
     if idx == 1  { return 3905402710; }
     if idx == 2  { return 606105819; }
@@ -114,7 +114,7 @@ fn md5_k(idx: u32) -> u32 {
 //   [20.. 23] bit_hi   high 32 bits of total message length in bits
 //   [24.. 27] buf_len  bytes currently in the message buffer
 //   [28.. 91] buf[64]  partial block accumulator
-fn md5_init(ctx: Address) {
+transform md5_init(ctx: Address) {
     store_u32_le(ctx, 0,  MD5_A0);
     store_u32_le(ctx, 4,  MD5_B0);
     store_u32_le(ctx, 8,  MD5_C0);
@@ -125,7 +125,7 @@ fn md5_init(ctx: Address) {
 }
 
 // Increment the 64-bit bit counter by `bits`, carrying into the high word.
-fn md5_add_bits(ctx: Address, bits: u32) {
+transform md5_add_bits(ctx: Address, bits: u32) {
     lo: u32 = load_u32_le(ctx, 16);
     hi: u32 = load_u32_le(ctx, 20);
     new_lo: u32 = (lo + bits) & MASK32;
@@ -135,7 +135,7 @@ fn md5_add_bits(ctx: Address, bits: u32) {
 }
 
 // Core compression: 64 rounds over a single 512-bit block at `block`.
-fn md5_compress(ctx: Address, block: Address) {
+transform md5_compress(ctx: Address, block: Address) {
     a0: u32 = load_u32_le(ctx, 0);
     b0: u32 = load_u32_le(ctx, 4);
     c0: u32 = load_u32_le(ctx, 8);
@@ -221,7 +221,7 @@ fn md5_compress(ctx: Address, block: Address) {
     free(m);
 }
 
-fn md5_update(ctx: Address, data: Address, len: u32) {
+transform md5_update(ctx: Address, data: Address, len: u32) {
     buf_len: u32 = load_u32_le(ctx, 24);
     i: u32 = 0;
     while i < len {
@@ -239,7 +239,7 @@ fn md5_update(ctx: Address, data: Address, len: u32) {
 
 // Pad per RFC 1321 Section 3.1: append 0x80, then zeros, then 64-bit
 // little-endian bit length, run final compression, write 16-byte digest.
-fn md5_final(ctx: Address, out: Address) {
+transform md5_final(ctx: Address, out: Address) {
     buf_len: u32 = load_u32_le(ctx, 24);
 
     // Account for the unprocessed buffered bytes in the bit counter
@@ -275,7 +275,7 @@ fn md5_final(ctx: Address, out: Address) {
     store_u32_le(out, 12, load_u32_le(ctx, 12));
 }
 
-fn md5_oneshot(data: Address, len: u32, out: Address) {
+transform md5_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(96);
     md5_init(ctx);
     md5_update(ctx, data, len);

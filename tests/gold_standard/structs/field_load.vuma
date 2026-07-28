@@ -11,7 +11,7 @@ struct Single {
 }
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let p1 = state_new(_L1);
     p1.v = 51;
     a: u64 = p1.v;

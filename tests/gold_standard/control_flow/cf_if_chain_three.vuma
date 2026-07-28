@@ -8,7 +8,7 @@
 // (if-else chain).
 // Expected exit code: 77
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 11;

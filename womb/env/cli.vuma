@@ -17,24 +17,24 @@ const AT_FDCWD: i64 = -100;
 const O_RDONLY: i32 = 0;
 const CMDLINE_BUF_SIZE: u32 = 4096;
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
@@ -43,7 +43,7 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 // Read /proc/self/cmdline into a heap buffer.
 // Returns a result struct (16 bytes): { data_ptr: u64, total_len: u32, arg_count: u32 }
 // The cmdline format is: arg0\0arg1\0arg2\0...argN\0\0
-fn cli_read_cmdline() -> Address {
+transform cli_read_cmdline() -> Address {
     // Open /proc/self/cmdline (need null-terminated path)
     path = allocate(32);
     *(path + 0) = 47;  // /
@@ -136,13 +136,13 @@ fn cli_read_cmdline() -> Address {
 }
 
 // Get argument count from cmdline result
-fn cli_arg_count(result: Address) -> u32 {
+transform cli_arg_count(result: Address) -> u32 {
     return load_u32(result, 12);
 }
 
 // Get argument N from cmdline result.
 // Returns (ptr, len) as u64: ptr in low 32 bits, len in high 32 bits.
-fn cli_arg_get(result: Address, idx: u32) -> u64 {
+transform cli_arg_get(result: Address, idx: u32) -> u64 {
     data: u64 = load_u64(result, 0);
     total_len: u32 = load_u32(result, 8);
     if data == 0 { return 0; }
@@ -169,7 +169,7 @@ fn cli_arg_get(result: Address, idx: u32) -> u64 {
 
 // Parse a --flag=value argument.
 // Returns value (ptr, len) as u64, or 0 if flag not found.
-fn cli_parse_flag(result: Address, flag_name: Address, flag_len: u32) -> u64 {
+transform cli_parse_flag(result: Address, flag_name: Address, flag_len: u32) -> u64 {
     count: u32 = cli_arg_count(result);
     i: u32 = 0;
     while i < count {
@@ -204,7 +204,7 @@ fn cli_parse_flag(result: Address, flag_name: Address, flag_len: u32) -> u64 {
 }
 
 // Check if a boolean flag --flag is present
-fn cli_has_flag(result: Address, flag_name: Address, flag_len: u32) -> u32 {
+transform cli_has_flag(result: Address, flag_name: Address, flag_len: u32) -> u32 {
     count: u32 = cli_arg_count(result);
     i: u32 = 0;
     while i < count {
@@ -228,7 +228,7 @@ fn cli_has_flag(result: Address, flag_name: Address, flag_len: u32) -> u32 {
     return 0;
 }
 
-fn cli_free(result: Address) {
+transform cli_free(result: Address) {
     data: u64 = load_u64(result, 0);
     total: u32 = load_u32(result, 8);
     if data != 0 { free(data); }

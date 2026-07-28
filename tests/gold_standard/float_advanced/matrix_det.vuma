@@ -6,7 +6,7 @@
 // trace = 2 + 5 = 7
 // Return floattoint(trace + det + 5.0) = floattoint(7 - 2 + 5) = 10.
 
-fn main() -> i32 {
+transform main() -> i32 {
     m00: f64 = 2.0;
     m01: f64 = 3.0;
     m10: f64 = 4.0;

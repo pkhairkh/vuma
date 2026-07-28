@@ -8,7 +8,7 @@
 // same total but different dims).
 // Expected exit code: 18
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..3 {
         for j in 0..6 {

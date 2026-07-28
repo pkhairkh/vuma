@@ -5,7 +5,7 @@
 //
 // Workaround note: bitwise ops with an immediate RHS are silently dropped by
 // the current codegen, so all operands are loaded into variables first.
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 0x7E;
     b: u64 = 0x3F;
     result: u64 = a & b;

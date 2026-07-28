@@ -7,7 +7,7 @@
 layout Buf_buf1 = { data: [u8; 8] }
 layout Buf_buf2 = { data: [u8; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf1 = state_new(Buf_buf1);
     let buf2 = state_new(Buf_buf2);
     buf1.data[0] = 40;

@@ -18,7 +18,7 @@
 // 0-25: A-Z (65-90), 26-51: a-z (97-122), 52-61: 0-9 (48-57),
 // 62: + (43), 63: / (47)
 
-fn b64_char(index: u64) -> u64 {
+transform b64_char(index: u64) -> u64 {
     if index < 26 {
         return index + 65;     // A-Z
     }
@@ -41,7 +41,7 @@ fn b64_char(index: u64) -> u64 {
 //   [bbbbbbbb][bbbbbbbb][bbbbbbbb]
 //   → [bbbbbb][bbbbbb][bbbbbb][bbbbbb]
 
-fn encode_triple(dst: Address, b0: u64, b1: u64, b2: u64) {
+transform encode_triple(dst: Address, b0: u64, b1: u64, b2: u64) {
     // Extract 6-bit groups
     g0: u64 = (b0 >> 2) & 63;
     g1: u64 = ((b0 & 3) << 4) | ((b1 >> 4) & 15);
@@ -59,7 +59,7 @@ fn encode_triple(dst: Address, b0: u64, b1: u64, b2: u64) {
 // Encode the final 1 or 2 bytes with padding
 // ===========================================================================
 
-fn encode_final(dst: Address, b0: u64, b1: u64, remaining: u64) {
+transform encode_final(dst: Address, b0: u64, b1: u64, remaining: u64) {
     g0: u64 = (b0 >> 2) & 63;
     g1: u64 = (b0 & 3) << 4;
 
@@ -86,7 +86,7 @@ fn encode_final(dst: Address, b0: u64, b1: u64, remaining: u64) {
 // Returns the length of the output (always a multiple of 4).
 // Also computes an XOR checksum of all output characters.
 
-fn base64_encode(input: Address, in_len: u64, output: Address) -> u64 {
+transform base64_encode(input: Address, in_len: u64, output: Address) -> u64 {
     i: u64 = 0;
     out_idx: u64 = 0;
     checksum: u64 = 0;
@@ -141,7 +141,7 @@ fn base64_encode(input: Address, in_len: u64, output: Address) -> u64 {
 // Base64("Hello, World!") = SGVsbG8sIFdvcmxkIQ==
 // That's 5 groups of 4: SGVs, bG8s, IFdv, cmxk, IQ==
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate input: "Hello, World!" (13 bytes)
     input = allocate(13);
     *(input + 0) = 72;    // 'H'

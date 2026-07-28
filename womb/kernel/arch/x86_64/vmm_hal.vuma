@@ -187,9 +187,9 @@ layout PageTableBuf = {
 // (same pattern as uart.vuma's `if base == 0 { return; }` guard).
 extern "C" {
     // Load an 8-byte PTE at address `addr`. Returns the raw u64.
-    fn __vuma_load_u64(addr: u64) -> u64;
+    transform __vuma_load_u64(addr: u64) -> u64;
     // Store an 8-byte PTE value `val` at address `addr`.
-    fn __vuma_store_u64(addr: u64, val: u64);
+    transform __vuma_store_u64(addr: u64, val: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ extern "C" {
 // + State<PmmState> + order — the bare-metal wrapper marshals those).
 // The zero-arg signature keeps the walker PMT-pure (no State<T> plumbing
 // through the arch layer) and matches the "give me a page" concept.
-fn pmm_alloc() -> u64 {
+transform pmm_alloc() -> u64 {
     return 0;
 }
 
@@ -221,7 +221,7 @@ fn pmm_alloc() -> u64 {
 // walker calls this helper inline (DRY); the self-test calls it to verify
 // the bit-extraction math for a known vaddr.
 
-fn x86_idx(vaddr: u64, level: u32) -> u64 {
+transform x86_idx(vaddr: u64, level: u32) -> u64 {
     let sh = 12 + 9 * level;
     return (vaddr >> sh) & 511;
 }
@@ -259,7 +259,7 @@ fn x86_idx(vaddr: u64, level: u32) -> u64 {
 // task spec, applied to x86_map_page (the walker that vmm_map_page
 // dispatches to in arch==0).
 
-fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
+transform x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
     // Hosted-mode null-root guard: skip the walk entirely when root==0
     // (otherwise __vuma_load_u64(0) segfaults on the unmapped null page).
     if root == 0 {
@@ -331,7 +331,7 @@ fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
 //
 // Returns u64 (not State<T>) — no state-typedness propagation issue.
 
-fn x86_translate(root: u64, vaddr: u64) -> u64 {
+transform x86_translate(root: u64, vaddr: u64) -> u64 {
     // Hosted-mode null-root guard: skip the walk entirely when root==0
     // (otherwise __vuma_load_u64(0) segfaults on the unmapped null page).
     if root == 0 {
@@ -391,7 +391,7 @@ fn x86_translate(root: u64, vaddr: u64) -> u64 {
 // Returns 0 on pass, 1..4 on the corresponding index-extraction failure,
 // 5 on the null-root check, 6/7 on the real-translate check.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Part 1: index extraction (the contract's required self-test) ───────
     let v = 20015998343868;  // 0x123456789ABC
     if x86_idx(v, 3) != 36 { return 1; }

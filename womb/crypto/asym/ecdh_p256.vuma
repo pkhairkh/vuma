@@ -20,7 +20,7 @@
 //   pubkey_y_be (out)   : 32-byte big-endian Q.y
 // ===========================================================================
 
-fn ecdh_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+transform ecdh_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
     // Delegate to the ECDSA module's keygen — same mathematical operation
     // (Q = d * G with d reduced mod n and d != 0 enforced).
     ecdsa_p256_keygen(privkey_be, pubkey_x_be, pubkey_y_be);
@@ -34,7 +34,7 @@ fn ecdh_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Addr
 // Returns 1 if valid, 0 otherwise.
 // ===========================================================================
 
-fn ecdh_p256_validate_pubkey(pubkey_x_be: Address, pubkey_y_be: Address) -> u32 {
+transform ecdh_p256_validate_pubkey(pubkey_x_be: Address, pubkey_y_be: Address) -> u32 {
     // Point at infinity check
     is_inf_x: u32 = 1;
     is_inf_y: u32 = 1;
@@ -79,7 +79,7 @@ fn ecdh_p256_validate_pubkey(pubkey_x_be: Address, pubkey_y_be: Address) -> u32 
 // shared point is the point at infinity (both indicate active attacks).
 // ===========================================================================
 
-fn ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, shared: Address) -> u32 {
+transform ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, shared: Address) -> u32 {
     // Validate peer public key before any math
     if ecdh_p256_validate_pubkey(peer_pubkey_x_be, peer_pubkey_y_be) == 0 {
         return 0;
@@ -143,7 +143,7 @@ fn ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_
 // concatenates K_i until enough bytes are produced (here, exactly 32 bytes).
 // ===========================================================================
 
-fn ecdh_p256_kdf(shared: Address, info: Address, info_len: u32, key_out: Address) {
+transform ecdh_p256_kdf(shared: Address, info: Address, info_len: u32, key_out: Address) {
     // Buffer layout: [4-byte counter BE] || [32-byte Z] || [info]
     buf = allocate(4 + 32 + info_len);
     // Place Z at offset 4
@@ -167,7 +167,7 @@ fn ecdh_p256_kdf(shared: Address, info: Address, info_len: u32, key_out: Address
 // in one call. Returns 1 on success, 0 on validation failure.
 // ===========================================================================
 
-fn ecdh_p256_derive_key(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, info: Address, info_len: u32, key_out: Address) -> u32 {
+transform ecdh_p256_derive_key(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, info: Address, info_len: u32, key_out: Address) -> u32 {
     shared = allocate(32);
     ok: u32 = ecdh_p256_shared_secret(privkey_be, peer_pubkey_x_be, peer_pubkey_y_be, shared);
     if ok == 1 {

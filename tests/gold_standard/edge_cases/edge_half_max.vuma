@@ -5,7 +5,7 @@
 // operands loaded into u32 variables first. Distinct from
 // s26_edge_max_minus_one (sub) and s22_edge_max_or_zero (or).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 2;
     r: u32 = a / b;       // 127

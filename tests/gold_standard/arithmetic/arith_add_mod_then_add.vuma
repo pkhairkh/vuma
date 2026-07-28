@@ -6,7 +6,7 @@
 // variables first. Straight-line arithmetic. Distinct from
 // s50_arith_div_then_add (130) and s47_arith_div_mod_add (51).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 120;
     b: u32 = 70;
     c: u32 = 100;

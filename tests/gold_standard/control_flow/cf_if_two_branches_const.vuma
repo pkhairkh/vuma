@@ -7,7 +7,7 @@
 // preserved). Distinct from s5_cf_if_then_else_3way (two assignments
 // inside the if body).
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 42;

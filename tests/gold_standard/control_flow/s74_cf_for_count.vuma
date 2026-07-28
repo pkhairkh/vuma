@@ -7,7 +7,7 @@
 // fixed. Distinct from s70_cf_for_count_12 (12), s66_cf_for_
 // count_9 (9) and s62_cf_for_count_5 (5).
 // Expected exit code: 93
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..93 {
         count = count + 1;

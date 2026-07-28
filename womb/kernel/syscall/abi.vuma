@@ -44,7 +44,7 @@
 //
 // ── Why is syscall_args_from_frame init-style, not return-style? ────────────
 // The K3e contract specified:
-//     fn syscall_args_from_frame(tf: State<TrapFrame>) -> State<SyscallArgs>
+//     transform syscall_args_from_frame(tf: State<TrapFrame>) -> State<SyscallArgs>
 // i.e. the function allocates the SyscallArgs internally and returns it.
 // The current VUMA codegen (verified via /home/z/probes/probe_return_state2.vuma
 // — STILL failing on today's build, K3e) does NOT propagate State-typedness
@@ -63,7 +63,7 @@
 // Per the K3e DoD ("No warnings from flatten_expr" + "self-test exits 0"),
 // the verbatim contract form is non-compliant. This file therefore uses
 // the canonical PMT init-style workaround:
-//     fn syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>)
+//     transform syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>)
 // The CALLER allocates `args` via `state_new(SyscallArgs)` and passes it
 // by reference; syscall_args_from_frame populates its fields from `tf`.
 // This is byte-identical in spirit to K2a's pmm_init(pool, pmm, mem_start,
@@ -102,7 +102,7 @@
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
 // TrapFrame and SyscallArgs are ___pmt_buffer-backed State<T>'s allocated
 // by the CALLER via `state_new(...)`. The CALLER owns the lifetime; this
-// file's functions only borrow the State<T>'s (regular VUMA-fn borrow —
+// file's functions only borrow the State<T>'s (regular VUMA-transform borrow —
 // NOT extern #[borrow], since these are VUMA fns not extern "C" calls).
 // None of this file's functions call any extern, so the codegen's
 // conservative State-invalidation-on-extern-call doesn't fire.
@@ -195,7 +195,7 @@ layout TrapFrame = {
 //   args.a5 ← tf.r9     (6th arg)
 // The caller allocates `args` via state_new(SyscallArgs) and passes it
 // here by reference; this function populates its 7 fields from `tf`.
-fn syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>) {
+transform syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>) {
     args.nr = tf.rax;
     args.a0 = tf.rdi;
     args.a1 = tf.rsi;
@@ -211,7 +211,7 @@ fn syscall_args_from_frame(tf: State<TrapFrame>, args: State<SyscallArgs>) {
 // returns (sibling dispatch.vuma); the trap_entry stub then restores
 // the TrapFrame and IRET/SYSRET back to user space, where rax holds the
 // return value the user-space syscall ABI expects.
-fn syscall_write_ret(tf: State<TrapFrame>, ret: u64) {
+transform syscall_write_ret(tf: State<TrapFrame>, ret: u64) {
     tf.rax = ret;
 }
 
@@ -236,7 +236,7 @@ fn syscall_write_ret(tf: State<TrapFrame>, ret: u64) {
 // and K3a's trap_trampoline.vuma for the same rule applied to
 // vector=14 and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tf = state_new(TrapFrame);
     tf.rax = 64;    // write syscall (asm-generic __NR_write)
     tf.rdi = 1;     // fd = stdout

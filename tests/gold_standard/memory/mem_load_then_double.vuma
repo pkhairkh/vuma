@@ -8,7 +8,7 @@
 // computes (a*b)+b across two offsets).
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(_L1);
     buf.v = 30;
     v: u64 = buf.v;

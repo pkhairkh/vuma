@@ -9,7 +9,7 @@ layout Buf_b1 = { data: [u8; 8] }
 layout Buf_b2 = { data: [u8; 8] }
 layout Buf_b3 = { data: [u8; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let b1 = state_new(Buf_b1);
     let b2 = state_new(Buf_b2);
     let b3 = state_new(Buf_b3);

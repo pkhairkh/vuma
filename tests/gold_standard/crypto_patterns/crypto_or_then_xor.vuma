@@ -8,7 +8,7 @@
 // crypto_xor_pair (85), s51_crypto_shl_mask (176) and s51_crypto_
 // and_then_xor (195).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;          // 0xF0
     b: u64 = 15;           // 0x0F
     c: u64 = 128;          // 0x80
