@@ -1,8 +1,8 @@
 // KAT: SSH-2 identification 'SSH-'
 // Expected: 5353482d
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // SSH-2: "SSH-2.0-..."
     // First 4 bytes: S S H - = 83 83 72 45
     out = allocate(4);

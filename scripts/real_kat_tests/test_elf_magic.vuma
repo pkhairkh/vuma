@@ -1,7 +1,7 @@
 // KAT: ELF writer — magic bytes 0x7f 0x45 0x4c 0x46
 // Expected: 7f454c46
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn main() -> i32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform main() -> i32 {
     out = allocate(4);
     *(out + 0) = 127;  // 0x7f
     *(out + 1) = 69;   // 'E'

@@ -1,11 +1,11 @@
 // KAT: E2E — lex '10', lex '+', lex '20', parse, eval = 30
 // Expected: 1e (30)
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn is_digit(c: u32) -> u32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform is_digit(c: u32) -> u32 {
     if c >= 48 { if c <= 57 { return 1; } }
     return 0;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     // Source: "10+20"
     src = allocate(5);
     *(src + 0) = 49;  // '1'

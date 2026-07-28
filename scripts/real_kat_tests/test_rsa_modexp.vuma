@@ -1,8 +1,8 @@
 // KAT: RSA 2^10 mod 17 = 4
 // Expected: 04
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // RSA: c = m^e mod n
     // Test: 2^10 mod 17 = 4
     m: u32 = 2; e: u32 = 10; n: u32 = 17;

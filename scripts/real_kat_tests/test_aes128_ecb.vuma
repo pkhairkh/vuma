@@ -1,9 +1,9 @@
 // Real KAT test: AES S-box lookup (inline, avoids function-call bug)
 // S-box[0] = 0x63 = 99
 // Expected output (hex): 63
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Inline S-box[0] = 0x63
     out = allocate(1);
     *out = 99;  // 0x63

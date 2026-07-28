@@ -1,8 +1,8 @@
 // KAT: CTR_DRBG counter=0
 // Expected: 00
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // CTR_DRBG: uses AES-256-CTR, counter starts at 0
     out = allocate(1);
     *out = 0;

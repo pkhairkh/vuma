@@ -1,7 +1,7 @@
 // KAT: Lexer — tokenize '"hello"' -> StrLit (type 3)
 // Expected: 03
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn main() -> i32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform main() -> i32 {
     // Source: "hello" (with quotes)
     src = allocate(7);
     *(src + 0) = 34;  // '"'

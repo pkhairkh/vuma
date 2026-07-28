@@ -1,8 +1,8 @@
 // KAT: Ed448 p mod 256 = 0xFF
 // Expected: ff
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Ed448: p = 2^448 - 2^224 - 1
     // p mod 256 = (0 - 0 - 1) mod 256 = 255
     out = allocate(1);

@@ -1,8 +1,8 @@
 // KAT: Poly1305 r[0] clamp
 // Expected: 05
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Poly1305: r[3], r[7], r[11], r[15] have top 4 bits cleared
     // r[4], r[8], r[12] have bottom 2 bits cleared
     // Test: r[0] = 0x85, clamp: r[0] &= 0x0f -> 0x05

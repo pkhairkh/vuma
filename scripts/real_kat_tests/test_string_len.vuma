@@ -1,8 +1,8 @@
 // KAT: strlen('hello') = 5
 // Expected: 05
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // string: strlen("hello") = 5
     buf = allocate(6);
     *(buf+0)=104; *(buf+1)=101; *(buf+2)=108; *(buf+3)=108; *(buf+4)=111; *(buf+5)=0;

@@ -58,7 +58,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 // FFI declaration — write(2) syscall wrapper.
 // ────────────────────────────────────────────────────────────────────────────
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -117,37 +117,37 @@ const IV7: u32 = 1541459225;  // 0x5be0cd19
 // ────────────────────────────────────────────────────────────────────────────
 
 // Right-rotate a 32-bit word by n positions (1 <= n <= 31).
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & MASK32;
 }
 
 // Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z).
-fn ch32(x: u32, y: u32, z: u32) -> u32 {
+transform ch32(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((x ^ MASK32) & z);
 }
 
 // Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z).
-fn maj32(x: u32, y: u32, z: u32) -> u32 {
+transform maj32(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
 // Big Sigma0(x) = ROTR^2(x) XOR ROTR^13(x) XOR ROTR^22(x).
-fn bsig0_32(x: u32) -> u32 {
+transform bsig0_32(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
 // Big Sigma1(x) = ROTR^6(x) XOR ROTR^11(x) XOR ROTR^25(x).
-fn bsig1_32(x: u32) -> u32 {
+transform bsig1_32(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
 // Small sigma0(x) = ROTR^7(x) XOR ROTR^18(x) XOR SHR^3(x).
-fn ssig0_32(x: u32) -> u32 {
+transform ssig0_32(x: u32) -> u32 {
     return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
 }
 
 // Small sigma1(x) = ROTR^17(x) XOR ROTR^19(x) XOR SHR^10(x).
-fn ssig1_32(x: u32) -> u32 {
+transform ssig1_32(x: u32) -> u32 {
     return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
 }
 
@@ -157,7 +157,7 @@ fn ssig1_32(x: u32) -> u32 {
 // Fill K.k[0..63] with the 64 round constants — the first 32 bits of the
 // fractional parts of the cube roots of the first 64 primes. All literals
 // are decimal per the VUMA convention.
-fn sha256_load_k(K: State<Sha256K>) {
+transform sha256_load_k(K: State<Sha256K>) {
     K.k[0] = 1116352408;
     K.k[1] = 1899447441;
     K.k[2] = 3049323471;
@@ -229,7 +229,7 @@ fn sha256_load_k(K: State<Sha256K>) {
 // ────────────────────────────────────────────────────────────────────────────
 // Read 4 LE bytes from ctx.state[base..base+3] as a u32. State is stored
 // little-endian (per sha256_init's IV seeding).
-fn load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
+transform load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
     let b0 = ctx.state[base] as u32;
     let b1 = ctx.state[base + 1] as u32;
     let b2 = ctx.state[base + 2] as u32;
@@ -239,7 +239,7 @@ fn load_state_le(ctx: State<Sha256Ctx>, base: u64) -> u32 {
 
 // Fold working-variable `val` into the running state at `base` (mod 2^32):
 //   new_state[base..base+3] (LE) = old_state[base..base+3] (LE) + val
-fn add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
+transform add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
     let old = load_state_le(ctx, base);
     let acc = (val + old) & MASK32;
     ctx.state[base] = (acc & 255) as u8;
@@ -256,7 +256,7 @@ fn add_state_word(ctx: State<Sha256Ctx>, base: u64, val: u32) {
 // byte little-endian. The IV0..IV7 const-declarations above are the
 // decimal values of H0..H7; this function decomposes each word into 4 LE
 // bytes via shifts and masks.
-fn sha256_init(ctx: State<Sha256Ctx>) {
+transform sha256_init(ctx: State<Sha256Ctx>) {
     // H0 = IV0 → LE bytes.
     ctx.state[0] = (IV0 & 255) as u8;
     ctx.state[1] = ((IV0 >> 8) & 255) as u8;
@@ -303,7 +303,7 @@ fn sha256_init(ctx: State<Sha256Ctx>) {
 
 // sha256_compress: fold one 64-byte block (ctx.buf) into ctx.state via the
 // FIPS-180-4 §6.2.2 64-round SHA-256 compression.
-fn sha256_compress(ctx: State<Sha256Ctx>) {
+transform sha256_compress(ctx: State<Sha256Ctx>) {
     let W = state_new(Sha256W);
     let K = state_new(Sha256K);
     sha256_load_k(K);
@@ -371,7 +371,7 @@ fn sha256_compress(ctx: State<Sha256Ctx>) {
 }
 
 // sha256_update: absorb `len` bytes of data into the hash state.
-fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
+transform sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
     let i = 0;
     while i < len {
         if ctx.len < 64 {
@@ -390,7 +390,7 @@ fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
 // sha256_final: append FIPS-180-4 §5.1.1 padding + 64-bit BE bit count,
 // run the final compression, and serialize ctx.state as 8 BE u32 words
 // into out (§5.1.2).
-fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
+transform sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
     let total_bits = ctx.total * 8;
 
     // Step 1: append 0x80 at ctx.buf[ctx.len].
@@ -455,7 +455,7 @@ fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
 // shows the hex equivalent for cross-checking.
 //   ba7816bf 8f01cfea 414140de 5dae2223
 //   b00361a3 96177a9c b410ff61 f20015ad
-fn load_expected_abc(out: State<ShaDigest>) {
+transform load_expected_abc(out: State<ShaDigest>) {
     out.data[0] = 186;   // 0xBA
     out.data[1] = 120;   // 0x78
     out.data[2] = 22;    // 0x16
@@ -506,7 +506,7 @@ fn load_expected_abc(out: State<ShaDigest>) {
 // matches, the test writes 186 (0xBA — the first byte of the expected
 // digest) to stdout via write(1, out, 1); if any byte differs, it writes
 // 0. Either way main returns 0 — the stdout byte is the KAT verdict.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Step 1: compute SHA-256("abc") via the real algorithm. ──
     let ctx = state_new(Sha256Ctx);
     sha256_init(ctx);
