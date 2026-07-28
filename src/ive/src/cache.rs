@@ -5,23 +5,9 @@
 //! results can be reused, avoiding redundant verification work.
 
 use std::collections::HashMap;
-use vuma_scg::graph::SCG;
-use vuma_scg::node::NodeId;
-
-// TODO: migrate to codegen Scg once payload adapters exist (Wave 4 graph
-// layer is ready). The codegen `vuma_codegen::Scg` now exposes the same
-// graph API this module relies on (`get_node` / `edges` / `nodes` /
-// `node_count`), and `compute_fingerprint` only reads `node.node_type` +
-// edge structure (it does NOT destructure `NodePayload`), so the read-side
-// graph contract is satisfied. However the codegen `ScgStatement` payloads
-// differ structurally from the semantic `NodePayload` -- e.g. codegen
-// `AllocationNode` is an enum `{Stack,Heap}` with no `region_id`, and the
-// codegen SCG has no `Deallocation` variant at all (arena/stack memory
-// model). Until a payload adapter maps codegen statement discriminants to
-// semantic `NodeType` values, IVE stays on the semantic SCG. The Wave 4
-// graph layer + Wave 3 hard gate already close the divergence
-// architecturally; this migration is an optimization, not a correctness
-// requirement.
+use vuma_codegen::scg_to_ir::Scg;
+use vuma_scg::edge::EdgeKind;
+use vuma_scg::node::{NodeId, NodeType};
 
 /// A structured invariant violation used by the batched violation system
 /// and the verification cache.
@@ -90,29 +76,40 @@ impl std::fmt::Display for Severity {
 /// The fingerprint incorporates the node types, payload hashes, and edge
 /// structure of the subgraph, so that any change to the subgraph will
 /// result in a different fingerprint.
-pub fn compute_fingerprint(scg: &SCG, nodes: &[NodeId]) -> u64 {
+pub fn compute_fingerprint(scg: &Scg, nodes: &[NodeId]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
 
-    // Hash node IDs and their types in sorted order for determinism
+    // Hash node IDs and their types in sorted order for determinism.
+    //
+    // Task 6-C: this now reads the codegen `Scg`'s `node_type` adapter
+    // (Task 6-A) rather than destructuring the semantic `NodeData` struct.
+    // The codegen `Scg::edges()` (Task 6-B) yields `CodegenEdge`s whose
+    // `source` / `target` / `kind` fields mirror the semantic `EdgeData`,
+    // so the edge-hashing loop is unchanged.
     let mut sorted_nodes: Vec<NodeId> = nodes.to_vec();
     sorted_nodes.sort_by_key(|n| n.as_u64());
 
     for &node_id in &sorted_nodes {
         node_id.as_u64().hash(&mut hasher);
-        if let Some(node) = scg.get_node(node_id) {
-            format!("{:?}", node.node_type).hash(&mut hasher);
+        // `node_type` is a semantic `NodeType` derived from the codegen
+        // ScgStatement discriminant by the 6-A adapter.
+        let node_type: Option<NodeType> = scg.node_type(node_id);
+        if let Some(nt) = node_type {
+            format!("{:?}", nt).hash(&mut hasher);
         }
     }
 
-    // Hash edges between the nodes
+    // Hash edges between the nodes. Each `CodegenEdge.kind` is a semantic
+    // `EdgeKind` mirrored by the 6-B edge layer.
     for edge in scg.edges() {
+        let kind: &EdgeKind = &edge.kind;
         if nodes.contains(&edge.source) || nodes.contains(&edge.target) {
             edge.source.as_u64().hash(&mut hasher);
             edge.target.as_u64().hash(&mut hasher);
-            format!("{:?}", edge.kind).hash(&mut hasher);
+            format!("{:?}", kind).hash(&mut hasher);
         }
     }
 
@@ -173,7 +170,7 @@ impl VerificationCache {
     /// Compute a fingerprint for the given subgraph nodes and cache the result.
     pub fn compute_and_insert(
         &mut self,
-        scg: &SCG,
+        scg: &Scg,
         nodes: &[NodeId],
         violations: Vec<InvariantViolation>,
     ) -> u64 {
@@ -183,7 +180,7 @@ impl VerificationCache {
     }
 
     /// Check if a result is cached for the given subgraph nodes.
-    pub fn get_for_nodes(&self, scg: &SCG, nodes: &[NodeId]) -> Option<&[InvariantViolation]> {
+    pub fn get_for_nodes(&self, scg: &Scg, nodes: &[NodeId]) -> Option<&[InvariantViolation]> {
         let fp = compute_fingerprint(scg, nodes);
         self.get(fp).map(|v| v.as_slice())
     }
@@ -196,18 +193,72 @@ impl VerificationCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vuma_scg::edge::EdgeKind;
-    use vuma_scg::graph::SCG;
-    use vuma_scg::node::{AllocationNode, NodePayload, NodeType, ProgramPoint};
-    use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
+    // `Scg`, `NodeId`, `NodeType`, and `EdgeKind` come from `super::*`
+    // (top-level imports); only the codegen statement-list builders need
+    // their own imports.
+    use vuma_codegen::scg_to_ir::{
+        AllocationNode, CodegenEdge, NodeLoc, ScgFunction, ScgNode, ScgStatement,
+        ScgType,
+    };
 
-    fn pp() -> ProgramPoint {
-        ProgramPoint {
-            file: Some("test.vu".into()),
-            line: Some(1),
-            column: Some(1),
-            offset: None,
+    /// Build a minimal codegen `Scg` containing `num_allocs` stack
+    /// allocations (each a distinct size) followed by a `Return` statement,
+    /// with the `node_index` map populated so the codegen `Scg`'s
+    /// `node_type` / `get_node` adapters (Task 6-A) resolve correctly.
+    ///
+    /// Returns the built `Scg` and the `NodeId`s of the allocation
+    /// statements (in body order). This is the codegen-Scg analogue of the
+    /// old semantic `SCG::add_node(NodeType::Allocation, ...)` fixtures.
+    fn build_alloc_scg(num_allocs: usize) -> (Scg, Vec<NodeId>) {
+        let mut body: Vec<ScgStatement> = Vec::new();
+        for i in 0..num_allocs {
+            body.push(ScgStatement::Allocation(AllocationNode::Stack {
+                name: format!("buf{}", i),
+                size: (64 * (i as u32 + 1)) as u32,
+                ty: ScgType::U8,
+            }));
         }
+        body.push(ScgStatement::Return(vec![]));
+        let body_len = body.len();
+
+        let func = ScgFunction {
+            name: "test_fn".to_string(),
+            params: vec![],
+            results: vec![],
+            body,
+            var_types: std::collections::HashMap::new(),
+        };
+        let mut scg = Scg::new(vec![ScgNode::Function(func)]);
+
+        // Populate node_index with fresh monotonic NodeIds (mirroring the
+        // 4-C contract used by the AST->codegen bridge). Without this,
+        // `Scg::get_node` / `Scg::node_type` return `None`.
+        let mut alloc_ids: Vec<NodeId> = Vec::new();
+        let mut all_ids: Vec<NodeId> = Vec::new();
+        for stmt_idx in 0..body_len {
+            let id = NodeId::new(stmt_idx as u64);
+            if stmt_idx < num_allocs {
+                alloc_ids.push(id);
+            }
+            scg.node_index
+                .insert(id, NodeLoc { fn_idx: 0, stmt_idx });
+            all_ids.push(id);
+        }
+
+        // Populate ControlFlow fall-through edges between consecutive
+        // statements (mirrors the codegen bridge's `populate_codegen_edges`
+        // post-pass from Task 6-B). This exercises the edge-hashing branch
+        // of `compute_fingerprint` against the codegen `CodegenEdge` shape.
+        for window in all_ids.windows(2) {
+            scg.edges.push(CodegenEdge {
+                source: window[0],
+                target: window[1],
+                kind: EdgeKind::ControlFlow,
+                label: None,
+            });
+        }
+
+        (scg, alloc_ids)
     }
 
     #[test]
@@ -248,52 +299,26 @@ mod tests {
 
     #[test]
     fn test_fingerprint_changes_with_scg() {
-        let rid = RegionId::new(1);
-        // SCG with one allocation
-        let mut scg1 = SCG::new();
-        let n1 = scg1.add_node(
-            NodeType::Allocation,
-            NodePayload::Allocation(AllocationNode {
-                size: 64,
-                align: 8,
-                region_id: rid,
-                type_name: None,
-            }),
-            pp(),
-        );
-        let mut region = SCGRegion::new(rid, DeploymentTarget::Heap);
-        region.add_node(n1);
-        scg1.add_region(region);
+        // codegen Scg with one allocation
+        let (scg1, ids1) = build_alloc_scg(1);
+        // codegen Scg with two allocations
+        let (scg2, ids2) = build_alloc_scg(2);
 
-        // SCG with two allocations
-        let mut scg2 = SCG::new();
-        let n2a = scg2.add_node(
-            NodeType::Allocation,
-            NodePayload::Allocation(AllocationNode {
-                size: 64,
-                align: 8,
-                region_id: rid,
-                type_name: None,
-            }),
-            pp(),
+        // Sanity-check the migrated read path: the codegen Scg's 6-A
+        // `node_type` adapter resolves allocations to the semantic
+        // `NodeType::Allocation`, and the 6-B edge layer is populated.
+        assert_eq!(
+            scg1.node_type(ids1[0]),
+            Some(NodeType::Allocation),
+            "6-A node_type adapter should classify allocations"
         );
-        let n2b = scg2.add_node(
-            NodeType::Allocation,
-            NodePayload::Allocation(AllocationNode {
-                size: 128,
-                align: 8,
-                region_id: rid,
-                type_name: None,
-            }),
-            pp(),
+        assert!(
+            scg1.edges().any(|e| e.kind == EdgeKind::ControlFlow),
+            "6-B edge layer should contain ControlFlow fall-throughs"
         );
-        let mut region2 = SCGRegion::new(rid, DeploymentTarget::Heap);
-        region2.add_node(n2a);
-        region2.add_node(n2b);
-        scg2.add_region(region2);
 
-        let fp1 = compute_fingerprint(&scg1, &[n1]);
-        let fp2 = compute_fingerprint(&scg2, &[n2a, n2b]);
+        let fp1 = compute_fingerprint(&scg1, &ids1);
+        let fp2 = compute_fingerprint(&scg2, &ids2);
         assert_ne!(
             fp1, fp2,
             "Different SCGs should have different fingerprints"
@@ -354,25 +379,12 @@ mod tests {
 
     #[test]
     fn test_cache_compute_and_insert() {
-        let rid = RegionId::new(1);
-        let mut scg = SCG::new();
-        let n1 = scg.add_node(
-            NodeType::Allocation,
-            NodePayload::Allocation(AllocationNode {
-                size: 64,
-                align: 8,
-                region_id: rid,
-                type_name: None,
-            }),
-            pp(),
-        );
-        let mut region = SCGRegion::new(rid, DeploymentTarget::Heap);
-        region.add_node(n1);
-        scg.add_region(region);
+        let (scg, ids) = build_alloc_scg(1);
+        let n1 = ids[0];
 
         let mut cache = VerificationCache::new();
         let violations = vec![InvariantViolation::new("test", n1, "msg", Severity::Medium)];
-        let fp = cache.compute_and_insert(&scg, &[n1], violations);
+        let fp = cache.compute_and_insert(&scg, &ids, violations);
         assert!(cache.get(fp).is_some());
         assert_eq!(cache.get(fp).unwrap().len(), 1);
     }

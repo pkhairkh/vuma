@@ -70,9 +70,10 @@ use vuma_codegen::{
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ChannelCloseStmt, ChannelOpenStmt,
-        ChannelRecvResultStmt, ChannelRecvStmt, ChannelSendStmt, ComputationNode, ControlNode,
-        GetAddressNode, IRBuilder, Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam,
-        ScgStatement, ScgType, SwitchArm, SyscallCallNode,
+        ChannelRecvResultStmt, ChannelRecvStmt, ChannelSendStmt, CodegenEdge, ComputationNode,
+        ConstantTimeStatement, ControlNode, EnumAccessNode, ForeignConsumeStmt, GetAddressNode,
+        IRBuilder, PmtOpStmt, Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement,
+        ScgType, StructAccessNode, SwitchArm, SyscallCallNode, UnaryComputationNode,
     },
     CastKind as CodegenCastKind, CodegenError, DataSectionKind,
 };
@@ -95,7 +96,7 @@ use vuma_core::{
     MSG,
 };
 use vuma_ive::{
-    AggregatedResult, InferenceEngine, InvariantAggregator, OverallVerdict,
+    AggregatedResult, InvariantAggregator, OverallVerdict,
     VerificationLevel as IveVerificationLevel,
 };
 use vuma_parser::{
@@ -1532,8 +1533,11 @@ pub fn compile_with_path(
 
     // ── Stage 4: BD Inference ─────────────────────────────────────────
     let t = Instant::now();
-    let inference_engine = InferenceEngine::new();
-    let bd_results = inference_engine.infer_types(&scg);
+    // NOTE: IVE's InferenceEngine now expects a codegen Scg (Task 6-E);
+    // since we hold a semantic SCG here, call the BD engine directly
+    // (it is hard-typed to &SCG). The NodeIds correspond 1:1.
+    let bd_engine = vuma_bd::inference::BDInferenceEngine::new();
+    let bd_results: Vec<(NodeId, BD)> = bd_engine.infer(&scg).bd_map.into_iter().collect();
     // Apply BD-inferred types to SCG nodes so downstream stages
     // (MSG construction, IR lowering) use refined types instead of
     // the defaults (ScgType::I64 for params, ScgType::U8 for allocs).
@@ -1600,15 +1604,20 @@ pub fn compile_with_path(
             // any PMT program that uses state ops.
             let pmt_layouts = build_pmt_layout_specs(&ast);
             let secret_vars = collect_secret_vars(&ast);
-            // (Task 3-B) Recover the codegen Scg's typed-state metadata
-            // (produced by `bridge_ast_to_codegen_scg_with_meta`, which
-            // walks the AST in parallel with the codegen-SCG bridge) and
-            // attach it so IVE's `verify_pmt` can run the
-            // `verify_typed_state_conformance` dual-derivation
-            // cross-check against the semantic SCG's `NodePayload`s.
-            let typed_state_meta =
-                bridge_ast_to_codegen_scg_with_meta(&ast).1;
-            let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+            // (Task 6-F) Bridge the AST to the codegen Scg ONCE and feed
+            // it directly to IVE via `from_codegen_scg` (no semantic-SCG
+            // detour). The codegen Scg's `typed_state_meta` is recovered
+            // from the same bridge call, so IVE's `verify_pmt` walks the
+            // codegen Scg's own `node_payload` adapter and the typed-state
+            // conformance cross-check compares the codegen Scg's
+            // `node_payload`-derived triples against this meta list.
+            // (For pipeline callers where both sides come from the same
+            // bridge, the cross-check is a tautology that always passes;
+            // it remains functional for callers that manually inject
+            // divergent meta — see `tests/scg_conformance.rs`.)
+            let (codegen_scg, typed_state_meta) =
+                bridge_ast_to_codegen_scg_with_meta(&ast);
+            let input = vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg)
                 .with_pmt_layouts(pmt_layouts)
                 .with_secret_vars(secret_vars)
                 .with_typed_state_meta(typed_state_meta);
@@ -2697,19 +2706,22 @@ pub fn compile_modules(
     };
     let pmt_layouts = build_pmt_layout_specs(&merged_ast);
     let secret_vars = collect_secret_vars(&merged_ast);
-    // (Task 3-B) Recover the codegen Scg's typed-state metadata and
-    // attach it so IVE's `verify_pmt` can run the
-    // `verify_typed_state_conformance` dual-derivation cross-check
-    // against the semantic SCG's `NodePayload`s. (Stage 3 below
-    // re-bridges for the actual codegen Scg; the meta is cheap to
-    // re-derive here and keeps this site self-contained.)
-    let typed_state_meta =
-        bridge_ast_to_codegen_scg_with_meta(&merged_ast).1;
+    // (Task 6-F) Bridge the merged AST to the codegen Scg ONCE and feed
+    // it directly to IVE via `from_codegen_scg`. The codegen Scg's
+    // `typed_state_meta` is recovered from the same bridge call. IVE's
+    // `verify_pmt` now walks the codegen Scg's `node_payload` adapter
+    // (Task 6-A), so the typed-state conformance cross-check compares the
+    // codegen Scg's adapter-derived triples against this meta list — a
+    // tautology for pipeline callers (both sides from the same bridge)
+    // that always passes, but remains functional for divergent-meta
+    // injection (see `tests/scg_conformance.rs`).
+    let (codegen_scg, typed_state_meta) =
+        bridge_ast_to_codegen_scg_with_meta(&merged_ast);
     let aggregator = InvariantAggregator::new()
         .with_level(IveVerificationLevel::Pmt)
         .with_max_paths(config.ive_max_paths)
         .with_max_path_length(config.ive_max_path_length);
-    let ive_input = vuma_ive::verification::VerificationInput::from_scg(pmt_scg.clone())
+    let ive_input = vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg)
         .with_pmt_layouts(pmt_layouts)
         .with_secret_vars(secret_vars)
         .with_typed_state_meta(typed_state_meta);
@@ -3128,8 +3140,11 @@ pub fn compile_with_recovery(
 
     // ── Stage 4: BD Inference ─────────────────────────────────────────
     let t = Instant::now();
-    let inference_engine = InferenceEngine::new();
-    let bd_results = inference_engine.infer_types(&scg);
+    // NOTE: IVE's InferenceEngine now expects a codegen Scg (Task 6-E);
+    // since we hold a semantic SCG here, call the BD engine directly
+    // (it is hard-typed to &SCG). The NodeIds correspond 1:1.
+    let bd_engine = vuma_bd::inference::BDInferenceEngine::new();
+    let bd_results: Vec<(NodeId, BD)> = bd_engine.infer(&scg).bd_map.into_iter().collect();
     refine_scg_types_with_bd(&mut scg, &bd_results);
     timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
 
@@ -3182,7 +3197,12 @@ pub fn compile_with_recovery(
             // any PMT program that uses state ops.
             let pmt_layouts = build_pmt_layout_specs(&ast);
             let secret_vars = collect_secret_vars(&ast);
-            let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone())
+            // (Task 6-F) Bridge the AST to the codegen Scg and feed it
+            // directly to IVE via `from_codegen_scg`. No typed-state meta
+            // is attached at this site (the typed-state conformance
+            // cross-check is skipped when `typed_state_meta` is empty).
+            let codegen_scg = bridge_ast_to_codegen_scg(&ast);
+            let input = vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg)
                 .with_pmt_layouts(pmt_layouts)
                 .with_secret_vars(secret_vars);
             let result = aggregator.verify_all(&input);
@@ -4940,6 +4960,52 @@ mod tests {
             result.err()
         );
     }
+
+    /// Task 6-B: verify `populate_codegen_edges` populates DataFlow and
+    /// ControlFlow edges from the codegen Scg's own structure after the
+    /// AST → codegen bridge runs.
+    #[test]
+    fn test_populate_codegen_edges_basic() {
+        let source = r#"
+            fn add(x: i64, y: i64) -> i64 {
+                let sum = x + y;
+                return sum;
+            }
+        "#;
+        let mut parser = vuma_parser::Parser::new(source);
+        let ast = parser.parse_program().expect("parse");
+        let scg = bridge_ast_to_codegen_scg(&ast);
+
+        // node_index should have entries for the top-level statements.
+        assert!(
+            scg.node_index.len() >= 2,
+            "node_index should index at least 2 statements, got {}",
+            scg.node_index.len()
+        );
+
+        // edges should be non-empty.
+        assert!(
+            !scg.edges.is_empty(),
+            "edges should be populated, got 0 edges"
+        );
+
+        // Should have at least one DataFlow edge (sum def → return sum).
+        let has_dataflow = scg
+            .edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::DataFlow);
+        assert!(has_dataflow, "should have at least one DataFlow edge");
+
+        // Should have at least one ControlFlow edge (sequential fall-through).
+        let has_controlflow = scg
+            .edges
+            .iter()
+            .any(|e| e.kind == EdgeKind::ControlFlow);
+        assert!(
+            has_controlflow,
+            "should have at least one ControlFlow edge"
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5102,6 +5168,327 @@ fn collect_alloc_sizes_in_stmts(
             _ => {}
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Task 6-B: Codegen Scg edge population (post-pass over node_index)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `bridge_ast_to_codegen_scg_with_meta` (Task 4-C) populated the codegen
+// Scg's `node_index: HashMap<NodeId, NodeLoc>` but left `edges: Vec<CodegenEdge>`
+// empty.  IVE's cache / query / inference modules need edges with `EdgeKind`
+// (DataFlow, ControlFlow, ...) for graph traversal (fingerprinting,
+// reachability, BD propagation).
+//
+// `populate_codegen_edges` is a post-pass that walks each function's
+// top-level body and derives two kinds of edges from the codegen Scg's own
+// structure (no semantic-SCG dependency):
+//
+//   1. **DataFlow**: for each statement, collect the `ScgExpr::Var(name)`
+//      references in its operands.  A `HashMap<String, NodeId>` maps variable
+//      name → defining `NodeId` as we walk.  When a Var reference matches a
+//      previously-defined variable, a `DataFlow` edge is created from the
+//      defining statement to this one.
+//
+//   2. **ControlFlow**: consecutive top-level statements get `ControlFlow`
+//      edges.  Control nodes (`If` / `Loop` / `Switch`) also get a
+//      `ControlFlow` edge to the next top-level statement after the block
+//      (the fall-through / join target).
+//
+// # Limitations (documented gaps)
+//
+// - Only **top-level** statements in each `ScgNode::Function` body receive
+//   NodeIds (per the 4-C node_index contract).  Statements nested inside
+//   `If`/`Loop`/`Switch` bodies are NOT in `node_index`, so they receive no
+//   edges and no intra-block dataflow edges are created.  This is
+//   acceptable for IVE's graph-traversal use cases (fingerprinting,
+//   reachability, BD propagation) which operate on the node-level graph.
+//
+// - Parameter references do NOT produce DataFlow edges (parameters have no
+//   defining statement in the body).  This is correct: parameters are
+//   function-entry inputs, not dataflow from a prior statement.
+//
+// - `ForeignConsume`'s `state_var` is a `String`, not an `ScgExpr`; we
+//   still treat it as a Var reference so a DataFlow edge is created from
+//   the statement that defined the consumed state.
+//
+// - Variable reassignment (`ComputationNode::reassigns`, `CallNode::reassigns`)
+//   updates the `def_map` so later references point to the most recent
+//   definition.  Only the latest def is tracked (SSA is not reconstructed).
+
+/// Recursively collect `ScgExpr::Var(name)` references from an expression
+/// into `out`.
+fn collect_scg_expr_vars(expr: &ScgExpr, out: &mut Vec<String>) {
+    match expr {
+        ScgExpr::Var(n) => out.push(n.clone()),
+        ScgExpr::Int(_) | ScgExpr::Float(_) | ScgExpr::Label(_) => {}
+        ScgExpr::BinOp { lhs, rhs, .. } => {
+            collect_scg_expr_vars(lhs, out);
+            collect_scg_expr_vars(rhs, out);
+        }
+        ScgExpr::Load { addr } => collect_scg_expr_vars(addr, out),
+    }
+}
+
+/// Collect variable names **read** (used as operands) by a statement.
+/// Only top-level expressions are inspected; nested statement bodies
+/// (inside `If`/`Loop`/`Switch`) are NOT walked (see limitations above).
+fn collect_stmt_var_reads(stmt: &ScgStatement, out: &mut Vec<String>) {
+    match stmt {
+        ScgStatement::Control(ctrl) => match ctrl {
+            ControlNode::If { cond, .. } => collect_scg_expr_vars(cond, out),
+            ControlNode::Loop { for_range, .. } => {
+                if let Some((_, start, end)) = for_range {
+                    collect_scg_expr_vars(start, out);
+                    collect_scg_expr_vars(end, out);
+                }
+            }
+            ControlNode::Break | ControlNode::Continue => {}
+            ControlNode::Switch { discriminant, .. } => {
+                collect_scg_expr_vars(discriminant, out)
+            }
+        },
+        ScgStatement::Allocation(AllocationNode::Heap { size_expr, .. }) => {
+            collect_scg_expr_vars(size_expr, out)
+        }
+        ScgStatement::Allocation(AllocationNode::Stack { .. }) => {}
+        ScgStatement::Access(AccessNode::Load { ptr, offset, .. }) => {
+            collect_scg_expr_vars(ptr, out);
+            if let Some(off) = offset {
+                collect_scg_expr_vars(off, out);
+            }
+        }
+        ScgStatement::Access(AccessNode::Store { ptr, offset, value, .. }) => {
+            collect_scg_expr_vars(ptr, out);
+            if let Some(off) = offset {
+                collect_scg_expr_vars(off, out);
+            }
+            collect_scg_expr_vars(value, out);
+        }
+        ScgStatement::Cast(CastNode { src, .. }) => collect_scg_expr_vars(src, out),
+        ScgStatement::Computation(ComputationNode { lhs, rhs, .. }) => {
+            collect_scg_expr_vars(lhs, out);
+            collect_scg_expr_vars(rhs, out);
+        }
+        ScgStatement::UnaryComputation(UnaryComputationNode { operand, .. }) => {
+            collect_scg_expr_vars(operand, out)
+        }
+        ScgStatement::Call(CallNode { args, .. }) => {
+            for a in args {
+                collect_scg_expr_vars(a, out);
+            }
+        }
+        ScgStatement::Return(exprs) => {
+            for e in exprs {
+                collect_scg_expr_vars(e, out);
+            }
+        }
+        ScgStatement::ConstantTime(ct) => {
+            for o in &ct.operands {
+                collect_scg_expr_vars(o, out);
+            }
+        }
+        ScgStatement::StructAccess(StructAccessNode::Load { ptr, .. }) => {
+            collect_scg_expr_vars(ptr, out)
+        }
+        ScgStatement::StructAccess(StructAccessNode::Store { ptr, value, .. }) => {
+            collect_scg_expr_vars(ptr, out);
+            collect_scg_expr_vars(value, out);
+        }
+        ScgStatement::EnumAccess(ea) => match ea {
+            EnumAccessNode::LoadTag { ptr, .. } => collect_scg_expr_vars(ptr, out),
+            EnumAccessNode::StoreTag { ptr, value, .. } => {
+                collect_scg_expr_vars(ptr, out);
+                collect_scg_expr_vars(value, out);
+            }
+            EnumAccessNode::LoadPayload { ptr, .. } => collect_scg_expr_vars(ptr, out),
+            EnumAccessNode::StorePayload { ptr, value, .. } => {
+                collect_scg_expr_vars(ptr, out);
+                collect_scg_expr_vars(value, out);
+            }
+        },
+        ScgStatement::GetAddress(GetAddressNode { .. }) => {} // name is a symbol, not a var
+        ScgStatement::Syscall(SyscallCallNode { args, .. }) => {
+            for a in args {
+                collect_scg_expr_vars(a, out);
+            }
+        }
+        ScgStatement::ForeignConsume(fc) => out.push(fc.state_var.clone()),
+        ScgStatement::ChannelOpen(ChannelOpenStmt { .. }) => {}
+        ScgStatement::ChannelSend(ChannelSendStmt { channel, message, .. }) => {
+            collect_scg_expr_vars(channel, out);
+            collect_scg_expr_vars(message, out);
+        }
+        ScgStatement::ChannelRecv(ChannelRecvStmt { channel, .. }) => {
+            collect_scg_expr_vars(channel, out)
+        }
+        ScgStatement::ChannelClose(ChannelCloseStmt { channel }) => {
+            collect_scg_expr_vars(channel, out)
+        }
+        ScgStatement::ChannelRecvResult(ChannelRecvResultStmt { channel, .. }) => {
+            collect_scg_expr_vars(channel, out)
+        }
+        ScgStatement::PmtOp(pmt) => match pmt {
+            PmtOpStmt::StateInit { .. } => {}
+            PmtOpStmt::StateRead { src, .. } => collect_scg_expr_vars(src, out),
+            PmtOpStmt::StateWrite { ptr, val, .. } => {
+                collect_scg_expr_vars(ptr, out);
+                collect_scg_expr_vars(val, out);
+            }
+            PmtOpStmt::StateTransform { src, .. } => collect_scg_expr_vars(src, out),
+            PmtOpStmt::ArenaNew { capacity, .. } => collect_scg_expr_vars(capacity, out),
+            PmtOpStmt::ArenaAlloc { arena, .. } => collect_scg_expr_vars(arena, out),
+            PmtOpStmt::ArenaGrow { arena, min_capacity, .. } => {
+                collect_scg_expr_vars(arena, out);
+                collect_scg_expr_vars(min_capacity, out);
+            }
+            PmtOpStmt::ArenaFree { ptr } => collect_scg_expr_vars(ptr, out),
+        },
+    }
+}
+
+/// Record the variable(s) **defined** (written) by a statement into the
+/// `def_map`.  Reassignments update the map so later reads point to the
+/// most recent def.
+fn record_stmt_defs(stmt: &ScgStatement, node_id: NodeId, def_map: &mut HashMap<String, NodeId>) {
+    match stmt {
+        ScgStatement::Allocation(AllocationNode::Stack { name, .. })
+        | ScgStatement::Allocation(AllocationNode::Heap { name, .. }) => {
+            def_map.insert(name.clone(), node_id);
+        }
+        ScgStatement::Access(AccessNode::Load { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::Cast(CastNode { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::Computation(ComputationNode { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::UnaryComputation(UnaryComputationNode { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::Call(CallNode { dst: Some(dst), .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::ConstantTime(ct) => {
+            def_map.insert(ct.dst.clone(), node_id);
+        }
+        ScgStatement::StructAccess(StructAccessNode::Load { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::EnumAccess(EnumAccessNode::LoadTag { dst, .. })
+        | ScgStatement::EnumAccess(EnumAccessNode::LoadPayload { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::GetAddress(GetAddressNode { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::Syscall(SyscallCallNode { dst: Some(dst), .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::ChannelOpen(ChannelOpenStmt { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::ChannelRecv(ChannelRecvStmt { dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+        }
+        ScgStatement::ChannelRecvResult(ChannelRecvResultStmt { dst, err_dst, .. }) => {
+            def_map.insert(dst.clone(), node_id);
+            def_map.insert(err_dst.clone(), node_id);
+        }
+        ScgStatement::PmtOp(pmt) => match pmt {
+            PmtOpStmt::StateInit { dst, .. }
+            | PmtOpStmt::StateRead { dst, .. }
+            | PmtOpStmt::StateTransform { dst, .. }
+            | PmtOpStmt::ArenaNew { dst, .. }
+            | PmtOpStmt::ArenaAlloc { dst, .. }
+            | PmtOpStmt::ArenaGrow { dst, .. } => {
+                def_map.insert(dst.clone(), node_id);
+            }
+            PmtOpStmt::StateWrite { .. } | PmtOpStmt::ArenaFree { .. } => {}
+        },
+        // Statements that do not define a variable:
+        // Return, Control(*), Access(Store), StructAccess(Store),
+        // EnumAccess(Store*), ForeignConsume, ChannelSend, ChannelClose.
+        _ => {}
+    }
+}
+
+/// Task 6-B: Populate the codegen Scg's `edges` vector with DataFlow and
+/// ControlFlow edges derived from the Scg's own structure.
+///
+/// Must be called **after** `node_index` is populated (Task 4-C), since the
+/// NodeIds are read from that index.  See the module-level comment above for
+/// the derivation rules and documented limitations.
+pub fn populate_codegen_edges(scg: &mut Scg) {
+    // Invert node_index: (fn_idx, stmt_idx) → NodeId.
+    let mut loc_to_node: HashMap<(usize, usize), NodeId> = HashMap::new();
+    for (node_id, loc) in &scg.node_index {
+        loc_to_node.insert((loc.fn_idx, loc.stmt_idx), *node_id);
+    }
+
+    let mut edges: Vec<CodegenEdge> = Vec::new();
+
+    for (fn_idx, node) in scg.nodes.iter().enumerate() {
+        let func = match node {
+            ScgNode::Function(f) => f,
+            ScgNode::Data(_) => continue,
+        };
+
+        // Variable name → defining NodeId, scoped to this function's body.
+        let mut def_map: HashMap<String, NodeId> = HashMap::new();
+        let body_len = func.body.len();
+
+        for stmt_idx in 0..body_len {
+            let stmt = &func.body[stmt_idx];
+            let this_id = match loc_to_node.get(&(fn_idx, stmt_idx)) {
+                Some(id) => *id,
+                None => continue,
+            };
+
+            // ── DataFlow edges: Var reads → defining statement ──────────
+            let mut var_reads: Vec<String> = Vec::new();
+            collect_stmt_var_reads(stmt, &mut var_reads);
+            for var_name in &var_reads {
+                if let Some(def_id) = def_map.get(var_name) {
+                    // Avoid duplicate edges (same source/target/kind/label).
+                    let label = format!("var:{}", var_name);
+                    let dup = edges.iter().any(|e| {
+                        e.source == *def_id
+                            && e.target == this_id
+                            && e.kind == EdgeKind::DataFlow
+                            && e.label.as_deref() == Some(label.as_str())
+                    });
+                    if !dup {
+                        edges.push(CodegenEdge {
+                            source: *def_id,
+                            target: this_id,
+                            kind: EdgeKind::DataFlow,
+                            label: Some(label),
+                        });
+                    }
+                }
+            }
+
+            // ── ControlFlow edge: sequential fall-through ───────────────
+            if stmt_idx + 1 < body_len {
+                if let Some(next_id) = loc_to_node.get(&(fn_idx, stmt_idx + 1)) {
+                    edges.push(CodegenEdge {
+                        source: this_id,
+                        target: *next_id,
+                        kind: EdgeKind::ControlFlow,
+                        label: None,
+                    });
+                }
+            }
+
+            // ── Record this statement's definitions ────────────────────
+            record_stmt_defs(stmt, this_id, &mut def_map);
+        }
+    }
+
+    scg.edges = edges;
 }
 
 /// Bridge a parsed VUMA AST into the codegen crate's SCG representation.
@@ -5481,7 +5868,9 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
 
     let mut codegen_scg = Scg::new_with_meta(nodes, program_meta.clone());
     codegen_scg.node_index = node_index;
-    // `codegen_scg.edges` stays `Vec::new()` (MINIMAL population).
+    // Task 6-B: derive DataFlow + ControlFlow edges from the codegen Scg's
+    // own structure (post-pass over the node_index populated above).
+    populate_codegen_edges(&mut codegen_scg);
 
     (codegen_scg, program_meta)
 }

@@ -13,31 +13,9 @@
 //! 4. On invalidation, only recompute affected queries.
 
 use std::collections::{HashMap, HashSet};
-use vuma_scg::graph::SCG;
-use vuma_scg::node::{NodeId, NodePayload};
-
-// TODO: migrate to codegen Scg once payload adapters exist (Wave 4 graph
-// layer is ready). The codegen `vuma_codegen::Scg` now exposes the same
-// graph API this module uses (`get_node` / `edges` / `nodes`), BUT its
-// `ScgStatement` payloads are structurally incompatible with the semantic
-// `NodePayload` this file pattern-matches on:
-//   * `Allocation(alloc)` reads `alloc.region_id` / `alloc.size` -- codegen
-//     `AllocationNode` is an enum `{Stack{name,size:u32,ty},Heap{...}}` with
-//     no `region_id`.
-//   * `Deallocation(dealloc)` reads `dealloc.region_id` -- there is NO
-//     `Deallocation` variant in codegen `ScgStatement` at all (arena/stack
-//     memory model; frees are `PmtOp::ArenaFree`).
-//   * `Access(access)` reads `access.region_id` / `access.mode` -- codegen
-//     `AccessNode` is an enum `{Load{..},Store{..}}` with no region/mode.
-//   * `Computation(comp)` calls `comp.kind.label()` -- codegen
-//     `ComputationNode` is `{dst,op,lhs,rhs,...}` with no `kind`/`label()`.
-// Additionally codegen `Scg::get_node` returns `&ScgStatement` directly (no
-// `NodeData` wrapper with `.payload`/`.node_type`), and `nodes()` yields
-// `ScgNode` (Function/Data) with no `.id`. A payload adapter layer is
-// required before IVE can verify the codegen SCG directly. Until then IVE
-// stays on the semantic SCG; the Wave 4 graph layer + Wave 3 hard gate
-// already close the divergence architecturally (this migration is an
-// optimization, not a correctness requirement).
+use vuma_codegen::scg_to_ir::Scg;
+use vuma_scg::edge::EdgeKind;
+use vuma_scg::node::{NodeId, NodePayload, NodeType};
 
 /// A cached query result.
 #[derive(Debug, Clone)]
@@ -74,7 +52,7 @@ impl QuerySystem {
 
     /// Query the safety of a node.
     /// Returns a cached result if available, otherwise computes it.
-    pub fn query(&mut self, node_id: NodeId, scg: &SCG) -> &QueryResult {
+    pub fn query(&mut self, node_id: NodeId, scg: &Scg) -> &QueryResult {
         if !self.cache.contains_key(&node_id) {
             let result = self.compute(node_id, scg);
             self.cache.insert(node_id, result);
@@ -83,14 +61,14 @@ impl QuerySystem {
     }
 
     /// Compute the BD for a node by examining its predecessors.
-    fn compute(&mut self, node_id: NodeId, scg: &SCG) -> QueryResult {
+    fn compute(&mut self, node_id: NodeId, scg: &Scg) -> QueryResult {
         let mut deps = HashSet::new();
         let mut safe = true;
         let mut summary = String::new();
 
-        // Get the node's data
-        if let Some(node) = scg.get_node(node_id) {
-            match &node.payload {
+        // Get the node's payload via the codegen adapter (Task 6-A).
+        if let Some(payload) = scg.node_payload(node_id) {
+            match &payload {
                 NodePayload::Allocation(alloc) => {
                     summary = format!(
                         "Allocation(region={:?}, size={})",
@@ -123,7 +101,8 @@ impl QuerySystem {
                     safe = true;
                 }
                 _ => {
-                    summary = format!("Node({:?})", node.node_type);
+                    let nt = scg.node_type(node_id).unwrap_or(NodeType::Control);
+                    summary = format!("Node({:?})", nt);
                     safe = true;
                 }
             }
@@ -149,7 +128,7 @@ impl QuerySystem {
     }
 
     /// Check if an allocation is eventually freed.
-    fn check_freed(&self, alloc_node: NodeId, scg: &SCG, deps: &mut HashSet<NodeId>) -> bool {
+    fn check_freed(&self, alloc_node: NodeId, scg: &Scg, deps: &mut HashSet<NodeId>) -> bool {
         // BFS from the allocation node to find a Deallocation
         let mut visited = HashSet::new();
         let mut queue = vec![alloc_node];
@@ -159,14 +138,14 @@ impl QuerySystem {
             }
             visited.insert(node);
             deps.insert(node);
-            if let Some(data) = scg.get_node(node) {
-                if let NodePayload::Deallocation(_) = &data.payload {
+            if let Some(payload) = scg.node_payload(node) {
+                if let NodePayload::Deallocation(_) = &payload {
                     return true;
                 }
             }
             // Follow ControlFlow edges
             for edge in scg.edges() {
-                if edge.source == node {
+                if edge.source == node && edge.kind == EdgeKind::ControlFlow {
                     queue.push(edge.target);
                 }
             }
@@ -203,8 +182,8 @@ impl QuerySystem {
     }
 
     /// Check if all queries are cached (no computation needed).
-    pub fn is_fully_cached(&self, scg: &SCG) -> bool {
-        scg.nodes().all(|n| self.cache.contains_key(&n.id))
+    pub fn is_fully_cached(&self, scg: &Scg) -> bool {
+        scg.node_index.keys().all(|n| self.cache.contains_key(n))
     }
 }
 

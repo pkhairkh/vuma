@@ -14,6 +14,7 @@ use vuma_bd::repd::{ByteRep, RepD, StructRep};
 use vuma_ive::InferenceEngine;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
+use vuma_codegen::scg_to_ir::Scg;
 use vuma_scg::node::{
     AccessMode, AccessNode, AllocationNode, ComputationNode, EffectNode, NodePayload, NodeType,
     ProgramPoint,
@@ -80,7 +81,7 @@ fn test_infer_numeric_repd() {
 
     // Also verify via the IVE InferenceEngine.
     let ive_engine = InferenceEngine::new();
-    let ive_result = ive_engine.infer(&scg);
+    let ive_result = ive_engine.infer(&Scg::from_semantic_scg(&scg));
     assert!(
         ive_result.is_ok(),
         "IVE inference failed: {:?}",
@@ -348,7 +349,7 @@ fn test_infer_capability_flow() {
 
     // Verify via IVE as well.
     let ive_engine = InferenceEngine::new();
-    let ive_result = ive_engine.infer(&scg);
+    let ive_result = ive_engine.infer(&Scg::from_semantic_scg(&scg));
     assert!(
         ive_result.is_ok(),
         "IVE inference failed: {:?}",
@@ -475,7 +476,7 @@ fn test_infer_security_level() {
     // Verify IVE constraint derivation produces a Security constraint
     // for the Derivation edge (if present) or from the effect node.
     let ive_engine = InferenceEngine::new();
-    let ive_result = ive_engine.infer(&scg);
+    let ive_result = ive_engine.infer(&Scg::from_semantic_scg(&scg));
     assert!(
         ive_result.is_ok(),
         "IVE inference failed: {:?}",
@@ -573,7 +574,7 @@ fn test_infer_temporal_relation() {
 
     // Verify via IVE — should produce temporal constraints from ControlFlow edges.
     let ive_engine = InferenceEngine::new();
-    let ive_result = ive_engine.infer(&scg);
+    let ive_result = ive_engine.infer(&Scg::from_semantic_scg(&scg));
     assert!(
         ive_result.is_ok(),
         "IVE inference failed: {:?}",
@@ -724,7 +725,7 @@ fn test_bd_vs_rust_type() {
 
     // Also verify via IVE.
     let ive_engine = InferenceEngine::new();
-    let ive_result = ive_engine.infer(&scg);
+    let ive_result = ive_engine.infer(&Scg::from_semantic_scg(&scg));
     assert!(
         ive_result.is_ok(),
         "IVE inference should succeed for valid SCG"
@@ -893,7 +894,7 @@ fn test_bd_more_permissive() {
 
     // Verify via IVE — should produce resource flow constraints from DataFlow edges.
     let ive_engine = InferenceEngine::new();
-    let ive_result = ive_engine.infer(&scg);
+    let ive_result = ive_engine.infer(&Scg::from_semantic_scg(&scg));
     assert!(ive_result.is_ok(), "IVE inference should succeed");
 
     // IVE should produce constraints from the DataFlow edges.
