@@ -5439,10 +5439,51 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
     // `tests/scg_conformance.rs` destructuring (Task 3-C will drop the
     // tuple and read `scg.typed_state_meta` directly). `TypedStateMeta:
     // Clone` (derive on the enum) so cloning the Vec is cheap and safe.
-    (
-        Scg::new_with_meta(nodes, program_meta.clone()),
-        program_meta,
-    )
+
+    // ── Task 4-C: populate the codegen Scg's graph layer ─────────────
+    //
+    // The canonical bridge lowers AST → codegen Scg DIRECTLY; it does not
+    // retain (or build) the semantic `vuma_scg::SCG`, so semantic `NodeId`s
+    // and `EdgeData` are not in scope here. (The `EdgeIndex` helper defined
+    // further up in this file is dead infrastructure left over from the
+    // deprecated `bridge_scg_to_codegen*` functions deleted in Tasks 1-A /
+    // 1-B — it is never instantiated by this bridge, hence the task brief's
+    // "builds an EdgeIndex then discards it" premise no longer holds for
+    // the canonical path.)
+    //
+    // MINIMAL population (per the task's escape hatch): build `node_index`
+    // by assigning a fresh, monotonic `NodeId` to every `ScgStatement`
+    // inside every `ScgNode::Function`, mapping each to its
+    // `NodeLoc { fn_idx, stmt_idx }`. This makes `Scg::get_node`,
+    // `Scg::nodes`, and `Scg::node_count` fully functional for IVE and any
+    // other consumer that walks the codegen Scg as a graph. `edges` is left
+    // empty — `successors` / `predecessors` therefore return empty vecs
+    // gracefully. Full edge population requires either threading the
+    // semantic SCG (or semantic NodeIds) into this bridge, or re-deriving
+    // dataflow edges from the AST; both are out of scope for the ≤1-file
+    // 4-C constraint — see NEEDS_FOLLOWUP 4-C.
+    let node_index: HashMap<NodeId, vuma_codegen::scg_to_ir::NodeLoc> = {
+        let mut idx: HashMap<NodeId, vuma_codegen::scg_to_ir::NodeLoc> = HashMap::new();
+        let mut next_id: u64 = 0;
+        for (fn_idx, node) in nodes.iter().enumerate() {
+            if let ScgNode::Function(f) = node {
+                for stmt_idx in 0..f.body.len() {
+                    idx.insert(
+                        NodeId(next_id),
+                        vuma_codegen::scg_to_ir::NodeLoc { fn_idx, stmt_idx },
+                    );
+                    next_id += 1;
+                }
+            }
+        }
+        idx
+    };
+
+    let mut codegen_scg = Scg::new_with_meta(nodes, program_meta.clone());
+    codegen_scg.node_index = node_index;
+    // `codegen_scg.edges` stays `Vec::new()` (MINIMAL population).
+
+    (codegen_scg, program_meta)
 }
 
 /// (Task 2-A) Thin wrapper around [`bridge_ast_to_codegen_scg_with_meta`]

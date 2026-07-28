@@ -177,6 +177,48 @@ use crate::Result;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+/// Re-export of the semantic SCG's `NodeId` so downstream consumers can refer
+/// to a single canonical node-identifier type when reading the codegen SCG's
+/// graph layer (edges + node_index).
+///
+/// Task 4-A: graph-types scaffolding. Accessors land in 4-B; population in 4-C.
+pub type NodeId = vuma_scg::node::NodeId;
+
+/// A directed edge in the codegen SCG's graph layer.
+///
+/// Task 4-A: graph-types scaffolding. The codegen `Scg` historically carried
+/// only a flat `nodes: Vec<ScgNode>` with no inter-node connectivity info.
+/// `CodegenEdge` records the source/target `NodeId`s plus the semantic
+/// `EdgeKind` (and an optional human-readable label) so the codegen SCG can be
+/// cross-checked against the semantic `vuma_scg::SCG` without changing the
+/// emitted binary. Populated in Task 4-C.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodegenEdge {
+    /// Source node of the edge.
+    pub source: NodeId,
+    /// Target node of the edge.
+    pub target: NodeId,
+    /// Semantic edge kind mirrored from `vuma_scg::edge::EdgeKind`.
+    pub kind: vuma_scg::edge::EdgeKind,
+    /// Optional human-readable label (e.g. a field name for a struct-access
+    /// derivation edge).
+    pub label: Option<String>,
+}
+
+/// Location of a node within the codegen SCG's flat `nodes` vector,
+/// indexed by function index and statement index within that function.
+///
+/// Task 4-A: graph-types scaffolding. `node_index` lets consumers O(1)-lookup
+/// where a given `NodeId` lives inside the `Scg::nodes` forest. Populated in
+/// Task 4-C.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeLoc {
+    /// Index of the enclosing top-level function/entry in `Scg::nodes`.
+    pub fn_idx: usize,
+    /// Index of the statement within that function's body.
+    pub stmt_idx: usize,
+}
+
 /// Convenience alias used throughout this module.
 type IRInstruction = IRInstr;
 
@@ -238,6 +280,16 @@ pub struct Scg {
     /// tests / synthetic builders that don't care about typed-state metadata
     /// still use).
     pub typed_state_meta: Vec<TypedStateMeta>,
+    /// Directed edges of the codegen SCG's graph layer (Task 4-A).
+    ///
+    /// Populated in Task 4-C; left empty by both [`Scg::new`] and
+    /// [`Scg::new_with_meta`] until then.
+    pub edges: Vec<CodegenEdge>,
+    /// O(1) lookup from a semantic `NodeId` to its location inside
+    /// [`Scg::nodes`](Scg::nodes) (Task 4-A).
+    ///
+    /// Populated in Task 4-C; left empty by both constructors until then.
+    pub node_index: HashMap<NodeId, NodeLoc>,
 }
 
 impl Scg {
@@ -252,6 +304,8 @@ impl Scg {
         Self {
             nodes,
             typed_state_meta: Vec::new(),
+            edges: Vec::new(),
+            node_index: HashMap::new(),
         }
     }
 
@@ -267,7 +321,78 @@ impl Scg {
         Self {
             nodes,
             typed_state_meta: meta,
+            edges: Vec::new(),
+            node_index: HashMap::new(),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 4-B: graph-layer accessors.
+    //
+    // These mirror the read-side API IVE expects from a graph-shaped SCG:
+    // looking up a node by `NodeId`, iterating edges / nodes, counting
+    // statements, and walking successors / predecessors. The codegen `Scg`
+    // is statement-list-shaped (`Vec<ScgNode>` where each `ScgNode::Function`
+    // holds a `Vec<ScgStatement>` body), so `get_node` resolves a `NodeId`
+    // through the O(1) `node_index: HashMap<NodeId, NodeLoc>` populated in
+    // Task 4-C and then indexes into the function forest.
+    // -----------------------------------------------------------------
+
+    /// O(1) lookup of a statement by its semantic [`NodeId`].
+    ///
+    /// Resolves `id` through [`node_index`](Scg::node_index) to a
+    /// [`NodeLoc`] `{ fn_idx, stmt_idx }`, then indexes into
+    /// [`nodes`](Scg::nodes)`[fn_idx]` (which must be a `ScgNode::Function`)
+    /// and that function's `body[stmt_idx]`. Returns `None` if the id is not
+    /// indexed or if the indexed top-level node is not a function.
+    pub fn get_node(&self, id: NodeId) -> Option<&ScgStatement> {
+        let loc = self.node_index.get(&id)?;
+        let func = self.nodes.get(loc.fn_idx)?.as_function()?;
+        func.body.get(loc.stmt_idx)
+    }
+
+    /// Iterate over the directed edges of the codegen SCG's graph layer.
+    pub fn edges(&self) -> impl Iterator<Item = &CodegenEdge> {
+        self.edges.iter()
+    }
+
+    /// Iterate over the top-level nodes (`ScgNode::Function` / `ScgNode::Data`).
+    pub fn nodes(&self) -> impl Iterator<Item = &ScgNode> {
+        self.nodes.iter()
+    }
+
+    /// Total number of SCG *statements* across all top-level functions.
+    ///
+    /// This counts `ScgStatement`s inside each `ScgNode::Function`'s body
+    /// (data declarations contribute 0), matching the granularity at which
+    /// `NodeId`s are assigned in Task 4-C and at which IVE reasons about
+    /// the codegen SCG.
+    pub fn node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|n| match n {
+                ScgNode::Function(f) => f.body.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// All `NodeId`s that `id` points to via an outgoing edge.
+    pub fn successors(&self, id: NodeId) -> Vec<NodeId> {
+        self.edges
+            .iter()
+            .filter(|e| e.source == id)
+            .map(|e| e.target)
+            .collect()
+    }
+
+    /// All `NodeId`s that point to `id` via an incoming edge.
+    pub fn predecessors(&self, id: NodeId) -> Vec<NodeId> {
+        self.edges
+            .iter()
+            .filter(|e| e.target == id)
+            .map(|e| e.source)
+            .collect()
     }
 }
 
@@ -348,6 +473,20 @@ pub enum ScgNode {
     Function(ScgFunction),
     /// A data declaration.
     Data(ScgData),
+}
+
+impl ScgNode {
+    /// Return a reference to the [`ScgFunction`] payload if this node is a
+    /// `Function`, else `None`.
+    ///
+    /// Task 4-B: accessor used by [`Scg::get_node`] to extract a function's
+    /// body when resolving a [`NodeLoc`] produced by the `node_index` map.
+    pub fn as_function(&self) -> Option<&ScgFunction> {
+        match self {
+            ScgNode::Function(f) => Some(f),
+            _ => None,
+        }
+    }
 }
 
 /// An SCG function node.
