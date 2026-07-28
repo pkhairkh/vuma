@@ -230,13 +230,17 @@ fn edge_keywords_in_unusual_positions() {
 
 #[test]
 fn edge_all_keywords_sequential() {
+    // (Wave 1-A) 8 cosplay keywords deleted from the lexer (safe, ptr,
+    // alloc, lock, unlock, use, self, ref); the surviving 65 real keywords
+    // are exercised here. Deleted keywords now lex as plain identifiers.
     let keywords = [
-        "fn", "let", "pub", "crate", "ptr", "region", "alloc", "allocate", "free", "derive",
-        "cast", "read", "write", "sync", "if", "else", "while", "for", "return", "struct", "enum",
-        "match", "unsafe", "safe", "bd", "repd", "capd", "reld", "import", "export", "mod", "use",
-        "self", "super", "async", "await", "spawn", "lock", "unlock", "channel", "send", "recv",
-        "true", "false", "null", "as", "sizeof", "alignof", "break", "continue", "where", "impl",
-        "trait", "type", "const", "static", "mut", "ref",
+        "fn", "let", "pub", "crate", "region", "allocate", "free", "derive",
+        "cast", "read", "write", "sync", "if", "else", "while", "for", "return",
+        "struct", "enum", "match", "unsafe", "bd", "repd", "capd", "reld",
+        "import", "export", "mod", "super", "async", "await", "spawn",
+        "channel", "send", "recv",
+        "true", "false", "null", "as", "sizeof", "alignof", "break", "continue",
+        "where", "impl", "trait", "type", "const", "static", "mut",
     ];
     let source = keywords.join(";\n");
     assert_no_panic(&source);

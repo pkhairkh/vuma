@@ -85,9 +85,6 @@ struct Cli {
     /// Launch the interactive REPL (shorthand for `vuma repl`)
     repl: bool,
 
-    /// Enable runtime memory safety checks (bounds checking, --safe mode)
-    safe: bool,
-
     /// Run performance benchmarks instead of compiling
     bench: bool,
 
@@ -547,7 +544,6 @@ fn print_usage() {
          \x20      --debug                        Include debug info in output (alias: --debug-info)\n\
          \x20      --sections                     Emit full ELF section headers in the output binary\n\
          \x20      --repl                         Launch the interactive REPL (shorthand for `vuma repl`)\n\
-         \x20      --safe                         Enable runtime memory safety checks\n\
          \x20      --bench                        Run performance benchmarks instead of compiling\n\
          \x20      --max-expr-depth <N>           Maximum expression nesting depth [default: 1024]\n\
          \x20  -v, --verbose                     Enable verbose/debug logging\n\
@@ -604,7 +600,6 @@ where
         debug: false,
         sections: false,
         repl: false,
-        safe: true, // `safe` is always on (--safe is a no-op)
         bench: false,
         verbose: false,
         quiet: false,
@@ -743,12 +738,15 @@ fn try_consume_global_flag(
             cli.repl = true;
             Ok(true)
         }
-        "--safe" => {
-            iter.next();
-            // No-op — `safe` is always `true`.
-            // Flag accepted for backwards compatibility.
-            Ok(true)
-        }
+        // VUMA 2.0: `--safe` is REMOVED — runtime bounds checks are
+        // ALWAYS ON (memory-safety analysis is mandatory). Reject the
+        // flag with a hard error so callers get a clear migration
+        // message instead of a silent no-op.
+        "--safe" => Err(ParseError::Msg(
+            "error: --safe has been removed in VUMA 2.0; runtime bounds \
+                 checks are always on (memory-safety analysis is mandatory)."
+                .to_string(),
+        )),
         // VUMA 2.0: `--no-memory-safety` is REMOVED — memory-safety
         // analysis is mandatory. Reject the flag with a hard error.
         "--no-memory-safety" => Err(ParseError::Msg(
@@ -1562,7 +1560,9 @@ fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
         allow_inconclusive: cli.allow_inconclusive,
         strict_ive: cli.strict_ive,
         section_headers: cli.sections,
-        runtime_bounds_checks: cli.safe,
+        // VUMA 2.0: runtime bounds checks are ALWAYS ON (the `--safe`
+        // flag has been removed — memory-safety analysis is mandatory).
+        runtime_bounds_checks: true,
         max_expr_depth: cli.max_expr_depth,
         ..CompileConfig::default()
     }
@@ -3007,11 +3007,9 @@ fn cmd_bench(_cli: &Cli) {
         if let Some(program) = parse_result.value {
             let codegen_scg = bridge_ast_to_codegen_scg(&program);
 
-            let config = if _cli.safe {
-                vuma_codegen::MemorySafetyConfig::safe_mode()
-            } else {
-                vuma_codegen::MemorySafetyConfig::compile_time_only()
-            };
+            // VUMA 2.0: runtime bounds checks are ALWAYS ON (`--safe` has
+            // been removed — memory-safety analysis is mandatory).
+            let config = vuma_codegen::MemorySafetyConfig::safe_mode();
 
             let start = std::time::Instant::now();
             let analyzer = vuma_codegen::MemorySafetyAnalyzer::new(config);
@@ -3480,6 +3478,17 @@ mod tests {
         assert!(
             result.is_err(),
             "--no-memory-safety must be rejected (removed in VUMA 2.0)"
+        );
+    }
+
+    /// Test 12e: `--safe` is rejected (removed in VUMA 2.0 — runtime bounds
+    /// checks are always on; the flag is no longer a recognized no-op).
+    #[test]
+    fn test_safe_flag_rejected() {
+        let result = parse_cli_from(["vuma", "--safe", "build", "hello.vuma"]);
+        assert!(
+            result.is_err(),
+            "--safe must be rejected (removed in VUMA 2.0; bounds checks are always on)"
         );
     }
 
