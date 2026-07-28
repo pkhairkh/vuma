@@ -2145,6 +2145,11 @@ pub fn compile_with_path(
             return Err(errors); // Cannot continue without IR.
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta so the
+    // proof-directed register allocator can use grades as interference
+    // constraints.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
 
     // ── Stage 8b: Shared post-IR-build O2 pipeline ────────────────────
     // The lowering passes (monomorphize,
@@ -2805,6 +2810,9 @@ pub fn compile_modules(
             return Err(errors);
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 4b: Shared post-IR-build O2 pipeline ────────────────────
@@ -3569,6 +3577,9 @@ pub fn compile_with_recovery(
             }));
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
 
     // Syscall allowlist — reject obviously invalid syscall numbers.
     // Since `nr` is arch-specific, we use a range check.
@@ -4067,6 +4078,9 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
             }])
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
 
     // Syscall allowlist — reject obviously invalid syscall numbers.
     // Since `nr` is arch-specific, we use a range check.
@@ -5982,6 +5996,70 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
 /// [`bridge_ast_to_codegen_scg_with_meta`] directly.
 pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     bridge_ast_to_codegen_scg_with_meta(program).0
+}
+
+/// Populate each IR function's `vreg_meta` from the codegen SCG's
+/// `typed_state_meta` (Wave 0-B: thread grade annotations to IR for
+/// proof-directed regalloc).
+///
+/// Grade mapping (proof-directed compilation linearity model):
+///   * `TypedStateMeta::StateInit { result_vreg, .. }` -> grade `Exclusive`
+///     (linearity class @1). The vreg holds an exclusively-owned state
+///     token (e.g. the pointer returned by `state_new(L)`) and must not
+///     share a physical register with any other simultaneously-live vreg.
+///     Over-stamping `Exclusive` is always sound: it is an over-constraint
+///     that can only cost a register, never break correctness.
+///   * `TypedStateMeta::StateRead { .. }` would map to grade `Shared`
+///     (linearity class one-half), but the codegen `StateRead` meta variant
+///     carries no result vreg (the loaded value's vreg is only known inside
+///     `IRBuilder` during lowering). Until a later wave threads the real
+///     vreg through the bridge, `StateRead` results fall back to `None`
+///     (liveness-only regalloc) -- the documented safe default.
+///   * All other `TypedStateMeta` variants (`StateWrite`, `StateTransform`,
+///     `ForeignConsume`) carry no result vreg and are skipped -> `None`.
+///
+/// Attribution caveat: `StateInit::result_vreg` is a *synthetic*
+/// program-wide source-order counter assigned by the AST -> codegen SCG
+/// bridge (`bridge_ast_to_codegen_scg_with_meta`), NOT the codegen IR
+/// vreg. `IRBuilder` likewise assigns program-wide unique vregs (its
+/// `next_vreg` counter is never reset across functions), so a given id is
+/// live in at most one IR function. Each grade is therefore stamped into
+/// the single IR function whose `vregs` table contains that id; ids that
+/// match no IR vreg are left absent -> `None` (regalloc falls back to
+/// liveness). A future wave that records grades inside `IRBuilder` (where
+/// the real IR vreg is known at lowering time) will make this attribution
+/// exact.
+pub fn populate_vreg_grades(
+    ir_program: &mut IRProgram,
+    meta: &[vuma_codegen::scg_to_ir::TypedStateMeta],
+) {
+    use vuma_codegen::ir::{VumaGrade, VregMeta};
+    for entry in meta {
+        let (vreg_id, grade) = match entry {
+            vuma_codegen::scg_to_ir::TypedStateMeta::StateInit { result_vreg, .. } => {
+                (*result_vreg, VumaGrade::Exclusive)
+            }
+            // StateRead meta carries no result vreg; the loaded value's
+            // vreg is only known inside IRBuilder at lowering time. Fall
+            // back to None (liveness-only regalloc) until a later wave
+            // threads the real vreg through the bridge.
+            vuma_codegen::scg_to_ir::TypedStateMeta::StateRead { .. } => continue,
+            // StateWrite / StateTransform / ForeignConsume carry no
+            // result vreg -> None (liveness fallback).
+            _ => continue,
+        };
+        // IRBuilder vregs are program-wide unique, so at most one function
+        // contains this id. Stamp the grade only where the vreg actually
+        // lives; absent vregs stay at the default (None -> liveness).
+        // `or_insert` keeps the first-wins grade if an id ever repeats.
+        for func in &mut ir_program.functions {
+            if func.vregs.contains_key(&vreg_id) {
+                func.vreg_meta
+                    .entry(vreg_id)
+                    .or_insert(VregMeta { grade: Some(grade) });
+            }
+        }
+    }
 }
 
 /// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter
