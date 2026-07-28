@@ -5263,6 +5263,31 @@ impl IRBuilder {
                 }
                 return Ok(());
             }
+            // ── Try operator (`expr?`): dispatch to lower_try ──
+            //
+            // Follow-up F3. The AST→SCG bridge (`pipeline.rs::flatten_expr`)
+            // lowers `Expr::Try` to a `CallNode` whose `func` is
+            // [`crate::ir::TRY_RUNTIME_HELPER`] (`__try`). Intercept it here
+            // and dispatch to [`IRBuilder::lower_try`], which loads the
+            // `Result` discriminant at offset 0 and branches: Ok → bind the
+            // payload (offset 8) to `dst` and continue; Err → early-return
+            // the error from the current function.
+            //
+            // This closes the end-to-end `?` path:
+            //   parser `Expr::Try`
+            //     → bridge `CallNode("__try", [operand])`
+            //       → `lower_call` → `lower_try`
+            //         → IR CondBranch + Ok/Err blocks.
+            name if name == crate::ir::TRY_RUNTIME_HELPER => {
+                let operand = call.args.first().ok_or_else(|| {
+                    crate::CodegenError::TranslationError(
+                        "__try requires 1 argument (the Result value)".into(),
+                    )
+                })?;
+                let ok_dst = call.dst.as_deref();
+                self.lower_try(operand, ok_dst, ir_func, names)?;
+                return Ok(());
+            }
             _ => {} // fall through to regular Call handling
         }
 

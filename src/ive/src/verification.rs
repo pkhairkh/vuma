@@ -122,6 +122,17 @@ pub struct VerificationInput {
     /// `Violated` result by `InvariantAggregator::verify_pmt`, mirroring
     /// the field-list cross-check.
     pub typed_state_meta: Vec<TypedStateMeta>,
+    /// Source-level contracts (`requires`/`ensures`) translated from the
+    /// parser AST by the pipeline (Follow-up F2). Consumed by
+    /// `VerificationEngine::verify_pmt`'s contract discharge pass
+    /// (`discharge_contracts_and_prove_blocks`). Empty when the program has
+    /// no `transform … requires … ensures …` declarations. See [`FnContract`].
+    pub contracts: Vec<FnContract>,
+    /// `prove { require …; <body> }` proof-obligation blocks translated
+    /// from the parser AST by the pipeline (Follow-up F2). Consumed by
+    /// `VerificationEngine::verify_pmt`'s discharge pass. Empty when the
+    /// program contains no `prove` blocks. See [`ProveBlockObligation`].
+    pub prove_blocks: Vec<ProveBlockObligation>,
 }
 
 /// A unified layout spec for PMT state verification.
@@ -157,6 +168,74 @@ pub struct PmtFieldSpec {
     pub size: u64,
     /// Field type as a display string (e.g. `"u32"`, `"[u8; 16]"`).
     pub type_name: String,
+}
+
+// ---------------------------------------------------------------------------
+// Source-level contracts & prove-block obligations (Follow-up F2)
+// ---------------------------------------------------------------------------
+//
+// The parser captures `requires`/`ensures` contracts (`Contract` AST node on
+// `FnDef`/`TransformDef`) and `prove { require …; <body> }` proof-obligation
+// blocks (`Expr::ProveBlock`). Follow-up F2 wires the IVE to *consume* these
+// so they are no longer dead data.
+//
+// The IVE crate does not depend on `vuma_parser` (intentional — see the
+// comment near `PmtLayoutSpec`), so it cannot hold `vuma_parser::ast::Expr`
+// directly. Instead the pipeline translates each clause into an
+// IVE-side [`ContractClause`] (a stringified source form plus a
+// `trivially_true` flag pre-computed from the AST — mirroring how
+// `build_pmt_layout_specs` pre-computes layout offsets from `LayoutDef`).
+//
+// `VerificationEngine::verify_pmt` runs a discharge pass over these clauses
+// (see `discharge_contracts_and_prove_blocks`). Full SMT/symbolic discharge
+// is deferred (TODO): non-trivial clauses currently produce a WARNING (not a
+// hard `Violated`) so that consumption is wired without rejecting every
+// program whose contracts the IVE cannot yet prove. The WARNING + TODO
+// marker is the explicit signal that hard-gate discharge is pending.
+
+/// A single contract clause (a `requires`/`ensures`/`require` expression)
+/// translated from the parser AST into an IVE-consumable form.
+///
+/// `source` is a debug stringification of the original `Expr` (sufficient
+/// for diagnostic messages); `trivially_true` is `true` iff the AST node is
+/// a literal `true` (the only clause shape the IVE can currently discharge
+/// on its own). Every other clause is deferred to a WARNING + TODO.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractClause {
+    /// Stringified source form of the clause expression (for diagnostics).
+    pub source: String,
+    /// `true` iff the clause is a literal `true` expression — the only
+    /// shape the IVE can currently discharge without an SMT solver.
+    pub trivially_true: bool,
+}
+
+/// A source-level contract attached to a `transform`/`fn`, translated from
+/// `vuma_parser::ast::Contract` by the pipeline. Consumed by the IVE's
+/// contract discharge pass (`discharge_contracts_and_prove_blocks`).
+///
+/// `requires` clauses are preconditions (checked at entry); `ensures`
+/// clauses are postconditions (checked at exit). Both are conjoined
+/// (logical AND).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnContract {
+    /// Name of the function/transform the contract is attached to.
+    pub fn_name: String,
+    /// Precondition clauses (`requires <expr>;`).
+    pub requires: Vec<ContractClause>,
+    /// Postcondition clauses (`ensures <expr>;`).
+    pub ensures: Vec<ContractClause>,
+}
+
+/// A `prove { require …; <body> }` proof-obligation block
+/// (`vuma_parser::ast::Expr::ProveBlock`), translated by the pipeline into
+/// an IVE-consumable form. Each `require` clause is a proof obligation the
+/// IVE must discharge before the block's body may execute.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProveBlockObligation {
+    /// Source location / enclosing function name (for diagnostics).
+    pub location: String,
+    /// Proof obligations (`require <expr>;` clauses inside the block).
+    pub requirements: Vec<ContractClause>,
 }
 
 /// Re-derive layout offsets/sizes from the field list using the same C-style
@@ -671,6 +750,8 @@ impl VerificationInput {
             pmt_layouts: None,
             secret_vars: HashSet::new(),
             typed_state_meta: Vec::new(),
+            contracts: Vec::new(),
+            prove_blocks: Vec::new(),
         }
     }
 
@@ -691,6 +772,8 @@ impl VerificationInput {
             pmt_layouts: None,
             secret_vars: HashSet::new(),
             typed_state_meta: Vec::new(),
+            contracts: Vec::new(),
+            prove_blocks: Vec::new(),
         }
     }
 
@@ -706,6 +789,8 @@ impl VerificationInput {
             pmt_layouts: None,
             secret_vars: HashSet::new(),
             typed_state_meta: Vec::new(),
+            contracts: Vec::new(),
+            prove_blocks: Vec::new(),
         }
     }
 
@@ -738,6 +823,27 @@ impl VerificationInput {
     /// recoverable [`TypedStateMeta`] entry alongside the codegen Scg).
     pub fn with_typed_state_meta(mut self, meta: Vec<TypedStateMeta>) -> Self {
         self.typed_state_meta = meta;
+        self
+    }
+
+    /// Attach the source-level contracts (`requires`/`ensures`) translated
+    /// from the parser AST (Follow-up F2). Consumed by
+    /// [`VerificationEngine::verify_pmt`]'s contract discharge pass
+    /// (`discharge_contracts_and_prove_blocks`). Built by the pipeline's
+    /// `collect_contracts` helper from `FnDef.contract` /
+    /// `TransformDef.contract`.
+    pub fn with_contracts(mut self, contracts: Vec<FnContract>) -> Self {
+        self.contracts = contracts;
+        self
+    }
+
+    /// Attach the `prove { require …; <body> }` proof-obligation blocks
+    /// translated from the parser AST (Follow-up F2). Consumed by
+    /// [`VerificationEngine::verify_pmt`]'s discharge pass. Built by the
+    /// pipeline's `collect_prove_blocks` helper from `Expr::ProveBlock`
+    /// nodes found in function/transform bodies.
+    pub fn with_prove_blocks(mut self, prove_blocks: Vec<ProveBlockObligation>) -> Self {
+        self.prove_blocks = prove_blocks;
         self
     }
 
@@ -1955,23 +2061,47 @@ impl VerificationEngine {
         let total_ops = reads.len() + writes.len() + transforms.len();
         let all_ok = read_ok && write_ok && transform_ok && arena_bounds_ok;
 
+        // ── Follow-up F2: contract & prove-block discharge pass ──────────
+        //
+        // Consume the `requires`/`ensures` contracts and `prove`-block
+        // obligations attached to `VerificationInput` by the pipeline. This
+        // is the wiring that makes those AST nodes non-dead data: the IVE
+        // reads every clause and attempts discharge.
+        //
+        // Discharge policy (per the F2 spec, point 4): the IVE cannot yet
+        // fully discharge arbitrary boolean expressions (no SMT/symbolic
+        // engine is wired). A clause is DISCHARGED iff it is trivially
+        // `true`; every other clause is DEFERRED with a `vuma_log!(warn, …)`
+        // + TODO marker rather than a hard `Violated`, so that consumption
+        // is wired without rejecting every program whose contracts the IVE
+        // cannot yet prove. The deferred clauses surface in the result
+        // description so they are visible to callers; the WARNING log makes
+        // them visible in the build log. Hard-gate discharge is the
+        // NEEDS_FOLLOWUP item.
+        let contract_summary = discharge_contracts_and_prove_blocks(input);
+        let contract_note = contract_summary.describe();
+
         if all_ok {
             VerificationResult::new(
                 "pmt-state",
                 VerificationStatus::Proven,
                 format!(
-                    "pmt-state check passed ({} init(s), {} read(s), {} write(s), {} transform(s))",
+                    "pmt-state check passed ({} init(s), {} read(s), {} write(s), {} transform(s)){}",
                     state_init_count,
                     reads.len(),
                     writes.len(),
-                    transforms.len()
+                    transforms.len(),
+                    contract_note,
                 ),
             )
         } else if total_ops == 0 {
             VerificationResult::new(
                 "pmt-state",
                 VerificationStatus::Proven,
-                "pmt-state check passed (no state operations found)".to_string(),
+                format!(
+                    "pmt-state check passed (no state operations found){}",
+                    contract_note,
+                ),
             )
         } else {
             VerificationResult::new(
@@ -1984,10 +2114,11 @@ impl VerificationEngine {
                     ),
                 },
                 format!(
-                    "pmt-state violations: {} read-error(s), {} write-error(s), {} transform-error(s)",
+                    "pmt-state violations: {} read-error(s), {} write-error(s), {} transform-error(s){}",
                     read_errs.len(),
                     write_errs.len(),
-                    transform_errs.len()
+                    transform_errs.len(),
+                    contract_note,
                 ),
             )
         }
@@ -2005,6 +2136,133 @@ impl VerificationEngine {
 /// counterexamples where the exact source location is not known.
 fn default_program_point() -> crate::result::ProgramPoint {
     String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Follow-up F2: contract & prove-block discharge pass
+// ---------------------------------------------------------------------------
+
+/// Tally of the contract/prove-block discharge pass run by
+/// [`VerificationEngine::verify_pmt`] (see `discharge_contracts_and_prove_blocks`).
+///
+/// `discharged` counts clauses the IVE proved (currently only literal `true`);
+/// `deferred` counts clauses the IVE could not yet discharge and deferred to a
+/// WARNING + TODO. The pass is a CONSUMPTION pass: the AST nodes are read and
+/// processed; full hard-gate discharge is pending (NEEDS_FOLLOWUP).
+#[derive(Debug, Clone, Default)]
+struct ContractDischargeSummary {
+    /// Number of `transform`/`fn` contracts examined.
+    contracts_checked: usize,
+    /// `requires`/`ensures` clauses successfully discharged.
+    clauses_discharged: usize,
+    /// `requires`/`ensures` clauses deferred (WARNING + TODO).
+    clauses_deferred: usize,
+    /// Number of `prove { require … }` blocks examined.
+    prove_blocks_checked: usize,
+    /// `require` clauses successfully discharged.
+    prove_reqs_discharged: usize,
+    /// `require` clauses deferred (WARNING + TODO).
+    prove_reqs_deferred: usize,
+}
+
+impl ContractDischargeSummary {
+    /// Render a human-readable suffix for the `verify_pmt` result
+    /// description. Returns an empty string when no contracts or prove
+    /// blocks were present (so existing programs with no contracts see no
+    /// description change), otherwise a compact `; contracts: …` note.
+    fn describe(&self) -> String {
+        let no_contracts = self.contracts_checked == 0 && self.prove_blocks_checked == 0;
+        if no_contracts {
+            return String::new();
+        }
+        format!(
+            "; contracts: {} checked ({} discharged, {} deferred); prove-blocks: {} checked ({} discharged, {} deferred)",
+            self.contracts_checked,
+            self.clauses_discharged,
+            self.clauses_deferred,
+            self.prove_blocks_checked,
+            self.prove_reqs_discharged,
+            self.prove_reqs_deferred,
+        )
+    }
+}
+
+/// Consume the `requires`/`ensures` contracts and `prove`-block obligations
+/// attached to [`VerificationInput`] and attempt discharge (Follow-up F2).
+///
+/// This is the function that makes the parser's `Contract` AST node and
+/// `Expr::ProveBlock` non-dead data: it reads every clause the pipeline
+/// translated onto the input and decides whether the IVE can discharge it.
+///
+/// # Discharge policy (spec point 4)
+///
+/// The IVE has no SMT/symbolic engine wired yet, so it can only discharge
+/// trivially-true clauses (the `trivially_true` flag pre-computed by the
+/// pipeline from `Expr::Lit(Lit::Bool(true))`). Every non-trivial clause is
+/// **deferred** with a `vuma_log!(warn, …)` + TODO marker — NOT a hard
+/// `Violated` — so that consumption is wired without rejecting programs whose
+/// contracts the IVE cannot yet prove. Turning the deferred clauses into a
+/// hard gate is the NEEDS_FOLLOWUP item (wire an SMT/symbolic discharge
+/// backend and promote deferred → `Violated`).
+///
+/// The returned [`ContractDischargeSummary`] is appended to the
+/// `verify_pmt` result description so callers and the build log can see how
+/// many clauses were discharged vs. deferred.
+fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDischargeSummary {
+    let mut s = ContractDischargeSummary::default();
+
+    // ── Contracts: requires (preconditions) + ensures (postconditions) ──
+    //
+    // Per spec points 2a/2b: `requires` clauses must hold at call sites
+    // (entry), `ensures` clauses must hold at return (exit). The IVE
+    // attempts to discharge each; non-trivial clauses are deferred.
+    for c in &input.contracts {
+        s.contracts_checked += 1;
+        for clause in c.requires.iter().chain(c.ensures.iter()) {
+            if clause.trivially_true {
+                s.clauses_discharged += 1;
+            } else {
+                s.clauses_deferred += 1;
+                vuma_log!(
+                    warn,
+                    "[F2] IVE could not discharge contract clause for `{}`: `{}` — \
+                     deferred (TODO: wire SMT/symbolic discharge backend). Contract \
+                     consumption is wired; hard-gate discharge pending.",
+                    c.fn_name,
+                    clause.source
+                );
+            }
+        }
+    }
+
+    // ── Prove blocks: each `require` is a proof obligation gating the body ──
+    //
+    // Per spec point 3: if the IVE can't discharge a `require`, the block
+    // doesn't compile (Violated). Since the IVE can't yet discharge
+    // non-trivial clauses, those are deferred to a WARNING + TODO rather
+    // than a hard Violated (spec point 4 override), so consumption is wired
+    // without rejecting every `prove` block.
+    for pb in &input.prove_blocks {
+        s.prove_blocks_checked += 1;
+        for clause in &pb.requirements {
+            if clause.trivially_true {
+                s.prove_reqs_discharged += 1;
+            } else {
+                s.prove_reqs_deferred += 1;
+                vuma_log!(
+                    warn,
+                    "[F2] IVE could not discharge prove-block requirement at {}: `{}` — \
+                     deferred (TODO: wire SMT/symbolic discharge backend; a non-trivial \
+                     `require` the IVE cannot prove should become a hard Violated). \
+                     Prove-block consumption is wired.",
+                    pb.location,
+                    clause.source
+                );
+            }
+        }
+    }
+
+    s
 }
 
 impl Default for VerificationEngine {
@@ -2970,6 +3228,148 @@ mod tests {
             result.message.contains("field-list cross-check failed"),
             "violation message should mention the field-list cross-check, \
              got: {}",
+            result.message,
+        );
+    }
+
+    // ── Follow-up F2: contract & prove-block discharge unit tests ──
+    //
+    // These tests pin the CONSUMPTION wiring: the IVE reads
+    // `requires`/`ensures` contracts and `prove`-block obligations attached
+    // to `VerificationInput`, discharges trivially-true clauses, and defers
+    // non-trivial clauses to a WARNING (NOT a hard `Violated`). Full
+    // hard-gate discharge is the NEEDS_FOLLOWUP item.
+
+    /// `discharge_contracts_and_prove_blocks` discharges trivially-true
+    /// clauses and defers non-trivial ones, tallying both.
+    #[test]
+    fn f2_discharge_pass_counts_trivial_and_nontrivial_clauses() {
+        let input = VerificationInput::from_scg(SCG::new())
+            .with_contracts(vec![
+                FnContract {
+                    fn_name: "trivial_transform".to_string(),
+                    requires: vec![ContractClause {
+                        source: "true".to_string(),
+                        trivially_true: true,
+                    }],
+                    ensures: vec![
+                        ContractClause {
+                            source: "true".to_string(),
+                            trivially_true: true,
+                        },
+                        ContractClause {
+                            source: "result > 0".to_string(),
+                            trivially_true: false,
+                        },
+                    ],
+                },
+                FnContract {
+                    fn_name: "nontrivial".to_string(),
+                    requires: vec![ContractClause {
+                        source: "x != 0".to_string(),
+                        trivially_true: false,
+                    }],
+                    ensures: vec![],
+                },
+            ])
+            .with_prove_blocks(vec![ProveBlockObligation {
+                location: "f".to_string(),
+                requirements: vec![
+                    ContractClause {
+                        source: "true".to_string(),
+                        trivially_true: true,
+                    },
+                    ContractClause {
+                        source: "ptr != null".to_string(),
+                        trivially_true: false,
+                    },
+                ],
+            }]);
+        let s = discharge_contracts_and_prove_blocks(&input);
+        assert_eq!(s.contracts_checked, 2);
+        assert_eq!(s.clauses_discharged, 2, "two trivially-true clauses");
+        assert_eq!(s.clauses_deferred, 2, "two non-trivial clauses deferred");
+        assert_eq!(s.prove_blocks_checked, 1);
+        assert_eq!(s.prove_reqs_discharged, 1);
+        assert_eq!(s.prove_reqs_deferred, 1);
+        // The summary string is non-empty when contracts/prove-blocks exist.
+        assert!(
+            s.describe().contains("contracts: 2 checked"),
+            "summary should report 2 contracts, got: {}",
+            s.describe()
+        );
+    }
+
+    /// An empty `VerificationInput` (no contracts, no prove blocks) yields an
+    /// empty discharge summary, so the `verify_pmt` description is unchanged
+    /// for existing programs.
+    #[test]
+    fn f2_discharge_pass_empty_input_yields_empty_summary() {
+        let input = VerificationInput::from_scg(SCG::new());
+        let s = discharge_contracts_and_prove_blocks(&input);
+        assert_eq!(s.contracts_checked, 0);
+        assert_eq!(s.prove_blocks_checked, 0);
+        assert!(s.describe().is_empty());
+    }
+
+    /// `verify_pmt` with attached contracts stays `Proven` (empty SCG ⇒ no
+    /// state ops) and appends the contract summary to the description — the
+    /// non-trivial clauses are deferred via WARNING, NOT a hard `Violated`.
+    #[test]
+    fn f2_verify_pmt_with_contracts_defers_nontrivial_as_warning_not_violation() {
+        let input = VerificationInput::from_scg(SCG::new()).with_contracts(vec![FnContract {
+            fn_name: "t".to_string(),
+            requires: vec![ContractClause {
+                source: "x > 0".to_string(),
+                trivially_true: false,
+            }],
+            ensures: vec![],
+        }]);
+        let engine = VerificationEngine::new();
+        let result = engine.verify_pmt(&input);
+        // Non-trivial contract clauses must NOT flip the verdict to Violated
+        // (consumption wired; hard-gate discharge is the NEEDS_FOLLOWUP item).
+        assert!(
+            matches!(result.status, VerificationStatus::Proven),
+            "verify_pmt must stay Proven when only contract clauses are deferred, got: {:?}",
+            result.status,
+        );
+        // The description must surface the contract consumption summary.
+        assert!(
+            result.message.contains("contracts: 1 checked"),
+            "description should mention the 1 checked contract, got: {}",
+            result.message,
+        );
+        assert!(
+            result.message.contains("1 deferred"),
+            "description should mention the 1 deferred clause, got: {}",
+            result.message,
+        );
+    }
+
+    /// `verify_pmt` consumes `prove`-block obligations the same way:
+    /// deferred `require` clauses are a WARNING, not a hard `Violated`.
+    #[test]
+    fn f2_verify_pmt_with_prove_block_defers_nontrivial_require() {
+        let input = VerificationInput::from_scg(SCG::new()).with_prove_blocks(vec![
+            ProveBlockObligation {
+                location: "g".to_string(),
+                requirements: vec![ContractClause {
+                    source: "ptr != null".to_string(),
+                    trivially_true: false,
+                }],
+            },
+        ]);
+        let engine = VerificationEngine::new();
+        let result = engine.verify_pmt(&input);
+        assert!(
+            matches!(result.status, VerificationStatus::Proven),
+            "deferred prove-block requirements must not Violate, got: {:?}",
+            result.status,
+        );
+        assert!(
+            result.message.contains("prove-blocks: 1 checked"),
+            "description should mention the 1 checked prove-block, got: {}",
             result.message,
         );
     }
