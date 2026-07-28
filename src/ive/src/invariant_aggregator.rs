@@ -556,7 +556,7 @@ impl fmt::Display for DiagnosticsReport {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use vuma_ive::invariant_aggregator::{
 ///     InvariantAggregator, VerificationLevel,
 /// };

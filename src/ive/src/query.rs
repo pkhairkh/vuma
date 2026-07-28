@@ -13,8 +13,9 @@
 //! 4. On invalidation, only recompute affected queries.
 
 use std::collections::{HashMap, HashSet};
-use vuma_scg::graph::SCG;
-use vuma_scg::node::{NodeId, NodePayload};
+use vuma_codegen::scg_to_ir::Scg;
+use vuma_scg::edge::EdgeKind;
+use vuma_scg::node::{NodeId, NodePayload, NodeType};
 
 /// A cached query result.
 #[derive(Debug, Clone)]
@@ -51,7 +52,7 @@ impl QuerySystem {
 
     /// Query the safety of a node.
     /// Returns a cached result if available, otherwise computes it.
-    pub fn query(&mut self, node_id: NodeId, scg: &SCG) -> &QueryResult {
+    pub fn query(&mut self, node_id: NodeId, scg: &Scg) -> &QueryResult {
         if !self.cache.contains_key(&node_id) {
             let result = self.compute(node_id, scg);
             self.cache.insert(node_id, result);
@@ -60,14 +61,14 @@ impl QuerySystem {
     }
 
     /// Compute the BD for a node by examining its predecessors.
-    fn compute(&mut self, node_id: NodeId, scg: &SCG) -> QueryResult {
+    fn compute(&mut self, node_id: NodeId, scg: &Scg) -> QueryResult {
         let mut deps = HashSet::new();
         let mut safe = true;
         let mut summary = String::new();
 
-        // Get the node's data
-        if let Some(node) = scg.get_node(node_id) {
-            match &node.payload {
+        // Get the node's payload via the codegen adapter (Task 6-A).
+        if let Some(payload) = scg.node_payload(node_id) {
+            match &payload {
                 NodePayload::Allocation(alloc) => {
                     summary = format!(
                         "Allocation(region={:?}, size={})",
@@ -100,7 +101,8 @@ impl QuerySystem {
                     safe = true;
                 }
                 _ => {
-                    summary = format!("Node({:?})", node.node_type);
+                    let nt = scg.node_type(node_id).unwrap_or(NodeType::Control);
+                    summary = format!("Node({:?})", nt);
                     safe = true;
                 }
             }
@@ -126,7 +128,7 @@ impl QuerySystem {
     }
 
     /// Check if an allocation is eventually freed.
-    fn check_freed(&self, alloc_node: NodeId, scg: &SCG, deps: &mut HashSet<NodeId>) -> bool {
+    fn check_freed(&self, alloc_node: NodeId, scg: &Scg, deps: &mut HashSet<NodeId>) -> bool {
         // BFS from the allocation node to find a Deallocation
         let mut visited = HashSet::new();
         let mut queue = vec![alloc_node];
@@ -136,14 +138,14 @@ impl QuerySystem {
             }
             visited.insert(node);
             deps.insert(node);
-            if let Some(data) = scg.get_node(node) {
-                if let NodePayload::Deallocation(_) = &data.payload {
+            if let Some(payload) = scg.node_payload(node) {
+                if let NodePayload::Deallocation(_) = &payload {
                     return true;
                 }
             }
             // Follow ControlFlow edges
             for edge in scg.edges() {
-                if edge.source == node {
+                if edge.source == node && edge.kind == EdgeKind::ControlFlow {
                     queue.push(edge.target);
                 }
             }
@@ -180,8 +182,8 @@ impl QuerySystem {
     }
 
     /// Check if all queries are cached (no computation needed).
-    pub fn is_fully_cached(&self, scg: &SCG) -> bool {
-        scg.nodes().all(|n| self.cache.contains_key(&n.id))
+    pub fn is_fully_cached(&self, scg: &Scg) -> bool {
+        scg.node_index.keys().all(|n| self.cache.contains_key(n))
     }
 }
 

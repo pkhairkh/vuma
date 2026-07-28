@@ -1234,8 +1234,12 @@ fn run_frontend(source: &str, config: &CompileConfig) -> FrontendResult {
     let _validation = scg.validate();
 
     // Stage 4: BD Inference (refine types)
-    let inference_engine = vuma_ive::InferenceEngine::new();
-    let bd_results = inference_engine.infer_types(&scg);
+    // NOTE: IVE's InferenceEngine now expects a codegen Scg (Task 6-E);
+    // since we hold a semantic SCG here, call the BD engine directly
+    // (it is hard-typed to &SCG). The NodeIds correspond 1:1.
+    let bd_engine = vuma_bd::inference::BDInferenceEngine::new();
+    let bd_results: Vec<(vuma_scg::NodeId, vuma_bd::BD)> =
+        bd_engine.infer(&scg).bd_map.into_iter().collect();
     pipeline::refine_scg_types_with_bd(&mut scg, &bd_results);
 
     // (VUMA 2.0 PMT-only) Build the PMT layout registry from the AST's

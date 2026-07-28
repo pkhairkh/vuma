@@ -69,7 +69,8 @@ use vuma_scg::{
     AllocationNode, CastNode, ChannelCloseNode, ChannelOpenNode, ChannelRecvNode, ChannelSendNode,
     ClosureEnvNode, ComputationNode, ControlKind, ControlNode, DeallocationNode, DeploymentTarget,
     EdgeKind, EffectNode, NodeId, NodePayload, NodeType, PhantomNode, ProgramPoint, RegionId,
-    SCGRegion, SyscallNode, VTableNode, SCG,
+    SCGRegion, StateInitNode, StateReadNode, StateWriteNode, SyscallNode,
+    VTableNode, SCG,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,6 +112,11 @@ pub struct AstToScg {
     /// was bound by `let p = state_new(Layout)` or annotated `: State<L>`,
     /// or is a `State<L>` function parameter.
     var_types: Vec<HashMap<String, String>>,
+    /// PMT: virtual-register counter for StateInit result vregs.
+    next_vreg: u32,
+    /// PMT: variable -> vreg scopes, parallel to `var_types`. A vreg is
+    /// assigned when a state-typed var is bound by `state_new(Layout)`.
+    var_vregs: Vec<HashMap<String, u32>>,
 }
 
 impl AstToScg {
@@ -126,6 +132,8 @@ impl AstToScg {
             struct_table: HashMap::new(),
             layouts: HashMap::new(),
             var_types: vec![HashMap::new()],
+            next_vreg: 0,
+            var_vregs: vec![HashMap::new()],
         }
     }
 
@@ -287,6 +295,30 @@ impl AstToScg {
         None
     }
 
+    /// PMT: allocate a fresh virtual register id for StateInit results.
+    fn alloc_vreg(&mut self) -> u32 {
+        let v = self.next_vreg;
+        self.next_vreg += 1;
+        v
+    }
+
+    /// PMT: define a variable's vreg in the current (innermost) scope.
+    fn define_var_vreg(&mut self, name: &str, vreg: u32) {
+        if let Some(scope) = self.var_vregs.last_mut() {
+            scope.insert(name.to_string(), vreg);
+        }
+    }
+
+    /// PMT: look up a variable's vreg by walking scopes from innermost out.
+    fn lookup_var_vreg(&self, name: &str) -> Option<u32> {
+        for scope in self.var_vregs.iter().rev() {
+            if let Some(vreg) = scope.get(name) {
+                return Some(*vreg);
+            }
+        }
+        None
+    }
+
     // -- PMT: state field read/write lowering ----------------------
 
     /// Walk an `AssignTarget` and detect whether it's a state-typed field
@@ -397,6 +429,38 @@ impl AstToScg {
                             // (position 0 = the buffer pointer for the Load).
                             if let Some(state_node) = self.lookup_var(&var_name) {
                                 let _ = scg.add_edge(state_node, access_id, EdgeKind::DataFlow);
+                            }
+
+                            // PMT (Task 2-B): ALSO emit a StateReadNode
+                            // ALONGSIDE the AccessNode{Read}. The
+                            // AccessNode stays for offset-based reasoning /
+                            // backward-compat; the StateReadNode carries the
+                            // vreg-based typed-state view (state_vreg +
+                            // layout_name + field_name + result_vreg) that
+                            // downstream codegen / IVE consumes. Only emitted
+                            // when the var is state-typed (lookup_var_vreg
+                            // returns Some AND lookup_var_type returns Some —
+                            // both already established by the enclosing guards).
+                            if let Some(state_vreg) = self.lookup_var_vreg(&var_name) {
+                                let field_name = chain.last().cloned().unwrap_or_default();
+                                let result_vreg = self.alloc_vreg();
+                                let state_read_id = scg.add_node(
+                                    NodeType::StateRead,
+                                    NodePayload::StateRead(StateReadNode {
+                                        state_vreg,
+                                        layout_name: layout_name.clone(),
+                                        field_name,
+                                        result_vreg,
+                                    }),
+                                    ProgramPoint {
+                                        file: None,
+                                        line: None,
+                                        column: None,
+                                        offset: None,
+                                    },
+                                );
+                                region.add_node(state_read_id);
+                                let _ = scg.add_edge(access_id, state_read_id, EdgeKind::Derivation);
                             }
 
                             // Register a temp var "v_<access_id>" pointing to
@@ -1053,6 +1117,27 @@ impl AstToScg {
                     // Register the var as state-typed so state.field accesses
                     // on it lower to Loads with the layout's field offsets.
                     self.define_var_type(&l.name, layout_name);
+
+                    // PMT (Task 2-A): ALSO emit a StateInitNode ALONGSIDE
+                    // the AllocationNode. The AllocationNode remains for
+                    // buffer-sizing/backward-compat with existing tests; the
+                    // StateInitNode carries the vreg-based typed-state view
+                    // that downstream codegen consumes (result_vreg is
+                    // tracked in `var_vregs` so state.field accesses can
+                    // resolve the producing vreg).
+                    let result_vreg = self.alloc_vreg();
+                    let state_init_id = scg.add_node(
+                        NodeType::StateInit,
+                        NodePayload::StateInit(StateInitNode {
+                            layout_name: layout_name.clone(),
+                            result_vreg,
+                        }),
+                        self.span_to_pp(&l.span),
+                    );
+                    region.add_node(state_init_id);
+                    let _ = scg.add_edge(id, state_init_id, EdgeKind::Derivation);
+                    let _ = scg.add_edge(alloc_id, state_init_id, EdgeKind::Derivation);
+                    self.define_var_vreg(&l.name, result_vreg);
                 }
 
                 // PMT: if the let-binding has a `State<L>` type
@@ -1161,6 +1246,33 @@ impl AstToScg {
                             // expr and add DataFlow edges from each source var
                             // (the first one becomes position 1).
                             self.add_data_flow_edges(&value_rewritten, access_id, scg);
+
+                            // PMT (Task 2-B): ALSO emit a StateWriteNode
+                            // ALONGSIDE the AccessNode{Write}. Mirrors the
+                            // StateReadNode emission for field reads: the
+                            // AccessNode stays for offset-based reasoning;
+                            // the StateWriteNode carries the typed-state view
+                            // (state_vreg + layout_name + field_name +
+                            // value_vreg). Only emitted when the var is
+                            // state-typed (lookup_var_vreg returns Some AND
+                            // lookup_var_type returns Some — both already
+                            // established by the enclosing guards).
+                            if let Some(state_vreg) = self.lookup_var_vreg(state_var) {
+                                let field_name = field_chain.last().cloned().unwrap_or_default();
+                                let value_vreg = self.alloc_vreg();
+                                let state_write_id = scg.add_node(
+                                    NodeType::StateWrite,
+                                    NodePayload::StateWrite(StateWriteNode {
+                                        state_vreg,
+                                        layout_name: layout_name.clone(),
+                                        field_name,
+                                        value_vreg,
+                                    }),
+                                    self.span_to_pp(&a.span),
+                                );
+                                region.add_node(state_write_id);
+                                let _ = scg.add_edge(access_id, state_write_id, EdgeKind::Derivation);
+                            }
                         }
                     }
                 } else {
@@ -3219,11 +3331,13 @@ impl AstToScg {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.var_types.push(HashMap::new());
+        self.var_vregs.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.var_types.pop();
+        self.var_vregs.pop();
     }
 
     fn define_var(&mut self, name: &str, node_id: NodeId) {

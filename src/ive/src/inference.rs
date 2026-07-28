@@ -8,9 +8,10 @@
 //!
 //! This module is wired to the real BD inference engine from `vuma-bd`:
 //!
-//! 1. [`InferenceEngine`] accepts a `vuma_scg::SCG` and delegates to
-//!    [`vuma_bd::inference::BDInferenceEngine`] for the 3-phase BD inference
-//!    algorithm (propagation, constraint solving, context refinement).
+//! 1. [`InferenceEngine`] accepts a `vuma_codegen::scg_to_ir::Scg` and
+//!    delegates to [`vuma_bd::inference::BDInferenceEngine`] (via
+//!    [`Scg::to_semantic_scg`]) for the 3-phase BD inference algorithm
+//!    (propagation, constraint solving, context refinement).
 //! 2. Constraint derivation converts SCG edge structure into IVE-level
 //!    constraints (temporal, resource flow, security, complexity, liveness).
 //! 3. The `infer_types` method returns fully inferred `(NodeId, BD)` pairs
@@ -27,8 +28,8 @@ use vuma_bd::inference::{
     BDInferenceEngine as BdEngineInner, InferenceResult as BdInferenceResult,
 };
 use vuma_scg::edge::EdgeKind;
-use vuma_scg::graph::SCG;
-use vuma_scg::node::{NodeId, NodePayload, NodeType};
+use vuma_codegen::scg_to_ir::Scg;
+use vuma_scg::node::{NodeData, NodeId, NodePayload, NodeType};
 
 // ---------------------------------------------------------------------------
 // InferenceError
@@ -229,7 +230,7 @@ impl InferenceEngine {
     /// 1. Runs the 3-phase BD inference algorithm
     /// 2. Derives IVE-level constraints from the SCG structure
     /// 3. Returns both BDs and constraints in a unified result
-    pub fn infer(&self, scg: &SCG) -> InferenceResult {
+    pub fn infer(&self, scg: &Scg) -> InferenceResult {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
 
@@ -289,9 +290,9 @@ impl InferenceEngine {
     ///
     /// Runs full inference and extracts the BD for the requested node.
     /// For batch inference, prefer [`infer`] which avoids redundant work.
-    pub fn infer_bd(&self, scg: &SCG, node_id: NodeId) -> Result<BD, InferenceError> {
+    pub fn infer_bd(&self, scg: &Scg, node_id: NodeId) -> Result<BD, InferenceError> {
         // Verify node exists
-        if scg.get_node(node_id).is_none() {
+        if scg.node_payload(node_id).is_none() {
             return Err(InferenceError::NodeNotFound { node_id });
         }
 
@@ -317,7 +318,7 @@ impl InferenceEngine {
     /// - **Security**: information-flow constraints from security annotations.
     /// - **Complexity**: complexity bounds from loop/recursion structure.
     /// - **Liveness**: progress guarantees from the graph topology.
-    pub fn infer_constraints(&self, scg: &SCG) -> Vec<Constraint> {
+    pub fn infer_constraints(&self, scg: &Scg) -> Vec<Constraint> {
         let bd_map = match self.run_bd_inference(scg) {
             Ok(result) => result.bd_map,
             Err(_) => HashMap::new(),
@@ -329,7 +330,7 @@ impl InferenceEngine {
     ///
     /// Returns a vector of (NodeId, BD) pairs representing the inferred
     /// behavioral description for each node.
-    pub fn infer_types(&self, scg: &SCG) -> Vec<(NodeId, BD)> {
+    pub fn infer_types(&self, scg: &Scg) -> Vec<(NodeId, BD)> {
         match self.run_bd_inference(scg) {
             Ok(result) => result.bd_map.into_iter().collect(),
             Err(_) => Vec::new(),
@@ -343,7 +344,7 @@ impl InferenceEngine {
     /// Run the 3-phase BD inference algorithm via vuma-bd.
     fn run_bd_inference(
         &self,
-        scg: &SCG,
+        scg: &Scg,
     ) -> Result<BdInferenceResult, vuma_bd::inference::InferenceError> {
         let engine = BdEngineInner::new().with_max_iterations(self.max_iterations);
 
@@ -355,7 +356,7 @@ impl InferenceEngine {
             );
         }
 
-        let result = engine.infer(scg);
+        let result = engine.infer(&scg.to_semantic_scg());
 
         if self.verbose {
             vuma_log!(
@@ -372,23 +373,32 @@ impl InferenceEngine {
     }
 
     /// Derive IVE-level constraints from the SCG structure and inferred BDs.
-    fn derive_constraints(&self, scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<Constraint> {
+    fn derive_constraints(&self, scg: &Scg, bd_map: &HashMap<NodeId, BD>) -> Vec<Constraint> {
         let mut constraints = Vec::new();
+
+        // Collect all semantic NodeData via the 6-A adapters (single walk of
+        // node_index; reused for complexity + liveness derivation below).
+        let all_nodes: Vec<NodeData> = scg
+            .node_index
+            .keys()
+            .copied()
+            .filter_map(|id| scg.node_data(id))
+            .collect();
 
         // Derive constraints from edges
         for edge in scg.edges() {
             match edge.kind {
                 EdgeKind::DataFlow => {
                     // Data flow imposes resource flow constraints
-                    let src = scg.get_node(edge.source);
-                    let dst = scg.get_node(edge.target);
+                    let src = scg.node_type(edge.source);
+                    let dst = scg.node_type(edge.target);
                     let desc = match (src, dst) {
                         (Some(s), Some(d)) => format!(
                             "data flows from {:?}({}) to {:?}({})",
-                            s.node_type,
-                            s.id.as_u64(),
-                            d.node_type,
-                            d.id.as_u64()
+                            s,
+                            edge.source.as_u64(),
+                            d,
+                            edge.target.as_u64()
                         ),
                         _ => format!(
                             "data flow: {} -> {}",
@@ -474,15 +484,15 @@ impl InferenceEngine {
                 EdgeKind::SyscallArg => {
                     // Syscall-arg edges impose data-flow-like constraints:
                     // the argument value must be valid before the syscall.
-                    let src = scg.get_node(edge.source);
-                    let dst = scg.get_node(edge.target);
+                    let src = scg.node_type(edge.source);
+                    let dst = scg.node_type(edge.target);
                     let desc = match (src, dst) {
                         (Some(s), Some(d)) => format!(
                             "syscall-arg flows from {:?}({}) to {:?}({})",
-                            s.node_type,
-                            s.id.as_u64(),
-                            d.node_type,
-                            d.id.as_u64()
+                            s,
+                            edge.source.as_u64(),
+                            d,
+                            edge.target.as_u64()
                         ),
                         _ => format!(
                             "syscall-arg flows from {} to {}",
@@ -498,7 +508,7 @@ impl InferenceEngine {
         }
 
         // Derive complexity constraints from loops
-        for node in scg.nodes() {
+        for node in &all_nodes {
             if let NodeType::Control = node.node_type {
                 if let NodePayload::Control(ctrl) = &node.payload {
                     if ctrl.kind == vuma_scg::node::ControlKind::LoopHeader {
@@ -515,20 +525,20 @@ impl InferenceEngine {
         }
 
         // Derive liveness constraints from allocation/deallocation patterns
-        let allocation_nodes: Vec<_> = scg
-            .nodes()
+        let allocation_count = all_nodes
+            .iter()
             .filter(|n| matches!(n.node_type, NodeType::Allocation))
-            .collect();
-        let deallocation_nodes: Vec<_> = scg
-            .nodes()
+            .count();
+        let deallocation_count = all_nodes
+            .iter()
             .filter(|n| matches!(n.node_type, NodeType::Deallocation))
-            .collect();
+            .count();
 
-        if allocation_nodes.len() > deallocation_nodes.len() {
+        if allocation_count > deallocation_count {
             let desc = format!(
                 "liveness: {} allocations but only {} deallocations — potential leaks",
-                allocation_nodes.len(),
-                deallocation_nodes.len()
+                allocation_count,
+                deallocation_count
             );
             constraints.push(Constraint::Liveness(LivenessConstraint {
                 description: desc,
@@ -604,7 +614,7 @@ mod tests {
     #[test]
     fn infer_on_empty_scg() {
         let engine = InferenceEngine::new();
-        let scg = SCG::new();
+        let scg = Scg::new(vec![]);
         let result = engine.infer(&scg);
         // Empty SCG should produce empty BDs and no errors
         assert!(result.bd_map.is_empty());
@@ -620,7 +630,7 @@ mod tests {
     #[test]
     fn infer_constraints_on_empty_scg() {
         let engine = InferenceEngine::new();
-        let scg = SCG::new();
+        let scg = Scg::new(vec![]);
         let constraints = engine.infer_constraints(&scg);
         assert!(constraints.is_empty());
     }
@@ -628,7 +638,7 @@ mod tests {
     #[test]
     fn infer_types_on_empty_scg() {
         let engine = InferenceEngine::new();
-        let scg = SCG::new();
+        let scg = Scg::new(vec![]);
         let types = engine.infer_types(&scg);
         assert!(types.is_empty());
     }
@@ -636,7 +646,7 @@ mod tests {
     #[test]
     fn infer_bd_node_not_found() {
         let engine = InferenceEngine::new();
-        let scg = SCG::new();
+        let scg = Scg::new(vec![]);
         let result = engine.infer_bd(&scg, NodeId::new(999));
         assert!(matches!(result, Err(InferenceError::NodeNotFound { .. })));
     }
