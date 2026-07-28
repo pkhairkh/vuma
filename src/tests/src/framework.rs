@@ -641,11 +641,23 @@ pub fn build_scg_from_source(source: &str) -> Result<SCG, Vec<ParseError>> {
 /// println!("Verdict: {}", result.overall);
 /// ```
 pub fn verify_program(source: &str) -> AggregatedResult {
+    // Parse source -> AST (needed for pmt_layouts).
+    let mut parser = Parser::new(source);
+    let parse_result = parser.parse_program();
+
     // Build the vuma_scg::SCG (silently treating parse errors as empty programs).
     let scg = build_scg_from_source(source).unwrap_or_default();
 
-    // Build verification input from the SCG.
-    let input = VerificationInput::from_scg(scg);
+    // Build pmt_layouts from the AST (needed for the field-list cross-check
+    // now that AstToScg emits typed-state StateRead/StateWrite nodes).
+    let pmt_layouts = if parse_result.has_errors() {
+        HashMap::new()
+    } else {
+        vuma::pipeline::build_pmt_layout_specs(&parse_result.unwrap())
+    };
+
+    // Build verification input from the SCG + pmt_layouts.
+    let input = VerificationInput::from_scg(scg).with_pmt_layouts(pmt_layouts);
 
     // Run all five invariant checks at Normal level.
     let aggregator = InvariantAggregator::new();
@@ -666,8 +678,15 @@ pub fn verify_program(source: &str) -> AggregatedResult {
 /// assert_eq!(result.per_invariant.len(), 1); // PMT runs a single state check
 /// ```
 pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> AggregatedResult {
+    let mut parser = Parser::new(source);
+    let parse_result = parser.parse_program();
     let scg = build_scg_from_source(source).unwrap_or_default();
-    let input = VerificationInput::from_scg(scg);
+    let pmt_layouts = if parse_result.has_errors() {
+        HashMap::new()
+    } else {
+        vuma::pipeline::build_pmt_layout_specs(&parse_result.unwrap())
+    };
+    let input = VerificationInput::from_scg(scg).with_pmt_layouts(pmt_layouts);
 
     let aggregator = InvariantAggregator::new().with_level(level);
     aggregator.verify_all(&input)
