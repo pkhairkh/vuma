@@ -148,9 +148,9 @@ fn wave9_production_compile_uses_parallel_regalloc() {
     use vuma::pipeline::{compile, CompileConfig, OptLevel};
 
     let source = r#"
-        fn add(a, b) -> i64 { return a + b; }
-        fn mul(a, b) -> i64 { return a * b; }
-        fn main() -> i64 {
+        transform add(a, b) -> i64 { return a + b; }
+        transform mul(a, b) -> i64 { return a * b; }
+        transform main() -> i64 {
             x = add(3, 4);
             y = mul(x, 2);
             return y;

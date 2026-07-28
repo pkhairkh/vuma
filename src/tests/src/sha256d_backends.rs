@@ -1289,13 +1289,13 @@ fn test_fp_conversion_vuma_source_parses() {
     // Test that a VUMA source program with float-related type annotations
     // can be parsed successfully.
     let source = r#"
-        fn convert_int_to_float(x: i64) -> i64 {
+        transform convert_int_to_float(x: i64) -> i64 {
             y: i64 = x * 2;
             z: i64 = y + 1;
             return z;
         }
 
-        fn main() -> i64 {
+        transform main() -> i64 {
             result: i64 = convert_int_to_float(42);
             return result;
         }

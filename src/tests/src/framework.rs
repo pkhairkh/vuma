@@ -2105,7 +2105,7 @@ mod tests {
     #[test]
     fn test_build_scg_from_function_source() {
         let source = r#"
-            fn add(a: u32, b: u32) -> u32 {
+            transform add(a: u32, b: u32) -> u32 {
                 return a;
             }
         "#;

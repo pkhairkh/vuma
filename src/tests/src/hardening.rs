@@ -1327,7 +1327,7 @@ fn test_wave50_uaf_pipeline_compiles_when_alloc_elided() {
     // field have both been removed — there is no opt-out.
     let uaf_source = r#"
         layout Cell = { v: i32 }
-        fn main() -> i32 {
+        transform main() -> i32 {
             let buf = state_new(Cell);
             buf.v = 42;
             val = buf.v;
@@ -1656,9 +1656,9 @@ fn test_wave50_cross_backend_opt_regression() {
 ///   - `full_lexer.vuma` (the entry point, 805 lines) declares `extern`
 ///     calls to `parse`, `irb_build_main`, `codegen_emit`, `write_elf64`
 ///     (the cross-module entry points living in the four sibling files).
-///   - `full_parser.vuma` defines `fn parse(tokens, token_count, src, ast,
+///   - `full_parser.vuma` defines `transform parse(tokens, token_count, src, ast,
 ///     ast_cap) -> u32`.
-///   - `ir_builder.vuma` defines `fn irb_build_main(...)`, plus the real
+///   - `ir_builder.vuma` defines `transform irb_build_main(...)`, plus the real
 ///     SCG/BD/IVE implementations: `fn scg_construct(ast)`,
 ///     `fn bd_infer(ir_buf)`, `fn ive_verify(ir_buf)`.
 ///   - `codegen.vuma` defines `fn codegen_emit(...)`.
@@ -1803,11 +1803,11 @@ fn test_wave50_bootstrap_milestone() {
     //
     //   full_lexer.vuma (entry)
     //     └─ extern calls to: parse, irb_build_main, codegen_emit, write_elf64
-    //   full_parser.vuma   → defines `fn parse`
-    //   ir_builder.vuma    → defines `fn irb_build_main`, `fn scg_construct`,
-    //                        `fn bd_infer`, `fn ive_verify`  (real impls)
-    //   codegen.vuma       → defines `fn codegen_emit`
-    //   elf.vuma           → defines `fn write_elf64`
+    //   full_parser.vuma   → defines `transform parse`
+    //   ir_builder.vuma    → defines `transform irb_build_main`, `transform scg_construct`,
+    //                        `transform bd_infer`, `transform ive_verify`  (real impls)
+    //   codegen.vuma       → defines `transform codegen_emit`
+    //   elf.vuma           → defines `transform write_elf64`
     //
     // Each `fn ...` definition uses the VUMA `fn <name>(<args>) -> <ty> {`
     // surface syntax, so we can scan the source for the substring
@@ -1846,12 +1846,12 @@ fn test_wave50_bootstrap_milestone() {
     // inside comments or unrelated identifiers.
     assert!(
         full_parser_src.contains("transform parse("),
-        "wave50 bootstrap milestone (sub-check B): full_parser.vuma does not define `fn parse(`"
+        "wave50 bootstrap milestone (sub-check B): full_parser.vuma does not define `transform parse(`"
     );
     assert!(
         ir_builder_src.contains("transform irb_build_main("),
         "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
-         `fn irb_build_main(`"
+         `transform irb_build_main(`"
     );
     assert!(
         ir_builder_src.contains("transform scg_construct("),

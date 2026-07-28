@@ -4357,7 +4357,7 @@ mod tests {
     fn test_compile_simple_allocation() {
         let source = r#"
             layout Point = { x: u32, y: u32 }
-            fn main() -> i32 {
+            transform main() -> i32 {
                 return 0;
             }
         "#;
@@ -4394,7 +4394,7 @@ mod tests {
     #[test]
     fn test_compile_no_optimisation() {
         let source = r#"
-            fn main() {
+            transform main() {
             }
         "#;
         let config = CompileConfig {
@@ -4420,10 +4420,10 @@ mod tests {
     fn test_compile_aggressive_optimisation() {
         let source = r#"
             layout Point = { x: u32, y: u32 }
-            fn process() -> i32 {
+            transform process() -> i32 {
                 return 42;
             }
-            fn main() -> i32 {
+            transform main() -> i32 {
                 return process();
             }
         "#;
@@ -4445,7 +4445,7 @@ mod tests {
     #[test]
     fn test_compile_verification_always_runs() {
         let source = r#"
-            fn main() {
+            transform main() {
             }
         "#;
         let config = CompileConfig::default(); // verification_level: Normal
@@ -4462,7 +4462,7 @@ mod tests {
     #[test]
     fn test_compile_quick_verification() {
         let source = r#"
-            fn main() {
+            transform main() {
             }
         "#;
         let config = CompileConfig {
@@ -4488,7 +4488,7 @@ mod tests {
     #[test]
     fn test_compile_with_debug_info() {
         let source = r#"
-            fn main() {
+            transform main() {
             }
         "#;
         let config = CompileConfig {
@@ -4524,7 +4524,7 @@ mod tests {
     #[test]
     fn test_incremental_compilation() {
         let source = r#"
-            fn main() {
+            transform main() {
             }
         "#;
         let config = CompileConfig::default();
@@ -4897,7 +4897,7 @@ mod tests {
         // is structurally impossible in PMT — states are linear, and the
         // IVE linearity checker enforces use-after-consume at compile time.
         let source = r#"
-            fn main() -> i32 {
+            transform main() -> i32 {
                 x = 42;
                 return x;
             }
@@ -4922,7 +4922,7 @@ mod tests {
         // to verify the memory-safety pass doesn't false-positive on
         // well-behaved code.
         let source = r#"
-            fn main() -> i32 {
+            transform main() -> i32 {
                 x = 42;
                 return x;
             }
@@ -4990,13 +4990,13 @@ mod tests {
     #[test]
     fn test_wave10e_match_ident_binding_compiles() {
         let source = r#"
-            fn passthrough(n: i64) -> i64 {
+            transform passthrough(n: i64) -> i64 {
                 match n {
                     0 => 0,
                     x => x,
                 }
             }
-            fn main() -> i32 {
+            transform main() -> i32 {
                 return 0;
             }
         "#;
@@ -5015,14 +5015,14 @@ mod tests {
     #[test]
     fn test_wave10e_match_enum_binding_compiles() {
         let source = r#"
-            fn extract(n: i64) -> i64 {
+            transform extract(n: i64) -> i64 {
                 match n {
                     0 => 0,
                     Some(v) => v,
                     _ => 99,
                 }
             }
-            fn main() -> i32 {
+            transform main() -> i32 {
                 return 0;
             }
         "#;
@@ -5041,7 +5041,7 @@ mod tests {
     #[test]
     fn test_wave10e_sync_block_compiles() {
         let source = r#"
-            fn main() -> i32 {
+            transform main() -> i32 {
                 x = 42;
                 sync {
                     x = x + 1;
@@ -5064,7 +5064,7 @@ mod tests {
     #[test]
     fn test_populate_codegen_edges_basic() {
         let source = r#"
-            fn add(x: i64, y: i64) -> i64 {
+            transform add(x: i64, y: i64) -> i64 {
                 let sum = x + y;
                 return sum;
             }

@@ -110,7 +110,7 @@ fn has_linear_error_containing(errors: &[VumaError], needle: &str) -> bool {
 fn wave3_open_then_close_compiles() {
     // The simplest valid linear lifecycle: open → close.
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             channel_close(ch);
             return 0;
@@ -129,7 +129,7 @@ fn wave3_open_use_close_compiles() {
     // open → send → recv → close (the canonical valid lifecycle).
     // Uses spawn_worker so both parent and child close their own handle.
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             pid = spawn_worker();
             if pid == 0 {
@@ -158,7 +158,7 @@ fn wave3_close_in_each_if_branch_compiles() {
     // canonical pattern that a flow-insensitive checker would false-
     // positive on; the path-sensitive check correctly accepts it.
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             flag = 1;
             if flag == 1 {
@@ -196,7 +196,7 @@ fn wave3_leak_open_without_close_fails() {
     // leak.  This is the canonical violation pattern: a channel that's
     // opened but never closed should fail to compile.
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             return 0;
         }
@@ -218,7 +218,7 @@ fn wave3_use_after_close_fails() {
     // closed.  This is a linear-discipline violation (the handle was
     // consumed by `channel_close`).
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             channel_close(ch);
             x = channel_recv(ch);
@@ -241,7 +241,7 @@ fn wave3_double_close_in_straight_line_fails() {
     // DOUBLE-CLOSE: `channel_close` on a handle that is already closed
     // (in straight-line code — no branches between the two closes).
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             channel_close(ch);
             channel_close(ch);
@@ -268,7 +268,7 @@ fn wave3_close_without_open_fails() {
     // produced (the linear check or the codegen error both prevent
     // emission of a binary, which is the desired outcome).
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             channel_close(ch);
             return 0;
         }
@@ -288,7 +288,7 @@ fn wave3_leak_on_one_path_fails() {
     // on the else-path.  The path-sensitive check flags this as a leak
     // (the else-path falls off the end of `main` with `ch` still open).
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             flag = 0;
             if flag == 1 {
@@ -315,7 +315,7 @@ fn wave3_send_after_close_in_branch_fails() {
     // then-branch closes `ch` then sends on it — a use-after-close
     // that the path-sensitive check catches inside the branch.
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             flag = 1;
             if flag == 1 {
