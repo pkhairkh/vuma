@@ -600,16 +600,16 @@ fn test_debug_sections_non_empty_all_backends() {
 
 // -- Test 14: extern "C" block parsing --
 
-/// Test: Verify that `extern "C" { fn write(...); fn read(...); fn exit(...); }`
+/// Test: Verify that `extern "C" { transform write(...); transform read(...); transform exit(...); }`
 /// is properly parsed by the VUMA parser, producing an `ExternBlockDef` with
 /// the correct convention and function declarations.
 #[test]
 fn test_extern_c_block_parsing() {
     let source = r#"
         extern "C" {
-            fn write(fd: i64, buf: Address, count: i64) -> i64;
-            fn read(fd: i64, buf: Address, count: i64) -> i64;
-            fn exit(code: i64);
+            transform write(fd: i64, buf: Address, count: i64) -> i64;
+            transform read(fd: i64, buf: Address, count: i64) -> i64;
+            transform exit(code: i64);
         }
     "#;
 
@@ -664,7 +664,7 @@ fn test_extern_c_block_parsing() {
 fn test_extern_block_scg_propagation() {
     let source = r#"
         extern "C" {
-            fn write(fd: i64, buf: Address, count: i64) -> i64;
+            transform write(fd: i64, buf: Address, count: i64) -> i64;
         }
     "#;
 
@@ -999,12 +999,12 @@ fn test_relocations_for_extern_calls() {
 fn test_ffi_demo_compiles_x86_64() {
     let source = r#"
         extern "C" {
-            fn write(fd: i64, buf: Address, count: i64) -> i64;
-            fn read(fd: i64, buf: Address, count: i64) -> i64;
-            fn exit(code: i64);
+            transform write(fd: i64, buf: Address, count: i64) -> i64;
+            transform read(fd: i64, buf: Address, count: i64) -> i64;
+            transform exit(code: i64);
         }
 
-        fn main() -> i64 {
+        transform main() -> i64 {
             let msg_addr: Address = 0x400000;
             let msg_len: i64 = 21;
             let result: i64 = write(1, msg_addr, msg_len);

@@ -89,11 +89,11 @@ const SAMPLE_CALL_PROGRAMS: &[&str] = &[
 const SAMPLE_EXTERN_PROGRAMS: &[(&str, &str)] = &[
     (
         "write",
-        "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    write(1, 0x400000, 13);\n}\n",
+        "extern \"C\" {\n    transform write(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    write(1, 0x400000, 13);\n}\n",
     ),
     (
         "read",
-        "extern \"C\" {\n    fn read(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    read(0, 0x400000, 13);\n}\n",
+        "extern \"C\" {\n    transform read(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    read(0, 0x400000, 13);\n}\n",
     ),
     (
         "my_extern_fn",
@@ -1688,7 +1688,7 @@ fn fuzz_ffi_extern_symbol_simple() {
     use vuma::api::VumaCompiler;
     use vuma::pipeline::CompileConfig;
 
-    let source = "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    write(1, 0x400000, 13);\n}\n";
+    let source = "extern \"C\" {\n    transform write(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    write(1, 0x400000, 13);\n}\n";
 
     let compiler = VumaCompiler::with_config(CompileConfig {
         section_headers: true,
