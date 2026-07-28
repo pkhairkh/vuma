@@ -816,32 +816,6 @@ pub enum MatchPattern {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Simplified Pattern type (for struct/enum destructuring)
-// ---------------------------------------------------------------------------
-
-/// A simplified pattern for struct/enum destructuring and matching.
-///
-/// Unlike [`MatchPattern`] (which carries source spans and supports the full
-/// range of VUMA match patterns), `Pattern` is a minimal, spanless pattern
-/// type designed for structural decomposition — particularly useful when
-/// lowering struct field access and enum variant destructuring in the SCG
-/// and codegen passes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pattern {
-    /// Wildcard pattern: `_` — matches anything, binds nothing.
-    Wild,
-    /// Literal pattern: matches an exact integer value.
-    Literal(i64),
-    /// Binding pattern: binds the matched value to a name.
-    Binding(String),
-    /// Variant pattern: matches an enum variant by name, with an optional
-    /// nested pattern for the variant's payload.
-    /// Examples: `None` → `Variant("None", None)`,
-    ///           `Some(x)` → `Variant("Some", Some(Box::new(Binding("x"))))`
-    Variant(String, Option<Box<Pattern>>),
-}
-
 /// `sync { … }` block for synchronized access.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SyncBlock {

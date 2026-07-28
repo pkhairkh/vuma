@@ -230,12 +230,6 @@ pub enum ParseErrorKind {
     TypeMismatch,
 
     // -- VUMA-specific errors ------------------------------------------------
-    /// An error related to a `region` declaration (e.g. missing `allocate`,
-    /// invalid region expression).
-    RegionError,
-    /// An error in a BD (behavioral domain) annotation directive
-    /// (`bd`, `repd`, `capd`, `reld`).
-    BDAnnotationError,
 
     /// An invalid token was used where a compound assignment operator was
     /// expected (e.g. `+=`, `-=`, etc.).
@@ -284,8 +278,6 @@ impl fmt::Display for ParseErrorKind {
             ParseErrorKind::DuplicateDefinition => write!(f, "duplicate definition"),
             ParseErrorKind::UndefinedReference => write!(f, "undefined reference"),
             ParseErrorKind::TypeMismatch => write!(f, "type mismatch"),
-            ParseErrorKind::RegionError => write!(f, "region error"),
-            ParseErrorKind::BDAnnotationError => write!(f, "BD annotation error"),
             ParseErrorKind::InvalidCompoundOp => write!(f, "invalid compound assignment operator"),
             ParseErrorKind::PointerSyntax => write!(f, "pointer syntax (PMT-only)"),
             ParseErrorKind::FfiAttr => write!(f, "FFI attribute placement error"),
@@ -436,16 +428,6 @@ impl ParseError {
         )
     }
 
-    /// Convenience: region-error.
-    pub fn region_error(msg: impl Into<String>, span: Span) -> Self {
-        Self::new(msg, span, ParseErrorKind::RegionError)
-    }
-
-    /// Convenience: BD-annotation-error.
-    pub fn bd_annotation_error(msg: impl Into<String>, span: Span) -> Self {
-        Self::new(msg, span, ParseErrorKind::BDAnnotationError)
-    }
-
     /// Convenience: invalid compound assignment operator error.
     pub fn invalid_compound_op(msg: impl Into<String>, span: Span) -> Self {
         Self::new(msg, span, ParseErrorKind::InvalidCompoundOp)
@@ -572,8 +554,6 @@ impl ErrorRecovery {
             ParseErrorKind::DuplicateDefinition => ErrorRecovery::SkipToStatementBoundary,
             ParseErrorKind::UndefinedReference => ErrorRecovery::SkipOneToken,
             ParseErrorKind::TypeMismatch => ErrorRecovery::SkipOneToken,
-            ParseErrorKind::RegionError => ErrorRecovery::SkipToStatementBoundary,
-            ParseErrorKind::BDAnnotationError => ErrorRecovery::SkipToStatementBoundary,
             ParseErrorKind::InvalidCompoundOp => ErrorRecovery::SkipOneToken,
             ParseErrorKind::InvalidAddress => ErrorRecovery::SkipOneToken,
             ParseErrorKind::UndefinedVariable => ErrorRecovery::SkipOneToken,
@@ -1324,11 +1304,6 @@ mod tests {
             "undefined reference"
         );
         assert_eq!(ParseErrorKind::TypeMismatch.to_string(), "type mismatch");
-        assert_eq!(ParseErrorKind::RegionError.to_string(), "region error");
-        assert_eq!(
-            ParseErrorKind::BDAnnotationError.to_string(),
-            "BD annotation error"
-        );
     }
 
     // -- ParseError construction tests ---------------------------------------
@@ -1353,11 +1328,6 @@ mod tests {
         assert_eq!(err.kind, ParseErrorKind::UndefinedReference);
         assert!(err.message.contains("foo"));
 
-        let err = ParseError::region_error("bad region", span);
-        assert_eq!(err.kind, ParseErrorKind::RegionError);
-
-        let err = ParseError::bd_annotation_error("bad bd", span);
-        assert_eq!(err.kind, ParseErrorKind::BDAnnotationError);
     }
 
     #[test]
@@ -1632,16 +1602,16 @@ mod tests {
 
     #[test]
     fn full_error_pipeline() {
-        let source = "region pool = allocate(1024);";
-        let err = ParseError::region_error("region size must be positive", Span::new(22, 26))
-            .with_suggestion("allocate(2048)");
+        let source = "let x = ;";
+        let err = ParseError::invalid_syntax("expected expression", Span::new(8, 9))
+            .with_suggestion("value");
 
         let mut collector = ErrorCollector::new();
         collector.add_parse_error(&err, source, Some("demo.vu"));
 
         assert_eq!(collector.error_count(), 1);
         let rendered = collector.render_all();
-        assert!(rendered.contains("region error"));
+        assert!(rendered.contains("invalid syntax"));
         assert!(rendered.contains("did you mean"));
     }
 

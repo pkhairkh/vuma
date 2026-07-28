@@ -294,14 +294,6 @@ fn parse_error_kind_maps_to_correct_codes() {
         "E010"
     );
     assert_eq!(
-        code_for_parse_error_kind(&ParseErrorKind::RegionError),
-        "E011"
-    );
-    assert_eq!(
-        code_for_parse_error_kind(&ParseErrorKind::BDAnnotationError),
-        "E012"
-    );
-    assert_eq!(
         code_for_parse_error_kind(&ParseErrorKind::InvalidCompoundOp),
         "E013"
     );
