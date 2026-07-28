@@ -61,7 +61,7 @@ Adding a syscall is a five-step process. The syscall layer lives in
 
    ```
        // handlers/io.vuma (3-arg signature — matches the write/read ABI):
-       fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+       transform sys_write(fd: u64, buf: u64, count: u64) -> i64 {
            if fd == 1 { return write(1, buf as Address, count as i64); }
            if fd == 2 { return write(2, buf as Address, count as i64); }
            return 0;   // VFS write stub (K5)
@@ -73,7 +73,7 @@ Adding a syscall is a five-step process. The syscall layer lives in
 
    ```
        // handlers/proc.vuma (6-arg signature):
-       fn sys_getpid(_a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> i64 {
+       transform sys_getpid(_a0: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> i64 {
            return 1;   // stub: return init's pid
        }
    ```
@@ -138,7 +138,7 @@ Adding a syscall is a five-step process. The syscall layer lives in
 **Do** follow the routing convention in `handlers/io.vuma`:
 
 ```
-    fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+    transform sys_write(fd: u64, buf: u64, count: u64) -> i64 {
         if fd == 1 { return write(1, buf as Address, count as i64); }
         if fd == 2 { return write(2, buf as Address, count as i64); }
         // else: VFS write (K5 stub returns 0)
@@ -151,7 +151,7 @@ pattern (`as Address` reinterpretation, no-op codegen on 64-bit targets).
 
 **Don't** declare a `State<T>` parameter on a syscall handler. The dispatch
 layer hands you raw `u64` from `SyscallArgs`; you marshal inside the handler
-if needed. A signature like `fn sys_write(fd: u64, buf: State<ByteBuf>, ...)`
+if needed. A signature like `transform sys_write(fd: u64, buf: State<ByteBuf>, ...)`
 won't compile — `SyscallArgs.a1` is `u64`, not `State<ByteBuf>`.
 
 **Don't** forget the `_a3`/`_a4`/`_a5` placeholders if you use the 6-arg
@@ -240,7 +240,7 @@ A driver has three parts:
 **Do** use explicit byte offsets for MMIO:
 
 ```
-    fn uart_putc_8250(base: u64, c: u8) {
+    transform uart_putc_8250(base: u64, c: u8) {
         // Spin on LSR.TX-empty (bit 5 of register at offset 5)
         while (mmio_read8(base + 5) & 32) == 0 { }
         mmio_write8(base + 0, c);
@@ -305,19 +305,19 @@ The directory currently contains:
 
    ```
        // VFS-layer helpers (re-declared byte-identically to vfs/inode.vuma):
-       fn inode_alloc(tbl: State<InodeTable>) -> u32 { ... }
-       fn inode_free(tbl: State<InodeTable>, idx: u32) { ... }
-       fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 { ... }
-       fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) { ... }
+       transform inode_alloc(tbl: State<InodeTable>) -> u32 { ... }
+       transform inode_free(tbl: State<InodeTable>, idx: u32) { ... }
+       transform inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 { ... }
+       transform inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) { ... }
        // ... 12 more inode_get_* / inode_set_* helpers
 
        // Filesystem-private operations (the <fs>_<op> pattern):
-       fn tmpfs_mount(inodes, dentries, data) -> u32 { ... }
-       fn tmpfs_create(inodes, dentries, parent_idx, name) -> u32 { ... }
-       fn tmpfs_mkdir(inodes, dentries, parent_idx, name) -> u32 { ... }
-       fn tmpfs_lookup(dentries, parent_idx, name) -> u32 { ... }
-       fn tmpfs_read(data, file, buf, count) -> i64 { ... }
-       fn tmpfs_write(data, file, buf, count) -> i64 { ... }
+       transform tmpfs_mount(inodes, dentries, data) -> u32 { ... }
+       transform tmpfs_create(inodes, dentries, parent_idx, name) -> u32 { ... }
+       transform tmpfs_mkdir(inodes, dentries, parent_idx, name) -> u32 { ... }
+       transform tmpfs_lookup(dentries, parent_idx, name) -> u32 { ... }
+       transform tmpfs_read(data, file, buf, count) -> i64 { ... }
+       transform tmpfs_write(data, file, buf, count) -> i64 { ... }
    ```
 
    At minimum, implement: `<fs>_mount`, `<fs>_create`, `<fs>_lookup`,
@@ -409,7 +409,7 @@ value.
 ```
     layout Console = { buf: [u8; 256], len: u32 }
 
-    fn console_putc(c: State<Console>, ch: u8) {
+    transform console_putc(c: State<Console>, ch: u8) {
         let idx = c.len;
         if idx < 256 {
             c.buf[idx] = ch;
@@ -421,7 +421,7 @@ value.
 **Don't:**
 
 ```
-    fn console_putc(c: *Console, ch: u8) {    // PARSE ERROR — *T forbidden
+    transform console_putc(c: *Console, ch: u8) {    // PARSE ERROR — *T forbidden
         (*c).buf[(*c).len] = ch;
         (*c).len = (*c).len + 1;
     }
@@ -438,7 +438,7 @@ caller; subsequent `s.field` accesses silently return 0 with a
 **Do:**
 
 ```
-    fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>,
+    transform pmm_init(pool: State<FlatPool>, pmm: State<PmmState>,
                 mem_start: u64, mem_size: u64) {
         // ... populate pmm's fields ...
     }
@@ -453,7 +453,7 @@ caller; subsequent `s.field` accesses silently return 0 with a
 **Don't:**
 
 ```
-    fn pmm_init(...) -> State<PmmState> {           // WARNING + broken caller
+    transform pmm_init(...) -> State<PmmState> {           // WARNING + broken caller
         let pmm = state_new(PmmState);
         // ... populate pmm ...
         return pmm;
@@ -476,11 +476,11 @@ When an FFI callee needs a raw pointer to a state buffer, cast with
 **Do:**
 
 ```
-    extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+    extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
     layout Console = { buf: [u8; 256], len: u32 }   // buf at offset 0
 
-    fn console_flush(c: State<Console>) {
+    transform console_flush(c: State<Console>) {
         if c.len > 0 {
             let base = c as Address;
             let _n = write(1, base, c.len as i64);
@@ -492,7 +492,7 @@ When an FFI callee needs a raw pointer to a state buffer, cast with
 **Don't:**
 
 ```
-    fn console_flush(c: State<Console>) {
+    transform console_flush(c: State<Console>) {
         // No way to write `&c.buf[0]` — VUMA has no `&`.
         // No way to write `*(u8*)c` — VUMA has no pointer cast syntax.
     }
@@ -518,10 +518,10 @@ When a function borrows a state (the caller wants to keep using it), use
 
 ```
     extern "C" {
-        #[borrow] fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+        #[borrow] transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
     }
 
-    fn vmm_walk(pt: State<PageTable>, vaddr: u64) -> u64 {
+    transform vmm_walk(pt: State<PageTable>, vaddr: u64) -> u64 {
         let idx3 = vmm_walk_idx(vaddr, 3);   // extract 9-bit index
         let pte  = pte_read(pt, 3, idx3);    // pt still valid
         let idx2 = vmm_walk_idx(vaddr, 2);
@@ -534,11 +534,11 @@ When a function borrows a state (the caller wants to keep using it), use
 
 ```
     extern "C" {
-        fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+        transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
         //                                                 ^^^ no #[borrow]
     }
 
-    fn vmm_walk(pt: State<PageTable>, vaddr: u64) -> u64 {
+    transform vmm_walk(pt: State<PageTable>, vaddr: u64) -> u64 {
         let idx3 = vmm_walk_idx(vaddr, 3);
         let pte  = pte_read(pt, 3, idx3);    // pt now CONSUMED
         let idx2 = vmm_walk_idx(vaddr, 2);
@@ -547,8 +547,8 @@ When a function borrows a state (the caller wants to keep using it), use
     }
 ```
 
-For regular (non-extern) VUMA fn calls, `#[borrow]` is NOT needed — the
-codegen tracks state lifetimes through regular fn calls. Only extern "C"
+For regular (non-extern) VUMA transform calls, `#[borrow]` is NOT needed — the
+codegen tracks state lifetimes through regular transform calls. Only extern "C"
 calls need it, because the codegen conservatively invalidates on extern
 calls (the extern's body is opaque to PMT analysis).
 
@@ -743,7 +743,7 @@ make `make_state` take `s` as a parameter (init-style).
 "C" call that didn't have `#[borrow]`. Fix: add `#[borrow]` to `helper`'s
 `s: State<T>` parameter.
 
-**`fn f(s: State<T>) { ... s.field ... }` called as `f(state_new(T))`** —
+**`transform f(s: State<T>) { ... s.field ... }` called as `f(state_new(T))`** —
 the inline `state_new(T)` doesn't get a binding, so its State-typedness
 isn't tracked. Fix: bind it first (`let s = state_new(T); f(s);`).
 
@@ -776,7 +776,7 @@ declare them (`let idx = ...`) or rewrite the example to use the actual
 `vmm_walk_idx(vaddr, level)` helper from `mm/vmm.vuma`:
 
 ```
-    fn vmm_walk(pt: State<PageTable>, vaddr: u64) -> u64 {
+    transform vmm_walk(pt: State<PageTable>, vaddr: u64) -> u64 {
         let idx3 = vmm_walk_idx(vaddr, 3);   // 9-bit index for level 3
         let pte  = pte_read(pt, 3, idx3);
         let idx2 = vmm_walk_idx(vaddr, 2);
@@ -791,7 +791,7 @@ If `--verify` passes (IVE: Pass) but `/tmp/test.bin` exits non-zero, the
 self-test's per-check return fired. The exit code tells you which check:
 
 ```
-    fn main() -> i32 {
+    transform main() -> i32 {
         if check1_fails { return 1; }
         if check2_fails { return 2; }
         if check3_fails { return 3; }
@@ -916,8 +916,8 @@ or populates a State<T>. The caller allocates the state via
 it by reference to the function:
 
 ```
-    // Function signature: takes State<T> by value (regular VUMA-fn borrow).
-    fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>,
+    // Function signature: takes State<T> by value (regular VUMA-transform borrow).
+    transform pmm_init(pool: State<FlatPool>, pmm: State<PmmState>,
                 mem_start: u64, mem_size: u64) {
         pmm.total_pages = mem_size / 4096;
         // ... populate pmm's fields ...
@@ -952,7 +952,7 @@ Pack/unpack helpers convert between the byte array and the u64 value:
     }
 
     // Read the u64 handler address for IRQ `n` from IrqTable.handlers.
-    fn irq_get_handler(tbl: State<IrqTable>, n: u32) -> u64 {
+    transform irq_get_handler(tbl: State<IrqTable>, n: u32) -> u64 {
         let off = n * 8;
         let v: u64 = 0;
         let i = 0;
@@ -966,7 +966,7 @@ Pack/unpack helpers convert between the byte array and the u64 value:
     }
 
     // Write the u64 handler address for IRQ `n` into IrqTable.handlers.
-    fn irq_set_handler(tbl: State<IrqTable>, n: u32, handler: u64) {
+    transform irq_set_handler(tbl: State<IrqTable>, n: u32, handler: u64) {
         let off = n * 8;
         let i = 0;
         while i < 8 {
@@ -991,7 +991,7 @@ VUMA's `if`/`else if`/`else` syntax is C-like. There's no `match`/`switch`
 statement; multi-branch state machines use nested `if`s:
 
 ```
-    fn trap_handler(tf: State<TrapFrame>) {
+    transform trap_handler(tf: State<TrapFrame>) {
         let vec = tf.vector;
         if vec < 32 {
             trap_panic(tf);
@@ -1022,7 +1022,7 @@ layout:
 ```
     layout Console = { buf: [u8; 256], len: u32 }   // buf at offset 0
 
-    fn console_flush(c: State<Console>) {
+    transform console_flush(c: State<Console>) {
         if c.len > 0 {
             let base = c as Address;       // ← yields &c.buf[0]
             let _n = write(1, base, c.len as i64);
@@ -1047,7 +1047,7 @@ new)` intrinsic lowers to `LOCK CMPXCHG` on x86_64 (and the equivalent on
 other arches). The pattern is a busy-wait loop:
 
 ```
-    fn spinlock_acquire(lock: State<Spinlock>) {
+    transform spinlock_acquire(lock: State<Spinlock>) {
         // CAS target word: bytes [0..7] of lock = { locked: u32, _pad0: u32 }
         let addr = lock as Address;
         let i = 0;
@@ -1084,7 +1084,7 @@ themselves:
         ...
     }
 
-    fn tmpfs_data_alloc_page(data: State<TmpfsData>) -> u32 {
+    transform tmpfs_data_alloc_page(data: State<TmpfsData>) -> u32 {
         if data.free_list == 255 {
             return 64;   // sentinel: all pages used
         }
@@ -1159,7 +1159,7 @@ Every kernel `.vuma` file follows this top-to-bottom structure:
     3. Extern "C" blocks (with #[borrow] where needed)
     4. Helper functions (pack/unpack, get/set accessors)
     5. Public API functions (init, alloc, free, ops)
-    6. Self-test (fn main() -> i32 with per-check returns)
+    6. Self-test (transform main() -> i32 with per-check returns)
 ```
 
 The K7a / K10b / K10c / K12b contracts enforce this layout. The
@@ -1198,7 +1198,7 @@ hex only in comments and prose for readability:
 Every self-test follows this pattern:
 
 ```
-    fn main() -> i32 {
+    transform main() -> i32 {
         // Setup.
         let tbl = state_new(SomeTable);
         some_init(tbl);
@@ -1254,7 +1254,7 @@ each one, then exercise the cross-subsystem path. Example: a pipe +
 signal integration test would:
 
 ```
-    fn main() -> i32 {
+    transform main() -> i32 {
         // ── Setup: pipe + signal ──
         let pipe = state_new(Pipe);
         pipe_init(pipe);

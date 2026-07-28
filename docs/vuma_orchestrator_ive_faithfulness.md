@@ -130,7 +130,7 @@ Background: The current Transform.lean takes `StateTransform` with
 `in_layout : Layout`, `out_layout : Layout`, `kind : TransformKind` (given).
 It checks `WF_Layout` for both layouts. This does NOT match Rust.
 
-Rust `src/ive/src/state_transform.rs::verify_transform` (search "pub fn verify_transform"):
+Rust `src/ive/src/state_transform.rs::verify_transform` (search "pub transform verify_transform"):
   - Signature: `(layouts: &HashMap<String, LayoutInfo>, input_layout: &str, output_layout: &str)`
   - Step 1: Look up `input_layout` by NAME in `layouts` (not-found → invalid, kind=Copy).
   - Step 2: Look up `output_layout` by NAME (not-found → invalid, kind=Copy).
@@ -141,7 +141,7 @@ Rust `src/ive/src/state_transform.rs::verify_transform` (search "pub fn verify_t
 
 Task: Rewrite Transform.lean to faithfully model the Rust function.
 
-Read (≤5 files): src/ive/src/state_transform.rs (search "pub fn verify_transform"),
+Read (≤5 files): src/ive/src/state_transform.rs (search "pub transform verify_transform"),
 proof/PMT/IVE/Soundness/Transform.lean (current, to understand what to replace),
 proof/PMT/Basic.lean (Layout, Field structures),
 proof/PMT/IVE/Soundness/WFLayoutBool.lean (wf_layout_bool, to reference but NOT use in the check),
@@ -197,7 +197,7 @@ Background: The current DependentTransform.lean takes `DependentTransform` with
 `in_layout : Layout`, `out_layout : Layout`, `dep_value : Nat`, and checks
 `WF_Layout in ∧ WF_Layout out ∧ dep_value ≤ out.total_size`. This does NOT match Rust.
 
-Rust `src/ive/src/state_transform.rs::verify_dependent_transform` (search "pub fn verify_dependent_transform"):
+Rust `src/ive/src/state_transform.rs::verify_dependent_transform` (search "pub transform verify_dependent_transform"):
   - Signature: `(elem_size: u64, count: u64, offset: u64, buffer_size: u64) -> bool`
   - Returns `offset.saturating_add(count.saturating_mul(elem_size)) <= buffer_size`.
   - Uses SATURATING arithmetic: overflow → u64::MAX → rejected.
@@ -315,18 +315,18 @@ Branch: task/ive-faith-5-d
 Background: The current L1L3Collapse.lean checks `type_hash = hash_string ir_type`
 with a simple foldl hash. This does NOT match Rust.
 
-Rust `src/ive/src/verification.rs::l1l3_collapse` (search "pub fn l1l3_collapse"):
+Rust `src/ive/src/verification.rs::l1l3_collapse` (search "pub transform l1l3_collapse"):
   - Walks the SCG for ChannelOpen, ChannelSend, ChannelRecv nodes.
   - Tracks `channel_types: HashMap<String, String>` (per-channel element type).
   - For ChannelOpen: checks `ty.is_empty() || type_hash(ty) == 0` (empty/invalid type → failure).
   - For ChannelSend/Recv: checks type consistency against prior ChannelOpen/Send/Recv on same channel.
   - Counts `l1_checks_folded` and `l2_checks_folded`.
   - Returns `L1L3Collapse { l1_checks_folded, l2_checks_folded, failures : Vec<String> }`.
-  - Uses `type_hash` function (search "fn type_hash" in verification.rs — it's the ACTUAL hash function, NOT a simple foldl).
+  - Uses `type_hash` function (search "transform type_hash" in verification.rs — it's the ACTUAL hash function, NOT a simple foldl).
 
 Task: Rewrite L1L3Collapse.lean to faithfully model the Rust function.
 
-Read (≤5 files): src/ive/src/verification.rs (search "pub fn l1l3_collapse" AND "fn type_hash"),
+Read (≤5 files): src/ive/src/verification.rs (search "pub transform l1l3_collapse" AND "transform type_hash"),
 src/scg/src/node.rs (search "ChannelOpen\|ChannelSend\|ChannelRecv" — the SCG node payloads),
 proof/PMT/IVE/Soundness/L1L3Collapse.lean (current, to replace).
 
@@ -391,7 +391,7 @@ Background: The current InformationFlow.lean models only 1 flow kind (Assign-lik
 with `src_label` and `dst_label`. Rust has 4 FlowKind variants including Branch
 (IMPLICIT FLOW). This is a SOUNDNESS HOLE — Lean accepts programs Rust rejects.
 
-Rust `src/ive/src/information_flow.rs::verify_information_flow` (search "pub fn verify_information_flow"):
+Rust `src/ive/src/information_flow.rs::verify_information_flow` (search "pub transform verify_information_flow"):
   - FlowKind::Assign { dst_vreg, dst_label, src_label }: checks `src_label.can_flow_to(dst_label)`.
   - FlowKind::BinOp { dst_vreg, dst_label, lhs_label, rhs_label }: computes
     `result_label = lhs_label.join(rhs_label)` (LUB), checks `result_label.can_flow_to(dst_label)`.
@@ -449,7 +449,7 @@ Branch: task/ive-faith-6-b
 Background: The current BorrowRegion.lean has no path-sensitivity and only 5 event kinds.
 Rust has 7 event kinds and full Branch/ElseStart/Join path-sensitivity with state snapshots/merges.
 
-Rust `src/ive/src/borrow_region.rs::verify_linear_channels` (search "pub fn verify_linear_channels"):
+Rust `src/ive/src/borrow_region.rs::verify_linear_channels` (search "pub transform verify_linear_channels"):
   - 7 ChannelEventKind: Open, Use, Close, Branch, ElseStart, Join, FunctionExit.
   - ChannelEvent has `vreg : String` (NOT Nat) and `at_node`.
   - State: `HashMap<String, ChannelLifecycle>` where ChannelLifecycle = Open | Closed.
@@ -511,7 +511,7 @@ Branch: task/ive-faith-6-c
 Background: The current SessionType.lean uses a single global session type and has no Open event.
 Rust tracks per-vreg session state.
 
-Rust `src/ive/src/session_type.rs::verify_session_types` (search "pub fn verify_session_types"):
+Rust `src/ive/src/session_type.rs::verify_session_types` (search "pub transform verify_session_types"):
   - SessionEventKind: Open { vreg, session_type }, Send { vreg, msg_type }, Recv { vreg, expected_type }, Close { vreg }.
   - State: `HashMap<u32, SessionType>` (per-vreg session type).
   - Open: initializes the vreg's session type. Re-open on already-open vreg → violation.
@@ -566,7 +566,7 @@ Branch: task/ive-faith-6-d
 Background: The current ArenaBounds.lean takes a pre-extracted list of ops and always checks capacity.
 Rust walks the SCG and uses Option<u64> for capacity (skips check when None).
 
-Rust `src/ive/src/arena_bounds.rs::verify_arena_bounds` (search "pub fn verify_arena_bounds"):
+Rust `src/ive/src/arena_bounds.rs::verify_arena_bounds` (search "pub transform verify_arena_bounds"):
   - Signature: `(pmt_layouts: &HashMap<String, LayoutSpec>, scg: &SCG)`.
   - Walks SCG for ArenaNew and ArenaAlloc nodes.
   - Tracks `arena_capacity: HashMap<u32, Option<u64>>` and `arena_used: HashMap<u32, u64>`.
@@ -695,13 +695,13 @@ Branch: task/ive-faith-7-a
 Background: The current LayoutConsistency.lean checks wf_layout_bool. Rust re-derives
 offsets using C-style alignment rules and compares, plus checks field-list consistency by name.
 
-Rust `src/ive/src/verification.rs::verify_layout_consistency` (search "pub fn verify_layout_consistency"):
+Rust `src/ive/src/verification.rs::verify_layout_consistency` (search "pub transform verify_layout_consistency"):
   - Calls `rederive_layout(&spec.fields)` which computes offsets using C-style alignment
     (fields aligned to their size, padding inserted).
   - Compares derived_total vs spec.total_size, derived_offset vs field.offset, derived_size vs field.size.
   - Returns Vec<String> of mismatch descriptions.
 
-Rust `verify_layout_field_list_consistency` (search "pub fn verify_layout_field_list_consistency"):
+Rust `verify_layout_field_list_consistency` (search "pub transform verify_layout_field_list_consistency"):
   - Takes TWO layout maps: parser_layouts and ivederived_layouts.
   - Compares field LISTS by NAME: every IVE-derived field name must be in the parser-provided layout.
   - Checks field count.
