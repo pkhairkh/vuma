@@ -1,18 +1,18 @@
 // Real KAT test: SHA-1("abc")
 // Expected output (hex): a9993e364706816aba3e25717850c26c9cd0d89d
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 const MASK32: u32 = 4294967295;
-fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
-fn load_u32_be(ptr: Address, off: u32) -> u32 {
+transform rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+transform load_u32_be(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
-fn store_u32_be(ptr: Address, off: u32, val: u32) {
+transform store_u32_be(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     ctx = allocate(20);
     store_u32_be(ctx, 0, 1732584193);
     store_u32_be(ctx, 4, 4023233417);

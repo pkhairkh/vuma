@@ -1,8 +1,8 @@
 // Real KAT test: Bignum modular exponentiation
 // 2^10 mod 17 = 1024 mod 17 = 1024 - 60*17 = 1024 - 1020 = 4
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     base: u32 = 2;
     exp: u32 = 10;
     mod_val: u32 = 17;

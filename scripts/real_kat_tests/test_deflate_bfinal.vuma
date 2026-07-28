@@ -1,8 +1,8 @@
 // KAT: DEFLATE BFINAL=1
 // Expected: 01
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // DEFLATE: BFINAL=1, BTYPE=00 (no compression)
     // First byte: 0x01
     out = allocate(1);

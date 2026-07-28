@@ -23,20 +23,7 @@ extern "C" {
     transform __vuma_load_u8(addr: Address) -> u64;
     transform __vuma_store_u8(addr: Address, val: u64);
 }
-
-transform store_u64(ptr: Address, offset: u32, val: u64) {
-    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
-    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
-    __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
-    __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
-}
-transform store_u32(ptr: Address, offset: u32, val: u32) {
-    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
-    __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
-}
-transform store_u16(ptr: Address, offset: u32, val: u32) {
-    __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
-}
+import "../lib/mem_helpers.vuma"::{store_u64, store_u32, store_u16};
 
 // ELF64 constants
 const ELFMAG: u32 = 0x464C457F;  // \x7FELF

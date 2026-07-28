@@ -1,8 +1,8 @@
 // KAT: FFDHE 5^3 mod 23 = 10
 // Expected: 0a
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // FFDHE: g^a mod p
     // Test: 5^3 mod 23 = 125 mod 23 = 10
     g: u32 = 5; a: u32 = 3; p: u32 = 23;

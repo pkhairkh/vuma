@@ -1,8 +1,8 @@
 // KAT: ML-DSA q=8380417 big-endian
 // Expected: 7ffe01
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ML-DSA-65: q = 8380417
     out = allocate(3);
     *(out+0) = (8380417 >> 16) & 255;  // 0x7F

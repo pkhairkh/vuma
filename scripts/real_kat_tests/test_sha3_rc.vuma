@@ -1,8 +1,8 @@
 // KAT: SHA-3 Keccak RC[0]
 // Expected: 01
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Keccak RC[0] = 0x0000000000000001
     // First byte = 0x01
     out = allocate(1);

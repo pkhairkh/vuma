@@ -1,8 +1,8 @@
 // KAT: HPACK :method GET = index 2
 // Expected: 02
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // HPACK static table[1] = :authority
     // Entry 2 = :method GET
     out = allocate(1);

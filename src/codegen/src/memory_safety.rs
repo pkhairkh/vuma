@@ -617,6 +617,10 @@ impl MemorySafetyAnalyzer {
                 // separately by the existing IR-level analysis. No
                 // ScgStatement-level allocation to record here.
                 ScgStatement::PmtOp(_) => {}
+                // Try (`?`) — fallible unwrap. No heap/stack allocation to
+                // track; the underlying Result pointer is owned by the
+                // operand expression's existing allocation, if any.
+                ScgStatement::Try(_) => {}
             }
         }
     }

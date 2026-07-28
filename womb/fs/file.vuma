@@ -1,3 +1,4 @@
+import "../lib/mem_helpers.vuma"::{store_u64, load_u64, store_u32, load_u32};
 // womb/fs/file.vuma — File I/O via raw Linux syscalls
 // Provides: open, read, write, close, read_to_string, write_file
 // Uses the vuma-native syscall() intrinsic for read/write/open/close
@@ -6,29 +7,6 @@
 // allocate()/free() are vuma-native builtins (P2 work).
 
 const AT_FDCWD: i64 = -100;
-
-transform store_u64(ptr: Address, offset: u32, val: u64) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
-    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
-}
-transform load_u64(ptr: Address, offset: u32) -> u64 {
-    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
-    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
-    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
-    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
-}
-transform store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-}
-transform load_u32(ptr: Address, offset: u32) -> u32 {
-    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
-    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-}
 
 // Read entire file into a heap-allocated buffer.
 // Returns a 16-byte result struct: { data_ptr: u64, len: u32, _pad: u32 }

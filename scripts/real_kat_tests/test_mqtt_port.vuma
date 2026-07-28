@@ -1,8 +1,8 @@
 // KAT: MQTT port 1883 mod 256 = 91
 // Expected: 5b
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // MQTT port = 1883
     // 1883 & 255 = 91
     out = allocate(1);

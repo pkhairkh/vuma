@@ -1,8 +1,8 @@
 // KAT: SHA-224 IV[0]
 // Expected: c1
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // SHA-224 IV[0] = 0xc1059ed8 = 3238371032
     // >> 24 = 0xc1 = 193
     v: u32 = 3238371032;

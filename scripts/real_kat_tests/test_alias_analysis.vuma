@@ -1,7 +1,7 @@
 // KAT: Alias analysis — two different allocations don't alias
 // Expected: 00 (no alias)
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn main() -> i32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform main() -> i32 {
     a = allocate(4);
     b = allocate(4);
     // Two different allocations: Unique(1) and Unique(2) -> no alias

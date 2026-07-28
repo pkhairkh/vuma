@@ -104,6 +104,50 @@ pub enum IRType {
 }
 
 // ---------------------------------------------------------------------------
+// Source Span — IR-side mirror of `vuma_parser::error::Span`
+// ---------------------------------------------------------------------------
+
+/// IR-side mirror of the parser's [`Span`](vuma_parser::error::Span).
+///
+/// This is a codegen-local copy of `vuma_parser::error::Span`; it exists so
+/// the codegen crate can carry source-location metadata on SCG statements
+/// (e.g. [`crate::scg_to_ir::TryStmt`]) **without** taking a dependency on the
+/// parser crate (which would create a cycle - the same rationale as the
+/// IR-side [`SessionType`] / [`SecurityLabel`] mirrors below). The pipeline
+/// (`pipeline.rs::flatten_expr`) bridges `vuma_parser::Span` -> `ir::Span`
+/// when it lowers statements that carry a span.
+///
+/// Like the parser version, this is a byte-offset range `[start, end)` into
+/// the source file. The two types are structurally identical, so the bridge
+/// is a trivial field copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Span {
+    /// Inclusive start byte offset.
+    pub start: usize,
+    /// Exclusive end byte offset.
+    pub end: usize,
+}
+
+impl Span {
+    /// Create a new span from `start` (inclusive) to `end` (exclusive) byte
+    /// offsets.
+    pub fn new(start: usize, end: usize) -> Self {
+        Self { start, end }
+    }
+
+    /// A synthetic span representing "no location" (e.g. generated nodes).
+    pub fn synthetic() -> Self {
+        Self { start: 0, end: 0 }
+    }
+}
+
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}..{}", self.start, self.end)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Session Types — IR-side mirror of `ast::SessionType`
 // ---------------------------------------------------------------------------
 

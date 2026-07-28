@@ -92,7 +92,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 // FFI declaration — write(2) syscall wrapper.
 // ────────────────────────────────────────────────────────────────────────────
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -138,7 +138,7 @@ layout OutByte = { byte: u8 }
 // width-extension issues per aes.vuma's header note). The full table is
 // written as 256 explicit assignments rather than a runtime loop so the
 // constants are visible to static analysis and IVE.
-fn aes_init_sbox(sbox: State<AesSbox>) {
+transform aes_init_sbox(sbox: State<AesSbox>) {
     sbox.data[0] = 99; sbox.data[1] = 124; sbox.data[2] = 119; sbox.data[3] = 123;
     sbox.data[4] = 242; sbox.data[5] = 107; sbox.data[6] = 111; sbox.data[7] = 197;
     sbox.data[8] = 48; sbox.data[9] = 1; sbox.data[10] = 103; sbox.data[11] = 43;
@@ -212,7 +212,7 @@ fn aes_init_sbox(sbox: State<AesSbox>) {
 // STUB). Writes the 16-byte key verbatim into all 11 round keys (round 0 =
 // key, rounds 1..10 = key copied). K11 will replace this with the real
 // Rijndael key expansion (RotWord + SubWord + Rcon XOR — FIPS-197 §5.2).
-fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
+transform aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
     // Round 0: copy the key verbatim.
     let i = 0;
     while i < 16 {
@@ -238,7 +238,7 @@ fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
 // For each i in 0..16: state.data[i] = sbox.data[state.data[i] as u32].
 // The `as u32` widening cast is required because VUMA's array index is
 // u32-typed while state.data[i] yields a u8 (byte-granular indexing).
-fn aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
+transform aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
     let i = 0;
     while i < 16 {
         state.data[i] = sbox.data[state.data[i] as u32];
@@ -262,7 +262,7 @@ fn aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
 // test compares only byte 0 (row 0, which ShiftRows does NOT touch), so
 // the bug is sidestepped — but a future W53+ fix to the swap pattern
 // would not affect this test's result either way.
-fn aes_shift_rows(state: State<AesState>) {
+transform aes_shift_rows(state: State<AesState>) {
     let tmp = state.data[1];
     // Row 1: left-rotate by 1.
     state.data[1] = state.data[5];
@@ -292,7 +292,7 @@ fn aes_shift_rows(state: State<AesState>) {
 // AddRoundKey(0) → 9× (SubBytes + ShiftRows + AddRoundKey) → final
 // SubBytes + ShiftRows + AddRoundKey(10). MixColumns (§5.1.3) is deferred
 // — see the file header's "Documented limitation" note.
-fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+transform aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
     // Working state (column-major 4×4 byte matrix, AES-128 = 16 bytes).
     let state = state_new(AesState);
     // S-box (rebuilt per call — VUMA has no import / cross-call caching).
@@ -348,7 +348,7 @@ fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<A
 // load_fips_key: Key = 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F.
 // Decimal: 0, 1, 2, ..., 15 — the canonical "incrementing byte" test key
 // used in FIPS-197 Appendix B.1 (the worked AES-128 example).
-fn load_fips_key(key: State<AesKey>) {
+transform load_fips_key(key: State<AesKey>) {
     key.data[0] = 0;     // 0x00
     key.data[1] = 1;     // 0x01
     key.data[2] = 2;     // 0x02
@@ -371,7 +371,7 @@ fn load_fips_key(key: State<AesKey>) {
 // Decimal: 0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221,
 // 238, 255 — the canonical FIPS-197 Appendix B.1 test plaintext (16-byte
 // sequence where byte i = i * 17 mod 256).
-fn load_fips_plaintext(pt: State<AesBlock>) {
+transform load_fips_plaintext(pt: State<AesBlock>) {
     pt.data[0] = 0;      // 0x00
     pt.data[1] = 17;     // 0x11
     pt.data[2] = 34;     // 0x22
@@ -394,7 +394,7 @@ fn load_fips_plaintext(pt: State<AesBlock>) {
 // Decimal: 105, 196, 224, 216, 106, 123, 4, 48, 216, 205, 183, 128, 112,
 // 180, 197, 90 — the canonical FIPS-197 Appendix B.1 expected ciphertext
 // (real AES-128 ECB encryption of the test key + plaintext).
-fn load_fips_expected(ct: State<AesBlock>) {
+transform load_fips_expected(ct: State<AesBlock>) {
     ct.data[0] = 105;    // 0x69
     ct.data[1] = 196;    // 0xC4
     ct.data[2] = 224;    // 0xE0
@@ -440,7 +440,7 @@ fn load_fips_expected(ct: State<AesBlock>) {
 // 105, and the test will start emitting 105 (pass). The IVE: Pass verdict
 // verifies the test FRAMEWORK compiles + verifies correctly — the runtime
 // output byte (0 vs 105) is the regression signal.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Step 1: load the FIPS-197 test vector. ──
     let key = state_new(AesKey);
     load_fips_key(key);
