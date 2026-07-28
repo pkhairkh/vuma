@@ -1,18 +1,18 @@
 // Real KAT test: SHA-256("abc")
 // Expected output (hex): ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 const MASK32: u32 = 4294967295;
-fn rotr32(x: u32, n: u32) -> u32 { return ((x >> n) | (x << (32 - n))) & MASK32; }
-fn load_u32_be(ptr: Address, off: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 { return ((x >> n) | (x << (32 - n))) & MASK32; }
+transform load_u32_be(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
-fn store_u32_be(ptr: Address, off: u32, val: u32) {
+transform store_u32_be(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
 }
-fn sha256_k(idx: u32) -> u32 {
+transform sha256_k(idx: u32) -> u32 {
     if idx == 0 { return 1116352408; } if idx == 1 { return 1899447441; }
     if idx == 2 { return 3049323471; } if idx == 3 { return 3921009573; }
     if idx == 4 { return 961987163; } if idx == 5 { return 1508970993; }
@@ -47,7 +47,7 @@ fn sha256_k(idx: u32) -> u32 {
     if idx == 62 { return 3204031479; } if idx == 63 { return 3329325298; }
     return 0;
 }
-fn sha256_compress(state: Address, block: Address) {
+transform sha256_compress(state: Address, block: Address) {
     w = allocate(256);
     i: u32 = 0;
     while i < 16 { store_u32_be(w, i*4, load_u32_be(block, i*4)); i = i + 1; }
@@ -82,7 +82,7 @@ fn sha256_compress(state: Address, block: Address) {
     store_u32_be(state,24,(load_u32_be(state,24)+g)&MASK32);
     store_u32_be(state,28,(load_u32_be(state,28)+h)&MASK32);
 }
-fn main() -> i32 {
+transform main() -> i32 {
     state = allocate(32);
     store_u32_be(state,0,1779033703); store_u32_be(state,4,3144134277);
     store_u32_be(state,8,1013904242); store_u32_be(state,12,2773480762);

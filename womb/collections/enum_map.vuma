@@ -1,3 +1,4 @@
+import "../lib/mem_helpers.vuma"::{store_u64, load_u64, store_u32, load_u32};
 // womb/collections/enum_map.vuma — Tagged union storage for AST/SCG node payloads
 // Stores heterogeneous data in a flat array, accessed by index.
 // Each entry has a tag (u32) and a payload (up to 32 bytes).
@@ -5,29 +6,6 @@
 // Layout (24 bytes header + entries):
 //   Header: { entries_ptr: u64, count: u32, capacity: u32, _pad: u32, _pad: u32 }
 //   Entry:  [tag: u32][payload: 32 bytes] = 36 bytes (round to 40 for alignment)
-
-transform store_u64(ptr: Address, offset: u32, val: u64) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
-    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
-}
-transform load_u64(ptr: Address, offset: u32) -> u64 {
-    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
-    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
-    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
-    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
-}
-transform store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
-}
-transform load_u32(ptr: Address, offset: u32) -> u32 {
-    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
-    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-}
 
 const ENTRY_SIZE: u32 = 40;  // 4 (tag) + 32 (payload) + 4 (padding)
 

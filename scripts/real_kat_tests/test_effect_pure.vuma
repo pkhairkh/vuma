@@ -1,7 +1,7 @@
 // KAT: Effect system — pure function has no effects
 // Expected: 00 (pure = no effects)
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn main() -> i32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform main() -> i32 {
     // A function that only does arithmetic is pure
     a: u32 = 3;
     b: u32 = 4;

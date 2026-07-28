@@ -491,6 +491,10 @@ impl Scg {
                 PmtOpStmt::ArenaAlloc { .. } => NodeType::ArenaAlloc,
                 PmtOpStmt::ArenaGrow { .. } => NodeType::ArenaGrow,
             },
+            // Try (`?`) — a fallible unwrap that yields a value (and may
+            // branch / early-return). Classify as Computation (it produces a
+            // value, like a Call), the closest available NodeType.
+            ScgStatement::Try(_) => NodeType::Computation,
         })
     }
 
@@ -678,6 +682,14 @@ impl Scg {
                     tail_call: false,
                 })
             }
+            // Try (`?`) — fallible unwrap. No dedicated SemTryNode exists,
+            // so collapse to a Computation payload (the `?` yields a value
+            // and may early-return, mirroring a call-like computation).
+            ScgStatement::Try(_) => NodePayload::Computation(SemComputationNode {
+                kind: ComputationKind::Other("__try".to_string()),
+                result_type: None,
+                tail_call: false,
+            }),
         })
     }
 
@@ -1149,6 +1161,34 @@ pub enum ScgStatement {
     ///   - `ArenaGrow`     → `IRInstr::Alloc`
     ///   - `ArenaFree`     → `IRInstr::Free`
     PmtOp(PmtOpStmt),
+    /// Try operator (`expr?`): unwrap a `Result<T, E>`. A first-class SCG
+    /// statement that lowers directly to a conditional branch (Ok -> bind
+    /// the payload and continue; Err -> early-return the error), replacing
+    /// the former `CallNode("__try", ...)` indirection. Dispatches to
+    /// [`IRBuilder::lower_try`].
+    Try(TryStmt),
+}
+
+/// The `?` operator as a first-class SCG statement.
+///
+/// `operand` evaluates to a `Result<T, E>` value (a pointer to the tagged
+/// union, per `IRType::TaggedUnion` layout, or an opaque extern result).
+/// `ok_dst` is the variable name that receives the unwrapped `Ok` payload on
+/// the success path. `span` carries the source location of the `expr?`
+/// expression (mirrored from `vuma_parser::Span`).
+///
+/// Lowers to [`IRBuilder::lower_try`]: load the discriminant at offset 0,
+/// branch on `tag == 0`; Ok -> load the payload at offset 8 into `ok_dst`;
+/// Err -> load the error payload and early-return it from the current
+/// function.
+#[derive(Debug, Clone)]
+pub struct TryStmt {
+    /// The `Result<T, E>` expression being unwrapped.
+    pub operand: ScgExpr,
+    /// The destination variable receiving the unwrapped `Ok` payload.
+    pub ok_dst: String,
+    /// Source span of the `expr?` expression (mirrored from the parser).
+    pub span: Option<Span>,
 }
 
 /// A foreign-consume marker. Marks `state_var` as consumed by a
@@ -2552,6 +2592,15 @@ impl IRBuilder {
             // corresponding IRInstr (Alloc/Load/Store/Transform/Free).
             ScgStatement::PmtOp(op) => {
                 self.lower_pmt_op(op, ir_func, names)?;
+            }
+            // Try operator (`expr?`) — dispatch to the existing
+            // `IRBuilder::lower_try`, which loads the Result discriminant
+            // and branches: Ok -> bind payload to `ok_dst`; Err -> early
+            // return the error. Replaces the former `CallNode("__try")`
+            // indirection (that path is retained in `lower_call` as a
+            // defensive fallback for any legacy callers).
+            ScgStatement::Try(t) => {
+                self.lower_try(&t.operand, Some(&t.ok_dst), ir_func, names)?;
             }
         }
         Ok(())
@@ -6787,6 +6836,12 @@ impl IRBuilder {
                         Self::expr_uses(ptr, &mut uses);
                     }
                 }
+            }
+            // Try (`?`) — defines `ok_dst` (the unwrapped Ok payload) and
+            // uses the `Result` operand expression.
+            ScgStatement::Try(t) => {
+                defs.insert(t.ok_dst.clone());
+                Self::expr_uses(&t.operand, &mut uses);
             }
         }
 

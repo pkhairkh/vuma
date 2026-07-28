@@ -1,8 +1,8 @@
 // KAT: HMAC ipad=0x36
 // Expected: 36
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // HMAC: K XOR ipad, ipad = 0x36
     k: u32 = 0;
     r: u32 = k ^ 54;

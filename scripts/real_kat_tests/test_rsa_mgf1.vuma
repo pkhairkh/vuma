@@ -1,8 +1,8 @@
 // KAT: MGF1 counter=0
 // Expected: 00000000
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // MGF1: T = T || Hash(mgfSeed || counter)
     // Counter starts at 0 (4 bytes big-endian)
     out = allocate(4);

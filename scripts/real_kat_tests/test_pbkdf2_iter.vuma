@@ -1,8 +1,8 @@
 // KAT: PBKDF2 c=1
 // Expected: 01
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // PBKDF2: T_i = F(Password, Salt, c, i)
     // F = U_1 ^ U_2 ^ ... ^ U_c
     // Test: c=1 means T = U_1

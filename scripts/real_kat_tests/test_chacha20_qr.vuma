@@ -2,11 +2,11 @@
 // QR(0x11111111, 0x01020304, 0x9b8d6f43, 0x01234567)
 // = (0xea2a92f4, 0x0aaa3c9c, 0x1e0b038a, 0x131286da)
 // We output the first word (big-endian): ea2a92f4
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 const MASK32: u32 = 4294967295;
-fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+transform rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 286331153;   // 0x11111111
     b: u32 = 16909060;    // 0x01020304
     c: u32 = 2609737539;  // 0x9b8d6f43

@@ -1,10 +1,10 @@
 // KAT: Salsa20 QR(1,0,0,0) b=0x80
 // Expected: 00000080
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 const MASK32: u32 = 4294967295;
 
-fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
-fn main() -> i32 {
+transform rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+transform main() -> i32 {
     // Salsa20 QR: b ^= rotl(a+d, 7); c ^= rotl(b+a, 9); d ^= rotl(c+b, 13); a ^= rotl(d+c, 18)
     a: u32 = 1; b: u32 = 0; c: u32 = 0; d: u32 = 0;
     b = b ^ rotl32((a + d) & MASK32, 7);
