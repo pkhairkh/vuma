@@ -17,7 +17,7 @@ not yet lower a construct, the entry links to
 Source files are UTF-8. Comments: `// line` and `/* block (non-nesting) */`.
 Identifiers: `[A-Za-z_][A-Za-z0-9_]*` (types PascalCase by convention).
 
-**Keywords.** `fn let mut return if else while for loop break continue match
+**Keywords.** `transform let mut return if else while for loop break continue match
 in as struct enum layout extern transform State spawn wait async await
 unsafe borrow move ref true false None Some Ok Err i8 i16 i32 i64 u8 u16 u32
 u64 f32 f64 bool Address Channel`.
@@ -134,10 +134,10 @@ return expr; break; continue;
 ## 5. Functions
 
 ```vuma
-fn name(p1: T1, p2: T2) -> Ret { … return expr; }
-fn no_return_type { … } // implicit unit return
-fn id<T>(x: T) -> T { return x; } // generic
-fn get_x(p: State<Point>) -> i32 { return p.x; } // state-typed parameter (PMT)
+transform name(p1: T1, p2: T2) -> Ret { … return expr; }
+transform no_return_type { … } // implicit unit return
+transform id<T>(x: T) -> T { return x; } // generic
+transform get_x(p: State<Point>) -> i32 { return p.x; } // state-typed parameter (PMT)
 transform id(s: State<Point>) -> u32 { return s.x; } // parsed; lowering partial — see 
 ```
 
@@ -147,8 +147,8 @@ to an aggregate slot. `extern "C"` follows the target C ABI.
 
 ```vuma
 extern "C" {
- fn write(fd: i64, buf: Address, count: i64) -> i64;
- fn exit(code: i64);
+ transform write(fd: i64, buf: Address, count: i64) -> i64;
+ transform exit(code: i64);
 }
 ```
 
@@ -175,7 +175,7 @@ state_new(Layout) -> State<Layout> state_read(s, field) -> U state_write(s, fiel
 channel_open(capacity: u64) -> Channel<T>
 channel_send(ch, value) -> bool channel_recv(ch) -> Option<T>
 channel_try_recv(ch) -> Option<T> channel_close(ch)
-spawn_worker(fn, args...) -> WorkerId // lowers to Syscall{nr:220 (clone)}
+spawn_worker(transform, args...) -> WorkerId // lowers to Syscall{nr:220 (clone)}
 wait_worker(id) -> i64
 
 // Capability / sandbox (parsed; expansion coverage varies)
@@ -253,12 +253,12 @@ IVE-test-constructed or deserialized SCGs (`scg/src/serialize.rs:1377+`).
 
 ```vuma
 extern "C" {
- fn write(fd: i64, buf: Address, count: i64) -> i64;
- fn exit(code: i64);
+ transform write(fd: i64, buf: Address, count: i64) -> i64;
+ transform exit(code: i64);
 }
 
 #[borrow]
-fn inspect(buf: Address, len: u64) -> u64 {
+transform inspect(buf: Address, len: u64) -> u64 {
  // IVE tracks the borrow region; rejects aliased mutable access during it.
  return *buf;
 }
@@ -288,7 +288,7 @@ the most impactful items:
 
 1. **`transform` keyword** — parsed and **fully lowered to SCG**. The `transform_call` statement form and
  `Item::TransformDef` both lower via `emit_call_nodes` + `convert_fn_def`.
- The legacy `fn`-with-`State<T>` workaround
+ The legacy `transform`-with-`State<T>` workaround
  (`tests/gold_standard/pmt_wave2/transform_id.vuma`) still works but is no
  longer required.
 2. **`spawn_worker` on wasm32** — emulated in-process; both branches run
