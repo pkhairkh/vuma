@@ -173,7 +173,7 @@ fn wave5_scheduler_in_production_preserves_output() {
     use vuma::pipeline::{compile, CompileConfig, OptLevel};
 
     let source = r#"
-        fn sum(n) -> i64 {
+        transform sum(n) -> i64 {
             total = 0;
             i = 0;
             while i < n {
@@ -182,7 +182,7 @@ fn wave5_scheduler_in_production_preserves_output() {
             }
             return total;
         }
-        fn main() -> i64 {
+        transform main() -> i64 {
             return sum(10);
         }
     "#;

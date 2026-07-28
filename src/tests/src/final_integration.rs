@@ -359,7 +359,7 @@ fn test_full_pipeline_parse_to_elf() {
 //
 // Previously a KNOWN REGRESSION: `IRBuilder::build` failed with
 // `UnknownVariable { name: "HashState" }`
-// when lowering the `state_new(HashState)` call inside `fn sha256d(...)` at
+// when lowering the `state_new(HashState)` call inside `transform sha256d(...)` at
 // examples/sha256d.vuma:363. The deprecated semantic-SCG → codegen-SCG
 // bridge (`bridge_scg_to_codegen`) mis-lowered `state_new(HashState)` as a
 // regular `CallNode` with `args=[Var("HashState")]` (the layout name leaked
@@ -824,9 +824,9 @@ transform main() {}"#;
 fn test_error_recovery_multiple_errors() {
     // Code with multiple syntax errors
     let bad_source = r#"
-        fn 123bad() {}
+        transform 123bad() {}
         let x = ;
-        fn main( {}
+        transform main( {}
     "#;
 
     let diags = VumaForLLM::check(bad_source);

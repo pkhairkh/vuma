@@ -490,7 +490,7 @@ fn e037_emitted_when_calling_undefined_function_via_api() {
     // The codegen step should emit E037 when it can't resolve the symbol.
     let compiler = VumaCompiler::new();
     let source = r#"
-        fn main() {
+        transform main() {
             result = helper(42);
         }
     "#;
@@ -519,7 +519,7 @@ fn e037_unresolved_relocation_in_backend_codegen() {
     // error (via BackendError), it is mapped to E037 with related info.
     let compiler = VumaCompiler::new();
     let source = r#"
-        fn main() {
+        transform main() {
             x = external_call(1, 2);
         }
     "#;

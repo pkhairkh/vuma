@@ -255,7 +255,7 @@ fn count_accesses(scg: &SCG) -> usize {
 /// cleanly, demonstrating UAF prevention by construction.
 const UAF_SOURCE: &str = r#"
     layout CellUaf = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellUaf);
         buf.v = 42;
         val: i32 = buf.v;
@@ -338,7 +338,7 @@ fn test_use_after_free_ive_known_gap() {
 
 const OVERFLOW_WRITE_SOURCE: &str = r#"
     layout CellOw = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellOw);
         buf.v = 42;
         return buf.v;
@@ -406,7 +406,7 @@ fn test_buffer_overflow_write_ive_known_gap() {
 
 const OVERFLOW_READ_SOURCE: &str = r#"
     layout CellOr = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellOr);
         buf.v = 42;
         val: i32 = buf.v;
@@ -446,7 +446,7 @@ fn test_buffer_overflow_read_compiles_without_verification() {
 
 const DOUBLE_FREE_SOURCE: &str = r#"
     layout CellDf = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellDf);
         buf.v = 42;
         return buf.v;
@@ -520,7 +520,7 @@ fn test_double_free_compiles_without_verification() {
 
 const LEAK_SOURCE: &str = r#"
     layout CellLk = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellLk);
         buf.v = 42;
         val: i32 = buf.v;
@@ -585,7 +585,7 @@ fn test_ive_detects_memory_leak() {
 // an attempt to dereference an unbound variable.
 
 const NULL_DEREF_SOURCE: &str = r#"
-    fn main() -> i32 {
+    transform main() -> i32 {
         val: i32 = unknown_var.field;
         return val;
     }
@@ -651,7 +651,7 @@ fn test_null_pointer_dereference_ive_known_gap() {
 
 const UNINIT_READ_SOURCE: &str = r#"
     layout CellUr = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellUr);
         val: i32 = buf.v;
         return val;
@@ -729,7 +729,7 @@ fn test_uninitialized_read_ive_known_gap() {
 
 const VALID_PROGRAM_SOURCE: &str = r#"
     layout CellVp = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellVp);
         buf.v = 42;
         val: i32 = buf.v;
@@ -788,7 +788,7 @@ fn test_valid_program_ive_false_positive_documented() {
 
 const MULTI_ALLOC_SOURCE: &str = r#"
     layout CellMa = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let a = state_new(CellMa);
         let b = state_new(CellMa);
         let c = state_new(CellMa);
@@ -829,17 +829,17 @@ fn test_multiple_allocs_correct_frees_compiles() {
 
 const NESTED_CALLS_SOURCE: &str = r#"
     layout CellNc = { v: i32 }
-    fn inner(p: State<CellNc>) {
+    transform inner(p: State<CellNc>) {
         p.v = 7;
         return;
     }
-    fn outer() -> i32 {
+    transform outer() -> i32 {
         let buf = state_new(CellNc);
         inner(buf);
         val: i32 = buf.v;
         return val;
     }
-    fn main() -> i32 {
+    transform main() -> i32 {
         return outer();
     }
 "#;
@@ -867,7 +867,7 @@ fn test_nested_function_calls_with_memory_parses_and_builds_scg() {
 
 const PTR_ARITH_SOURCE: &str = r#"
     layout PairPa = { a: i32, b: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(PairPa);
         buf.b = 99;
         val: i32 = buf.b;
@@ -909,7 +909,7 @@ fn test_pointer_arithmetic_in_bounds_compiles() {
 
 const COND_FREE_BOTH_BRANCHES_SOURCE: &str = r#"
     layout CellCfbb = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellCfbb);
         let x = 1;
         if x {
@@ -923,7 +923,7 @@ const COND_FREE_BOTH_BRANCHES_SOURCE: &str = r#"
 
 const COND_FREE_ONE_BRANCH_SOURCE: &str = r#"
     layout CellCfob = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let buf = state_new(CellCfob);
         let x = 1;
         if x {
@@ -975,7 +975,7 @@ fn test_conditional_free_one_branch_parses_and_compiles() {
 
 const LOOP_ALLOC_SOURCE: &str = r#"
     layout CellLa = { v: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let i = 0;
         while i < 5 {
             let buf = state_new(CellLa);
@@ -1007,12 +1007,12 @@ fn test_loop_alloc_free_parses_and_builds_scg() {
 
 const FN_RETURNS_ALLOC_SOURCE: &str = r#"
     layout CellFra = { v: i32 }
-    fn make_buf() -> State<CellFra> {
+    transform make_buf() -> State<CellFra> {
         let buf = state_new(CellFra);
         buf.v = 42;
         return buf;
     }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let b = make_buf();
         val: i32 = b.v;
         return val;
@@ -1036,7 +1036,7 @@ fn test_function_returns_allocation_parses_and_builds_scg() {
 
 const STRUCT_FIELD_SOURCE: &str = r#"
     layout Point = { x: i32, y: i32 }
-    fn main() -> i32 {
+    transform main() -> i32 {
         let p = state_new(Point);
         p.x = 10;
         p.y = 20;

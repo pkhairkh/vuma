@@ -218,11 +218,11 @@ fn test_wave47_bootstrap_source_uses_argv() {
     // ── The two runtime intrinsics must be declared as externs. ──
     assert!(
         source.contains("transform __vuma_argc() -> i32"),
-        "full_lexer.vuma must declare `fn __vuma_argc() -> i32` as an extern"
+        "full_lexer.vuma must declare `transform __vuma_argc() -> i32` as an extern"
     );
     assert!(
         source.contains("transform __vuma_argv() -> Address"),
-        "full_lexer.vuma must declare `fn __vuma_argv() -> Address` as an extern"
+        "full_lexer.vuma must declare `transform __vuma_argv() -> Address` as an extern"
     );
 
     // ── input_path() must call __vuma_argc (real argv-reading code path). ──
@@ -237,7 +237,7 @@ fn test_wave47_bootstrap_source_uses_argv() {
 
     // ── The fallback path must still be present (backward compat). ──
     assert!(
-        source.contains("fn write_fallback_path"),
+        source.contains("transform write_fallback_path"),
         "full_lexer.vuma must define write_fallback_path() for the argc<2 fallback"
     );
     // The hardcoded "womb/lang/hello.vuma" bytes must still be present in

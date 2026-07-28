@@ -65,15 +65,15 @@ fn read_ir_builder_source() -> String {
 
 /// Extract a single function body from the source by name.
 ///
-/// Returns the substring starting at `fn <name>(` and ending just before
-/// the next top-level `fn ` declaration (or end of file). Panics if the
+/// Returns the substring starting at `transform <name>(` and ending just before
+/// the next top-level `transform ` declaration (or end of file). Panics if the
 /// function is not found.
 fn extract_function_body(source: &str, name: &str) -> String {
     let needle = format!("fn {}(", name);
     let start = source
         .find(&needle)
         .unwrap_or_else(|| panic!("function `{}` not found in ir_builder.vuma", name));
-    // Find the next top-level `fn ` after `start` (i.e., a `fn ` at the
+    // Find the next top-level `transform ` after `start` (i.e., a `transform ` at the
     // start of a line, not indented).
     let rest = &source[start..];
     let mut end = source.len();

@@ -2,7 +2,7 @@
 //!
 //! Validates that the ELF binaries produced by every native backend are
 //! well-formed and could be loaded by the Linux kernel.  Each backend
-//! compiles a minimal `fn add(a, b) -> i64 { a + b }` program through
+//! compiles a minimal `transform add(a, b) -> i64 { a + b }` program through
 //! the full SCG → IR → register-allocation → encode_program pipeline,
 //! and the resulting bytes are parsed as an ELF file.
 //!
@@ -290,7 +290,7 @@ impl ElfFile {
 // Helpers
 // ===========================================================================
 
-/// Build a minimal codegen SCG with a single `fn main(a, b) -> i64 { a + b }`.
+/// Build a minimal codegen SCG with a single `transform main(a, b) -> i64 { a + b }`.
 fn make_add_scg() -> Scg {
     Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),

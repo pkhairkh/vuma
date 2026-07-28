@@ -67,7 +67,7 @@ fn compile_to_elf(scg: &Scg, config: &EmitConfig) -> Vec<u8> {
 // Test 1: Simple add function
 // ---------------------------------------------------------------------------
 
-/// Test: Lower a simple `fn add(a, b) -> i64 { a + b }` to ARM64.
+/// Test: Lower a simple `transform add(a, b) -> i64 { a + b }` to ARM64.
 ///
 /// Validates:
 /// - IR function has two params and an Add instruction
