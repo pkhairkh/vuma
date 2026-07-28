@@ -1363,6 +1363,16 @@ impl fmt::Display for CastKind {
 // IR Instruction
 // ---------------------------------------------------------------------------
 
+/// Name of the runtime helper used as the fallback lowering for the `?`
+/// (try) operator when a `Result<T, E>` value's layout cannot be inspected
+/// statically (e.g. an opaque extern result whose discriminant offset /
+/// payload size are unknown).
+///
+/// The preferred lowering branches on the `Result` enum discriminant
+/// directly (see `IRBuilder::lower_try` in `scg_to_ir`); this helper is
+/// emitted only when that static layout information is unavailable.
+pub const TRY_RUNTIME_HELPER: &str = "__try";
+
 /// A single IR instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IRInstr {
