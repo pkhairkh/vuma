@@ -7,11 +7,14 @@
 
 use std::collections::HashSet;
 
-use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
+use vuma_codegen::ir::{
+    BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VregMeta, VumaGrade,
+};
 use vuma_codegen::opt::{
     dead_state_eliminate, dead_store_eliminate, dead_store_eliminate_with_linearity,
     ive_proven_non_aliasing_with, mark_ive_proven_nonaliasing,
 };
+use vuma_codegen::regalloc::build_grade_interference;
 
 #[test]
 fn wave8_alloc_region_provenance_basic() {
@@ -349,5 +352,169 @@ fn test_dead_state_eliminate_removes_consumed_alloc() {
         0,
         "Alloc of consumed state v0 should be removed by dead_state_eliminate; found {} allocs",
         allocs.len()
+    );
+}
+
+
+// ===========================================================================
+// Wave 2-B: grade-based register-allocation interference tests
+// ===========================================================================
+//
+// Wave 2-A added `build_grade_interference(func)` to regalloc.rs. It derives
+// interference edges purely from `IRFunction::vreg_meta` grades (Wave 0-B),
+// independent of plain liveness:
+//
+// - Exclusive + Exclusive, live simultaneously -> interfere.
+// - Exclusive + Shared -> interfere (over-constraint, sound regardless of
+//   liveness).
+// - Shared + Shared -> do NOT interfere (they may share a register).
+// - Any pair involving a vreg whose grade is `None` (or absent) -> skipped;
+//   such pairs fall back to liveness interference via `build_merged_interference`.
+//
+// These three tests exercise the core grade rules directly against a
+// hand-built `vreg_meta` table. The IR is constructed so the two vregs are
+// live simultaneously (overlapping live intervals), isolating the grade rule
+// as the deciding factor.
+
+/// Two `Exclusive` vregs that are live simultaneously must interfere.
+#[test]
+fn test_exclusive_vregs_interfere() {
+    // v0: defined at instr 0 (pos 0), used at instr 2 (pos 4) -> [0, 4]
+    // v1: defined at instr 1 (pos 2), used at instr 3 (pos 6) -> [2, 6]
+    // Strict overlap: 0 < 6 && 2 < 4 -> overlap. Both Exclusive -> edge.
+    let mut func = IRFunction::new("grade_excl_interfere");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        IRInstr::Alloc {
+            dst: IRValue::Register(1),
+            size: 8,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(1),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(2),
+            addr: IRValue::Register(1),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    func.vreg_meta.insert(0, VregMeta { grade: Some(VumaGrade::Exclusive) });
+    func.vreg_meta.insert(1, VregMeta { grade: Some(VumaGrade::Exclusive) });
+
+    let edges = build_grade_interference(&func);
+
+    assert!(
+        edges.contains(&(0, 1)),
+        "two Exclusive vregs live simultaneously must interfere; got {:?}",
+        edges
+    );
+}
+
+/// Two `Shared` vregs must NOT interfere, even when live simultaneously --
+/// they are permitted to share a physical register.
+#[test]
+fn test_shared_vregs_dont_interfere() {
+    // Same overlapping live intervals as the Exclusive case, but both vregs
+    // are graded Shared -> no grade-based edge may be emitted.
+    let mut func = IRFunction::new("grade_shared_no_interfere");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        IRInstr::Alloc {
+            dst: IRValue::Register(1),
+            size: 8,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(1),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(2),
+            addr: IRValue::Register(1),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    func.vreg_meta.insert(0, VregMeta { grade: Some(VumaGrade::Shared) });
+    func.vreg_meta.insert(1, VregMeta { grade: Some(VumaGrade::Shared) });
+
+    let edges = build_grade_interference(&func);
+
+    assert!(
+        !edges.contains(&(0, 1)),
+        "two Shared vregs must not interfere (they may share a register); got {:?}",
+        edges
+    );
+    assert!(
+        edges.is_empty(),
+        "Shared+Shared should emit no grade-based edges; got {:?}",
+        edges
+    );
+}
+
+/// Vregs whose grade is `None` (unknown) are skipped by the grade-based
+/// pass -- it must return nothing for them (they fall back to liveness
+/// interference via `build_merged_interference`, not here).
+#[test]
+fn test_unknown_grade_no_interference() {
+    // Both vregs carry an explicit `None` grade and are live simultaneously.
+    // The grade-based pass must not emit any edge for them.
+    let mut func = IRFunction::new("grade_unknown_no_interfere");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        IRInstr::Alloc {
+            dst: IRValue::Register(1),
+            size: 8,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(1),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(2),
+            addr: IRValue::Register(1),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    func.vreg_meta.insert(0, VregMeta { grade: None });
+    func.vreg_meta.insert(1, VregMeta { grade: None });
+
+    let edges = build_grade_interference(&func);
+
+    assert!(
+        edges.is_empty(),
+        "vregs with unknown (None) grade must produce no grade-based interference; got {:?}",
+        edges
+    );
+    assert!(
+        !edges.contains(&(0, 1)),
+        "None-grade pair must not appear in grade interference; got {:?}",
+        edges
     );
 }
