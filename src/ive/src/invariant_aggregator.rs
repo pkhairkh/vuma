@@ -10,10 +10,11 @@
 //! # Verification Levels
 //!
 //! VUMA 2.0 is PMT-only: every program is verified with
-//! [`VerificationLevel::Pmt`] (the default). The `Quick` and `Normal`
-//! variants remain on the enum for API stability and IVE-internal tests,
-//! but they are NOT user-selectable in the production pipeline and all
-//! remap to the same single-PMT-check code path.
+//! [`VerificationLevel::Pmt`] (the default and only variant). The
+//! `VerificationLevel` enum exposes a single `Pmt` variant — the legacy
+//! `Quick` / `Normal` / `Exhaustive` / `Modular` / `ConstantTime` /
+//! `Hardened` levels have been deleted, so callers cannot bypass PMT
+//! enforcement by selecting a different level.
 //!
 //! # Incremental Verification
 //!
@@ -128,32 +129,20 @@ impl fmt::Display for InvariantKind {
 ///
 /// # Historical context
 ///
-/// The historical documentation claimed that
-/// [`InvariantAggregator::with_level`] "silently coerces" non-`Pmt`
-/// levels to `Pmt` under `#[cfg(not(test))]`, leaving the 5-invariant /
-/// constant-time / interprocedural code paths dead in production. That
-/// mechanism **no longer exists**: the enum itself was collapsed to a
-/// single variant, so there is nothing to coerce. Specifically:
+/// Earlier VUMA revisions exposed six verification levels
+/// (`Quick` / `Normal` / `Exhaustive` / `Modular` / `ConstantTime` /
+/// `Hardened`) and five legacy pointer invariants (Liveness /
+/// Exclusivity / Interpretation / Origin / Cleanup). All of these have
+/// been **DELETED**: `InvariantKind` exposes only
+/// [`InvariantKind::Pmt`] (see the 8 → 1 narrative on that variant),
+/// and this enum exposes only `Pmt`. Consequently:
 ///
-/// - The five legacy pointer invariants (Liveness / Exclusivity /
-///   Interpretation / Origin / Cleanup) have been **DELETED** from
-///   `InvariantKind` — see `lib.rs:9-12` and the `InvariantKind` doc
-///   comment at `invariant_aggregator.rs:33-59` (which carries the
-///   full 8 → 1 historical-context narrative). Only
-///   `InvariantKind::Pmt` remains.
-/// - The `Quick` / `Normal` / `Exhaustive` / `Modular` /
-///   `ConstantTime` / `Hardened` level variants have been **DELETED**
-///   from this enum.
-/// - [`InvariantAggregator::with_level`] (at `invariant_aggregator.rs:551`)
-///   is a no-op: it accepts a `VerificationLevel` purely for API
-///   stability and always resolves to `Pmt`.
-/// - [`invariants_for_level`] (at `invariant_aggregator.rs:696-698`)
-///   always returns `vec![InvariantKind::Pmt]`.
+/// - [`InvariantAggregator::with_level`] is a no-op retained for API
+///   stability — it always resolves to `Pmt`.
+/// - [`invariants_for_level`] always returns `vec![InvariantKind::Pmt]`.
 ///
-/// The "silent coercion" caveat is therefore **STALE**: the dead code
-/// paths were deleted, not bypassed. Callers cannot opt out of PMT
-/// verification by selecting a different level — the type system
-/// forbids it.
+/// Callers cannot opt out of PMT verification by selecting a different
+/// level — the type system forbids it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VerificationLevel {
     /// PMT state verification only — runs the 3 state verifiers
@@ -548,7 +537,7 @@ impl fmt::Display for DiagnosticsReport {
 // InvariantAggregator
 // ---------------------------------------------------------------------------
 
-/// Runs all five VUMA invariant checks and aggregates the results.
+/// Runs the VUMA invariant check and aggregates the result.
 ///
 /// The aggregator wraps a [`VerificationEngine`] and orchestrates the
 /// individual invariant checks, collecting timing data, supporting
@@ -739,10 +728,10 @@ impl InvariantAggregator {
 
     /// Return the set of invariants to check for the current level.
     ///
-    /// (Legacy cleanup) Always returns `vec![InvariantKind::Pmt]` — the
-    /// five legacy pointer invariants have been removed. The `Quick` and
-    /// `Normal` levels are accepted for backwards compatibility but
-    /// produce the same single-PMT-check set.
+    /// Always returns `vec![InvariantKind::Pmt]` — the five legacy
+    /// pointer invariants have been removed and `VerificationLevel`
+    /// exposes only the `Pmt` variant, so there is exactly one
+    /// invariant to check.
     fn invariants_for_level(&self) -> Vec<InvariantKind> {
         vec![InvariantKind::Pmt]
     }
