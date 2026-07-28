@@ -5,9 +5,12 @@
 //! receives it as a parameter and uses it to prove non-aliasing across
 //! same-type pointers from different allocations.
 
+use std::collections::HashSet;
+
 use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
 use vuma_codegen::opt::{
-    dead_store_eliminate, ive_proven_non_aliasing_with, mark_ive_proven_nonaliasing,
+    dead_state_eliminate, dead_store_eliminate, dead_store_eliminate_with_linearity,
+    ive_proven_non_aliasing_with, mark_ive_proven_nonaliasing,
 };
 
 #[test]
@@ -224,5 +227,127 @@ fn wave8_no_provenance_for_unrelated_vregs() {
     assert!(
         !ive_proven_non_aliasing_with(&provenance, 0, 1),
         "vregs without provenance should not be proven non-aliasing"
+    );
+}
+
+
+// ===========================================================================
+// Wave 1-B: linearity-driven DCE tests
+// ===========================================================================
+//
+// Wave 0-A added `dead_store_eliminate_with_linearity` (consumed-state store
+// kill) and `dead_state_eliminate` (whole-lifecycle removal of consumed
+// state). These tests exercise both entry points directly with a hand-built
+// `consumed_vregs` set, mirroring the data the IVE linearity report will
+// feed in once Wave 4-A routes it through the pipeline.
+
+#[test]
+fn test_linearity_dce_removes_dead_state_store() {
+    // Alloc(v0); Store(addr=v0); v0 is IVE-proven consumed -> the store
+    // writes to destroyed state with no observable effect and must be
+    // eliminated by the linearity-aware DSE.
+    let mut func = IRFunction::new("lin_dce_dead_store");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(42),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    let (func, provenance) = mark_ive_proven_nonaliasing(func);
+
+    let mut consumed: HashSet<u32> = HashSet::new();
+    consumed.insert(0);
+
+    let result = dead_store_eliminate_with_linearity(func, &provenance, Some(&consumed));
+
+    let stores: Vec<_> = result.blocks[0]
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, IRInstr::Store { .. }))
+        .collect();
+    assert_eq!(
+        stores.len(),
+        0,
+        "store to consumed state v0 should be eliminated by linearity DCE; found {} stores",
+        stores.len()
+    );
+}
+
+#[test]
+fn test_linearity_dce_keeps_live_state_store() {
+    // Same IR as above, but v0 is NOT consumed -> the store must survive
+    // (the state is still live and the store may be observed).
+    let mut func = IRFunction::new("lin_dce_live_store");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(42),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    let (func, provenance) = mark_ive_proven_nonaliasing(func);
+
+    // v0 is NOT in the consumed set: linearity data present, but v0 is live.
+    let consumed: HashSet<u32> = HashSet::new();
+
+    let result = dead_store_eliminate_with_linearity(func, &provenance, Some(&consumed));
+
+    let stores: Vec<_> = result.blocks[0]
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, IRInstr::Store { .. }))
+        .collect();
+    assert_eq!(
+        stores.len(),
+        1,
+        "store to live (unconsumed) state v0 must be kept; found {} stores",
+        stores.len()
+    );
+}
+
+#[test]
+fn test_dead_state_eliminate_removes_consumed_alloc() {
+    // Alloc(v0); v0 consumed -> dead_state_eliminate removes the Alloc (the
+    // whole materialisation lifecycle of the consumed state is dead).
+    let mut func = IRFunction::new("dse_consumed_alloc");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![IRInstr::Alloc {
+        dst: IRValue::Register(0),
+        size: 8,
+    }];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    let mut consumed: HashSet<u32> = HashSet::new();
+    consumed.insert(0);
+
+    let result = dead_state_eliminate(func, &consumed);
+
+    let allocs: Vec<_> = result.blocks[0]
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, IRInstr::Alloc { .. }))
+        .collect();
+    assert_eq!(
+        allocs.len(),
+        0,
+        "Alloc of consumed state v0 should be removed by dead_state_eliminate; found {} allocs",
+        allocs.len()
     );
 }
