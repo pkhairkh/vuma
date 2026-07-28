@@ -1,8 +1,8 @@
 // KAT: Hex 0='0', 15='f'
 // Expected: 3066
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Hex: 0-9 = 48-57, a-f = 97-102
     out = allocate(2);
     *(out+0) = 48;  // '0'

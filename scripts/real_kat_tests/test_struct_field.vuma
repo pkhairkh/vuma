@@ -1,8 +1,8 @@
 // KAT: Struct field access — Point { x: u32, y: u32 }
 // Expected: 1e (30 = 10 + 20)
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 struct Point { x: u32, y: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     p = allocate(8);
     *(p + 0) = 10;
     *(p + 4) = 20;

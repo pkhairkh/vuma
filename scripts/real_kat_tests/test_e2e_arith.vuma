@@ -1,7 +1,7 @@
 // KAT: E2E — evaluate '3 + 4 * 2' = 11
 // Expected: 0b (11)
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn main() -> i32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform main() -> i32 {
     // Manually drive the full pipeline:
     // Source "3 + 4 * 2" -> tokens -> AST -> IR -> eval = 11
     // Simplified: just evaluate directly

@@ -1,8 +1,8 @@
 // KAT: Bignum2048 1+1=2
 // Expected: 02
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // 2048-bit add: 1 + 1 = 2
     a = allocate(256); b = allocate(256); r = allocate(256);
     i: u32 = 0;

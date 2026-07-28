@@ -1,8 +1,8 @@
 // KAT: AES-XTS tweak GF(2^128) double(0x01)=0x02
 // Expected: 02
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // XTS: tweak is multiplied by 2 in GF(2^128) for each sector
     // Same as GCM doubling
     x: u32 = 1;  // 0x01

@@ -1,13 +1,13 @@
 // KAT: Lexer — tokenize "return" -> Return keyword (type 16 = 0x10)
 // Expected: 10
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
-fn is_alpha(c: u32) -> u32 {
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+transform is_alpha(c: u32) -> u32 {
     if c >= 97 { if c <= 122 { return 1; } }
     if c >= 65 { if c <= 90 { return 1; } }
     if c == 95 { return 1; }
     return 0;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     // Source: "return"
     src = allocate(6);
     *(src + 0) = 114; // 'r'

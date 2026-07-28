@@ -1,8 +1,8 @@
 // KAT: ECDH 3*5 mod 7 = 1
 // Expected: 01
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ECDH: shared = dA * QB = dB * QA
     // Test: scalar mult in GF(p)
     // 3 * 5 mod 7 = 15 mod 7 = 1

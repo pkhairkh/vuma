@@ -1,8 +1,8 @@
 // KAT: SHA-512/256 IV[0]
 // Expected: 22
-extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // SHA-512/256 IV[0] hi = 0x22312194 = 574016148
     // >> 24 = 0x22 = 34
     v: u32 = 574016148;
