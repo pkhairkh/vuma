@@ -67,7 +67,7 @@ fn assert_scg_valid(scg: &SCG) {
 
 #[test]
 fn test_minimal_program() {
-    let source = "fn main() -> i32 { return 0; }";
+    let source = "transform main() -> i32 { return 0; }";
 
     let program = parse(source);
 
@@ -102,7 +102,7 @@ fn test_minimal_program() {
 
 #[test]
 fn test_function_with_params() {
-    let source = "fn add(a: u32, b: u32) -> u32 { return a + b; }";
+    let source = "transform add(a: u32, b: u32) -> u32 { return a + b; }";
 
     let program = parse(source);
 
@@ -426,15 +426,15 @@ fn test_error_recovery() {
 
     let malformed_sources = &[
         // Missing semicolon after return
-        "fn bad() -> i32 { return 0 }",
+        "transform bad() -> i32 { return 0 }",
         // Missing closing brace
-        "fn unclosed() { let x = 1;",
+        "transform unclosed() { let x = 1;",
         // Invalid token in expression
-        "fn weird() { x = @@@; }",
+        "transform weird() { x = @@@; }",
         // Missing function name
         "fn () { }",
         // Type in wrong position
-        "fn bad() { let x = ; }",
+        "transform bad() { let x = ; }",
         // Just completely garbled input
         "{{{{ fn }}}}",
     ];

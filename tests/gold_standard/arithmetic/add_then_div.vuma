@@ -5,7 +5,7 @@
 // 42 / 2 = 21. All operands kept as i32 locals. Straight-line
 // arithmetic. Distinct from s78_arith_add_then_div (11),
 // s74_arith_add_then_div (170) and s73_arith_add_then_mod (23).
-fn main() -> i32 {
+transform main() -> i32 {
     a: i32 = 24;
     b: i32 = 18;
     c: i32 = 2;

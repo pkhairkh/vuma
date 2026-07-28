@@ -15,7 +15,7 @@ layout Point = { x: u32, y: u32 }
 
 layout Line = { a: Point, b: Point }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let l = state_new(Line);
     l.a.x = 3;
     return l.a.x;

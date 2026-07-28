@@ -7,7 +7,7 @@
 // s18_edge_one_mul_one (1 * 1 = 1) and s14_edge_zero_minus_zero
 // (0 - 0 = 0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     s: u32 = 7;
     r: u32 = a << s;      // 128

@@ -5,7 +5,7 @@
 // memory access, so the *(buf+offset) U8-truncation bug doesn't
 // apply. Distinct from s3_edge_u8_max_minus_one (different framing).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 1;
     r: u32 = a - b;

@@ -6,7 +6,7 @@
 //   is_zero(x) = 1 - ((x | (0 - x)) >> 63)
 // (For any non-zero x in two's complement, x | -x has bit 63 set; for x=0 it
 // does not.) We also AND with n's own non-zero-ness so n=0 returns 0.
-fn main() -> i32 {
+transform main() -> i32 {
     n: u64 = 8;
     zero: u64 = 0;
     one: u64 = 1;

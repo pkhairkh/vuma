@@ -2522,11 +2522,11 @@ fn f_name_is_runtime(name: &str) -> bool {
 ///
 /// Example:
 ///   fn square(x) { return x * x; }
-///   fn main() { return square(5); }  // always called with 5
+///   transform main() { return square(5); }  // always called with 5
 ///
 /// After constant propagation:
 ///   fn square() { return 5 * 5; }    // x replaced with 5, param removed
-///   fn main() { return square(); }
+///   transform main() { return square(); }
 ///
 /// Then constant_fold folds 5*5 → 25, and DCE removes the now-trivial function.
 ///
@@ -4842,7 +4842,7 @@ mod working_tests {
     #[test]
     fn wave28_cross_function_constant_prop_propagates() {
         // fn square(x) { v1 = x * x; ret v1 }
-        // fn main() { v0 = square(5); ret v0 }
+        // transform main() { v0 = square(5); ret v0 }
         // After cross_function_constant_prop + constant_fold:
         //   - square's body has v1 = 5 * 5 (x substituted with 5)
         //   - constant_fold folds 5*5 → 25
@@ -4904,7 +4904,7 @@ mod working_tests {
         // of the callers).
         //
         // fn id(x) { v1 = x + 0; ret v1 }   // trivial: returns x
-        // fn main() { a = id(5); b = id(7); ret a }
+        // transform main() { a = id(5); b = id(7); ret a }
         //
         // id is called with 5 and with 7 — NOT all the same constant, so
         // the propagation must skip the `x` parameter.

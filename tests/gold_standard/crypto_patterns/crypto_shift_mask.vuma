@@ -8,7 +8,7 @@
 // and s5_bit_shr_mask (different shift and mask values, bitwise
 // category).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 255;    // 0xFF
     sh: u64 = 4;
     mask: u64 = 7;   // 0x07

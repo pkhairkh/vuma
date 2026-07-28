@@ -20,6 +20,6 @@ transform handle(req: State<Request>) -> State<Response> {
     return;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

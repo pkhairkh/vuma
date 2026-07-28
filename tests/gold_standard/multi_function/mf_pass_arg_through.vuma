@@ -6,18 +6,18 @@
 // s10_mf_helper_returns_arg (single helper) and s8_mf_pass_through
 // (single pass-through helper).
 
-fn id(x: u32) -> u32 {
+transform id(x: u32) -> u32 {
     r: u32 = x;
     return r;
 }
 
-fn add3(x: u32) -> u32 {
+transform add3(x: u32) -> u32 {
     c: u32 = 3;
     r: u32 = x + c;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = id(10);     // 10
     b: u32 = add3(20);   // 23
     s: u32 = a + b;      // 33

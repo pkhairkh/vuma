@@ -6,7 +6,7 @@
 // Distinct from s10_u32_shl_then_xor (shl-then-xor, no mask) and
 // s8_u32_xor_add (xor-then-add).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 18;          // 0x12
     b: u32 = 52;          // 0x34
     sh: u32 = 1;

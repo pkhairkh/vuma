@@ -3530,7 +3530,7 @@ mod tests {
     fn from_parse_error_integration() {
         use vuma_parser::Span;
 
-        let source = "fn main() { x }";
+        let source = "transform main() { x }";
         let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
         let diag = from_parse_error(&err, source, Some("main.vu"));
 

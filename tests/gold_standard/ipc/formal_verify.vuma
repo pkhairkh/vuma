@@ -24,7 +24,7 @@
 // always returns 0 or 1), the test exits 0 — failing the gold standard.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     // The program does a channel send+recv (2 L1 checks folded).
     ch = channel_open<i32>();
     pid = spawn_worker();

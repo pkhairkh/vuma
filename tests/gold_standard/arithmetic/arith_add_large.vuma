@@ -7,7 +7,7 @@
 // addition code path. The exit code is the low 8 bits of the sum, which
 // is 2.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 4000000001;
     b: u64 = 4000000001;
     sum: u64 = a + b;            // 8000000002, fits in u64

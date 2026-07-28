@@ -4,7 +4,7 @@
 // 0 - 1 = -1 in i32; masked to u32 = 0xFFFFFFFF = 4294967295.
 // Masking with 0xFF00 yields 0xFF00; the shell exit code (low 8 bits) is 0.
 
-fn main() -> i32 {
+transform main() -> i32 {
     zero: u32 = 0;
     one: u32 = 1;
     neg: u32 = (zero - one) & 4294967295;   // 0xFFFFFFFF

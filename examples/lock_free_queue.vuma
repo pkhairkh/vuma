@@ -9,7 +9,7 @@
 // Uses separate allocations for each component.
 // ===========================================================================
 
-fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32, value: u32) -> i32 {
+transform queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32, value: u32) -> i32 {
     // Read head and tail indices (stored as single byte, values 0-255)
     head: u32 = *(head_ptr + 0);
     tail: u32 = *(tail_ptr + 0);
@@ -32,7 +32,7 @@ fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32,
     return 1;
 }
 
-fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) -> u32 {
+transform queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) -> u32 {
     head: u32 = *(head_ptr + 0);
     tail: u32 = *(tail_ptr + 0);
 
@@ -57,7 +57,7 @@ fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) 
 // Main Entry Point
 // ===========================================================================
 
-fn main() -> i32 {
+transform main() -> i32 {
     capacity: u32 = 4;
     buf = allocate(capacity * 4);  // 4 elements × 4 bytes = 16 bytes
     head_ptr = allocate(8);

@@ -5,7 +5,7 @@
 // counter) do not propagate. On buggy codegen, s stays 0 and the loop
 // either never terminates (i never advances) or returns 0.
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     s: u32 = 0;
     while (i < 5) {

@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s18_bit_xor_chain_3 (xor-only chain)
 // and s14_bit_or_then_xor (or-then-xor, different values).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 160;         // 0xA0
     b: u64 = 5;           // 0x05
     c: u64 = 16;          // 0x10

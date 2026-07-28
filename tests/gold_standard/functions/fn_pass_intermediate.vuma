@@ -5,13 +5,13 @@
 // that result back into double -> 20. Single-helper nested call.
 // Distinct from s5_fn_call_chain_diff_funcs (different helpers).
 
-fn double(x: u32) -> u32 {
+transform double(x: u32) -> u32 {
     two: u32 = 2;
     r: u32 = x * two;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = double(5);   // 10
     b: u32 = double(a);   // 20
     return b;

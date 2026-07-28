@@ -1,22 +1,22 @@
 // state_type — State<T> as a function parameter type
 // Expected exit code: 0
 //
-// Parse-only smoke test: a regular `fn` (not a `transform`) that
+// Parse-only smoke test: a regular `transform` (not a `transform`) that
 // accepts a `State<Point>` parameter. Verifies the parser handles the
 // `State<T>` type annotation in any position where a `Type` is expected,
 // not only inside `transform` signatures.
 //
 // VUMA Key Concepts:
-//   - `State<T>` as a first-class type (usable in any fn signature)
+//   - `State<T>` as a first-class type (usable in any transform signature)
 //   - Coexistence with the existing `*T` pointer syntax
 //   - A future pass will type-check that `s` is a state-typed value
 
 layout Point = { x: u32, y: u32 }
 
-fn read_x(s: State<Point>) -> u32 {
+transform read_x(s: State<Point>) -> u32 {
     return 0;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

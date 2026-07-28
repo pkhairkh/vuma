@@ -15,14 +15,14 @@
 // The `extern "C"` block tells the compiler to use the C calling
 // convention and emit relocations instead of local BL instructions.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn exit(code: i64);
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
+    transform exit(code: i64);
 }
 
 // ── Main ─────────────────────────────────────────────────────
 
-fn main() -> i64 {
+transform main() -> i64 {
     // Simply return 0 — the extern block above is compiled and
     // relocations are emitted, testing the FFI declaration system.
     // We don't call write/read/exit here to ensure compatibility

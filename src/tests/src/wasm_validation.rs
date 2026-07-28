@@ -50,7 +50,7 @@ const WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
 // Helpers
 // ===========================================================================
 
-/// Build a minimal IR function `fn main() -> i32 { return N; }`.
+/// Build a minimal IR function `transform main() -> i32 { return N; }`.
 fn make_main_returning(value: i32) -> IRFunction {
     IRFunction {
         name: "main".to_string(),
@@ -73,7 +73,7 @@ fn make_main_returning(value: i32) -> IRFunction {
     }
 }
 
-/// Build a minimal IR function `fn main() { }` (void return).
+/// Build a minimal IR function `transform main() { }` (void return).
 fn make_main_void() -> IRFunction {
     IRFunction {
         name: "main".to_string(),
@@ -94,7 +94,7 @@ fn make_main_void() -> IRFunction {
     }
 }
 
-/// Compile the default test program (`fn main() -> i32 { return 0; }`) to Wasm.
+/// Compile the default test program (`transform main() -> i32 { return 0; }`) to Wasm.
 fn compile_default_wasm() -> Vec<u8> {
     let func = make_main_returning(0);
     compile_to_wasm(&[func]).expect("default compilation should succeed")

@@ -1,7 +1,7 @@
 // KAT test for url
 // URL: space (0x20) is not alphanumeric, so it's unsafe (needs encoding)
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     c: u32 = 32;  // space
     // Space is NOT in [0-9] (48-57), NOT in [A-Z] (65-90), NOT in [a-z] (97-122)
     // So it's unsafe -> return 1

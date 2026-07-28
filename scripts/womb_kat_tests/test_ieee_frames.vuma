@@ -2,4 +2,4 @@
 // Ethernet min frame
 // Expected exit code: 64
 
-fn main() -> i32 { return 64; }
+transform main() -> i32 { return 64; }

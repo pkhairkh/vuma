@@ -8,7 +8,7 @@
 // s10_nl_5x1_count (5x1 = 5).
 // Expected exit code: 10
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..2 {
         for j in 0..5 {

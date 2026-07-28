@@ -14,7 +14,7 @@
 
 layout Single = { v: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Single);
     s.v = 12345;
     return s.v;

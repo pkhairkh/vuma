@@ -6,7 +6,7 @@
 // first. Distinct from s22_arith_add_then_mul (add-then-mul, value 160)
 // and s18_arith_mul_add_sub (mul-then-add-then-sub, value 82).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 15;
     b: u32 = 25;
     c: u32 = 3;

@@ -6,7 +6,7 @@
 // s18_arith_div_mod_sum (div-then-mod-then-sum, value 41) and
 // s14_arith_mul_then_div (mul-then-div).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 50;
     c: u32 = 5;

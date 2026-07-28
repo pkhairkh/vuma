@@ -7,7 +7,7 @@
 // variables first. Distinct from s7_crypto_xor_self_zero (a^a=0) and
 // s9_crypto_xor_with_key (two-operand XOR to all-ones).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 170;         // 0xAA
     b: u64 = 85;          // 0x55
     c: u64 = 255;         // 0xFF

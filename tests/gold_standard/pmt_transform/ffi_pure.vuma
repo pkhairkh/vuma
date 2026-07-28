@@ -11,16 +11,16 @@
 // After calling `state_size(buf)`, `buf.len` is still valid.
 //
 // VUMA Key Concepts:
-//   - `#[pure]` on an extern fn declares it does not modify state args
+//   - `#[pure]` on an extern transform declares it does not modify state args
 //   - The marshal pass (`marshal::marshal_state_for_ffi`) recognises the
 //     `pure` attribute via `marshal::is_pure_extern` and sets
 //     `MarshalResult::preserved = true`.
 //   - Subsequent reads of the state are still valid (no invalidation).
 //   - The IVE `ffi` verifier does NOT report `buf` as invalidated.
 //
-// Note: `#[pure]` attribute parsing on extern fn declarations is
+// Note: `#[pure]` attribute parsing on extern transform declarations is
 // forward-looking — the attribute name is recognised by the marshal pass
-// when present in the fn's attribute list. The source-level attribute is
+// when present in the transform's attribute list. The source-level attribute is
 // shown here as a comment to keep the test parseable on all backends.
 
 layout Buffer = { len: u32, data: u64 }
@@ -28,10 +28,10 @@ layout Buffer = { len: u32, data: u64 }
 extern "C" {
     // #[pure] — declared pure: does not modify its state argument.
     // After `state_size(buf)`, `buf` is PRESERVED (not invalidated).
-    fn state_size(buf: Address) -> i64;
+    transform state_size(buf: Address) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(Buffer);
     buf.len = 12;
     // In a real call: state_size(&buf as *Buffer) — `buf` is PRESERVED.

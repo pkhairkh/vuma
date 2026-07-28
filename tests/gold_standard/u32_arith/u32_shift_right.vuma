@@ -4,7 +4,7 @@
 // 16 >> 2 = 4. Uses variables for both operands because VUMA may drop
 // bitwise ops with immediate RHS.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u32 = 16;
     n: u32 = 2;
     shifted: u32 = val >> n;

@@ -5,7 +5,7 @@
 // counter pattern (loop counter compared to a variable bound) so it should
 // execute correctly on backends whose for-loop body codegen is buggy.
 
-fn main() -> i32 {
+transform main() -> i32 {
     sum: u32 = 0;
     i: u32 = 1;
     n: u32 = 11;   // upper bound (exclusive)

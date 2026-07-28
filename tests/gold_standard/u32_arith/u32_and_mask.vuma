@@ -5,7 +5,7 @@
 // variable first to dodge the immediate-RHS bitwise drop bug.
 // Distinct from s5_u32_mask_high_nibble (masks 0xAB with 0x0F -> 11).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 255;     // 0xFF
     m: u32 = 15;      // 0x0F
     r: u32 = v & m;   // 0x0F = 15

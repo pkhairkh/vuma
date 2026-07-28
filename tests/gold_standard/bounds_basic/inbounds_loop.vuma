@@ -22,7 +22,7 @@
 layout Buf = { data: [u8; 32] }
 layout Acc = { sum: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(Buf);
     let acc = state_new(Acc);
 

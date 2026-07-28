@@ -10,7 +10,7 @@
 // inside the inner loop never updates `count` outside the loop, so the
 // program returns 0 instead of 4. It will pass once that bug is fixed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..2 {
         for j in 0..2 {

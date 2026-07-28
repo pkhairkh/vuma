@@ -7,7 +7,7 @@
 // fixed. Distinct from s4_cf_for_count_5 (5 iterations).
 // Expected exit code: 7
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..7 {
         count = count + 1;

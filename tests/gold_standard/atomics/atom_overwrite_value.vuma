@@ -7,7 +7,7 @@
 // Distinct from s33_atom_overwrite_first (overwrite-first, 100) and s30_atom_overwrite_first (different values).
 // Expected exit code: 175
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let c1 = state_new(_L1);
     c1.v = 200;
     c1.v = 175;

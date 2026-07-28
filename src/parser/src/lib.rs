@@ -18,7 +18,7 @@
 //!
 //! let source = r#"
 //!     region memory_pool = allocate(1024);
-//!     fn main() {
+//!     transform main() {
 //!         node_ptr = memory_pool + 64;
 //!         header = node_ptr as *NodeHeader;
 //!     }

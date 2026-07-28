@@ -2,4 +2,4 @@
 // printf '%'
 // Expected exit code: 37
 
-fn main() -> i32 { return 37; }
+transform main() -> i32 { return 37; }

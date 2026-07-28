@@ -13,7 +13,7 @@
 //   - floattoint (final truncation)
 //   - f64 subtraction and addition (LCG advance)
 
-fn main() -> i32 {
+transform main() -> i32 {
     total: i64 = 1000;
     inside: i64 = 0;
     state: i64 = 12345;  // LCG seed

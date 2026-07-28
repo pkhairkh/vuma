@@ -121,7 +121,7 @@ layout ShaDigest = { data: [u8; 32] }
 // into ctx.state[0..7], zeros ctx.state[8..31], zeros ctx.buf, and
 // sets ctx.len = ctx.total = 0. K11 will seed all 32 IV bytes (8 words
 // × 4 bytes/word) and use word-granular storage.
-fn sha256_init(ctx: State<Sha256Ctx>) {
+transform sha256_init(ctx: State<Sha256Ctx>) {
     // H0 = 0x6a09e667 → LE: 67 e6 09 6a.
     ctx.state[0] = 103; ctx.state[1] = 230; ctx.state[2] = 9; ctx.state[3] = 106;
     // H1 = 0xbb67ae85 → LE: 85 ae 67 bb.
@@ -146,7 +146,7 @@ fn sha256_init(ctx: State<Sha256Ctx>) {
 // without buffering or compressing. K11 will replace this with the
 // real streaming path (buffer partial blocks, compress when a 64-byte
 // block accumulates).
-fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
+transform sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
     ctx.total = ctx.total + len;
 }
 
@@ -159,7 +159,7 @@ fn sha256_update(ctx: State<Sha256Ctx>, data: State<ShaData>, len: u64) {
 // K11 will replace this with the real SHA-256 padding + final
 // compression pass + big-endian digest serialization (FIPS 180-4
 // §5.1.1 + §6.2.2).
-fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
+transform sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
     let i = 0;
     while i < 32 {
         out.data[i] = ctx.state[i];
@@ -181,7 +181,7 @@ fn sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
 //   SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 // i.e. out.data[0] == 227 (0xe3), out.data[1] == 176 (0xb0), ...
 // For now, exit 0 (stub passes its own KAT).
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Initialize the SHA-256 context ──
     let ctx = state_new(Sha256Ctx);
     sha256_init(ctx);

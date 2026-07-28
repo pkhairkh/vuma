@@ -5,7 +5,7 @@
 // the correct value. The frame is built by the riscv64 backend's
 // ChannelSend handler and verified by ChannelRecv.
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i64>();
     pid = spawn_worker();
     if pid == 0 {

@@ -2,4 +2,4 @@
 // SSH-2
 // Expected exit code: 83
 
-fn main() -> i32 { return 83; }
+transform main() -> i32 { return 83; }

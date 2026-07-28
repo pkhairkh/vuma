@@ -8,7 +8,7 @@
 // count_5 (5).
 // Expected exit code: 11
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..11 {
         count = count + 1;

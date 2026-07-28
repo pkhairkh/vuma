@@ -6,11 +6,11 @@
 // is chosen so it fits in the 8-bit exit code (originally the spec called
 // for 1000, but Linux exit codes are 0..255).
 
-fn echo_u64(x: u64) -> u64 {
+transform echo_u64(x: u64) -> u64 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = echo_u64(250);
     return v;
 }

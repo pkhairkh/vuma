@@ -6,23 +6,23 @@
 // -> 11. Each call uses an intermediate local. Distinct from
 // s4_mf_chain_3 (different addends).
 
-fn add3(x: u32) -> u32 {
+transform add3(x: u32) -> u32 {
     n: u32 = 3;
     r: u32 = x + n;
     return r;
 }
-fn add2(x: u32) -> u32 {
+transform add2(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x + n;
     return r;
 }
-fn add1(x: u32) -> u32 {
+transform add1(x: u32) -> u32 {
     n: u32 = 1;
     r: u32 = x + n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = add3(5);   // 8
     b: u32 = add2(a);   // 10
     c: u32 = add1(b);   // 11

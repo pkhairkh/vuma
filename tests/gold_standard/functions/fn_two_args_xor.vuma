@@ -6,12 +6,12 @@
 // immediate-RHS bitwise issue — both operands are variables). Distinct
 // from s9_fn_two_args_add (two-arg add) and s7_fn_two_args_sub (two-arg sub).
 
-fn xor_pair(a: u32, b: u32) -> u32 {
+transform xor_pair(a: u32, b: u32) -> u32 {
     r: u32 = a ^ b;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = xor_pair(85, 170);   // 0x55 ^ 0xAA = 0xFF
     return v;
 }

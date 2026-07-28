@@ -5,7 +5,7 @@
 // variables first. Distinct from s10_edge_one_minus_one (1 - 1 = 0)
 // and s5_edge_one_shift_left (1 << 4 = 16).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 1;
     r: u32 = a * b;       // 1

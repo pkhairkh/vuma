@@ -1,23 +1,23 @@
 // Test: u32 arithmetic that exercises 32-bit overflow and function calls
 // Expected: exit 79 (0x4F)
 
-fn add_u32(a: u32, b: u32) -> u32 {
+transform add_u32(a: u32, b: u32) -> u32 {
     return a + b;
 }
 
-fn xor_u32(a: u32, b: u32) -> u32 {
+transform xor_u32(a: u32, b: u32) -> u32 {
     return a ^ b;
 }
 
-fn and_u32(a: u32, b: u32) -> u32 {
+transform and_u32(a: u32, b: u32) -> u32 {
     return a & b;
 }
 
-fn rotr_u32(x: u32, n: u32) -> u32 {
+transform rotr_u32(x: u32, n: u32) -> u32 {
     return (x >> n) | (x << (32 - n));
 }
 
-fn main() -> u64 {
+transform main() -> u64 {
     // Test u32 arithmetic that could overflow into upper 32 bits
     a: u32 = 0xFFFFFFFF;
     b: u32 = 1;

@@ -116,8 +116,8 @@ pub struct Parser<'src> {
 
 /// Token kinds that begin a top-level item declaration.
 const ITEM_STARTERS: &[TokenKind] = &[
-    TokenKind::Fn,
-    // Wave 3-A: `transform` begins a function item just like `fn`.
+    // Wave 3-C: `fn` removed from the lexer; `transform` is the sole
+    // function-declaration keyword.
     TokenKind::Transform,
     TokenKind::Struct,
     TokenKind::Enum,
@@ -345,13 +345,13 @@ impl<'src> Parser<'src> {
         let visibility = self.parse_visibility()?;
 
         match self.current.kind {
-            TokenKind::Fn | TokenKind::Transform => {
+            TokenKind::Transform => {
                 self.parse_fn_def(false, visibility, attrs).map(Item::FnDef)
             }
             TokenKind::Async => {
                 // Could be `async fn`/`async transform` or `async { block }` as expression
                 let next = self.peek_next();
-                if next.kind == TokenKind::Fn || next.kind == TokenKind::Transform {
+                if next.kind == TokenKind::Transform {
                     self.parse_fn_def(true, visibility, attrs).map(Item::FnDef)
                 } else {
                     self.parse_stmt().map(Item::Stmt)
@@ -1060,8 +1060,8 @@ impl<'src> Parser<'src> {
                     continue;
                 }
             }
-            // Method: `fn`/`transform name(...) -> T;` or `... { body }`
-            if self.at(TokenKind::Fn) || self.at(TokenKind::Transform) {
+            // Method: `transform name(...) -> T;` or `... { body }`
+            if self.at(TokenKind::Transform) {
                 let method = self.parse_fn_def(false, Visibility::default(), Vec::new())?;
                 if method.body.statements.is_empty()
                     && !method.is_async
@@ -1154,7 +1154,7 @@ impl<'src> Parser<'src> {
 
         let mut methods = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            if self.at(TokenKind::Fn) || self.at(TokenKind::Transform) {
+            if self.at(TokenKind::Transform) {
                 match self.parse_fn_def(false, Visibility::default(), Vec::new()) {
                     Ok(method) => methods.push(method),
                     Err(err) => {
@@ -1207,8 +1207,8 @@ impl<'src> Parser<'src> {
 
         let mut functions = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            // Allow attributes (#[...]) before `fn`/`transform` inside extern blocks.
-            if self.at(TokenKind::Fn) || self.at(TokenKind::Transform) || self.at(TokenKind::Hash) {
+            // Allow attributes (#[...]) before `transform` inside extern blocks.
+            if self.at(TokenKind::Transform) || self.at(TokenKind::Hash) {
                 match self.parse_extern_fn_decl() {
                     Ok(fn_decl) => functions.push(fn_decl),
                     Err(err) => {
@@ -3959,21 +3959,18 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Consume the function-declaration keyword (`fn` or `transform`).
+    /// Consume the function-declaration keyword (`transform`).
     ///
-    /// Wave 3-A introduces `transform` as an alias for `fn`; both are accepted
-    /// during the migration window and `fn` is removed in Wave 3-C. This
-    /// helper centralises the "either keyword is fine" logic so that every
-    /// function-declaration entry point (`parse_fn_def`,
-    /// `parse_extern_fn_decl`) stays in sync.
+    /// Wave 3-C removed `fn` from the lexer; `transform` is now the sole
+    /// function-declaration keyword. This helper centralises the keyword
+    /// consumption so that every function-declaration entry point
+    /// (`parse_fn_def`, `parse_extern_fn_decl`) stays in sync.
     fn expect_fn_keyword(&mut self) -> Result<Token, ParseError> {
-        if self.current.kind == TokenKind::Fn
-            || self.current.kind == TokenKind::Transform
-        {
+        if self.current.kind == TokenKind::Transform {
             Ok(self.advance())
         } else {
             let mut err = ParseError::expected(
-                "'fn' or 'transform'",
+                "'transform'",
                 format!("'{}'", self.current.kind),
                 self.current.span,
             );
@@ -4081,7 +4078,6 @@ impl<'src> Parser<'src> {
                 | TokenKind::Derive
                 | TokenKind::Crate
                 | TokenKind::Async
-                | TokenKind::Fn
         )
     }
 
@@ -4430,7 +4426,7 @@ mod tests {
     // ---- Test 2: Function definition ----
     #[test]
     fn parse_fn_def() {
-        let source = "fn add(a: u32, b: u32) -> u32 { return a; }";
+        let source = "transform add(a: u32, b: u32) -> u32 { return a; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         assert_eq!(program.items.len(), 1);
@@ -4483,7 +4479,7 @@ mod tests {
     #[test]
     fn parse_while_loop() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = 0;
                 while x < 10 {
                     x = x + 1;
@@ -4505,7 +4501,7 @@ mod tests {
     #[test]
     fn parse_if_else() {
         let source = r#"
-            fn test() {
+            transform test() {
                 if x > 0 {
                     y = 1;
                 } else {
@@ -4563,7 +4559,7 @@ mod tests {
     #[test]
     fn parse_match_stmt() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match x {
                     0 => y,
                     1 => z,
@@ -4591,7 +4587,7 @@ mod tests {
     #[test]
     fn parse_for_loop() {
         let source = r#"
-            fn test() {
+            transform test() {
                 for i in items {
                     process(i);
                 }
@@ -4612,7 +4608,7 @@ mod tests {
     #[test]
     fn parse_sync_block() {
         let source = r#"
-            fn test() {
+            transform test() {
                 sync {
                     x = 1;
                 }
@@ -4633,7 +4629,7 @@ mod tests {
     #[test]
     fn parse_bool_and_logical_ops() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let a = true;
                 let b = false;
                 let c = a && b;
@@ -4654,7 +4650,7 @@ mod tests {
     #[test]
     fn parse_sizeof_alignof() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let s = sizeof(u32);
                 let a = alignof(u64);
             }
@@ -4673,7 +4669,7 @@ mod tests {
     #[test]
     fn parse_derive_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let derived = derive(ptr, region);
             }
         "#;
@@ -4691,7 +4687,7 @@ mod tests {
     #[test]
     fn parse_async_spawn() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let task = async { compute(); };
                 let handle = spawn task;
             }
@@ -4709,7 +4705,7 @@ mod tests {
     // ---- Test 18: Array type ----
     #[test]
     fn parse_array_type() {
-        let source = "fn test() { let arr: [u8; 256] = data; }";
+        let source = "transform test() { let arr: [u8; 256] = data; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -4733,7 +4729,7 @@ mod tests {
     // ---- Test 19: Generic type ----
     #[test]
     fn parse_generic_type() {
-        let source = "fn test() { let v: Vec<u32> = data; }";
+        let source = "transform test() { let v: Vec<u32> = data; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -4756,7 +4752,7 @@ mod tests {
     #[test]
     fn parse_nested_generic_a_bc() {
         // A<B<C>> — the >> is lexed as Shr, must be split into two Gt tokens
-        let source = "fn test() { let v: A<B<C>> = data; }";
+        let source = "transform test() { let v: A<B<C>> = data; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("A<B<C>> should parse");
         match &program.items[0] {
@@ -4791,7 +4787,7 @@ mod tests {
     #[test]
     fn parse_deeply_nested_generic_a_bc_d() {
         // A<B<C<D>>> — the >>> is lexed as Shr + Gt, must be split correctly
-        let source = "fn test() { let v: A<B<C<D>>> = data; }";
+        let source = "transform test() { let v: A<B<C<D>>> = data; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("A<B<C<D>>> should parse");
         match &program.items[0] {
@@ -4847,11 +4843,11 @@ mod tests {
     #[test]
     fn parse_nested_generic_in_fn_arg() {
         // Nested generics in function parameters
-        let source = "fn test(x: A<B<C>>) {}";
+        let source = "transform test(x: A<B<C>>) {}";
         let mut parser = Parser::new(source);
         let program = parser
             .parse_program()
-            .expect("nested generic in fn arg should parse");
+            .expect("nested generic in transform arg should parse");
         match &program.items[0] {
             Item::FnDef(f) => {
                 assert_eq!(f.params.len(), 1);
@@ -4885,7 +4881,7 @@ mod tests {
     #[test]
     fn parse_nested_generic_in_return_type() {
         // Nested generics in return type
-        let source = "fn test() -> A<B<C>> {}";
+        let source = "transform test() -> A<B<C>> {}";
         let mut parser = Parser::new(source);
         let program = parser
             .parse_program()
@@ -4922,7 +4918,7 @@ mod tests {
     #[test]
     fn parse_shr_still_works_as_operator() {
         // >> as right shift operator in expressions must NOT be affected
-        let source = "fn test() { let x = a >> b; }";
+        let source = "transform test() { let x = a >> b; }";
         let mut parser = Parser::new(source);
         let program = parser
             .parse_program()
@@ -4985,7 +4981,7 @@ mod tests {
     fn parse_module_def() {
         let source = r#"
             mod utils {
-                fn helper() {}
+                transform helper() {}
             }
         "#;
         let mut parser = Parser::new(source);
@@ -5003,7 +4999,7 @@ mod tests {
     #[test]
     fn parse_index_access() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = arr[0];
                 arr[1] = 42;
             }
@@ -5022,7 +5018,7 @@ mod tests {
     #[test]
     fn parse_namespace_access() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let v = Math::abs(x);
             }
         "#;
@@ -5039,7 +5035,7 @@ mod tests {
     // ---- Test 23: BD annotation type ----
     #[test]
     fn parse_bd_annot_type() {
-        let source = "fn test() { let x: #bd(Secure) = data; }";
+        let source = "transform test() { let x: #bd(Secure) = data; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -5058,9 +5054,9 @@ mod tests {
     #[test]
     fn parse_error_recovery() {
         let source = r#"
-            fn good() { return 1; }
-            fn bad( { }
-            fn also_good() { return 2; }
+            transform good() { return 1; }
+            transform bad( { }
+            transform also_good() { return 2; }
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
@@ -5076,7 +5072,7 @@ mod tests {
     #[test]
     fn parse_bitwise_ops() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let a = x & y;
                 let b = x | y;
                 let c = x ^ y;
@@ -5115,7 +5111,7 @@ mod tests {
     #[test]
     fn parse_else_if_chain() {
         let source = r#"
-            fn test() {
+            transform test() {
                 if x > 0 {
                     y = 1;
                 } else if x < 0 {
@@ -5155,7 +5151,7 @@ mod tests {
     #[test]
     fn parse_else_if_block_chain() {
         let source = r#"
-            fn test() {
+            transform test() {
                 if c == 40 { ttype = 61; }
                 else { if c == 41 { ttype = 62; } }
                 else { if c == 123 { ttype = 63; } }
@@ -5226,7 +5222,7 @@ mod tests {
     #[test]
     fn parse_else_block_with_if_then_more_stmts() {
         let source = r#"
-            fn test(a: u32) -> u32 {
+            transform test(a: u32) -> u32 {
                 if a == 32 {
                     return 1;
                 } else {
@@ -5285,7 +5281,7 @@ mod tests {
     #[test]
     fn parse_else_block_with_if_then_more_stmts_orphan_else() {
         let source = r#"
-            fn test(a: u32) -> u32 {
+            transform test(a: u32) -> u32 {
                 if a == 32 {
                     return 1;
                 } else {
@@ -5343,7 +5339,7 @@ mod tests {
     #[test]
     fn parse_break_stmt() {
         let source = r#"
-            fn test() {
+            transform test() {
                 loop {
                     break;
                 }
@@ -5367,7 +5363,7 @@ mod tests {
     #[test]
     fn parse_break_with_value() {
         let source = r#"
-            fn test() {
+            transform test() {
                 loop {
                     break 42;
                 }
@@ -5393,7 +5389,7 @@ mod tests {
     #[test]
     fn parse_continue_stmt() {
         let source = r#"
-            fn test() {
+            transform test() {
                 while true {
                     continue;
                 }
@@ -5417,7 +5413,7 @@ mod tests {
     #[test]
     fn parse_compound_assign() {
         let source = r#"
-            fn test() {
+            transform test() {
                 x += 1;
                 y -= 2;
                 z *= 3;
@@ -5460,7 +5456,7 @@ mod tests {
     #[test]
     fn parse_bitwise_compound_assign() {
         let source = r#"
-            fn test() {
+            transform test() {
                 a &= mask;
                 b |= flags;
                 c ^= key;
@@ -5502,7 +5498,7 @@ mod tests {
     #[test]
     fn parse_bd_directives() {
         let source = r#"
-            fn test() {
+            transform test() {
                 bd(Secure);
                 repd(Fast, x);
                 capd(RW);
@@ -5554,7 +5550,7 @@ mod tests {
     #[test]
     fn parse_expression_precedence() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let a = 1 + 2 * 3;
                 let b = (1 + 2) * 3;
                 let c = x == y && z != w;
@@ -5591,7 +5587,7 @@ mod tests {
     #[test]
     fn parse_loop_with_break_continue() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let i = 0;
                 loop {
                     break i;
@@ -5612,7 +5608,7 @@ mod tests {
     #[test]
     fn parse_address_literal_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let addr = 0xDEADBEEF;
             }
         "#;
@@ -5637,9 +5633,9 @@ mod tests {
     #[test]
     fn parse_multiple_error_recovery() {
         let source = r#"
-            fn ok1() { return 1; }
-            fn bad1( { }
-            fn ok2() { return 2; }
+            transform ok1() { return 1; }
+            transform bad1( { }
+            transform ok2() { return 2; }
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
@@ -5656,7 +5652,7 @@ mod tests {
     #[test]
     fn parse_function_type() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let callback: (u32) -> u32 = f;
             }
         "#;
@@ -5687,7 +5683,7 @@ mod tests {
     // ---- Reg Test 1: Deeply nested if/else (10+ levels) ----
     #[test]
     fn reg_deeply_nested_if_else() {
-        let mut source = String::from("fn test() { let x = 0; ");
+        let mut source = String::from("transform test() { let x = 0; ");
         for i in 0..12 {
             source.push_str(&format!("if x == {} {{ ", i));
         }
@@ -5705,7 +5701,7 @@ mod tests {
     #[test]
     fn reg_deeply_nested_match() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match x {
                     0 => y,
                     1 => z,
@@ -5757,11 +5753,11 @@ mod tests {
         for i in 0..22 {
             params.push(format!("p{}: u32", i));
         }
-        let source = format!("fn test({}) -> u32 {{ return 0; }}", params.join(", "));
+        let source = format!("transform test({}) -> u32 {{ return 0; }}", params.join(", "));
         let mut parser = Parser::new(&source);
         let program = parser
             .parse_program()
-            .expect("fn with 20+ params should parse");
+            .expect("transform with 20+ params should parse");
         match &program.items[0] {
             Item::FnDef(f) => assert_eq!(f.params.len(), 22),
             other => panic!("expected FnDef, got {:?}", other),
@@ -5772,7 +5768,7 @@ mod tests {
     #[test]
     fn reg_chained_field_access() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let v = a.b.c.d.e.f.g;
             }
         "#;
@@ -5790,7 +5786,7 @@ mod tests {
     #[test]
     fn reg_chained_method_calls() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let v = a.b().c().d().e();
             }
         "#;
@@ -5808,7 +5804,7 @@ mod tests {
     #[test]
     fn reg_complex_binary_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = a + b * c - d / e % f & g | h ^ i << j >> k;
             }
         "#;
@@ -5826,7 +5822,7 @@ mod tests {
     #[test]
     fn reg_multiple_compound_assign() {
         let source = r#"
-            fn test() {
+            transform test() {
                 x += 1;
                 y -= 2;
                 z *= 3;
@@ -5858,7 +5854,7 @@ mod tests {
     #[test]
     fn reg_nested_paren_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = (((a + b)));
                 let y = ((a * (b + c)));
             }
@@ -5877,7 +5873,7 @@ mod tests {
     #[test]
     fn reg_async_in_sync_block() {
         let source = r#"
-            fn test() {
+            transform test() {
                 sync {
                     let task = async { compute(); };
                     let handle = spawn task;
@@ -5902,7 +5898,7 @@ mod tests {
         for i in 0..25 {
             arms.push(format!("{} => x{},", i, i));
         }
-        let source = format!("fn test() {{ match x {{ {} }} }}", arms.join(" "));
+        let source = format!("transform test() {{ match x {{ {} }} }}", arms.join(" "));
         let mut parser = Parser::new(&source);
         let program = parser
             .parse_program()
@@ -5924,7 +5920,7 @@ mod tests {
     #[test]
     fn reg_for_loop_over_range() {
         let source = r#"
-            fn test() {
+            transform test() {
                 for i in 0..10 {
                     process(i);
                 }
@@ -5947,7 +5943,7 @@ mod tests {
     #[test]
     fn reg_for_loop_over_range_var_end() {
         let source = r#"
-            fn test(n: u32) {
+            transform test(n: u32) {
                 for i in 0..n {
                     val: u32 = 0;
                 }
@@ -6002,7 +5998,7 @@ mod tests {
     #[test]
     fn reg_type_ascription_complex() {
         let source = r#"
-            fn test() {
+            transform test() {
                 val: u32 = a + b;
             }
         "#;
@@ -6033,7 +6029,7 @@ mod tests {
     #[test]
     fn reg_error_missing_semicolons() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = 1
                 let y = 2
             }
@@ -6048,7 +6044,7 @@ mod tests {
     #[test]
     fn reg_error_missing_closing_brace() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = 1;
         "#;
         let mut parser = Parser::new(source);
@@ -6061,7 +6057,7 @@ mod tests {
     #[test]
     fn reg_error_missing_else_block() {
         let source = r#"
-            fn test() {
+            transform test() {
                 if x > 0 {
                     y = 1;
                 } else
@@ -6077,7 +6073,7 @@ mod tests {
     #[test]
     fn reg_error_invalid_token_in_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = 1 @ @ 2;
             }
         "#;
@@ -6090,7 +6086,7 @@ mod tests {
     #[test]
     fn reg_error_unterminated_string_in_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x = "unterminated;
             }
         "#;
@@ -6103,7 +6099,7 @@ mod tests {
     #[test]
     fn reg_error_double_else() {
         let source = r#"
-            fn test() {
+            transform test() {
                 if x > 0 {
                     y = 1;
                 } else {
@@ -6122,7 +6118,7 @@ mod tests {
     #[test]
     fn reg_error_invalid_type_syntax() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let x: >>> = 1;
             }
         "#;
@@ -6135,7 +6131,7 @@ mod tests {
     #[test]
     fn reg_error_missing_fn_name() {
         let source = r#"
-            fn (x: u32) { return x; }
+            transform (x: u32) { return x; }
         "#;
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
@@ -6164,7 +6160,7 @@ mod tests {
     #[test]
     fn reg_error_invalid_match_pattern() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match x {
                     + => y,
                 }
@@ -6183,7 +6179,7 @@ mod tests {
     #[test]
     fn reg_derive_complex_ptr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let d = derive(ptr + offset, heap);
             }
         "#;
@@ -6201,7 +6197,7 @@ mod tests {
     #[test]
     fn reg_bd_directive() {
         let source = r#"
-            fn test() {
+            transform test() {
                 bd(Secure);
             }
         "#;
@@ -6223,7 +6219,7 @@ mod tests {
     #[test]
     fn reg_repd_directive() {
         let source = r#"
-            fn test() {
+            transform test() {
                 repd(Fast, n);
             }
         "#;
@@ -6246,7 +6242,7 @@ mod tests {
     #[test]
     fn reg_capd_directive() {
         let source = r#"
-            fn test() {
+            transform test() {
                 capd(RW);
             }
         "#;
@@ -6267,7 +6263,7 @@ mod tests {
     #[test]
     fn reg_reld_directive() {
         let source = r#"
-            fn test() {
+            transform test() {
                 reld(Ordered, x + 1);
             }
         "#;
@@ -6289,7 +6285,7 @@ mod tests {
     #[test]
     fn reg_sync_block_with_spawn() {
         let source = r#"
-            fn test() {
+            transform test() {
                 sync {
                     let handle = spawn async { compute(); };
                 }
@@ -6312,7 +6308,7 @@ mod tests {
     #[test]
     fn reg_struct_init_nested() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let n = Outer { inner: Inner { x: 1, y: 2 }, z: 3 };
             }
         "#;
@@ -6374,7 +6370,7 @@ mod tests {
     #[test]
     fn reg_sizeof_alignof_expressions() {
         let source = r#"
-            fn test() {
+            transform test() {
                 let s = sizeof(u32);
                 let a = alignof(u64);
                 let arr: [u8; 256] = data;
@@ -6580,7 +6576,7 @@ mod tests {
 
     #[test]
     fn parse_simple_trait_def() {
-        let source = "trait Animal { fn speak() -> String; }";
+        let source = "trait Animal { transform speak() -> String; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6594,7 +6590,7 @@ mod tests {
 
     #[test]
     fn parse_trait_with_default_method() {
-        let source = "trait Greeter { fn greet() -> String { return \"hi\"; } }";
+        let source = "trait Greeter { transform greet() -> String { return \"hi\"; } }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6609,7 +6605,7 @@ mod tests {
 
     #[test]
     fn parse_impl_for_type() {
-        let source = "impl Display for MyType { fn fmt() -> String { return \"ok\"; } }";
+        let source = "impl Display for MyType { transform fmt() -> String { return \"ok\"; } }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6624,7 +6620,7 @@ mod tests {
 
     #[test]
     fn parse_impl_inherent() {
-        let source = "impl MyStruct { fn new() -> MyStruct { return MyStruct {}; } }";
+        let source = "impl MyStruct { transform new() -> MyStruct { return MyStruct {}; } }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6638,7 +6634,7 @@ mod tests {
 
     #[test]
     fn parse_trait_with_type_params() {
-        let source = "trait Container<T> { fn get() -> T; }";
+        let source = "trait Container<T> { transform get() -> T; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6657,7 +6653,7 @@ mod tests {
 
     #[test]
     fn parse_trait_assoc_types() {
-        let source = "trait Iterator { type Item; fn next() -> Option<Item>; }";
+        let source = "trait Iterator { type Item; transform next() -> Option<Item>; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6685,7 +6681,7 @@ mod tests {
 
     #[test]
     fn parse_where_clause() {
-        let source = "fn foo<T>() where T: Display { return; }";
+        let source = "transform foo<T>() where T: Display { return; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6701,7 +6697,7 @@ mod tests {
 
     #[test]
     fn parse_type_param_bounds() {
-        let source = "fn foo<T: Display + Clone>() { return; }";
+        let source = "transform foo<T: Display + Clone>() { return; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6834,7 +6830,7 @@ mod tests {
 
     #[test]
     fn parse_async_fn() {
-        let source = "async fn fetch() -> String { return \"data\"; }";
+        let source = "async transform fetch() -> String { return \"data\"; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6890,7 +6886,7 @@ mod tests {
 
     #[test]
     fn parse_non_async_fn() {
-        let source = "fn sync_fn() { return; }";
+        let source = "transform sync_fn() { return; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6909,7 +6905,7 @@ mod tests {
     #[test]
     fn recursion_depth_normal_expr_ok() {
         // Normal expressions should parse fine at default depth
-        let source = "fn test() { let x = 1 + 2 + 3 + 4 + 5; }";
+        let source = "transform test() { let x = 1 + 2 + 3 + 4 + 5; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -6926,7 +6922,7 @@ mod tests {
         // A deeply nested expression should hit the limit with a low max_depth
         let parens = "(".repeat(20);
         let close_parens = ")".repeat(20);
-        let source = format!("fn test() {{ let x = {}1{}; }}", parens, close_parens);
+        let source = format!("transform test() {{ let x = {}1{}; }}", parens, close_parens);
         let mut parser = Parser::with_max_depth(&source, 10);
         let result = parser.parse_program();
         assert!(
@@ -6963,7 +6959,7 @@ mod tests {
         // With a custom high limit, deep nesting should work
         let parens = "(".repeat(30);
         let close_parens = ")".repeat(30);
-        let source = format!("fn test() {{ let x = {}1{}; }}", parens, close_parens);
+        let source = format!("transform test() {{ let x = {}1{}; }}", parens, close_parens);
         let mut parser = Parser::new(&source);
         let program = parser
             .parse_program()
@@ -6980,7 +6976,7 @@ mod tests {
 
     #[test]
     fn pub_fn_visibility() {
-        let source = "pub fn hello() {}";
+        let source = "pub transform hello() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7036,7 +7032,7 @@ mod tests {
 
     #[test]
     fn private_item_default_visibility() {
-        let source = "fn private_fn() {}";
+        let source = "transform private_fn() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7067,7 +7063,7 @@ mod tests {
 
     #[test]
     fn parse_simple_attribute() {
-        let source = "#[inline] fn fast() {}";
+        let source = "#[inline] transform fast() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7084,7 +7080,7 @@ mod tests {
 
     #[test]
     fn parse_attribute_with_single_value() {
-        let source = "#[cfg(test)] fn test_fn() {}";
+        let source = "#[cfg(test)] transform test_fn() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7142,7 +7138,7 @@ mod tests {
 
     #[test]
     fn parse_multiple_attributes() {
-        let source = "#[inline] #[allow(dead_code)] fn foo() {}";
+        let source = "#[inline] #[allow(dead_code)] transform foo() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7180,7 +7176,7 @@ mod tests {
     #[test]
     fn parse_match_guard_simple() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match x {
                     Some(v) if v > 0 => v,
                     _ => 0,
@@ -7209,7 +7205,7 @@ mod tests {
     #[test]
     fn parse_match_guard_with_comparison() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match n {
                     0 => "zero",
                     x if x == 1 => "one",
@@ -7236,7 +7232,7 @@ mod tests {
     #[test]
     fn parse_match_no_guard() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match x {
                     1 => a,
                     2 => b,
@@ -7263,7 +7259,7 @@ mod tests {
     #[test]
     fn parse_match_guard_complex_expr() {
         let source = r#"
-            fn test() {
+            transform test() {
                 match val {
                     n if n > 0 && n < 100 => n,
                     _ => 0,
@@ -7287,7 +7283,7 @@ mod tests {
     // ---- Test: Uninitialized variable binding (`let x;`) ----
     #[test]
     fn parse_let_uninitialized() {
-        let source = "fn test() { let x; }";
+        let source = "transform test() { let x; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7312,7 +7308,7 @@ mod tests {
     // ---- Test: Initialized variable binding (`let x = 5;`) still works ----
     #[test]
     fn parse_let_initialized_still_works() {
-        let source = "fn test() { let x = 5; }";
+        let source = "transform test() { let x = 5; }";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         match &program.items[0] {
@@ -7357,7 +7353,7 @@ mod tests {
     /// failure mode would be invisible.
     #[test]
     fn test_negative_parse_pointer_syntax_is_fatal_error() {
-        let source = "fn main() { let x = *p; }";
+        let source = "transform main() { let x = *p; }";
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         assert!(
@@ -7384,7 +7380,7 @@ mod tests {
     #[test]
     fn test_negative_parse_unterminated_function_body_has_errors() {
         // Missing closing brace — the parser hits EOF mid-body.
-        let source = "fn main() { let x = 1;";
+        let source = "transform main() { let x = 1;";
         let mut parser = Parser::new(source);
         let result = parser.parse_program();
         assert!(
@@ -7399,7 +7395,7 @@ mod tests {
 // ---- Diagnostic test for generic params ----
 #[test]
 fn diag_fn_single_generic_param() {
-    let source = "fn foo<T>(x: T) {}";
+    let source = "transform foo<T>(x: T) {}";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     eprintln!(
@@ -7414,7 +7410,7 @@ fn diag_fn_single_generic_param() {
     eprintln!("DIAG: items len={}", program.items.len());
     match &program.items[0] {
         Item::FnDef(f) => {
-            eprintln!("DIAG: fn name={}, type_params={:?}", f.name, f.type_params);
+            eprintln!("DIAG: transform name={}, type_params={:?}", f.name, f.type_params);
         }
         other => eprintln!("DIAG: expected FnDef, got {:?}", other),
     }
@@ -7422,7 +7418,7 @@ fn diag_fn_single_generic_param() {
 
 #[test]
 fn diag_fn_nested_generic_type() {
-    let source = "fn test(x: A<B<C>>) {}";
+    let source = "transform test(x: A<B<C>>) {}";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     eprintln!(
@@ -7445,7 +7441,7 @@ fn diag_fn_nested_generic_type() {
 
     #[test]
     fn test_parse_empty_function_body() {
-        let source = "fn foo() {}";
+        let source = "transform foo() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().expect("parse should succeed");
         assert_eq!(program.items.len(), 1);

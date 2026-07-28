@@ -6,7 +6,7 @@
 // Computed as ((v << 4) | (v >> 4)) & 0xFF. All operands loaded
 // into variables first.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 43;       // 0x2B
     four: u64 = 4;
     mask: u64 = 255;   // 0xFF

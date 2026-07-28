@@ -8,14 +8,14 @@
 
 layout Buf_node = { data: [u8; 16] }
 
-fn make_and_load() -> u32 {
+transform make_and_load() -> u32 {
     let node = state_new(Buf_node);
     node.data[0] = 42;
     v: u64 = node.data[0];
     return v;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = make_and_load();
     return v;
 }

@@ -6,7 +6,7 @@
 // can be overwritten while the others retain their original values.
 
 layout _L1 = { data: [u8; 24] }
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(_L1);
     p.data[0] = 10;
     p.data[8] = 20;

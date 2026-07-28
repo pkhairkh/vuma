@@ -32,7 +32,7 @@ struct ListNode {
 // Returns the new head pointer. This is the standard cons-cell pattern.
 
 layout _L1 = { a: u32, b: u32 }
-fn list_prepend(head: Address, value: u64) -> Address {
+transform list_prepend(head: Address, value: u64) -> Address {
     // Allocate a new node (16 bytes per ListNode)
     // IVE verifies: allocation is live, size matches struct layout
     let node = state_new(_L1);
@@ -45,7 +45,7 @@ fn list_prepend(head: Address, value: u64) -> Address {
 // ===========================================================================
 // Walks from head to tail, counting nodes. O(n) time.
 
-fn list_length(head: Address) -> u64 {
+transform list_length(head: Address) -> u64 {
     count: u64 = 0;
     current = head;
     while current != 0 {
@@ -60,7 +60,7 @@ fn list_length(head: Address) -> u64 {
 // ===========================================================================
 // Walks from head to tail, accumulating the sum of data fields.
 
-fn list_sum(head: Address) -> u64 {
+transform list_sum(head: Address) -> u64 {
     sum: u64 = 0;
     current = head;
     while current != 0 {
@@ -76,7 +76,7 @@ fn list_sum(head: Address) -> u64 {
 // Iteratively walks and frees each node. IVE verifies each free() releases
 // a live, unique allocation and no use-after-free occurs.
 
-fn list_free(head: Address) {
+transform list_free(head: Address) {
     current = head;
     while current != 0 {
         next = (curren.vt).next;
@@ -92,7 +92,7 @@ fn list_free(head: Address) {
 // Length = 5, Sum = 150
 // Exit code: 150
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Start with empty list (null head)
     head: Address = 0;
 

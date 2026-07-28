@@ -10,23 +10,23 @@
 // Uses intermediate variables for the nested calls because VUMA
 // miscompiles nested call expressions used directly as arguments.
 
-fn sub(x: u32) -> u32 {
+transform sub(x: u32) -> u32 {
     return x - 2;
 }
 
-fn mul(x: u32) -> u32 {
+transform mul(x: u32) -> u32 {
     r: u32 = x * 2;
     s: u32 = sub(r);
     return s;
 }
 
-fn add(x: u32) -> u32 {
+transform add(x: u32) -> u32 {
     r: u32 = x + 1;
     s: u32 = mul(r);
     return s;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = add(5);
     return v;
 }

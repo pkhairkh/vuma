@@ -5,11 +5,11 @@
 // propagates through the call/return boundary. Spec called for 500, but
 // exit codes are 8-bit (500 mod 256 = 244), so 203 is used instead.
 
-fn get_i32() -> i32 {
+transform get_i32() -> i32 {
     return 203;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: i32 = get_i32();
     return v;
 }

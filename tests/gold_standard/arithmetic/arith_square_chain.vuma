@@ -7,7 +7,7 @@
 // (chain of distinct multipliers, not squares) and s5_arith_quad_sum
 // (four-way add of identical values).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 3;
     b: u32 = 4;
     c: u32 = 5;

@@ -7,7 +7,7 @@
 // (3), s74_cs_overwrite_last (85) and s73_cs_overwrite_middle (155).
 layout Buf_c1 = { data: [u8; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let c1 = state_new(Buf_c1);
     c1.data[0] = 1;
     c1.data[0] = 14;

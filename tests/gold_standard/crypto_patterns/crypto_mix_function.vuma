@@ -7,7 +7,7 @@
 //   b*2 = 2
 //   a + b*2 = 40 + 2 = 42.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 40;
     b: u64 = 1;
     two: u64 = 2;

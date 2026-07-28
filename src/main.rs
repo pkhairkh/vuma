@@ -2861,7 +2861,7 @@ fn cmd_bench(_cli: &Cli) {
 
     for &line_count in &[10, 50, 100, 500] {
         // Generate a synthetic program of the given size
-        let mut source = String::from("fn main() {\n");
+        let mut source = String::from("transform main() {\n");
         for i in 0..line_count {
             source.push_str(&format!("    x{} = {} + {};\n", i, i, i + 1));
         }

@@ -30,7 +30,7 @@ transform to_ghost(p: State<Point>) -> State<Ghost> {
     return p;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     p.x = 5;
     let q = to_ghost(p);

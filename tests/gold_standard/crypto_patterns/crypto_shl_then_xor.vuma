@@ -7,7 +7,7 @@
 // s9_crypto_shl_mask_byte (shift then AND-mask) and
 // s10_crypto_xor_inverse (XOR-self inverse framing).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 1;
     sh: u64 = 4;
     k: u64 = 16;          // 0x10

@@ -3,7 +3,7 @@
 //
 // Mix of modulo and multiplication. 17 % 5 = 2, then 2 * 3 = 6.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 17;
     b: u32 = 5;
     c: u32 = 3;

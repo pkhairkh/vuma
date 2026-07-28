@@ -6,7 +6,7 @@
 // drop bug workaround). Distinct from s10_u32_or_then_and
 // (OR-then-AND) and s9_u32_and_mask (single AND-mask).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 240;         // 0xF0
     b: u32 = 15;          // 0x0F
     c: u32 = 85;          // 0x55

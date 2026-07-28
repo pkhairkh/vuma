@@ -6,7 +6,7 @@
 // s14_u32_xor_then_shl (XOR-then-SHL) and s9_u32_shift_right_2 (pure
 // shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 240;         // 0xF0
     b: u32 = 15;          // 0x0F
     sh: u32 = 2;

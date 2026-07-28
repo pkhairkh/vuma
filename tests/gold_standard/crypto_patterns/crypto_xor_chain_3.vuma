@@ -5,7 +5,7 @@
 // All operands loaded into variables first to dodge the immediate-RHS
 // bitwise drop bug. Distinct from s5_bit_xor_then_not (XOR-then-NOT).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 15;     // 0x0F
     b: u64 = 51;     // 0x33
     c: u64 = 85;     // 0x55

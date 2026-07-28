@@ -7,7 +7,7 @@
 // s26_bit_shl_then_xor (shl-then-xor, no or) and s22_bit_xor_or_xor
 // (xor-or-xor, no shl).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 15;          // 0x0F
     b: u64 = 4;
     c: u64 = 3;           // 0x03

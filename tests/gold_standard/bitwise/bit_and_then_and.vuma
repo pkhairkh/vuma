@@ -6,7 +6,7 @@
 // first (immediate-RHS bitwise drop bug workaround). Distinct from
 // s46_bit_and_then_shl (224) and s42_bit_and_then_xor.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;          // 0xFF
     b: u64 = 195;          // 0xC3
     c: u64 = 128;          // 0x80

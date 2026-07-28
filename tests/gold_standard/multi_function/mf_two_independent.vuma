@@ -4,14 +4,14 @@
 // Helper A returns 40, helper B returns 50. Neither depends on the
 // other. main calls both and returns their sum.
 
-fn ha() -> u32 {
+transform ha() -> u32 {
     return 40;
 }
-fn hb() -> u32 {
+transform hb() -> u32 {
     return 50;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = ha();
     b: u32 = hb();
     s: u32 = a + b;

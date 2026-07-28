@@ -4,7 +4,7 @@
 // 255 ^ 250 = 5. Loads both operands into variables because VUMA may
 // drop bitwise ops with immediate RHS.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;     // 0xFF
     b: u32 = 250;     // 0xFA
     result: u32 = a ^ b;

@@ -3,7 +3,7 @@
 // The session_type_check in the pipeline (verify_session_types_from_ir)
 // scans the IR and verifies the channel operations follow a valid order.
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

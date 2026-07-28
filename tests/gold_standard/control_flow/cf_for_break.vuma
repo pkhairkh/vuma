@@ -5,7 +5,7 @@
 // does not depend on whether the for-loop variable leaks to outer scope.
 // Exposes: for-body assignment + break propagation bugs.
 
-fn main() -> i32 {
+transform main() -> i32 {
     result: u32 = 0;
     for i in 0..100 {
         if (i == 5) {

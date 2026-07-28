@@ -2,4 +2,4 @@
 // Unicode 'A'
 // Expected exit code: 65
 
-fn main() -> i32 { return 65; }
+transform main() -> i32 { return 65; }

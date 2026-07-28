@@ -5,7 +5,7 @@
 // while-body assignments to the loop counter may not propagate. On buggy
 // codegen, the loop never terminates or returns 0.
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     while (true) {
         if (i == 7) {

@@ -5,7 +5,7 @@
 // bit 0 to bit 2. (1 << 4) = 16; (16 >> 2) = 4. All operands loaded
 // into variables. Distinct from s5_bit_shr_mask (single shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 1;
     sh_l: u64 = 4;
     sh_r: u64 = 2;

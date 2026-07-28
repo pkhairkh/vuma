@@ -203,7 +203,7 @@ macro_rules! vuma_verification_test {
 ///
 /// ```rust,ignore
 /// vuma_codegen_test!(test_arm64_emit {
-///     let result = $crate::framework::compile_to_arm64("fn main() { return; }");
+///     let result = $crate::framework::compile_to_arm64("transform main() { return; }");
 ///     assert!(result.is_err()); // codegen not yet available
 /// });
 /// ```
@@ -684,7 +684,7 @@ pub fn verify_program(source: &str) -> AggregatedResult {
 ///
 /// ```rust,ignore
 /// use vuma_ive::VerificationLevel;
-/// let result = verify_program_at_level("fn main() { return; }", VerificationLevel::Pmt);
+/// let result = verify_program_at_level("transform main() { return; }", VerificationLevel::Pmt);
 /// assert_eq!(result.per_invariant.len(), 1); // PMT runs a single state check
 /// ```
 pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> AggregatedResult {
@@ -1952,7 +1952,7 @@ mod tests {
     fn test_build_scg_from_valid_source() {
         // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
         // V1.0 `region pool = allocate(1024); free(pool);` source.
-        let source = "fn main() { return; }";
+        let source = "transform main() { return; }";
         let result = build_scg_from_source(source);
         assert!(result.is_ok(), "Expected successful SCG construction");
 
@@ -1965,7 +1965,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_verify_program_returns_five_invariants() {
-        let source = "fn main() { return; }";
+        let source = "transform main() { return; }";
         let result = verify_program(source);
 
         assert!(
@@ -2039,7 +2039,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_compile_to_arm64_produces_output() {
-        let source = "fn main() { return; }";
+        let source = "transform main() { return; }";
         let result = compile_to_arm64(source);
         assert!(
             result.is_ok(),
@@ -2129,7 +2129,7 @@ mod tests {
     fn test_verify_program_detailed_all_stages() {
         // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
         // V1.0 `region buf = allocate(256); free(buf);` source.
-        let source = "fn main() { return; }";
+        let source = "transform main() { return; }";
         let result = verify_program_detailed(source);
 
         // All stages should pass (codegen is now enabled).
@@ -2391,7 +2391,7 @@ mod tests {
     fn test_pipeline_result_display() {
         // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
         // V1.0 `region buf = allocate(64); free(buf);` source.
-        let source = "fn main() { return; }";
+        let source = "transform main() { return; }";
         let result = verify_program_detailed(source);
         let display = format!("{}", result);
         assert!(display.contains("Pipeline Result"));

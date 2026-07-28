@@ -4,13 +4,13 @@
 // Helper double(x) = x * 2. main calls double(50) -> 100. Distinct
 // from s4_fn_pass_literal (different helper, single literal arg).
 
-fn double(x: u32) -> u32 {
+transform double(x: u32) -> u32 {
     two: u32 = 2;
     r: u32 = x * two;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = double(50);   // 100
     return v;
 }

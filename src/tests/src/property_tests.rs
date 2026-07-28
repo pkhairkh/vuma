@@ -58,29 +58,29 @@ const ARG_COUNT_EDGE_CASES: [usize; 5] = [0, 4, 5, 8, 16];
 /// Hand-written valid VUMA programs used as deterministic test inputs.
 const SAMPLE_VUMA_PROGRAMS: &[&str] = &[
     // Minimal program — just `main`.
-    "fn main() {\n}\n",
+    "transform main() {\n}\n",
     // Simple expression statement.
-    "fn main() {\n    x = 1 + 2;\n}\n",
+    "transform main() {\n    x = 1 + 2;\n}\n",
     // Two-function program with a call.
-    "fn helper() {\n    x = 1 + 2;\n}\nfn main() {\n    helper();\n}\n",
+    "transform helper() {\n    x = 1 + 2;\n}\ntransform main() {\n    helper();\n}\n",
     // Variable assignment from a literal.
-    "fn main() {\n    x = 42;\n}\n",
+    "transform main() {\n    x = 42;\n}\n",
     // Multiple binary operations in one body.
-    "fn main() {\n    x = 10 - 3;\n    y = 4 * 5;\n    z = x + y;\n}\n",
+    "transform main() {\n    x = 10 - 3;\n    y = 4 * 5;\n    z = x + y;\n}\n",
 ];
 
 /// Hand-written memory-operation programs (replaces
 /// `arb_memory_program`).
 const SAMPLE_MEMORY_PROGRAMS: &[&str] = &[
-    "layout Cell1 = { v: i32 }\nfn main() {\n    let p = state_new(Cell1);\n    p.v = 42;\n}\n",
-    "layout Cell2 = { v: i32 }\nfn main() {\n    let p = state_new(Cell2);\n    p.v = 0;\n}\n",
-    "layout Cell3 = { v: i32 }\nfn main() {\n    let p = state_new(Cell3);\n    p.v = 64;\n}\n",
+    "layout Cell1 = { v: i32 }\ntransform main() {\n    let p = state_new(Cell1);\n    p.v = 42;\n}\n",
+    "layout Cell2 = { v: i32 }\ntransform main() {\n    let p = state_new(Cell2);\n    p.v = 0;\n}\n",
+    "layout Cell3 = { v: i32 }\ntransform main() {\n    let p = state_new(Cell3);\n    p.v = 64;\n}\n",
 ];
 
 /// Hand-written function-call programs (replaces `arb_call_program`).
 const SAMPLE_CALL_PROGRAMS: &[&str] = &[
-    "fn helper_one() {\n    x = 1 + 2;\n}\nfn main() {\n    helper_one();\n}\n",
-    "fn compute() {\n    x = 1 + 2;\n}\nfn main() {\n    compute();\n}\n",
+    "transform helper_one() {\n    x = 1 + 2;\n}\ntransform main() {\n    helper_one();\n}\n",
+    "transform compute() {\n    x = 1 + 2;\n}\ntransform main() {\n    compute();\n}\n",
 ];
 
 /// Hand-written extern-declaration programs paired with the symbol
@@ -89,15 +89,15 @@ const SAMPLE_CALL_PROGRAMS: &[&str] = &[
 const SAMPLE_EXTERN_PROGRAMS: &[(&str, &str)] = &[
     (
         "write",
-        "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\nfn main() {\n    write(1, 0x400000, 13);\n}\n",
+        "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    write(1, 0x400000, 13);\n}\n",
     ),
     (
         "read",
-        "extern \"C\" {\n    fn read(fd: i64, buf: Address, count: i64) -> i64;\n}\nfn main() {\n    read(0, 0x400000, 13);\n}\n",
+        "extern \"C\" {\n    fn read(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    read(0, 0x400000, 13);\n}\n",
     ),
     (
         "my_extern_fn",
-        "extern \"C\" {\n    fn my_extern_fn(x: i64) -> i64;\n}\nfn main() {\n    my_extern_fn(42);\n}\n",
+        "extern \"C\" {\n    fn my_extern_fn(x: i64) -> i64;\n}\ntransform main() {\n    my_extern_fn(42);\n}\n",
     ),
 ];
 
@@ -158,12 +158,12 @@ const FINITE_F64_VALUES: &[f64] = &[
 
 /// Hand-written VUMA programs that exercise integer↔float casts.
 const FP_CAST_PROGRAMS: &[&str] = &[
-    "fn main() {\n    x: f64 = 0.0;\n    y: i64 = x as i64;\n}\n",
-    "fn main() {\n    x: f64 = 1.0;\n    y: i64 = x as i64;\n}\n",
-    "fn main() {\n    x: f64 = -1.0;\n    y: i64 = x as i64;\n}\n",
-    "fn main() {\n    x: f64 = 1.0e308 * 2.0;\n    y: i64 = x as i64;\n}\n",
-    "fn main() {\n    x: f64 = -1.0e308 * 2.0;\n    y: i64 = x as i64;\n}\n",
-    "fn main() {\n    x: f64 = 3.14159;\n    y: i64 = x as i64;\n}\n",
+    "transform main() {\n    x: f64 = 0.0;\n    y: i64 = x as i64;\n}\n",
+    "transform main() {\n    x: f64 = 1.0;\n    y: i64 = x as i64;\n}\n",
+    "transform main() {\n    x: f64 = -1.0;\n    y: i64 = x as i64;\n}\n",
+    "transform main() {\n    x: f64 = 1.0e308 * 2.0;\n    y: i64 = x as i64;\n}\n",
+    "transform main() {\n    x: f64 = -1.0e308 * 2.0;\n    y: i64 = x as i64;\n}\n",
+    "transform main() {\n    x: f64 = 3.14159;\n    y: i64 = x as i64;\n}\n",
 ];
 
 /// (current, desired) pairs for atomic CAS tests where the expected
@@ -847,7 +847,7 @@ fn prop_atomic_cas_compiles() {
     for &(current, desired) in CAS_MATCHING_PAIRS {
         // Generate a VUMA program that uses atomic_cas.
         let source = format!(
-            "fn main() {{\n    lock = allocate(8);\n    *lock = {};\n    old = atomic_cas(lock, {}, {});\n}}\n",
+            "transform main() {{\n    lock = allocate(8);\n    *lock = {};\n    old = atomic_cas(lock, {}, {});\n}}\n",
             current, current, desired
         );
 
@@ -1480,7 +1480,7 @@ fn prop_ffi_multiple_extern_symbols() {
     let name1 = "write";
     let name2 = "read";
     let source = format!(
-        "extern \"C\" {{\n    fn {}(x: i64) -> i64;\n    fn {}(x: i64) -> i64;\n}}\nfn main() {{\n    let a = {}(1);\n    let b = {}(2);\n}}\n",
+        "extern \"C\" {{\n    fn {}(x: i64) -> i64;\n    fn {}(x: i64) -> i64;\n}}\ntransform main() {{\n    let a = {}(1);\n    let b = {}(2);\n}}\n",
         name1, name2, name1, name2
     );
 
@@ -1656,7 +1656,7 @@ fn fuzz_dwarf_text_consistency_simple() {
     use vuma::api::VumaCompiler;
     use vuma::pipeline::CompileConfig;
 
-    let source = "fn main() {\n    x = 1 + 2;\n}\n";
+    let source = "transform main() {\n    x = 1 + 2;\n}\n";
 
     let compiler_no_debug = VumaCompiler::with_config(CompileConfig {
         debug_info: false,
@@ -1688,7 +1688,7 @@ fn fuzz_ffi_extern_symbol_simple() {
     use vuma::api::VumaCompiler;
     use vuma::pipeline::CompileConfig;
 
-    let source = "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\nfn main() {\n    write(1, 0x400000, 13);\n}\n";
+    let source = "extern \"C\" {\n    fn write(fd: i64, buf: Address, count: i64) -> i64;\n}\ntransform main() {\n    write(1, 0x400000, 13);\n}\n";
 
     let compiler = VumaCompiler::with_config(CompileConfig {
         section_headers: true,

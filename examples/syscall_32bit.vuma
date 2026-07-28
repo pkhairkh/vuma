@@ -14,10 +14,10 @@
 // arm32, mips64, ppc64, loongarch64.
 
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Store "VUMA\n" in a buffer (5 bytes: V, U, M, A, newline)
     buf = allocate(8);
     *(buf + 0) = 86;   // 'V'

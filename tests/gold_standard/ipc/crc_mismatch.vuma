@@ -19,7 +19,7 @@
 //   -1 = Closed/Invalid, -3 = Timeout (recv_timeout),
 //   -2 = EAGAIN (try_recv), -4 = CAP_DENIED, -5 = PROTO_VIOLATION,
 //   -6 = CRC_MISMATCH, -7 = TypeMismatch).
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     x = channel_recv_timeout(ch, 100);
     channel_close(ch);

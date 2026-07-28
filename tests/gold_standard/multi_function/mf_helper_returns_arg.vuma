@@ -5,12 +5,12 @@
 // identity(77) -> 77. Distinct from s5_mf_param_passthrough (chains
 // two helpers passing the arg through) and s3_mf_param_passthrough.
 
-fn identity(x: u32) -> u32 {
+transform identity(x: u32) -> u32 {
     r: u32 = x;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = identity(77);
     return v;
 }

@@ -3,7 +3,7 @@
 // This test verifies the wait_worker/supervisor_call path works for
 // multiple workers.
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

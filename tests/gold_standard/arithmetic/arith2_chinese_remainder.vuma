@@ -6,7 +6,7 @@
 //   x = (a1*M1*y1 + a2*M2*y2) mod M = (1*5*2 + 2*3*2) mod 15 = (10 + 12) mod 15 = 22 mod 15 = 7
 // Straight-line code only.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a1: u32 = 1;  r1: u32 = 3;   // x ≡ 1 (mod 3)
     a2: u32 = 2;  r2: u32 = 5;   // x ≡ 2 (mod 5)
     M: u32 = 15;

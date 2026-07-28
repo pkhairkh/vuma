@@ -9,7 +9,7 @@
 
 layout Buf_buf = { data: [u8; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(Buf_buf);
     val: u32 = 0x12345678;
     mask: u32 = 255;

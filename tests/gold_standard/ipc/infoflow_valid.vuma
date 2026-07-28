@@ -12,7 +12,7 @@
 //   return     : Low  (returning a Low value to a Low caller — permitted)
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     low_input = 7;
     low_result = low_input - 6;
     if low_result == 1 {

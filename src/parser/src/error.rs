@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn diagnostic_from_parse_error() {
-        let source = "fn main() { x }";
+        let source = "transform main() { x }";
         let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
         let diag = Diagnostic::from_parse_error(&err, source, Some("main.vu"));
         assert_eq!(diag.severity, Severity::Error);
@@ -1476,7 +1476,7 @@ mod tests {
 
     #[test]
     fn diagnostic_display_with_source() {
-        let source = "fn main() { x }";
+        let source = "transform main() { x }";
         let loc = offset_to_location(source, 13, Some("main.vu"));
         let diag = Diagnostic::error("undefined variable `x`", loc).with_suggestion("y");
         let rendered = diag.display_with_source();

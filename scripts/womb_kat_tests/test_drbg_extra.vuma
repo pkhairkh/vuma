@@ -2,4 +2,4 @@
 // CTR_DRBG
 // Expected exit code: 0
 
-fn main() -> i32 { return 0; }
+transform main() -> i32 { return 0; }

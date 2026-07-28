@@ -9,7 +9,7 @@ use vuma_codegen::opt::{cross_function_constant_prop, whole_program_dce};
 
 /// Build a program:
 ///   fn double(x) { return x * 2; }
-///   fn main() { return double(5); }  // double always called with 5
+///   transform main() { return double(5); }  // double always called with 5
 fn make_program() -> IRProgram {
     let mut double = IRFunction::new("double");
     double.params = vec![IRValue::Register(0)]; // x

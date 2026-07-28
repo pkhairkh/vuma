@@ -22,7 +22,7 @@
 
 layout Point = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     p.x = 1;
     p.x = 2;

@@ -17,10 +17,10 @@ layout DbHandle = { raw: u64 }
 
 extern "C" {
     #[callback]
-    fn with_callback(db: State<DbHandle>, cb: Address) -> i32;
+    transform with_callback(db: State<DbHandle>, cb: Address) -> i32;
 }
 
-fn bad_callback(ctx: Address) -> i32 {
+transform bad_callback(ctx: Address) -> i32 {
     // BUG: writing to a caller-live offset would trap at runtime.
     // The callback_live_set guard in callback.rs:check_access returns
     // false for caller-live offsets, and vuma_write_u32 aborts.
@@ -28,7 +28,7 @@ fn bad_callback(ctx: Address) -> i32 {
     return 0;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let db = state_new(DbHandle);
     db.raw = 0;
     // Hypothetically: with_callback(db, bad_callback)

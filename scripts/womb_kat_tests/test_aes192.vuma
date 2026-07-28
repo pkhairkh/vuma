@@ -2,4 +2,4 @@
 // AES-192 rounds
 // Expected exit code: 12
 
-fn main() -> i32 { return 12; }
+transform main() -> i32 { return 12; }

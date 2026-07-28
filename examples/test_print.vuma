@@ -1,5 +1,5 @@
 // Test program: print integers and hex output to stdout
-fn main() -> i32 {
+transform main() -> i32 {
     // Test print_int: print the number 42
     print_int(42);
 

@@ -14,7 +14,7 @@
 //!
 //! | VUMA construct          | SCG node / edge                                  |
 //! |-------------------------|--------------------------------------------------|
-//! | `fn f(…) { … }`        | Region + FunctionEntry/FunctionReturn nodes      |
+//! | `transform f(…) { … }` | Region + FunctionEntry/FunctionReturn nodes      |
 //! | `let x = …`            | Computation node + DataFlow edges                |
 //! | `allocate(size)`        | Allocation node (size, align from type)          |
 //! | `free(ptr)`            | Deallocation node (references allocation)        |
@@ -4390,7 +4390,7 @@ mod tests {
 
     #[test]
     fn test_fn_def_creates_region_with_entry_exit() {
-        let scg = parse_and_convert("fn add(a: u32, b: u32) -> u32 { return a; }");
+        let scg = parse_and_convert("transform add(a: u32, b: u32) -> u32 { return a; }");
 
         assert!(
             scg.region_count() >= 2,
@@ -4523,12 +4523,12 @@ mod tests {
 
     #[test]
     fn test_function_call_creates_entry_return() {
-        let scg = parse_and_convert("fn foo(a: u32) -> u32 { return a; } foo(42);");
+        let scg = parse_and_convert("transform foo(a: u32) -> u32 { return a; } foo(42);");
 
         let entries = find_all_control_nodes(&scg, ControlKind::FunctionEntry);
         assert!(
             entries.len() >= 2,
-            "should have FunctionEntry nodes from fn def and call site"
+            "should have FunctionEntry nodes from transform def and call site"
         );
     }
 
@@ -4668,7 +4668,7 @@ mod tests {
 
     #[test]
     fn test_fn_entry_label_includes_return_type() {
-        let scg = parse_and_convert("fn get_value() -> u64 { return 42; }");
+        let scg = parse_and_convert("transform get_value() -> u64 { return 42; }");
 
         let entry = find_control_node(&scg, ControlKind::FunctionEntry);
         assert!(entry.is_some());
@@ -4688,7 +4688,7 @@ mod tests {
 
     #[test]
     fn test_fn_body_nodes_are_intermediate_between_entry_exit() {
-        let scg = parse_and_convert("fn f(x: u32) -> u32 { let y = x; return y; }");
+        let scg = parse_and_convert("transform f(x: u32) -> u32 { let y = x; return y; }");
 
         let entry = find_control_node(&scg, ControlKind::FunctionEntry);
         let ret = find_control_node(&scg, ControlKind::FunctionReturn);
@@ -4710,7 +4710,7 @@ mod tests {
     #[test]
     fn test_call_site_argument_data_flow() {
         let scg = parse_and_convert(
-            "fn add(a: u32, b: u32) -> u32 { return a; } let x = 1; let y = 2; add(x, y);",
+            "transform add(a: u32, b: u32) -> u32 { return a; } let x = 1; let y = 2; add(x, y);",
         );
 
         // Find the call FunctionEntry node.
@@ -4879,7 +4879,7 @@ mod tests {
 
     #[test]
     fn test_return_value_data_flow_to_caller() {
-        let scg = parse_and_convert("fn foo() -> u32 { return 42; } let result = foo();");
+        let scg = parse_and_convert("transform foo() -> u32 { return 42; } let result = foo();");
 
         // Find the call-site FunctionReturn.
         let call_return = scg.nodes().find(|n| {

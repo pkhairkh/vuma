@@ -8,7 +8,7 @@
 // (if-true x=10, else x=20).
 // Expected exit code: 64
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 64;

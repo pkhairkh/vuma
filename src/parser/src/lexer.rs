@@ -241,11 +241,13 @@ pub enum TokenKind {
     ShrEq,
 
     // ---- Keywords ---------------------------------------------------------
-    /// `fn`
+    /// `fn` -- retained variant. Wave 3-C removed `"fn"` from `keyword_kind`,
+    /// so the lexer now emits `fn` as a plain `Ident`; `transform` is the
+    /// sole function-declaration keyword. The variant is kept because
+    /// `parser.rs` / `is_name_keyword` / the `Display` impl still reference it;
+    /// it is never produced by the lexer.
     Fn,
-    /// `transform` -- Wave 3-A alias for `fn` (function-declaration keyword).
-    /// Parsed identically to [`TokenKind::Fn`] during the `fn` -> `transform`
-    /// migration; `fn` is removed in Wave 3-C.
+    /// `transform` -- the sole function-declaration keyword (Wave 3-C).
     Transform,
     /// `let`
     Let,
@@ -592,8 +594,8 @@ impl std::fmt::Display for TokenKind {
 fn keyword_kind(ident: &str) -> Option<TokenKind> {
     match ident {
         // Core
-        "fn" => Some(TokenKind::Fn),
-        // Wave 3-A: `transform` is an alias for `fn` (function declarations).
+        // Wave 3-C: `fn` removed from the keyword table -- it now lexes as a
+        // plain `Ident`. `transform` is the only function-declaration keyword.
         "transform" => Some(TokenKind::Transform),
         "let" => Some(TokenKind::Let),
         "pub" => Some(TokenKind::Pub),
@@ -1989,7 +1991,9 @@ mod tests {
     fn lex_all_keywords() {
         // (Wave 1-A) 8 cosplay keywords deleted from the lexer (safe, ptr,
         // alloc, lock, unlock, use, self, ref) — they now lex as `Ident`.
-        let source = "fn let region allocate free derive cast read write \
+        // (Wave 3-C) `fn` deleted from the keyword table — it now lexes as
+        // `Ident`; `transform` is the sole function keyword.
+        let source = "transform let region allocate free derive cast read write \
                       sync if else while for return struct enum match unsafe \
                       bd repd capd reld import export mod super \
                       async await spawn channel send recv \
@@ -1999,7 +2003,7 @@ mod tests {
         assert_eq!(
             kinds(&tokens),
             vec![
-                TokenKind::Fn,
+                TokenKind::Transform,
                 TokenKind::Let,
                 TokenKind::Region,
                 TokenKind::Allocate,
@@ -2329,7 +2333,7 @@ mod tests {
     // ---- Test 17: Peek does not consume ----
     #[test]
     fn peek_does_not_consume() {
-        let source = "fn foo() {}";
+        let source = "transform foo() {}";
         let mut lex = Lexer::new(source);
         let p = lex.peek().clone();
         let n = lex.next_token();
@@ -2365,7 +2369,7 @@ mod tests {
     #[test]
     fn lex_hello_memory_example() {
         let source = r#"
-            fn main() -> i32 {
+            transform main() -> i32 {
                 region = allocate(8);
                 *region = 42;
                 value: i32 = *region;
@@ -2377,7 +2381,7 @@ mod tests {
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.starts_with(&[
-            TokenKind::Fn,
+            TokenKind::Transform,
             TokenKind::Ident,
             TokenKind::LParen,
             TokenKind::RParen,
@@ -2462,12 +2466,12 @@ mod tests {
     // ---- Test 27: Concurrency keywords in context ----
     #[test]
     fn lex_concurrency_keywords() {
-        let source = "async fn producer() { let ch = channel(); spawn send(ch, 1); }";
+        let source = "async transform producer() { let ch = channel(); spawn send(ch, 1); }";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.contains(&TokenKind::Async));
-        assert!(kinds.contains(&TokenKind::Fn));
+        assert!(kinds.contains(&TokenKind::Transform));
         assert!(kinds.contains(&TokenKind::Channel));
         assert!(kinds.contains(&TokenKind::Spawn));
         assert!(kinds.contains(&TokenKind::Send));
@@ -2605,12 +2609,12 @@ mod tests {
     // ---- Test 35: Where clause ----
     #[test]
     fn lex_where_clause() {
-        let source = "fn foo<T>() where T: trait {}";
+        let source = "transform foo<T>() where T: trait {}";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         let kinds = kinds(&tokens);
         assert!(kinds.contains(&TokenKind::Where));
-        assert!(kinds.contains(&TokenKind::Fn));
+        assert!(kinds.contains(&TokenKind::Transform));
         assert!(kinds.contains(&TokenKind::Trait));
     }
 
@@ -2791,15 +2795,15 @@ mod tests {
     // ---- Test 49: Position tracking with multiple lines ----
     #[test]
     fn lex_position_tracking_multiline() {
-        let source = "fn foo()\n  -> i32\n{\n  return 0;\n}";
+        let source = "transform foo()\n  -> i32\n{\n  return 0;\n}";
         let (tokens, errors) = lex(source);
         assert!(errors.is_empty(), "errors: {:?}", errors);
         // "fn" at line 0, col 0
         assert_eq!(tokens[0].line, 0);
         assert_eq!(tokens[0].column, 0);
-        // "foo" at line 0, col 3
+        // "foo" at line 0, col 10 (after "transform ")
         assert_eq!(tokens[1].line, 0);
-        assert_eq!(tokens[1].column, 3);
+        assert_eq!(tokens[1].column, 10);
         // "->" at line 1, col 2
         let arrow = tokens.iter().find(|t| t.kind == TokenKind::Arrow).unwrap();
         assert_eq!(arrow.line, 1);

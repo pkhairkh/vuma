@@ -5,11 +5,11 @@
 // it for its side effect (none) and returns 0. Exercises the call /
 // ret path with an empty callee frame.
 
-fn noop() {
+transform noop() {
     return;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     noop();
     return 0;
 }

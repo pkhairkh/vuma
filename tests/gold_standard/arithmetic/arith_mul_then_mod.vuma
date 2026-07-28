@@ -6,7 +6,7 @@
 // Distinct from s17_arith_mul_then_sub (mul-then-sub) and
 // s14_arith_sub_then_mul (sub-then-mul).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 17;
     b: u32 = 9;
     d: u32 = 20;

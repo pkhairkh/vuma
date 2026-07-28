@@ -38,13 +38,13 @@ struct ThreadPool {
     shutdown: AtomicU64,   // 1 = pool is shutting down
 }
 
-fn task_queue_new() -> TaskQueue {
+transform task_queue_new() -> TaskQueue {
     // Create an empty task queue
     // IVE verifies: zero-initialized, no dangling pointers
     return TaskQueue { head: 0, tail: 0, len: 0 };
 }
 
-fn task_queue_push(queue: Address, func: Address, arg: u64) {
+transform task_queue_push(queue: Address, func: Address, arg: u64) {
     // Push a task onto the tail of the queue
     // IVE verifies: new task allocation is live
     // IVE verifies: linked list update maintains consistency
@@ -63,7 +63,7 @@ fn task_queue_push(queue: Address, func: Address, arg: u64) {
     (*queue).unlock(q);   // Release mutex
 }
 
-fn task_queue_pop(queue: Address) -> Address {
+transform task_queue_pop(queue: Address) -> Address {
     // Pop a task from the head of the queue
     // IVE verifies: returned task is still live (not freed)
     // IVE verifies: head update doesn't break list structure
@@ -80,7 +80,7 @@ fn task_queue_pop(queue: Address) -> Address {
     return task;  // Caller owns this allocation
 }
 
-fn worker_loop(pool: Address, worker_id: u64) {
+transform worker_loop(pool: Address, worker_id: u64) {
     // Worker thread main loop
     //
     // IVE verifies concurrent safety:
@@ -117,7 +117,7 @@ fn worker_loop(pool: Address, worker_id: u64) {
     }
 }
 
-fn pool_create(thread_count: u64) -> Address {
+transform pool_create(thread_count: u64) -> Address {
     // Create a thread pool with the given number of workers
     // IVE verifies: all allocations are tracked for Cleanup
     pool = allocate(48);  // sizeof(ThreadPool)
@@ -142,7 +142,7 @@ fn pool_create(thread_count: u64) -> Address {
     return pool;
 }
 
-fn pool_submit(pool: Address, func: Address, arg: u64) {
+transform pool_submit(pool: Address, func: Address, arg: u64) {
     // Submit a task to the pool
     // IVE verifies: task is enqueued under mutex protection
     // IVE verifies: condvar signal wakes exactly one thread
@@ -150,7 +150,7 @@ fn pool_submit(pool: Address, func: Address, arg: u64) {
     (*pool).notify.signal();  // Wake one worker
 }
 
-fn pool_destroy(pool: Address) {
+transform pool_destroy(pool: Address) {
     // Shut down the pool and join all threads
     //
     // IVE verifies Cleanup invariant:
@@ -184,13 +184,13 @@ fn pool_destroy(pool: Address) {
     free(pool);
 }
 
-fn compute_square(arg: u64) {
+transform compute_square(arg: u64) {
     // Example task function
     result = arg * arg;
     print(result);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Create a pool with 4 worker threads
     pool = pool_create(4);
 

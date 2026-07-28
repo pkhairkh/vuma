@@ -1607,7 +1607,7 @@ Expressions:
         }
 
         // Strategy 2: Try to parse as a VUMA expression wrapped in a function.
-        let wrapped = format!("fn _type_query() {{ let _result = {}; }}", expr.trim());
+        let wrapped = format!("transform _type_query() {{ let _result = {}; }}", expr.trim());
         let mut parser = Parser::new(&wrapped);
         let result = parser.parse_program();
         if !result.has_errors() {

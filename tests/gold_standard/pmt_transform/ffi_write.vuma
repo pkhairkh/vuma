@@ -31,10 +31,10 @@
 layout Buffer = { len: u32, data: u64 }
 
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(Buffer);
     buf.len = 0;
     // In a real call: write(1, &buf as *Buffer, 8) — `buf` is INVALIDATED.

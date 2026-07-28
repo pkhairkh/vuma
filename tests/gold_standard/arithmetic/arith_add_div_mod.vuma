@@ -6,7 +6,7 @@
 // s18_arith_div_mod_sum (div-mod-add, different order) and
 // s17_arith_add_then_mod (add-then-mod, two-stage).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 180;
     b: u32 = 20;
     d: u32 = 8;

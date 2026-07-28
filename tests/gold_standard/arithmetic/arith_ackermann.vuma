@@ -6,7 +6,7 @@
 // A(m, n)   = A(m-1, A(m, n-1))      for m, n > 0
 // A(2, 3)   = 9.
 
-fn ackermann(m: u32, n: u32) -> u32 {
+transform ackermann(m: u32, n: u32) -> u32 {
     zero: u32 = 0;
     one: u32 = 1;
     if m == zero {
@@ -19,7 +19,7 @@ fn ackermann(m: u32, n: u32) -> u32 {
     return ackermann(m - one, inner);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     result: u32 = ackermann(2, 3);
     return result;
 }

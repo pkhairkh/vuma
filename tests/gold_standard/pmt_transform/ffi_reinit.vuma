@@ -28,10 +28,10 @@
 layout Buf = { x: u32, y: u32 }
 
 extern "C" {
-    fn do_thing(buf: Address) -> i64;
+    transform do_thing(buf: Address) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(Buf);
     buf.x = 10;
     buf.y = 20;

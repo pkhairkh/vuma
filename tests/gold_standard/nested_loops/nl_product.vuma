@@ -7,7 +7,7 @@
 // factor gets squared: prod = 1*1 * 2*2 * 3*3 = 1 * 4 * 9 = 36.
 // NOW PASSING until the for-body assignment propagation bug is fixed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     prod: u32 = 1;
     for i in 0..3 {
         one: u32 = 1;

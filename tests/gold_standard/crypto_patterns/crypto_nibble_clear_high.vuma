@@ -7,7 +7,7 @@
 // s14_crypto_low_nibble (extracts low nibble of 0x9E) and
 // s9_crypto_nibble_clear (clears low nibble via & 0xF0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 205;         // 0xCD
     m: u64 = 15;          // 0x0F
     r: u64 = v & m;       // 0x0D = 13

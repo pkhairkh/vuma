@@ -3,7 +3,7 @@
 //
 // 255 & 255 = 255.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u32 = 255;
     masked: u32 = val & 255;
     return masked;

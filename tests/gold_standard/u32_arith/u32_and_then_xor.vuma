@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s22_u32_xor_then_or (xor-then-or,
 // value 218) and s22_u32_shl_then_and (shl-then-and, value 32).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;         // 0xFF
     b: u32 = 60;          // 0x3C
     c: u32 = 3;           // 0x03

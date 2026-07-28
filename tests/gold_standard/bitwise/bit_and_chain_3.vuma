@@ -5,7 +5,7 @@
 // All operands loaded into variables first to dodge the immediate-RHS
 // bitwise drop bug. Distinct from s5_bit_and_or_chain (AND-then-OR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;   // 0xFF
     b: u64 = 240;   // 0xF0
     c: u64 = 51;    // 0x33

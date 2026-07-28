@@ -6,7 +6,7 @@
 // clamp(50, 0, 100) = 50  (already in range).
 // Here we only test the upper-bound clamp and return 100.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u32 = 150;
     lo: u32 = 0;
     hi: u32 = 100;

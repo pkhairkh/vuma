@@ -28,7 +28,7 @@
 
 layout Cell = { v: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let c = state_new(Cell);
     c.v = 60;
     return c.v;

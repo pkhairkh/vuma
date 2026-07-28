@@ -5,7 +5,7 @@
 // first. Distinct from s26_edge_max_minus_one (255-1=254) and
 // s22_edge_one_and_max (1&255=1).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 0;
     b: u32 = 1;
     r: u32 = a & b;       // 0

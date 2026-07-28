@@ -5,7 +5,7 @@
 // Iterations: x=1 (i=0), x=2 (i=1), x=3 (i=2) → break. return x=3.
 // Exposes: for-body assignment + if-body break + propagation bugs.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     for i in 0..5 {
         x = x + 1;

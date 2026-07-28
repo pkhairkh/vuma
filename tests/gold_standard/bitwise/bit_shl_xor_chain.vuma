@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s14_bit_shl_then_shr (shift-then-shift)
 // and s9_bit_shl_then_or (shift-then-OR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 1;
     sh: u64 = 5;
     k: u64 = 85;          // 0x55

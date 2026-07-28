@@ -5,7 +5,7 @@
 // with one intermediate. Distinct from s9_arith_mod_then_add
 // (mod-then-add) and s8_arith_div_mod_sum (div-mod-sum).
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 60;
     d: u32 = 5;
     c: u32 = 90;

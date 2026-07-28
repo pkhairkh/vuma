@@ -6,13 +6,13 @@
 // s26_mf_inc_then_double (inc-then-dbl, 42) and s22_mf_double_call_diff
 // (different ops).
 
-fn dbl(x: u32) -> u32 {
+transform dbl(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x * n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = dbl(30);     // 60
     b: u32 = dbl(15);     // 30
     r: u32 = a + b;       // 90

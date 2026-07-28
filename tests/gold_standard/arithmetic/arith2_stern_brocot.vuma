@@ -7,7 +7,7 @@
 // then returns the numerator of the parent (2).
 // Straight-line code only.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Left neighbor of 3/5 in the tree
     la: u32 = 1;  lb: u32 = 2;
     // Right neighbor of 3/5 (this is the parent)

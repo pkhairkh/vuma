@@ -7,7 +7,7 @@
 // (if-true x=15) and s4_cf_if_assign_simple (if-true x=10, else x=20).
 // Expected exit code: 44
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 44;

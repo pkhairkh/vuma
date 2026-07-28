@@ -10,7 +10,7 @@
 // exit 1).
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     // 1073741824 = 1 GiB.  Set RLIMIT_AS so the process is capped at 1 GiB
     // of virtual memory — enough to run, but a real limit the kernel enforces.
     set_memory_limit(1073741824);

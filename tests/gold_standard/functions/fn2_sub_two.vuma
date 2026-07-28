@@ -5,11 +5,11 @@
 // difference. Verifies that subtraction flows through the call/return
 // path.
 
-fn sub(a: u32, b: u32) -> u32 {
+transform sub(a: u32, b: u32) -> u32 {
     return a - b;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = sub(10, 4);
     return v;
 }

@@ -3,7 +3,7 @@
 //
 // |3 - 8| = 5. Uses if/else to select the larger operand, then subtracts.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 3;
     b: u32 = 8;
     diff: u32 = 0;

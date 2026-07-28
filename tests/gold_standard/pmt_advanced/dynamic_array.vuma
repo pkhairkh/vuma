@@ -27,7 +27,7 @@
 
 layout DynArr = { count: u32, data: [u32; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let da = state_new(DynArr);
     da.count = 0;
     // "push" 3 elements (count tracked separately)

@@ -2,4 +2,4 @@
 // Ed448 p mod 256
 // Expected exit code: 255
 
-fn main() -> i32 { return 255; }
+transform main() -> i32 { return 255; }

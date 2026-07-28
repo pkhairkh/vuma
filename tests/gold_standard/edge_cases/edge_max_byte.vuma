@@ -6,7 +6,7 @@
 // sign-extension issues. Distinct from s5_edge_255_minus_1 (254
 // via subtraction).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 255;
     return v;
 }

@@ -7,7 +7,7 @@
 //   3. Running `./a.out` prints `42\n` to stdout and exits with code 0.
 //
 // Subset exercised (the bootstrap compiler's supported grammar):
-//   - `fn main() -> i32 { ... }`           (function definition with i32 return)
+//   - `transform main() -> i32 { ... }`           (function definition with i32 return)
 //   - `print_int(<int_literal>);`           (call to the print_int builtin)
 //   - `return <int_literal>;`               (return statement)
 //   - integer literal `42`
@@ -16,7 +16,7 @@
 // generics, match, while loops in codegen (parser handles them; codegen
 // stubs control flow as documented in codegen.vuma).
 
-fn main() -> i32 {
+transform main() -> i32 {
     print_int(42);
     return 0;
 }

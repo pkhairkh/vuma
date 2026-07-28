@@ -6,7 +6,7 @@
 // workaround). Distinct from s58_edge_max_shr_one (127), s58_edge_one_
 // shl_seven (128) and s58_edge_zero_or_zero (0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 4;
     r: u32 = a >> b;       // 15

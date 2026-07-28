@@ -15,7 +15,7 @@
 //!
 //! let source = r#"
 //!     region buf = allocate(256);
-//!     fn main() {
+//!     transform main() {
 //!         ptr = buf + 64;
 //!         header = ptr as *NodeHeader;
 //!     }
@@ -1449,7 +1449,7 @@ pub fn run_ir_pipeline(
 ///
 /// let source = r#"
 ///     import "utils.vuma";
-///     fn main() { helper(); }
+///     transform main() { helper(); }
 /// "#;
 /// let config = CompileConfig::default();
 /// let result = compile_with_path(source, Some(Path::new("src/main.vuma")), &config);
@@ -2633,8 +2633,8 @@ fn host_backend_kind() -> vuma_codegen::backend::BackendKind {
 /// use vuma::pipeline::{compile_modules, CompileConfig};
 ///
 /// let modules: Vec<(String, String)> = vec![
-///     ("main.vuma".into(), "extern \"C\" { fn helper(); } fn main() { helper(); }".into()),
-///     ("helper.vuma".into(), "fn helper() { }".into()),
+///     ("main.vuma".into(), "extern \"C\" { fn helper(); } transform main() { helper(); }".into()),
+///     ("helper.vuma".into(), "transform helper() { }".into()),
 /// ];
 /// let config = CompileConfig::default();
 /// match compile_modules(&modules, &config) {
@@ -2991,7 +2991,7 @@ pub fn compile_modules(
 /// ```rust,ignore
 /// use vuma::pipeline::{compile_with_recovery, CompileConfig};
 ///
-/// let source = "fn main() {}";
+/// let source = "transform main() {}";
 /// let config = CompileConfig::default();
 /// match compile_with_recovery(source, None, &config) {
 ///     CompileResult::Success(output) => {
@@ -3900,7 +3900,7 @@ fn read_u64_le_or_be(bytes: &[u8], le: bool) -> u64 {
 /// ```rust,ignore
 /// use vuma::pipeline::compile_to_wasm;
 ///
-/// let source = "fn main() -> i32 { return 42; }";
+/// let source = "transform main() -> i32 { return 42; }";
 /// let wasm_binary = compile_to_wasm(source).expect("compilation failed");
 /// // wasm_binary is a valid .wasm module that exits with code 42
 /// ```
@@ -4478,9 +4478,9 @@ mod tests {
     /// Test 8: Source fingerprint detects changes.
     #[test]
     fn test_source_fingerprint() {
-        let fp1 = SourceFingerprint::from_source("fn main() {}");
-        let fp2 = SourceFingerprint::from_source("fn main() {} ");
-        let fp3 = SourceFingerprint::from_source("fn main() {}");
+        let fp1 = SourceFingerprint::from_source("transform main() {}");
+        let fp2 = SourceFingerprint::from_source("transform main() {} ");
+        let fp3 = SourceFingerprint::from_source("transform main() {}");
         assert_ne!(
             fp1, fp2,
             "Different sources should have different fingerprints"
@@ -5089,7 +5089,7 @@ mod tests {
 // `region buf = allocate(1024);`) used to be silently dropped, so `main`
 // segfaulted on the first reference to `buf`.  The bridge now collects
 // every top-level statement and either prepends it to `main`'s body or,
-// when no `fn main` exists, synthesises a `fn main() -> i64` containing
+// when no `fn main` exists, synthesises a `transform main() -> i64` containing
 // them followed by `return 0;`.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -5566,7 +5566,7 @@ pub fn populate_codegen_edges(scg: &mut Scg) {
 /// Top-level statements (`Item::Stmt`) are injected at the START of `main`'s
 /// body so that file-scope `region buf = allocate(N);` declarations execute
 /// before `main` references the buffer. If the program has top-level
-/// statements but no `fn main`, a synthetic `fn main() -> i64` containing
+/// statements but no `fn main`, a synthetic `transform main() -> i64` containing
 /// them (followed by `return 0;`) is emitted.
 pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vuma_codegen::scg_to_ir::TypedStateMeta>) {
     // Collect extern function names so we can mark calls as is_extern.

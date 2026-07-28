@@ -6,7 +6,7 @@
 // bitwise drop bug workaround). Distinct from s22_bit_shl_and_mask
 // (shl-then-and, 0x70) and s18_bit_shl_xor_shr (shl-xor-shr).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1;
     b: u64 = 5;
     c: u64 = 85;          // 0x55

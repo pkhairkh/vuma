@@ -25,16 +25,16 @@
 // ===========================================================================
 
 extern "C" {
-    fn pipe(pipefd: Address) -> i64;           // create pipe; pipefd = int[2]
-    fn fork() -> i64;                          // create child process
-    fn dup2(oldfd: i64, newfd: i64) -> i64;   // duplicate file descriptor
-    fn close(fd: i64) -> i64;                  // close file descriptor
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
-    fn exit(code: i64);
-    fn sigaction(signum: i64, act: Address, oldact: Address) -> i64;
-    fn getpid() -> i64;
+    transform pipe(pipefd: Address) -> i64;           // create pipe; pipefd = int[2]
+    transform fork() -> i64;                          // create child process
+    transform dup2(oldfd: i64, newfd: i64) -> i64;   // duplicate file descriptor
+    transform close(fd: i64) -> i64;                  // close file descriptor
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform waitpid(pid: i64, status: Address, options: i64) -> i64;
+    transform exit(code: i64);
+    transform sigaction(signum: i64, act: Address, oldact: Address) -> i64;
+    transform getpid() -> i64;
 }
 
 // ===========================================================================
@@ -45,7 +45,7 @@ extern "C" {
 
 child_exited: Address = allocate(8);
 
-fn sigchld_handler(signum: i64) {
+transform sigchld_handler(signum: i64) {
     AtomicStore(1, child_exited);
 }
 
@@ -53,14 +53,14 @@ fn sigchld_handler(signum: i64) {
 // Helper: little-endian i32 read/write (for pipefd arrays)
 // ===========================================================================
 
-fn write_i32_le(buf: Address, offset: u64, val: i32) {
+transform write_i32_le(buf: Address, offset: u64, val: i32) {
     *(buf + offset)     = (val as u64) & 255;
     *(buf + offset + 1) = ((val as u64) >> 8) & 255;
     *(buf + offset + 2) = ((val as u64) >> 16) & 255;
     *(buf + offset + 3) = ((val as u64) >> 24) & 255;
 }
 
-fn read_i32_le(buf: Address, offset: u64) -> i32 {
+transform read_i32_le(buf: Address, offset: u64) -> i32 {
     b0: u64 = *(buf + offset);
     b1: u64 = *(buf + offset + 1);
     b2: u64 = *(buf + offset + 2);
@@ -75,40 +75,40 @@ fn read_i32_le(buf: Address, offset: u64) -> i32 {
 
 // ── u32 right-rotate (no built-in rotate; compose from shifts) ────────
 
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;
 }
 
 // ── SHA-256 logical functions (FIPS 180-4 §4.1.2) ─────────────────────
 
-fn ch(x: u32, y: u32, z: u32) -> u32 {
+transform ch(x: u32, y: u32, z: u32) -> u32 {
     // Constant-time: (x & y) ^ ((x ^ 0xFFFFFFFF) & z); no bitwise NOT
     return (x & y) ^ ((x ^ 4294967295) & z);
 }
 
-fn maj(a: u32, b: u32, c: u32) -> u32 {
+transform maj(a: u32, b: u32, c: u32) -> u32 {
     return (a & b) ^ (a & c) ^ (b & c);
 }
 
-fn big_sigma0(x: u32) -> u32 {
+transform big_sigma0(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
-fn big_sigma1(x: u32) -> u32 {
+transform big_sigma1(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
-fn small_sigma0(x: u32) -> u32 {
+transform small_sigma0(x: u32) -> u32 {
     return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
 }
 
-fn small_sigma1(x: u32) -> u32 {
+transform small_sigma1(x: u32) -> u32 {
     return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
 }
 
 // ── Read/write u32 big-endian (FIPS 180-4 byte order) ─────────────────
 
-fn read_u32_be(buf: Address, offset: u64) -> u32 {
+transform read_u32_be(buf: Address, offset: u64) -> u32 {
     b0: u32 = *(buf + offset);
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
@@ -116,7 +116,7 @@ fn read_u32_be(buf: Address, offset: u64) -> u32 {
     return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
 }
 
-fn write_u32_be(buf: Address, offset: u64, val: u32) {
+transform write_u32_be(buf: Address, offset: u64, val: u32) {
     *(buf + offset)     = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
     *(buf + offset + 2) = (val >> 8) & 255;
@@ -125,17 +125,17 @@ fn write_u32_be(buf: Address, offset: u64, val: u32) {
 
 // ── W schedule array helpers (stride = 4 bytes) ───────────────────────
 
-fn w_store(w_base: Address, idx: u64, val: u32) {
+transform w_store(w_base: Address, idx: u64, val: u32) {
     write_u32_be(w_base, idx * 4, val);
 }
 
-fn w_load(w_base: Address, idx: u64) -> u32 {
+transform w_load(w_base: Address, idx: u64) -> u32 {
     return read_u32_be(w_base, idx * 4);
 }
 
 // ── Initialize H[0..7] (FIPS 180-4 §5.3.3) ───────────────────────────
 
-fn sha256_init_state(state: Address) {
+transform sha256_init_state(state: Address) {
     write_u32_be(state, 0,  1779033703);   // 0x6a09e667
     write_u32_be(state, 4,  3144134277);   // 0xbb67ae85
     write_u32_be(state, 8,  1013904242);   // 0x3c6ef372
@@ -148,7 +148,7 @@ fn sha256_init_state(state: Address) {
 
 // ── Initialize K[0..63] (FIPS 180-4 §4.2.2) ──────────────────────────
 
-fn sha256_init_k(k: Address) {
+transform sha256_init_k(k: Address) {
     write_u32_be(k, 0,   1116352408);  write_u32_be(k, 4,   1899447441);
     write_u32_be(k, 8,   3049323471);  write_u32_be(k, 12,  3921009573);
     write_u32_be(k, 16,  961987163);   write_u32_be(k, 20,  1508970993);
@@ -185,7 +185,7 @@ fn sha256_init_k(k: Address) {
 
 // ── SHA-256 compression: process one 512-bit block (FIPS 180-4 §6.2.2) ─
 
-fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
+transform sha256_transform(state: Address, k: Address, w: Address, block: Address) {
     // Build message schedule W[0..63]
     i: u64 = 0;
     for i in 0..16 {
@@ -240,7 +240,7 @@ fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
 
 // ── Pad message into 64-byte block (up to 55-byte messages) ───────────
 
-fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
+transform sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
     i: u64 = 0;
     for i in 0..msg_len {
         *(block + i) = *(msg + i);
@@ -263,7 +263,7 @@ fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
 
 // ── Copy 32 bytes ─────────────────────────────────────────────────────
 
-fn copy32(dst: Address, src: Address) {
+transform copy32(dst: Address, src: Address) {
     i: u64 = 0;
     for i in 0..32 {
         *(dst + i) = *(src + i);
@@ -272,7 +272,7 @@ fn copy32(dst: Address, src: Address) {
 
 // ── SHA256d: SHA-256(SHA-256(message)) ────────────────────────────────
 
-fn sha256d(msg: Address, msg_len: u64, out: Address) {
+transform sha256d(msg: Address, msg_len: u64, out: Address) {
     state = allocate(32);
     k = allocate(256);
     w = allocate(256);
@@ -304,7 +304,7 @@ fn sha256d(msg: Address, msg_len: u64, out: Address) {
 // Hex Encoding — byte-to-hex using a 16-byte lookup table
 // ===========================================================================
 
-fn init_hex_table(table: Address) {
+transform init_hex_table(table: Address) {
     *(table + 0)  = 48;  // '0'    *(table + 1)  = 49;  // '1'
     *(table + 2)  = 50;  // '2'    *(table + 3)  = 51;  // '3'
     *(table + 4)  = 52;  // '4'    *(table + 5)  = 53;  // '5'
@@ -317,7 +317,7 @@ fn init_hex_table(table: Address) {
 
 // Convert 32 bytes → 64 hex characters (high nibble first per byte)
 
-fn hex_encode(input: Address, output: Address) {
+transform hex_encode(input: Address, output: Address) {
     hex_table = allocate(16);
     init_hex_table(hex_table);
 
@@ -344,7 +344,7 @@ fn hex_encode(input: Address, output: Address) {
 // We set sa_flags = SA_NOCLDSTOP (1) to only be notified on child exit,
 // not stop/continue. sa_mask = all zeros (don't block signals in handler).
 
-fn install_sigchld_handler() -> i64 {
+transform install_sigchld_handler() -> i64 {
     act = allocate(144);
     oldact = allocate(144);
 
@@ -383,7 +383,7 @@ fn install_sigchld_handler() -> i64 {
 // Reads up to 4096 bytes from stdin, computes SHA256d, writes 32-byte
 // digest to the pipe1 write end.
 
-fn child_sha256d_filter(pipe1_write: i64) {
+transform child_sha256d_filter(pipe1_write: i64) {
     inbuf = allocate(4096);
     n: i64 = read(0, inbuf, 4096);
     if n < 0 {
@@ -415,7 +415,7 @@ fn child_sha256d_filter(pipe1_write: i64) {
 // Reads 32 bytes from pipe1, converts to 64 hex chars + newline,
 // writes 65 bytes to pipe2.
 
-fn child_hex_encoder(pipe1_read: i64, pipe2_write: i64) {
+transform child_hex_encoder(pipe1_read: i64, pipe2_write: i64) {
     digest = allocate(32);
     n: i64 = read(pipe1_read, digest, 32);
     if n < 0 {
@@ -460,7 +460,7 @@ fn child_hex_encoder(pipe1_read: i64, pipe2_write: i64) {
 // ===========================================================================
 // Pipeline: stdin → child1(SHA256d) → pipe1 → child2(hex) → pipe2 → parent → stdout
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Create pipe1 (child1 → child2) ────────────────────────────────
     pipefd1 = allocate(8);   // int[2]
     ret1: i64 = pipe(pipefd1);

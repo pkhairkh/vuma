@@ -7,7 +7,7 @@
 // s10_crypto_xor_chain_4 (four-way XOR chain) and
 // s9_crypto_xor_with_key (single-key XOR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 171;          // 0xAB
     k1: u64 = 18;          // 0x12
     k2: u64 = 52;          // 0x34

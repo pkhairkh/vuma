@@ -34,7 +34,7 @@
 //
 // Similarly, CastKind::UIntToFloat handles unsigned integers.
 
-fn demo_int_to_float() -> f64 {
+transform demo_int_to_float() -> f64 {
     // Convert signed integer 7 to f64
     // Result: 7.0
     a: f64 = inttofloat(7);
@@ -57,7 +57,7 @@ fn demo_int_to_float() -> f64 {
 //
 // CastKind::FloatToUInt converts to unsigned integer by truncation.
 
-fn demo_float_to_int() -> i64 {
+transform demo_float_to_int() -> i64 {
     // Convert 9.7 to signed integer (truncates to 9)
     a: i64 = floattoint(9.7);
 
@@ -76,7 +76,7 @@ fn demo_float_to_int() -> i64 {
 //   - f32 → f64 (widening, lossless)
 //   - f64 → f32 (narrowing, may lose precision)
 
-fn demo_float_to_float() -> f64 {
+transform demo_float_to_float() -> f64 {
     // Start with an f32 value
     x: f32 = 3.14159;
 
@@ -100,7 +100,7 @@ fn demo_float_to_float() -> f64 {
 // IVE verifies: all FP values at a memory location match the stored
 // type (Interpretation invariant) — no accidental bit reinterpretation.
 
-fn demo_fp_arithmetic() -> f64 {
+transform demo_fp_arithmetic() -> f64 {
     // Addition
     sum: f64 = 10.0 + 5.5;     // 15.5
 
@@ -124,7 +124,7 @@ fn demo_fp_arithmetic() -> f64 {
 // computation. The conversion is explicit in VUMA — no implicit
 // coercion.
 
-fn demo_mixed_computation() -> f64 {
+transform demo_mixed_computation() -> f64 {
     // Compute sum of 1/i for i = 1..5
     // Using explicit int→float conversion for each iteration
     total: f64 = 0.0;
@@ -148,7 +148,7 @@ fn demo_mixed_computation() -> f64 {
 // IVE verifies the Interpretation invariant: the stored type matches
 // what is later read from that address.
 
-fn demo_fp_memory() -> f64 {
+transform demo_fp_memory() -> f64 {
     // Allocate 8 bytes for an f64
     // IVE verifies: allocation is live (Liveness)
     ptr = allocate(8);
@@ -175,7 +175,7 @@ fn demo_fp_memory() -> f64 {
 // Runs all demos and produces a combined integer result by converting
 // the floating-point sums back to integers.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Demo 1: int→float — expected 10.0
     r1: f64 = demo_int_to_float();
 

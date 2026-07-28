@@ -11,7 +11,7 @@
 // VUMA codegen workaround: bitwise ops with immediate RHS are dropped,
 // so the mask is loaded into a named variable.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 0x12345678;
     mFF: u64 = 0xFF;
     low: u64 = val & mFF;          // 0x78

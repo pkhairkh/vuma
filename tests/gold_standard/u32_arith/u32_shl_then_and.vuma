@@ -7,7 +7,7 @@
 // s18_u32_shl_then_or (shl-then-or) and s14_u32_xor_then_shl
 // (xor-then-shl).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 7;           // 0x07
     s: u32 = 3;
     m: u32 = 60;          // 0x3C

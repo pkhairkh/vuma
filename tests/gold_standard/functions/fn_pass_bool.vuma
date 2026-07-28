@@ -6,11 +6,11 @@
 // broken in VUMA), we cannot actually inspect the boolean — this test
 // only verifies that a bool parameter can be passed without crashing.
 
-fn is_true(b: bool) -> u32 {
+transform is_true(b: bool) -> u32 {
     return 1;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = is_true(true);
     return v;
 }

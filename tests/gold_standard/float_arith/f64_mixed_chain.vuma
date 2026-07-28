@@ -1,7 +1,7 @@
 // f64_mixed_chain — mixed int/float: inttofloat(7) + 3.0 = 10.0
 // Expected exit code: 10
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: i64 = 7;
     fi: f64 = inttofloat(i);   // 7.0
     b: f64 = 3.0;

@@ -5,7 +5,7 @@
 // in bits 4-7 (nibble 1 from LSB). We extract it as (val >> 4) & 0xF = 7.
 // (Task description said "nibble 3" but expected 7; this extracts the
 // nibble position that yields the expected value.)
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 0x12345678;
     four: u64 = 4;
     nib_mask: u64 = 0xF;

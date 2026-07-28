@@ -2,7 +2,7 @@
 // Expected exit code: 60
 // 15 = 0b...01111 has 4 ones and 60 zeros in a u64. We compute
 // popcount(15) = 4 via the SWAR algorithm, then subtract from 64.
-fn main() -> i32 {
+transform main() -> i32 {
     x: u64 = 15;
     m1: u64 = 0x5555555555555555;
     m2: u64 = 0x3333333333333333;

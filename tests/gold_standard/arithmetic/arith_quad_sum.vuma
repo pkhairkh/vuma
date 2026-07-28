@@ -6,7 +6,7 @@
 // inside U8 range; no memory access, so the *(buf+offset) U8
 // truncation bug doesn't apply.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 5;
     b: u32 = 5;
     c: u32 = 5;

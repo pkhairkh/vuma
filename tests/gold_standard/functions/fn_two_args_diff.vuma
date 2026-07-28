@@ -5,12 +5,12 @@
 // function with subtraction. Distinct from s9_fn_two_args_add
 // (add(40, 50) = 90) and s10_fn_three_args_mul (three-arg mul).
 
-fn diff(a: u32, b: u32) -> u32 {
+transform diff(a: u32, b: u32) -> u32 {
     r: u32 = a - b;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = diff(80, 35);
     return v;
 }

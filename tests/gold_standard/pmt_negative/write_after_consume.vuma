@@ -39,7 +39,7 @@ transform to_vec2(p: State<Point>) -> State<Vec2> {
     return p;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     p.x = 5;
     let q = to_vec2(p);   // p is consumed here

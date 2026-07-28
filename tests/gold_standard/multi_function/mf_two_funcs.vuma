@@ -4,11 +4,11 @@
 // Simplest multi-function test: main calls a single leaf helper that
 // returns a constant. Straight-line code, no branches, no loops.
 
-fn helper() -> u32 {
+transform helper() -> u32 {
     return 42;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = helper();
     return v;
 }

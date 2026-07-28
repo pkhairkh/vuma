@@ -24,7 +24,7 @@
 //   3. Verifies an invalid handle (99) — expects 0 (invalid handle).
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     proof = stark_prove(42);
     if proof != 0 {
         valid = stark_verify(proof);

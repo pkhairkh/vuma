@@ -7,7 +7,7 @@
 //   - f64 multiplication and addition/subtraction
 //   - Mixed int/float (coefficients as int literals -> inttofloat)
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: f64 = 2.0;
     // Coefficients 3, -2, 5, -7 — use inttofloat for signed.
     c0: f64 = inttofloat(3);

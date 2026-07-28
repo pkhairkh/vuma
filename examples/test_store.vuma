@@ -1,5 +1,5 @@
 // Test: allocate, store, return
-fn main() -> i32 {
+transform main() -> i32 {
     msg = allocate(3);
     *(msg + 0) = 97;
     free(msg);

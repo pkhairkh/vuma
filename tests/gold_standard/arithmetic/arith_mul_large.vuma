@@ -5,7 +5,7 @@
 // is the low 8 bits, which equals 129 (since 1000001 mod 256 = 65 and
 // 65 * 65 mod 256 = 4225 mod 256 = 129).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1000001;
     b: u64 = 1000001;
     product: u64 = a * b;        // 1000002000001

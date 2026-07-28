@@ -10,7 +10,7 @@
 //
 // CRITICAL for G3/G4 hppa/m68k: validates the FloatToFloat bit-copy.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: f32 = 3.5;
     x_wide: f64 = floattofloat(x);      // f32 -> f64
     x_back: f32 = floattofloat(x_wide); // f64 -> f32

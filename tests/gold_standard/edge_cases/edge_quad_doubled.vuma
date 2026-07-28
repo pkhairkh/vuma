@@ -6,7 +6,7 @@
 // many simultaneously-live locals. Distinct from s4_edge_long_expr
 // (single 7-element chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a1: u32 = 1;
     a2: u32 = 1;
     b1: u32 = 2;

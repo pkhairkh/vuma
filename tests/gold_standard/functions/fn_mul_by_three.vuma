@@ -5,13 +5,13 @@
 // single literal argument, multiplication by 3. Distinct from
 // s8_fn_double_arg (multiply by 2) and s7_fn_square (square, not mul3).
 
-fn mul3(x: u32) -> u32 {
+transform mul3(x: u32) -> u32 {
     n: u32 = 3;
     r: u32 = x * n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = mul3(30);
     return v;
 }

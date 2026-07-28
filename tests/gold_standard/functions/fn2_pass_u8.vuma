@@ -5,11 +5,11 @@
 // it unchanged. Verifies u8 parameter passing round-trip with a value
 // above 127 (high bit set).
 
-fn echo_u8(x: u8) -> u8 {
+transform echo_u8(x: u8) -> u8 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u8 = echo_u8(200);
     return v;
 }

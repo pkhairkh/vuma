@@ -56,7 +56,7 @@ use vuma_scg::NodeType;
 /// - Detailed pipeline shows all stages passing (except codegen)
 #[test]
 fn test_full_pipeline_trivial_allocate_free() {
-    let source = "layout Cell = { v: i32 }\nfn main() { let p = state_new(Cell); p.v = 42; }";
+    let source = "layout Cell = { v: i32 }\ntransform main() { let p = state_new(Cell); p.v = 42; }";
 
     // Phase 1: Parse → SCG
     let scg = build_scg_from_source(source).expect("Trivial source should parse");
@@ -137,7 +137,7 @@ fn test_full_pipeline_trivial_allocate_free() {
 /// - IVE verification produces no violations
 #[test]
 fn test_full_pipeline_multiple_regions() {
-    let source = "layout Cell = { v: i32 }\nfn main() { let a = state_new(Cell); let b = state_new(Cell); a.v = 1; b.v = 2; }";
+    let source = "layout Cell = { v: i32 }\ntransform main() { let a = state_new(Cell); let b = state_new(Cell); a.v = 1; b.v = 2; }";
 
     let scg = build_scg_from_source(source).expect("Multi-region source should parse");
     let alloc_count = scg
@@ -166,7 +166,7 @@ fn test_full_pipeline_multiple_regions() {
 /// - IVE verification produces no violations
 #[test]
 fn test_full_pipeline_read_write_region() {
-    let source = "fn main() { x = 42; return x; }";
+    let source = "transform main() { x = 42; return x; }";
 
     let scg = build_scg_from_source(source).expect("Read/write source should parse");
     // Note: The parser currently treats `write(buf, 42)` and `read(buf)` as
@@ -200,7 +200,7 @@ fn test_full_pipeline_read_write_region() {
 #[test]
 fn test_full_pipeline_nested_operations() {
     let source =
-        "fn compute(x: i64) -> i64 { return x + 1; } fn main() { x = compute(42); return x; }";
+        "transform compute(x: i64) -> i64 { return x + 1; } transform main() { x = compute(42); return x; }";
 
     let scg = build_scg_from_source(source).expect("Nested operations source should parse");
     let has_comp = scg
@@ -259,7 +259,7 @@ fn test_full_pipeline_invalid_source() {
 /// - Overall verdict is not `Violated`
 #[test]
 fn test_full_pipeline_safe_program_ive() {
-    let source = "fn main() { return; }";
+    let source = "transform main() { return; }";
 
     let result = verify_program(source);
     assert!(
@@ -302,7 +302,7 @@ fn test_full_pipeline_detailed_tracking() {
     // VUMA 2.0 PMT-only: use a simple arithmetic program instead of the
     // V1.0 `region data = allocate(128); free(data);` source.  This test
     // exercises the detailed pipeline stage tracker, not pointer semantics.
-    let source = "fn main() { let x = 1; }";
+    let source = "transform main() { let x = 1; }";
 
     let result = verify_program_detailed(source);
 
@@ -365,7 +365,7 @@ fn test_full_pipeline_compile_to_elf() {
     // `region buf = allocate(256); free(buf);` source.  The source is only
     // used to verify parsing succeeds; the codegen-level SCG below is built
     // by hand and does not depend on the source.
-    let source = "fn main() { let x = 1; }";
+    let source = "transform main() { let x = 1; }";
     let scg = build_scg_from_source(source).expect("Source should parse");
     assert!(scg.validate().is_valid, "SCG should validate");
 
@@ -444,7 +444,7 @@ fn test_full_pipeline_minimal_program() {
     // Minimal valid program.  VUMA 2.0 PMT-only: use a simple arithmetic
     // program instead of the V1.0 `region x = allocate(8); free(x);`
     // source.
-    let source = "fn main() { let x = 1; }";
+    let source = "transform main() { let x = 1; }";
 
     let scg = build_scg_from_source(source).expect("Minimal source should parse");
     assert!(
@@ -492,10 +492,10 @@ fn test_full_pipeline_minimal_program() {
 #[test]
 fn test_full_pipeline_complex_program() {
     let source = r#"
-        fn compute(x: i64) -> i64 {
+        transform compute(x: i64) -> i64 {
             return x + 1;
         }
-        fn main() -> i32 {
+        transform main() -> i32 {
             x = compute(42);
             y = compute(x);
             z = x + y;
@@ -598,7 +598,7 @@ fn test_full_pipeline_complex_program() {
 fn test_full_e2e_pipeline_compile() {
     // Test that the full pipeline can compile a simple VUMA program
     let source = r#"
-        fn main() {
+        transform main() {
             let x = 42;
             let y = x + 1;
         }
@@ -647,7 +647,7 @@ fn test_full_e2e_pipeline_compile() {
 /// - The pipeline runs end-to-end without skipping any stages
 #[test]
 fn test_pipeline_no_skipped_stages() {
-    let source = "fn main() { let x = 1; }";
+    let source = "transform main() { let x = 1; }";
     // Use verify_program_detailed to check that no stages are skipped
     let result = verify_program_detailed(source);
     for (stage, outcome) in &result.stages {

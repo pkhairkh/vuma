@@ -1,5 +1,5 @@
 // Simple test: return exit code 42
 // Expected exit code: 42
-fn main() -> u64 {
+transform main() -> u64 {
     42
 }

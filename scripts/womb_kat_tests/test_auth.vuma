@@ -2,4 +2,4 @@
 // JWK kty
 // Expected exit code: 3
 
-fn main() -> i32 { return 3; }
+transform main() -> i32 { return 3; }

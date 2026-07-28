@@ -6,7 +6,7 @@
 // s34_edge_max_minus_one (255 - 1 = 254) and s26_edge_max_minus_one
 // (254).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 2;
     r: u32 = a - b;        // 253

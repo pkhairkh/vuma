@@ -39,7 +39,7 @@ struct Rect {
 // Compute the area of a rectangle
 // ===========================================================================
 
-fn rect_area(r: Address) -> u32 {
+transform rect_area(r: Address) -> u32 {
     w: u32 = *(r + 8);
     h: u32 = *(r + 12);
     return (w * h) & 4294967295;
@@ -49,7 +49,7 @@ fn rect_area(r: Address) -> u32 {
 // Main entry point
 // ===========================================================================
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate a Rect struct (16 bytes)
     r = allocate(16);
 

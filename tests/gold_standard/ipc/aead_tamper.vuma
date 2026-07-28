@@ -14,7 +14,7 @@
 // decrypted bytes to the caller."
 //
 // Expected exit code: 1 (tamper detected — aead_open returned -6)
-fn main() -> i32 {
+transform main() -> i32 {
     // 64-byte buffer (need >= 20 bytes: 8 nonce + 8 ciphertext + 4 tag).
     buf = shared_memory_open(64);
     // Plaintext at offset 8 (offset 0 reserved for the nonce prefix).
