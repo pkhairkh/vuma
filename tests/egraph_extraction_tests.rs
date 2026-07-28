@@ -9,7 +9,7 @@
 use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
 use vuma_codegen::opt::equality_saturation;
 
-/// Build a minimal function: `fn name(v0: i64) -> i64 { <body> }`
+/// Build a minimal function: `transform name(v0: i64) -> i64 { <body> }`
 fn make_func(name: &str, body: Vec<IRInstr>, result: IRValue) -> IRFunction {
     let mut func = IRFunction::new(name);
     func.params = vec![IRValue::Register(0)];
