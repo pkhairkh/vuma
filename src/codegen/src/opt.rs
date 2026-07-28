@@ -3668,6 +3668,253 @@ pub fn build_happens_before_dag(
     edges
 }
 
+// ===========================================================================
+// Wave 3-A: proof-directed instruction scheduler
+// ===========================================================================
+
+/// Classify an instruction as a *scheduler barrier*: an instruction whose
+/// side effects are **not** fully captured by the happens-before DAG and
+/// which therefore must remain in its original program-order position
+/// relative to every other instruction in the block.
+///
+/// The DAG produced by [`build_happens_before_dag`] models four dependency
+/// classes: vreg RAW, vreg WAW, Load/Store aliasing (with the IVE
+/// non-aliasing exemption), and Alloc->Free.  It is *silent* about the
+/// arbitrary memory/control effects of calls, syscalls, channel I/O,
+/// atomics, bulk memory ops, state transforms, and explicit control flow.
+/// Reordering such an instruction past a neighbour with no DAG edge would
+/// change observable behaviour, so the conservative choice — mandated by
+/// the task spec ("if unsure, keep original order") — is to pin them.
+///
+/// The whitelist below is the set of *pure or DAG-modelled* instructions
+/// that the scheduler is willing to move:
+///   - `Load` / `Store` — memory ops, fully modelled by the DAG's alias
+///     rule (and prime candidates for latency hiding, hence priority 0).
+///   - Pure arithmetic / dataflow — `BinOp`, `UnaryOp`, `Add`, `Sub`,
+///     `Mul`, `Div`, `Cmp`, `Cast`, `GetAddress`, `Offset`, `Select`,
+///     `CtSelect`, `CtEq`, `VectorOp`.  These touch only their operand
+///     and destination vregs, so RAW/WAW in the DAG fully orders them.
+///   - `Alloc` — defines its dst vreg and has its only cross-instruction
+///     semantic (Alloc->Free) captured by DAG rule 4.
+///
+/// Everything else (the `_` arm) is a barrier.  In particular `Phi` is
+/// treated as a barrier: many backends require phi nodes at block entry,
+/// and moving them is never profitable, so pinning them is the safe call.
+fn is_scheduler_barrier(instr: &IRInstr) -> bool {
+    match instr {
+        IRInstr::Load { .. }
+        | IRInstr::Store { .. }
+        | IRInstr::BinOp { .. }
+        | IRInstr::UnaryOp { .. }
+        | IRInstr::Alloc { .. }
+        | IRInstr::Cast { .. }
+        | IRInstr::GetAddress { .. }
+        | IRInstr::Offset { .. }
+        | IRInstr::Select { .. }
+        | IRInstr::Add { .. }
+        | IRInstr::Sub { .. }
+        | IRInstr::Mul { .. }
+        | IRInstr::Div { .. }
+        | IRInstr::Cmp { .. }
+        | IRInstr::CtSelect { .. }
+        | IRInstr::CtEq { .. }
+        | IRInstr::VectorOp { .. } => false,
+        // Opaque side effects not modelled by the happens-before DAG, or
+        // control-flow / phi nodes that backends expect pinned: keep
+        // original order.
+        _ => true,
+    }
+}
+
+/// Latency-hiding priority class for list scheduling.  Lower values are
+/// scheduled earlier.  Memory ops (`Load`/`Store`) get class 0 so they
+/// float to the top of each barrier-delimited segment and their latency
+/// overlaps with the dependent computation that follows; everything else
+/// gets class 1.  Barriers are pinned by [`is_scheduler_barrier`] edges,
+/// so their priority class is immaterial — they are assigned 1 for
+/// uniformity.
+fn scheduler_priority(instr: &IRInstr) -> u8 {
+    match instr {
+        IRInstr::Load { .. } | IRInstr::Store { .. } => 0,
+        _ => 1,
+    }
+}
+
+/// Reorder the instructions of a single basic block into a latency-optimal
+/// topological order, honouring the happens-before DAG and the barrier
+/// policy.
+///
+/// `instrs` is the block's instruction slice (block-local indices `0..n`);
+/// `base` is the global instruction index of local index 0 (matching the
+/// flat cursor scheme used by [`build_happens_before_dag`]); `dag` is the
+/// global edge set.
+///
+/// Constraints modelled (all consistent because every DAG edge and every
+/// barrier edge follows program order, so the result is always acyclic):
+///   1. **DAG edges** — for every intra-block pair `i < j`, if
+///      `(base+i, base+j)` is in `dag`, add `i -> j`.
+///   2. **Barrier pinning** — for every barrier at position `k`, add
+///      `m -> k` for all `m < k` and `k -> m` for all `m > k`.  This pins
+///      the barrier's relative order with every neighbour while leaving
+///      non-barrier pairs free to reorder subject to (1).
+///
+/// List scheduling then repeatedly emits the ready node (in-degree zero)
+/// with the best `(scheduler_priority, original_index)` key — memory ops
+/// first, ties broken by smallest original index.  The original-index
+/// tie-break is the "conservative: keep original order" fallback.
+///
+/// If scheduling ever fails to emit all `n` nodes (which would indicate a
+/// cycle — impossible by construction, but checked defensively), the
+/// original order is returned unchanged.
+fn schedule_block_instructions(
+    instrs: &[IRInstr],
+    base: usize,
+    dag: &HashSet<(usize, usize)>,
+) -> Vec<IRInstr> {
+    let n = instrs.len();
+    if n <= 1 {
+        return instrs.to_vec();
+    }
+
+    // Adjacency + in-degree for the block-local dependency graph.
+    let mut adj: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut indeg: Vec<usize> = vec![0; n];
+
+    // Insert `from -> to`, deduplicating so in-degree stays consistent.
+    let add_edge = |adj: &mut Vec<HashSet<usize>>,
+                        indeg: &mut Vec<usize>,
+                        from: usize,
+                        to: usize| {
+        if from != to && adj[from].insert(to) {
+            indeg[to] += 1;
+        }
+    };
+
+    // (1) Intra-block DAG edges.  The DAG only ever records edges in
+    // program order, so for i < j we only need to check (base+i, base+j).
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if dag.contains(&(base + i, base + j)) {
+                add_edge(&mut adj, &mut indeg, i, j);
+            }
+        }
+    }
+
+    // (2) Barrier pinning: preserve program order between each barrier and
+    // every other instruction in the block.
+    for k in 0..n {
+        if is_scheduler_barrier(&instrs[k]) {
+            for m in 0..n {
+                if m < k {
+                    add_edge(&mut adj, &mut indeg, m, k);
+                } else if m > k {
+                    add_edge(&mut adj, &mut indeg, k, m);
+                }
+            }
+        }
+    }
+
+    // (3) List scheduling with memory-op-first priority + original-index
+    // tie-break.  Basic blocks are small, so a re-sort each step is fine
+    // and keeps the logic trivially verifiable.
+    let mut ready: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+
+    while !ready.is_empty() {
+        // Best = lowest (priority, original_index).
+        ready.sort_by(|&a, &b| {
+            scheduler_priority(&instrs[a])
+                .cmp(&scheduler_priority(&instrs[b]))
+                .then(a.cmp(&b))
+        });
+        let pick = ready.remove(0);
+        order.push(pick);
+
+        // Decrement successors; collect newly-ready to avoid borrow issues.
+        let mut newly_ready: Vec<usize> = Vec::new();
+        for &s in adj[pick].iter() {
+            indeg[s] -= 1;
+            if indeg[s] == 0 {
+                newly_ready.push(s);
+            }
+        }
+        ready.extend(newly_ready);
+    }
+
+    // Defensive cycle guard: if we couldn't schedule everything, fall back
+    // to the original order rather than emit a partial / wrong schedule.
+    if order.len() != n {
+        return instrs.to_vec();
+    }
+
+    order.into_iter().map(|i| instrs[i].clone()).collect()
+}
+
+/// Proof-directed instruction scheduler (Wave 3-A).
+///
+/// Reorders instructions **within each basic block** of `func` to find a
+/// latency-optimal topological order, using the happens-before DAG
+/// produced by [`build_happens_before_dag`].
+///
+/// # Correctness envelope
+///
+/// - **No cross-block reordering.**  Each block is scheduled independently;
+///   block layout, terminators, predecessor/successor sets, and all
+///   non-instruction fields of [`IRFunction`] are preserved verbatim.
+///   Only `block.instructions` may be permuted.
+/// - **DAG-respecting.**  Two instructions are swapped only if there is no
+///   happens-before edge between them in `dag` (a necessary condition per
+///   the task spec).  Edges are translated from global indices to
+///   block-local indices using the same flat-cursor scheme as
+///   [`build_happens_before_dag`].
+/// - **Conservative.**  Instructions whose side effects are not fully
+///   modelled by the DAG (calls, syscalls, channel I/O, atomics, bulk
+///   memory ops, state transforms, control flow, phi nodes) are treated
+///   as scheduler barriers and pinned to their original program-order
+///   position — see [`is_scheduler_barrier`].  When in doubt, the
+///   original order is preserved (the list-scheduling tie-break is the
+///   smallest original index).
+/// - **Latency hiding.**  Among ready, reorderable instructions, memory
+///   ops (`Load`/`Store`) are issued first so their latency overlaps with
+///   subsequent dependent computation — see [`scheduler_priority`].
+///
+/// This pass is **not** wired into the optimisation pipeline; Wave 4-A
+/// will do that.  It is exercised directly by callers such as
+/// [`schedule_with_provenance`].
+pub fn schedule_instructions(
+    func: &IRFunction,
+    dag: &HashSet<(usize, usize)>,
+) -> IRFunction {
+    let mut scheduled = func.clone();
+
+    // Mirror the flat global-index cursor used by build_happens_before_dag
+    // so block-local index `i` in block `b` maps to global index
+    // `base + i` exactly as it does in the DAG.
+    let mut base = 0usize;
+    for block in &mut scheduled.blocks {
+        let new_instrs =
+            schedule_block_instructions(&block.instructions, base, dag);
+        block.instructions = new_instrs;
+        base += block.instructions.len();
+    }
+
+    scheduled
+}
+
+/// Convenience wrapper: build the happens-before DAG from `provenance`
+/// then run [`schedule_instructions`].
+///
+/// This is the entry point Wave 4-A will thread into the optimisation
+/// pipeline once the DAG / scheduler have been validated in isolation.
+/// It exists so callers don't have to assemble the DAG by hand.
+pub fn schedule_with_provenance(
+    func: &IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> IRFunction {
+    let dag = build_happens_before_dag(func, provenance);
+    schedule_instructions(func, &dag)
+}
+
 /// Dead store elimination pass (backward-compatible 2-arg entry point).
 ///
 /// Delegates to [`dead_store_eliminate_with_linearity`] with
