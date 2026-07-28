@@ -137,7 +137,7 @@ fn test_function_with_params() {
 fn test_memory_operations() {
     let source = r#"
         layout Cell = { v: i32 }
-        fn use_mem() {
+        transform use_mem() {
             let buf = state_new(Cell);
             buf.v = 42;
             val = buf.v;
@@ -178,7 +178,7 @@ fn test_memory_operations() {
 #[test]
 fn test_for_loop() {
     let source = r#"
-        fn loop_test() {
+        transform loop_test() {
             for i in 0..10 {
                 x = i;
             }
@@ -213,10 +213,10 @@ fn test_for_loop() {
 #[test]
 fn test_nested_function_calls() {
     let source = r#"
-        fn inner(x: u32) -> u32 {
+        transform inner(x: u32) -> u32 {
             return x;
         }
-        fn outer() {
+        transform outer() {
             result = inner(inner(42));
         }
     "#;
@@ -253,7 +253,7 @@ fn test_nested_function_calls() {
 #[test]
 fn test_u32_masking() {
     let source = r#"
-        fn masked_add(x: u32, y: u32) -> u32 {
+        transform masked_add(x: u32, y: u32) -> u32 {
             return (x + y) & 4294967295;
         }
     "#;
@@ -286,7 +286,7 @@ fn test_u32_masking() {
 #[test]
 fn test_bitwise_ops() {
     let source = r#"
-        fn bitwise(a: u32, b: u32) {
+        transform bitwise(a: u32, b: u32) {
             c = a & b;
             d = a | b;
             e = a ^ b;
@@ -327,7 +327,7 @@ fn test_bitwise_ops() {
 fn test_pointer_arithmetic() {
     let source = r#"
         layout Pair = { a: i32, b: i32 }
-        fn ptr_arith() {
+        transform ptr_arith() {
             let buf = state_new(Pair);
             offset = 4;
             buf.b = 99;

@@ -41,7 +41,7 @@ use vuma_codegen::{
 // Helpers
 // ===========================================================================
 
-/// Build a minimal codegen SCG with a single `fn add(a, b) -> i64 { a + b }`.
+/// Build a minimal codegen SCG with a single `transform add(a, b) -> i64 { a + b }`.
 fn make_add_scg() -> Scg {
     Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "add".to_string(),

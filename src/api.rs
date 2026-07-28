@@ -1801,7 +1801,7 @@ mod tests {
     fn test_compile_simple() {
         let compiler = VumaCompiler::new();
         let source = r#"
-            fn main() {
+            transform main() {
             }
         "#;
         let result = compiler.compile(source);
@@ -1828,7 +1828,7 @@ mod tests {
         });
         let source = r#"
             layout Point = { x: u32, y: u32 }
-            fn main() -> i32 {
+            transform main() -> i32 {
                 return 0;
             }
         "#;
@@ -1846,10 +1846,10 @@ mod tests {
     fn test_parse_only() {
         let compiler = VumaCompiler::new();
         let source = r#"
-            fn add(a: i64, b: i64) {
+            transform add(a: i64, b: i64) {
                 result = a + b;
             }
-            fn main() {
+            transform main() {
             }
         "#;
         let result = compiler.parse(source);
@@ -1865,7 +1865,7 @@ mod tests {
     fn test_analyze() {
         let compiler = VumaCompiler::new();
         let source = r#"
-            fn main() {
+            transform main() {
                 x = 1 + 2;
             }
         "#;

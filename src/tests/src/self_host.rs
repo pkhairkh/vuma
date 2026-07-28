@@ -10,11 +10,11 @@
 //!
 //! 2. **Deduplication regression tests**
 //!    - `test_compile_modules_dedups_identical_fns`: 2 modules where
-//!      both define `fn helper() -> i32 { return 42; }` — should
+//!      both define `transform helper() -> i32 { return 42; }` — should
 //!      compile successfully (no error) and the resulting binary should
 //!      run and print "42".
 //!    - `test_compile_modules_rejects_conflicting_fns`: 2 modules where
-//!      both define `fn helper()` but with different bodies — should
+//!      both define `transform helper()` but with different bodies — should
 //!      fail with a `VumaError` mentioning "conflicting fn definition".
 //!
 //! 3. **Bootstrap self-host end-to-end test** (`test_wave48_bootstrap_self_host`)
@@ -74,9 +74,9 @@ fn workspace_root() -> std::path::PathBuf {
 /// synthetic multi-module program.
 ///
 /// Module `main_mod` declares `extern "C" { fn helper(); }` and calls
-/// `helper()` from `main`. Module `helper_mod` defines `fn helper()`.
+/// `helper()` from `main`. Module `helper_mod` defines `transform helper()`.
 /// After merging, the `extern` declaration for `helper` must be stripped
-/// (because a real `fn helper` definition exists in `helper_mod`), and the
+/// (because a real `transform helper` definition exists in `helper_mod`), and the
 /// call to `helper()` from `main` must resolve to a local call (no
 /// `UnresolvedRelocation` from the backend).
 ///
@@ -98,15 +98,15 @@ fn workspace_root() -> std::path::PathBuf {
 #[test]
 fn test_wave48_compile_modules_simple() {
     // Module 1: entry point. Declares `helper` as extern (to be resolved
-    // against module 2's `fn helper` definition during the merge step).
+    // against module 2's `transform helper` definition during the merge step).
     let main_src = r#"
         extern "C" {
-            fn helper() -> i32;
+            transform helper() -> i32;
         }
 
-        fn main() -> i32 {
+        transform main() -> i32 {
             // Call helper() — its extern declaration is stripped by the
-            // merge step (because helper_mod defines `fn helper`), so the
+            // merge step (because helper_mod defines `transform helper`), so the
             // backend should emit a local call that resolves to helper's
             // body. The result (42) is captured in `x`, then printed via
             // the runtime-stub `print_int`.
@@ -117,10 +117,10 @@ fn test_wave48_compile_modules_simple() {
         }
     "#;
 
-    // Module 2: helper definition. The merge step sees `fn helper` here
+    // Module 2: helper definition. The merge step sees `transform helper` here
     // and strips the `extern "C" { fn helper(...); }` from module 1.
     let helper_src = r#"
-        fn helper() -> i32 {
+        transform helper() -> i32 {
             return 42;
         }
     "#;
@@ -167,7 +167,7 @@ fn test_wave48_compile_modules_simple() {
     // IR-function count: the merged program has 2 user fns (main + helper)
     // plus runtime stubs (_start, print_int, __vuma_argc, __vuma_argv, etc.).
     // The opt pass (O2 default) may inline `helper` into `main`, so the
-    // post-opt IR may have only 1 user fn (main) + runtime stubs. The
+    // post-opt IR may have only 1 user transform (main) + runtime stubs. The
     // minimum we can assert is ≥1 (main must always survive — it's the
     // entry point).
     assert!(
@@ -207,7 +207,7 @@ fn test_wave48_compile_modules_simple() {
 /// Prove `merge_module_asts` **deduplicates** identical fn definitions
 /// across modules instead of rejecting them as a hard error.
 ///
-/// Both modules define the SAME `fn helper() -> i32 { return 42; }`. The
+/// Both modules define the SAME `transform helper() -> i32 { return 42; }`. The
 /// previous `merge_module_asts` Pass 1 would have rejected this as a
 /// duplicate-fn hard error. The current Pass 1 structurally compares
 /// the two `FnDef`s (span-agnostically, via `fn_defs_equivalent` →
@@ -215,7 +215,7 @@ fn test_wave48_compile_modules_simple() {
 /// with a `vuma_log!(debug, ...)` trace.
 ///
 /// Module `main_mod` declares `extern "C" { fn helper(); }` and calls
-/// `helper()` from `main`. Module `helper_mod` defines `fn helper()`. The
+/// `helper()` from `main`. Module `helper_mod` defines `transform helper()`. The
 /// `helper` definition is identical between modules — this would be
 /// unusual in user code (you'd normally only define `helper` once) but it
 /// mirrors the bootstrap pattern where each `.vuma` file copy-pastes a
@@ -237,30 +237,30 @@ fn test_wave48_compile_modules_simple() {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn test_compile_modules_dedups_identical_fns() {
-    // Both modules define IDENTICAL `fn helper() -> i32 { return 42; }`.
+    // Both modules define IDENTICAL `transform helper() -> i32 { return 42; }`.
     // The merge step must dedup them down to a single definition.
     let helper_src = r#"
-        fn helper() -> i32 {
+        transform helper() -> i32 {
             return 42;
         }
     "#;
 
     // Module 1: entry point. Declares `helper` as extern (to be resolved
-    // against the local `fn helper` definition during the merge step).
-    // ALSO defines the same `fn helper` body — this is the duplicate
+    // against the local `transform helper` definition during the merge step).
+    // ALSO defines the same `transform helper` body — this is the duplicate
     // that the merge step must dedup, not reject.
     let main_src = format!(
         r#"
         extern "C" {{
-            fn helper() -> i32;
+            transform helper() -> i32;
         }}
 
         {}
 
-        fn main() -> i32 {{
+        transform main() -> i32 {{
             // Call helper() — both modules define it identically; the
             // merge step dedups down to one definition, the extern decl
-            // is stripped (because a real `fn helper` exists), and the
+            // is stripped (because a real `transform helper` exists), and the
             // backend emits a local call that resolves to helper's body.
             x: i32 = helper();
             print_int(x);
@@ -288,7 +288,7 @@ fn test_compile_modules_dedups_identical_fns() {
             }
             panic!(
                 "wave48 dedup identical: compilation failed with {} error(s) (see stderr) — \
-                 expected Ok because the two `fn helper` definitions are byte-identical and \
+                 expected Ok because the two `transform helper` definitions are byte-identical and \
                  should be deduplicated, not rejected",
                 errors.len()
             );
@@ -320,7 +320,7 @@ fn test_compile_modules_dedups_identical_fns() {
     );
 
     eprintln!(
-        "wave48 dedup identical: OK — merged 2 modules with identical `fn helper` defs into \
+        "wave48 dedup identical: OK — merged 2 modules with identical `transform helper` defs into \
          {}-byte ELF, stdout = {:?} (contains \"42\" ✓)",
         output.binary.len(),
         stdout
@@ -335,7 +335,7 @@ fn test_compile_modules_dedups_identical_fns() {
 /// across modules with a `VumaError::AstToScg` mentioning
 /// "conflicting fn definition".
 ///
-/// Both modules define `fn helper() -> i32` but with DIFFERENT bodies:
+/// Both modules define `transform helper() -> i32` but with DIFFERENT bodies:
 /// module 1 returns `42`, module 2 returns `99`. The current Pass 1
 /// structurally compares the two `FnDef`s (span-agnostically) and,
 /// finding them NOT equivalent, emits a hard `VumaError::AstToScg` with a
@@ -357,17 +357,17 @@ fn test_compile_modules_dedups_identical_fns() {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn test_compile_modules_rejects_conflicting_fns() {
-    // Module 1: defines `fn helper` returning 42.
+    // Module 1: defines `transform helper` returning 42.
     let main_src = r#"
         extern "C" {
-            fn helper() -> i32;
+            transform helper() -> i32;
         }
 
-        fn helper() -> i32 {
+        transform helper() -> i32 {
             return 42;
         }
 
-        fn main() -> i32 {
+        transform main() -> i32 {
             x: i32 = helper();
             print_int(x);
             print_newline();
@@ -375,11 +375,11 @@ fn test_compile_modules_rejects_conflicting_fns() {
         }
     "#;
 
-    // Module 2: defines `fn helper` with a DIFFERENT body (returns 99
+    // Module 2: defines `transform helper` with a DIFFERENT body (returns 99
     // instead of 42). Same signature, different body — this is a real
     // conflict that the merge step must reject.
     let helper_src = r#"
-        fn helper() -> i32 {
+        transform helper() -> i32 {
             return 99;
         }
     "#;
@@ -396,7 +396,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
         Ok(output) => {
             panic!(
                 "wave48 conflict reject: expected compile_modules to FAIL with a `conflicting fn \
-                 definition` error (because the two `fn helper` bodies differ), but it succeeded \
+                 definition` error (because the two `transform helper` bodies differ), but it succeeded \
                  and emitted a {}-byte ELF — the dedup logic incorrectly treated the conflicting \
                  definitions as identical",
                 output.binary.len()
@@ -427,7 +427,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
     );
 
     eprintln!(
-        "wave48 conflict reject: OK — compile_modules correctly rejected the conflicting `fn \
+        "wave48 conflict reject: OK — compile_modules correctly rejected the conflicting `transform \
          helper` definitions with {} error(s) (the first one mentions \"conflicting fn \
          definition\")",
         errors.len()
@@ -491,7 +491,7 @@ fn test_compile_modules_rejects_conflicting_fns() {
 /// (`src/pipeline.rs:5429-5448` in the old revision) rejected every
 /// duplicate as a hard error.
 ///
-/// Site map of the duplicates (rg `^fn (store_u64|load_u64|store_u32|load_u32)`):
+/// Site map of the duplicates (rg `^transform (store_u64|load_u64|store_u32|load_u32)`):
 ///
 /// ```text
 /// womb/lang/full_lexer.vuma:102  fn store_u64(...)

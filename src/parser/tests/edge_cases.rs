@@ -427,7 +427,7 @@ fn test_parse_else_block_with_nested_if_chain_balanced() {
             }
             return 0;
         }
-        fn main() -> i32 { return 0; }
+        transform main() -> i32 { return 0; }
     "#;
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
@@ -469,7 +469,7 @@ fn test_parse_else_if_block_chain_five_branches() {
             }}
             return 0;
         }
-        fn main() -> i32 { return 0; }
+        transform main() -> i32 { return 0; }
     "#;
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
@@ -646,7 +646,7 @@ fn test_reld_as_identifier_in_let() {
 #[test]
 fn test_repd_as_bd_directive_still_works() {
     let source = r#"
-        fn main() {
+        transform main() {
             bd(Secure);
             repd(Fast, x);
             capd(RW);

@@ -98,7 +98,7 @@ fn has_linear_channel_transform_error(errors: &[VumaError], needle: &str) -> boo
 #[test]
 fn linear_channel_valid_program_still_compiles() {
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             channel_send(ch, 42);
             channel_close(ch);
@@ -129,7 +129,7 @@ fn linear_channel_valid_program_still_compiles() {
 #[test]
 fn linear_channel_use_after_close_fails_by_default() {
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             channel_close(ch);
             x = channel_recv(ch);
@@ -159,7 +159,7 @@ fn linear_channel_use_after_close_fails_by_default() {
 #[test]
 fn linear_channel_double_close_fails_by_default() {
     let src = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             channel_close(ch);
             channel_close(ch);

@@ -155,8 +155,8 @@ fn wave11_production_compile_with_lto() {
     use vuma::pipeline::{compile, CompileConfig, OptLevel};
 
     let source = r#"
-        fn helper(x) -> i64 { return x + 1; }
-        fn main() -> i64 {
+        transform helper(x) -> i64 { return x + 1; }
+        transform main() -> i64 {
             a = helper(10);
             b = helper(20);
             return a + b;

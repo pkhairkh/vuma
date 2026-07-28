@@ -49,7 +49,7 @@ fn assert_l1l3_collapse_stage_ran(stage_timings: &[(String, u64)]) -> u64 {
 #[test]
 fn verify_l1l3_collapse_wired_in_trivial_program() {
     let source = r#"
-        fn main() {
+        transform main() {
             let x = 42;
             let y = x + 1;
         }
@@ -112,7 +112,7 @@ fn verify_l1l3_collapse_wired_in_channel_program() {
     //   3. Re-running `l1l3_collapse(&out.scg)` yields `collapsed == true`
     //      (the proof succeeded — no type mismatches)
     let source = r#"
-        fn main() -> i32 {
+        transform main() -> i32 {
             ch = channel_open<i32>();
             pid = spawn_worker();
             if pid == 0 {
