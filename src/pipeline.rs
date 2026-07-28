@@ -1617,10 +1617,18 @@ pub fn compile_with_path(
             // divergent meta — see `tests/scg_conformance.rs`.)
             let (codegen_scg, typed_state_meta) =
                 bridge_ast_to_codegen_scg_with_meta(&ast);
+            // Follow-up F2: translate `requires`/`ensures` contracts and
+            // `prove` blocks from the AST into IVE-consumable form so they
+            // are no longer dead data (see `discharge_contracts_and_prove_blocks`
+            // in `verification.rs`).
+            let contracts = collect_contracts(&ast);
+            let prove_blocks = collect_prove_blocks(&ast);
             let input = vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg)
                 .with_pmt_layouts(pmt_layouts)
                 .with_secret_vars(secret_vars)
-                .with_typed_state_meta(typed_state_meta);
+                .with_typed_state_meta(typed_state_meta)
+                .with_contracts(contracts)
+                .with_prove_blocks(prove_blocks);
             let result = aggregator.verify_all(&input);
             // Verification is a hard safety gate: if any invariant was
             // violated, refuse to emit code for the program.  This is
@@ -2721,10 +2729,18 @@ pub fn compile_modules(
         .with_level(IveVerificationLevel::Pmt)
         .with_max_paths(config.ive_max_paths)
         .with_max_path_length(config.ive_max_path_length);
+    // Follow-up F2: translate `requires`/`ensures` contracts and `prove`
+    // blocks from the merged AST into IVE-consumable form so they are no
+    // longer dead data (see `discharge_contracts_and_prove_blocks` in
+    // `verification.rs`).
+    let contracts = collect_contracts(&merged_ast);
+    let prove_blocks = collect_prove_blocks(&merged_ast);
     let ive_input = vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg)
         .with_pmt_layouts(pmt_layouts)
         .with_secret_vars(secret_vars)
-        .with_typed_state_meta(typed_state_meta);
+        .with_typed_state_meta(typed_state_meta)
+        .with_contracts(contracts)
+        .with_prove_blocks(prove_blocks);
     let verification = aggregator.verify_all(&ive_input);
     timings.push((
         "ive-verification".to_string(),
@@ -3202,9 +3218,17 @@ pub fn compile_with_recovery(
             // is attached at this site (the typed-state conformance
             // cross-check is skipped when `typed_state_meta` is empty).
             let codegen_scg = bridge_ast_to_codegen_scg(&ast);
+            // Follow-up F2: translate `requires`/`ensures` contracts and
+            // `prove` blocks from the AST into IVE-consumable form so they
+            // are no longer dead data (see `discharge_contracts_and_prove_blocks`
+            // in `verification.rs`).
+            let contracts = collect_contracts(&ast);
+            let prove_blocks = collect_prove_blocks(&ast);
             let input = vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg)
                 .with_pmt_layouts(pmt_layouts)
-                .with_secret_vars(secret_vars);
+                .with_secret_vars(secret_vars)
+                .with_contracts(contracts)
+                .with_prove_blocks(prove_blocks);
             let result = aggregator.verify_all(&input);
             // Verification is a hard safety gate: if any invariant was
             // violated, refuse to emit code for the program.  This is
@@ -3969,11 +3993,19 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
         let pmt_layouts = build_pmt_layout_specs(&ast);
         let secret_vars = collect_secret_vars(&ast);
         let (codegen_scg_for_ive, typed_state_meta) = bridge_ast_to_codegen_scg_with_meta(&ast);
+        // Follow-up F2: translate `requires`/`ensures` contracts and `prove`
+        // blocks from the AST into IVE-consumable form so they are no longer
+        // dead data (see `discharge_contracts_and_prove_blocks` in
+        // `verification.rs`).
+        let contracts = collect_contracts(&ast);
+        let prove_blocks = collect_prove_blocks(&ast);
         let ive_input =
             vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg_for_ive)
                 .with_pmt_layouts(pmt_layouts)
                 .with_secret_vars(secret_vars)
-                .with_typed_state_meta(typed_state_meta);
+                .with_typed_state_meta(typed_state_meta)
+                .with_contracts(contracts)
+                .with_prove_blocks(prove_blocks);
         let aggregator = InvariantAggregator::new()
             .with_level(IveVerificationLevel::Pmt)
             .with_max_paths(wasm_config.ive_max_paths)
@@ -6740,6 +6772,312 @@ fn let_stmt_has_secret_attr(let_stmt: &vuma_parser::ast::LetStmt) -> bool {
 /// Symmetric with [`let_stmt_has_secret_attr`].
 fn param_has_secret_attr(param: &vuma_parser::ast::Param) -> bool {
     param.attrs.iter().any(|a| a.name == "secret")
+}
+
+// ===========================================================================
+// Follow-up F2: collect `requires`/`ensures` contracts & `prove` blocks
+// ===========================================================================
+//
+// The parser captures `requires`/`ensures` contracts (`Contract` AST node on
+// `FnDef`/`TransformDef`) and `prove { require …; <body> }` proof-obligation
+// blocks (`Expr::ProveBlock`). Follow-up F2 wires the IVE to *consume* them
+// so they are no longer dead data.
+//
+// The IVE crate does not depend on `vuma_parser`, so these helpers translate
+// the AST nodes into IVE-side `FnContract` / `ProveBlockObligation` structs
+// (mirroring how `build_pmt_layout_specs` translates `LayoutDef` into
+// `PmtLayoutSpec`). The translated vectors are attached to `VerificationInput`
+// via `.with_contracts(...)` / `.with_prove_blocks(...)` at every pipeline
+// call site that constructs a `VerificationInput`.
+//
+// Each clause is stringified (Debug form, for diagnostics) and tagged with a
+// `trivially_true` flag pre-computed from `Expr::Lit(Lit::Bool(true))` — the
+// only clause shape the IVE can currently discharge on its own. Non-trivial
+// clauses are deferred to a WARNING + TODO by the IVE's discharge pass (see
+// `discharge_contracts_and_prove_blocks` in `verification.rs`).
+
+/// Translate a parser AST contract clause (`Expr`) into an IVE-side
+/// [`ContractClause`]. `trivially_true` is `true` iff the expression is a
+/// literal `true` — the only shape the IVE can currently discharge without
+/// an SMT solver.
+fn contract_clause_from_expr(
+    expr: &vuma_parser::ast::Expr,
+) -> vuma_ive::verification::ContractClause {
+    use vuma_parser::ast::{Expr, Lit};
+    let trivially_true = matches!(expr, Expr::Lit { value: Lit::Bool(true), .. });
+    vuma_ive::verification::ContractClause {
+        source: format!("{:?}", expr),
+        trivially_true,
+    }
+}
+
+/// Push an IVE-side [`FnContract`] for `contract` (if `Some`) attached to
+/// `fn_name`. No-op when the function/transform has no contract.
+fn push_fn_contract(
+    contract: &Option<vuma_parser::ast::Contract>,
+    fn_name: &str,
+    out: &mut Vec<vuma_ive::verification::FnContract>,
+) {
+    if let Some(c) = contract {
+        out.push(vuma_ive::verification::FnContract {
+            fn_name: fn_name.to_string(),
+            requires: c.requires.iter().map(contract_clause_from_expr).collect(),
+            ensures: c.ensures.iter().map(contract_clause_from_expr).collect(),
+        });
+    }
+}
+
+/// Collect source-level `requires`/`ensures` contracts from the AST into
+/// IVE-consumable [`FnContract`]s (Follow-up F2).
+///
+/// Walks every `Item::FnDef`, `Item::TransformDef`, `Item::ImplBlock`
+/// (methods), and `Item::TraitDef` (provided methods), recursing into
+/// nested modules. `transform … requires … ensures …` declarations land
+/// here via `TransformDef.contract` / `FnDef.contract`.
+pub fn collect_contracts(program: &AstProgram) -> Vec<vuma_ive::verification::FnContract> {
+    let mut out = Vec::new();
+    for item in &program.items {
+        collect_contracts_from_item(item, &mut out);
+    }
+    out
+}
+
+/// Recursive helper for [`collect_contracts`]. Walks an `Item` and any
+/// nested items (modules), accumulating [`FnContract`]s into `out`.
+fn collect_contracts_from_item(
+    item: &Item,
+    out: &mut Vec<vuma_ive::verification::FnContract>,
+) {
+    use vuma_parser::ast::{ImplBlock, ModuleDef, TraitDef};
+    match item {
+        Item::FnDef(f) => push_fn_contract(&f.contract, &f.name, out),
+        Item::TransformDef(t) => push_fn_contract(&t.contract, &t.name, out),
+        Item::ImplBlock(ImplBlock { methods, .. }) => {
+            for m in methods {
+                push_fn_contract(&m.contract, &m.name, out);
+            }
+        }
+        Item::TraitDef(TraitDef {
+            provided_methods, ..
+        }) => {
+            for m in provided_methods {
+                push_fn_contract(&m.contract, &m.name, out);
+            }
+        }
+        Item::ModuleDef(ModuleDef { items, .. }) => {
+            for inner in items {
+                collect_contracts_from_item(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect `prove { require …; <body> }` proof-obligation blocks from the
+/// AST into IVE-consumable [`ProveBlockObligation`]s (Follow-up F2).
+///
+/// Walks every function/transform/method body and recurses into nested
+/// blocks & expressions (mirroring [`collect_secret_vars`]). Each
+/// `Expr::ProveBlock` encountered becomes one `ProveBlockObligation` whose
+/// `location` is the enclosing function/transform/method name; the walker
+/// also descends into the block's body so nested `prove` blocks are caught.
+pub fn collect_prove_blocks(
+    program: &AstProgram,
+) -> Vec<vuma_ive::verification::ProveBlockObligation> {
+    let mut out = Vec::new();
+    for item in &program.items {
+        collect_prove_blocks_from_item(item, &mut out);
+    }
+    out
+}
+
+/// Recursive helper for [`collect_prove_blocks`]. Walks an `Item` and any
+/// nested items (modules), accumulating [`ProveBlockObligation`]s into
+/// `out`. The `current_fn` context threads the enclosing function name so
+/// each obligation's `location` is informative.
+fn collect_prove_blocks_from_item(
+    item: &Item,
+    out: &mut Vec<vuma_ive::verification::ProveBlockObligation>,
+) {
+    use vuma_parser::ast::{ImplBlock, ModuleDef, TraitDef};
+    match item {
+        Item::FnDef(f) => {
+            collect_prove_blocks_from_block(&f.body, &f.name, out);
+        }
+        Item::TransformDef(t) => {
+            // TransformDef.body is `Vec<Stmt>` (not a `Block`).
+            for s in &t.body {
+                collect_prove_blocks_from_stmt(s, &t.name, out);
+            }
+        }
+        Item::ImplBlock(ImplBlock { methods, .. }) => {
+            for m in methods {
+                collect_prove_blocks_from_block(&m.body, &m.name, out);
+            }
+        }
+        Item::TraitDef(TraitDef {
+            provided_methods, ..
+        }) => {
+            for m in provided_methods {
+                collect_prove_blocks_from_block(&m.body, &m.name, out);
+            }
+        }
+        Item::ModuleDef(ModuleDef { items, .. }) => {
+            for inner in items {
+                collect_prove_blocks_from_item(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk a `Block`'s statements recursively, collecting `prove` blocks.
+fn collect_prove_blocks_from_block(
+    block: &vuma_parser::ast::Block,
+    current_fn: &str,
+    out: &mut Vec<vuma_ive::verification::ProveBlockObligation>,
+) {
+    for stmt in &block.statements {
+        collect_prove_blocks_from_stmt(stmt, current_fn, out);
+    }
+}
+
+/// Recursive statement walker for [`collect_prove_blocks`]. Descends into
+/// nested blocks (if/while/for/loop/match/sync/unsafe) and the expressions
+/// they carry, recording every `Expr::ProveBlock` encountered. Mirrors
+/// `collect_secret_vars_from_stmt`'s coverage.
+fn collect_prove_blocks_from_stmt(
+    stmt: &vuma_parser::ast::Stmt,
+    current_fn: &str,
+    out: &mut Vec<vuma_ive::verification::ProveBlockObligation>,
+) {
+    use vuma_parser::ast::Stmt;
+    match stmt {
+        Stmt::Let(l) => collect_prove_blocks_from_expr(&l.value, current_fn, out),
+        Stmt::If(i) => {
+            collect_prove_blocks_from_expr(&i.condition, current_fn, out);
+            collect_prove_blocks_from_block(&i.then_block, current_fn, out);
+            if let Some(else_b) = &i.else_block {
+                collect_prove_blocks_from_block(else_b, current_fn, out);
+            }
+        }
+        Stmt::While(w) => {
+            collect_prove_blocks_from_expr(&w.condition, current_fn, out);
+            collect_prove_blocks_from_block(&w.body, current_fn, out);
+        }
+        Stmt::For(f) => {
+            collect_prove_blocks_from_expr(&f.iter, current_fn, out);
+            collect_prove_blocks_from_block(&f.body, current_fn, out);
+        }
+        Stmt::Loop(l) => collect_prove_blocks_from_block(&l.body, current_fn, out),
+        Stmt::Match(m) => {
+            collect_prove_blocks_from_expr(&m.subject, current_fn, out);
+            for arm in &m.arms {
+                if let Some(g) = &arm.guard {
+                    collect_prove_blocks_from_expr(g, current_fn, out);
+                }
+                collect_prove_blocks_from_expr(&arm.body, current_fn, out);
+            }
+        }
+        Stmt::Sync(s) => collect_prove_blocks_from_block(&s.body, current_fn, out),
+        Stmt::UnsafeBlock { body, .. } => {
+            collect_prove_blocks_from_block(body, current_fn, out)
+        }
+        Stmt::Assign(a) => collect_prove_blocks_from_expr(&a.value, current_fn, out),
+        Stmt::CompoundAssign(a) => {
+            collect_prove_blocks_from_expr(&a.value, current_fn, out)
+        }
+        Stmt::Return(r) => {
+            if let Some(e) = &r.value {
+                collect_prove_blocks_from_expr(e, current_fn, out);
+            }
+        }
+        Stmt::Expr(e) => collect_prove_blocks_from_expr(&e.expr, current_fn, out),
+        _ => {}
+    }
+}
+
+/// Walk an expression for `Expr::ProveBlock` nodes (recording each as a
+/// [`ProveBlockObligation`]) and descend into sub-expressions. Mirrors
+/// `collect_secret_vars_from_expr`'s coverage, with the added `ProveBlock`
+/// arm that records the obligation AND recurses into the block's body
+/// (so nested `prove` blocks are caught).
+fn collect_prove_blocks_from_expr(
+    expr: &vuma_parser::ast::Expr,
+    current_fn: &str,
+    out: &mut Vec<vuma_ive::verification::ProveBlockObligation>,
+) {
+    use vuma_parser::ast::Expr;
+    match expr {
+        Expr::ProveBlock {
+            requirements,
+            body,
+            ..
+        } => {
+            // Record this prove block's obligations, then descend into the
+            // body (a `prove` block's body may itself contain nested
+            // `prove` blocks).
+            out.push(vuma_ive::verification::ProveBlockObligation {
+                location: current_fn.to_string(),
+                requirements: requirements
+                    .iter()
+                    .map(contract_clause_from_expr)
+                    .collect(),
+            });
+            collect_prove_blocks_from_expr(body, current_fn, out);
+        }
+        Expr::Block {
+            statements,
+            trailing_expr,
+            ..
+        } => {
+            for s in statements {
+                collect_prove_blocks_from_stmt(s, current_fn, out);
+            }
+            if let Some(e) = trailing_expr {
+                collect_prove_blocks_from_expr(e, current_fn, out);
+            }
+        }
+        Expr::MatchExpr {
+            scrutinee, arms, ..
+        } => {
+            collect_prove_blocks_from_expr(scrutinee, current_fn, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_prove_blocks_from_expr(g, current_fn, out);
+                }
+                collect_prove_blocks_from_expr(&arm.body, current_fn, out);
+            }
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            collect_prove_blocks_from_expr(lhs, current_fn, out);
+            collect_prove_blocks_from_expr(rhs, current_fn, out);
+        }
+        Expr::UnOp { expr: inner, .. }
+        | Expr::AddressOf { expr: inner, .. }
+        | Expr::Deref { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::Spawn { expr: inner, .. }
+        | Expr::Await { expr: inner, .. } => {
+            collect_prove_blocks_from_expr(inner, current_fn, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_prove_blocks_from_expr(callee, current_fn, out);
+            for a in args {
+                collect_prove_blocks_from_expr(a, current_fn, out);
+            }
+        }
+        Expr::FieldAccess { expr: inner, .. } => {
+            collect_prove_blocks_from_expr(inner, current_fn, out)
+        }
+        Expr::Index {
+            expr: inner, index, ..
+        } => {
+            collect_prove_blocks_from_expr(inner, current_fn, out);
+            collect_prove_blocks_from_expr(index, current_fn, out);
+        }
+        _ => {}
+    }
 }
 
 // PMT: resolve a state-field chain `(layout_name, [field1, field2, ...])`
