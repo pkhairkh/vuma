@@ -3355,6 +3355,207 @@ pub fn ive_values_proven_non_aliasing_with(
     }
 }
 
+/// Build the happens-before dependency DAG for proof-directed scheduling.
+///
+/// Returns a set of `(instr_idx_a, instr_idx_b)` pairs meaning
+/// "instruction `a` must execute before instruction `b`".  Indices are
+/// **global flat instruction indices**: a 0-based counter that walks
+/// `func.blocks` in layout order and, within each block, the
+/// `instructions` vector in order.  Every edge connects two instructions
+/// **within the same block** — the DAG is strictly per-block (never
+/// cross-block); the global indexing merely makes each pair unambiguous
+/// across blocks so the whole-function result fits in a single
+/// `HashSet`.  A scheduler can recover block boundaries from
+/// `func.blocks` and slice the edge set accordingly.
+///
+/// # Edge rules
+///
+/// 1. **RAW** — instruction `i` writes vreg `V`, instruction `j` reads
+///    `V` => edge `(i, j)`.
+/// 2. **WAW** — instruction `i` writes vreg `V`, instruction `j` writes
+///    `V` => edge `(i, j)`.
+///    (WAR — `i` reads `V`, `j` writes `V` — is intentionally *not*
+///    emitted, per the task spec; the IVE provenance map and linearity
+///    make RAW+WAW sufficient for the scheduler's correctness envelope.)
+/// 3. **Memory aliasing** — `Load`/`Store` pairs that *may* alias are
+///    ordered (edge `(i, j)`), *unless* their address vregs are
+///    IVE-proven non-aliasing (different Alloc regions), in which case
+///    **no** edge is added — they may be freely reordered.  `Load`-`Load`
+///    pairs never receive an edge (reads don't conflict).  When aliasing
+///    cannot be disproven (either address lacks provenance), we
+///    conservatively assume aliasing and add the edge.
+/// 4. **Alloc->Free** — if `V` is the result of an `Alloc` (region root
+///    `R == V`) and a later instruction `Free`s a pointer deriving from
+///    `R`, add edge `(alloc, free)`.  This captures both a direct free of
+///    the Alloc's dst and a free of an offset pointer derived from it
+///    (which a plain vreg RAW on `V` would miss, since the freed pointer
+///    is a *different* vreg).
+///
+/// The DAG is conservative with respect to *unproven* aliasing: when we
+/// cannot prove two memory accesses non-aliasing, we assume they alias
+/// and add the ordering edge.  This is the happens-before input the
+/// (future) instruction scheduler consumes.
+pub fn build_happens_before_dag(
+    func: &IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> HashSet<(usize, usize)> {
+    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+
+    // Global flat instruction index — walks all blocks in layout order.
+    let mut cursor: usize = 0;
+
+    for block in &func.blocks {
+        let instrs = &block.instructions;
+        let n = instrs.len();
+        let base = cursor; // first global index belonging to this block
+
+        // ------------------------------------------------------------------
+        // Rule 1 & 2: vreg RAW / WAW dependencies.
+        //
+        // For each vreg V touched in this block, collect the (block-local)
+        // indices of its definitions and uses.  Then:
+        //   - def @ i, use @ j, i < j  ->  RAW edge (i, j)
+        //   - def @ i, def @ j, i < j  ->  WAW edge (i, j)
+        // Both index lists are in program order (we iterate in order), so
+        // ordering checks are simple comparisons.
+        // ------------------------------------------------------------------
+        let mut defs_by_vreg: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut uses_by_vreg: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, instr) in instrs.iter().enumerate() {
+            for d in instr.defined_regs() {
+                defs_by_vreg.entry(d).or_default().push(i);
+            }
+            for u in instr.used_regs() {
+                uses_by_vreg.entry(u).or_default().push(i);
+            }
+        }
+
+        // RAW: every (def, use) pair of the same vreg with def before use.
+        for (vreg, def_indices) in &defs_by_vreg {
+            if let Some(use_indices) = uses_by_vreg.get(vreg) {
+                for &di in def_indices {
+                    for &ui in use_indices {
+                        if di < ui {
+                            edges.insert((base + di, base + ui));
+                        }
+                    }
+                }
+            }
+        }
+        // WAW: every ordered pair of defs of the same vreg.
+        for def_indices in defs_by_vreg.values() {
+            for a in 0..def_indices.len() {
+                for b in (a + 1)..def_indices.len() {
+                    // def_indices is in program order => def_indices[a] < [b].
+                    edges.insert((base + def_indices[a], base + def_indices[b]));
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Rule 3: memory dependencies with the IVE non-aliasing exemption.
+        //
+        // Collect each Load/Store as (block-local idx, address vreg,
+        // writes_memory).  Two memory ops i < j get an edge iff at least
+        // one writes memory AND their addresses are NOT proven
+        // non-aliasing.  Load-Load never gets an edge.
+        // ------------------------------------------------------------------
+        #[derive(Clone, Copy)]
+        struct MemOp {
+            idx: usize,
+            addr: Option<u32>,
+            writes: bool,
+        }
+        let mem_ops: Vec<MemOp> = instrs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instr)| match instr {
+                IRInstr::Load { addr, .. } => Some(MemOp {
+                    idx: i,
+                    addr: addr.as_register(),
+                    writes: false,
+                }),
+                IRInstr::Store { addr, .. } => Some(MemOp {
+                    idx: i,
+                    addr: addr.as_register(),
+                    writes: true,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        for a in 0..mem_ops.len() {
+            for b in (a + 1)..mem_ops.len() {
+                let ma = mem_ops[a];
+                let mb = mem_ops[b];
+                // mem_ops is in program order, so ma.idx < mb.idx.
+                // Only order when at least one side writes memory.
+                if !ma.writes && !mb.writes {
+                    continue;
+                }
+                // Proven non-aliasing?  If BOTH addresses carry provenance
+                // and derive from DIFFERENT regions, skip the edge.
+                let non_aliasing = match (ma.addr, mb.addr) {
+                    (Some(va), Some(vb)) => {
+                        ive_proven_non_aliasing_with(provenance, va, vb)
+                    }
+                    _ => false,
+                };
+                if non_aliasing {
+                    continue;
+                }
+                edges.insert((base + ma.idx, base + mb.idx));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Rule 4: Alloc -> Free ordering.
+        //
+        // For each Alloc (region root R = its dst vreg), add an edge to
+        // every later Free whose pointer derives from R (i.e. whose
+        // provenance region equals R).  This covers a direct free of the
+        // Alloc's dst (provenance[dst] == dst == R) and a free of a
+        // derived/offset pointer (provenance[derived] == R) alike.
+        // ------------------------------------------------------------------
+        let allocs: Vec<(usize, u32)> = instrs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instr)| match instr {
+                IRInstr::Alloc { dst, .. } => dst.as_register().map(|r| (i, r)),
+                _ => None,
+            })
+            .collect();
+        let frees: Vec<(usize, Option<u32>)> = instrs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instr)| match instr {
+                IRInstr::Free { ptr } => Some((i, ptr.as_register())),
+                _ => None,
+            })
+            .collect();
+
+        for &(alloc_idx, region_root) in &allocs {
+            for &(free_idx, free_ptr) in &frees {
+                if free_idx <= alloc_idx {
+                    continue;
+                }
+                let derives = match free_ptr {
+                    Some(p) => provenance.get(&p).copied() == Some(region_root),
+                    None => false,
+                };
+                if derives {
+                    edges.insert((base + alloc_idx, base + free_idx));
+                }
+            }
+        }
+
+        // Advance the global cursor past this block.
+        cursor += n;
+    }
+
+    edges
+}
+
 /// Dead store elimination pass.
 ///
 /// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
