@@ -2919,6 +2919,21 @@ impl<'src> Parser<'src> {
                         span: Span::new(start, end),
                     };
                 }
+                TokenKind::Question => {
+                    // Try operator: `expr?` — the only error-propagation
+                    // form in VUMA (Pillar III). `expr` is expected to be
+                    // `Result<T,E>`; `expr?` yields `T` on `Ok` and
+                    // propagates the `Err` (early-return) otherwise. It
+                    // desugars to:
+                    //   match expr { Ok(v) => v, Err(e) => return Err(e) }
+                    let start = expr.span().start;
+                    let end = self.current.span.end; // end of '?' token
+                    self.advance(); // consume '?'
+                    expr = Expr::Try {
+                        expr: Box::new(expr),
+                        span: Span::new(start, end),
+                    };
+                }
                 _ => break,
             }
         }
@@ -4377,6 +4392,7 @@ impl Expr {
             Expr::ArenaGrow { span, .. } => *span,
             Expr::ArenaFree { span, .. } => *span,
             Expr::IfExpr { span, .. } => *span,
+            Expr::Try { span, .. } => *span,
         }
     }
 }

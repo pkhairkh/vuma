@@ -3744,6 +3744,10 @@ impl AstToScg {
                     self.collect_stmt_uses(stmt, uses);
                 }
             }
+            // `expr?` — uses come from the inner expression.
+            Expr::Try { expr, .. } => {
+                self.collect_uses(expr, uses);
+            }
         }
     }
 
@@ -3946,6 +3950,10 @@ impl AstToScg {
                     "i64".to_string()
                 }
             }
+            // `expr?` yields the `Ok` payload's type (best-effort: recurse
+            // into the inner `Result<T,E>` expression — precise `T` recovery
+            // requires type information not yet tracked here).
+            Expr::Try { expr, .. } => self.infer_expr_type(expr),
         }
     }
 
@@ -4200,6 +4208,7 @@ impl AstToScg {
                     self.expr_to_string(condition)
                 )
             }
+            Expr::Try { expr, .. } => format!("{}?", self.expr_to_string(expr)),
         }
     }
 

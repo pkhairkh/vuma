@@ -1330,6 +1330,24 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Try operator: `expr?` (Pillar III — the only error-propagation form).
+    ///
+    /// `expr` must have type `Result<T, E>`. The expression `expr?` has type
+    /// `T` and desugars to:
+    ///
+    /// ```text
+    /// match expr { Ok(v) => v, Err(e) => return Err(e) }
+    /// ```
+    ///
+    /// Together with `Result`/`Ok`/`Err` and the `Ok`/`Err` constructors, `?`
+    /// replaces the legacy integer-return-code convention
+    /// (`return -1` / `return 0`).
+    Try {
+        /// The `Result<T,E>` expression being unwrapped.
+        expr: Box<Expr>,
+        /// Source span (covers `expr` and the trailing `?`).
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------
