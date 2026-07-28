@@ -8,7 +8,7 @@ use vuma_codegen::ir::{BinOpKind, IRFunction, IRInstr, IRProgram, IRTerminator, 
 use vuma_codegen::opt::{cross_function_constant_prop, whole_program_dce};
 
 /// Build a program:
-///   fn double(x) { return x * 2; }
+///   transform double(x) { return x * 2; }
 ///   transform main() { return double(5); }  // double always called with 5
 fn make_program() -> IRProgram {
     let mut double = IRFunction::new("double");

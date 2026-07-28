@@ -4812,7 +4812,7 @@ fn build_alpha_elf(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Ve
 
     // --- ELF header fields (little-endian) ---
     elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
-    elf.extend_from_slice(&0x9026u16.to_le_bytes()); // e_machine = EM_ALPHA
+    elf.extend_from_slice(&0x0026u16.to_le_bytes()); // e_machine = EM_ALPHA
     elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff

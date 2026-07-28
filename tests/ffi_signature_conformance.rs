@@ -48,7 +48,7 @@
 ///
 /// Expected Rust extern signature:
 /// ```ignore
-/// extern "C" fn verified_capacity_check(used: u64, size: u64, capacity: u64) -> u8;
+/// extern "C" transform verified_capacity_check(used: u64, size: u64, capacity: u64) -> u8;
 /// ```
 const SYM_VERIFIED_CAPACITY_CHECK: (&str, &str) = (
     "verified_capacity_check",
@@ -60,7 +60,7 @@ const SYM_VERIFIED_CAPACITY_CHECK: (&str, &str) = (
 ///
 /// Expected Rust extern signature:
 /// ```ignore
-/// extern "C" fn verified_field_bounds_check(offset: u64, size: u64, total: u64) -> u8;
+/// extern "C" transform verified_field_bounds_check(offset: u64, size: u64, total: u64) -> u8;
 /// ```
 const SYM_VERIFIED_FIELD_BOUNDS_CHECK: (&str, &str) = (
     "verified_field_bounds_check",
@@ -73,7 +73,7 @@ const SYM_VERIFIED_FIELD_BOUNDS_CHECK: (&str, &str) = (
 /// Expected Rust extern signature (flattened C marshalling, FFI_BRIDGE_PLAN §1
 /// option (ii)):
 /// ```ignore
-/// extern "C" fn verified_linearity_check(
+/// extern "C" transform verified_linearity_check(
 ///     var: *const c_char,
 ///     consumed: *const *const c_char,
 ///     consumed_len: usize,
@@ -89,7 +89,7 @@ const SYM_VERIFIED_LINEARITY_CHECK: (&str, &str) = (
 /// Expected Rust extern signature (aggregate; argument order matches
 /// `pmt_check::verified_pmt_check`):
 /// ```ignore
-/// extern "C" fn verified_pmt_check(
+/// extern "C" transform verified_pmt_check(
 ///     used: u64, total: u64, capacity: u64,        // -> capacity check
 ///     offset: u64, size: u64,                       // -> field-bounds check (total reused)
 ///     var: *const c_char, consumed: *const *const c_char, consumed_len: usize, // -> linearity
@@ -105,7 +105,7 @@ const SYM_VERIFIED_PMT_CHECK: (&str, &str) = (
 ///
 /// Expected Rust extern signature:
 /// ```ignore
-/// extern "C" fn lean_verify_transform(registry_and_transform: *mut LeanObject) -> u8;
+/// extern "C" transform lean_verify_transform(registry_and_transform: *mut LeanObject) -> u8;
 /// ```
 const SYM_LEAN_VERIFY_TRANSFORM: (&str, &str) = (
     "lean_verify_transform",
@@ -117,7 +117,7 @@ const SYM_LEAN_VERIFY_TRANSFORM: (&str, &str) = (
 ///
 /// Expected Rust extern signature:
 /// ```ignore
-/// extern "C" fn lean_verify_state_reads(
+/// extern "C" transform lean_verify_state_reads(
 ///     layouts: *mut LeanObject,
 ///     reads: *mut LeanObject,
 /// ) -> u8;
@@ -132,7 +132,7 @@ const SYM_LEAN_VERIFY_STATE_READS: (&str, &str) = (
 ///
 /// Expected Rust extern signature:
 /// ```ignore
-/// extern "C" fn lean_verify_state_writes(
+/// extern "C" transform lean_verify_state_writes(
 ///     layouts: *mut LeanObject,
 ///     consumed: *mut LeanObject,
 ///     writes: *mut LeanObject,
