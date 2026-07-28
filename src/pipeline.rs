@@ -73,7 +73,7 @@ use vuma_codegen::{
         ChannelRecvResultStmt, ChannelRecvStmt, ChannelSendStmt, CodegenEdge, ComputationNode,
         ConstantTimeStatement, ControlNode, EnumAccessNode, ForeignConsumeStmt, GetAddressNode,
         IRBuilder, PmtOpStmt, Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement,
-        ScgType, StructAccessNode, SwitchArm, SyscallCallNode, UnaryComputationNode,
+        ScgType, StructAccessNode, SwitchArm, SyscallCallNode, TryStmt, UnaryComputationNode,
     },
     CastKind as CodegenCastKind, CodegenError, DataSectionKind,
 };
@@ -5425,6 +5425,8 @@ fn collect_stmt_var_reads(stmt: &ScgStatement, out: &mut Vec<String>) {
         ScgStatement::ChannelRecvResult(ChannelRecvResultStmt { channel, .. }) => {
             collect_scg_expr_vars(channel, out)
         }
+        // Try (`?`) — reads the `Result` operand expression.
+        ScgStatement::Try(t) => collect_scg_expr_vars(&t.operand, out),
         ScgStatement::PmtOp(pmt) => match pmt {
             PmtOpStmt::StateInit { .. } => {}
             PmtOpStmt::StateRead { src, .. } => collect_scg_expr_vars(src, out),
@@ -8659,15 +8661,28 @@ pub fn flatten_expr(
         // (e.g. extern results), emit a call to `__try`. Full in-line branch
         // lowering (without the helper call) is a future follow-up once the
         // bridge can prove the static TaggedUnion layout.
-        Expr::Try { expr: inner, .. } => {
+        Expr::Try { expr: inner, span } => {
+            // Flatten the inner expression to obtain the `Result<T,E>`
+            // value (a pointer to the tagged union, per IRType::TaggedUnion
+            // layout, or an opaque extern result).
             let operand = flatten_expr(inner, stmts, ctx);
             let dst = ctx.alloc_temp();
-            stmts.push(ScgStatement::Call(CallNode {
-                dst: Some(dst.clone()),
-                func: vuma_codegen::ir::TRY_RUNTIME_HELPER.to_string(),
-                args: vec![operand],
-                is_extern: false,
-                reassigns: None,
+            // Emit a first-class `ScgStatement::Try` that lowers directly
+            // to a conditional branch (Ok -> bind payload to `dst`; Err ->
+            // early-return the error). This replaces the former
+            // `CallNode("__try", ...)` indirection: the IRBuilder's
+            // `lower_statement` dispatches `ScgStatement::Try` to
+            // `IRBuilder::lower_try`. The legacy `__try` interception in
+            // `lower_call` is retained as a defensive fallback for any
+            // callers still emitting the CallNode form. The source span is
+            // bridged from `vuma_parser::Span` to `codegen::ir::Span`.
+            stmts.push(ScgStatement::Try(TryStmt {
+                operand,
+                ok_dst: dst.clone(),
+                span: Some(vuma_codegen::ir::Span {
+                    start: span.start,
+                    end: span.end,
+                }),
             }));
             ScgExpr::Var(dst)
         }
