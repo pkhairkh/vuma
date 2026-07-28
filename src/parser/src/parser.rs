@@ -117,6 +117,8 @@ pub struct Parser<'src> {
 /// Token kinds that begin a top-level item declaration.
 const ITEM_STARTERS: &[TokenKind] = &[
     TokenKind::Fn,
+    // Wave 3-A: `transform` begins a function item just like `fn`.
+    TokenKind::Transform,
     TokenKind::Struct,
     TokenKind::Enum,
     TokenKind::Region,
@@ -343,11 +345,13 @@ impl<'src> Parser<'src> {
         let visibility = self.parse_visibility()?;
 
         match self.current.kind {
-            TokenKind::Fn => self.parse_fn_def(false, visibility, attrs).map(Item::FnDef),
+            TokenKind::Fn | TokenKind::Transform => {
+                self.parse_fn_def(false, visibility, attrs).map(Item::FnDef)
+            }
             TokenKind::Async => {
-                // Could be `async fn` or `async { block }` as expression
+                // Could be `async fn`/`async transform` or `async { block }` as expression
                 let next = self.peek_next();
-                if next.kind == TokenKind::Fn {
+                if next.kind == TokenKind::Fn || next.kind == TokenKind::Transform {
                     self.parse_fn_def(true, visibility, attrs).map(Item::FnDef)
                 } else {
                     self.parse_stmt().map(Item::Stmt)
@@ -442,7 +446,7 @@ impl<'src> Parser<'src> {
             self.advance();
         }
 
-        self.expect(TokenKind::Fn)?;
+        self.expect_fn_keyword()?;
 
         let name = self.expect_name()?;
 
@@ -1056,8 +1060,8 @@ impl<'src> Parser<'src> {
                     continue;
                 }
             }
-            // Method: `fn name(...) -> T;` or `fn name(...) -> T { body }`
-            if self.at(TokenKind::Fn) {
+            // Method: `fn`/`transform name(...) -> T;` or `... { body }`
+            if self.at(TokenKind::Fn) || self.at(TokenKind::Transform) {
                 let method = self.parse_fn_def(false, Visibility::default(), Vec::new())?;
                 if method.body.statements.is_empty()
                     && !method.is_async
@@ -1150,7 +1154,7 @@ impl<'src> Parser<'src> {
 
         let mut methods = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            if self.at(TokenKind::Fn) {
+            if self.at(TokenKind::Fn) || self.at(TokenKind::Transform) {
                 match self.parse_fn_def(false, Visibility::default(), Vec::new()) {
                     Ok(method) => methods.push(method),
                     Err(err) => {
@@ -1203,8 +1207,8 @@ impl<'src> Parser<'src> {
 
         let mut functions = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            // Allow attributes (#[...]) before `fn` inside extern blocks.
-            if self.at(TokenKind::Fn) || self.at(TokenKind::Hash) {
+            // Allow attributes (#[...]) before `fn`/`transform` inside extern blocks.
+            if self.at(TokenKind::Fn) || self.at(TokenKind::Transform) || self.at(TokenKind::Hash) {
                 match self.parse_extern_fn_decl() {
                     Ok(fn_decl) => functions.push(fn_decl),
                     Err(err) => {
@@ -1233,7 +1237,7 @@ impl<'src> Parser<'src> {
         // Parse outer attributes on this extern fn (e.g. #[callback],
         // #[foreign_consume(raw)]).
         let attrs = self.parse_outer_attributes()?;
-        self.expect(TokenKind::Fn)?;
+        self.expect_fn_keyword()?;
 
         let name = self.expect_name()?;
 
@@ -3949,6 +3953,36 @@ impl<'src> Parser<'src> {
                 }
             }
             // Populate line/column from the current token
+            err.line = Some(self.current.line as u32 + 1);
+            err.column = Some(self.current.column as u32 + 1);
+            Err(err)
+        }
+    }
+
+    /// Consume the function-declaration keyword (`fn` or `transform`).
+    ///
+    /// Wave 3-A introduces `transform` as an alias for `fn`; both are accepted
+    /// during the migration window and `fn` is removed in Wave 3-C. This
+    /// helper centralises the "either keyword is fine" logic so that every
+    /// function-declaration entry point (`parse_fn_def`,
+    /// `parse_extern_fn_decl`) stays in sync.
+    fn expect_fn_keyword(&mut self) -> Result<Token, ParseError> {
+        if self.current.kind == TokenKind::Fn
+            || self.current.kind == TokenKind::Transform
+        {
+            Ok(self.advance())
+        } else {
+            let mut err = ParseError::expected(
+                "'fn' or 'transform'",
+                format!("'{}'", self.current.kind),
+                self.current.span,
+            );
+            // If the unexpected token is an identifier, suggest the keyword.
+            if self.current.kind == TokenKind::Ident {
+                if let Some(kw) = suggest_keyword(&self.current.lexeme) {
+                    err = err.with_suggestion(kw);
+                }
+            }
             err.line = Some(self.current.line as u32 + 1);
             err.column = Some(self.current.column as u32 + 1);
             Err(err)

@@ -243,6 +243,10 @@ pub enum TokenKind {
     // ---- Keywords ---------------------------------------------------------
     /// `fn`
     Fn,
+    /// `transform` -- Wave 3-A alias for `fn` (function-declaration keyword).
+    /// Parsed identically to [`TokenKind::Fn`] during the `fn` -> `transform`
+    /// migration; `fn` is removed in Wave 3-C.
+    Transform,
     /// `let`
     Let,
     /// `pub`
@@ -480,6 +484,7 @@ impl std::fmt::Display for TokenKind {
 
             // Keywords
             TokenKind::Fn => write!(f, "'fn'"),
+            TokenKind::Transform => write!(f, "'transform'"),
             TokenKind::Let => write!(f, "'let'"),
             TokenKind::Pub => write!(f, "'pub'"),
             TokenKind::Crate => write!(f, "'crate'"),
@@ -588,6 +593,8 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
     match ident {
         // Core
         "fn" => Some(TokenKind::Fn),
+        // Wave 3-A: `transform` is an alias for `fn` (function declarations).
+        "transform" => Some(TokenKind::Transform),
         "let" => Some(TokenKind::Let),
         "pub" => Some(TokenKind::Pub),
         "crate" => Some(TokenKind::Crate),

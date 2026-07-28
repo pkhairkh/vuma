@@ -234,7 +234,7 @@ fn edge_all_keywords_sequential() {
     // alloc, lock, unlock, use, self, ref); the surviving 65 real keywords
     // are exercised here. Deleted keywords now lex as plain identifiers.
     let keywords = [
-        "fn", "let", "pub", "crate", "region", "allocate", "free", "derive",
+        "fn", "transform", "let", "pub", "crate", "region", "allocate", "free", "derive",
         "cast", "read", "write", "sync", "if", "else", "while", "for", "return",
         "struct", "enum", "match", "unsafe", "bd", "repd", "capd", "reld",
         "import", "export", "mod", "super", "async", "await", "spawn",
