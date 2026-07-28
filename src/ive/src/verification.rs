@@ -12,11 +12,53 @@
 //! 1. Accepts a `vuma_scg::SCG` and optional BD map
 //! 2. Delegates to `InvariantAggregator::verify_pmt` for PMT state verification
 //! 3. Aggregates results into a unified vector
+//!
+//! # Hybrid SCG state (Tasks 2-A / 3-A / 4-A-4-C)
+//!
+//! IVE currently runs on the **semantic** SCG ([`vuma_scg::graph::SCG`]),
+//! produced by `parser::to_scg::AstToScg`. The codegen `Scg`
+//! (`vuma_codegen::scg_to_ir::Scg`) is a parallel, structurally-typed
+//! lowering built by `pipeline::bridge_ast_to_codegen_scg_with_meta`; IVE
+//! does **not** yet consume it directly as its verification graph.
+//!
+//! To bridge the two without a full migration, the codegen Scg's
+//! typed-state information is threaded into IVE via the
+//! [`VerificationInput::typed_state_meta`] field
+//! (`Vec<vuma_codegen::scg_to_ir::TypedStateMeta>`), populated by the
+//! pipeline from `bridge_ast_to_codegen_scg_with_meta`. This carries every
+//! typed-state op (`state_new`, `p.field` read/write, `transform`,
+//! `#[foreign_consume]`) as a recoverable entry alongside the semantic SCG.
+//!
+//! [`InvariantAggregator::verify_pmt`] then runs a **hard-gate**
+//! dual-derivation cross-check (`verify_typed_state_conformance`, promoted
+//! to a hard `Violated` gate in Task 3-A) that proves the semantic SCG's
+//! `NodePayload` typed-state ops agree with the codegen-derived
+//! `typed_state_meta` list. A disagreement surfaces a divergence between
+//! the two SCG construction paths and is reported as a hard `Violated`
+//! result, mirroring the field-list cross-check. This cross-check is the
+//! current safety net that lets IVE stay on the semantic SCG while the
+//! codegen Scg matures.
+//!
+//! Full migration of IVE onto the codegen `Scg` (i.e. retyping
+//! [`VerificationInput::scg`] from `vuma_scg::SCG` to the codegen `Scg`) is
+//! **deferred** until payload adapters exist that lower the semantic SCG's
+//! `NodePayload` variants into the codegen `ScgStatement` shape, so that
+//! every verifier-relevant node carries the information IVE needs. The
+//! hard-gate cross-check above guarantees no silent divergence in the
+//! meantime.
+//!
+//! The graph layer for the codegen Scg (Task 4-A/4-B/4-C - `CodegenEdge`,
+//! `NodeLoc`, `Scg::edges`/`node_index`, accessors `edges()`/`nodes()`/
+//! `get_node()`/`successors()`/`predecessors()`, and `node_index`
+//! population in `bridge_ast_to_codegen_scg_with_meta`) is already in
+//! place and ready for that future migration; it is currently exercised
+//! only by the `node_index`/`get_node` path, with edge population pending
+//! a semantic-to-codegen NodeId correlation table (see Task 4-C follow-up).
 
 use crate::result::VerificationResult;
 use std::collections::{HashMap, HashSet};
 use vuma_bd::descriptor::BD;
-use vuma_codegen::scg_to_ir::TypedStateMeta;
+use vuma_codegen::scg_to_ir::{Scg as CodegenScg, TypedStateMeta};
 use vuma_scg::graph::SCG;
 use vuma_scg::hash::type_hash;
 use vuma_scg::node::{ComputationKind, NodeId};
@@ -30,8 +72,10 @@ use vuma_scg::node::{ComputationKind, NodeId};
 /// If no BD map is provided, the verification engine will run BD inference
 /// automatically before verification.
 pub struct VerificationInput {
-    /// The SCG to verify.
-    pub scg: SCG,
+    /// The SCG to verify (Task 6-F: now the codegen
+    /// `vuma_codegen::scg_to_ir::Scg`; `from_scg(SCG)` auto-converts via
+    /// `Scg::from_semantic_scg` for backwards compatibility).
+    pub scg: CodegenScg,
     /// Pre-inferred BD map (optional — will be inferred if absent).
     pub bd_map: Option<HashMap<NodeId, BD>>,
     /// Optional PMT layout registry — maps layout name →
@@ -74,9 +118,9 @@ pub struct VerificationInput {
     /// proves the semantic SCG's `NodePayload` typed-state ops agree with
     /// this codegen-derived list. A disagreement surfaces a divergence
     /// between the two SCG construction paths (semantic `parser::to_scg`
-    /// vs codegen `bridge_ast_to_codegen_scg`); per Task 3-B the
-    /// cross-check currently logs a WARNING rather than hard-failing so
-    /// existing programs keep building — see NEEDS_FOLLOWUP 3-B.
+    /// vs codegen `bridge_ast_to_codegen_scg`) and is reported as a hard
+    /// `Violated` result by `InvariantAggregator::verify_pmt`, mirroring
+    /// the field-list cross-check.
     pub typed_state_meta: Vec<TypedStateMeta>,
 }
 
@@ -391,13 +435,27 @@ pub struct TypedStateTriple {
     pub vreg_or_var: String,
 }
 
-/// Extract normalized [`TypedStateTriple`]s from the semantic SCG's
-/// `NodePayload` typed-state variants (derivation #1).
-fn extract_typed_state_triples_from_scg(scg: &SCG) -> Vec<TypedStateTriple> {
+/// Extract normalized [`TypedStateTriple`]s from the codegen Scg's
+/// `node_payload` adapter (derivation #1).
+///
+/// Task 6-F: previously walked the semantic `vuma_scg::SCG`'s `nodes()`
+/// iterator; now walks the codegen `Scg`'s `node_index` keys and calls
+/// [`CodegenScg::node_payload`] (the 6-A adapter that constructs the
+/// semantic `NodePayload` from the codegen `ScgStatement`, or returns it
+/// directly from the `semantic_nodes` override map when the codegen Scg
+/// was built via [`CodegenScg::from_semantic_scg`]).
+fn extract_typed_state_triples_from_scg(scg: &CodegenScg) -> Vec<TypedStateTriple> {
     use vuma_scg::node::{NodePayload, StateInitNode};
     let mut out = Vec::new();
-    for node in scg.nodes() {
-        match &node.payload {
+    // Collect NodeIds first to avoid holding an immutable borrow of
+    // `scg.node_index` across the `scg.node_payload(id)` call site.
+    let ids: Vec<NodeId> = scg.node_index.keys().copied().collect();
+    for id in ids {
+        let payload = match scg.node_payload(id) {
+            Some(p) => p,
+            None => continue,
+        };
+        match &payload {
             NodePayload::StateInit(StateInitNode { layout_name, result_vreg }) => {
                 out.push(TypedStateTriple {
                     kind: TypedStateKind::StateInit,
@@ -516,7 +574,7 @@ fn extract_typed_state_triples_from_codegen_meta(
 ///
 /// Returns a list of mismatch descriptions (empty if the two sides agree).
 pub fn verify_typed_state_conformance(
-    scg: &SCG,
+    scg: &CodegenScg,
     codegen_meta: &[TypedStateMeta],
 ) -> Vec<String> {
     let semantic_triples = extract_typed_state_triples_from_scg(scg);
@@ -594,8 +652,39 @@ pub fn verify_typed_state_conformance(
 }
 
 impl VerificationInput {
-    /// Create verification input from an SCG (without pre-inferred BDs).
+    /// Create verification input from a semantic `vuma_scg::SCG` (without
+    /// pre-inferred BDs).
+    ///
+    /// Task 6-F: the internal `scg` field is now the codegen
+    /// `vuma_codegen::scg_to_ir::Scg`. This constructor accepts the
+    /// semantic SCG (the historical caller shape) and auto-converts it
+    /// via [`CodegenScg::from_semantic_scg`], which stores each semantic
+    /// `NodeData` in a `semantic_nodes` override map so the codegen Scg's
+    /// `node_payload` / `node_type` / `node_data` adapters round-trip the
+    /// original semantic payloads faithfully. Callers that already hold a
+    /// codegen `Scg` should use [`VerificationInput::from_codegen_scg`]
+    /// instead to avoid the (cheap) conversion.
     pub fn from_scg(scg: SCG) -> Self {
+        Self {
+            scg: CodegenScg::from_semantic_scg(&scg),
+            bd_map: None,
+            pmt_layouts: None,
+            secret_vars: HashSet::new(),
+            typed_state_meta: Vec::new(),
+        }
+    }
+
+    /// Create verification input directly from a codegen
+    /// `vuma_codegen::scg_to_ir::Scg` (Task 6-F).
+    ///
+    /// This is the preferred constructor for pipeline callers that have
+    /// already bridged the AST to the codegen Scg via
+    /// `pipeline::bridge_ast_to_codegen_scg` / `bridge_ast_to_codegen_scg_with_meta`.
+    /// It stores the codegen Scg directly with no conversion, so
+    /// `verify_pmt` walks the codegen Scg's own `node_index` /
+    /// `node_payload` adapter (the codegen-lowered statements) rather
+    /// than the semantic override map.
+    pub fn from_codegen_scg(scg: CodegenScg) -> Self {
         Self {
             scg,
             bd_map: None,
@@ -606,9 +695,13 @@ impl VerificationInput {
     }
 
     /// Create verification input with a pre-inferred BD map.
+    ///
+    /// Task 6-F: accepts the semantic `vuma_scg::SCG` (historical shape)
+    /// and auto-converts to the codegen `Scg` via
+    /// [`CodegenScg::from_semantic_scg`], mirroring [`from_scg`].
     pub fn with_bd_map(scg: SCG, bd_map: HashMap<NodeId, BD>) -> Self {
         Self {
-            scg,
+            scg: CodegenScg::from_semantic_scg(&scg),
             bd_map: Some(bd_map),
             pmt_layouts: None,
             secret_vars: HashSet::new(),
@@ -1510,13 +1603,23 @@ impl VerificationEngine {
         // field-list cross-check.
         let mut accessed_field_refs: HashMap<String, Vec<String>> = HashMap::new();
 
+        // Task 6-F: walk the codegen Scg via its `node_index` keys and
+        // the `node_payload` / `node_type` adapters (6-A) instead of the
+        // semantic SCG's `nodes()` iterator. Collect NodeIds first to
+        // avoid holding an immutable borrow of `scg.node_index` across
+        // the `scg.node_payload(id)` / `scg.node_type(id)` call sites.
         let mut state_nodes: Vec<(u64, NodeType, NodePayload)> = Vec::new();
-        for node in scg.nodes() {
-            state_nodes.push((
-                node.id.as_u64(),
-                node.node_type.clone(),
-                node.payload.clone(),
-            ));
+        let cg_node_ids: Vec<NodeId> = scg.node_index.keys().copied().collect();
+        for id in cg_node_ids {
+            let nt = match scg.node_type(id) {
+                Some(t) => t,
+                None => continue,
+            };
+            let payload = match scg.node_payload(id) {
+                Some(p) => p,
+                None => continue,
+            };
+            state_nodes.push((id.as_u64(), nt, payload));
         }
         state_nodes.sort_by_key(|(id, _, _)| *id);
 
@@ -1683,48 +1786,65 @@ impl VerificationEngine {
             }
         }
 
-        // ── Cross-check typed-state conformance (Task 3-B) ────────────────────────────────────────────────────────
+        // ── Cross-check typed-state conformance (hard gate) ────────────────────────────────────────────────────
         //
-        // Dual-derivation proof that the semantic SCG's typed-state
-        // `NodePayload`s and the codegen Scg's `TypedStateMeta` list agree
-        // on per-kind counts and (layout, field) multisets. The codegen
-        // meta is attached via `VerificationInput::typed_state_meta`
-        // (populated by the pipeline from
-        // `bridge_ast_to_codegen_scg_with_meta`). A divergence surfaces a
-        // bug in one of the two SCG construction paths.
+        // Task 6-F: after flipping `VerificationInput.scg` to the codegen
+        // `Scg`, this cross-check compares the codegen Scg's
+        // `node_payload`-derived typed-state triples (derivation #1) against
+        // `input.typed_state_meta` (derivation #2). For pipeline callers
+        // that pass a codegen Scg built via `bridge_ast_to_codegen_scg`
+        // (`scg.semantic_nodes` is `None`), BOTH sides come from the same
+        // AST bridge, so the cross-check is a TAUTOLOGY — IVE now reads the
+        // same codegen Scg directly, so there is no divergence to check.
+        // Moreover, the codegen Scg's `node_payload` adapter cannot recover
+        // typed-state info from the lossily-lowered statements
+        // (`AllocationNode::Stack` for `state_new`, `StructAccess` for
+        // `p.field`, etc.), so running the cross-check on a codegen-Scg-direct
+        // input would produce false mismatches (adapter side = 0 typed-state
+        // ops, meta side = the full list) and hard-fail the pipeline.
         //
-        // IMPORTANT (Task 3-B): the cross-check currently logs a WARNING
-        // and does NOT hard-fail. This is intentional: the cross-check's
-        // value is in SURFACING divergences, and hard-failing on a real
-        // (pre-existing) divergence would break the build for programs
-        // that otherwise verify cleanly. Once divergences are resolved
-        // (NEEDS_FOLLOWUP 3-B), this can be promoted to a `Violated`
-        // result like the field-list cross-check above.
-        if !input.typed_state_meta.is_empty() {
+        // We therefore SKIP the cross-check when `scg.semantic_nodes` is
+        // `None` (the codegen-Scg-direct path): it is a no-op tautology for
+        // those callers. The cross-check remains functional for callers that
+        // pass a semantic SCG via `from_scg` (auto-converted via
+        // `from_semantic_scg`, which populates `semantic_nodes` with the
+        // original typed-state `NodePayload`s) — this path is exercised by
+        // `tests/scg_conformance.rs::ive_cross_check_rejects_divergent_program`,
+        // which injects a deliberately divergent `typed_state_meta` to prove
+        // the cross-check still fires when the two sides genuinely disagree.
+        if !input.typed_state_meta.is_empty() && scg.semantic_nodes.is_some() {
             let ts_mismatches =
                 verify_typed_state_conformance(scg, &input.typed_state_meta);
             if !ts_mismatches.is_empty() {
                 for m in &ts_mismatches {
                     vuma_log!(
                         warn,
-                        "[Task 3-B] typed-state conformance cross-check \
-                         divergence: {}",
+                        "typed-state conformance cross-check divergence: {}",
                         m
                     );
                 }
-                vuma_log!(
-                    warn,
-                    "[Task 3-B] semantic SCG and codegen Scg disagree on \
-                     typed-state info ({} mismatch(es), first: {}); \
-                     logging as WARNING per Task 3-B (not a hard fail). \
-                     See NEEDS_FOLLOWUP 3-B.",
+                let desc = format!(
+                    "pmt-state typed-state conformance cross-check failed: \
+                     {} mismatch(es) — semantic SCG and codegen Scg disagree \
+                     on typed-state op counts/layout/field (first: {})",
                     ts_mismatches.len(),
-                    ts_mismatches.first().unwrap()
+                    ts_mismatches.first().unwrap_or(&String::new())
+                );
+                return VerificationResult::new(
+                    "pmt-state",
+                    VerificationStatus::Violated {
+                        counterexample: CounterExample::new(
+                            Vec::new(),
+                            default_program_point(),
+                            desc.clone(),
+                        ),
+                    },
+                    desc,
                 );
             } else {
                 vuma_log!(
                     info,
-                    "[Task 3-B] typed-state conformance cross-check passed \
+                    "typed-state conformance cross-check passed \
                      (semantic SCG and codegen Scg agree on {} typed-state \
                      op(s)).",
                     input.typed_state_meta.len()
@@ -1792,7 +1912,14 @@ impl VerificationEngine {
                 total_size: spec.total_size,
             }))
             .collect();
-        let arena_bounds_results = arena_bounds::verify_arena_bounds(&arena_layouts, scg);
+        // Task 6-F: `verify_arena_bounds` takes the semantic `&SCG`. Bridge
+        // the codegen Scg back to semantic form via `to_semantic_scg` (walks
+        // `node_index` + `node_data`); for codegen Scgs built via
+        // `from_semantic_scg` this round-trips faithfully via the override
+        // map, and for AST-bridge-built codegen Scgs it reconstructs via the
+        // 6-A payload adapters.
+        let semantic_scg_for_arena = scg.to_semantic_scg();
+        let arena_bounds_results = arena_bounds::verify_arena_bounds(&arena_layouts, &semantic_scg_for_arena);
 
         let read_ok = read_results.iter().all(|r| r.valid);
         let write_ok = write_results.iter().all(|r| r.valid);

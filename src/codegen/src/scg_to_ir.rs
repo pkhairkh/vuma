@@ -177,6 +177,74 @@ use crate::Result;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+// Task 6-A: semantic-SCG type imports for the payload adapter methods on
+// `impl Scg`.
+//
+// IVE pattern-matches on semantic `NodePayload` variants, but the codegen
+// `Scg` carries statement-list-shaped `ScgStatement`s whose variants don't
+// line up 1:1 with the semantic payloads (e.g. the codegen `AllocationNode`
+// is an enum with `Stack`/`Heap` arms, while the semantic `AllocationNode`
+// is a struct with `size`/`align`/`region_id`/`type_name` fields). The
+// adapter methods `node_type` / `node_payload` / `node_data` (added below
+// on `impl Scg`) construct the semantic payload types from codegen
+// statements so IVE can consume the codegen `Scg` directly.
+//
+// The `as Sem*` aliases avoid clashing with the codegen-side type aliases
+// (`ControlNode` / `AllocationNode` / `AccessNode` / `CastNode` /
+// `ComputationNode`) defined further down in this file.
+use vuma_scg::node::{
+    AccessMode, AccessNode as SemAccessNode, AllocationNode as SemAllocationNode,
+    ArenaAllocNode, ArenaGrowNode, ArenaNewNode, CastNode as SemCastNode,
+    ChannelCloseNode, ChannelOpenNode, ChannelRecvNode, ChannelSendNode, ComputationKind,
+    ComputationNode as SemComputationNode, ConstantTimeNode, ConstantTimeOp, ControlKind,
+    ControlNode as SemControlNode, DeallocationNode, ForeignConsumeNode, NodeData, NodePayload,
+    NodeType, ProgramPoint, StateInitNode, StateReadNode, StateTransformNode, StateWriteNode,
+    SyscallNode,
+};
+use vuma_scg::region::RegionId;
+
+/// Re-export of the semantic SCG's `NodeId` so downstream consumers can refer
+/// to a single canonical node-identifier type when reading the codegen SCG's
+/// graph layer (edges + node_index).
+///
+/// Task 4-A: graph-types scaffolding. Accessors land in 4-B; population in 4-C.
+pub type NodeId = vuma_scg::node::NodeId;
+
+/// A directed edge in the codegen SCG's graph layer.
+///
+/// Task 4-A: graph-types scaffolding. The codegen `Scg` historically carried
+/// only a flat `nodes: Vec<ScgNode>` with no inter-node connectivity info.
+/// `CodegenEdge` records the source/target `NodeId`s plus the semantic
+/// `EdgeKind` (and an optional human-readable label) so the codegen SCG can be
+/// cross-checked against the semantic `vuma_scg::SCG` without changing the
+/// emitted binary. Populated in Task 4-C.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodegenEdge {
+    /// Source node of the edge.
+    pub source: NodeId,
+    /// Target node of the edge.
+    pub target: NodeId,
+    /// Semantic edge kind mirrored from `vuma_scg::edge::EdgeKind`.
+    pub kind: vuma_scg::edge::EdgeKind,
+    /// Optional human-readable label (e.g. a field name for a struct-access
+    /// derivation edge).
+    pub label: Option<String>,
+}
+
+/// Location of a node within the codegen SCG's flat `nodes` vector,
+/// indexed by function index and statement index within that function.
+///
+/// Task 4-A: graph-types scaffolding. `node_index` lets consumers O(1)-lookup
+/// where a given `NodeId` lives inside the `Scg::nodes` forest. Populated in
+/// Task 4-C.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeLoc {
+    /// Index of the enclosing top-level function/entry in `Scg::nodes`.
+    pub fn_idx: usize,
+    /// Index of the statement within that function's body.
+    pub stmt_idx: usize,
+}
+
 /// Convenience alias used throughout this module.
 type IRInstruction = IRInstr;
 
@@ -238,6 +306,26 @@ pub struct Scg {
     /// tests / synthetic builders that don't care about typed-state metadata
     /// still use).
     pub typed_state_meta: Vec<TypedStateMeta>,
+    /// Directed edges of the codegen SCG's graph layer (Task 4-A).
+    ///
+    /// Populated in Task 4-C; left empty by both [`Scg::new`] and
+    /// [`Scg::new_with_meta`] until then.
+    pub edges: Vec<CodegenEdge>,
+    /// O(1) lookup from a semantic `NodeId` to its location inside
+    /// [`Scg::nodes`](Scg::nodes) (Task 4-A).
+    ///
+    /// Populated in Task 4-C; left empty by both constructors until then.
+    pub node_index: HashMap<NodeId, NodeLoc>,
+    /// Optional semantic-node override map (Task 6-E).
+    ///
+    /// When `Some`, [`node_type`](Self::node_type) /
+    /// [`node_payload`](Self::node_payload) / [`node_data`](Self::node_data)
+    /// return directly from this map instead of reconstructing via the
+    /// `ScgStatement` adapter. Set by [`from_semantic_scg`](Self::from_semantic_scg)
+    /// so that [`to_semantic_scg`](Self::to_semantic_scg) round-trips
+    /// faithfully. `None` for codegen-Scgs built by [`new`](Self::new) /
+    /// [`new_with_meta`](Self::new_with_meta) / the AST bridge.
+    pub semantic_nodes: Option<HashMap<NodeId, NodeData>>,
 }
 
 impl Scg {
@@ -252,6 +340,9 @@ impl Scg {
         Self {
             nodes,
             typed_state_meta: Vec::new(),
+            edges: Vec::new(),
+            node_index: HashMap::new(),
+            semantic_nodes: None,
         }
     }
 
@@ -267,7 +358,492 @@ impl Scg {
         Self {
             nodes,
             typed_state_meta: meta,
+            edges: Vec::new(),
+            node_index: HashMap::new(),
+            semantic_nodes: None,
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 4-B: graph-layer accessors.
+    //
+    // These mirror the read-side API IVE expects from a graph-shaped SCG:
+    // looking up a node by `NodeId`, iterating edges / nodes, counting
+    // statements, and walking successors / predecessors. The codegen `Scg`
+    // is statement-list-shaped (`Vec<ScgNode>` where each `ScgNode::Function`
+    // holds a `Vec<ScgStatement>` body), so `get_node` resolves a `NodeId`
+    // through the O(1) `node_index: HashMap<NodeId, NodeLoc>` populated in
+    // Task 4-C and then indexes into the function forest.
+    // -----------------------------------------------------------------
+
+    /// O(1) lookup of a statement by its semantic [`NodeId`].
+    ///
+    /// Resolves `id` through [`node_index`](Scg::node_index) to a
+    /// [`NodeLoc`] `{ fn_idx, stmt_idx }`, then indexes into
+    /// [`nodes`](Scg::nodes)`[fn_idx]` (which must be a `ScgNode::Function`)
+    /// and that function's `body[stmt_idx]`. Returns `None` if the id is not
+    /// indexed or if the indexed top-level node is not a function.
+    pub fn get_node(&self, id: NodeId) -> Option<&ScgStatement> {
+        let loc = self.node_index.get(&id)?;
+        let func = self.nodes.get(loc.fn_idx)?.as_function()?;
+        func.body.get(loc.stmt_idx)
+    }
+
+    /// Iterate over the directed edges of the codegen SCG's graph layer.
+    pub fn edges(&self) -> impl Iterator<Item = &CodegenEdge> {
+        self.edges.iter()
+    }
+
+    /// Iterate over the top-level nodes (`ScgNode::Function` / `ScgNode::Data`).
+    pub fn nodes(&self) -> impl Iterator<Item = &ScgNode> {
+        self.nodes.iter()
+    }
+
+    /// Total number of SCG *statements* across all top-level functions.
+    ///
+    /// This counts `ScgStatement`s inside each `ScgNode::Function`'s body
+    /// (data declarations contribute 0), matching the granularity at which
+    /// `NodeId`s are assigned in Task 4-C and at which IVE reasons about
+    /// the codegen SCG.
+    pub fn node_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|n| match n {
+                ScgNode::Function(f) => f.body.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// All `NodeId`s that `id` points to via an outgoing edge.
+    pub fn successors(&self, id: NodeId) -> Vec<NodeId> {
+        self.edges
+            .iter()
+            .filter(|e| e.source == id)
+            .map(|e| e.target)
+            .collect()
+    }
+
+    /// All `NodeId`s that point to `id` via an incoming edge.
+    pub fn predecessors(&self, id: NodeId) -> Vec<NodeId> {
+        self.edges
+            .iter()
+            .filter(|e| e.target == id)
+            .map(|e| e.source)
+            .collect()
+    }
+
+    // -----------------------------------------------------------------
+    // Task 6-A: payload adapter methods.
+    //
+    // IVE pattern-matches on semantic `NodePayload` variants, but the
+    // codegen `Scg` carries statement-list-shaped `ScgStatement`s whose
+    // variants don't line up 1:1 with the semantic payloads (e.g. the
+    // codegen `AllocationNode` is an enum with `Stack`/`Heap` arms,
+    // while the semantic `AllocationNode` is a struct with `size`/
+    // `align`/`region_id`/`type_name` fields). These three adapters
+    // construct the semantic types from codegen statements so IVE can
+    // consume the codegen `Scg` directly without a separate graph-
+    // shaped SCG.
+    //
+    // Fields the codegen doesn't track (region_id, alignment, vregs)
+    // are filled with sensible defaults (0 / None) — the goal is
+    // structural compatibility for IVE's pattern-matches, not perfect
+    // fidelity. The mapping was verified by audit (see task 6-A).
+    // -----------------------------------------------------------------
+
+    /// Map a codegen `ScgStatement` (looked up by `NodeId`) to its
+    /// semantic [`NodeType`].
+    ///
+    /// Returns `None` if `id` is not indexed by `node_index`.
+    pub fn node_type(&self, id: NodeId) -> Option<NodeType> {
+        if let Some(ref sn) = self.semantic_nodes {
+            return sn.get(&id).map(|d| d.node_type.clone());
+        }
+        let stmt = self.get_node(id)?;
+        Some(match stmt {
+            ScgStatement::Control(_) => NodeType::Control,
+            ScgStatement::Allocation(_) => NodeType::Allocation,
+            ScgStatement::Access(_) => NodeType::Access,
+            ScgStatement::Cast(_) => NodeType::Cast,
+            ScgStatement::Computation(_)
+            | ScgStatement::UnaryComputation(_)
+            | ScgStatement::Call(_) => NodeType::Computation,
+            ScgStatement::Return(_) => NodeType::Control,
+            ScgStatement::ConstantTime(_) => NodeType::ConstantTime,
+            ScgStatement::StructAccess(_)
+            | ScgStatement::EnumAccess(_)
+            | ScgStatement::GetAddress(_)
+            | ScgStatement::ChannelRecvResult(_) => NodeType::Computation,
+            ScgStatement::Syscall(_) => NodeType::Syscall,
+            ScgStatement::ForeignConsume(_) => NodeType::ForeignConsume,
+            ScgStatement::ChannelOpen(_) => NodeType::ChannelOpen,
+            ScgStatement::ChannelSend(_) => NodeType::ChannelSend,
+            ScgStatement::ChannelRecv(_) => NodeType::ChannelRecv,
+            ScgStatement::ChannelClose(_) => NodeType::ChannelClose,
+            ScgStatement::PmtOp(p) => match p {
+                PmtOpStmt::ArenaFree { .. } => NodeType::Deallocation,
+                PmtOpStmt::StateInit { .. } => NodeType::StateInit,
+                PmtOpStmt::StateRead { .. } => NodeType::StateRead,
+                PmtOpStmt::StateWrite { .. } => NodeType::StateWrite,
+                PmtOpStmt::StateTransform { .. } => NodeType::StateTransform,
+                PmtOpStmt::ArenaNew { .. } => NodeType::ArenaNew,
+                PmtOpStmt::ArenaAlloc { .. } => NodeType::ArenaAlloc,
+                PmtOpStmt::ArenaGrow { .. } => NodeType::ArenaGrow,
+            },
+        })
+    }
+
+    /// Map a codegen `ScgStatement` (looked up by `NodeId`) to a semantic
+    /// [`NodePayload`], constructing the semantic struct from the codegen
+    /// fields.
+    ///
+    /// Codegen doesn't track `region_id`, alignment, or vregs, so those
+    /// fields default to `0` / `None` (per the Task 6-A audit). The
+    /// mapping preserves the *kind* of each statement so IVE's pattern-
+    /// matches dispatch to the right arm and return sensible results.
+    pub fn node_payload(&self, id: NodeId) -> Option<NodePayload> {
+        if let Some(ref sn) = self.semantic_nodes {
+            return sn.get(&id).map(|d| d.payload.clone());
+        }
+        let stmt = self.get_node(id)?;
+        Some(match stmt {
+            ScgStatement::Control(c) => {
+                let kind = match c {
+                    ControlNode::If { .. } => ControlKind::Branch,
+                    ControlNode::Loop { .. } => ControlKind::LoopHeader,
+                    ControlNode::Break => ControlKind::LoopExit,
+                    ControlNode::Continue => ControlKind::Jump,
+                    ControlNode::Switch { .. } => ControlKind::Switch,
+                };
+                NodePayload::Control(SemControlNode { kind, label: None })
+            }
+            ScgStatement::Allocation(a) => {
+                let size = match a {
+                    AllocationNode::Stack { size, .. } => *size as u64,
+                    AllocationNode::Heap { .. } => 0,
+                };
+                NodePayload::Allocation(SemAllocationNode {
+                    size,
+                    align: 0,
+                    region_id: RegionId(0),
+                    type_name: None,
+                })
+            }
+            ScgStatement::Access(a) => {
+                let mode = match a {
+                    AccessNode::Load { .. } => AccessMode::Read,
+                    AccessNode::Store { .. } => AccessMode::Write,
+                };
+                NodePayload::Access(SemAccessNode {
+                    mode,
+                    region_id: RegionId(0),
+                    offset: None,
+                    access_size: None,
+                })
+            }
+            ScgStatement::Cast(c) => NodePayload::Cast(SemCastNode {
+                from_type: format!("{:?}", c.from_ty),
+                to_type: format!("{:?}", c.to_ty),
+                is_lossless: false,
+            }),
+            ScgStatement::Computation(c) => NodePayload::Computation(SemComputationNode {
+                kind: ComputationKind::Other(format!("{:?}", c.op)),
+                result_type: None,
+                tail_call: c.tail_call,
+            }),
+            ScgStatement::UnaryComputation(u) => {
+                NodePayload::Computation(SemComputationNode {
+                    kind: ComputationKind::Other(format!("{:?}", u.op)),
+                    result_type: None,
+                    tail_call: u.tail_call,
+                })
+            }
+            ScgStatement::Call(c) => NodePayload::Computation(SemComputationNode {
+                kind: ComputationKind::Other(c.func.clone()),
+                result_type: None,
+                tail_call: false,
+            }),
+            ScgStatement::Return(_) => NodePayload::Control(SemControlNode {
+                kind: ControlKind::FunctionReturn,
+                label: None,
+            }),
+            ScgStatement::ConstantTime(ct) => {
+                let op = match ct.op {
+                    ConstantTimeOpKind::CtSelect => ConstantTimeOp::CtSelect,
+                    ConstantTimeOpKind::CtEq => ConstantTimeOp::CtEq,
+                };
+                NodePayload::ConstantTime(ConstantTimeNode {
+                    op,
+                    dst: ct.dst.clone(),
+                    operands: ct.operands.iter().map(expr_label).collect(),
+                })
+            }
+            ScgStatement::Syscall(s) => NodePayload::Syscall(SyscallNode {
+                nr: s.nr,
+                dst: s.dst.clone(),
+                args: s.args.iter().map(expr_label).collect(),
+            }),
+            ScgStatement::ForeignConsume(fc) => {
+                NodePayload::ForeignConsume(ForeignConsumeNode {
+                    input_vreg: 0,
+                    layout_name: fc.layout_name.clone(),
+                })
+            }
+            ScgStatement::ChannelOpen(co) => NodePayload::ChannelOpen(ChannelOpenNode {
+                dst: co.dst.clone(),
+                elem_type: format!("{}", co.elem_ty),
+            }),
+            ScgStatement::ChannelSend(cs) => NodePayload::ChannelSend(ChannelSendNode {
+                channel: expr_label(&cs.channel),
+                message: expr_label(&cs.message),
+                ty: format!("{}", cs.ty),
+            }),
+            ScgStatement::ChannelRecv(cr) => NodePayload::ChannelRecv(ChannelRecvNode {
+                dst: cr.dst.clone(),
+                channel: expr_label(&cr.channel),
+                ty: format!("{}", cr.ty),
+            }),
+            ScgStatement::ChannelClose(cc) => {
+                NodePayload::ChannelClose(ChannelCloseNode {
+                    channel: expr_label(&cc.channel),
+                })
+            }
+            ScgStatement::PmtOp(p) => match p {
+                PmtOpStmt::ArenaFree { .. } => {
+                    NodePayload::Deallocation(DeallocationNode {
+                        allocation_node: vuma_scg::node::NodeId(0),
+                        region_id: RegionId(0),
+                    })
+                }
+                PmtOpStmt::StateInit { layout_name, .. } => {
+                    NodePayload::StateInit(StateInitNode {
+                        layout_name: layout_name.clone(),
+                        result_vreg: 0,
+                    })
+                }
+                PmtOpStmt::StateRead { layout_name, field_name, .. } => {
+                    NodePayload::StateRead(StateReadNode {
+                        state_vreg: 0,
+                        layout_name: layout_name.clone(),
+                        field_name: field_name.clone(),
+                        result_vreg: 0,
+                    })
+                }
+                PmtOpStmt::StateWrite { layout_name, field_name, .. } => {
+                    NodePayload::StateWrite(StateWriteNode {
+                        state_vreg: 0,
+                        layout_name: layout_name.clone(),
+                        field_name: field_name.clone(),
+                        value_vreg: 0,
+                    })
+                }
+                PmtOpStmt::StateTransform { from_layout, to_layout, .. } => {
+                    NodePayload::StateTransform(StateTransformNode {
+                        input_vreg: 0,
+                        input_layout: from_layout.clone(),
+                        output_layout: to_layout.clone(),
+                        result_vreg: 0,
+                    })
+                }
+                PmtOpStmt::ArenaNew { .. } => NodePayload::ArenaNew(ArenaNewNode {
+                    capacity_vreg: 0,
+                    result_vreg: 0,
+                }),
+                PmtOpStmt::ArenaAlloc { layout_name, .. } => {
+                    NodePayload::ArenaAlloc(ArenaAllocNode {
+                        arena_vreg: 0,
+                        layout_name: layout_name.clone(),
+                        result_arena_vreg: 0,
+                        result_state_vreg: 0,
+                    })
+                }
+                PmtOpStmt::ArenaGrow { .. } => NodePayload::ArenaGrow(ArenaGrowNode {
+                    arena_vreg: 0,
+                    min_capacity_vreg: 0,
+                    result_vreg: 0,
+                }),
+            },
+            // Default: unmappable statement-list variants (struct/enum
+            // field access, getaddress, fallible channel-recv) collapse
+            // to a generic Computation payload so IVE's match stays
+            // total and dispatches to a sensible arm.
+            ScgStatement::StructAccess(_)
+            | ScgStatement::EnumAccess(_)
+            | ScgStatement::GetAddress(_)
+            | ScgStatement::ChannelRecvResult(_) => {
+                NodePayload::Computation(SemComputationNode {
+                    kind: ComputationKind::Other("unknown".to_string()),
+                    result_type: None,
+                    tail_call: false,
+                })
+            }
+        })
+    }
+
+    /// Combine [`node_type`](Self::node_type) and
+    /// [`node_payload`](Self::node_payload) into a full semantic
+    /// [`NodeData`] for `id`.
+    ///
+    /// `annotation` is `None` (codegen doesn't carry BD references) and
+    /// `program_point` is the default (empty) — the codegen SCG doesn't
+    /// track source locations at the statement level.
+    pub fn node_data(&self, id: NodeId) -> Option<NodeData> {
+        if let Some(ref sn) = self.semantic_nodes {
+            return sn.get(&id).cloned();
+        }
+        let node_type = self.node_type(id)?;
+        let payload = self.node_payload(id)?;
+        Some(NodeData {
+            id,
+            node_type,
+            annotation: None,
+            program_point: ProgramPoint {
+                file: None,
+                line: None,
+                column: None,
+                offset: None,
+            },
+            payload,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Task 6-E: semantic->codegen Scg reverse adapter.
+    //
+    // External callers (pipeline.rs, api.rs, tests/bd_inference.rs) hold
+    // a semantic `vuma_scg::graph::SCG` and need to call IVE's
+    // `InferenceEngine` (which now expects a codegen `Scg`). Rather than
+    // lossily reverse-mapping `NodePayload` -> `ScgStatement`, this
+    // adapter stores the semantic `NodeData` directly in a
+    // `semantic_nodes` override map so that `node_type` / `node_payload`
+    // / `node_data` / `to_semantic_scg` round-trip faithfully.
+    // -----------------------------------------------------------------
+
+    /// Build a codegen [`Scg`] from a semantic [`vuma_scg::graph::SCG`].
+    ///
+    /// This is the reverse of [`to_semantic_scg`](Self::to_semantic_scg).
+    /// It stores each semantic `NodeData` in a `semantic_nodes` override
+    /// map so that the 6-A adapter methods (`node_type` / `node_payload`
+    /// / `node_data`) return the original semantic data, and
+    /// `to_semantic_scg` round-trips faithfully. The codegen `nodes`
+    /// forest is left empty (no `ScgStatement` reconstruction needed).
+    pub fn from_semantic_scg(scg: &vuma_scg::graph::SCG) -> Self {
+        let mut semantic_nodes: HashMap<NodeId, NodeData> = HashMap::new();
+        let mut node_index: HashMap<NodeId, NodeLoc> = HashMap::new();
+        for node in scg.nodes() {
+            let id = node.id;
+            semantic_nodes.insert(id, node.clone());
+            // Dummy NodeLoc — never used because `semantic_nodes` short-
+            // circuits `get_node` via the override check in
+            // `node_type` / `node_payload` / `node_data`.
+            node_index.insert(id, NodeLoc { fn_idx: 0, stmt_idx: 0 });
+        }
+        let mut edges: Vec<CodegenEdge> = Vec::new();
+        for edge in scg.edges() {
+            edges.push(CodegenEdge {
+                source: edge.source,
+                target: edge.target,
+                kind: edge.kind.clone(),
+                label: edge.label.clone(),
+            });
+        }
+        Self {
+            nodes: Vec::new(),
+            typed_state_meta: Vec::new(),
+            edges,
+            node_index,
+            semantic_nodes: Some(semantic_nodes),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Task 6-E: codegen->semantic SCG bridge for BD inference.
+    //
+    // `vuma_bd::BDInferenceEngine::infer(&self, scg: &vuma_scg::graph::SCG)`
+    // is hard-typed against the *semantic* graph-shaped SCG (multi-crate
+    // API boundary). Rather than rewrite the BD crate's public signature,
+    // this adapter reconstructs a semantic `SCG` from the codegen `Scg`
+    // by walking `node_index` (via [`node_data`](Self::node_data)) and
+    // `edges`. The resulting semantic SCG is fed ONLY to the BD
+    // inference call; all other IVE reads (constraint derivation,
+    // fingerprinting, queries) walk the codegen `Scg` directly via the
+    // 6-A adapter methods.
+    // -----------------------------------------------------------------
+
+    /// Build a semantic [`vuma_scg::graph::SCG`] from this codegen `Scg`.
+    ///
+    /// Walks [`node_index`](Scg::node_index) (calling
+    /// [`node_data`](Self::node_data) for each `NodeId`) and
+    /// [`edges`](Self::edges), populating a fresh semantic SCG via
+    /// `add_node_with_id` / `add_edge`. The semantic SCG is the
+    /// representation hard-typed into
+    /// `vuma_bd::BDInferenceEngine::infer(&self, scg: &SCG)`, so this
+    /// adapter is the bridge the IVE inference engine uses to feed the
+    /// codegen `Scg` into the BD propagation algorithm without rewriting
+    /// the BD crate's public API.
+    ///
+    /// Constraint derivation in IVE does NOT go through this method: it
+    /// walks the codegen `Scg` directly via [`node_type`](Self::node_type)
+    /// / [`node_payload`](Self::node_payload) / [`edges`](Self::edges).
+    ///
+    /// Errors from `add_node_with_id` (duplicate `NodeId`) and
+    /// `add_edge` (missing endpoint) are silently dropped - both are
+    /// impossible for a well-formed codegen `Scg` whose `node_index`
+    /// keys are unique `NodeId`s and whose `edges` reference only
+    /// indexed endpoints.
+    pub fn to_semantic_scg(&self) -> vuma_scg::graph::SCG {
+        let mut scg = vuma_scg::graph::SCG::new();
+
+        // Add all nodes (collect keys first to avoid holding an
+        // immutable borrow of `self.node_index` across the
+        // `self.node_data(id)` call site, which also borrows `self`).
+        let node_ids: Vec<NodeId> = self.node_index.keys().copied().collect();
+        for id in node_ids {
+            if let Some(data) = self.node_data(id) {
+                // `add_node_with_id` fails only on duplicate ids; since
+                // `node_index` is a `HashMap<NodeId, NodeLoc>`, that
+                // can't happen here.
+                let _ = scg.add_node_with_id(
+                    data.id,
+                    data.node_type,
+                    data.payload,
+                    data.program_point,
+                );
+            }
+        }
+
+        // Add all edges. `add_edge` fails only if either endpoint is
+        // missing; both endpoints come from `node_index` so they're
+        // guaranteed present. Labels are threaded through via
+        // `get_edge_mut` since `add_edge` always sets `label: None`.
+        for edge in &self.edges {
+            if let Ok(eid) = scg.add_edge(edge.source, edge.target, edge.kind.clone()) {
+                if let Some(label) = edge.label.clone() {
+                    if let Some(ed) = scg.get_edge_mut(eid) {
+                        ed.label = Some(label);
+                    }
+                }
+            }
+        }
+
+        scg
+    }
+}
+
+/// Task 6-A: best-effort string label for an [`ScgExpr`] operand, used
+/// when constructing semantic payloads that carry variable-name strings
+/// (e.g. [`SyscallNode::args`], [`ChannelSendNode::message`]). `Var`
+/// operands round-trip their name; literals/compound expressions get a
+/// synthesized label so IVE sees a non-empty, stable string.
+fn expr_label(e: &ScgExpr) -> String {
+    match e {
+        ScgExpr::Var(n) => n.clone(),
+        ScgExpr::Int(i) => format!("lit_{}", i),
+        ScgExpr::Float(fl) => format!("lit_{}", fl),
+        ScgExpr::Label(l) => l.clone(),
+        ScgExpr::BinOp { op, .. } => format!("{:?}", op),
+        ScgExpr::Load { .. } => "load".to_string(),
     }
 }
 
@@ -348,6 +924,20 @@ pub enum ScgNode {
     Function(ScgFunction),
     /// A data declaration.
     Data(ScgData),
+}
+
+impl ScgNode {
+    /// Return a reference to the [`ScgFunction`] payload if this node is a
+    /// `Function`, else `None`.
+    ///
+    /// Task 4-B: accessor used by [`Scg::get_node`] to extract a function's
+    /// body when resolving a [`NodeLoc`] produced by the `node_index` map.
+    pub fn as_function(&self) -> Option<&ScgFunction> {
+        match self {
+            ScgNode::Function(f) => Some(f),
+            _ => None,
+        }
+    }
 }
 
 /// An SCG function node.

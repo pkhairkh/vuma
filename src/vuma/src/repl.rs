@@ -57,7 +57,7 @@ use std::time::Instant;
 use vuma_ive::verification::VerificationEngine;
 use vuma_ive::verification::VerificationInput;
 use vuma_ive::{
-    AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAggregator, VerificationLevel,
+    AggregatedResult, DiagnosticsReport, InvariantAggregator, VerificationLevel,
 };
 use vuma_parser::ast::{Expr, Item, Lit, Stmt};
 use vuma_parser::to_scg::AstToScg;
@@ -665,7 +665,7 @@ fn format_scg_summary(scg: &SCG) -> String {
 }
 
 /// Generate a BD (Behavioural Descriptor) display for all nodes in the SCG.
-fn format_bd_display(scg: &SCG, inference_engine: &InferenceEngine) -> String {
+fn format_bd_display(scg: &SCG) -> String {
     let mut result = String::new();
     result.push_str("Behavioural Descriptors:\n");
 
@@ -674,8 +674,14 @@ fn format_bd_display(scg: &SCG, inference_engine: &InferenceEngine) -> String {
         return result;
     }
 
+    // Run BD inference once on the semantic SCG. IVE's InferenceEngine now
+    // expects a codegen Scg (Task 6-E); since this REPL holds a semantic
+    // SCG, call the BD engine directly (it is hard-typed to &SCG).
+    let bd_engine = vuma_bd::inference::BDInferenceEngine::new();
+    let bd_map = bd_engine.infer(scg).bd_map;
+
     for node in scg.nodes() {
-        let bd = inference_engine.infer_bd(scg, node.id).unwrap_or_else(|_| {
+        let bd = bd_map.get(&node.id).cloned().unwrap_or_else(|| {
             vuma_bd::descriptor::BD::new(
                 vuma_bd::repd::RepD::Byte(vuma_bd::repd::ByteRep { size: 0, align: 0 }),
                 vuma_bd::capd::CapD::empty(),
@@ -732,8 +738,6 @@ pub struct VumaRepl {
     msg: Option<MSG>,
     /// The AST-to-SCG converter (maintains variable scopes).
     converter: AstToScg,
-    /// IVE inference engine.
-    inference_engine: InferenceEngine,
     /// IVE verification engine (reserved for individual invariant checks).
     _verification_engine: VerificationEngine,
     /// IVE invariant aggregator.
@@ -777,7 +781,6 @@ impl VumaRepl {
             scg: SCG::new(),
             msg: None,
             converter: AstToScg::new(),
-            inference_engine: InferenceEngine::new(),
             _verification_engine: VerificationEngine::new(),
             aggregator: InvariantAggregator::new().with_level(VerificationLevel::Pmt),
             history: Vec::new(),
@@ -796,7 +799,6 @@ impl VumaRepl {
         // verbose REPL too (default `InvariantAggregator::new()` already
         // uses PMT, but we set it explicitly for clarity).
         Self {
-            inference_engine: InferenceEngine::new().with_verbose(true),
             _verification_engine: VerificationEngine::new().with_verbose(true),
             aggregator: InvariantAggregator::new()
                 .with_level(VerificationLevel::Pmt)
@@ -1119,10 +1121,7 @@ Expressions:
                     "No MSG available. Enter some VUMA code first.".to_string(),
                 ))),
             },
-            "bd" => Ok(ReplResult::Ok(Some(format_bd_display(
-                &self.scg,
-                &self.inference_engine,
-            )))),
+            "bd" => Ok(ReplResult::Ok(Some(format_bd_display(&self.scg)))),
             _ => Ok(ReplResult::Ok(Some(format!(
                 "Unknown show target: '{what}'. Use :show scg, :show msg, or :show bd"
             )))),
@@ -1658,6 +1657,10 @@ Expressions:
     fn infer_type_from_scg(&self, expr: &str) -> String {
         // If we have an SCG with nodes, try to find a matching node.
         if self.scg.node_count() > 0 {
+            // Run BD inference once on the semantic SCG (IVE's
+            // InferenceEngine now expects a codegen Scg per Task 6-E).
+            let bd_engine = vuma_bd::inference::BDInferenceEngine::new();
+            let bd_map = bd_engine.infer(&self.scg).bd_map;
             for node in self.scg.nodes() {
                 // Match by payload content.
                 let matches = match &node.payload {
@@ -1668,8 +1671,7 @@ Expressions:
                     _ => false,
                 };
                 if matches {
-                    let bd = self.inference_engine.infer_bd(&self.scg, node.id);
-                    if let Ok(bd) = bd {
+                    if let Some(bd) = bd_map.get(&node.id) {
                         return format!("{} : {}", expr, bd.repd);
                     }
                 }
@@ -1745,10 +1747,13 @@ Expressions:
 
         // Display nodes.
         output.push_str("  Nodes:\n");
+        // Run BD inference once on the semantic SCG (IVE's
+        // InferenceEngine now expects a codegen Scg per Task 6-E).
+        let bd_engine = vuma_bd::inference::BDInferenceEngine::new();
+        let bd_map = bd_engine.infer(&self.scg).bd_map;
         for node in &found_nodes {
-            let bd_str = self
-                .inference_engine
-                .infer_bd(&self.scg, node.id)
+            let bd_str = bd_map
+                .get(&node.id)
                 .map(|bd| format!(" — {}", bd.repd))
                 .unwrap_or_default();
             output.push_str(&format!(
