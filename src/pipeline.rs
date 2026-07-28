@@ -3924,34 +3924,99 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     };
 
     // ── Stage 3: SCG Transforms ───────────────────────────────────────
-    // VUMA 2.0: verification is mandatory, but `run_scg_transforms`
-    // itself does not run IVE — the `verification_level` field is only
-    // consulted by the IVE stage (which `compile_to_wasm` does not
-    // invoke; Wasm is a sandboxed target and PMT verification is the
-    // caller's responsibility). We use `Normal` (the default, which
-    // maps to `Pmt` in the pipeline) rather than the removed `None`
-    // variant so the config is well-formed.
-    let _ = run_scg_transforms(
-        &mut scg,
-        &CompileConfig {
-            target: CompileTarget::Wasm32,
-            opt_level: OptLevel::O3,
-            verification_level: VerificationLevel::Normal,
-            allow_inconclusive: false,
-            strict_ive: false,
-            ive_max_paths: 64,
-            ive_max_path_length: 256,
-            entry_name: "main".to_string(),
-            debug_info: false,
-            stop_on_first_error: true,
-            max_inline_size: 50,
-            inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
+    // (Pillar IX.3 — "one compilation path, IVE always full".) VUMA 2.0
+    // verification is MANDATORY on EVERY compilation path. The difference
+    // between `vuma build` and Wasm emission is the OUTPUT FORMAT (ELF vs
+    // Wasm), NOT whether IVE runs — so the Wasm path now runs the SAME
+    // PMT state verification + memory-safety gates as the canonical
+    // `compile_with_path` / `compile_with_recovery` route (see Stage 6 /
+    // Stage 6b there). We use `Normal` (the default, which maps to `Pmt`
+    // in the pipeline) rather than the removed `None` variant so the
+    // config is well-formed.
+    let wasm_config = CompileConfig {
+        target: CompileTarget::Wasm32,
+        opt_level: OptLevel::O3,
+        verification_level: VerificationLevel::Normal,
+        allow_inconclusive: false,
+        strict_ive: false,
+        ive_max_paths: 64,
+        ive_max_path_length: 256,
+        entry_name: "main".to_string(),
+        debug_info: false,
+        stop_on_first_error: true,
+        max_inline_size: 50,
+        inline_threshold: vuma_codegen::opt::DEFAULT_INLINE_THRESHOLD,
+        runtime_bounds_checks: false,
+        section_headers: false,
+        max_expr_depth: vuma_parser::MAX_EXPR_DEPTH,
+        backend: vuma_codegen::backend::BackendKind::Wasm32,
+    };
+    let _ = run_scg_transforms(&mut scg, &wasm_config);
+
+    // ── Stage 3b: IVE PMT Verification (VUMA 2.0 — MANDATORY) ─────────
+    // (Pillar IX.3 unification.) `compile_to_wasm` previously SKIPPED IVE
+    // entirely — the legacy comment read "Wasm is a sandboxed target and
+    // PMT verification is the caller's responsibility." That created a
+    // SECOND compilation path with a weaker safety story than the
+    // canonical `compile_with_path` route. The v4 thesis requires ONE
+    // compilation path with IVE always full, so the Wasm path now runs
+    // the SAME PMT state verification gate (the 3 state verifiers at
+    // `IveVerificationLevel::Pmt`) that the canonical pipeline runs in
+    // Stage 6. Verification is a HARD gate: on `Fail` (or `Inconclusive`,
+    // since `compile_to_wasm` takes no `CompileConfig` and therefore has
+    // no `--allow-inconclusive` opt-out) the Wasm binary is NOT emitted.
+    {
+        let pmt_layouts = build_pmt_layout_specs(&ast);
+        let secret_vars = collect_secret_vars(&ast);
+        let (codegen_scg_for_ive, typed_state_meta) = bridge_ast_to_codegen_scg_with_meta(&ast);
+        let ive_input =
+            vuma_ive::verification::VerificationInput::from_codegen_scg(codegen_scg_for_ive)
+                .with_pmt_layouts(pmt_layouts)
+                .with_secret_vars(secret_vars)
+                .with_typed_state_meta(typed_state_meta);
+        let aggregator = InvariantAggregator::new()
+            .with_level(IveVerificationLevel::Pmt)
+            .with_max_paths(wasm_config.ive_max_paths)
+            .with_max_path_length(wasm_config.ive_max_path_length);
+        let ive_result = aggregator.verify_all(&ive_input);
+        if ive_result.overall == OverallVerdict::Fail
+            || ive_result.overall == OverallVerdict::Inconclusive
+        {
+            return Err(vec![VumaError::Verification { result: ive_result }]);
+        }
+    }
+
+    // ── Stage 3c: Memory Safety Analysis (MANDATORY, blocking) ────────
+    // Mirrors Stage 6b of `compile_with_path`: VUMA 2.0 is PMT-only and
+    // memory-safety analysis is MANDATORY (no opt-out). Runs the
+    // SCG-liveness-based UAF / uninit-read / double-free check on the
+    // semantic SCG; leak detection is advisory-only (IVE Stage 3b handles
+    // real leaks via its static-lifetime analysis). A HARD gate: any
+    // violation refuses to emit the Wasm binary.
+    {
+        let liveness = vuma_scg::liveness::LivenessAnalysis::new(&scg);
+        let ms_config_blocking = vuma_codegen::memory_safety::MemorySafetyConfig {
+            check_use_after_free: true,
+            check_uninitialized_reads: true,
+            check_double_free: true,
+            check_memory_leaks: false,
+            check_dangling_pointers: false,
             runtime_bounds_checks: false,
-            section_headers: false,
-            max_expr_depth: vuma_parser::MAX_EXPR_DEPTH,
-            backend: vuma_codegen::backend::BackendKind::Wasm32,
-        },
-    );
+            errors_are_fatal: true,
+        };
+        let liveness_violations = vuma_codegen::memory_safety::analyze_with_scg_liveness(
+            &liveness,
+            &scg,
+            &ms_config_blocking,
+        );
+        if !liveness_violations.is_empty() {
+            let report = vuma_codegen::memory_safety::MemorySafetyReport {
+                violations: liveness_violations,
+                ..vuma_codegen::memory_safety::MemorySafetyReport::empty()
+            };
+            return Err(vec![VumaError::MemorySafety { report }]);
+        }
+    }
 
     // ── Stage 4: IR Lowering ─────────────────────────────────────
     // NOTE: The canonical pipeline now uses the DIRECT AST→codegen SCG
