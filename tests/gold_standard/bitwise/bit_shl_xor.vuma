@@ -5,7 +5,7 @@
 // amount and the XOR operand are both loaded into variables first to
 // avoid the immediate-RHS bitwise drop bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     one: u64 = 1;
     sh: u64 = 4;
     lit: u64 = 16;     // 0x10

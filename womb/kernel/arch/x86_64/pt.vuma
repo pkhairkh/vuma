@@ -106,22 +106,22 @@ layout PageTableEntry = { raw: u64 }
 // Mask 17592186028032 = 0x000FFFFFFFFFF000 — bits 12 through 51 only.
 // This is the SAME mask pte_make uses to sanitize its paddr argument,
 // so pte_addr(pte_make(p, f)) == p for any p in bits 12-51.
-fn pte_addr(pte: u64) -> u64 {
+transform pte_addr(pte: u64) -> u64 {
     return pte & 17592186028032;
 }
 
 // Check if the Present bit (bit 0) is set.
-fn pte_present(pte: u64) -> u8 {
+transform pte_present(pte: u64) -> u8 {
     return (pte & 1) as u8;
 }
 
 // Check if the R/W bit (bit 1) is set.
-fn pte_writable(pte: u64) -> u8 {
+transform pte_writable(pte: u64) -> u8 {
     return ((pte >> 1) & 1) as u8;
 }
 
 // Check if the U/S bit (bit 2) is set (user-accessible).
-fn pte_user(pte: u64) -> u8 {
+transform pte_user(pte: u64) -> u8 {
     return ((pte >> 2) & 1) as u8;
 }
 
@@ -129,7 +129,7 @@ fn pte_user(pte: u64) -> u8 {
 // 9223372036854775808 = 0x8000000000000000 — the sign bit of an i64, but
 // VUMA's u64 literals go through parse_int_radix which handles the full
 // 64-bit unsigned range, so this works as a pure u64 shift-and-mask.
-fn pte_no_exec(pte: u64) -> u8 {
+transform pte_no_exec(pte: u64) -> u8 {
     return ((pte >> 63) & 1) as u8;
 }
 
@@ -145,7 +145,7 @@ fn pte_no_exec(pte: u64) -> u8 {
 // matches the Intel SDM convention where the page-table walker treats a
 // not-present PTE as a leaf "not present" indicator regardless of any
 // other bits the OS might have stored in the available fields.
-fn pte_make(paddr: u64, flags: u64) -> u64 {
+transform pte_make(paddr: u64, flags: u64) -> u64 {
     return (paddr & 17592186028032) | (flags & 4095) | 1;
 }
 
@@ -180,7 +180,7 @@ fn pte_make(paddr: u64, flags: u64) -> u64 {
 // Returns 0 on success, 1..4 on the corresponding failure (so a future
 // CI failure pinpoints the broken helper).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pte = pte_make(1048576, 3);
     if pte_present(pte) != 1 { return 1; }
     if pte_writable(pte) != 1 { return 2; }

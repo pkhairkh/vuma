@@ -16,7 +16,7 @@
 // returns 1.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     x = 1;
     y = x + 1;
     z = y - 1;

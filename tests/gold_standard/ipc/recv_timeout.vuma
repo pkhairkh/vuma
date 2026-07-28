@@ -15,7 +15,7 @@
 //   -7 = TypeMismatch (channel_recv only — type_hash mismatch)
 //
 // Expected exit code: 88
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     x = channel_recv_timeout(ch, 100);
     channel_close(ch);

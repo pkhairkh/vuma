@@ -5,7 +5,7 @@
 // Exits with the count (mod 256) to verify all messages were delivered.
 //
 // Expected exit code: 232 (1000 % 256 = 232)
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i64>();
     pid = spawn_worker();
     if pid == 0 {

@@ -3,7 +3,7 @@
 //
 // isqrt(144) = 12. Newton iteration: x_{k+1} = (x_k + n / x_k) / 2.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 144;
     zero: u32 = 0;
     one: u32 = 1;

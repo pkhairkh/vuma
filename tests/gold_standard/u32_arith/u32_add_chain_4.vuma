@@ -5,7 +5,7 @@
 // s4_u32_add_three (three-way add) and s6_u32_add_pair (two-way
 // add). All values well inside U8 range.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 10;
     b: u32 = 20;
     c: u32 = 30;

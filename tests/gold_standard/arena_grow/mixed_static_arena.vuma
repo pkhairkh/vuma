@@ -9,7 +9,7 @@ layout Arena = { base: u64, offset: u64, capacity: u64 }
 layout Point = { x: u32, y: u32 }
 layout Widget = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Static state (in ___pmt_buffer)
     let p = state_new(Point);
     p.x = 1;

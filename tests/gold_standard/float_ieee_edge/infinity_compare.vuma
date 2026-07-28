@@ -9,7 +9,7 @@
 // Note: backends that trap on division-by-zero will crash here; this test
 // is for backends that produce IEEE Inf (x86_64 SSE, AArch64, RISC-V, etc.)
 
-fn main() -> i32 {
+transform main() -> i32 {
     one: f64 = 1.0;
     zero: f64 = 0.0;
     inf: f64 = one / zero;    // +Inf

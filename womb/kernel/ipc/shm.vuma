@@ -366,7 +366,7 @@
 //   kfree and mmap.vuma's sys_mmap / sys_munmap).
 //
 //   W44: K7d now DOES call allocators — pmm_alloc (forward-declared
-//   VUMA fn, NOT extern "C" — empty body returning 0 in hosted mode,
+//   VUMA transform, NOT extern "C" — empty body returning 0 in hosted mode,
 //   real buddy allocator in K11 bare-metal mode) in sys_shmget, and
 //   pmm_free (same forward-declaration pattern) in sys_shmdt. The
 //   hosted-mode fallback is mmap / munmap (extern "C" runtime stubs —
@@ -419,14 +419,14 @@
 //
 // The mmap/munmap externs are runtime stubs (same category as write/read/
 // exit — see womb/kernel/hosted/host.vuma). pmm_alloc / pmm_free are VUMA
-// `fn` forward declarations (NOT extern "C" — per the W35 task spec,
+// `transform` forward declarations (NOT extern "C" — per the W35 task spec,
 // pmm_alloc/vmm_map are VUMA functions; in hosted mode they have empty
 // bodies, in K11 bare-metal mode the linker resolves them against
 // womb/kernel/mm/pmm.vuma's real implementation). The FlatPool / PmmState
 // layouts are re-declared byte-identically to pmm.vuma so the State<T>
 // marshaling on the forward-declared calls uses the correct field offsets.
 //
-// PMT-pure: pmm_alloc is a VUMA fn forward declaration. mmap is an extern
+// PMT-pure: pmm_alloc is a VUMA transform forward declaration. mmap is an extern
 // C runtime stub (same as write/read/exit). No pointer syntax in VUMA
 // source — the only `*` in code lines are multiplication, the only `&`
 // are bitwise-AND.
@@ -442,11 +442,11 @@ extern "C" {
     // when pmm_alloc returns 0 (so the self-test still allocates real
     // pages from the host OS). Same extern pattern as
     // womb/kernel/mm/kmalloc.vuma's mmap declaration.
-    fn mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: u32, offset: u64) -> u64;
+    transform mmap(addr: u64, len: u64, prot: u32, flags: u32, fd: u32, offset: u64) -> u64;
     // munmap(addr, len) — release the mapping. Returns 0 on success.
     // Used by sys_shmdt to free mmap'd pages when the last attacher
     // detaches.
-    fn munmap(addr: u64, len: u64) -> i64;
+    transform munmap(addr: u64, len: u64) -> i64;
 }
 
 // PMM free-list node pool (pmm.vuma). Re-declared for the pmm_alloc /
@@ -472,18 +472,18 @@ layout PmmState = {
     free_pages:  u64,
 }
 
-// pmm_alloc — forward-declared VUMA fn matching pmm.vuma's signature.
+// pmm_alloc — forward-declared VUMA transform matching pmm.vuma's signature.
 // Returns the physical address of a fresh 4 KB page (order 0), or 0 on
 // OOM. In hosted mode this is an empty body (returns 0); sys_shmget
 // falls back to mmap. In K11 bare-metal mode this resolves to
 // womb/kernel/mm/pmm.vuma::pmm_alloc (real buddy allocator).
-fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
+transform pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64;
 
-// pmm_free — forward-declared VUMA fn matching pmm.vuma's signature.
+// pmm_free — forward-declared VUMA transform matching pmm.vuma's signature.
 // Returns a previously-allocated page to the buddy allocator. In hosted
 // mode this is a no-op (empty body); in K11 bare-metal mode it resolves
 // to womb/kernel/mm/pmm.vuma::pmm_free (real buddy coalescing).
-fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8);
+transform pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8);
 
 // ────────────────────────────────────────────────────────────────────────────
 // Layouts.
@@ -585,7 +585,7 @@ layout ShmTable = {
 //
 // State<T> params: 1 (tbl). Pure write — 64 byte writes to tbl.used
 // + one u32 write to tbl.count. No reads, no helper calls.
-fn shm_init(tbl: State<ShmTable>) {
+transform shm_init(tbl: State<ShmTable>) {
     let i = 0;
     while i < 64 {
         shm_set_used(tbl, i, 0);
@@ -615,7 +615,7 @@ fn shm_init(tbl: State<ShmTable>) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 4 bytes from
 // tbl.keys[off..off+4]. No writes, no helper calls.
-fn shm_get_key(tbl: State<ShmTable>, idx: u32) -> u32 {
+transform shm_get_key(tbl: State<ShmTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -642,7 +642,7 @@ fn shm_get_key(tbl: State<ShmTable>, idx: u32) -> u32 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 4 bytes into
 // tbl.keys[off..off+4]. No reads, no helper calls.
-fn shm_set_key(tbl: State<ShmTable>, idx: u32, val: u32) {
+transform shm_set_key(tbl: State<ShmTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -667,7 +667,7 @@ fn shm_set_key(tbl: State<ShmTable>, idx: u32, val: u32) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 8 bytes from
 // tbl.addrs[off..off+8]. No writes, no helper calls.
-fn shm_get_addr(tbl: State<ShmTable>, idx: u32) -> u64 {
+transform shm_get_addr(tbl: State<ShmTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -693,7 +693,7 @@ fn shm_get_addr(tbl: State<ShmTable>, idx: u32) -> u64 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 8 bytes into
 // tbl.addrs[off..off+8]. No reads, no helper calls.
-fn shm_set_addr(tbl: State<ShmTable>, idx: u32, val: u64) {
+transform shm_set_addr(tbl: State<ShmTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -718,7 +718,7 @@ fn shm_set_addr(tbl: State<ShmTable>, idx: u32, val: u64) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 8 bytes from
 // tbl.sizes[off..off+8]. No writes, no helper calls.
-fn shm_get_size(tbl: State<ShmTable>, idx: u32) -> u64 {
+transform shm_get_size(tbl: State<ShmTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -745,7 +745,7 @@ fn shm_get_size(tbl: State<ShmTable>, idx: u32) -> u64 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 8 bytes into
 // tbl.sizes[off..off+8]. No reads, no helper calls.
-fn shm_set_size(tbl: State<ShmTable>, idx: u32, val: u64) {
+transform shm_set_size(tbl: State<ShmTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -770,7 +770,7 @@ fn shm_set_size(tbl: State<ShmTable>, idx: u32, val: u64) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 4 bytes from
 // tbl.creators[off..off+4]. No writes, no helper calls.
-fn shm_get_creator(tbl: State<ShmTable>, idx: u32) -> u32 {
+transform shm_get_creator(tbl: State<ShmTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -796,7 +796,7 @@ fn shm_get_creator(tbl: State<ShmTable>, idx: u32) -> u32 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 4 bytes into
 // tbl.creators[off..off+4]. No reads, no helper calls.
-fn shm_set_creator(tbl: State<ShmTable>, idx: u32, val: u32) {
+transform shm_set_creator(tbl: State<ShmTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -821,7 +821,7 @@ fn shm_set_creator(tbl: State<ShmTable>, idx: u32, val: u32) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 4 bytes from
 // tbl.attached_counts[off..off+4]. No writes, no helper calls.
-fn shm_get_attached(tbl: State<ShmTable>, idx: u32) -> u32 {
+transform shm_get_attached(tbl: State<ShmTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -848,7 +848,7 @@ fn shm_get_attached(tbl: State<ShmTable>, idx: u32) -> u32 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 4 bytes into
 // tbl.attached_counts[off..off+4]. No reads, no helper calls.
-fn shm_set_attached(tbl: State<ShmTable>, idx: u32, val: u32) {
+transform shm_set_attached(tbl: State<ShmTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -871,7 +871,7 @@ fn shm_set_attached(tbl: State<ShmTable>, idx: u32, val: u32) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 1 byte from
 // tbl.used[idx]. No writes, no helper calls.
-fn shm_get_used(tbl: State<ShmTable>, idx: u32) -> u8 {
+transform shm_get_used(tbl: State<ShmTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
@@ -887,7 +887,7 @@ fn shm_get_used(tbl: State<ShmTable>, idx: u32) -> u8 {
 //
 // State<T> params: 1 (tbl). Pure write — writes 1 byte to
 // tbl.used[idx]. No reads, no helper calls.
-fn shm_set_used(tbl: State<ShmTable>, idx: u32, val: u8) {
+transform shm_set_used(tbl: State<ShmTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
@@ -909,7 +909,7 @@ fn shm_set_used(tbl: State<ShmTable>, idx: u32, val: u8) {
 // State<T> params: 1 (tbl). Pure read — reads used for each slot
 // until a free one is found. No writes, no helper calls (other than
 // shm_get_used, which is also a pure read).
-fn shm_find_free(tbl: State<ShmTable>) -> u32 {
+transform shm_find_free(tbl: State<ShmTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if shm_get_used(tbl, i) == 0 {
@@ -942,7 +942,7 @@ fn shm_find_free(tbl: State<ShmTable>) -> u32 {
 // shm_get_page: read the u64 page address for slot `slot`, page index
 // `page_idx`. Used by sys_shmdt to walk the slot's page array when
 // freeing pages on last-detach.
-fn shm_get_page(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u64 {
+transform shm_get_page(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u64 {
     let off = slot * 128 + page_idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -956,7 +956,7 @@ fn shm_get_page(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u64 {
 }
 
 // shm_set_page: store `val` (u64) at slot `slot`, page index `page_idx`.
-fn shm_set_page(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u64) {
+transform shm_set_page(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u64) {
     let off = slot * 128 + page_idx * 8;
     let i = 0;
     while i < 8 {
@@ -969,20 +969,20 @@ fn shm_set_page(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u64) {
 
 // shm_get_page_source: read the u8 source flag for slot `slot`, page
 // index `page_idx`. 0 = unused, 1 = pmm_alloc'd, 2 = mmap'd.
-fn shm_get_page_source(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u8 {
+transform shm_get_page_source(tbl: State<ShmTable>, slot: u32, page_idx: u32) -> u8 {
     let off = slot * 16 + page_idx;
     return tbl.page_sources[off];
 }
 
 // shm_set_page_source: store the u8 source flag at slot `slot`, page
 // index `page_idx`.
-fn shm_set_page_source(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u8) {
+transform shm_set_page_source(tbl: State<ShmTable>, slot: u32, page_idx: u32, val: u8) {
     let off = slot * 16 + page_idx;
     tbl.page_sources[off] = val;
 }
 
 // shm_get_page_count: read the u32 page_count for slot `idx`.
-fn shm_get_page_count(tbl: State<ShmTable>, idx: u32) -> u32 {
+transform shm_get_page_count(tbl: State<ShmTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -996,7 +996,7 @@ fn shm_get_page_count(tbl: State<ShmTable>, idx: u32) -> u32 {
 }
 
 // shm_set_page_count: store `val` (u32) at slot `idx`'s page_count field.
-fn shm_set_page_count(tbl: State<ShmTable>, idx: u32, val: u32) {
+transform shm_set_page_count(tbl: State<ShmTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -1060,7 +1060,7 @@ fn shm_set_page_count(tbl: State<ShmTable>, idx: u32, val: u32) {
 // page_count, used, pages, page_sources (via the byte-pack helpers);
 // writes count (direct field write). Calls pmm_alloc (forward-decl
 // no-op in hosted mode) and mmap (extern C runtime stub).
-fn sys_shmget(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, key: u32, size: u64, flags: u32) -> i64 {
+transform sys_shmget(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, key: u32, size: u64, flags: u32) -> i64 {
     // For IPC_PRIVATE, just allocate a new segment. K7d does NOT
     // implement the "look up existing segment by key" path — every
     // call to sys_shmget creates a new segment (matching the K7d
@@ -1180,7 +1180,7 @@ fn sys_shmget(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>,
 //
 // State<T> params: 1 (tbl). Reads used + attached_count; writes addr
 // + attached_count. All field access is through the helpers.
-fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
+transform sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
     if shmid >= 64 {
         return 0;  // invalid shmid
     }
@@ -1250,7 +1250,7 @@ fn sys_shmat(tbl: State<ShmTable>, shmid: u32, addr: u64, flags: u32) -> u64 {
 // attached_count + pages + page_sources + page_count. Calls pmm_free
 // (forward-decl no-op in hosted mode) and munmap (extern C runtime
 // stub) for each page being freed.
-fn sys_shmdt(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, addr: u64) -> i64 {
+transform sys_shmdt(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, addr: u64) -> i64 {
     let i = 0;
     while i < 64 {
         if shm_get_used(tbl, i) == 1 {
@@ -1325,7 +1325,7 @@ fn sys_shmdt(tbl: State<ShmTable>, pool: State<FlatPool>, pmm: State<PmmState>, 
 // State<T> params: 1 (tbl). Reads used (validation) + size (IPC_STAT);
 // writes used + count (IPC_RMID). All field access is through the
 // helpers (except tbl.count, which is a direct u32 field).
-fn sys_shmctl(tbl: State<ShmTable>, shmid: u32, cmd: u32) -> i64 {
+transform sys_shmctl(tbl: State<ShmTable>, shmid: u32, cmd: u32) -> i64 {
     if shmid >= 64 {
         return 0 - 1;  // invalid shmid
     }
@@ -1394,7 +1394,7 @@ fn sys_shmctl(tbl: State<ShmTable>, shmid: u32, cmd: u32) -> i64 {
 // 0xFFFFFFFF are hex (sentinel-value exception, same as mmap.vuma's
 // 0xFFFFFFFFFFFFFFFF return from sys_munmap).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(ShmTable);
     // W44: pool + pmm are needed for sys_shmget / sys_shmdt (which
     // now call pmm_alloc / pmm_free — forward-declared VUMA fns with

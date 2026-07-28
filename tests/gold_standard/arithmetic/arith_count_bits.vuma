@@ -4,7 +4,7 @@
 // popcount(127) = popcount(0b1111111) = 7. Uses Brian Kernighan's algorithm:
 // repeatedly clear the lowest set bit.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 127;
     zero: u32 = 0;
     count: u32 = 0;

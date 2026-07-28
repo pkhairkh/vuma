@@ -9,7 +9,7 @@
 // -9223372036854775808 (i64::MIN) is parsed as unary minus applied to
 // 9223372036854775808, which overflows i64 before the negation.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: i64 = 1;
     n = n << 63;  // n = 2^63 = i64::MIN (high bit set)
     big: f64 = uinttofloat(n);

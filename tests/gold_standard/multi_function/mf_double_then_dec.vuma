@@ -6,18 +6,18 @@
 // intermediate local. Distinct from s22_mf_double_then_inc
 // (inc(dbl(20)) = 41) and s18_mf_two_helpers_chain (inner+12, outer*3).
 
-fn dbl(x: u32) -> u32 {
+transform dbl(x: u32) -> u32 {
     n: u32 = 2;
     r: u32 = x * n;
     return r;
 }
-fn dec(x: u32) -> u32 {
+transform dec(x: u32) -> u32 {
     n: u32 = 1;
     r: u32 = x - n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = dbl(25);     // 50
     b: u32 = dec(a);      // 49
     return b;

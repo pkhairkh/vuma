@@ -6,7 +6,7 @@
 // s22_edge_max_or_zero (255 | 0 = 255) and s24_edge_max_xor_max
 // (255 ^ 255 = 0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 1;
     r: u32 = a ^ b;       // 254

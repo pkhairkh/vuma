@@ -4,7 +4,7 @@
 // Exposes: if-body assignments dropped (here the drop is benign since the
 // branch is false, but verifies the false-branch is correctly skipped).
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 2;
     if false {
         x = 1;

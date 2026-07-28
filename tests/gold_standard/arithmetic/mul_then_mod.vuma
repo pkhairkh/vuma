@@ -5,7 +5,7 @@
 // 34 % 50 = 34. All operands kept as i32 locals. Straight-line
 // arithmetic. Distinct from s78_arith_mul_then_mod (12),
 // s74_arith_mul_then_sub (250) and s73_arith_mul_then_sub (180).
-fn main() -> i32 {
+transform main() -> i32 {
     a: i32 = 17;
     b: i32 = 2;
     c: i32 = 50;

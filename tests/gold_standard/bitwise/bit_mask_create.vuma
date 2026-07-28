@@ -5,7 +5,7 @@
 // Workaround note: nested binary expressions where the LHS is a computed
 // shift and the RHS is an immediate can be miscompiled, so the shift is
 // materialised into its own variable first.
-fn main() -> i32 {
+transform main() -> i32 {
     one: u64 = 1;
     three: u64 = 3;
     shifted: u64 = one << three;

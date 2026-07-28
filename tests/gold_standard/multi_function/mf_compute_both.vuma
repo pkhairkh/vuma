@@ -5,14 +5,14 @@
 // returns their product. Tests arithmetic on function-call results
 // with intermediate variables.
 
-fn ha() -> u32 {
+transform ha() -> u32 {
     return 10;
 }
-fn hb() -> u32 {
+transform hb() -> u32 {
     return 20;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = ha();
     b: u32 = hb();
     p: u32 = a * b;

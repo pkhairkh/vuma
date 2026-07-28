@@ -12,7 +12,7 @@ struct Triple {
 }
 
 layout _L1 = { data: [u8; 24] }
-fn main() -> i32 {
+transform main() -> i32 {
     let t = state_new(_L1);
     t.data[0] = 1;
     t.data[8] = 2;

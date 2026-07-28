@@ -384,7 +384,7 @@ layout DirentBuf = {
 // reads. Lifecycle (inode_init / inode_alloc) byte-identical to K5a.
 
 // Read the u64 `ino` field of Inode slot `idx`.
-fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -398,7 +398,7 @@ fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `ino` field of Inode slot `idx`.
-fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -410,7 +410,7 @@ fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u32 `mode` field of Inode slot `idx`.
-fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+transform inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -424,7 +424,7 @@ fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `mode` field of Inode slot `idx`.
-fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+transform inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -436,7 +436,7 @@ fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
 }
 
 // Read the u64 `size` field of Inode slot `idx`.
-fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -450,7 +450,7 @@ fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `size` field of Inode slot `idx`.
-fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -462,7 +462,7 @@ fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `private` field of Inode slot `idx`.
-fn inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -476,7 +476,7 @@ fn inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `private` field of Inode slot `idx`.
-fn inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -490,7 +490,7 @@ fn inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
 // inode_init: zero all 64 inos (mark every slot FREE — ino == 0 is the
 // free marker) and set count = 0. Idempotent. Byte-identical to K5a's
 // inode.vuma.
-fn inode_init(tbl: State<InodeTable>) {
+transform inode_init(tbl: State<InodeTable>) {
     let i = 0;
     while i < 64 {
         inode_set_ino(tbl, i, 0);
@@ -502,7 +502,7 @@ fn inode_init(tbl: State<InodeTable>) {
 // inode_alloc: find the first FREE slot (ino == 0), set ino = idx + 1, bump
 // count, return the slot index. Returns 64 if the table is full. Byte-
 // identical to K5a's inode.vuma.
-fn inode_alloc(tbl: State<InodeTable>) -> u32 {
+transform inode_alloc(tbl: State<InodeTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if inode_get_ino(tbl, i) == 0 {
@@ -524,19 +524,19 @@ fn inode_alloc(tbl: State<InodeTable>) -> u32 {
 // used). Lifecycle (dentry_init / dentry_alloc) byte-identical to K5a.
 
 // Read byte `off` (0..63) of the name field of Dentry slot `idx`.
-fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+transform dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
     let base = idx * 64;
     return tbl.names[base + off];
 }
 
 // Write byte `off` (0..63) of the name field of Dentry slot `idx`.
-fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+transform dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
     let base = idx * 64;
     tbl.names[base + off] = val;
 }
 
 // Read the u64 `parent` field of Dentry slot `idx`.
-fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -550,7 +550,7 @@ fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `parent` field of Dentry slot `idx`.
-fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -562,7 +562,7 @@ fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `inode` field of Dentry slot `idx`.
-fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -576,7 +576,7 @@ fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `inode` field of Dentry slot `idx`.
-fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -588,7 +588,7 @@ fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of Dentry slot `idx` (next sibling — 0 = EOL).
-fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -602,7 +602,7 @@ fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Dentry slot `idx`.
-fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -614,7 +614,7 @@ fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `child` field of Dentry slot `idx` (first child — 0 = none).
-fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -628,7 +628,7 @@ fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `child` field of Dentry slot `idx`.
-fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -640,28 +640,28 @@ fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u8 `mounted` field of Dentry slot `idx`.
-fn dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.mounteds[idx];
 }
 
 // Write the u8 `mounted` field of Dentry slot `idx`.
-fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.mounteds[idx] = val;
 }
 
 // Read the u8 `used` flag of Dentry slot `idx` (1 = in use, 0 = free).
-fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of Dentry slot `idx`.
-fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
 // dentry_init: zero all 64 used flags (mark every slot FREE) and set
 // count = 0. Idempotent. Byte-identical to K5a's dentry.vuma.
-fn dentry_init(tbl: State<DentryTable>) {
+transform dentry_init(tbl: State<DentryTable>) {
     let i = 0;
     while i < 64 {
         dentry_set_used(tbl, i, 0);
@@ -673,7 +673,7 @@ fn dentry_init(tbl: State<DentryTable>) {
 // dentry_alloc: find the first FREE slot (used == 0), set used = 1, bump
 // count, return the slot index. Returns 64 if the table is full. Byte-
 // identical to K5a's dentry.vuma.
-fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
+transform dentry_alloc(tbl: State<DentryTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if dentry_get_used(tbl, i) == 0 {
@@ -696,7 +696,7 @@ fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
 // directly (not the table), but K5c/K5d consumers will use the table.
 
 // Read the u64 `dentry` field of File slot `idx`.
-fn file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -710,7 +710,7 @@ fn file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `dentry` field of File slot `idx`.
-fn file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -722,7 +722,7 @@ fn file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `pos` field of File slot `idx`.
-fn file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -736,7 +736,7 @@ fn file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `pos` field of File slot `idx`.
-fn file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -748,7 +748,7 @@ fn file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `ops` field of File slot `idx`.
-fn file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -762,7 +762,7 @@ fn file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `ops` field of File slot `idx`.
-fn file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -774,7 +774,7 @@ fn file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `private` field of File slot `idx`.
-fn file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -788,7 +788,7 @@ fn file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `private` field of File slot `idx`.
-fn file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -800,7 +800,7 @@ fn file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u32 `flags` field of File slot `idx`.
-fn file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
+transform file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -814,7 +814,7 @@ fn file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `flags` field of File slot `idx`.
-fn file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
+transform file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -826,18 +826,18 @@ fn file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
 }
 
 // Read the u8 `used` flag of File slot `idx` (1 = in use, 0 = free).
-fn file_get_used(tbl: State<FileTable>, idx: u32) -> u8 {
+transform file_get_used(tbl: State<FileTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of File slot `idx`.
-fn file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
+transform file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
 // file_init: zero all 64 used flags (mark every slot FREE) and set
 // count = 0. Idempotent. Byte-identical to K5a's file.vuma.
-fn file_init(tbl: State<FileTable>) {
+transform file_init(tbl: State<FileTable>) {
     let i = 0;
     while i < 64 {
         file_set_used(tbl, i, 0);
@@ -849,7 +849,7 @@ fn file_init(tbl: State<FileTable>) {
 // file_alloc: find the first FREE slot (used == 0), set used = 1, bump
 // count, return the slot index. Returns 64 if the table is full. Byte-
 // identical to K5a's file.vuma.
-fn file_alloc(tbl: State<FileTable>) -> u32 {
+transform file_alloc(tbl: State<FileTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if file_get_used(tbl, i) == 0 {
@@ -864,7 +864,7 @@ fn file_alloc(tbl: State<FileTable>) -> u32 {
 
 // file_free: mark slot `idx` as FREE (used = 0), decrement count. Byte-
 // identical to K5a's file.vuma.
-fn file_free(tbl: State<FileTable>, idx: u32) {
+transform file_free(tbl: State<FileTable>, idx: u32) {
     file_set_used(tbl, idx, 0);
     tbl.count = tbl.count - 1;
 }
@@ -886,7 +886,7 @@ fn file_free(tbl: State<FileTable>, idx: u32) {
 // If all 64 bytes match without hitting a null, return 1 (both names fill
 // the entire 64-byte field — the no-null-needed edge case).
 
-fn name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
+transform name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
     let i = 0;
     while i < 64 {
         let c = dentry_get_name_byte(tbl, idx, i);
@@ -924,7 +924,7 @@ fn name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
 // never read because tmpfs_read only reads bytes that tmpfs_write wrote
 // within the same page, and the self-test verifies this by writing 5
 // bytes then reading exactly 5 bytes back).
-fn tmpfs_data_init(data: State<TmpfsData>) {
+transform tmpfs_data_init(data: State<TmpfsData>) {
     let i = 0;
     while i < 64 {
         data.page_used[i] = 0;
@@ -939,7 +939,7 @@ fn tmpfs_data_init(data: State<TmpfsData>) {
 // -ENOSPC in that case). Lowest-free-page-wins policy matches Linux's
 // find_first_zero_bit (same as K5a's inode_alloc / dentry_alloc /
 // file_alloc).
-fn tmpfs_data_alloc_page(data: State<TmpfsData>) -> u32 {
+transform tmpfs_data_alloc_page(data: State<TmpfsData>) -> u32 {
     let i = 0;
     while i < 64 {
         if data.page_used[i] == 0 {
@@ -965,7 +965,7 @@ fn tmpfs_data_alloc_page(data: State<TmpfsData>) -> u32 {
 // &root_dentry convention (K5a's dentry.vuma documents this). The root
 // dentry's `child` is set to 0 (no children yet — tmpfs_create / mkdir
 // will set it when the first child is linked in).
-fn tmpfs_mount(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>) -> u32 {
+transform tmpfs_mount(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>) -> u32 {
     // Initialize all three tables (idempotent — safe to call on a fresh
     // state_new(T), which is already zeroed, but explicit init makes the
     // "fresh mount" semantics clear and matches the K5a contract's
@@ -1014,7 +1014,7 @@ fn tmpfs_mount(inodes: State<InodeTable>, dentries: State<DentryTable>, data: St
 // allocate the page and store it in the inode's `private` (so subsequent
 // opens can share the same page), but this K5c effort doesn't implement
 // tmpfs_open (the self-test does the allocation manually).
-fn tmpfs_create(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+transform tmpfs_create(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
     // Allocate the new inode. Set its mode to S_IFREG | 0o644 = 33188
     // (a regular file with rw-r--r-- permissions — the conventional
     // default file mode on Linux, matching the K5a inode.vuma self-test).
@@ -1060,7 +1060,7 @@ fn tmpfs_create(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_
 // table is full. The new directory starts with child = 0 (empty — files
 // can be created under it via subsequent tmpfs_create / mkdir calls,
 // which will set its `child` pointer when the first child is linked in).
-fn tmpfs_mkdir(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+transform tmpfs_mkdir(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
     // Allocate the new inode. Set its mode to S_IFDIR | 0o755 = 16877.
     let ino_idx = inode_alloc(inodes);
     if ino_idx == 64 { return 256; }  // table full
@@ -1112,7 +1112,7 @@ fn tmpfs_mkdir(inodes: State<InodeTable>, dentries: State<DentryTable>, parent_i
 // path-resolution outer loop; tmpfs_lookup does just the sibling walk for
 // a single component, since tmpfs_create / mkdir / lookup operate on a
 // single name under a known parent, not on a multi-component path).
-fn tmpfs_lookup(dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+transform tmpfs_lookup(dentries: State<DentryTable>, parent_idx: u32, name: State<PathBuf>) -> u32 {
     let next = dentry_get_child(dentries, parent_idx) as u32;
     while next != 256 && dentry_get_used(dentries, next) == 1 {
         if name_matches(dentries, next, name) == 1 {
@@ -1141,7 +1141,7 @@ fn tmpfs_lookup(dentries: State<DentryTable>, parent_idx: u32, name: State<PathB
 // the file. A real implementation would return a short read (fewer bytes
 // than requested) at EOF. K5c's sys_read wrapper will do the EOF check
 // via inode_get_size before calling tmpfs_read.
-fn tmpfs_read(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, count: u64) -> i64 {
+transform tmpfs_read(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, count: u64) -> i64 {
     let page = file.private as u32;
     let pos = file.pos as u32;
     let base = page * 256;
@@ -1163,7 +1163,7 @@ fn tmpfs_read(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, co
 // instead of page → buf). Same caveats: no EOF check (the caller must
 // ensure `pos + count <= 256`), u32 cast on the count is well-defined
 // because the page size is 256.
-fn tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, count: u64) -> i64 {
+transform tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, count: u64) -> i64 {
     let page = file.private as u32;
     let pos = file.pos as u32;
     let base = page * 256;
@@ -1233,7 +1233,7 @@ fn tmpfs_write(data: State<TmpfsData>, file: State<File>, buf: State<ByteBuf>, c
 // dentry. (Without this unlink, a freed dentry in the middle of the
 // sibling list would cause tmpfs_lookup to stop early at the freed
 // slot, since its loop condition checks `dentry_get_used(next) == 1`.)
-fn tmpfs_unlink(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>, parent_idx: u32, name: State<PathBuf>) -> u32 {
+transform tmpfs_unlink(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>, parent_idx: u32, name: State<PathBuf>) -> u32 {
     // Walk parent's child list, tracking `prev` for the splice.
     // prev == 256 means "next is the first child" (no previous sibling
     // yet) — we'll update parent's child pointer in that case.
@@ -1304,7 +1304,7 @@ fn tmpfs_unlink(inodes: State<InodeTable>, dentries: State<DentryTable>, data: S
 // root would be listed as its own child. Non-root directories don't
 // have this self-reference, but the check is harmless for them and
 // keeps the function correct for all directories.
-fn tmpfs_readdir(dentries: State<DentryTable>, parent_idx: u32, out: State<DirentBuf>) -> u32 {
+transform tmpfs_readdir(dentries: State<DentryTable>, parent_idx: u32, out: State<DirentBuf>) -> u32 {
     // Zero the output count up front (idempotent — safe even if the
     // caller pre-zeroed the DirentBuf via state_new).
     out.count = 0;
@@ -1358,7 +1358,7 @@ fn tmpfs_readdir(dentries: State<DentryTable>, parent_idx: u32, out: State<Diren
 // when the file is opened (tmpfs_open in K5c ...)". The page is
 // stored in inode.private (page_idx + 1) so tmpfs_unlink can find and
 // free it later.
-fn tmpfs_open(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>, parent_idx: u32, name: State<PathBuf>, flags: u32) -> u32 {
+transform tmpfs_open(inodes: State<InodeTable>, dentries: State<DentryTable>, data: State<TmpfsData>, parent_idx: u32, name: State<PathBuf>, flags: u32) -> u32 {
     // Try to find an existing dentry under parent with this name.
     let found = tmpfs_lookup(dentries, parent_idx, name);
     if found == 256 {
@@ -1453,7 +1453,7 @@ fn tmpfs_open(inodes: State<InodeTable>, dentries: State<DentryTable>, data: Sta
 // index, 0 = root dentry / page index / null terminator / initial pos,
 // 2 = O_RDWR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate the three tmpfs tables. state_new zero-initializes them,
     // but tmpfs_mount re-initializes them explicitly (idempotent — safe
     // on a fresh table, and makes the "fresh mount" semantics clear).

@@ -6,7 +6,7 @@
 // All operands loaded into variables first. Distinct from
 // s6_crypto_rotate_right_4 (right rotation, different amount).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 9;        // 0x09
     sh_l: u64 = 3;
     sh_r: u64 = 5;

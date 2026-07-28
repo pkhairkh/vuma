@@ -3,7 +3,7 @@
 //
 // Exposes: while-body assignments to non-counter variables (sum) don't propagate.
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     sum: u32 = 0;
     while (i < 10) {

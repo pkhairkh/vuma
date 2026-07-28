@@ -6,7 +6,7 @@
 // The child exits 1 if the limit was set.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     pid = spawn_worker();
     if pid == 0 {
         // RLIMIT_AS = 9, limit = 1MB (1048576 bytes)

@@ -2,5 +2,5 @@
 // Hex(0xF)='f'
 // Expected exit code: 102
 
-fn hex_char(idx: u32) -> u32 { if idx < 10 { return idx + 48; } return idx + 87; }
-fn main() -> i32 { return hex_char(15); }
+transform hex_char(idx: u32) -> u32 { if idx < 10 { return idx + 48; } return idx + 87; }
+transform main() -> i32 { return hex_char(15); }

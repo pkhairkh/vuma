@@ -91,14 +91,14 @@ const MDNS_RECORD_SIZE: u32 = 28;
 //  assembled byte-by-byte.)
 // ===========================================================================
 
-fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+transform store_u32_le(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset + 0) = val & 255;
     *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255;
     *(ptr + offset + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+transform load_u32_le(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset + 0);
     b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2);
@@ -106,18 +106,18 @@ fn load_u32_le(ptr: Address, offset: u32) -> u32 {
     return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
 }
 
-fn store_u16_be(ptr: Address, offset: u32, val: u32) {
+transform store_u16_be(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset + 0) = (val >> 8) & 255;
     *(ptr + offset + 1) = val & 255;
 }
 
-fn load_u16_be(ptr: Address, offset: u32) -> u32 {
+transform load_u16_be(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset + 0);
     b1: u32 = *(ptr + offset + 1);
     return (b0 << 8) | b1;
 }
 
-fn load_u32_be(ptr: Address, offset: u32) -> u32 {
+transform load_u32_be(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset + 0);
     b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2);
@@ -135,7 +135,7 @@ fn load_u32_be(ptr: Address, offset: u32) -> u32 {
 // names compression is forbidden (RFC 4034 §3.1.7), but we handle them
 // defensively. Returns the number of bytes consumed (including the
 // terminator or the 2-byte pointer).
-fn dns_name_wire_len(buf: Address, offset: u32, max_len: u32) -> u32 {
+transform dns_name_wire_len(buf: Address, offset: u32, max_len: u32) -> u32 {
     pos: u32 = offset;
     while pos < max_len {
         len: u32 = *(buf + pos);
@@ -148,7 +148,7 @@ fn dns_name_wire_len(buf: Address, offset: u32, max_len: u32) -> u32 {
 
 // Encode a dotted domain string ("www.example.com") into DNS wire format
 // ([3]www[7]example[3]com[0]) at `out`. Returns bytes written.
-fn dns_encode_name(domain: Address, out: Address) -> u32 {
+transform dns_encode_name(domain: Address, out: Address) -> u32 {
     pos: u32 = 0;
     label_start: u32 = 0;
     i: u32 = 0;
@@ -196,7 +196,7 @@ fn dns_encode_name(domain: Address, out: Address) -> u32 {
 //   [9..10]  RDLENGTH = 0
 // ===========================================================================
 
-fn edns0_build_opt(udp_size: u32, do_flag: u32, out: Address) -> u32 {
+transform edns0_build_opt(udp_size: u32, do_flag: u32, out: Address) -> u32 {
     // Name: root (.)
     *(out + 0) = 0;
     // Type: 41 (OPT)
@@ -231,7 +231,7 @@ fn edns0_build_opt(udp_size: u32, do_flag: u32, out: Address) -> u32 {
 // Returns total query length, or 0 on error.
 // ===========================================================================
 
-fn dnssec_build_query(domain: Address, qtype: u32, do_flag: u32, txn_id: u32, out: Address) -> u32 {
+transform dnssec_build_query(domain: Address, qtype: u32, do_flag: u32, txn_id: u32, out: Address) -> u32 {
     pos: u32 = 0;
 
     // --- Header (12 bytes) ---
@@ -291,7 +291,7 @@ fn dnssec_build_query(domain: Address, qtype: u32, do_flag: u32, txn_id: u32, ou
 // Returns 1 on success, 0 on error (buffer too short).
 // ===========================================================================
 
-fn dnssec_parse_rrsig(buf: Address, offset: u32,
+transform dnssec_parse_rrsig(buf: Address, offset: u32,
                       type_covered: Address, algorithm: Address,
                       labels: Address, orig_ttl: Address,
                       sig_expiration: Address, sig_inception: Address,
@@ -358,7 +358,7 @@ fn dnssec_parse_rrsig(buf: Address, offset: u32,
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn dnssec_parse_dnskey(buf: Address, offset: u32,
+transform dnssec_parse_dnskey(buf: Address, offset: u32,
                        flags: Address, protocol: Address,
                        algorithm: Address, public_key: Address,
                        key_len: Address) -> u32 {
@@ -398,7 +398,7 @@ fn dnssec_parse_dnskey(buf: Address, offset: u32,
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn dnssec_parse_ds(buf: Address, offset: u32,
+transform dnssec_parse_ds(buf: Address, offset: u32,
                    key_tag: Address, algorithm: Address,
                    digest_type: Address, digest: Address,
                    digest_len: Address) -> u32 {
@@ -454,7 +454,7 @@ fn dnssec_parse_ds(buf: Address, offset: u32,
 // Returns 1 on success, 0 on failure.
 // ===========================================================================
 
-fn dnssec_verify_rrset(rrset: Address, rrset_len: u32,
+transform dnssec_verify_rrset(rrset: Address, rrset_len: u32,
                        rrsig: Address, rrsig_len: u32,
                        dnskey: Address, dnskey_len: u32) -> u32 {
     // -- Need at least 18 bytes of RRSIG fixed fields + 1 byte signer name
@@ -554,7 +554,7 @@ fn dnssec_verify_rrset(rrset: Address, rrset_len: u32,
 // Returns 1 on success, 0 on failure.
 // ===========================================================================
 
-fn mdns_query(name: Address, qtype: u32) -> u32 {
+transform mdns_query(name: Address, qtype: u32) -> u32 {
     // Create UDP socket
     sockfd: i64 = syscall(198, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if sockfd < 0 { return 0; }
@@ -629,7 +629,7 @@ fn mdns_query(name: Address, qtype: u32) -> u32 {
 // Returns the number of records written (0 .. max_records).
 // ===========================================================================
 
-fn mdns_parse_response(buf: Address, buf_len: u32, records: Address, max_records: u32) -> u32 {
+transform mdns_parse_response(buf: Address, buf_len: u32, records: Address, max_records: u32) -> u32 {
     if buf_len < 12 { return 0; }
 
     qdcount: u32 = load_u16_be(buf, 4);
@@ -718,7 +718,7 @@ fn mdns_parse_response(buf: Address, buf_len: u32, records: Address, max_records
 
 // Internal helper: send a length-prefixed DNS message over a connected
 // TCP socket. Returns 1 on success, 0 on failure.
-fn dot_send_message(sockfd: i64, msg: Address, msg_len: u32) -> u32 {
+transform dot_send_message(sockfd: i64, msg: Address, msg_len: u32) -> u32 {
     // 2-byte big-endian length prefix
     hdr = allocate(2);
     *(hdr + 0) = (msg_len >> 8) & 255;
@@ -736,7 +736,7 @@ fn dot_send_message(sockfd: i64, msg: Address, msg_len: u32) -> u32 {
 // Internal helper: receive a length-prefixed DNS message. Reads the 2-byte
 // length, then reads exactly that many bytes into `out`. Returns the number
 // of bytes received, or 0 on error.
-fn dot_recv_message(sockfd: i64, out: Address, out_max: u32) -> u32 {
+transform dot_recv_message(sockfd: i64, out: Address, out_max: u32) -> u32 {
     hdr = allocate(2);
     got: i64 = tcp_recv(sockfd, hdr, 2);
     if got != 2 { free(hdr); return 0; }
@@ -755,7 +755,7 @@ fn dot_recv_message(sockfd: i64, out: Address, out_max: u32) -> u32 {
     return total;
 }
 
-fn dot_resolve(domain: Address, dns_server_ip: u32, port: u32, ip_out: Address) -> u32 {
+transform dot_resolve(domain: Address, dns_server_ip: u32, port: u32, ip_out: Address) -> u32 {
     // Use default DoT port if caller passes 0
     eff_port: u32 = port;
     if eff_port == 0 { eff_port = DOT_DEFAULT_PORT; }
@@ -830,7 +830,7 @@ fn dot_resolve(domain: Address, dns_server_ip: u32, port: u32, ip_out: Address) 
 // Parse a dotted-decimal IPv4 string into a u32 (host order, MSB first).
 // Returns 1 on success, 0 on failure. Does NOT consume the trailing bytes
 // (stops at first non-digit/non-dot).
-fn parse_ipv4(s: Address, out: Address) -> u32 {
+transform parse_ipv4(s: Address, out: Address) -> u32 {
     result: u32 = 0;
     octet: u32 = 0;
     dots: u32 = 0;
@@ -860,7 +860,7 @@ fn parse_ipv4(s: Address, out: Address) -> u32 {
 
 // Copy bytes from src to dst until a NUL terminator is found in src.
 // Returns the number of bytes copied (excluding the NUL).
-fn copy_str(dst: Address, src: Address, max: u32) -> u32 {
+transform copy_str(dst: Address, src: Address, max: u32) -> u32 {
     i: u32 = 0;
     while i < max {
         b: u32 = *(src + i);
@@ -873,7 +873,7 @@ fn copy_str(dst: Address, src: Address, max: u32) -> u32 {
 }
 
 // Compute C-string length (up to max).
-fn str_len(s: Address, max: u32) -> u32 {
+transform str_len(s: Address, max: u32) -> u32 {
     i: u32 = 0;
     while i < max {
         if *(s + i) == 0 { return i; }
@@ -882,7 +882,7 @@ fn str_len(s: Address, max: u32) -> u32 {
     return max;
 }
 
-fn doh_resolve(doh_url: Address, domain: Address, ip_out: Address) -> u32 {
+transform doh_resolve(doh_url: Address, domain: Address, ip_out: Address) -> u32 {
     // --- Parse URL: expect "https://host[:port]/path" ---
     // Skip scheme "http://" (7) or "https://" (8)
     url_off: u32 = 0;
@@ -1150,7 +1150,7 @@ fn doh_resolve(doh_url: Address, domain: Address, ip_out: Address) -> u32 {
 
 // --- String literals used by doh_resolve (allocated on demand) ---
 
-fn doh_default_path() -> Address {
+transform doh_default_path() -> Address {
     buf = allocate(11);
     // "/dns-query"
     *(buf + 0) = 100;  // d
@@ -1166,7 +1166,7 @@ fn doh_default_path() -> Address {
     return buf;
 }
 
-fn doh_http_version() -> Address {
+transform doh_http_version() -> Address {
     buf = allocate(12);
     // "HTTP/1.1\r\n"
     *(buf + 0) = 72;   // H
@@ -1183,7 +1183,7 @@ fn doh_http_version() -> Address {
     return buf;
 }
 
-fn doh_host_header() -> Address {
+transform doh_host_header() -> Address {
     buf = allocate(8);
     // "Host: "
     *(buf + 0) = 72;   // H
@@ -1196,7 +1196,7 @@ fn doh_host_header() -> Address {
     return buf;
 }
 
-fn doh_content_type_header() -> Address {
+transform doh_content_type_header() -> Address {
     buf = allocate(42);
     // "Content-Type: application/dns-message\r\n"
     *(buf + 0) = 67;   // C
@@ -1242,7 +1242,7 @@ fn doh_content_type_header() -> Address {
     return buf;
 }
 
-fn doh_content_length_header() -> Address {
+transform doh_content_length_header() -> Address {
     buf = allocate(18);
     // "Content-Length: "
     *(buf + 0) = 67;   // C
@@ -1268,7 +1268,7 @@ fn doh_content_length_header() -> Address {
 // Find the offset of the CRLFCRLF terminator that ends HTTP headers.
 // Returns the offset of the first CR of the CRLFCRLF sequence, or
 // `total` if not found.
-fn doh_find_header_end(buf: Address, total: u32) -> u32 {
+transform doh_find_header_end(buf: Address, total: u32) -> u32 {
     i: u32 = 0;
     while i + 3 < total {
         if *(buf + i) == 13 {

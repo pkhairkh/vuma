@@ -6,7 +6,7 @@
 // (chain of divisions, no mul) and s6_arith_div_mod_combined
 // (div + mod, no mul).
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 60;
     d: u32 = 5;
     m: u32 = 3;

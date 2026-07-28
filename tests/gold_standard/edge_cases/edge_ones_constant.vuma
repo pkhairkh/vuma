@@ -5,7 +5,7 @@
 // each 1 distinct rather than folding. Distinct from
 // s5_edge_quad_doubled (doubled pairs).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 1;
     c: u32 = 1;

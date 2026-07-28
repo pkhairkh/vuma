@@ -23,7 +23,7 @@
 //! ```rust
 //! use vuma::pipeline::{compile, CompileConfig};
 //!
-//! let source = "fn main() {}";
+//! let source = "transform main() {}";
 //! let config = CompileConfig::default();
 //! match compile(source, &config) {
 //!     Ok(output) => println!("Compiled {} bytes", output.binary.len()),

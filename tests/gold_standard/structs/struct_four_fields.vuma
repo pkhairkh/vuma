@@ -13,7 +13,7 @@ struct Quad {
 }
 
 layout _L1 = { data: [u8; 32] }
-fn main() -> i32 {
+transform main() -> i32 {
     let q = state_new(_L1);
     q.data[0] = 1;
     q.data[8] = 2;

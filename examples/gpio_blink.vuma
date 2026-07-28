@@ -21,7 +21,7 @@ const GPFSEL0_OFFSET: Address = 0x00;   // Function select register 0
 const GPSET0_OFFSET: Address = 0x1c;    // Pin set register 0
 const GPCLR0_OFFSET: Address = 0x28;    // Pin clear register 0
 
-fn gpio_set_output(pin: u32) {
+transform gpio_set_output(pin: u32) {
     // Configure a GPIO pin as an output
     //
     // Map GPIO peripheral into our address space.
@@ -35,21 +35,21 @@ fn gpio_set_output(pin: u32) {
     *fsel = (*fsel & ~(7 << (pin * 3))) | (1 << (pin * 3));
 }
 
-fn gpio_set(pin: u32) {
+transform gpio_set(pin: u32) {
     // Set a GPIO pin high (turn LED on)
     // IVE verifies: gpio + GPSET0_OFFSET is within mapped region
     gpio = map_device(GPIO_BASE, 4096);
     *(gpio + GPSET0_OFFSET) = 1 << pin;
 }
 
-fn gpio_clear(pin: u32) {
+transform gpio_clear(pin: u32) {
     // Set a GPIO pin low (turn LED off)
     // IVE verifies: gpio + GPCLR0_OFFSET is within mapped region
     gpio = map_device(GPIO_BASE, 4096);
     *(gpio + GPCLR0_OFFSET) = 1 << pin;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Blink the AArch64 onboard LED on GPIO 25
     led_pin: u32 = 25;
 

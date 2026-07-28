@@ -8,7 +8,7 @@
 // (adds 10) and s6_cf_while_dec_count.
 // Expected exit code: 10
 
-fn main() -> i32 {
+transform main() -> i32 {
     acc: u32 = 0;
     i: u32 = 0;
     while i < 5 {

@@ -99,14 +99,14 @@ const HTTP_STATUS_INTERNAL_ERROR: u32 = 500;
 // Little-endian u32 store/load (VUMA exposes only byte-granular access).
 // ===========================================================================
 
-fn http_put_u32_le(addr: Address, val: u32) {
+transform http_put_u32_le(addr: Address, val: u32) {
     *(addr + 0) = val & 255;
     *(addr + 1) = (val >> 8) & 255;
     *(addr + 2) = (val >> 16) & 255;
     *(addr + 3) = (val >> 24) & 255;
 }
 
-fn http_get_u32_le(addr: Address) -> u32 {
+transform http_get_u32_le(addr: Address) -> u32 {
     b0: u32 = *(addr + 0);
     b1: u32 = *(addr + 1);
     b2: u32 = *(addr + 2);
@@ -119,7 +119,7 @@ fn http_get_u32_le(addr: Address) -> u32 {
 // compare. No `break` / early return; loop termination is via flags.
 // ===========================================================================
 
-fn http_strlen(s: Address) -> u32 {
+transform http_strlen(s: Address) -> u32 {
     n: u32 = 0;
     done: u32 = 0;
     while done == 0 {
@@ -131,7 +131,7 @@ fn http_strlen(s: Address) -> u32 {
 
 // Find first occurrence of `target` byte in buf[start..end).
 // Returns offset, or `end` if not found.
-fn http_find_byte(buf: Address, start: u32, end: u32, target: u32) -> u32 {
+transform http_find_byte(buf: Address, start: u32, end: u32, target: u32) -> u32 {
     i: u32 = start;
     found: u32 = end;
     done: u32 = 0;
@@ -143,7 +143,7 @@ fn http_find_byte(buf: Address, start: u32, end: u32, target: u32) -> u32 {
 }
 
 // Find first CRLF in buf[start..end). Returns offset of '\r', or `end`.
-fn http_find_crlf(buf: Address, start: u32, end: u32) -> u32 {
+transform http_find_crlf(buf: Address, start: u32, end: u32) -> u32 {
     i: u32 = start;
     found: u32 = end;
     done: u32 = 0;
@@ -157,7 +157,7 @@ fn http_find_crlf(buf: Address, start: u32, end: u32) -> u32 {
 }
 
 // ASCII lowercase (only A-Z affected).
-fn http_lower(c: u32) -> u32 {
+transform http_lower(c: u32) -> u32 {
     r: u32 = c;
     if c >= 65 && c <= 90 { r = c + 32; }
     return r;
@@ -165,7 +165,7 @@ fn http_lower(c: u32) -> u32 {
 
 // Case-insensitive equality of two byte sequences.
 // Returns 1 if equal, 0 otherwise.
-fn http_str_eq_nc(a: Address, alen: u32, b: Address, blen: u32) -> u32 {
+transform http_str_eq_nc(a: Address, alen: u32, b: Address, blen: u32) -> u32 {
     eq: u32 = 0;
     if alen == blen { eq = 1; }
     i: u32 = 0;
@@ -182,7 +182,7 @@ fn http_str_eq_nc(a: Address, alen: u32, b: Address, blen: u32) -> u32 {
 
 // Writes minimal decimal ASCII representation (no leading zeros, but at
 // least one digit). Returns number of bytes written.
-fn http_u32_to_decimal(value: u32, out: Address) -> u32 {
+transform http_u32_to_decimal(value: u32, out: Address) -> u32 {
     let temp = state_new(HttpTemp12);
     tp: u32 = 0;
     v: u32 = value;
@@ -209,7 +209,7 @@ fn http_u32_to_decimal(value: u32, out: Address) -> u32 {
 
 // Writes minimal lowercase hex ASCII representation (no leading zeros, but
 // at least one digit). Returns number of bytes written.
-fn http_u32_to_hex_minimal(value: u32, out: Address) -> u32 {
+transform http_u32_to_hex_minimal(value: u32, out: Address) -> u32 {
     let temp = state_new(HttpTemp8);
     tp: u32 = 0;
     v: u32 = value;
@@ -240,7 +240,7 @@ fn http_u32_to_hex_minimal(value: u32, out: Address) -> u32 {
 }
 
 // Parse single ASCII hex digit. Returns 0..15, or 16 if invalid.
-fn http_parse_hex_digit(c: u32) -> u32 {
+transform http_parse_hex_digit(c: u32) -> u32 {
     r: u32 = 16;
     if c >= 48 && c <= 57 { r = c - 48; }       // '0'..'9'
     if c >= 65 && c <= 70 { r = c - 55; }        // 'A'..'F'
@@ -254,7 +254,7 @@ fn http_parse_hex_digit(c: u32) -> u32 {
 // SP that terminates the method token.
 // ===========================================================================
 
-fn http_parse_method(buf: Address, end: u32) -> u32 {
+transform http_parse_method(buf: Address, end: u32) -> u32 {
     m: u32 = HTTP_UNKNOWN;
     if end == 3 {
         if *(buf + 0) == 71 && *(buf + 1) == 69 && *(buf + 2) == 84 { m = HTTP_GET; }       // GET
@@ -280,7 +280,7 @@ fn http_parse_method(buf: Address, end: u32) -> u32 {
 
 // Method code -> ASCII name. Writes NUL-terminated name to `out`.
 // Returns name length (excluding NUL).
-fn http_method_name(method: u32, out: State<HttpMtmp16>) -> u32 {
+transform http_method_name(method: u32, out: State<HttpMtmp16>) -> u32 {
     n: u32 = 0;
     if method == HTTP_GET       { out.data[0] = 71; out.data[1] = 69; out.data[2] = 84;                                                                 n = 3; }
     if method == HTTP_POST      { out.data[0] = 80; out.data[1] = 79; out.data[2] = 83; out.data[3] = 84;                                                n = 4; }
@@ -297,7 +297,7 @@ fn http_method_name(method: u32, out: State<HttpMtmp16>) -> u32 {
 
 // Parse "HTTP/x.y" at buf[start..end). Returns (major<<16 | minor), or 0 on error.
 // Expects exactly 8 bytes: 'H','T','T','P','/',major,'.',minor.
-fn http_parse_version(buf: Address, start: u32, end: u32) -> u32 {
+transform http_parse_version(buf: Address, start: u32, end: u32) -> u32 {
     v: u32 = 0;
     if start + 8 <= end {
         if *(buf + start + 0) == 72 && *(buf + start + 1) == 84 && *(buf + start + 2) == 84 && *(buf + start + 3) == 80 && *(buf + start + 4) == 47 && *(buf + start + 6) == 46 {
@@ -315,14 +315,14 @@ fn http_parse_version(buf: Address, start: u32, end: u32) -> u32 {
 // Headers struct manipulation (RFC 7230 §3.2 field-line abstraction).
 // ===========================================================================
 
-fn http_headers_init(headers: Address) {
+transform http_headers_init(headers: Address) {
     http_put_u32_le(headers + 0, 0);       // count = 0
     http_put_u32_le(headers + 4, 0);       // pool_used = 0
 }
 
 // Append a header (name + value as raw byte sequences with lengths).
 // Returns 1 on success, 0 on overflow.
-fn http_headers_add_internal(headers: Address, name_ptr: Address, name_len: u32,
+transform http_headers_add_internal(headers: Address, name_ptr: Address, name_len: u32,
                             val_ptr: Address, val_len: u32) -> u32 {
     count: u32 = http_get_u32_le(headers + 0);
     pool_used: u32 = http_get_u32_le(headers + 4);
@@ -357,7 +357,7 @@ fn http_headers_add_internal(headers: Address, name_ptr: Address, name_len: u32,
 // http_set_header(headers, name, value) -> u32
 // Append a header to the struct. `name` and `value` are NUL-terminated.
 // Returns 1 on success, 0 on overflow.
-fn http_set_header(headers: Address, name: Address, value: Address) -> u32 {
+transform http_set_header(headers: Address, name: Address, value: Address) -> u32 {
     nl: u32 = http_strlen(name);
     vl: u32 = http_strlen(value);
     return http_headers_add_internal(headers, name, nl, value, vl);
@@ -367,7 +367,7 @@ fn http_set_header(headers: Address, name: Address, value: Address) -> u32 {
 // Case-insensitive lookup by name (NUL-terminated). On match, copies the
 // value (NUL-terminated) into `value` (caller-allocated, >= HTTP_MAX_LINE).
 // Returns 1 if found, 0 otherwise.
-fn http_get_header(headers: Address, name: Address, value: Address) -> u32 {
+transform http_get_header(headers: Address, name: Address, value: Address) -> u32 {
     found: u32 = 0;
     nl: u32 = http_strlen(name);
     count: u32 = http_get_u32_le(headers + 0);
@@ -401,7 +401,7 @@ fn http_get_header(headers: Address, name: Address, value: Address) -> u32 {
 // the CRLF. On error, returns 0.
 // ===========================================================================
 
-fn http_parse_one_header(data: Address, start: u32, len: u32, headers: Address) -> u32 {
+transform http_parse_one_header(data: Address, start: u32, len: u32, headers: Address) -> u32 {
     status: u32 = 0;
     next: u32 = 0;
 
@@ -460,7 +460,7 @@ fn http_parse_one_header(data: Address, start: u32, len: u32, headers: Address) 
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn http_parse_request(data: Address, len: u32, method: Address, path: Address,
+transform http_parse_request(data: Address, len: u32, method: Address, path: Address,
                      version: Address, headers: Address, body: Address) -> u32 {
     status: u32 = 0;
     pos: u32 = 0;
@@ -544,7 +544,7 @@ fn http_parse_request(data: Address, len: u32, method: Address, path: Address,
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn http_parse_response(data: Address, len: u32, status_out: Address, reason: Address,
+transform http_parse_response(data: Address, len: u32, status_out: Address, reason: Address,
                       headers: Address, body: Address) -> u32 {
     status: u32 = 0;
     pos: u32 = 0;
@@ -631,7 +631,7 @@ fn http_parse_response(data: Address, len: u32, status_out: Address, reason: Add
 // Returns total bytes written to `out`.
 // ===========================================================================
 
-fn http_build_request(method: u32, path: Address, host: Address,
+transform http_build_request(method: u32, path: Address, host: Address,
                      headers: Address, body: Address, out: Address) -> u32 {
     pos: u32 = 0;
 
@@ -729,7 +729,7 @@ fn http_build_request(method: u32, path: Address, host: Address,
 // Returns total bytes written to `out`.
 // ===========================================================================
 
-fn http_build_response(status_code: u32, reason: Address, headers: Address,
+transform http_build_response(status_code: u32, reason: Address, headers: Address,
                       body: Address, out: Address) -> u32 {
     pos: u32 = 0;
 
@@ -820,7 +820,7 @@ fn http_build_response(status_code: u32, reason: Address, headers: Address,
 // decoded payload to `out`. Returns total bytes written, 0 on error.
 // ===========================================================================
 
-fn http_encode_chunked(data: Address, len: u32, out: Address) -> u32 {
+transform http_encode_chunked(data: Address, len: u32, out: Address) -> u32 {
     pos: u32 = 0;
     sent: u32 = 0;
 
@@ -861,7 +861,7 @@ fn http_encode_chunked(data: Address, len: u32, out: Address) -> u32 {
     return pos;
 }
 
-fn http_decode_chunked(data: Address, len: u32, out: Address) -> u32 {
+transform http_decode_chunked(data: Address, len: u32, out: Address) -> u32 {
     status: u32 = 0;
     pos: u32 = 0;
     out_pos: u32 = 0;

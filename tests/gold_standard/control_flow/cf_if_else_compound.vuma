@@ -12,7 +12,7 @@
 // (different branch values 42/99).
 // Expected exit code: 20
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 20;

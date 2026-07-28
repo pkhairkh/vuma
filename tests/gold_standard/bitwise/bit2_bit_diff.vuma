@@ -10,7 +10,7 @@
 //
 // Workaround note: VUMA does not have a builtin abs() for unsigned types,
 // but since 0xFF >= 0xFD, we just subtract directly.
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 0xFF;
     b: u64 = 0xFD;
     result: u64 = a - b;

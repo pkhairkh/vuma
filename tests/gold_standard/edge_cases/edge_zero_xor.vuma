@@ -6,7 +6,7 @@
 // s5_edge_zero_sum (sum of zeros, not xor) and s6_edge_zero_mul
 // (0 * anything = 0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 0;
     b: u64 = 99;
     r: u64 = a ^ b;   // 99

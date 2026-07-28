@@ -5,7 +5,7 @@
 // 12 & 15 = 12. Distinct from s5_crypto_nibble_extract (returns sum of
 // both nibbles) and s6_crypto_nibble_swap (swaps nibbles).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 205;         // 0xCD
     sh: u64 = 4;
     mask: u64 = 15;       // 0x0F

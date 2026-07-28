@@ -10,7 +10,7 @@
 // statement to avoid the nested-shift-mask miscompilation noted in the
 // bit_count_ones workaround.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u64 = 0xFF;
     m1: u64 = 0x5555555555555555;
     m2: u64 = 0x3333333333333333;

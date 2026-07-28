@@ -5,7 +5,7 @@
 // while loop) do not propagate. On buggy codegen, c stays 0 and the outer
 // loop may never terminate (i never advances).
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     c: u32 = 0;
     while (i < 3) {

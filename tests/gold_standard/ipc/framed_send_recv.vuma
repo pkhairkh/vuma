@@ -1,6 +1,6 @@
 // framed_send_recv — Send i32, receive i32, verify roundtrip
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

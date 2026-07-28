@@ -6,7 +6,7 @@
 // u32 variables first. Straight-line arithmetic. Distinct from
 // s46_arith_mul_mod_add (49) and s42_arith_sub_then_mod.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 6;
     c: u32 = 18;

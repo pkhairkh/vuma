@@ -58,7 +58,7 @@
 //        b. syscall_dispatch(tbl, args)       — sibling dispatch.vuma
 //        c. syscall_write_ret(tf, ret)        — sibling abi.vuma
 //      syscall_dispatch looks up the handler via syscall_table_get,
-//      calls it (K11 — VUMA has no fn-pointer call today, so the
+//      calls it (K11 — VUMA has no transform-pointer call today, so the
 //      dispatch's handler-call is a stub; K11 adds real dispatch), and
 //      returns the handler's return value.
 //
@@ -89,7 +89,7 @@
 // reference to syscall_register / syscall_table_get / syscall_table_set
 // (init-style API — see "Why init-style?" in womb/kernel/mm/pmm.vuma for
 // the codegen rationale). The State<SyscallTable> params are regular
-// VUMA-fn borrows (NOT extern #[borrow] — VUMA fn calls don't need the
+// VUMA-transform borrows (NOT extern #[borrow] — VUMA transform calls don't need the
 // attribute, only extern "C" calls do). None of this file's functions
 // call any extern, so the codegen's conservative State-invalidation-on-
 // extern-call doesn't fire.
@@ -163,7 +163,7 @@ layout SyscallTable = {
 // or the syscall was never registered in the first place). The caller
 // (dispatch layer) is responsible for bounds-checking nr BEFORE calling
 // this — see "Why does this file not bounds-check nr?" in the file header.
-fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+transform syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
     let off = nr * 8;
     let v: u64 = 0;
     let i = 0;
@@ -181,7 +181,7 @@ fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
 // 63..56). The mask-255 truncates each shifted byte to its low 8 bits
 // (the (handler >> sh) >> 8 path would lose the high bits — same
 // pattern as pmm.vuma's pool_set_base).
-fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+transform syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     let off = nr * 8;
     let i = 0;
     while i < 8 {
@@ -204,7 +204,7 @@ fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // (no PIC to unmask — syscalls are software traps, not hardware IRQs).
 // K11 may add a "syscall table commit" extern here if the bare-metal
 // kernel uses a copy-on-write syscall table for hot-patching.
-fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+transform syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     syscall_table_set(tbl, nr, handler);
     tbl.count = tbl.count + 1;
 }
@@ -235,7 +235,7 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // K3a's trap_trampoline.vuma for the same rule applied to vector=14
 // and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(SyscallTable);
     tbl.count = 0;
 

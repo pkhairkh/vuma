@@ -90,14 +90,14 @@ const PKI_HASH_SHA256: u32 = 1;     // issuerNameHash/issuerKeyHash = 32 bytes
 // Little-endian u32 load/store helpers
 // ===========================================================================
 
-fn pki_store_u32(buf: Address, off: u32, val: u32) {
+transform pki_store_u32(buf: Address, off: u32, val: u32) {
     *(buf + off)     = val & 255;
     *(buf + off + 1) = (val >> 8) & 255;
     *(buf + off + 2) = (val >> 16) & 255;
     *(buf + off + 3) = (val >> 24) & 255;
 }
 
-fn pki_load_u32(buf: Address, off: u32) -> u32 {
+transform pki_load_u32(buf: Address, off: u32) -> u32 {
     return *(buf + off) | (*(buf + off + 1) << 8)
          | (*(buf + off + 2) << 16) | (*(buf + off + 3) << 24);
 }
@@ -108,7 +108,7 @@ fn pki_load_u32(buf: Address, off: u32) -> u32 {
 
 // Returns the number of bytes that der_write_length will emit for `len`.
 // Mirrors asn1.vuma's der_write_length (max 3 bytes / 0x82 form).
-fn pki_len_bytes_for(len: u32) -> u32 {
+transform pki_len_bytes_for(len: u32) -> u32 {
     if len < 128 { return 1; }
     if len < 256 { return 2; }
     return 3;
@@ -117,7 +117,7 @@ fn pki_len_bytes_for(len: u32) -> u32 {
 // Effective DER INTEGER content length for the given raw big-endian bytes.
 // Strips leading zeros (keeping at least one byte) and accounts for the
 // 0x00 pad byte that DER requires when the MSB of the remaining value is 1.
-fn pki_integer_content_len(val: Address, val_len: u32) -> u32 {
+transform pki_integer_content_len(val: Address, val_len: u32) -> u32 {
     if val_len == 0 { return 1; }
     start: u32 = 0;
     while start < val_len - 1 {
@@ -132,7 +132,7 @@ fn pki_integer_content_len(val: Address, val_len: u32) -> u32 {
 }
 
 // Full TLV size for a DER INTEGER with the given raw bytes.
-fn pki_integer_tlv_len(val: Address, val_len: u32) -> u32 {
+transform pki_integer_tlv_len(val: Address, val_len: u32) -> u32 {
     c: u32 = pki_integer_content_len(val, val_len);
     return 1 + pki_len_bytes_for(c) + c;
 }
@@ -142,21 +142,21 @@ fn pki_integer_tlv_len(val: Address, val_len: u32) -> u32 {
 // ===========================================================================
 
 // Write a generic TLV header. Returns bytes written.
-fn pki_write_tlv_header(buf: Address, offset: u32, tag: u32, content_len: u32) -> u32 {
+transform pki_write_tlv_header(buf: Address, offset: u32, tag: u32, content_len: u32) -> u32 {
     *(buf + offset) = tag & 255;
     return 1 + der_write_length(buf, offset + 1, content_len);
 }
 
-fn pki_write_seq_header(buf: Address, offset: u32, content_len: u32) -> u32 {
+transform pki_write_seq_header(buf: Address, offset: u32, content_len: u32) -> u32 {
     return pki_write_tlv_header(buf, offset, PKI_TAG_SEQUENCE, content_len);
 }
 
-fn pki_write_set_header(buf: Address, offset: u32, content_len: u32) -> u32 {
+transform pki_write_set_header(buf: Address, offset: u32, content_len: u32) -> u32 {
     return pki_write_tlv_header(buf, offset, PKI_TAG_SET, content_len);
 }
 
 // Write a small non-negative integer (0..127) as a DER INTEGER.
-fn pki_write_small_int(buf: Address, offset: u32, val: u32) -> u32 {
+transform pki_write_small_int(buf: Address, offset: u32, val: u32) -> u32 {
     *(buf + offset)     = PKI_TAG_INTEGER;
     *(buf + offset + 1) = 1;
     *(buf + offset + 2) = val & 127;
@@ -169,7 +169,7 @@ fn pki_write_small_int(buf: Address, offset: u32, val: u32) -> u32 {
 
 // RSA encryption OID: 1.2.840.113549.1.1.1
 // DER bytes: 2A 86 48 86 F7 0D 01 01 01 (9 bytes)
-fn pki_oid_rsa_enc() -> Address {
+transform pki_oid_rsa_enc() -> Address {
     buf = allocate(9);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
@@ -179,7 +179,7 @@ fn pki_oid_rsa_enc() -> Address {
 
 // sha256WithRSAEncryption OID: 1.2.840.113549.1.1.11
 // DER bytes: 2A 86 48 86 F7 0D 01 01 0B (9 bytes)
-fn pki_oid_sha256_rsa() -> Address {
+transform pki_oid_sha256_rsa() -> Address {
     buf = allocate(9);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
@@ -189,7 +189,7 @@ fn pki_oid_sha256_rsa() -> Address {
 
 // SHA-256 OID: 2.16.840.1.101.3.4.2.1
 // DER bytes: 60 86 48 01 65 03 04 02 01 (9 bytes)
-fn pki_oid_sha256() -> Address {
+transform pki_oid_sha256() -> Address {
     buf = allocate(9);
     *(buf + 0) = 96;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 1;   *(buf + 4) = 101; *(buf + 5) = 3;
@@ -199,7 +199,7 @@ fn pki_oid_sha256() -> Address {
 
 // SHA-1 OID: 1.3.14.3.2.26
 // DER bytes: 2B 0E 03 02 1A (5 bytes)
-fn pki_oid_sha1() -> Address {
+transform pki_oid_sha1() -> Address {
     buf = allocate(5);
     *(buf + 0) = 43;  *(buf + 1) = 14; *(buf + 2) = 3;
     *(buf + 3) = 2;   *(buf + 4) = 26;
@@ -208,7 +208,7 @@ fn pki_oid_sha1() -> Address {
 
 // id-data OID: 1.2.840.113549.1.7.1
 // DER bytes: 2A 86 48 86 F7 0D 01 07 01 (9 bytes)
-fn pki_oid_data() -> Address {
+transform pki_oid_data() -> Address {
     buf = allocate(9);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
@@ -218,7 +218,7 @@ fn pki_oid_data() -> Address {
 
 // id-signedData OID: 1.2.840.113549.1.7.2
 // DER bytes: 2A 86 48 86 F7 0D 01 07 02 (9 bytes)
-fn pki_oid_signed_data() -> Address {
+transform pki_oid_signed_data() -> Address {
     buf = allocate(9);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
@@ -228,7 +228,7 @@ fn pki_oid_signed_data() -> Address {
 
 // id-pkix-ocsp-basic OID: 1.3.6.1.5.5.7.48.1.1
 // DER bytes: 2B 06 01 05 05 07 30 01 01 (9 bytes)
-fn pki_oid_ocsp_basic() -> Address {
+transform pki_oid_ocsp_basic() -> Address {
     buf = allocate(9);
     *(buf + 0) = 43;  *(buf + 1) = 6;   *(buf + 2) = 1;
     *(buf + 3) = 5;   *(buf + 4) = 5;   *(buf + 5) = 7;
@@ -241,7 +241,7 @@ fn pki_oid_ocsp_basic() -> Address {
 // ===========================================================================
 
 // Write SEQUENCE { OID, NULL } into `buf` at `offset`. Returns bytes written.
-fn pki_write_alg_id(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
+transform pki_write_alg_id(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
     oid_tlv_len: u32 = 1 + pki_len_bytes_for(oid_len) + oid_len;
     content_len: u32 = oid_tlv_len + 2;  // NULL = 05 00 (2 bytes)
     pos: u32 = offset;
@@ -252,7 +252,7 @@ fn pki_write_alg_id(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32)
 }
 
 // Total size of an AlgorithmIdentifier TLV with a given raw OID length.
-fn pki_alg_id_len(oid_len: u32) -> u32 {
+transform pki_alg_id_len(oid_len: u32) -> u32 {
     oid_tlv_len: u32 = 1 + pki_len_bytes_for(oid_len) + oid_len;
     content_len: u32 = oid_tlv_len + 2;
     return 1 + pki_len_bytes_for(content_len) + content_len;
@@ -288,7 +288,7 @@ fn pki_alg_id_len(oid_len: u32) -> u32 {
 //   inner RSAPrivateKey version is always 0 per PKCS#1.
 //   Returns total bytes written.
 
-fn pkcs8_encode_rsa_private_key(version: u32, n: Address, n_len: u32,
+transform pkcs8_encode_rsa_private_key(version: u32, n: Address, n_len: u32,
                                 e: Address, e_len: u32,
                                 d: Address, d_len: u32,
                                 p: Address, p_len: u32,
@@ -358,7 +358,7 @@ fn pkcs8_encode_rsa_private_key(version: u32, n: Address, n_len: u32,
 // each integer's effective range.
 // Returns 1 on success, 0 on error.
 
-fn pkcs8_decode(buf: Address, buf_len: u32, key_data: Address) -> u32 {
+transform pkcs8_decode(buf: Address, buf_len: u32, key_data: Address) -> u32 {
     pos: u32 = 0;
 
     // Outer SEQUENCE
@@ -458,7 +458,7 @@ fn pkcs8_decode(buf: Address, buf_len: u32, key_data: Address) -> u32 {
 //                  + key_size + 64 bytes
 //   Returns total bytes written.
 
-fn csr_build(subject: Address, subject_len: u32,
+transform csr_build(subject: Address, subject_len: u32,
              pubkey: Address, pubkey_len: u32,
              privkey_d: Address, n: Address, key_size: u32,
              out: Address) -> u32 {
@@ -549,7 +549,7 @@ fn csr_build(subject: Address, subject_len: u32,
 //
 // Returns 1 on success, 0 on error.
 
-fn csr_parse(buf: Address, buf_len: u32,
+transform csr_parse(buf: Address, buf_len: u32,
              subject: Address, pubkey: Address, sig: Address) -> u32 {
     pos: u32 = 0;
 
@@ -666,7 +666,7 @@ fn csr_parse(buf: Address, buf_len: u32,
 //                  + key_size + 256 bytes
 //   Returns total bytes written; 0 on error.
 
-fn cms_build_signed_data(content: Address, content_len: u32,
+transform cms_build_signed_data(content: Address, content_len: u32,
                          cert: Address, cert_len: u32,
                          privkey_d: Address, n: Address, key_size: u32,
                          out: Address) -> u32 {
@@ -837,7 +837,7 @@ fn cms_build_signed_data(content: Address, content_len: u32,
 //
 // Returns 1 on success, 0 on error.
 
-fn cms_parse_signed_data(buf: Address, buf_len: u32,
+transform cms_parse_signed_data(buf: Address, buf_len: u32,
                          content: Address, cert: Address, sig: Address) -> u32 {
     pos: u32 = 0;
 
@@ -1034,7 +1034,7 @@ fn cms_parse_signed_data(buf: Address, buf_len: u32,
 //   `out`               — output buffer (256 bytes is ample)
 //   Returns total bytes written.
 
-fn ocsp_build_request(cert_serial: Address, serial_len: u32,
+transform ocsp_build_request(cert_serial: Address, serial_len: u32,
                       issuer_name_hash: Address, issuer_key_hash: Address,
                       hash_algorithm: u32, out: Address) -> u32 {
     // Determine hash length and OID
@@ -1148,7 +1148,7 @@ fn ocsp_build_request(cert_serial: Address, serial_len: u32,
 // Returns 1 on success (even if responseStatus != successful — outputs other
 // than status are zeroed in that case), 0 on parse error.
 
-fn ocsp_parse_response(buf: Address, buf_len: u32,
+transform ocsp_parse_response(buf: Address, buf_len: u32,
                        status: Address, cert_status: Address,
                        this_update: Address, next_update: Address) -> u32 {
     // Zero all outputs up front; we fill them as we go.
@@ -1352,7 +1352,7 @@ fn ocsp_parse_response(buf: Address, buf_len: u32,
 //                        (or 0,0 if absent)
 //   Returns the count of revoked serial entries written.
 
-fn crl_parse(buf: Address, buf_len: u32,
+transform crl_parse(buf: Address, buf_len: u32,
              revoked_serials: Address, max_entries: u32,
              next_update: Address) -> u32 {
     pki_store_u32(next_update, 0, 0);
@@ -1483,7 +1483,7 @@ fn crl_parse(buf: Address, buf_len: u32,
 //
 // Returns 1 if the serial is revoked, 0 otherwise (including parse errors).
 
-fn crl_check_revoked(crl: Address, crl_len: u32,
+transform crl_check_revoked(crl: Address, crl_len: u32,
                      serial: Address, serial_len: u32) -> u32 {
     if serial_len == 0 { return 0; }
 

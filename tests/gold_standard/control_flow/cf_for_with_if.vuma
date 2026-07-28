@@ -3,7 +3,7 @@
 //
 // Exposes: if-body assignments dropped → r stays 0, exit 0 instead of 42.
 
-fn main() -> i32 {
+transform main() -> i32 {
     r: u32 = 0;
     for i in 0..10 {
         if (i == 5) {

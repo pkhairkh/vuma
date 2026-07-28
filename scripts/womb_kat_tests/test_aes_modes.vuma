@@ -2,4 +2,4 @@
 // AES-CBC IV XOR
 // Expected exit code: 127
 
-fn main() -> i32 { return (255 ^ 128) & 255; }
+transform main() -> i32 { return (255 ^ 128) & 255; }

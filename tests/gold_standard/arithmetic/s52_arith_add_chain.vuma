@@ -6,7 +6,7 @@
 // Distinct from s50_arith_add_then_div (50) and s46_arith_sub_then_div
 // (30).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 30;
     b: u32 = 40;
     c: u32 = 50;

@@ -2508,7 +2508,7 @@ fn lower_function(func: &IRFunction) -> Result<LoweredWasmFunction, BackendError
     // already empty for all functions, so this override was a no-op.  The
     // direct `bridge_ast_to_codegen_scg` bridge (now in `src/pipeline.rs`)
     // correctly populates `result_types` from the VUMA source (e.g.
-    // `[I32]` for `fn main() -> i32`), which exposed this latent
+    // `[I32]` for `transform main() -> i32`), which exposed this latent
     // dependency: with non-empty `result_types`, the emitted module fails
     // Wasm validation → wasmtime rejects it → the wasm32 backend
     // collapses from 99.65% to 1.20% pass rate (5669 failures).
@@ -6162,7 +6162,7 @@ fn emit_write_wrapper() -> WasmFuncBody {
 /// use vuma_codegen::wasm32::compile_to_wasm;
 /// use vuma_codegen::ir::{IRFunction, IRType, IRValue, IRInstr, IRTerminator};
 ///
-/// // Build a simple IR function: fn main() -> i32 { return 42; }
+/// // Build a simple IR function: transform main() -> i32 { return 42; }
 /// let func = IRFunction {
 ///     name: "main".to_string(),
 ///     params: vec![],
@@ -8063,7 +8063,7 @@ mod wasm_target_tests {
     use crate::ir::{IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue};
     use std::collections::HashSet;
 
-    /// Helper: build a minimal IR function `fn main() -> i32 { return N; }`.
+    /// Helper: build a minimal IR function `transform main() -> i32 { return N; }`.
     fn make_main_returning(value: i32) -> IRFunction {
         IRFunction {
             name: "main".to_string(),
@@ -8086,7 +8086,7 @@ mod wasm_target_tests {
         }
     }
 
-    /// Helper: build a minimal IR function `fn main() { }` (void return).
+    /// Helper: build a minimal IR function `transform main() { }` (void return).
     fn make_main_void() -> IRFunction {
         IRFunction {
             name: "main".to_string(),
@@ -8279,7 +8279,7 @@ mod wasm_target_tests {
 
     #[test]
     fn test_compile_to_wasm_simple_return() {
-        // Compile fn main() -> i32 { return 42; }
+        // Compile transform main() -> i32 { return 42; }
         let func = make_main_returning(42);
         let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
 
@@ -8294,7 +8294,7 @@ mod wasm_target_tests {
 
     #[test]
     fn test_compile_to_wasm_void_main() {
-        // Compile fn main() { }
+        // Compile transform main() { }
         let func = make_main_void();
         let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
 
@@ -8377,7 +8377,7 @@ mod wasm_target_tests {
         // host runner.
         //
         // ── Case 1: program with no filesystem calls ──────────────────
-        // `make_main_returning(0)` builds `fn main() -> i32 { return 0; }`,
+        // `make_main_returning(0)` builds `transform main() -> i32 { return 0; }`,
         // which has no Call instructions at all.  Its `relocations` vec is
         // empty, so `used_externs` is empty, so NO vuma.* imports are
         // emitted.
@@ -8424,7 +8424,7 @@ mod wasm_target_tests {
         }
 
         // ── Case 2: program that calls vuma.open ─────────────────────
-        // Build `fn main() -> i32 { x = call open(0, 0, 0); return x; }`
+        // Build `transform main() -> i32 { x = call open(0, 0, 0); return x; }`
         // so that `used_externs` contains "open" and the vuma.open import
         // IS emitted.
         let func_with_open = IRFunction {
@@ -8570,21 +8570,21 @@ mod wasm_target_tests {
     ///
     /// The direct `bridge_ast_to_codegen_scg` bridge (src/pipeline.rs)
     /// populates `IRFunction::result_types` from the VUMA source — e.g.
-    /// `[IRType::I32]` for `fn main() -> i32`.  The wasm32 backend's
+    /// `[IRType::I32]` for `transform main() -> i32`.  The wasm32 backend's
     /// `lower_function` previously built `wasm_func_type.results` directly
     /// from `func.result_types`, but the Ret/Return lowering stores the
     /// value to memory[0] and emits `return` with an empty value stack.
     /// When `results` was non-empty, the Wasm validator rejected the
     /// module ("stack underflow at return"), wasmtime exited 1, and the
     /// wasm32 backend collapsed from 99.65% to 1.20% pass rate (5669
-    /// failures) — even the trivial `fn main() -> i32 { return 0; }`.
+    /// failures) — even the trivial `transform main() -> i32 { return 0; }`.
     ///
     /// The fix forces `wasm_func_type.results = vec![]` for all program
     /// functions (the void+memory[0] return convention already used by
     /// Ret/Return lowering, call sites, and the `_start`/`_vuma_main`
     /// wrappers).  This test exercises the full path
     /// (`allocate_registers` → `encode_program`) with the minimal
-    /// `fn main() -> i32 { return 0; }` IR and asserts:
+    /// `transform main() -> i32 { return 0; }` IR and asserts:
     ///   1. encode_program returns Ok(bytes).
     ///   2. The bytes start with the Wasm magic and version 1 header.
     ///   3. The module exports `_vuma_main` (the test-harness entry).
@@ -8592,7 +8592,7 @@ mod wasm_target_tests {
     ///      `() -> ()` — i.e. results is empty (the actual fix).
     #[test]
     fn test_wasm32_main_returning_i32_emits_void_func_type() {
-        // ── Step 1: construct minimal IR for `fn main() -> i32 { return 0; }`
+        // ── Step 1: construct minimal IR for `transform main() -> i32 { return 0; }`
         // (params: [], result_types: [I32] — exactly what the direct bridge
         // produces for this source).
         let func = make_main_returning(0);
@@ -8602,7 +8602,7 @@ mod wasm_target_tests {
         let backend = Wasm32Backend::new();
         let allocated = backend
             .allocate_registers(&func)
-            .expect("allocate_registers should succeed for fn main() -> i32 { return 0; }");
+            .expect("allocate_registers should succeed for transform main() -> i32 { return 0; }");
 
         // Sanity: wasm_func_type must be Some (set by allocate_registers).
         assert!(

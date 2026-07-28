@@ -8,7 +8,7 @@
 // s51_crypto_and_then_xor (195), s58_crypto_or_then_xor (127) and
 // s55_crypto_nibble_clear (15).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;          // 0xF0
     b: u64 = 15;           // 0x0F
     c: u64 = 170;          // 0xAA

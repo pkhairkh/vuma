@@ -7,7 +7,7 @@
 // s26_bit_and_or_xor (and-or-xor, 25) and s22_bit_or_xor_chain
 // (or-xor-chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 170;          // 0xAA
     b: u64 = 15;           // 0x0F
     c: u64 = 3;

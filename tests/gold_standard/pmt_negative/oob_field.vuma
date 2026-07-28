@@ -38,7 +38,7 @@
 
 layout Small = { tag: u8 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Small);
     s.tag = 42;
     return s.tag;

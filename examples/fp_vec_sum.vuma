@@ -10,7 +10,7 @@
 //   - Pointer arithmetic for array access
 //   - IVE verifies Interpretation (loaded type matches stored type)
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate 1024 * 4 = 4096 bytes for an f32 array.
     ptr = allocate(4096);
     // Fill with 1.0 each.

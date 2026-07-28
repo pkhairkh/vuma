@@ -13,7 +13,7 @@
 // the shift amounts are loaded into named variables; the final byte
 // mask is also loaded into a named variable.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 69;
     three: u64 = 3;
     five: u64 = 5;

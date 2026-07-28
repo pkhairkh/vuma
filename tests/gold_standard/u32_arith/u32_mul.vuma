@@ -3,7 +3,7 @@
 //
 // 6 * 7 = 42. No overflow. Masked to u32 = 42.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 6;
     b: u32 = 7;
     product: u32 = (a * b) & 4294967295;

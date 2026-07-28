@@ -6,7 +6,7 @@
 // Straight-line arithmetic. Distinct from s38_arith_sub_then_mod
 // (50) and s34_arith_mul_then_mod (7).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 15;
     b: u32 = 9;
     c: u32 = 17;

@@ -3,7 +3,7 @@
 //
 // Sanity: false if-body should be skipped.
 
-fn main() -> i32 {
+transform main() -> i32 {
     if false {
         return 42;
     }

@@ -7,7 +7,7 @@
 // s22_crypto_shl_mask_high (shl-mask high) and s18_crypto_shl_mask
 // (shl-mask, different values).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1;
     b: u64 = 4;
     c: u64 = 63;          // 0x3F

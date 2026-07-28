@@ -12,24 +12,24 @@
 // Entry layout: [key: key_max_len bytes][val: 8 bytes] = key_max_len + 8
 // Entries are kept sorted by key (insertion sort for simplicity).
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
@@ -37,7 +37,7 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 
 // Create a BTreeMap with given capacity and key size.
 // key_max_len: maximum key length in bytes (keys are fixed-size).
-fn btreemap_new(capacity: u32, key_max_len: u32) -> Address {
+transform btreemap_new(capacity: u32, key_max_len: u32) -> Address {
     m = allocate(24);
     if capacity == 0 { capacity = 64; }
     if key_max_len == 0 { key_max_len = 32; }
@@ -54,14 +54,14 @@ fn btreemap_new(capacity: u32, key_max_len: u32) -> Address {
     return m;
 }
 
-fn btreemap_count(m: Address) -> u32 { return load_u32(m, 8); }
-fn btreemap_entry_size(m: Address) -> u32 {
+transform btreemap_count(m: Address) -> u32 { return load_u32(m, 8); }
+transform btreemap_entry_size(m: Address) -> u32 {
     return load_u32(m, 16) + 8;  // key_max_len + 8
 }
 
 // Compare key at entries[idx] with (key, key_len).
 // Returns: 0 = equal, 1 = entry > key, -1 = entry < key
-fn btreemap_cmp_key(m: Address, entries: u64, idx: u32, key: Address, key_len: u32) -> i32 {
+transform btreemap_cmp_key(m: Address, entries: u64, idx: u32, key: Address, key_len: u32) -> i32 {
     key_max_len: u32 = load_u32(m, 16);
     entry_offset: u32 = idx * (key_max_len + 8);
     i: u32 = 0;
@@ -81,7 +81,7 @@ fn btreemap_cmp_key(m: Address, entries: u64, idx: u32, key: Address, key_len: u
 }
 
 // Binary search for key. Returns index if found, or complement of insertion point.
-fn btreemap_bsearch(m: Address, key: Address, key_len: u32) -> i32 {
+transform btreemap_bsearch(m: Address, key: Address, key_len: u32) -> i32 {
     count: u32 = load_u32(m, 8);
     entries: u64 = load_u64(m, 0);
     lo: u32 = 0;
@@ -100,7 +100,7 @@ fn btreemap_bsearch(m: Address, key: Address, key_len: u32) -> i32 {
 // Grow the entries buffer to double its current capacity.
 // Allocates a new buffer, copies the old contents, frees the old buffer,
 // and updates the map header. Mirrors the vec_reserve pattern.
-fn btreemap_grow(m: Address) {
+transform btreemap_grow(m: Address) {
     cap: u32 = load_u32(m, 12);
     key_max_len: u32 = load_u32(m, 16);
     entry_size: u32 = key_max_len + 8;
@@ -123,7 +123,7 @@ fn btreemap_grow(m: Address) {
 }
 
 // Insert key->val. If key exists, update value.
-fn btreemap_insert(m: Address, key: Address, key_len: u32, val: u64) {
+transform btreemap_insert(m: Address, key: Address, key_len: u32, val: u64) {
     count: u32 = load_u32(m, 8);
     cap: u32 = load_u32(m, 12);
     if count >= cap { btreemap_grow(m); }
@@ -178,7 +178,7 @@ fn btreemap_insert(m: Address, key: Address, key_len: u32, val: u64) {
 }
 
 // Lookup: returns val or 0 if not found.
-fn btreemap_get(m: Address, key: Address, key_len: u32) -> u64 {
+transform btreemap_get(m: Address, key: Address, key_len: u32) -> u64 {
     idx: i32 = btreemap_bsearch(m, key, key_len);
     if idx < 0 { return 0; }
     entries: u64 = load_u64(m, 0);
@@ -188,14 +188,14 @@ fn btreemap_get(m: Address, key: Address, key_len: u32) -> u64 {
 }
 
 // Check if key exists
-fn btreemap_contains(m: Address, key: Address, key_len: u32) -> u32 {
+transform btreemap_contains(m: Address, key: Address, key_len: u32) -> u32 {
     idx: i32 = btreemap_bsearch(m, key, key_len);
     if idx >= 0 { return 1; }
     return 0;
 }
 
 // Get key at index (for iteration). Copies key to dst buffer.
-fn btreemap_get_key_at(m: Address, idx: u32, dst: Address, dst_cap: u32) -> u32 {
+transform btreemap_get_key_at(m: Address, idx: u32, dst: Address, dst_cap: u32) -> u32 {
     count: u32 = load_u32(m, 8);
     if idx >= count { return 0; }
     entries: u64 = load_u64(m, 0);
@@ -209,7 +209,7 @@ fn btreemap_get_key_at(m: Address, idx: u32, dst: Address, dst_cap: u32) -> u32 
 }
 
 // Get value at index (for iteration)
-fn btreemap_get_val_at(m: Address, idx: u32) -> u64 {
+transform btreemap_get_val_at(m: Address, idx: u32) -> u64 {
     count: u32 = load_u32(m, 8);
     if idx >= count { return 0; }
     entries: u64 = load_u64(m, 0);
@@ -218,7 +218,7 @@ fn btreemap_get_val_at(m: Address, idx: u32) -> u64 {
     return load_u64(entries, entry_offset + key_max_len);
 }
 
-fn btreemap_free(m: Address) {
+transform btreemap_free(m: Address) {
     entries: u64 = load_u64(m, 0);
     cap: u32 = load_u32(m, 12);
     key_max_len: u32 = load_u32(m, 16);

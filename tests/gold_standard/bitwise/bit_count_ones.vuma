@@ -10,7 +10,7 @@
 //
 // Workaround note: nested (shift) & mask patterns after a prior shift-and-mask
 // are miscompiled, so each shift-then-mask is split into two statements.
-fn main() -> i32 {
+transform main() -> i32 {
     x: u64 = 15;
     m1: u64 = 0x5555555555555555;
     m2: u64 = 0x3333333333333333;

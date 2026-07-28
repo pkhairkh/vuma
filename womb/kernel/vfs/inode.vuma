@@ -95,10 +95,10 @@
 // (K2a's pmm_init(pool, pmm, ...), K3d's trap_frame_init(tf), K4a's
 // pt_init(tbl) — see womb/kernel/mm/pmm.vuma header "Why init-style?"
 // for the codegen rationale: the current codegen does NOT propagate
-// State-typedness through function return values, so `fn inode_new() ->
+// State-typedness through function return values, so `transform inode_new() ->
 // State<InodeTable>` would produce broken field-access code in
 // callers). All inode.vuma helpers take `tbl: State<InodeTable>` by
-// regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't
+// regular VUMA-transform borrow (NOT extern #[borrow] — VUMA transform calls don't
 // need the attribute; only extern "C" calls do, and none of these
 // helpers call any extern).
 //
@@ -264,7 +264,7 @@ layout InodeTable = {
 // shifted-bytes on reads.
 
 // Read the u64 `ino` field of Inode slot `idx` from InodeTable.inos.
-fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -278,7 +278,7 @@ fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `ino` field of Inode slot `idx` into InodeTable.inos.
-fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -290,7 +290,7 @@ fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `size` field of Inode slot `idx` from InodeTable.sizes.
-fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -304,7 +304,7 @@ fn inode_get_size(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `size` field of Inode slot `idx` into InodeTable.sizes.
-fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -316,7 +316,7 @@ fn inode_set_size(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `blocks` field of Inode slot `idx` from InodeTable.blocks.
-fn inode_get_blocks(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_blocks(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -330,7 +330,7 @@ fn inode_get_blocks(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `blocks` field of Inode slot `idx` into InodeTable.blocks.
-fn inode_set_blocks(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_blocks(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -342,7 +342,7 @@ fn inode_set_blocks(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `atime` field of Inode slot `idx` from InodeTable.atimes.
-fn inode_get_atime(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_atime(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -356,7 +356,7 @@ fn inode_get_atime(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `atime` field of Inode slot `idx` into InodeTable.atimes.
-fn inode_set_atime(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_atime(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -368,7 +368,7 @@ fn inode_set_atime(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `mtime` field of Inode slot `idx` from InodeTable.mtimes.
-fn inode_get_mtime(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_mtime(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -382,7 +382,7 @@ fn inode_get_mtime(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `mtime` field of Inode slot `idx` into InodeTable.mtimes.
-fn inode_set_mtime(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_mtime(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -394,7 +394,7 @@ fn inode_set_mtime(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `ops` field of Inode slot `idx` from InodeTable.ops.
-fn inode_get_ops(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_ops(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -408,7 +408,7 @@ fn inode_get_ops(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `ops` field of Inode slot `idx` into InodeTable.ops.
-fn inode_set_ops(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_ops(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -420,7 +420,7 @@ fn inode_set_ops(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `private` field of Inode slot `idx` from InodeTable.privates.
-fn inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -434,7 +434,7 @@ fn inode_get_private(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `private` field of Inode slot `idx` into InodeTable.privates.
-fn inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -455,7 +455,7 @@ fn inode_set_private(tbl: State<InodeTable>, idx: u32, val: u64) {
 // bytes 4..7 would be zero-shifted out anyway.
 
 // Read the u32 `mode` field of Inode slot `idx` from InodeTable.modes.
-fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+transform inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -469,7 +469,7 @@ fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `mode` field of Inode slot `idx` into InodeTable.modes.
-fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+transform inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -481,7 +481,7 @@ fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `uid` field of Inode slot `idx` from InodeTable.uids.
-fn inode_get_uid(tbl: State<InodeTable>, idx: u32) -> u32 {
+transform inode_get_uid(tbl: State<InodeTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -495,7 +495,7 @@ fn inode_get_uid(tbl: State<InodeTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `uid` field of Inode slot `idx` into InodeTable.uids.
-fn inode_set_uid(tbl: State<InodeTable>, idx: u32, val: u32) {
+transform inode_set_uid(tbl: State<InodeTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -507,7 +507,7 @@ fn inode_set_uid(tbl: State<InodeTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `gid` field of Inode slot `idx` from InodeTable.gids.
-fn inode_get_gid(tbl: State<InodeTable>, idx: u32) -> u32 {
+transform inode_get_gid(tbl: State<InodeTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -521,7 +521,7 @@ fn inode_get_gid(tbl: State<InodeTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `gid` field of Inode slot `idx` into InodeTable.gids.
-fn inode_set_gid(tbl: State<InodeTable>, idx: u32, val: u32) {
+transform inode_set_gid(tbl: State<InodeTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -544,7 +544,7 @@ fn inode_set_gid(tbl: State<InodeTable>, idx: u32, val: u32) {
 // (K5d's tmpfs_create sets mode + uid + gid; K5c's file_write bumps
 // size + mtime), so zeroing them here would be wasted work (and VUMA
 // has no memset).
-fn inode_init(tbl: State<InodeTable>) {
+transform inode_init(tbl: State<InodeTable>) {
     let i = 0;
     while i < 64 {
         inode_set_ino(tbl, i, 0);
@@ -567,7 +567,7 @@ fn inode_init(tbl: State<InodeTable>) {
 //
 // The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
 // (verified by the self-test: free slot 0, alloc → returns 0, not 2).
-fn inode_alloc(tbl: State<InodeTable>) -> u32 {
+transform inode_alloc(tbl: State<InodeTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if inode_get_ino(tbl, i) == 0 {
@@ -587,7 +587,7 @@ fn inode_alloc(tbl: State<InodeTable>) -> u32 {
 // calls this when the last reference to an inode is dropped; K5d's
 // tmpfs_unlink calls this when a file is removed from the directory
 // tree AND the link count reaches 0.
-fn inode_free(tbl: State<InodeTable>, idx: u32) {
+transform inode_free(tbl: State<InodeTable>, idx: u32) {
     inode_set_ino(tbl, idx, 0);
     tbl.count = tbl.count - 1;
 }
@@ -626,7 +626,7 @@ fn inode_free(tbl: State<InodeTable>, idx: u32) {
 // header for the same rationale, and K4a's task.vuma for the same rule
 // applied to slot count 256 and state values 1/2).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(InodeTable);
     inode_init(tbl);
 

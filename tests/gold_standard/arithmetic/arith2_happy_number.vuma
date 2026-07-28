@@ -6,7 +6,7 @@
 // We compute one iteration (1 → 1), confirm sum == n, return 1.
 // Straight-line code only.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 1;
     // One happy iteration: sum of squares of digits
     d: u32 = n % 10;        // 1

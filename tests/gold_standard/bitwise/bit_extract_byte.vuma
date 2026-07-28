@@ -6,7 +6,7 @@
 // Workaround note: nested (shift) & mask expressions where the shift input
 // was itself computed via a prior shift-and-mask are miscompiled. We split
 // the shift and the mask into separate statements as a precaution.
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 0x12345678;
     sixteen: u64 = 16;
     byte_mask: u64 = 0xFF;

@@ -1,7 +1,7 @@
 // womb/encoding/base64.vuma — Base64 Encoding (RFC 4648)
 // No main() — importable library module.
 
-fn b64_enc_char(idx: u32) -> u32 {
+transform b64_enc_char(idx: u32) -> u32 {
     if idx < 26 { return idx + 65; }
     if idx < 52 { return (idx - 26) + 97; }
     if idx < 62 { return (idx - 52) + 48; }
@@ -9,7 +9,7 @@ fn b64_enc_char(idx: u32) -> u32 {
     return 47;
 }
 
-fn b64_dec_char(c: u32) -> u32 {
+transform b64_dec_char(c: u32) -> u32 {
     if c >= 65 { if c <= 90 { return c - 65; } }
     if c >= 97 { if c <= 122 { return c - 97 + 26; } }
     if c >= 48 { if c <= 57 { return c - 48 + 52; } }
@@ -18,7 +18,7 @@ fn b64_dec_char(c: u32) -> u32 {
     return 255;
 }
 
-fn base64_encode(input: Address, len: u32, output: Address) -> u32 {
+transform base64_encode(input: Address, len: u32, output: Address) -> u32 {
     out_idx: u32 = 0;
     in_idx: u32 = 0;
     while in_idx + 3 <= len {
@@ -52,7 +52,7 @@ fn base64_encode(input: Address, len: u32, output: Address) -> u32 {
     return out_idx;
 }
 
-fn base64_decode(input: Address, len: u32, output: Address) -> u32 {
+transform base64_decode(input: Address, len: u32, output: Address) -> u32 {
     if len % 4 != 0 { return 4294967295; }
     out_idx: u32 = 0;
     in_idx: u32 = 0;

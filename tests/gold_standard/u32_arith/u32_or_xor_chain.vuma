@@ -6,7 +6,7 @@
 // s10_u32_or_then_and (or-then-and) and s7_u32_or_mask (single OR with
 // mask).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 16;          // 0x10
     b: u32 = 32;          // 0x20
     c: u32 = 15;          // 0x0F

@@ -6,7 +6,7 @@
 // 3 (the three diagonal entries).
 // NOW PASSING until the for-body assignment propagation bug is fixed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     sum: u32 = 0;
     for i in 0..3 {
         for j in 0..3 {

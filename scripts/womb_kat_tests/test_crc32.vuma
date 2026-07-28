@@ -3,12 +3,12 @@
 // Expected exit code: 38
 
 const POLY: u32 = 3988292384;
-fn crc32_table_entry(idx: u32) -> u32 {
+transform crc32_table_entry(idx: u32) -> u32 {
     crc: u32 = idx; i: u32 = 0;
     while i < 8 { if (crc&1)==1 { crc=(crc>>1)^POLY; } else { crc=crc>>1; } i=i+1; }
     return crc;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     table = allocate(1024);
     i: u32 = 0;
     while i < 256 {

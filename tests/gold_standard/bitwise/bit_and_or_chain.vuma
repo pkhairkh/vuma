@@ -6,7 +6,7 @@
 // to dodge the immediate-RHS bitwise drop bug. Distinct from
 // s4_bit_or_then_and (op order swapped).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 12;
     b: u64 = 10;
     c: u64 = 5;

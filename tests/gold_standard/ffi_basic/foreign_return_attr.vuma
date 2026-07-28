@@ -1,4 +1,4 @@
-// ffi_wave0/foreign_return_attr — #[foreign_return(raw)] on an extern fn (parse-only)
+// ffi_wave0/foreign_return_attr — #[foreign_return(raw)] on an extern transform (parse-only)
 // Expected exit code: 0
 //
 // Test: #[foreign_return(raw)] declares the return mode: the C return
@@ -9,9 +9,9 @@ layout DbHandle = { raw: u64 }
 
 extern "C" {
     #[foreign_return(raw)]
-    fn sqlite3_open(path: Address) -> State<DbHandle>;
+    transform sqlite3_open(path: Address) -> State<DbHandle>;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

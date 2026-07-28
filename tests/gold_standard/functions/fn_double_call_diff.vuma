@@ -5,13 +5,13 @@
 // sums them. Distinct from s5_fn_call_chain_diff_funcs (different
 // helpers in chain).
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     one: u32 = 1;
     r: u32 = x + one;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = inc(10);   // 11
     b: u32 = inc(20);   // 21
     s: u32 = a + b;     // 32

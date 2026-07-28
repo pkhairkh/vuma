@@ -154,7 +154,7 @@
 // passes it by reference to tcp_init / tcp_alloc / ... / tcp_free
 // (init-style API — see "Why init-style?" in K4e's wait.vuma header for
 // the codegen rationale: the current codegen does NOT propagate State-
-// typedness through function return values, so `fn tcp_new() ->
+// typedness through function return values, so `transform tcp_new() ->
 // State<TcpTable>` would produce broken field-access code in callers).
 // No externs are declared (pure-PM — no syscalls, no IRQ, no allocation).
 // The actual "send bytes over the wire" path is deferred to the NIC
@@ -249,7 +249,7 @@ layout TcpTable = {
 
 // tcp_init: zero all 64 connection slots' state + used flags, count=0.
 // Same pattern as K9a's sock_init / K4a's pt_init / K8e's ipi_init.
-fn tcp_init(tbl: State<TcpTable>) {
+transform tcp_init(tbl: State<TcpTable>) {
     let i = 0;
     while i < 64 {
         tbl.states[i] = 0;  // CLOSED
@@ -262,7 +262,7 @@ fn tcp_init(tbl: State<TcpTable>) {
 // tcp_alloc: find a free connection slot, mark it used, bump count.
 // Returns the slot index (0..63) on success, or 64 if the table is full
 // (one-past-the-end sentinel — same convention as K4a's task_alloc).
-fn tcp_alloc(tbl: State<TcpTable>) -> u32 {
+transform tcp_alloc(tbl: State<TcpTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if tbl.used[i] == 0 {
@@ -288,7 +288,7 @@ fn tcp_alloc(tbl: State<TcpTable>) -> u32 {
 
 // Read the u16 `local_port` field of connection slot `idx` from
 // TcpTable.local_ports.
-fn tcp_get_local_port(tbl: State<TcpTable>, idx: u32) -> u16 {
+transform tcp_get_local_port(tbl: State<TcpTable>, idx: u32) -> u16 {
     let off = idx * 2;
     let v: u16 = 0;
     let i = 0;
@@ -303,7 +303,7 @@ fn tcp_get_local_port(tbl: State<TcpTable>, idx: u32) -> u16 {
 
 // Write the u16 `local_port` field of connection slot `idx` into
 // TcpTable.local_ports.
-fn tcp_set_local_port(tbl: State<TcpTable>, idx: u32, val: u16) {
+transform tcp_set_local_port(tbl: State<TcpTable>, idx: u32, val: u16) {
     let off = idx * 2;
     let i = 0;
     while i < 2 {
@@ -316,7 +316,7 @@ fn tcp_set_local_port(tbl: State<TcpTable>, idx: u32, val: u16) {
 
 // Read the u16 `remote_port` field of connection slot `idx` from
 // TcpTable.remote_ports.
-fn tcp_get_remote_port(tbl: State<TcpTable>, idx: u32) -> u16 {
+transform tcp_get_remote_port(tbl: State<TcpTable>, idx: u32) -> u16 {
     let off = idx * 2;
     let v: u16 = 0;
     let i = 0;
@@ -331,7 +331,7 @@ fn tcp_get_remote_port(tbl: State<TcpTable>, idx: u32) -> u16 {
 
 // Write the u16 `remote_port` field of connection slot `idx` into
 // TcpTable.remote_ports.
-fn tcp_set_remote_port(tbl: State<TcpTable>, idx: u32, val: u16) {
+transform tcp_set_remote_port(tbl: State<TcpTable>, idx: u32, val: u16) {
     let off = idx * 2;
     let i = 0;
     while i < 2 {
@@ -347,7 +347,7 @@ fn tcp_set_remote_port(tbl: State<TcpTable>, idx: u32, val: u16) {
 // the 2-byte little-endian pack helpers above (the same pattern K9a's
 // sys_bind uses for sock_set_local_port).
 // Returns 0 on success, 22=-EINVAL on idx >= 64, 9=-EBADF on unused slot.
-fn tcp_connect(tbl: State<TcpTable>, idx: u32, local_port: u16, remote_port: u16) -> i64 {
+transform tcp_connect(tbl: State<TcpTable>, idx: u32, local_port: u16, remote_port: u16) -> i64 {
     if idx >= 64 { return 22; }
     if tbl.used[idx] == 0 { return 9; }
     tcp_set_local_port(tbl, idx, local_port);
@@ -358,7 +358,7 @@ fn tcp_connect(tbl: State<TcpTable>, idx: u32, local_port: u16, remote_port: u16
 
 // tcp_accept_syn: receive SYN, send SYN-ACK, move to SYN_RECEIVED(2).
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
-fn tcp_accept_syn(tbl: State<TcpTable>, idx: u32) -> i64 {
+transform tcp_accept_syn(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
     tbl.states[idx] = 2;  // SYN_RECEIVED
     return 0;
@@ -376,7 +376,7 @@ fn tcp_accept_syn(tbl: State<TcpTable>, idx: u32) -> i64 {
 // RFC 793, an ACK segment may also carry a FIN — that case is handled
 // by tcp_recv_fin (called separately when the FIN flag bit is set).
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
-fn tcp_ack(tbl: State<TcpTable>, idx: u32) -> i64 {
+transform tcp_ack(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
     let s = tbl.states[idx];
     if s == 2 {  // SYN_RECEIVED
@@ -403,7 +403,7 @@ fn tcp_ack(tbl: State<TcpTable>, idx: u32) -> i64 {
 // A real TCP segment carrying both ACK+FIN would call both in sequence
 // (K9e+ will wire the flag dispatch once the IP layer lands).
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
-fn tcp_recv_fin(tbl: State<TcpTable>, idx: u32) -> i64 {
+transform tcp_recv_fin(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
     let s = tbl.states[idx];
     if s == 3 {  // ESTABLISHED
@@ -422,7 +422,7 @@ fn tcp_recv_fin(tbl: State<TcpTable>, idx: u32) -> i64 {
 // K9d's stub returns `len` (pretend all bytes were sent — the caller's
 // contract is "if return >= 0, that many bytes were sent"). Real TCP
 // send (segmentation, sequence-number bump, retransmit timer) is K9e+.
-fn tcp_send(tbl: State<TcpTable>, idx: u32, len: u64) -> i64 {
+transform tcp_send(tbl: State<TcpTable>, idx: u32, len: u64) -> i64 {
     if idx >= 64 { return 22; }
     if tbl.states[idx] != 3 { return 107; }  // -ENOTCONN
     return len as i64;
@@ -433,7 +433,7 @@ fn tcp_send(tbl: State<TcpTable>, idx: u32, len: u64) -> i64 {
 // >= 64, 107=-ENOTCONN if states[idx] != 3 (ESTABLISHED).
 // K9d's stub returns 0 (no data available). Real TCP recv (RX ring
 // buffer + sequence reassembly) is K9e+.
-fn tcp_recv(tbl: State<TcpTable>, idx: u32) -> i64 {
+transform tcp_recv(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
     if tbl.states[idx] != 3 { return 107; }
     return 0;  // stub: no data
@@ -450,7 +450,7 @@ fn tcp_recv(tbl: State<TcpTable>, idx: u32) -> i64 {
 // has already been received (CLOSE_WAIT → LAST_ACK) or not
 // (ESTABLISHED → FIN_WAIT_1).
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
-fn tcp_close(tbl: State<TcpTable>, idx: u32) -> i64 {
+transform tcp_close(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
     let s = tbl.states[idx];
     if s == 7 {  // CLOSE_WAIT
@@ -468,7 +468,7 @@ fn tcp_close(tbl: State<TcpTable>, idx: u32) -> i64 {
 // event (no actual wall-clock wait — the caller is responsible for
 // scheduling tcp_timeout after the 2MSL interval). Other states: no-op.
 // Returns 0 on success, 22=-EINVAL on idx >= 64.
-fn tcp_timeout(tbl: State<TcpTable>, idx: u32) -> i64 {
+transform tcp_timeout(tbl: State<TcpTable>, idx: u32) -> i64 {
     if idx >= 64 { return 22; }
     if tbl.states[idx] == 6 {  // TIME_WAIT
         tbl.states[idx] = 0;   // CLOSED
@@ -481,7 +481,7 @@ fn tcp_timeout(tbl: State<TcpTable>, idx: u32) -> i64 {
 // the count-- would underflow u32 — K9d's contract callers always free
 // exactly once after a successful tcp_alloc, matching K9a's sys_close
 // discipline).
-fn tcp_free(tbl: State<TcpTable>, idx: u32) {
+transform tcp_free(tbl: State<TcpTable>, idx: u32) {
     if idx >= 64 { return; }
     tbl.states[idx] = 0;
     tbl.used[idx] = 0;
@@ -500,7 +500,7 @@ fn tcp_free(tbl: State<TcpTable>, idx: u32) {
 //       ESTABLISHED → FIN_WAIT_1 → CLOSING → TIME_WAIT → CLOSED.
 // Returns 0 on success, 1..26 on individual check failures (each check
 // guards one observable state transition + the per-sequence free).
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(TcpTable);
     tcp_init(tbl);
 

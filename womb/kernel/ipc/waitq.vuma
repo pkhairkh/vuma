@@ -88,7 +88,7 @@
 // rationale), so a Task struct's `next` field lives in a parallel byte
 // array inside ProcessTable.nexts (K4a). That means a TRUE wait queue
 // would need to take BOTH State<WaitQueue> AND State<ProcessTable> on
-// every operation — waitq_add would be `fn waitq_add(wq, tbl, task_idx)`.
+// every operation — waitq_add would be `transform waitq_add(wq, tbl, task_idx)`.
 // The K7e contract deliberately avoids that coupling: the WaitQueue
 // tracks head/tail/count PLUS a single `next` field (head's immediate
 // successor) — NOT a full per-task next array. waitq_add maintains
@@ -182,7 +182,7 @@
 // waitq_wake_one / waitq_wake_all (init-style API — see "Why init-
 // style?" in K4e's wait.vuma header for the codegen rationale: the
 // current codegen does NOT propagate State-typedness through function
-// return values, so `fn waitq_new() -> State<WaitQueue>` would produce
+// return values, so `transform waitq_new() -> State<WaitQueue>` would produce
 // broken field-access code in callers). No externs are declared in this
 // file (waitq is pure-PM on the WaitQueue — no syscalls, no context
 // switch, no memory allocation).
@@ -277,7 +277,7 @@ layout WaitQueue = {
 // rationale).
 //
 // State<T> params: 1 (wq). Pure write — no reads, no helper calls.
-fn waitq_init(wq: State<WaitQueue>) {
+transform waitq_init(wq: State<WaitQueue>) {
     wq.head = 256;  // empty
     wq.tail = 256;
     wq.next = 256;  // head has no successor
@@ -308,7 +308,7 @@ fn waitq_init(wq: State<WaitQueue>) {
 //
 // State<T> params: 1 (wq). Reads wq.head / wq.next for the empty +
 // successor checks; writes wq.head / wq.tail / wq.next / wq.count.
-fn waitq_add(wq: State<WaitQueue>, task_idx: u64) {
+transform waitq_add(wq: State<WaitQueue>, task_idx: u64) {
     if wq.head == 256 {
         // Empty queue — task_idx becomes both head and tail. Head has
         // no successor yet (next = 256).
@@ -364,7 +364,7 @@ fn waitq_add(wq: State<WaitQueue>, task_idx: u64) {
 //
 // State<T> params: 1 (wq). Reads wq.head / wq.count; writes wq.head /
 // wq.tail / wq.count.
-fn waitq_remove(wq: State<WaitQueue>, task_idx: u64) -> i64 {
+transform waitq_remove(wq: State<WaitQueue>, task_idx: u64) -> i64 {
     if wq.head == 256 {
         return 0 - 1;  // -1 (empty queue)
     }
@@ -431,7 +431,7 @@ fn waitq_remove(wq: State<WaitQueue>, task_idx: u64) -> i64 {
 // pattern is the same as K4b's scheduler.vuma `let min_idx = rq.head;`
 // — direct field read into a u64 local (verified to work by
 // scheduler.vuma's self-test).
-fn waitq_wake_one(wq: State<WaitQueue>) -> u64 {
+transform waitq_wake_one(wq: State<WaitQueue>) -> u64 {
     if wq.head == 256 {
         return 256;  // empty
     }
@@ -493,7 +493,7 @@ fn waitq_wake_one(wq: State<WaitQueue>) -> u64 {
 // `let min_idx = rq.head;` followed by `rq.head = ...` — direct
 // field read into a local, then subsequent field writes don't affect
 // the local (verified to work by scheduler.vuma's self-test).
-fn waitq_wake_all(wq: State<WaitQueue>) -> u32 {
+transform waitq_wake_all(wq: State<WaitQueue>) -> u32 {
     let n = wq.count;
     wq.head = 256;
     wq.tail = 256;
@@ -553,7 +553,7 @@ fn waitq_wake_all(wq: State<WaitQueue>) -> u32 {
 // header for the same rationale, and K3a's trap_trampoline.vuma for
 // the same rule).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let wq = state_new(WaitQueue);
     waitq_init(wq);
 

@@ -6,23 +6,23 @@
 // from s11_mf_three_helpers_chain (inc(5) -> dbl -> dec = 11) and
 // s10_mf_three_chain_diff (different ops).
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     c: u32 = 1;
     r: u32 = x + c;
     return r;
 }
-fn dbl(x: u32) -> u32 {
+transform dbl(x: u32) -> u32 {
     c: u32 = 2;
     r: u32 = x * c;
     return r;
 }
-fn add10(x: u32) -> u32 {
+transform add10(x: u32) -> u32 {
     c: u32 = 10;
     r: u32 = x + c;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = inc(2);      // 3
     b: u32 = dbl(a);      // 6
     c: u32 = add10(b);    // 16

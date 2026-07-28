@@ -8,7 +8,7 @@
 // Byte swap: byte0(input) -> byte3(output), byte3(input) -> byte0(output).
 //   out = (in & 0xFF) << 24 | (in >> 8 & 0xFF) << 16
 //       | (in >> 16 & 0xFF) << 8 | (in >> 24 & 0xFF)
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 0x12345678;
     mFF: u64 = 0xFF;
     eight: u64 = 8;

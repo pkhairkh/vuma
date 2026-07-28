@@ -4,11 +4,11 @@
 // Tests a function that returns a u8 value. Verifies u8 return type
 // propagates through the call/return boundary.
 
-fn get_u8() -> u8 {
+transform get_u8() -> u8 {
     return 200;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u8 = get_u8();
     return v;
 }

@@ -9,7 +9,7 @@
 // fixed. Distinct from s78_cf_if_else_const (10),
 // s74_cf_if_else_const (19) and s73_cf_if_else_const (53).
 // Expected exit code: 45
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 45;

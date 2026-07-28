@@ -5,7 +5,7 @@
 // still compiles and runs. The child blocks on recv (no sender), so it
 // exits with the recv_timeout sentinel.
 // Expected exit code: 88
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

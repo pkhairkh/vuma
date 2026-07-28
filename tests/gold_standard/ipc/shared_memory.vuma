@@ -9,7 +9,7 @@
 // Note: MAP_SHARED|MAP_ANONYMOUS memory is inherited across fork()
 // and both processes see the same physical pages, so writes by the
 // parent are visible to the child (and vice versa).
-fn main() -> i32 {
+transform main() -> i32 {
     shm = shared_memory_open(4096);
     pid = spawn_worker();
     if pid == 0 {

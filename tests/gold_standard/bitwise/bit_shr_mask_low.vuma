@@ -6,7 +6,7 @@
 // Distinct from s13_bit_shr_then_and (240>>2 & 0x3F = 60) and
 // s10_bit_shl_and_mask (shl-then-mask).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 255;         // 0xFF
     sh: u64 = 4;
     mask: u64 = 7;        // 0x07

@@ -6,7 +6,7 @@
 // workaround). Distinct from s14_u32_xor_then_shl (XOR-then-shift) and
 // s11_u32_xor_shl_mask (XOR-shift-mask chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 51;          // 0x33
     b: u32 = 15;          // 0x0F
     m: u32 = 240;         // 0xF0

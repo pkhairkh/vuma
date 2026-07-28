@@ -6,7 +6,7 @@
 // The child checks the return and exits 1 if sandbox was applied.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     pid = spawn_worker();
     if pid == 0 {
         sandbox_apply();

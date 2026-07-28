@@ -50,17 +50,17 @@ extern "C" {
     // the syscall ABI; the stub is "mov eax,#1; syscall; ret" (write) /
     // "mov eax,#0; syscall; ret" (read). Returns the byte count
     // transferred, or a negative errno on failure.
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
 
     // — Process —
     // exit(code) does not return; the stub ends with INT3 as a safety guard.
     // getpid/fork are no-arg simple stubs. waitpid(pid, status, options) is
     // the 3-arg wait4 wrapper (rusage=NULL is set by the stub).
-    fn exit(code: i64);
-    fn getpid() -> i64;
-    fn fork() -> i64;
-    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+    transform exit(code: i64);
+    transform getpid() -> i64;
+    transform fork() -> i64;
+    transform waitpid(pid: i64, status: Address, options: i64) -> i64;
 
     // — Memory (hosted: real Linux mmap / munmap / mremap) —
     // mmap(addr, length, prot, flags, fd, offset) — 6 args. SysV puts arg4
@@ -75,9 +75,9 @@ extern "C" {
     //   PROT_READ=1, PROT_WRITE=2 → prot = 3
     //   MAP_PRIVATE=2, MAP_ANONYMOUS=32 → flags = 34
     //   fd = -1, offset = 0  for anonymous mappings
-    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
-    fn munmap(addr: Address, length: u64) -> i64;
-    fn mremap(old_addr: Address, old_size: u64, new_size: u64, flags: i32, new_addr: Address) -> Address;
+    transform mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    transform munmap(addr: Address, length: u64) -> i64;
+    transform mremap(old_addr: Address, old_size: u64, new_size: u64, flags: i32, new_addr: Address) -> Address;
 
     // — Argument access (pre-loaded by _start stub) —
     // __vuma_argc / __vuma_argv are NOT syscalls — they read from a 16-byte
@@ -85,17 +85,17 @@ extern "C" {
     // _start stub at process entry. argc is stored as a u64 (sign-extended
     // from i32 by the _start stub), argv as the raw argv[] pointer. Both
     // stubs load the 8-byte slot into RAX and return.
-    fn __vuma_argc() -> i64;
-    fn __vuma_argv() -> Address;
+    transform __vuma_argc() -> i64;
+    transform __vuma_argv() -> Address;
 }
 
 // ── main entry stub ──────────────────────────────────────────────────────────
 // Pure declaration module (extern block only, no top-level execution). The
-// compiler requires a `fn main()` entry to compile as a standalone program;
+// compiler requires a `transform main()` entry to compile as a standalone program;
 // the real kmain (K1d) lives in womb/kernel/kernel.vuma and will call the
 // externs declared here via the host abstraction layer in
 // womb/kernel/hosted/host.vuma.
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

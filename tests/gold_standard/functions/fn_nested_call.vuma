@@ -6,18 +6,18 @@
 // variable because VUMA miscompiles nested call expressions used
 // directly as arguments.
 
-fn g(x: u32) -> u32 {
+transform g(x: u32) -> u32 {
     three: u32 = 3;
     r: u32 = x + three;
     return r;
 }
-fn f(x: u32) -> u32 {
+transform f(x: u32) -> u32 {
     twelve: u32 = 12;
     r: u32 = x + twelve;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     inner: u32 = g(7);
     outer: u32 = f(inner);
     return outer;

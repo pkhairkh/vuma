@@ -8,7 +8,7 @@
 // shape and value).
 // Expected exit code: 6
 
-fn main() -> i32 {
+transform main() -> i32 {
     acc: u32 = 0;
     for i in 0..3 {
         for j in 0..2 {

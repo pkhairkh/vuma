@@ -34,11 +34,11 @@ const SALSA20_SIGMA_3: u32 = 1797285236;  // "te k"
 // 32-bit primitives.
 // ===========================================================================
 
-fn salsa20_rotl32(x: u32, n: u32) -> u32 {
+transform salsa20_rotl32(x: u32, n: u32) -> u32 {
     return ((x << n) | (x >> (32 - n))) & SALSA20_MASK32;
 }
 
-fn salsa20_load_u32_le(ptr: Address, off: u32) -> u32 {
+transform salsa20_load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -46,7 +46,7 @@ fn salsa20_load_u32_le(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn salsa20_store_u32_le(ptr: Address, off: u32, val: u32) {
+transform salsa20_store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -62,7 +62,7 @@ fn salsa20_store_u32_le(ptr: Address, off: u32, val: u32) {
 // Operates in place on the 16-word state.
 // ===========================================================================
 
-fn salsa20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
+transform salsa20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
     va: u32 = salsa20_load_u32_le(state, a * 4);
     vb: u32 = salsa20_load_u32_le(state, b * 4);
     vc: u32 = salsa20_load_u32_le(state, c * 4);
@@ -80,7 +80,7 @@ fn salsa20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
 }
 
 // One Salsa20 double-round: column round + row round.
-fn salsa20_double_round(state: Address) {
+transform salsa20_double_round(state: Address) {
     // Column round.
     salsa20_qr(state, 0, 4, 8, 12);
     salsa20_qr(state, 5, 9, 13, 1);
@@ -114,7 +114,7 @@ fn salsa20_double_round(state: Address) {
 //   word 15 (off 60):  "te k"
 // ===========================================================================
 
-fn salsa20_block(key: Address, nonce: Address, counter: u32, out: Address) {
+transform salsa20_block(key: Address, nonce: Address, counter: u32, out: Address) {
     state = allocate(64);
     initial = allocate(64);
 
@@ -174,7 +174,7 @@ fn salsa20_block(key: Address, nonce: Address, counter: u32, out: Address) {
 // directions. Counter starts at 0 and increments by 1 per 64-byte block.
 // ===========================================================================
 
-fn salsa20_encrypt(data: Address, data_len: u32, key: Address,
+transform salsa20_encrypt(data: Address, data_len: u32, key: Address,
                    nonce: Address, output: Address) -> u32 {
     pos: u32 = 0;
     ctr: u32 = 0;
@@ -201,7 +201,7 @@ fn salsa20_encrypt(data: Address, data_len: u32, key: Address,
     return data_len;
 }
 
-fn salsa20_decrypt(data: Address, data_len: u32, key: Address,
+transform salsa20_decrypt(data: Address, data_len: u32, key: Address,
                    nonce: Address, output: Address) -> u32 {
     return salsa20_encrypt(data, data_len, key, nonce, output);
 }
@@ -219,7 +219,7 @@ fn salsa20_decrypt(data: Address, data_len: u32, key: Address,
 // what makes HSalsa20 a secure PRF for subkey derivation.
 // ===========================================================================
 
-fn hsalsa20(key: Address, nonce_first16: Address, out: Address) {
+transform hsalsa20(key: Address, nonce_first16: Address, out: Address) {
     state = allocate(64);
 
     // Constants.
@@ -278,7 +278,7 @@ fn hsalsa20(key: Address, nonce_first16: Address, out: Address) {
 // the Salsa20 nonce. Encrypt and decrypt are identical (XOR keystream).
 // ===========================================================================
 
-fn xsalsa20_encrypt(data: Address, data_len: u32, key: Address,
+transform xsalsa20_encrypt(data: Address, data_len: u32, key: Address,
                     nonce: Address, output: Address) -> u32 {
     subkey = allocate(SALSA20_KEY_SIZE);
     hsalsa20(key, nonce, subkey);
@@ -292,7 +292,7 @@ fn xsalsa20_encrypt(data: Address, data_len: u32, key: Address,
     return data_len;
 }
 
-fn xsalsa20_decrypt(data: Address, data_len: u32, key: Address,
+transform xsalsa20_decrypt(data: Address, data_len: u32, key: Address,
                     nonce: Address, output: Address) -> u32 {
     return xsalsa20_encrypt(data, data_len, key, nonce, output);
 }
@@ -307,7 +307,7 @@ fn xsalsa20_decrypt(data: Address, data_len: u32, key: Address,
 // Tag is computed over the ciphertext via poly1305.vuma.
 // ===========================================================================
 
-fn xsalsa20_poly1305_encrypt(key: Address, nonce: Address,
+transform xsalsa20_poly1305_encrypt(key: Address, nonce: Address,
                              plaintext: Address, pt_len: u32,
                              ciphertext: Address, tag: Address) -> u32 {
     subkey = allocate(SALSA20_KEY_SIZE);

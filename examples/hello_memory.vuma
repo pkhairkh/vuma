@@ -16,7 +16,7 @@
 //   - IVE proves all 5 invariants (LIVE) for every pointer operation
 //   - No `unsafe` keyword exists in VUMA — verification is always on
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate a region for one integer
     // IVE verifies: the region is live after allocation (Liveness)
     region = allocate(8);

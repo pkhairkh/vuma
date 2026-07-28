@@ -6,7 +6,7 @@
 // s9_arith_mod_then_add (mod-then-add only) and s14_arith_mod_then_add
 // (mod-then-add, different operands).
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 130;
     d: u32 = 7;
     m: u32 = 4;

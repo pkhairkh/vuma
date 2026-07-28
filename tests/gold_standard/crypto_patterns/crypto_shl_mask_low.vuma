@@ -7,7 +7,7 @@
 // s22_crypto_shl_mask_high (shl-then-high-nibble-mask, value 0) and
 // s14_crypto_shl_then_xor (shl-then-xor).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 3;
     s: u64 = 4;
     m: u64 = 127;         // 0x7F

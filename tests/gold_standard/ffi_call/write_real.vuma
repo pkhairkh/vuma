@@ -13,10 +13,10 @@ layout IoBuf = { len: u64, data: [u8; 16] }
 
 extern "C" {
     #[borrow]
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(IoBuf);
     buf.len = 16;
     buf.data[0] = 72;  // 'H'

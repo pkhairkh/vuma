@@ -8,7 +8,7 @@
 // (7 iterations).
 // Expected exit code: 3
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..3 {
         count = count + 1;

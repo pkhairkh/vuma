@@ -7,7 +7,7 @@
 // (add-then-mod, 50+30 % 7 = 3) and s14_arith_mod_then_add
 // (mod-then-add).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 50;
     d: u32 = 13;

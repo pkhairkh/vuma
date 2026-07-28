@@ -6,7 +6,7 @@
 // (immediate-RHS bitwise drop bug workaround). Distinct from
 // s86_crypto_shl_mask (231), s82_crypto_shl_then_xor (45) and
 // s78_crypto_or_then_xor (4).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 2;
     s: u32 = 3;
     c: u32 = 2;            // 0x02

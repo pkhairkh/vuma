@@ -3,7 +3,7 @@
 //
 // Computes 2^10 mod 1023 = 1024 mod 1023 = 1.
 
-fn main() -> i32 {
+transform main() -> i32 {
     base: u32 = 2;
     exp: u32 = 10;
     modulus: u32 = 1023;

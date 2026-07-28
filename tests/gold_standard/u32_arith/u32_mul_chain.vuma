@@ -3,7 +3,7 @@
 //
 // 2 * 3 = 6; 6 * 4 = 24. Each step masked to u32.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 2;
     b: u32 = 3;
     c: u32 = 4;

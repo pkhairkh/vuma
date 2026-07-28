@@ -14,7 +14,7 @@
 // returns the extracted payload as its exit code.
 //
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i64>();
     pid = spawn_worker();
     if pid == 0 {

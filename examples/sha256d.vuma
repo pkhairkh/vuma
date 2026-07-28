@@ -71,7 +71,7 @@ layout Message = { a: u8, b: u8, c: u8, d: u8 }
 // ===========================================================================
 // rotate_right(x, n) = (x >> n) | (x << (32 - n))
 
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;
 }
 
@@ -79,28 +79,28 @@ fn rotr32(x: u32, n: u32) -> u32 {
 // SHA-256 logical functions (FIPS 180-4 Section 4.1.2)
 // ===========================================================================
 
-fn ch(x: u32, y: u32, z: u32) -> u32 {
+transform ch(x: u32, y: u32, z: u32) -> u32 {
     // Constant-time Ch function: (x & y) ^ (~x & z)
     return (x & y) ^ ((x ^ 4294967295) & z);
 }
 
-fn maj(a: u32, b: u32, c: u32) -> u32 {
+transform maj(a: u32, b: u32, c: u32) -> u32 {
     return (a & b) ^ (a & c) ^ (b & c);
 }
 
-fn big_sigma0(x: u32) -> u32 {
+transform big_sigma0(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
-fn big_sigma1(x: u32) -> u32 {
+transform big_sigma1(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
-fn small_sigma0(x: u32) -> u32 {
+transform small_sigma0(x: u32) -> u32 {
     return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
 }
 
-fn small_sigma1(x: u32) -> u32 {
+transform small_sigma1(x: u32) -> u32 {
     return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
 }
 
@@ -108,7 +108,7 @@ fn small_sigma1(x: u32) -> u32 {
 // Pack 4 u8s into a u32 (big-endian)
 // ===========================================================================
 
-fn pack_u32_be(a: u32, b: u32, c: u32, d: u32) -> u32 {
+transform pack_u32_be(a: u32, b: u32, c: u32, d: u32) -> u32 {
     return ((a << 24) | (b << 16) | (c << 8) | d) & 4294967295;
 }
 
@@ -116,7 +116,7 @@ fn pack_u32_be(a: u32, b: u32, c: u32, d: u32) -> u32 {
 // Unpack a u32 into 4 u8s (big-endian)
 // ===========================================================================
 
-fn unpack_u32_be(val: u32) -> u32 {
+transform unpack_u32_be(val: u32) -> u32 {
     // Returns the high byte (d0) of the value; the layout's other fields
     // would each get their own byte in a full implementation.
     return (val >> 24) & 255;
@@ -128,7 +128,7 @@ fn unpack_u32_be(val: u32) -> u32 {
 // H values from FIPS 180-4 Section 5.3.3 (decimal: first 32 bits of
 // fractional parts of square roots of first 8 primes).
 
-fn sha256_init_state(state: State<HashState>) {
+transform sha256_init_state(state: State<HashState>) {
     state.h0 = 1779033703;   // 0x6a09e667
     state.h1 = 3144134277;   // 0xbb67ae85
     state.h2 = 1013904242;   // 0x3c6ef372
@@ -146,7 +146,7 @@ fn sha256_init_state(state: State<HashState>) {
 // K values from FIPS 180-4 Section 4.2.2 (decimal: first 32 bits of
 // fractional parts of cube roots of first 16 primes — subset shown).
 
-fn sha256_init_k(k: State<KTable>) {
+transform sha256_init_k(k: State<KTable>) {
     k.k0 = 1116352408;   // 0x428a2f98
     k.k1 = 1899447441;   // 0x71374491
     k.k2 = 3049323471;   // 0xb5c0fbcf
@@ -170,7 +170,7 @@ fn sha256_init_k(k: State<KTable>) {
 // Copy 8 u32 fields from one HashState to another
 // ===========================================================================
 
-fn copy_state(dst: State<HashState>, src: State<HashState>) {
+transform copy_state(dst: State<HashState>, src: State<HashState>) {
     dst.h0 = src.h0;
     dst.h1 = src.h1;
     dst.h2 = src.h2;
@@ -186,7 +186,7 @@ fn copy_state(dst: State<HashState>, src: State<HashState>) {
 // Build message schedule W[0..15] from the block (first 16 words)
 // ===========================================================================
 
-fn build_schedule_first_16(w: State<WSched>, block: State<Block>) {
+transform build_schedule_first_16(w: State<WSched>, block: State<Block>) {
     w.w0 = block.b0;
     w.w1 = block.b1;
     w.w2 = block.b2;
@@ -211,7 +211,7 @@ fn build_schedule_first_16(w: State<WSched>, block: State<Block>) {
 // ===========================================================================
 // W[i] = sigma1(W[i-2]) + W[i-7] + sigma0(W[i-15]) + W[i-16]
 
-fn extend_schedule(w: State<WSched>) {
+transform extend_schedule(w: State<WSched>) {
     w.w16 = (small_sigma1(w.w14) + w.w9 + small_sigma0(w.w1) + w.w0) & 4294967295;
     w.w17 = (small_sigma1(w.w15) + w.w10 + small_sigma0(w.w2) + w.w1) & 4294967295;
     w.w18 = (small_sigma1(w.w16) + w.w11 + small_sigma0(w.w3) + w.w2) & 4294967295;
@@ -236,7 +236,7 @@ fn extend_schedule(w: State<WSched>) {
 // ===========================================================================
 // Per FIPS 180-4 Section 6.2.2, simplified to 16 rounds.
 
-fn sha256_transform(state: State<HashState>, k: State<KTable>, w: State<WSched>) {
+transform sha256_transform(state: State<HashState>, k: State<KTable>, w: State<WSched>) {
     // Initialize working variables from current hash state
     let a: u32 = state.h0;
     let b: u32 = state.h1;
@@ -288,7 +288,7 @@ fn sha256_transform(state: State<HashState>, k: State<KTable>, w: State<WSched>)
 // Simplified: writes the message bytes to the first 4-byte word, then
 // the 0x80 padding byte, then the bit length in the last word.
 
-fn sha256_pad_block(block: State<Block>, msg: State<Message>, msg_len: u32) {
+transform sha256_pad_block(block: State<Block>, msg: State<Message>, msg_len: u32) {
     // First word: pack the message bytes (big-endian)
     block.b0 = pack_u32_be(msg.a, msg.b, msg.c, 0);
     // Second word: 0x80 byte at position 4, rest zero
@@ -317,7 +317,7 @@ fn sha256_pad_block(block: State<Block>, msg: State<Message>, msg_len: u32) {
 // Copy 8 u32 fields from a HashState to a Digest
 // ===========================================================================
 
-fn copy_state_to_digest(dst: State<Digest>, src: State<HashState>) {
+transform copy_state_to_digest(dst: State<Digest>, src: State<HashState>) {
     dst.d0 = src.h0;
     dst.d1 = src.h1;
     dst.d2 = src.h2;
@@ -333,7 +333,7 @@ fn copy_state_to_digest(dst: State<Digest>, src: State<HashState>) {
 // Copy 8 u32 fields between two Digests
 // ===========================================================================
 
-fn copy_digest(dst: State<Digest>, src: State<Digest>) {
+transform copy_digest(dst: State<Digest>, src: State<Digest>) {
     dst.d0 = src.d0;
     dst.d1 = src.d1;
     dst.d2 = src.d2;
@@ -358,7 +358,7 @@ fn copy_digest(dst: State<Digest>, src: State<Digest>) {
 //   block:   Block      — current message block
 //   inner:   Digest     — inner hash output
 
-fn sha256d(msg: State<Message>, out: State<Digest>) {
+transform sha256d(msg: State<Message>, out: State<Digest>) {
     // Allocate working memory
     let state = state_new(HashState);
     let k = state_new(KTable);
@@ -414,7 +414,7 @@ fn sha256d(msg: State<Message>, out: State<Digest>) {
 // SHA256d("abc") = 4f8b42c22dd3729b519ba6f68d2da7cc5b2d606d05daed5ad5128cc03e6c6358
 // First byte = 0x4f = 79
 
-fn main() -> i32 {
+transform main() -> i32 {
     // "abc" — NIST FIPS 180-4 test vector
     let msg = state_new(Message);
     msg.a = 97;   // 'a'

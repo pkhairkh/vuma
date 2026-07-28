@@ -6,13 +6,13 @@
 // from s14_fn_one_arg_add (add_one(41) = 42, addition) and
 // s9_fn_one_arg_sub (sub5(100) = 95).
 
-fn triple(x: u32) -> u32 {
+transform triple(x: u32) -> u32 {
     n: u32 = 3;
     r: u32 = x * n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = triple(14);
     return v;
 }

@@ -3,7 +3,7 @@
 //
 // Two successive integer divisions. 200 / 5 = 40, then 40 / 4 = 10.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 5;
     c: u32 = 4;

@@ -51,7 +51,7 @@
 //
 // ── How is the handler-call wired? ─────────────────────────────────
 // VUMA has no first-class function-pointer type: `handler()` where
-// `handler` is a u64 won't compile (the parser only accepts direct fn-
+// `handler` is a u64 won't compile (the parser only accepts direct transform-
 // identifier calls, not indirect calls through a u64). The K3e contract
 // documented this limitation; R4c left the handler-call as a stub
 // (`let result = 0;`) because no indirect-call mechanism existed yet.
@@ -139,7 +139,7 @@
 // This file's main() calls syscall_dispatch_from_trap BEFORE
 // syscall_dispatch_from_trap is declared (the helper appears after
 // main in the source). VUMA's parser supports forward function
-// references (it does a two-pass scan: pass 1 collects all fn
+// references (it does a two-pass scan: pass 1 collects all transform
 // signatures into the symbol table, pass 2 resolves call sites).
 // Verified in this file's self-test (exit=0). Same forward-reference
 // pattern is used by K3d's irq.vuma and K3e's original dispatch.vuma.
@@ -148,7 +148,7 @@
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
 // TrapFrame and SyscallTable are ___pmt_buffer-backed State<T>'s
 // allocated by the CALLER via `state_new(...)`. The State<T> params are
-// regular VUMA-fn borrows (NOT extern #[borrow] — VUMA fn calls don't
+// regular VUMA-transform borrows (NOT extern #[borrow] — VUMA transform calls don't
 // need the attribute, only extern "C" calls do). None of this file's
 // functions call any extern, so the codegen's conservative State-
 // invalidation-on-extern-call doesn't fire.
@@ -176,7 +176,7 @@
 // the same rationale).
 //
 // ── Why does syscall_dispatch_from_trap return u64, not i64? ────────────────
-// The contract specifies `fn syscall_dispatch_from_trap(...) -> u64`.
+// The contract specifies `transform syscall_dispatch_from_trap(...) -> u64`.
 // The kernel's syscall ABI conventionally returns -errno as a negative
 // i64 (in the range [-4095, -1]) for errors and a non-negative value
 // for success. VUMA's u64/i64 implicit-conversion rules are sometimes
@@ -204,7 +204,7 @@
 // stubs). It lowers to `mov rax, rdi; mov rdi, rsi; jmp rax` — a tail call
 // that invokes the function at `ptr` with `arg` in RDI (SysV AMD64 first-
 // argument register). This is the VUMA-pure way to perform an indirect
-// function-pointer call: the language has no first-class fn-ptr type, so
+// function-pointer call: the language has no first-class transform-ptr type, so
 // indirect dispatch is delegated to a runtime stub (same category as
 // write/read/exit — NOT a C library function).
 //
@@ -223,7 +223,7 @@
 //         which packs real function pointers — the indirect call lands
 //         at the handler's first instruction.
 extern "C" {
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -265,7 +265,7 @@ layout SyscallTable = {
 
 // Read the u64 GPR at canonical slot `idx` from tf.gpr. 8-byte LE unpack
 // at byte offset `idx * 8`. Byte-identical to R2a's tf_get_gpr.
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -280,7 +280,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 
 // Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
 // at byte offset `idx * 8`. Byte-identical to R2a's tf_set_gpr.
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -295,7 +295,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // TrapFrame before the arch-specific trap-to-superset adapter (R2b/R2c/
 // R2d) populates the arch-specific fields, OR before the self-test uses
 // it as a fresh save area. Byte-identical to R2a's tf_init.
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -318,7 +318,7 @@ fn tf_init(tf: State<TrapFrame>) {
 
 // Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
 // Re-declared byte-identically to table.vuma.
-fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+transform syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
     let off = nr * 8;
     let v: u64 = 0;
     let i = 0;
@@ -333,7 +333,7 @@ fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
 
 // Write the u64 handler address for syscall `nr` into SyscallTable.handlers.
 // Re-declared byte-identically to table.vuma.
-fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+transform syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     let off = nr * 8;
     let i = 0;
     while i < 8 {
@@ -348,7 +348,7 @@ fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // increment tbl.count. Re-declared byte-identically to table.vuma.
 // No "unregister" in this wave; K11 may add one if needed for runtime
 // syscall-table patching / seccomp-style filtering.
-fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+transform syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     syscall_table_set(tbl, nr, handler);
     tbl.count = tbl.count + 1;
 }
@@ -360,13 +360,13 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // slot 0, looks up the handler, and writes the return value to canonical
 // slot 7. The handler-call is wired through the __call_indirect1
 // runtime stub (see the extern block above) — VUMA has no first-class
-// fn-ptr type, so indirect dispatch is delegated to the asm trampoline.
+// transform-ptr type, so indirect dispatch is delegated to the asm trampoline.
 //
 // The two helpers syscall_set_ret / syscall_get_arg expose the canonical
 // slot-7 (return) and slot-(1+idx) (arg) accesses so K11's per-syscall
 // handlers can read args / write ret without hardcoding the slot
 // numbers everywhere. K11's handler signature will likely be:
-//     fn sys_write(tf: State<TrapFrame>) -> u64 {
+//     transform sys_write(tf: State<TrapFrame>) -> u64 {
 //         let fd = syscall_get_arg(tf, 0);  // slot 1
 //         let buf = syscall_get_arg(tf, 1); // slot 2
 //         let count = syscall_get_arg(tf, 2); // slot 3
@@ -384,7 +384,7 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // before returning, so the trap_entry stub can blindly reload slot 7
 // into the architecture's return register (rax / x0 / a0) on iretq/eret/
 // mret — no arch-conditional logic at the trap return path.
-fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) -> u64 {
+transform syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) -> u64 {
     let nr = tf_get_gpr(tf, 0);
     if nr >= 512 {
         // Out-of-range: still write the -ENOSYS to slot 7 so the trap
@@ -418,7 +418,7 @@ fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) ->
 // Write the syscall return value to canonical slot 7. Called by K11's
 // per-syscall handlers (sys_write, sys_read, ...) so they don't hardcode
 // the slot number. Pure PMT field-write.
-fn syscall_set_ret(tf: State<TrapFrame>, ret: u64) {
+transform syscall_set_ret(tf: State<TrapFrame>, ret: u64) {
     tf_set_gpr(tf, 7, ret);
 }
 
@@ -429,7 +429,7 @@ fn syscall_set_ret(tf: State<TrapFrame>, ret: u64) {
 //   ...
 //   arg_idx=5 → slot 6 (a5)
 // Pure PMT field-read.
-fn syscall_get_arg(tf: State<TrapFrame>, arg_idx: u32) -> u64 {
+transform syscall_get_arg(tf: State<TrapFrame>, arg_idx: u32) -> u64 {
     return tf_get_gpr(tf, arg_idx + 1);
 }
 
@@ -457,7 +457,7 @@ fn syscall_get_arg(tf: State<TrapFrame>, arg_idx: u32) -> u64 {
 // Per the contract's "Use decimal constants" rule: all non-zero constants
 // in the self-test use DECIMAL (64, 1, 4096, 3, 8192, 65, 999, 38, 0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(SyscallTable);
     let tf = state_new(TrapFrame);
     tf_init(tf);

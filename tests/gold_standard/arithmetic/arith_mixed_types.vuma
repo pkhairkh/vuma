@@ -5,7 +5,7 @@
 // u64_val = 0x100000000 (2^32), u32_val = 100. Sum = 0x100000064.
 // Low 8 bits = 0x64 = 100.
 
-fn main() -> i32 {
+transform main() -> i32 {
     big: u64 = 4294967296;   // 2^32
     small: u32 = 100;
     sum: u64 = big + small;

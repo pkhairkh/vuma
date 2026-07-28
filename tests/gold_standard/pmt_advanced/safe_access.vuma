@@ -31,7 +31,7 @@
 
 layout FixedBuf = { data: [u32; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let fb = state_new(FixedBuf);
     fb.data[0] = 10;
     fb.data[1] = 20;

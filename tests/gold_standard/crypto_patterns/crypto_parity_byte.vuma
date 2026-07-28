@@ -10,7 +10,7 @@
 // 0xA0 ^ 0x28 = 0x88; x^=x>>1 → 0x88 ^ 0x44 = 0xCC; parity = 0xCC&1
 // = 0.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u64 = 170;     // 0xAA
     four: u64 = 4;
     two: u64 = 2;

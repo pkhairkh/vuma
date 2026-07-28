@@ -4,7 +4,7 @@
 // OR of complementary nibbles produces 0xFF, then AND with 0xAA leaves
 // only the even bits → 0xAA = 170.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;   // 0xF0
     b: u64 = 15;    // 0x0F
     c: u64 = 170;   // 0xAA

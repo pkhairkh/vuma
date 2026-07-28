@@ -5,14 +5,14 @@
 // convention's register-vs-stack split. The result 1+2+3+4 = 10 is
 // returned to main.
 
-fn add4(a: u32, b: u32, c: u32, d: u32) -> u32 {
+transform add4(a: u32, b: u32, c: u32, d: u32) -> u32 {
     s1: u32 = a + b;
     s2: u32 = s1 + c;
     s3: u32 = s2 + d;
     return s3;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = add4(1, 2, 3, 4);
     return v;
 }

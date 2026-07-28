@@ -6,7 +6,7 @@
 // completion (so i ends at 10) or i is 0 after the loop, neither of which
 // matches the expected 3.
 
-fn main() -> i32 {
+transform main() -> i32 {
     for i in 0..10 {
         if (i == 3) {
             break;

@@ -6,7 +6,7 @@
 // extract bit 0 (LSB) of 43 (0b101011). The mask 0x01 is loaded into
 // a named variable to dodge the bitwise-immediate-RHS codegen bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 43;                   // 0b101011
     one: u64 = 1;                  // mask for bit 0
     bit0: u64 = v & one;           // 1

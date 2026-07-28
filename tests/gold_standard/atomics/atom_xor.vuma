@@ -21,7 +21,7 @@
 // already knows how to lower to proper atomic IR instructions).
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let counter = state_new(_L1);
     counter.v = 255;
     v = counter.v;

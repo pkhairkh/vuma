@@ -5,12 +5,12 @@
 // On wasm32/WASI, epoll is not supported, so we just return 0.
 
 extern "C" {
-    fn epoll_create1(flags: i64) -> i64;
-    fn close(fd: i64) -> i64;
-    fn exit(code: i64);
+    transform epoll_create1(flags: i64) -> i64;
+    transform close(fd: i64) -> i64;
+    transform exit(code: i64);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Try to create an epoll fd.
     // On Linux backends, this returns a valid fd (>= 0).
     // On wasm32/WASI, the epoll_create1 stub doesn't exist and the

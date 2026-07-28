@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s14_bit_xor_chain_3 (three-way XOR) and
 // s11_bit_xor_and_toggle (XOR-then-AND).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;         // 0xFF
     b: u64 = 15;          // 0x0F
     c: u64 = 170;         // 0xAA

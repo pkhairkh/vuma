@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s18_u32_add_xor_chain (add-xor chain)
 // and s14_u32_xor_then_shl (xor-then-shl).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;         // 0xFF
     b: u32 = 240;         // 0xF0
     s: u32 = 3;

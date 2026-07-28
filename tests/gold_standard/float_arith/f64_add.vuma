@@ -1,7 +1,7 @@
 // f64_add — f64 addition: 10.0 + 5.5 = 15.5 -> floattoint = 15
 // Expected exit code: 15
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: f64 = 10.0;
     b: f64 = 5.5;
     sum: f64 = a + b;

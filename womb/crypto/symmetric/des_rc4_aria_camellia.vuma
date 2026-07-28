@@ -11,7 +11,7 @@ const MASK32: u32 = 4294967295;
 // ===========================================================================
 
 // Initial Permutation (IP) — 64-bit
-fn des_ip(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
+transform des_ip(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
     // Combine into 64-bit (we use two u32s and bit-pack)
     // IP table: 58 50 42 34 26 18 10 2, 60 52 44 36 28 20 12 4, ...
     // We implement IP bit-by-bit using the standard table.
@@ -31,7 +31,7 @@ fn des_ip(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
 }
 
 // Final Permutation (FP = IP^-1)
-fn des_fp(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
+transform des_fp(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
     in: u64 = ((in_hi as u64) << 32) | (in_lo as u64);
     out: u64 = 0;
     bit: u32 = 0;
@@ -46,7 +46,7 @@ fn des_fp(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
 }
 
 // Expansion E (32 -> 48 bits)
-fn des_expand_e(r: u32) -> u64 {
+transform des_expand_e(r: u32) -> u64 {
     out: u64 = 0;
     bit: u32 = 0;
     while bit < 48 {
@@ -59,7 +59,7 @@ fn des_expand_e(r: u32) -> u64 {
 }
 
 // Permutation P (32 -> 32 bits)
-fn des_perm_p(x: u32) -> u32 {
+transform des_perm_p(x: u32) -> u32 {
     out: u32 = 0;
     bit: u32 = 0;
     while bit < 32 {
@@ -72,7 +72,7 @@ fn des_perm_p(x: u32) -> u32 {
 }
 
 // S-box lookup: S[box_idx][6-bit input] -> 4-bit output
-fn des_sbox(box: u32, val6: u32) -> u32 {
+transform des_sbox(box: u32, val6: u32) -> u32 {
     row: u32 = ((val6 >> 4) & 2) | (val6 & 1);
     col: u32 = (val6 >> 1) & 15;
     idx: u32 = row * 16 + col;
@@ -80,7 +80,7 @@ fn des_sbox(box: u32, val6: u32) -> u32 {
 }
 
 // Feistel f function: E(R) XOR K, then 8 S-boxes, then P
-fn des_f(r: u32, k48: u64) -> u32 {
+transform des_f(r: u32, k48: u64) -> u32 {
     er: u64 = des_expand_e(r) ^ k48;
     // Pack 8 6-bit groups into 32-bit output
     out: u32 = 0;
@@ -96,7 +96,7 @@ fn des_f(r: u32, k48: u64) -> u32 {
 }
 
 // PC-1: 64-bit key -> 56-bit (drop parity bits)
-fn des_pc1(key_hi: u32, key_lo: u32, c_out: Address, d_out: Address) {
+transform des_pc1(key_hi: u32, key_lo: u32, c_out: Address, d_out: Address) {
     in: u64 = ((key_hi as u64) << 32) | (key_lo as u64);
     c: u64 = 0;
     d: u64 = 0;
@@ -115,7 +115,7 @@ fn des_pc1(key_hi: u32, key_lo: u32, c_out: Address, d_out: Address) {
 }
 
 // PC-2: 56-bit (C||D) -> 48-bit subkey
-fn des_pc2(c: u64, d: u64) -> u64 {
+transform des_pc2(c: u64, d: u64) -> u64 {
     combined: u64 = (c << 28) | d;
     out: u64 = 0;
     bit: u32 = 0;
@@ -129,13 +129,13 @@ fn des_pc2(c: u64, d: u64) -> u64 {
 }
 
 // Left rotate 28-bit value by n
-fn des_rotl28(x: u64, n: u32) -> u64 {
+transform des_rotl28(x: u64, n: u32) -> u64 {
     m: u64 = 268435455;  // 0x0FFFFFFF
     return ((x << n) | (x >> (28 - n))) & m;
 }
 
 // Key schedule: produce 16 subkeys
-fn des_key_schedule(key: Address, subkeys: Address) {
+transform des_key_schedule(key: Address, subkeys: Address) {
     key_hi: u32 = 0;
     key_lo: u32 = 0;
     i: u32 = 0;
@@ -161,7 +161,7 @@ fn des_key_schedule(key: Address, subkeys: Address) {
 }
 
 // Reconstruct 48-bit subkey from 6 stored bytes
-fn des_load_subkey(subkeys: Address, round: u32) -> u64 {
+transform des_load_subkey(subkeys: Address, round: u32) -> u64 {
     sk: u64 = 0;
     b: u32 = 0;
     while b < 6 {
@@ -172,7 +172,7 @@ fn des_load_subkey(subkeys: Address, round: u32) -> u64 {
 }
 
 // DES encrypt a single 8-byte block
-fn des_encrypt_block(plain: Address, key: Address, cipher: Address) {
+transform des_encrypt_block(plain: Address, key: Address, cipher: Address) {
     subkeys = allocate(96);  // 16 * 6 bytes
     des_key_schedule(key, subkeys);
     in_hi: u32 = 0;
@@ -203,7 +203,7 @@ fn des_encrypt_block(plain: Address, key: Address, cipher: Address) {
 }
 
 // DES decrypt a single 8-byte block (subkeys in reverse order)
-fn des_decrypt_block(cipher: Address, key: Address, plain: Address) {
+transform des_decrypt_block(cipher: Address, key: Address, plain: Address) {
     subkeys = allocate(96);
     des_key_schedule(key, subkeys);
     in_hi: u32 = 0;
@@ -233,7 +233,7 @@ fn des_decrypt_block(cipher: Address, key: Address, plain: Address) {
 }
 
 // 3DES EDE3: C = E_K3(D_K2(E_K1(P)))
-fn tdes_ede3_encrypt_block(plain: Address, k1: Address, k2: Address, k3: Address, cipher: Address) {
+transform tdes_ede3_encrypt_block(plain: Address, k1: Address, k2: Address, k3: Address, cipher: Address) {
     tmp = allocate(8);
     des_encrypt_block(plain, k1, tmp);
     des_decrypt_block(tmp, k2, tmp);
@@ -241,14 +241,14 @@ fn tdes_ede3_encrypt_block(plain: Address, k1: Address, k2: Address, k3: Address
 }
 
 // 3DES EDE3 decrypt: P = D_K1(E_K2(D_K3(C)))
-fn tdes_ede3_decrypt_block(cipher: Address, k1: Address, k2: Address, k3: Address, plain: Address) {
+transform tdes_ede3_decrypt_block(cipher: Address, k1: Address, k2: Address, k3: Address, plain: Address) {
     tmp = allocate(8);
     des_decrypt_block(cipher, k3, tmp);
     des_encrypt_block(tmp, k2, tmp);
     des_decrypt_block(tmp, k1, plain);
 }
 
-fn tdes_cbc_encrypt(plain: Address, pt_len: u32, k1: Address, k2: Address, k3: Address, iv: Address, cipher: Address) -> u32 {
+transform tdes_cbc_encrypt(plain: Address, pt_len: u32, k1: Address, k2: Address, k3: Address, iv: Address, cipher: Address) -> u32 {
     pad: u32 = 8 - (pt_len & 7);
     if pad == 0 { pad = 8; }
     padded: u32 = pt_len + pad;
@@ -272,7 +272,7 @@ fn tdes_cbc_encrypt(plain: Address, pt_len: u32, k1: Address, k2: Address, k3: A
     return padded;
 }
 
-fn tdes_cbc_decrypt(cipher: Address, ct_len: u32, k1: Address, k2: Address, k3: Address, iv: Address, plain: Address) -> u32 {
+transform tdes_cbc_decrypt(cipher: Address, ct_len: u32, k1: Address, k2: Address, k3: Address, iv: Address, plain: Address) -> u32 {
     prev = allocate(8);
     i: u32 = 0;
     while i < 8 { *(prev + i) = *(iv + i); i = i + 1; }
@@ -298,7 +298,7 @@ fn tdes_cbc_decrypt(cipher: Address, ct_len: u32, k1: Address, k2: Address, k3: 
 // RC4 — RFC 6229 stream cipher
 // ===========================================================================
 
-fn rc4_ksa(key: Address, keylen: u32, s_out: Address) {
+transform rc4_ksa(key: Address, keylen: u32, s_out: Address) {
     i: u32 = 0;
     while i < 256 { *(s_out + i) = i; i = i + 1; }
     j: u32 = 0;
@@ -316,7 +316,7 @@ fn rc4_ksa(key: Address, keylen: u32, s_out: Address) {
     }
 }
 
-fn rc4_prga(s_state: Address, data: Address, len: u32, out: Address) {
+transform rc4_prga(s_state: Address, data: Address, len: u32, out: Address) {
     i: u32 = 0;
     j: u32 = 0;
     n: u32 = 0;
@@ -332,7 +332,7 @@ fn rc4_prga(s_state: Address, data: Address, len: u32, out: Address) {
     }
 }
 
-fn rc4_crypt(key: Address, keylen: u32, data: Address, len: u32, out: Address) {
+transform rc4_crypt(key: Address, keylen: u32, data: Address, len: u32, out: Address) {
     s = allocate(256);
     rc4_ksa(key, keylen, s);
     rc4_prga(s, data, len, out);
@@ -343,13 +343,13 @@ fn rc4_crypt(key: Address, keylen: u32, data: Address, len: u32, out: Address) {
 // ===========================================================================
 
 // Camellia S-boxes (SBOX1, SBOX2, SBOX3, SBOX4)
-fn cam_sbox1(x: u32) -> u32 { return cam_sbox1_table(x & 255); }
-fn cam_sbox2(x: u32) -> u32 { return cam_sbox2_table(x & 255); }
-fn cam_sbox3(x: u32) -> u32 { return cam_sbox3_table(x & 255); }
-fn cam_sbox4(x: u32) -> u32 { return cam_sbox4_table(x & 255); }
+transform cam_sbox1(x: u32) -> u32 { return cam_sbox1_table(x & 255); }
+transform cam_sbox2(x: u32) -> u32 { return cam_sbox2_table(x & 255); }
+transform cam_sbox3(x: u32) -> u32 { return cam_sbox3_table(x & 255); }
+transform cam_sbox4(x: u32) -> u32 { return cam_sbox4_table(x & 255); }
 
 // Camellia F function: 64-bit input -> 64-bit output
-fn cam_f(inp: u64, k: u64) -> u64 {
+transform cam_f(inp: u64, k: u64) -> u64 {
     t: u64 = inp ^ k;
     t_hi: u32 = (t >> 32) & MASK32;
     t_lo: u32 = t & MASK32;
@@ -379,7 +379,7 @@ fn cam_f(inp: u64, k: u64) -> u64 {
 }
 
 // Camellia P permutation (64-bit -> 64-bit)
-fn cam_p(z_hi: u32, z_lo: u32) -> u64 {
+transform cam_p(z_hi: u32, z_lo: u32) -> u64 {
     // 8 bytes: b0..b7 = z_hi bytes, z_lo bytes
     b0: u32 = (z_hi >> 24) & 255;
     b1: u32 = (z_hi >> 16) & 255;
@@ -404,7 +404,7 @@ fn cam_p(z_hi: u32, z_lo: u32) -> u64 {
 }
 
 // FL function: (x_L || x_R) -> (x_L & KL || x_R ^ ROTL(x_R & KR, 1))
-fn cam_fl(inp: u64, k: u64) -> u64 {
+transform cam_fl(inp: u64, k: u64) -> u64 {
     x_hi: u32 = (inp >> 32) & MASK32;
     x_lo: u32 = inp & MASK32;
     k_hi: u32 = (k >> 32) & MASK32;
@@ -418,7 +418,7 @@ fn cam_fl(inp: u64, k: u64) -> u64 {
 }
 
 // FL^-1 function
-fn cam_fl_inv(inp: u64, k: u64) -> u64 {
+transform cam_fl_inv(inp: u64, k: u64) -> u64 {
     y_hi: u32 = (inp >> 32) & MASK32;
     y_lo: u32 = inp & MASK32;
     k_hi: u32 = (k >> 32) & MASK32;
@@ -432,7 +432,7 @@ fn cam_fl_inv(inp: u64, k: u64) -> u64 {
 
 // ROTL128 — return the high 64 bits of (x_hi || x_lo) rotated left by n bits.
 // Per RFC 3713 §2.2, the key schedule uses rotations by 0, 15, 30, 45, 60, 77, 94, 111.
-fn cam_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+transform cam_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
     m: u32 = 0;
     if n == 0 { return x_hi & MASK64; }
@@ -446,7 +446,7 @@ fn cam_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
 }
 
 // ROTL128 — return the low 64 bits of (x_hi || x_lo) rotated left by n bits.
-fn cam_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+transform cam_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
     m: u32 = 0;
     if n == 0 { return x_lo & MASK64; }
@@ -460,7 +460,7 @@ fn cam_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
 }
 
 // Camellia key schedule for 128-bit key (26 subkeys: ku_kl_*, kr_ka_*)
-fn cam_key_schedule_128(key: Address, subkeys: Address) {
+transform cam_key_schedule_128(key: Address, subkeys: Address) {
     // KL = (K1, K2) = (key_hi, key_lo) as 64-bit halves
     // KR = 0
     // KA = F(KL ^ KR) ^ KL
@@ -508,7 +508,7 @@ fn cam_key_schedule_128(key: Address, subkeys: Address) {
     // The test vectors will reveal any mismatch.
 }
 
-fn cam_store_subkey(sk: Address, idx: u32, val: u64) {
+transform cam_store_subkey(sk: Address, idx: u32, val: u64) {
     hi: u32 = (val >> 32) & MASK32;
     lo: u32 = val & MASK32;
     *(sk + idx * 8 + 0) = (hi >> 24) & 255;
@@ -521,7 +521,7 @@ fn cam_store_subkey(sk: Address, idx: u32, val: u64) {
     *(sk + idx * 8 + 7) = lo & 255;
 }
 
-fn cam_load_subkey(sk: Address, idx: u32) -> u64 {
+transform cam_load_subkey(sk: Address, idx: u32) -> u64 {
     hi: u32 = 0;
     lo: u32 = 0;
     i: u32 = 0;
@@ -542,7 +542,7 @@ fn cam_load_subkey(sk: Address, idx: u32) -> u64 {
 //   24,25   = kl5, kl6     (FL after round 18)
 //   26..31  = k19..k24
 //   32,33   = kw3, kw4     (post-whitening)
-fn cam_key_schedule_256(key: Address, subkeys: Address) {
+transform cam_key_schedule_256(key: Address, subkeys: Address) {
     MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
     // KL = (K1, K2) = key[0..16]; KR = (K3, K4) = key[16..32]
     kl_hi: u64 = 0;
@@ -621,7 +621,7 @@ fn cam_key_schedule_256(key: Address, subkeys: Address) {
 }
 
 // Camellia 128-bit block encryption (18 rounds + 6 FL/FL^-1)
-fn camellia_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
+transform camellia_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
     subkeys = allocate(208);  // 26 * 8 bytes
     cam_key_schedule_128(key, subkeys);
     // Load plaintext as D1 || D2 (64-bit halves)
@@ -659,7 +659,7 @@ fn camellia_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
     while i < 16 { *(cipher + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
 }
 
-fn camellia_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
+transform camellia_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
     subkeys = allocate(208);
     cam_key_schedule_128(key, subkeys);
     d1: u64 = 0; d2: u64 = 0;
@@ -697,7 +697,7 @@ fn camellia_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
 // 256-bit key uses 24 rounds; same Feistel structure with FL/FL^-1 after rounds 6, 12, 18.
 // Per RFC 3713 §2.3 (24-round variant): pre-whitening, 6 rounds, FL, 6 rounds, FL,
 // 6 rounds, FL, 6 rounds, post-whitening (with implicit final swap).
-fn camellia_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
+transform camellia_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
     subkeys = allocate(272);  // 34 subkeys * 8 bytes
     cam_key_schedule_256(key, subkeys);
     // Load plaintext as D1 || D2 (64-bit halves)
@@ -740,7 +740,7 @@ fn camellia_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
     while i < 16 { *(cipher + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
 }
 
-fn camellia_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
+transform camellia_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
     // Mirror of encrypt_256: run the same Feistel network with subkeys in reverse
     // order, and swap the kl_left/kl_right keys at each FL point (matching the
     // 128-bit decrypt structure already in this file).
@@ -790,13 +790,13 @@ fn camellia_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
 // ===========================================================================
 
 // ARIA S-boxes (SB1, SB2, SB3, SB4)
-fn aria_sb1(x: u32) -> u32 { return aria_sb1_table(x & 255); }
-fn aria_sb2(x: u32) -> u32 { return aria_sb2_table(x & 255); }
-fn aria_sb3(x: u32) -> u32 { return aria_sb3_table(x & 255); }
-fn aria_sb4(x: u32) -> u32 { return aria_sb4_table(x & 255); }
+transform aria_sb1(x: u32) -> u32 { return aria_sb1_table(x & 255); }
+transform aria_sb2(x: u32) -> u32 { return aria_sb2_table(x & 255); }
+transform aria_sb3(x: u32) -> u32 { return aria_sb3_table(x & 255); }
+transform aria_sb4(x: u32) -> u32 { return aria_sb4_table(x & 255); }
 
 // Substitution layer 1: SB1 SB2 SB3 SB4 (repeated 4 times for 16 bytes)
-fn aria_sl1(state: Address) {
+transform aria_sl1(state: Address) {
     i: u32 = 0;
     while i < 16 {
         b: u32 = *(state + i);
@@ -809,7 +809,7 @@ fn aria_sl1(state: Address) {
 }
 
 // Substitution layer 2: SB3 SB4 SB1 SB2
-fn aria_sl2(state: Address) {
+transform aria_sl2(state: Address) {
     i: u32 = 0;
     while i < 16 {
         b: u32 = *(state + i);
@@ -822,7 +822,7 @@ fn aria_sl2(state: Address) {
 }
 
 // Diffusion layer A (16 bytes -> 16 bytes)
-fn aria_a(state: Address) {
+transform aria_a(state: Address) {
     s0: u32 = *(state + 0); s1: u32 = *(state + 1);
     s2: u32 = *(state + 2); s3: u32 = *(state + 3);
     s4: u32 = *(state + 4); s5: u32 = *(state + 5);
@@ -850,12 +850,12 @@ fn aria_a(state: Address) {
 }
 
 // XOR round key (16 bytes)
-fn aria_xor_ek(state: Address, ek: Address, off: u32) {
+transform aria_xor_ek(state: Address, ek: Address, off: u32) {
     i: u32 = 0;
     while i < 16 { *(state + i) = *(state + i) ^ *(ek + off + i); i = i + 1; }
 }
 
-fn aria_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
+transform aria_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
     ek = allocate(176);  // 11 * 16 bytes
     aria_key_schedule_128(key, ek);
     state = allocate(16);
@@ -877,7 +877,7 @@ fn aria_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
     while i < 16 { *(cipher + i) = *(state + i); i = i + 1; }
 }
 
-fn aria_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
+transform aria_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
     ek = allocate(176);
     dk = allocate(176);
     aria_key_schedule_128(key, ek);
@@ -923,7 +923,7 @@ fn aria_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
 // (x_hi || x_lo) is treated as a single 128-bit value; rotate left by n bits.
 // Each helper returns one 64-bit half of the rotated result. The rotation
 // amounts used by ARIA-128 are 19, 31, and 67 (RFC 5794 §3.1).
-fn aria_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+transform aria_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
     n_mod: u32 = n & 127;
     if n_mod == 0 { return x_hi & MASK64; }
@@ -934,7 +934,7 @@ fn aria_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     return ((x_lo << (n_mod - 64)) | (x_hi >> (128 - n_mod))) & MASK64;
 }
 
-fn aria_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+transform aria_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
     n_mod: u32 = n & 127;
     if n_mod == 0 { return x_lo & MASK64; }
@@ -945,7 +945,7 @@ fn aria_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     return ((x_hi << (n_mod - 64)) | (x_lo >> (128 - n_mod))) & MASK64;
 }
 
-fn aria_key_schedule_128(key: Address, ek: Address) {
+transform aria_key_schedule_128(key: Address, ek: Address) {
     // RFC 5794 §2.4 key schedule for ARIA-128.
     // W0 = KL (16 bytes), W1 = FO(W0, CK1), W2 = FE(W1, CK2), W3 = FO(W2, CK3).
     // Round keys EK_1..EK_11 are then derived by 128-bit rotations of W0..W3
@@ -961,7 +961,7 @@ fn aria_key_schedule_128(key: Address, ek: Address) {
     aria_derive_ek_128(w, ek);
 }
 
-fn aria_fo(w: Address, src_off: u32, dst_off: u32, ck_sel: u32) {
+transform aria_fo(w: Address, src_off: u32, dst_off: u32, ck_sel: u32) {
     // FO(X, RK) = A(SL1(X XOR RK)) — odd round function.
     // ck_sel selects the embedded cipher-key constant: 1 -> CK1, 3 -> CK3.
     // RFC 5794 §2.4: W1 = FO(W0, CK1), W3 = FO(W2, CK3).
@@ -979,7 +979,7 @@ fn aria_fo(w: Address, src_off: u32, dst_off: u32, ck_sel: u32) {
     while i < 16 { *(w + dst_off + i) = *(tmp + i); i = i + 1; }
 }
 
-fn aria_fe(w: Address, src_off: u32, dst_off: u32) {
+transform aria_fe(w: Address, src_off: u32, dst_off: u32) {
     tmp = allocate(16);
     i: u32 = 0;
     while i < 16 { *(tmp + i) = *(w + src_off + i) ^ aria_ck2(i); i = i + 1; }
@@ -989,7 +989,7 @@ fn aria_fe(w: Address, src_off: u32, dst_off: u32) {
     while i < 16 { *(w + dst_off + i) = *(tmp + i); i = i + 1; }
 }
 
-fn aria_derive_ek_128(w: Address, ek: Address) {
+transform aria_derive_ek_128(w: Address, ek: Address) {
     // RFC 5794 §3.1 round-key derivation for ARIA-128.
     // EK_{i+1} = (W_{i mod 4} rotl R_{i / 4}) for i = 0..10,
     // where R_0 = 19, R_1 = 31, R_2 = 67 (the rotation amounts fixed by
@@ -1038,12 +1038,12 @@ fn aria_derive_ek_128(w: Address, ek: Address) {
     }
 }
 
-fn aria_ck1(idx: u32) -> u32 { return aria_ck1_table(idx); }
-fn aria_ck2(idx: u32) -> u32 { return aria_ck2_table(idx); }
-fn aria_ck3(idx: u32) -> u32 { return aria_ck3_table(idx); }
+transform aria_ck1(idx: u32) -> u32 { return aria_ck1_table(idx); }
+transform aria_ck2(idx: u32) -> u32 { return aria_ck2_table(idx); }
+transform aria_ck3(idx: u32) -> u32 { return aria_ck3_table(idx); }
 
 // 256-bit key ARIA: 14 rounds, expanded key schedule
-fn aria_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
+transform aria_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
     ek = allocate(208);  // 13 * 16 bytes
     aria_key_schedule_256(key, ek);
     state = allocate(16);
@@ -1064,7 +1064,7 @@ fn aria_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
     while i < 16 { *(cipher + i) = *(state + i); i = i + 1; }
 }
 
-fn aria_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
+transform aria_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
     // Same pattern as 128-bit: derive DK from EK via diffusion
     ek = allocate(208);
     dk = allocate(208);
@@ -1101,7 +1101,7 @@ fn aria_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
     while i < 16 { *(plain + i) = *(state + i); i = i + 1; }
 }
 
-fn aria_key_schedule_256(key: Address, ek: Address) {
+transform aria_key_schedule_256(key: Address, ek: Address) {
     w = allocate(80);  // 5 * 16 bytes
     i: u32 = 0;
     while i < 16 { *(w + i) = *(key + i); i = i + 1; }
@@ -1134,7 +1134,7 @@ fn aria_key_schedule_256(key: Address, ek: Address) {
 
 // ---- DES Tables (FIPS 46-3) ----
 
-fn des_ip_table(idx: u32) -> u32 {
+transform des_ip_table(idx: u32) -> u32 {
     if idx == 0 { return 58; }
     if idx == 1 { return 50; }
     if idx == 2 { return 42; }
@@ -1202,7 +1202,7 @@ fn des_ip_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_fp_table(idx: u32) -> u32 {
+transform des_fp_table(idx: u32) -> u32 {
     if idx == 0 { return 40; }
     if idx == 1 { return 8; }
     if idx == 2 { return 48; }
@@ -1270,7 +1270,7 @@ fn des_fp_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_e_table(idx: u32) -> u32 {
+transform des_e_table(idx: u32) -> u32 {
     if idx == 0 { return 32; }
     if idx == 1 { return 1; }
     if idx == 2 { return 2; }
@@ -1322,7 +1322,7 @@ fn des_e_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_p_table(idx: u32) -> u32 {
+transform des_p_table(idx: u32) -> u32 {
     if idx == 0 { return 16; }
     if idx == 1 { return 7; }
     if idx == 2 { return 20; }
@@ -1358,7 +1358,7 @@ fn des_p_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_sbox_table(box: u32, idx: u32) -> u32 {
+transform des_sbox_table(box: u32, idx: u32) -> u32 {
     if box == 0 {
         if idx == 0 { return 14; }
         if idx == 1 { return 4; }
@@ -1898,7 +1898,7 @@ fn des_sbox_table(box: u32, idx: u32) -> u32 {
     return 0;
 }
 
-fn des_pc1_c_table(idx: u32) -> u32 {
+transform des_pc1_c_table(idx: u32) -> u32 {
     if idx == 0 { return 57; }
     if idx == 1 { return 49; }
     if idx == 2 { return 41; }
@@ -1930,7 +1930,7 @@ fn des_pc1_c_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_pc1_d_table(idx: u32) -> u32 {
+transform des_pc1_d_table(idx: u32) -> u32 {
     if idx == 0 { return 63; }
     if idx == 1 { return 55; }
     if idx == 2 { return 47; }
@@ -1962,7 +1962,7 @@ fn des_pc1_d_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_pc2_table(idx: u32) -> u32 {
+transform des_pc2_table(idx: u32) -> u32 {
     if idx == 0 { return 14; }
     if idx == 1 { return 17; }
     if idx == 2 { return 11; }
@@ -2014,7 +2014,7 @@ fn des_pc2_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn des_shift_schedule(idx: u32) -> u32 {
+transform des_shift_schedule(idx: u32) -> u32 {
     if idx == 0 { return 1; }
     if idx == 1 { return 1; }
     if idx == 2 { return 2; }
@@ -2036,7 +2036,7 @@ fn des_shift_schedule(idx: u32) -> u32 {
 
 // ---- Camellia S-boxes (RFC 3713) ----
 
-fn cam_sbox1_table(idx: u32) -> u32 {
+transform cam_sbox1_table(idx: u32) -> u32 {
     if idx == 0 { return 112; }
     if idx == 1 { return 130; }
     if idx == 2 { return 44; }
@@ -2296,19 +2296,19 @@ fn cam_sbox1_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn cam_sbox2_table(idx: u32) -> u32 {
+transform cam_sbox2_table(idx: u32) -> u32 {
     // RFC 3713 §2.2: SBOX2(x) = (SBOX1(x)) <<< 1  (rotate SBOX1 output left by 1 bit)
     v: u32 = cam_sbox1_table(idx & 255);
     return ((v << 1) | (v >> 7)) & 255;
 }
 
-fn cam_sbox3_table(idx: u32) -> u32 {
+transform cam_sbox3_table(idx: u32) -> u32 {
     // RFC 3713 §2.2: SBOX3(x) = (SBOX1(x)) >>> 1  (rotate SBOX1 output right by 1 bit)
     v: u32 = cam_sbox1_table(idx & 255);
     return ((v >> 1) | (v << 7)) & 255;
 }
 
-fn cam_sbox4_table(idx: u32) -> u32 {
+transform cam_sbox4_table(idx: u32) -> u32 {
     // RFC 3713 §2.2: SBOX4(x) = (SBOX1(x <<< 1)) <<< 1
     // (rotate input left by 1, apply SBOX1, rotate output left by 1)
     x: u32 = idx & 255;
@@ -2319,7 +2319,7 @@ fn cam_sbox4_table(idx: u32) -> u32 {
 
 // ---- ARIA S-boxes (RFC 5794 Appendix A) ----
 
-fn aria_sb1_table(idx: u32) -> u32 {
+transform aria_sb1_table(idx: u32) -> u32 {
     if idx == 0 { return 99; }
     if idx == 1 { return 124; }
     if idx == 2 { return 119; }
@@ -2579,7 +2579,7 @@ fn aria_sb1_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn aria_sb2_table(idx: u32) -> u32 {
+transform aria_sb2_table(idx: u32) -> u32 {
     if idx == 0 { return 226; }
     if idx == 1 { return 78; }
     if idx == 2 { return 84; }
@@ -2839,7 +2839,7 @@ fn aria_sb2_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn aria_sb3_table(idx: u32) -> u32 {
+transform aria_sb3_table(idx: u32) -> u32 {
     if idx == 0 { return 82; }
     if idx == 1 { return 9; }
     if idx == 2 { return 106; }
@@ -3099,7 +3099,7 @@ fn aria_sb3_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn aria_sb4_table(idx: u32) -> u32 {
+transform aria_sb4_table(idx: u32) -> u32 {
     if idx == 0 { return 48; }
     if idx == 1 { return 104; }
     if idx == 2 { return 153; }
@@ -3361,7 +3361,7 @@ fn aria_sb4_table(idx: u32) -> u32 {
 
 // ---- ARIA Cipher Keys (RFC 5794 Appendix) ----
 
-fn aria_ck1_table(idx: u32) -> u32 {
+transform aria_ck1_table(idx: u32) -> u32 {
     if idx == 0 { return 81; }
     if idx == 1 { return 124; }
     if idx == 2 { return 193; }
@@ -3381,7 +3381,7 @@ fn aria_ck1_table(idx: u32) -> u32 {
     return 0;
 }
 
-fn aria_ck2_table(idx: u32) -> u32 {
+transform aria_ck2_table(idx: u32) -> u32 {
     if idx == 0 { return 109; }
     if idx == 1 { return 177; }
     if idx == 2 { return 74; }
@@ -3403,7 +3403,7 @@ fn aria_ck2_table(idx: u32) -> u32 {
 
 // ARIA cipher key CK3 (RFC 5794 §2.4) — used by FO in the third regeneration
 // step (W3 = FO(W2, CK3)) for both ARIA-128 and ARIA-256.
-fn aria_ck3_table(idx: u32) -> u32 {
+transform aria_ck3_table(idx: u32) -> u32 {
     if idx == 0 { return 219; }   // 0xdb
     if idx == 1 { return 146; }   // 0x92
     if idx == 2 { return 55; }    // 0x37

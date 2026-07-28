@@ -9,7 +9,7 @@
 // Standard round-up-to-power-of-2 algorithm:
 //   v--; v |= v>>1; v |= v>>2; v |= v>>4; v |= v>>8; v |= v>>16; v |= v>>32; v++;
 // For v=200: v-- = 199, propagate ones to give 255, then v++ = 256.
-fn main() -> i32 {
+transform main() -> i32 {
     v0: u64 = 200;
     one: u64 = 1;
     two: u64 = 2;

@@ -3,7 +3,7 @@
 //
 // Exposes: while-body assignments to counter variable may not propagate.
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     while (count < 10) {
         count = count + 1;

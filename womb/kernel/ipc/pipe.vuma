@@ -340,7 +340,7 @@
 // to pipe_init / pipe_create / pipe_read / pipe_write / pipe_close
 // (init-style API — see "Why init-style?" in K4e's wait.vuma header for
 // the codegen rationale: the current codegen does NOT propagate State-
-// typedness through function return values, so `fn pipe_new() ->
+// typedness through function return values, so `transform pipe_new() ->
 // State<Pipe>` would produce broken field-access code in callers). No
 // externs are declared in this file (the pipe ops are pure-PM — no
 // syscalls, no context switch, no memory allocation). The actual
@@ -477,7 +477,7 @@ layout PipeBuf = { data: [u8; 256] }
 // 256, p.read_waitq.count = 0, p.write_waitq.*) lower to chained GEPs
 // (same codegen path as K4a's `task.regs.rip` access — verified to
 // work by K4a's self-test).
-fn pipe_init(p: State<Pipe>) {
+transform pipe_init(p: State<Pipe>) {
     p.head = 0;
     p.tail = 0;
     p.count = 0;
@@ -516,7 +516,7 @@ fn pipe_init(p: State<Pipe>) {
 // State<T> params: 1 (p). Delegates to pipe_init (which takes p by
 // reference — state-typedness is preserved across the call, per the
 // K7e self-test header's note).
-fn pipe_create(p: State<Pipe>) -> i64 {
+transform pipe_create(p: State<Pipe>) -> i64 {
     pipe_init(p);
     return 0;
 }
@@ -552,7 +552,7 @@ fn pipe_create(p: State<Pipe>) -> i64 {
 // State<T> params: 2 (p + buf). p is read (p.closed, p.count, p.head,
 // p.buf) and written (p.head, p.count); buf is written (buf.data[n]).
 // The two-state-param pattern is the same as K6b's tty_readline.
-fn pipe_read(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
+transform pipe_read(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
     if p.closed == 1 && p.count == 0 {
         return 0;  // EOF (closed and drained)
     }
@@ -596,7 +596,7 @@ fn pipe_read(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
 // State<T> params: 2 (p + buf). p is read (p.closed, p.count, p.tail)
 // and written (p.buf, p.tail, p.count); buf is read (buf.data[n]).
 // Same two-state-param pattern as pipe_read.
-fn pipe_write(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
+transform pipe_write(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
     if p.closed == 1 {
         return 32;  // -EPIPE (closed — no readers)
     }
@@ -633,7 +633,7 @@ fn pipe_write(p: State<Pipe>, buf: State<PipeBuf>, count: u64) -> i64 {
 //
 // State<T> params: 1 (p). Pure write — p.closed = 1, then 2 nested
 // field writes (p.read_waitq.count = 0, p.write_waitq.count = 0).
-fn pipe_close(p: State<Pipe>) {
+transform pipe_close(p: State<Pipe>) {
     p.closed = 1;
     // Wake all readers and writers (simplified — just set counts to 0,
     // matching K7e's waitq_wake_all. The full wake-one-at-a-time path
@@ -685,7 +685,7 @@ fn pipe_close(p: State<Pipe>) {
 // lexer accepts Char tokens — but the contract explicitly says "Use
 // decimal ASCII values", so we use decimal.)
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Pipe);
     let buf = state_new(PipeBuf);
     pipe_create(p);

@@ -10,7 +10,7 @@
 // correctly, so exit is 10. Kept as a regression guard for the
 // historically-documented if-body drop bug.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     y: u32 = 0;
     if true {

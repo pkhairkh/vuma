@@ -3,7 +3,7 @@
 //
 // XOR swap: a ^= b; b ^= a; a ^= b. After the swap, a holds b's original
 // value and b holds a's. With a=2, b=1: after swap, a=1. Return a = 1.
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 2;
     b: u64 = 1;
     a = a ^ b;

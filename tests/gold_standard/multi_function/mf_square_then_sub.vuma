@@ -6,12 +6,12 @@
 // s14_mf_helper_double (double, not square) and s13_mf_shared_squarer
 // (square called twice).
 
-fn sq(x: u32) -> u32 {
+transform sq(x: u32) -> u32 {
     r: u32 = x * x;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = sq(9);       // 81
     five: u32 = 5;
     r: u32 = a - five;    // 76

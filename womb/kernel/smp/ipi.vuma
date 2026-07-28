@@ -62,9 +62,9 @@
 //                                           `vector` and (in a real
 //                                           kernel) calls it. In VUMA
 //                                           hosted mode this is a stub
-//                                           — VUMA has no fn-pointer
+//                                           — VUMA has no transform-pointer
 //                                           call (see "Why no
-//                                           fn-pointer call?" below).
+//                                           transform-pointer call?" below).
 //
 // ── Layout: IpiTable ───────────────────────────────────────────────────────
 //   layout IpiTable = {
@@ -177,7 +177,7 @@
 //   ipi; K8e mirrors that by keeping the arch call inline (lapic_write
 //   directly) and declaring the other arches' externs for future use.
 //
-// ── Why no fn-pointer call in dispatch? ────────────────────────────────────
+// ── Why no transform-pointer call in dispatch? ────────────────────────────────────
 //   VUMA has no first-class function-pointer type and no indirect-call
 //   instruction. The handlers[] array stores u64 handler addresses
 //   (so the table can be inspected, listed, and round-tripped through
@@ -190,7 +190,7 @@
 //   VUMA's verifier (IVE) doesn't model indirect calls, so the
 //   hosted-mode stub just looks up the handler and returns (the
 //   contract's note: "In a real kernel: call handler(). VUMA has no
-//   fn-pointer call — stub.").
+//   transform-pointer call — stub.").
 //
 //   The self-test verifies that ipi_dispatch doesn't crash and that
 //   the handler lookup correctly returns 0x5000 for vector 0 (the
@@ -285,23 +285,23 @@ extern "C" {
     // u64 into two 32-bit writes at APIC_BASE + reg (low) and APIC_BASE
     // + reg + 16 (high) — the LAPIC's 64-bit ICR is accessed as two
     // 32-bit MMIO writes on real hardware.
-    fn lapic_write(reg: u32, val: u64);
+    transform lapic_write(reg: u32, val: u64);
     // aarch64: send an SGI (Software Generated Interrupt) to `cpu`
     // with vector `vector`. K11 stub: compose the GICD_SGIR value
     // (target CPU in bits 16..23, SGI ID in bits 0..3) and write it
     // to the GIC distributor.
-    fn gic_send_sgi(cpu: u32, vector: u32);
+    transform gic_send_sgi(cpu: u32, vector: u32);
     // riscv64: send an IPI to each hart in `cpu_mask` (bit N = hart N).
     // K11 stub: ecall with the SBI send_ipi extension ID, passing the
     // physical address of the hart mask as the argument.
-    fn sbi_send_ipi(cpu_mask: u64);
+    transform sbi_send_ipi(cpu_mask: u64);
     // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by ipi_dispatch to
     // invoke the per-vector IPI handler. Same stub category as
     // write/read/exit — NOT a C library function. Real asm body
     // registered in src/codegen/src/x86_64/mod.rs::build_runtime_
     // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -319,7 +319,7 @@ extern "C" {
 // (VUMA has no memset builtin; the loop unrolls to 128 byte-stores,
 // which the codegen lowers to a sequence of MOV byte ptr [addr+N], 0
 // instructions — efficient on all backends).
-fn ipi_init(tbl: State<IpiTable>) {
+transform ipi_init(tbl: State<IpiTable>) {
     let i = 0;
     while i < 128 {
         tbl.handlers[i] = 0;
@@ -351,7 +351,7 @@ fn ipi_init(tbl: State<IpiTable>) {
 // womb/kernel/proc/task.vuma:294-303) — VUMA's [u8; N] array is the
 // only array form the IVE verifier has full byte-level access to, so
 // u64 values stored in struct arrays are byte-packed.
-fn ipi_register_handler(tbl: State<IpiTable>, vector: u32, handler: u64) {
+transform ipi_register_handler(tbl: State<IpiTable>, vector: u32, handler: u64) {
     if vector >= 16 { return; }
     let off = vector * 8;
     let i = 0;
@@ -379,7 +379,7 @@ fn ipi_register_handler(tbl: State<IpiTable>, vector: u32, handler: u64) {
 //
 // The byte-unpacking loop is the same idiom as K4a's pt_get_pid (see
 // womb/kernel/proc/task.vuma:280-291) — inverse of ipi_register_handler.
-fn ipi_get_handler(tbl: State<IpiTable>, vector: u32) -> u64 {
+transform ipi_get_handler(tbl: State<IpiTable>, vector: u32) -> u64 {
     if vector >= 16 { return 0; }
     let off = vector * 8;
     let v: u64 = 0;
@@ -411,7 +411,7 @@ fn ipi_get_handler(tbl: State<IpiTable>, vector: u32) -> u64 {
 // but uses the decimal form (4096 = 0x1000). The codegen lowers this
 // to a left-shift on every backend (the opt pass recognizes the
 // multiply-by-power-of-2 pattern), so there's no perf cost.
-fn ipi_send(cpu: u32, vector: u32) {
+transform ipi_send(cpu: u32, vector: u32) {
     // x86_64: LAPIC ICR write.
     // ICR is at offset 0x300 (768), command is (cpu << 12) | vector.
     // In hosted mode: lapic_write is a stub (no-op).
@@ -435,7 +435,7 @@ fn ipi_send(cpu: u32, vector: u32) {
 // `vector` combines the vector bits (0..7) with the shorthand bits
 // (18..19) without overlapping (vector is at most 15, so bits 4..7
 // might be set but bits 18..19 are far above).
-fn ipi_broadcast(vector: u32) {
+transform ipi_broadcast(vector: u32) {
     // x86_64: LAPIC ICR with destination shorthand "all excluding self".
     // Bit 18-19: shorthand. 0b11 = all excluding self.
     let icr_val = (vector as u64) | 196608;  // 196608 = 0x30000 (bits 18-19)
@@ -446,9 +446,9 @@ fn ipi_broadcast(vector: u32) {
 // the trap handler (K3a's trap_trampoline.vuma / K3b's riscv64
 // equivalent) when an IPI is received. Looks up the handler for
 // `vector` via ipi_get_handler; if non-zero, invokes it through the
-//  __call_indirect1 runtime stub — VUMA has no first-class fn-
+//  __call_indirect1 runtime stub — VUMA has no first-class transform-
 // pointer type, so indirect dispatch is delegated to the asm trampoline
-// (see "Why no fn-pointer call in dispatch?" in the file header for the
+// (see "Why no transform-pointer call in dispatch?" in the file header for the
 // rationale, and the extern block above for the stub signature).
 //
 //   tbl:     the IpiTable.
@@ -458,7 +458,7 @@ fn ipi_broadcast(vector: u32) {
 // of tbl.handlers). The handler-address check `if handler != 0` is
 // the gate for "should we call the handler?". `tbl` is preserved across
 // the __call_indirect1 extern call because it is passed as a regular
-// VUMA-fn borrow, NOT as an extern #[borrow] param (only extern
+// VUMA-transform borrow, NOT as an extern #[borrow] param (only extern
 // #[borrow] State<T> params are conservatively invalidated).
 //
 // This function is the RECEIVING-CPU side of the IPI. The SENDING
@@ -471,7 +471,7 @@ fn ipi_broadcast(vector: u32) {
 // lookup / dispatch-logic paths are exercised by the self-test, and
 // the indirect-call site is IVE-verified (the compile_dump --verify
 // step runs the IVE state verifiers, not the binary itself).
-fn ipi_dispatch(tbl: State<IpiTable>, vector: u32) {
+transform ipi_dispatch(tbl: State<IpiTable>, vector: u32) {
     if vector >= 16 { return; }
     let handler = ipi_get_handler(tbl, vector);
     if handler != 0 {
@@ -513,7 +513,7 @@ fn ipi_dispatch(tbl: State<IpiTable>, vector: u32) {
 // address; the other constants are 0 / 1 / 5 / 16 — already small
 // enough to be unambiguous in either base).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(IpiTable);
     ipi_init(tbl);
     // Register handler for vector 0 (reschedule).

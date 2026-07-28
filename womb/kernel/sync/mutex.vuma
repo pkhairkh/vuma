@@ -388,7 +388,7 @@ layout Mutex = {
 // State<T> params: 1 (m). Pure write — no reads, no helper calls.
 // The 4 field assignments are direct (no byte-packing needed because
 // every field is a primitive u32, not a nested layout).
-fn mutex_init(m: State<Mutex>) {
+transform mutex_init(m: State<Mutex>) {
     m.locked = 0;
     m._pad0 = 0;
     m.owner = 256;
@@ -459,7 +459,7 @@ fn mutex_init(m: State<Mutex>) {
 // than the previous K8b behavior (infinite busy-wait → hosted runtime
 // hang) but still a bug — callers must not recursively acquire. See
 // "Mutex vs. spinlock" in the file header.
-fn mutex_acquire(m: State<Mutex>, task_idx: u32) -> i32 {
+transform mutex_acquire(m: State<Mutex>, task_idx: u32) -> i32 {
     // Fast path: try AtomicCas(0 → 1).
     //   atomic_cas(addr, expected, desired) returns the OLD value at
     //   addr. If old == expected (0), the swap succeeded (we got the
@@ -587,7 +587,7 @@ fn mutex_acquire(m: State<Mutex>, task_idx: u32) -> i32 {
 // `_pad0`); the `owner` field at offset 8 is untouched by the
 // atomic_store, which is why we explicitly set m.owner = 256 BEFORE the
 // atomic_store. (Same pattern as K8a's spinlock_release.)
-fn mutex_release(m: State<Mutex>, task_idx: u32) {
+transform mutex_release(m: State<Mutex>, task_idx: u32) {
     // Ownership check. Not the owner → silent no-op (stub error).
     if m.owner != task_idx {
         return;
@@ -664,7 +664,7 @@ fn mutex_release(m: State<Mutex>, task_idx: u32) {
 //     could add as a 5th check, but the contract specifies 4).
 //   - Actual sleep_on / wake_one (hosted has no scheduler — K9 covers
 //     this with the bare-metal scheduler integration tests).
-fn main() -> i32 {
+transform main() -> i32 {
     let m = state_new(Mutex);
     mutex_init(m);
     // Acquire as task 5 — fast path should succeed immediately.

@@ -102,7 +102,7 @@ layout AesState = { data: [u8; 16] }
 // The full table is written as 256 explicit `sbox.data[N] = <decimal>;`
 // assignments rather than a runtime loop so the constants are visible
 // to static analysis and IVE.
-fn aes_init_sbox(sbox: State<AesSbox>) {
+transform aes_init_sbox(sbox: State<AesSbox>) {
     sbox.data[0] = 99; sbox.data[1] = 124; sbox.data[2] = 119; sbox.data[3] = 123;
     sbox.data[4] = 242; sbox.data[5] = 107; sbox.data[6] = 111; sbox.data[7] = 197;
     sbox.data[8] = 48; sbox.data[9] = 1; sbox.data[10] = 103; sbox.data[11] = 43;
@@ -179,7 +179,7 @@ fn aes_init_sbox(sbox: State<AesSbox>) {
 // copies of the original key. K11 will replace this with the real
 // Rijndael key expansion (RotWord + SubWord + Rcon XOR — see FIPS-197
 // §5.2 Key Expansion for the 4-word → 44-word expansion schedule).
-fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
+transform aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
     // Round 0: copy the key verbatim.
     let i = 0;
     while i < 16 {
@@ -213,7 +213,7 @@ fn aes_key_expansion(ctx: State<AesCtx>, key: State<AesKey>) {
 // non-linear, non-identity permutation that gives AES its resistance
 // to differential + linear cryptanalysis (the same property W29S1's
 // real S-box provides over the K10b identity permutation).
-fn aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
+transform aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
     let i = 0;
     while i < 16 {
         state.data[i] = sbox.data[state.data[i] as u32];
@@ -237,7 +237,7 @@ fn aes_sub_bytes(state: State<AesState>, sbox: State<AesSbox>) {
 // K6e scheduler.vuma's decimal-reverse helper). `tmp` is typed u8 from
 // the first `state.data[1]` read (VUMA infers the type from the
 // initializer — byte-granular indexing of a [u8; 16] field yields u8).
-fn aes_shift_rows(state: State<AesState>) {
+transform aes_shift_rows(state: State<AesState>) {
     let tmp = state.data[1];
     // Row 1: left-rotate by 1.
     state.data[1] = state.data[5];
@@ -285,7 +285,7 @@ fn aes_shift_rows(state: State<AesState>) {
 // and initialized via aes_init_sbox — VUMA has no import, so each
 // encrypt_block call rebuilds the S-box from scratch (one-time 256-byte
 // fill; the cost is dwarfed by the 10×16 = 160 SubBytes lookups).
-fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+transform aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
     // Working state (column-major 4×4 byte matrix, AES-128 = 16 bytes).
     let state = state_new(AesState);
     // S-box (rebuilt per call — VUMA has no import / cross-call caching).
@@ -343,7 +343,7 @@ fn aes_encrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<A
 // inverse cipher (InvSubBytes + InvShiftRows + InvMixColumns +
 // AddRoundKey, with the round-key schedule iterated in reverse — see
 // FIPS-197 §5.3 Pseudocode for the Inverse Cipher).
-fn aes_decrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
+transform aes_decrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<AesBlock>) {
     aes_encrypt_block(ctx, input, output);
 }
 
@@ -379,7 +379,7 @@ fn aes_decrypt_block(ctx: State<AesCtx>, input: State<AesBlock>, output: State<A
 //   at every round (all start at 0, all transform identically). The W49
 //   swap pattern (rows 1/2/3) therefore produces the same result as the
 //   canonical FIPS-197 ShiftRows for this specific test vector.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── S-box path ──
     let sbox = state_new(AesSbox);
     aes_init_sbox(sbox);

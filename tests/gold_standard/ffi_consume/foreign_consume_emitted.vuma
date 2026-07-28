@@ -21,10 +21,10 @@ layout DbHandle = { raw: u64 }
 
 extern "C" {
     #[foreign_consume(raw)]
-    fn sqlite3_close(db: State<DbHandle>);
+    transform sqlite3_close(db: State<DbHandle>);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let db = state_new(DbHandle);
     db.raw = 0;
     // When linked against -lsqlite3, this call would execute:

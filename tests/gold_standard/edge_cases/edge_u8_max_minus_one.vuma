@@ -4,7 +4,7 @@
 // Edge case: compute 255 - 1 using intermediate variables to avoid
 // the immediate-RHS bitwise drop. 255 - 1 = 254.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     one: u32 = 1;
     r: u32 = a - one;

@@ -35,7 +35,7 @@ struct TypedArena {
     total_allocated: u64,  // Total bytes allocated across all scopes
 }
 
-fn typed_arena_create(type_size: u64, type_align: u64, capacity: u64) -> Address {
+transform typed_arena_create(type_size: u64, type_align: u64, capacity: u64) -> Address {
     // Create a typed arena for a specific type
     //
     // IVE verifies: single large allocation for the entire arena
@@ -56,7 +56,7 @@ fn typed_arena_create(type_size: u64, type_align: u64, capacity: u64) -> Address
     return arena;
 }
 
-fn scope_alloc(scope: Address, size: u64, align: u64) -> Address {
+transform scope_alloc(scope: Address, size: u64, align: u64) -> Address {
     // Bump-allocate within a scope, respecting alignment
     //
     // IVE verifies: derivation chain scope.base → current → aligned
@@ -74,7 +74,7 @@ fn scope_alloc(scope: Address, size: u64, align: u64) -> Address {
     return aligned;
 }
 
-fn typed_alloc(arena: Address) -> Address {
+transform typed_alloc(arena: Address) -> Address {
     // Allocate one typed element from the arena
     //
     // IVE verifies: returned pointer is within arena's root allocation
@@ -88,7 +88,7 @@ fn typed_alloc(arena: Address) -> Address {
     return result;
 }
 
-fn push_scope(arena: Address, scope_size: u64) -> Address {
+transform push_scope(arena: Address, scope_size: u64) -> Address {
     // Create a nested scope within the arena
     //
     // Nested scopes allow rolling back part of the arena without
@@ -112,7 +112,7 @@ fn push_scope(arena: Address, scope_size: u64) -> Address {
     return scope;
 }
 
-fn pop_scope(arena: Address, scope: Address) {
+transform pop_scope(arena: Address, scope: Address) {
     // Pop a nested scope, reclaiming its memory
     //
     // IVE verifies: all pointers derived from this scope are invalidated
@@ -126,7 +126,7 @@ fn pop_scope(arena: Address, scope: Address) {
     // The memory reverts to the parent scope for reuse
 }
 
-fn arena_reset(arena: Address) {
+transform arena_reset(arena: Address) {
     // Reset the arena — reclaim ALL allocations in O(1)
     //
     // IVE verifies: after reset, all previously derived pointers
@@ -144,7 +144,7 @@ fn arena_reset(arena: Address) {
     (*arena).total_allocated = 0;
 }
 
-fn arena_destroy(arena: Address) {
+transform arena_destroy(arena: Address) {
     // Destroy the arena, freeing all memory
     // IVE verifies: all derived pointers become invalid
     // IVE verifies: no memory leaked (Cleanup invariant)
@@ -157,7 +157,7 @@ struct Point {
     y: u64,
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Create a typed arena for Point structs (16 bytes, align 8)
     // Capacity: 256 points → 4096 bytes total
     arena = typed_arena_create(16, 8, 256);

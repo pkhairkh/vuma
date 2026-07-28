@@ -6,7 +6,7 @@
 // without truncation. Distinct from s5_edge_255_minus_1 (254 via
 // subtraction) and s6_edge_max_byte (literal 255 returned directly).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 55;
     r: u32 = a + b;   // 255

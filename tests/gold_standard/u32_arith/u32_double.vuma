@@ -3,7 +3,7 @@
 //
 // 100 * 2 = 200. Masked to u32 = 200.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u32 = 100;
     two: u32 = 2;
     doubled: u32 = (val * two) & 4294967295;

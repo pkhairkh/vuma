@@ -1,7 +1,7 @@
 // womb/encoding/url.vuma — URL/Percent Encoding (RFC 3986)
 // No main() — importable library module.
 
-fn url_encode_char(c: u32) -> u32 {
+transform url_encode_char(c: u32) -> u32 {
     // Unreserved characters: A-Z a-z 0-9 - _ . ~
     if c >= 65 { if c <= 90 { return 0; } }
     if c >= 97 { if c <= 122 { return 0; } }
@@ -13,7 +13,7 @@ fn url_encode_char(c: u32) -> u32 {
     return 1;  // needs encoding
 }
 
-fn url_encode(input: Address, len: u32, output: Address) -> u32 {
+transform url_encode(input: Address, len: u32, output: Address) -> u32 {
     out_idx: u32 = 0;
     i: u32 = 0;
     while i < len {
@@ -38,7 +38,7 @@ fn url_encode(input: Address, len: u32, output: Address) -> u32 {
     return out_idx;
 }
 
-fn url_decode(input: Address, len: u32, output: Address) -> u32 {
+transform url_decode(input: Address, len: u32, output: Address) -> u32 {
     out_idx: u32 = 0;
     i: u32 = 0;
     while i < len {
@@ -62,7 +62,7 @@ fn url_decode(input: Address, len: u32, output: Address) -> u32 {
     return out_idx;
 }
 
-fn hex_val(c: u32) -> u32 {
+transform hex_val(c: u32) -> u32 {
     if c >= 48 { if c <= 57 { return c - 48; } }
     if c >= 97 { if c <= 102 { return c - 87; } }
     if c >= 65 { if c <= 70 { return c - 55; } }

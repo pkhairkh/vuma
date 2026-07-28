@@ -6,7 +6,7 @@
 // into variables first to dodge the immediate-RHS bitwise drop bug.
 // Distinct from s6_bit_and_chain_3 (three-way chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;       // 0xFF
     b: u64 = 240;       // 0xF0
     c: u64 = 204;       // 0xCC

@@ -114,10 +114,10 @@
 // pt_init(tbl), K5a's own inode_init / dentry_init — see womb/kernel/
 // mm/pmm.vuma header "Why init-style?" for the codegen rationale: the
 // current codegen does NOT propagate State-typedness through function
-// return values, so `fn file_new() -> State<FileTable>` would produce
+// return values, so `transform file_new() -> State<FileTable>` would produce
 // broken field-access code in callers). All file.vuma helpers take
-// `tbl: State<FileTable>` by regular VUMA-fn borrow (NOT extern
-// #[borrow] — VUMA fn calls don't need the attribute; only extern "C"
+// `tbl: State<FileTable>` by regular VUMA-transform borrow (NOT extern
+// #[borrow] — VUMA transform calls don't need the attribute; only extern "C"
 // calls do, and none of these helpers call any extern).
 //
 // ── Pack/unpack helpers ─────────────────────────────────────────────────────
@@ -292,7 +292,7 @@ layout FileTable = {
 // shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
 
 // Read the u64 `dentry` field of File slot `idx` from FileTable.dentries.
-fn file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -306,7 +306,7 @@ fn file_get_dentry(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `dentry` field of File slot `idx` into FileTable.dentries.
-fn file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -318,7 +318,7 @@ fn file_set_dentry(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `pos` field of File slot `idx` from FileTable.poses.
-fn file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -332,7 +332,7 @@ fn file_get_pos(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `pos` field of File slot `idx` into FileTable.poses.
-fn file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -344,7 +344,7 @@ fn file_set_pos(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `ops` field of File slot `idx` from FileTable.ops.
-fn file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -358,7 +358,7 @@ fn file_get_ops(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `ops` field of File slot `idx` into FileTable.ops.
-fn file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -370,7 +370,7 @@ fn file_set_ops(tbl: State<FileTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `private` field of File slot `idx` from FileTable.privates.
-fn file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
+transform file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -384,7 +384,7 @@ fn file_get_private(tbl: State<FileTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `private` field of File slot `idx` into FileTable.privates.
-fn file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
+transform file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -405,7 +405,7 @@ fn file_set_private(tbl: State<FileTable>, idx: u32, val: u64) {
 // sum-of-shifted-bytes on reads.
 
 // Read the u32 `flags` field of File slot `idx` from FileTable.flags.
-fn file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
+transform file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -419,7 +419,7 @@ fn file_get_flags(tbl: State<FileTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `flags` field of File slot `idx` into FileTable.flags.
-fn file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
+transform file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -443,12 +443,12 @@ fn file_set_flags(tbl: State<FileTable>, idx: u32, val: u32) {
 // (not part of the K5a contract's helper list, but exposed for K5c's
 // file_close to double-check a slot is in use before freeing it, and
 // for K6's sys_close to do the same).
-fn file_get_used(tbl: State<FileTable>, idx: u32) -> u8 {
+transform file_get_used(tbl: State<FileTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of File slot `idx` into FileTable.used.
-fn file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
+transform file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
@@ -462,7 +462,7 @@ fn file_set_used(tbl: State<FileTable>, idx: u32, val: u8) {
 // other File fields (dentries, poses, etc.) — those are populated by
 // file_alloc's caller, so zeroing them here would be wasted work (and
 // VUMA has no memset).
-fn file_init(tbl: State<FileTable>) {
+transform file_init(tbl: State<FileTable>) {
     let i = 0;
     while i < 64 {
         file_set_used(tbl, i, 0);
@@ -484,7 +484,7 @@ fn file_init(tbl: State<FileTable>) {
 //
 // The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
 // (verified by the self-test: free slot 0, alloc → returns 0, not 2).
-fn file_alloc(tbl: State<FileTable>) -> u32 {
+transform file_alloc(tbl: State<FileTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if file_get_used(tbl, i) == 0 {
@@ -504,7 +504,7 @@ fn file_alloc(tbl: State<FileTable>) -> u32 {
 // calls this on every close(2) syscall. K4d's sys_exit calls this in
 // a loop for every open file in the exiting task's fd table (K4g
 // will wire that).
-fn file_free(tbl: State<FileTable>, idx: u32) {
+transform file_free(tbl: State<FileTable>, idx: u32) {
     file_set_used(tbl, idx, 0);
     tbl.count = tbl.count - 1;
 }
@@ -546,7 +546,7 @@ fn file_free(tbl: State<FileTable>, idx: u32) {
 // when byte 1+ of the u64 is non-zero (e.g. a missing shift, a wrong
 // mask, an off-by-one in the loop bound).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(FileTable);
     file_init(tbl);
 

@@ -18,7 +18,7 @@
 // ===========================================================================
 // 0-9 → '0'-'9' (48-57), 10-15 → 'A'-'F' (65-70)
 
-fn nybble_to_hex(n: u64) -> u64 {
+transform nybble_to_hex(n: u64) -> u64 {
     if n < 10 {
         return n + 48;    // '0' = 48
     } else {
@@ -30,7 +30,7 @@ fn nybble_to_hex(n: u64) -> u64 {
 // Convert a byte to two hex characters, stored at dst and dst+1
 // ===========================================================================
 
-fn byte_to_hex(dst: Address, byte: u64) {
+transform byte_to_hex(dst: Address, byte: u64) {
     hi: u64 = nybble_to_hex((byte >> 4) & 15);
     lo: u64 = nybble_to_hex(byte & 15);
     *dst = hi;
@@ -43,7 +43,7 @@ fn byte_to_hex(dst: Address, byte: u64) {
 // For N input bytes, writes 2*N hex characters to the output buffer.
 // Returns a checksum: XOR of all output byte values.
 
-fn hex_dump(input: Address, output: Address, len: u64) -> u64 {
+transform hex_dump(input: Address, output: Address, len: u64) -> u64 {
     checksum: u64 = 0;
     i: u64 = 0;
     while i < len {
@@ -69,7 +69,7 @@ fn hex_dump(input: Address, output: Address, len: u64) -> u64 {
 // XOR of all = computed at runtime
 // Expected exit code: XOR result & 0xFF
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate input buffer (8 bytes)
     input = allocate(8);
     *(input + 0) = 222;   // 0xDE

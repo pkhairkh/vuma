@@ -25,7 +25,7 @@ const AES192_ROUND_KEYS_BYTES: u32 = 208;   // 4 * (Nr+1) * 4 = 13*16
 //   w[i] = w[i-Nk] XOR temp
 // ===========================================================================
 
-fn aes192_key_expansion(key: Address, roundkeys: Address) {
+transform aes192_key_expansion(key: Address, roundkeys: Address) {
     // Copy the 24-byte (6-word) input key as the first 6 words.
     i: u32 = 0;
     while i < 24 {
@@ -78,7 +78,7 @@ fn aes192_key_expansion(key: Address, roundkeys: Address) {
 // out := state
 // ===========================================================================
 
-fn aes192_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
+transform aes192_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
     roundkeys = allocate(AES192_ROUND_KEYS_BYTES);
     aes192_key_expansion(key, roundkeys);
 
@@ -119,7 +119,7 @@ fn aes192_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
 // out := state
 // ===========================================================================
 
-fn aes192_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
+transform aes192_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
     roundkeys = allocate(AES192_ROUND_KEYS_BYTES);
     aes192_key_expansion(key, roundkeys);
 
@@ -155,7 +155,7 @@ fn aes192_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
 // Decrypt: P_i = AES_dec(C_i) XOR C_{i-1}
 // ===========================================================================
 
-fn aes192_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes192_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     // PKCS#7 pad to a multiple of 16; always append 1..16 bytes.
     pad_byte: u32 = 16 - (pt_len % 16);
     if pad_byte == 0 { pad_byte = 16; }
@@ -196,7 +196,7 @@ fn aes192_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
     return padded_len;
 }
 
-fn aes192_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes192_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     prev = allocate(16);
     i: u32 = 0;
     while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
@@ -237,7 +237,7 @@ fn aes192_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Addres
 // XORed against the leading bytes of the keystream.
 // ===========================================================================
 
-fn aes192_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+transform aes192_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
     counter_block = allocate(16);
     i: u32 = 0;
     while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }

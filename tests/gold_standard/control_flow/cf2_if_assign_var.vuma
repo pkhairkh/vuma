@@ -13,7 +13,7 @@
 // current build and to pass once the bool-variable condition codegen bug is
 // fixed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     cond: bool = true;
     if cond {

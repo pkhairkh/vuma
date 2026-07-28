@@ -42,7 +42,7 @@ enum Result {
 // Create an Option::Some value in memory
 // ===========================================================================
 
-fn make_some(val: u32, out: Address) {
+transform make_some(val: u32, out: Address) {
     // Write tag = 1 (Some variant)
     *(out + 0) = 1;
     // Write payload as 4 individual bytes (little-endian).
@@ -59,7 +59,7 @@ fn make_some(val: u32, out: Address) {
 // Create an Option::None value in memory
 // ===========================================================================
 
-fn make_none(out: Address) {
+transform make_none(out: Address) {
     // Write tag = 0 (None variant)
     *(out + 0) = 0;
 }
@@ -70,7 +70,7 @@ fn make_none(out: Address) {
 // This uses a simple if/else to check the tag, demonstrating
 // how pattern matching on enums works at the memory level.
 
-fn option_unwrap_or(opt: Address, default: u32) -> u32 {
+transform option_unwrap_or(opt: Address, default: u32) -> u32 {
     tag: u32 = *(opt + 0);
     if tag == 1 {
         // Read payload as 4 individual bytes and reassemble (little-endian).
@@ -89,7 +89,7 @@ fn option_unwrap_or(opt: Address, default: u32) -> u32 {
 // Main entry point
 // ===========================================================================
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate space for an Option enum (8 bytes: tag + payload)
     opt = allocate(8);
 

@@ -6,7 +6,7 @@
 // variables first. Distinct from s6_u32_shift_left_3 (shift by 3) and
 // s5_u32_add_then_shift (add-then-shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 1;
     sh: u32 = 4;
     c: u32 = 16;          // 0x10

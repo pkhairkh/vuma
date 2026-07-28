@@ -12,7 +12,7 @@
 // delegated token id is non-zero.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     cap = capability_grant(7, 3);
     delegated = capability_delegate(cap, 7, 1);
     if delegated != 0 {

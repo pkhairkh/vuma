@@ -6,7 +6,7 @@
 //   v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4)  // swap nibbles
 //   v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2)  // swap pairs
 //   v = ((v & 0xAA) >> 1) | ((v & 0x55) << 1)  // swap bits
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 15;
     mF0: u64 = 0xF0;
     m0F: u64 = 0x0F;

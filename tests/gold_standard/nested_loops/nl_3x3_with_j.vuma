@@ -8,7 +8,7 @@
 // from s4_nl_3x3_sum (sums j, not j*j).
 // Expected exit code: 15
 
-fn main() -> i32 {
+transform main() -> i32 {
     acc: u32 = 0;
     for i in 0..3 {
         for j in 0..3 {

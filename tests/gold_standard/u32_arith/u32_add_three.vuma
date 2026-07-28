@@ -4,7 +4,7 @@
 // Three-way u32 addition chain. All values within U8 range so the
 // known *(buf+offset) U8-truncation bug doesn't apply (no memory).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 100;
     b: u32 = 50;
     c: u32 = 25;

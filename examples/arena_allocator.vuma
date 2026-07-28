@@ -22,14 +22,14 @@ struct Arena {
     offset: u64,     // Current allocation offset
 }
 
-fn arena_create(size: u64) -> Arena {
+transform arena_create(size: u64) -> Arena {
     // Allocate one contiguous block for the entire arena
     // IVE verifies: allocation succeeds and size is recorded
     base = allocate(size);
     return Arena { base, size, offset: 0 };
 }
 
-fn arena_alloc(arena: Address, alloc_size: u64, align: u64) -> Address {
+transform arena_alloc(arena: Address, alloc_size: u64, align: u64) -> Address {
     // Bump-allocate within the arena, respecting alignment
     //
     // IVE tracks the derivation chain:
@@ -46,7 +46,7 @@ fn arena_alloc(arena: Address, alloc_size: u64, align: u64) -> Address {
     return aligned;
 }
 
-fn arena_destroy(arena: Arena) {
+transform arena_destroy(arena: Arena) {
     // Free the entire arena in one operation
     // IVE verifies: all derivations from arena.base are now invalid
     //
@@ -56,7 +56,7 @@ fn arena_destroy(arena: Arena) {
     free(arena.base);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     arena = arena_create(4096);
 
     // Both `a` and `b` are derived from arena.base

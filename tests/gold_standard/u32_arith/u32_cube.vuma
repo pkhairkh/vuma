@@ -3,7 +3,7 @@
 //
 // 5 * 5 = 25; 25 * 5 = 125. Masked to u32 = 125.
 
-fn main() -> i32 {
+transform main() -> i32 {
     val: u32 = 5;
     sq: u32 = (val * val) & 4294967295;       // 25
     cube: u32 = (sq * val) & 4294967295;      // 125

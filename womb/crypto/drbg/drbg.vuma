@@ -30,7 +30,7 @@ const DRBG_RESEED_INTERVAL: u32 = 4294967295;  // 2^32 - 1
 //   reseed_counter = 1
 // ===========================================================================
 
-fn drbg_init(state: Address, entropy: Address, entropy_len: u32,
+transform drbg_init(state: Address, entropy: Address, entropy_len: u32,
              nonce: Address, nonce_len: u32) {
     i: u32 = 0;
     while i < DRBG_SEEDLEN { *(state + DRBG_K_OFF + i) = 0; i = i + 1; }
@@ -61,7 +61,7 @@ fn drbg_init(state: Address, entropy: Address, entropy_len: u32,
 //     V = HMAC(K, V)
 // ===========================================================================
 
-fn drbg_update(state: Address, provided_data: Address, data_len: u32) {
+transform drbg_update(state: Address, provided_data: Address, data_len: u32) {
     input_len: u32 = DRBG_SEEDLEN + 1 + data_len;
     input = allocate(input_len);
     i: u32 = 0;
@@ -114,7 +114,7 @@ fn drbg_update(state: Address, provided_data: Address, data_len: u32) {
 //   reseed_counter = 1
 // ===========================================================================
 
-fn drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
+transform drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
     drbg_update(state, entropy, entropy_len);
     *(state + DRBG_CT_OFF) = 1;
     *(state + DRBG_CT_OFF + 1) = 0;
@@ -126,7 +126,7 @@ fn drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
 // Read the u32 reseed counter (little-endian).
 // ===========================================================================
 
-fn drbg_get_counter(state: Address) -> u32 {
+transform drbg_get_counter(state: Address) -> u32 {
     b0: u32 = *(state + DRBG_CT_OFF);
     b1: u32 = *(state + DRBG_CT_OFF + 1);
     b2: u32 = *(state + DRBG_CT_OFF + 2);
@@ -134,7 +134,7 @@ fn drbg_get_counter(state: Address) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn drbg_set_counter(state: Address, ctr: u32) {
+transform drbg_set_counter(state: Address, ctr: u32) {
     *(state + DRBG_CT_OFF) = ctr & 255;
     *(state + DRBG_CT_OFF + 1) = (ctr >> 8) & 255;
     *(state + DRBG_CT_OFF + 2) = (ctr >> 16) & 255;
@@ -154,7 +154,7 @@ fn drbg_set_counter(state: Address, ctr: u32) {
 //   reseed-required).
 // ===========================================================================
 
-fn drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
+transform drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
     rc: u32 = drbg_get_counter(state);
     if rc > DRBG_RESEED_INTERVAL {
         // Caller must reseed before generating more output.

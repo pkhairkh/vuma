@@ -12,7 +12,7 @@
 layout Buf_src = { data: [u8; 8] }
 layout Buf_dst = { data: [u8; 8] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let src = state_new(Buf_src);
     let dst = state_new(Buf_dst);
     src.data[0] = 42;

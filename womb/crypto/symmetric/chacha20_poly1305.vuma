@@ -26,7 +26,7 @@ const C20P1305_FAIL: u32 = 4294967295;
 // in the Poly1305 mac_input construction (RFC 8439 §2.8, "Construction").
 // ===========================================================================
 
-fn c20p1305_store_u64_le(ptr: Address, off: u32, val: u64) {
+transform c20p1305_store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -39,7 +39,7 @@ fn c20p1305_store_u64_le(ptr: Address, off: u32, val: u64) {
 
 // Round `len` up to the next multiple of 16. Returns `len` unchanged when
 // it is already a multiple of 16.
-fn c20p1305_pad16(len: u32) -> u32 {
+transform c20p1305_pad16(len: u32) -> u32 {
     rem: u32 = len % 16;
     if rem == 0 { return len; }
     return len + (16 - rem);
@@ -55,7 +55,7 @@ fn c20p1305_pad16(len: u32) -> u32 {
 // bytes long.
 // ===========================================================================
 
-fn c20p1305_build_mac_input(mac_input: Address, aad: Address, aad_len: u32,
+transform c20p1305_build_mac_input(mac_input: Address, aad: Address, aad_len: u32,
                             ct: Address, ct_len: u32) -> u32 {
     aad_padded: u32 = c20p1305_pad16(aad_len);
     ct_padded: u32 = c20p1305_pad16(ct_len);
@@ -87,7 +87,7 @@ fn c20p1305_build_mac_input(mac_input: Address, aad: Address, aad_len: u32,
 // The remaining 32 bytes of that 64-byte block are discarded.
 // ===========================================================================
 
-fn c20p1305_derive_poly_key(key: Address, nonce: Address, poly_key: Address) {
+transform c20p1305_derive_poly_key(key: Address, nonce: Address, poly_key: Address) {
     zero = allocate(32);
     i: u32 = 0;
     while i < 32 { *(zero + i) = 0; i = i + 1; }
@@ -105,7 +105,7 @@ fn c20p1305_derive_poly_key(key: Address, nonce: Address, poly_key: Address) {
 // Returns pt_len on success.
 // ===========================================================================
 
-fn chacha20_poly1305_encrypt(key: Address, nonce: Address,
+transform chacha20_poly1305_encrypt(key: Address, nonce: Address,
                              aad: Address, aad_len: u32,
                              plaintext: Address, pt_len: u32,
                              ciphertext: Address, tag: Address) -> u32 {
@@ -139,7 +139,7 @@ fn chacha20_poly1305_encrypt(key: Address, nonce: Address,
 // buffer is left untouched in the failure case).
 // ===========================================================================
 
-fn chacha20_poly1305_decrypt(key: Address, nonce: Address,
+transform chacha20_poly1305_decrypt(key: Address, nonce: Address,
                              aad: Address, aad_len: u32,
                              ciphertext: Address, ct_len: u32,
                              plaintext: Address, tag: Address) -> u32 {
@@ -182,7 +182,7 @@ fn chacha20_poly1305_decrypt(key: Address, nonce: Address,
 // usage where the counter is implicit per-session.
 // ===========================================================================
 
-fn chacha20_poly1305_encrypt_iv(key: Address, fixed_nonce: Address,
+transform chacha20_poly1305_encrypt_iv(key: Address, fixed_nonce: Address,
                                 counter: u32, aad: Address, aad_len: u32,
                                 plaintext: Address, pt_len: u32,
                                 ciphertext: Address, tag: Address,

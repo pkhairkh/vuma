@@ -4,11 +4,11 @@
 // Tests passing a 32-bit unsigned integer parameter and returning it
 // unchanged. Verifies u32 parameter passing round-trip.
 
-fn echo_u32(x: u32) -> u32 {
+transform echo_u32(x: u32) -> u32 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = echo_u32(100);
     return v;
 }

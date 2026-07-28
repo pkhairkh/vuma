@@ -6,7 +6,7 @@
 // from s6_bit_shl_then_shr (shift chain, no XOR) and s5_bit_xor_then_not
 // (double XOR self-cancel).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 15;       // 0x0F
     b: u64 = 240;      // 0xF0
     sh: u64 = 1;

@@ -18,7 +18,7 @@
 // SHA-256 Helper: u32 right-rotate
 // ===========================================================================
 
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;
 }
 
@@ -26,27 +26,27 @@ fn rotr32(x: u32, n: u32) -> u32 {
 // SHA-256 logical functions (FIPS 180-4 Section 4.1.2)
 // ===========================================================================
 
-fn ch(x: u32, y: u32, z: u32) -> u32 {
+transform ch(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((x ^ 4294967295) & z);
 }
 
-fn maj(a: u32, b: u32, c: u32) -> u32 {
+transform maj(a: u32, b: u32, c: u32) -> u32 {
     return (a & b) ^ (a & c) ^ (b & c);
 }
 
-fn big_sigma0(x: u32) -> u32 {
+transform big_sigma0(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
-fn big_sigma1(x: u32) -> u32 {
+transform big_sigma1(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
-fn small_sigma0(x: u32) -> u32 {
+transform small_sigma0(x: u32) -> u32 {
     return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
 }
 
-fn small_sigma1(x: u32) -> u32 {
+transform small_sigma1(x: u32) -> u32 {
     return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
 }
 
@@ -54,7 +54,7 @@ fn small_sigma1(x: u32) -> u32 {
 // Read/write u32 from a byte buffer (big-endian, per FIPS 180-4)
 // ===========================================================================
 
-fn read_u32_be(buf: Address, offset: u64) -> u32 {
+transform read_u32_be(buf: Address, offset: u64) -> u32 {
     b0: u32 = *(buf + offset);
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
@@ -62,18 +62,18 @@ fn read_u32_be(buf: Address, offset: u64) -> u32 {
     return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
 }
 
-fn write_u32_be(buf: Address, offset: u64, val: u32) {
+transform write_u32_be(buf: Address, offset: u64, val: u32) {
     *(buf + offset) = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
     *(buf + offset + 2) = (val >> 8) & 255;
     *(buf + offset + 3) = val & 255;
 }
 
-fn w_store(w_base: Address, idx: u64, val: u32) {
+transform w_store(w_base: Address, idx: u64, val: u32) {
     write_u32_be(w_base, idx * 4, val);
 }
 
-fn w_load(w_base: Address, idx: u64) -> u32 {
+transform w_load(w_base: Address, idx: u64) -> u32 {
     return read_u32_be(w_base, idx * 4);
 }
 
@@ -81,7 +81,7 @@ fn w_load(w_base: Address, idx: u64) -> u32 {
 // Initialize SHA-256 state and round constants
 // ===========================================================================
 
-fn sha256_init_state(state: Address) {
+transform sha256_init_state(state: Address) {
     write_u32_be(state, 0,  1779033703);
     write_u32_be(state, 4,  3144134277);
     write_u32_be(state, 8,  1013904242);
@@ -92,7 +92,7 @@ fn sha256_init_state(state: Address) {
     write_u32_be(state, 28, 1541459225);
 }
 
-fn sha256_init_k(k: Address) {
+transform sha256_init_k(k: Address) {
     write_u32_be(k, 0,   1116352408);
     write_u32_be(k, 4,   1899447441);
     write_u32_be(k, 8,   3049323471);
@@ -163,7 +163,7 @@ fn sha256_init_k(k: Address) {
 // SHA-256 compression function
 // ===========================================================================
 
-fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
+transform sha256_transform(state: Address, k: Address, w: Address, block: Address) {
     i: u64 = 0;
     for i in 0..16 {
         val: u32 = read_u32_be(block, i * 4);
@@ -216,7 +216,7 @@ fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
 // Pad a message into a 64-byte block
 // ===========================================================================
 
-fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
+transform sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
     i: u64 = 0;
     for i in 0..msg_len {
         *(block + i) = *(msg + i);
@@ -236,7 +236,7 @@ fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
     *(block + 63) = bit_len & 255;
 }
 
-fn copy32(dst: Address, src: Address) {
+transform copy32(dst: Address, src: Address) {
     i: u64 = 0;
     for i in 0..32 {
         *(dst + i) = *(src + i);
@@ -247,7 +247,7 @@ fn copy32(dst: Address, src: Address) {
 // SHA256d: SHA-256(SHA-256(message))
 // ===========================================================================
 
-fn sha256d(msg: Address, msg_len: u64, out: Address) {
+transform sha256d(msg: Address, msg_len: u64, out: Address) {
     state = allocate(32);
     k = allocate(256);
     w = allocate(256);
@@ -280,7 +280,7 @@ fn sha256d(msg: Address, msg_len: u64, out: Address) {
 // It computes SHA256d of the message, stores the result, and sets
 // the atomic flag. This tests reentrancy and atomic operations.
 
-fn hash_handler(msg: Address, msg_len: u64, result_addr: Address, flag_addr: Address) {
+transform hash_handler(msg: Address, msg_len: u64, result_addr: Address, flag_addr: Address) {
     // Compute SHA256d of the message
     scratch = allocate(32);
     sha256d(msg, msg_len, scratch);
@@ -301,7 +301,7 @@ fn hash_handler(msg: Address, msg_len: u64, result_addr: Address, flag_addr: Add
 // Main Entry Point
 // ===========================================================================
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Step 1: Prepare the fixed message "signal-test" (11 bytes)
     msg = allocate(11);
     *(msg + 0)  = 115;   // 's'

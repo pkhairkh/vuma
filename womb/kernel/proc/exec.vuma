@@ -98,10 +98,10 @@
 // trap_frame_init(tf), K4a's pt_init(tbl) — see K2a's pmm.vuma header
 // "Why init-style?" for the codegen rationale: the current codegen does
 // NOT propagate State-typedness through function return values, so
-// `fn exec_new() -> State<ProcessTable>` would produce broken field-
+// `transform exec_new() -> State<ProcessTable>` would produce broken field-
 // access code in callers). All exec.vuma functions take
-// `tbl: State<ProcessTable>` by regular VUMA-fn borrow (NOT extern
-// #[borrow] — VUMA fn calls don't need the attribute; only extern "C"
+// `tbl: State<ProcessTable>` by regular VUMA-transform borrow (NOT extern
+// #[borrow] — VUMA transform calls don't need the attribute; only extern "C"
 // calls do, and none of these functions call any extern).
 //
 // State<T> params: per the K4b contract's "Keep State<T> params to 1-2
@@ -205,13 +205,13 @@ layout ProcessTable = {
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
@@ -219,7 +219,7 @@ fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
 // Re-declared byte-identically to K4a's task.vuma (4-byte little-endian
 // unpack loop — same pattern as K3e's syscall_table_get but with a 4-byte
 // loop bound for u32).
-fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -234,7 +234,7 @@ fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 
 // Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -249,7 +249,7 @@ fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 // ProcessTable.mm_roots. Re-declared byte-identically to K4a's task.vuma
 // (8-byte little-endian unpack loop — same pattern as K2a's pool_get_base
 // and K3e's syscall_table_get).
-fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -269,7 +269,7 @@ fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 // real ELF loader); in a real kernel this would be the new program's
 // PGD physical address (the ELF loader's output) and `entry` would be
 // stored in the per-arch Task's rip field instead.
-fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -290,7 +290,7 @@ fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
 // Idempotent. Re-declared byte-identically to K4a's task.vuma.
-fn pt_init(tbl: State<ProcessTable>) {
+transform pt_init(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
         pt_set_state(tbl, i, 0);
@@ -303,7 +303,7 @@ fn pt_init(tbl: State<ProcessTable>) {
 // (state = 2), assign PID = slot + 1 (so PID 0 is never handed out),
 // bump count, return the slot index. Returns 256 if the table is full.
 // Re-declared byte-identically to K4a's task.vuma.
-fn task_alloc(tbl: State<ProcessTable>) -> u32 {
+transform task_alloc(tbl: State<ProcessTable>) -> u32 {
     let i = 0;
     while i < 256 {
         if pt_get_state(tbl, i) == 0 {
@@ -455,7 +455,7 @@ transform sys_exec(tbl: State<ProcessTable>, task_idx: u32, entry: u64, stack: u
 // future bare-metal run that wires K4c's task_init_for_switch to
 // sys_exec can reuse the same test values.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(ProcessTable);
     pt_init(tbl);
 

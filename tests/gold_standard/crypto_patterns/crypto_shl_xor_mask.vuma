@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s14_crypto_shl_then_xor (shl-then-XOR,
 // different operands) and s8_crypto_rotate_left_3 (rotate framing).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 5;           // 0x05
     sh: u64 = 4;
     k: u64 = 51;          // 0x33

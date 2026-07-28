@@ -11,7 +11,7 @@
 // current codegen drops unary NOT). All masks are loaded into named
 // variables per the bitwise-immediate-RHS workaround.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 42;
     b: u64 = 99;
     mask: u64 = 0xFF;

@@ -7,7 +7,7 @@
 // s34_bit_shl_then_and (shl-then-and, 32) and s30_bit_shr_then_or
 // (shr-then-or).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;          // 0xF0
     b: u64 = 15;           // 0x0F
     c: u64 = 2;

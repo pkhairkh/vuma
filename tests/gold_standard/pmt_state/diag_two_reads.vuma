@@ -11,7 +11,7 @@
 
 layout Pair = { a: u32, b: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Pair);
     p.a = 10;
     p.b = 20;

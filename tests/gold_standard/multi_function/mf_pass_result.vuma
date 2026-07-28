@@ -5,18 +5,18 @@
 // passes that into inc -> 10. Distinct from s5_mf_three_chain
 // (three helpers).
 
-fn square(x: u32) -> u32 {
+transform square(x: u32) -> u32 {
     r: u32 = x * x;
     return r;
 }
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     one: u32 = 1;
     r: u32 = x + one;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = square(3);   // 9
     b: u32 = inc(a);      // 10
     return b;

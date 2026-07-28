@@ -2,24 +2,24 @@
 // Provides: DFS, topological sort, SCC (Tarjan's), cycle detection
 // Uses the digraph.vuma data structure.
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
@@ -32,7 +32,7 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 // Topological sort (Kahn's algorithm).
 // Result: array of u32 node IDs in topological order.
 // Returns a result struct (16 bytes): { order_ptr: u64, count: u32, has_cycle: u32 }
-fn graph_toposort(g: Address) -> Address {
+transform graph_toposort(g: Address) -> Address {
     // g layout: nodes_ptr(8), edges_ptr(8), node_count(4), edge_count(4), node_cap(4), edge_cap(4)
     node_count: u32 = load_u32(g, 16);
     
@@ -117,11 +117,11 @@ fn graph_toposort(g: Address) -> Address {
     return result;
 }
 
-fn toposort_result_order(result: Address) -> u64 { return load_u64(result, 0); }
-fn toposort_result_count(result: Address) -> u32 { return load_u32(result, 8); }
-fn toposort_result_has_cycle(result: Address) -> u32 { return load_u32(result, 12); }
+transform toposort_result_order(result: Address) -> u64 { return load_u64(result, 0); }
+transform toposort_result_count(result: Address) -> u32 { return load_u32(result, 8); }
+transform toposort_result_has_cycle(result: Address) -> u32 { return load_u32(result, 12); }
 
-fn toposort_free(result: Address) {
+transform toposort_free(result: Address) {
     order: u64 = load_u64(result, 0);
     // We don't know the exact allocated size, but it was node_count * 4.
     // Use a reasonable default for free (the OS will handle it).
@@ -131,7 +131,7 @@ fn toposort_free(result: Address) {
 
 // ── Cycle detection (DFS-based) ──
 // Returns 1 if the graph has a cycle, 0 if it's a DAG.
-fn graph_has_cycle(g: Address) -> u32 {
+transform graph_has_cycle(g: Address) -> u32 {
     node_count: u32 = load_u32(g, 16);
     // state: 0=unvisited, 1=in-progress, 2=done
     state = allocate(node_count);

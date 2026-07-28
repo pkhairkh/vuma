@@ -16,7 +16,7 @@
 // for the same adaptation). To exercise the same state-operation
 // pipeline (StateInit → Alloc, StateWrite → Store, StateRead → Load)
 // that a real transform would run on, this test uses a regular
-// `fn to_buf2(p: State<Buf>) -> State<Buf2>` that semantically plays
+// `transform to_buf2(p: State<Buf>) -> State<Buf2>` that semantically plays
 // the role of a transform: it reads `p` (the "consumed" input),
 // allocates a fresh `Buf2` (the "produced" output), copies the
 // payload over, and returns the new state. The caller then uses
@@ -32,7 +32,7 @@
 //
 // VUMA Key Concepts:
 //   - state_new(Buf) allocates a typed buffer (LIVE)
-//   - "transform" via regular fn taking State<Buf> → State<Buf2>
+//   - "transform" via regular transform taking State<Buf> → State<Buf2>
 //   - callee reads p.data[0] (the "consume" phase)
 //   - callee allocates a fresh Buf2 and writes to it (the "produce" phase)
 //   - caller uses the produced state (b2), never the consumed one (b)
@@ -41,10 +41,10 @@
 layout Buf = { data: [u8; 8] }
 layout Buf2 = { data: [u8; 8] }
 
-fn to_buf2(p: State<Buf>) -> State<Buf2> {
+transform to_buf2(p: State<Buf>) -> State<Buf2> {
     // In a real `transform`, this body would CONSUME `p` (mark DEAD)
     // and PRODUCE a fresh State<Buf2> (mark LIVE). With the regular
-    // `fn` lowering, the caller's `b` pointer is still valid — but
+    // `transform` lowering, the caller's `b` pointer is still valid — but
     // the *program* never reads `b` after the call, mirroring the
     // legal transform pattern that IVE enforces for `transform` bodies.
     let q = state_new(Buf2);
@@ -52,7 +52,7 @@ fn to_buf2(p: State<Buf>) -> State<Buf2> {
     return q;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let b = state_new(Buf);
     b.data[0] = 42;
     let b2 = to_buf2(b);

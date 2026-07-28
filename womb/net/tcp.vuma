@@ -48,7 +48,7 @@ const INET_ADDRSTRLEN: u32 = 16;
 //   [8..15]  sin_zero (8 bytes padding)
 // ===========================================================================
 
-fn make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
+transform make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
     // sin_family = AF_INET (2), little-endian on most archs
     addr.data[0] = 2;
     addr.data[1] = 0;
@@ -82,7 +82,7 @@ fn make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
 // ip is a u32 in host byte order (e.g. 0x7F000001 = 127.0.0.1)
 // ===========================================================================
 
-fn tcp_connect(ip: u32, port: u32) -> i64 {
+transform tcp_connect(ip: u32, port: u32) -> i64 {
     sockfd: i64 = syscall(198, AF_INET, SOCK_STREAM, 0);
     if sockfd < 0 {
         return -1;
@@ -105,7 +105,7 @@ fn tcp_connect(ip: u32, port: u32) -> i64 {
 // TCP Server: bind to port, listen, return socket fd (-1 on error)
 // ===========================================================================
 
-fn tcp_listen(port: u32) -> i64 {
+transform tcp_listen(port: u32) -> i64 {
     sockfd: i64 = syscall(198, AF_INET, SOCK_STREAM, 0);
     if sockfd < 0 {
         return -1;
@@ -142,7 +142,7 @@ fn tcp_listen(port: u32) -> i64 {
 // TCP Accept: accept a connection, return client fd (-1 on error)
 // ===========================================================================
 
-fn tcp_accept(listen_fd: i64) -> i64 {
+transform tcp_accept(listen_fd: i64) -> i64 {
     let client_addr = state_new(SockaddrIn);
     let addrlen = state_new(SockLen);
     addrlen.data[0] = 16;
@@ -159,7 +159,7 @@ fn tcp_accept(listen_fd: i64) -> i64 {
 // TCP Send: send data, return bytes sent (-1 on error)
 // ===========================================================================
 
-fn tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
+transform tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
     // RESHAPE: send(sockfd, buf, len, flags) -> sendto(sockfd, buf, len, flags, NULL, 0)
     // = syscall(206, sockfd, buf, len, flags, 0, 0). `len` is u32 -> i64 widening cast.
     return syscall(206, sockfd, data, len as i64, 0, 0, 0);
@@ -169,7 +169,7 @@ fn tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
 // TCP Recv: receive data, return bytes received (-1 on error, 0 on EOF)
 // ===========================================================================
 
-fn tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
+transform tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
     // RESHAPE: recv(sockfd, buf, len, flags) -> recvfrom(sockfd, buf, len, flags, NULL, NULL)
     // = syscall(207, sockfd, buf, len, flags, 0, 0). `len` is u32 -> i64 widening cast.
     return syscall(207, sockfd, buf, len as i64, 0, 0, 0);
@@ -179,7 +179,7 @@ fn tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
 // TCP Close: close socket
 // ===========================================================================
 
-fn tcp_close(sockfd: i64) {
+transform tcp_close(sockfd: i64) {
     syscall(57, sockfd);
 }
 
@@ -188,7 +188,7 @@ fn tcp_close(sockfd: i64) {
 // On architectures without socket support, returns 0 (skip)
 // ===========================================================================
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Try to create a TCP socket
     sockfd: i64 = syscall(198, AF_INET, SOCK_STREAM, 0);
 

@@ -9,7 +9,7 @@
 // Standard convention: number of steps to reach 1 from 7 is 16.
 // We return 16.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 7;
     one: u32 = 1;
     two: u32 = 2;

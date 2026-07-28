@@ -4,7 +4,7 @@
 // Edge case: arithmetic on small literal values (1, 2, 3). Uses
 // intermediate variables to avoid any dropped-subexpression issue.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 2;
     c: u32 = 3;

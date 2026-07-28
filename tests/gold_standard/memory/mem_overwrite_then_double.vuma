@@ -8,7 +8,7 @@
 // s10_mem_overwrite_middle (3-cell overwrite, no multiply).
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(_L1);
     buf.v = 7;
     buf.v = 14;

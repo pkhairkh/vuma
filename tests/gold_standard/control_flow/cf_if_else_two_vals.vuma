@@ -8,7 +8,7 @@
 // (values 42/99) and s11_cf_if_else_branches (values 30/90).
 // Expected exit code: 33
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 33;

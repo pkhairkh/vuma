@@ -6,7 +6,7 @@
 // variables first. Distinct from s9_arith_div_then_mul (single chain)
 // and s10_arith_quad_then_sub (single sub at the end).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 7;
     b: u32 = 9;
     c: u32 = 50;

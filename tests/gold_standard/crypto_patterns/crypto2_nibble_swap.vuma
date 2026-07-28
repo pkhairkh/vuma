@@ -9,7 +9,7 @@
 // loaded into a named variable (immediate RHS of a bitwise op would
 // be dropped).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 0xF0;
     mLo: u64 = 0x0F;
     four: u64 = 4;

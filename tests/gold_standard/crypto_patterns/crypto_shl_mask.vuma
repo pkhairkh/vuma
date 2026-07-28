@@ -7,7 +7,7 @@
 // drop bug. Distinct from s14_crypto_shl_then_xor (shl-then-xor) and
 // s14_crypto_low_nibble (mask-low-nibble via &).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 7;           // 0x07
     s: u64 = 5;
     m: u64 = 240;         // 0xF0

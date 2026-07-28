@@ -47,7 +47,7 @@ use vuma_scg::NodeType;
 // Helper: create a minimal IR function for testing
 // ===========================================================================
 
-/// Creates a minimal `fn main() -> i64 { return 42; }` IR function.
+/// Creates a minimal `transform main() -> i64 { return 42; }` IR function.
 fn make_simple_function() -> IRFunction {
     let mut func = IRFunction::new("main");
     func.result_types.push(IRType::I64);
@@ -1295,7 +1295,7 @@ fn test_arch_from_name() {
 #[test]
 fn test_dwarf_debug_full_pipeline() {
     // Create a simple VUMA program with a function
-    let source = "fn main() { let x = 42; }";
+    let source = "transform main() { let x = 42; }";
 
     // Parse the source
     let mut parser = Parser::new(source);

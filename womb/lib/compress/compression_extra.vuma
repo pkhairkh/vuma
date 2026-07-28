@@ -53,14 +53,14 @@ const INV32: u32      = 4294967295;     // 0xFFFFFFFF (CRC init / final XOR)
 // Byte-level memory helpers (little-endian)
 // ===========================================================================
 
-fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+transform store_u32_le(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset + 0) = val & 255;
     *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255;
     *(ptr + offset + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+transform load_u32_le(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset + 0);
     b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2);
@@ -69,7 +69,7 @@ fn load_u32_le(ptr: Address, offset: u32) -> u32 {
 }
 
 // Store an Address as 8 little-endian bytes (Address is treated as u64).
-fn store_addr_le(ptr: Address, offset: u32, val: Address) {
+transform store_addr_le(ptr: Address, offset: u32, val: Address) {
     v: u64 = val as u64;
     *(ptr + offset + 0) = v & 255;
     *(ptr + offset + 1) = (v >> 8) & 255;
@@ -82,7 +82,7 @@ fn store_addr_le(ptr: Address, offset: u32, val: Address) {
 }
 
 // Load an Address from 8 little-endian bytes.
-fn load_addr_le(ptr: Address, offset: u32) -> Address {
+transform load_addr_le(ptr: Address, offset: u32) -> Address {
     b0: u64 = *(ptr + offset + 0);
     b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2);
@@ -101,7 +101,7 @@ fn load_addr_le(ptr: Address, offset: u32) -> Address {
 // Bitwise, allocation-free. Used by gzip.
 // ===========================================================================
 
-fn crc32(data: Address, len: u32) -> u32 {
+transform crc32(data: Address, len: u32) -> u32 {
     crc: u32 = INV32;                 // init = 0xFFFFFFFF
     i: u32 = 0;
     while i < len {
@@ -125,7 +125,7 @@ fn crc32(data: Address, len: u32) -> u32 {
 // Adler-32 (RFC 1950) — used by zlib; included for completeness.
 // ===========================================================================
 
-fn adler32(data: Address, len: u32) -> u32 {
+transform adler32(data: Address, len: u32) -> u32 {
     s1: u32 = 1;
     s2: u32 = 0;
     i: u32 = 0;
@@ -155,7 +155,7 @@ fn adler32(data: Address, len: u32) -> u32 {
 // valid across calls to bit_writer_put / bit_writer_align. (VUMA's
 // allocate() returns a stack-local pointer; returning one from a helper
 // would dangle, so we allocate in the long-lived caller and init here.)
-fn bit_writer_init(w: Address, output: Address, max: u32) {
+transform bit_writer_init(w: Address, output: Address, max: u32) {
     store_u32_le(w, 0, 0);            // accumulator
     store_u32_le(w, 4, 0);            // bit_count
     store_addr_le(w, 8, output);      // output
@@ -165,7 +165,7 @@ fn bit_writer_init(w: Address, output: Address, max: u32) {
 }
 
 // Write nbits of value (LSB first). nbits must be <= 24.
-fn bit_writer_put(w: Address, value: u32, nbits: u32) {
+transform bit_writer_put(w: Address, value: u32, nbits: u32) {
     acc: u32 = load_u32_le(w, 0);
     bits: u32 = load_u32_le(w, 4);
     mask: u32 = (1 << nbits) - 1;
@@ -191,28 +191,28 @@ fn bit_writer_put(w: Address, value: u32, nbits: u32) {
 }
 
 // Pad with zero bits up to the next byte boundary.
-fn bit_writer_align(w: Address) {
+transform bit_writer_align(w: Address) {
     bits: u32 = load_u32_le(w, 4);
     if bits > 0 {
         bit_writer_put(w, 0, 8 - bits);
     }
 }
 
-fn bit_writer_pos(w: Address) -> u32 {
+transform bit_writer_pos(w: Address) -> u32 {
     return load_u32_le(w, 16);
 }
 
 // Advance the byte write position by n (after writing raw bytes directly).
-fn bit_writer_advance(w: Address, n: u32) {
+transform bit_writer_advance(w: Address, n: u32) {
     pos: u32 = load_u32_le(w, 16);
     store_u32_le(w, 16, pos + n);
 }
 
-fn bit_writer_error(w: Address) -> u32 {
+transform bit_writer_error(w: Address) -> u32 {
     return load_u32_le(w, 24);
 }
 
-fn bit_writer_free(w: Address) {
+transform bit_writer_free(w: Address) {
     free(w);
 }
 
@@ -225,7 +225,7 @@ fn bit_writer_free(w: Address) {
 
 // Initialize a bit reader state that the CALLER has already allocated (at
 // least 32 bytes). See bit_writer_init for why the caller owns the storage.
-fn bit_reader_init(r: Address, data: Address, len: u32) {
+transform bit_reader_init(r: Address, data: Address, len: u32) {
     store_addr_le(r, 0, data);
     store_u32_le(r, 8, 0);            // byte_pos
     store_u32_le(r, 12, 0);           // bit_pos
@@ -233,7 +233,7 @@ fn bit_reader_init(r: Address, data: Address, len: u32) {
     store_u32_le(r, 20, 0);           // error
 }
 
-fn bit_reader_bit(r: Address) -> u32 {
+transform bit_reader_bit(r: Address) -> u32 {
     byte_pos: u32 = load_u32_le(r, 8);
     bit_pos: u32 = load_u32_le(r, 12);
     len: u32 = load_u32_le(r, 16);
@@ -255,7 +255,7 @@ fn bit_reader_bit(r: Address) -> u32 {
 }
 
 // Read n bits (LSB first). The first bit read becomes the LSB of the result.
-fn bit_reader_bits(r: Address, n: u32) -> u32 {
+transform bit_reader_bits(r: Address, n: u32) -> u32 {
     result: u32 = 0;
     i: u32 = 0;
     while i < n {
@@ -267,7 +267,7 @@ fn bit_reader_bits(r: Address, n: u32) -> u32 {
 }
 
 // Advance to the next byte boundary.
-fn bit_reader_align(r: Address) {
+transform bit_reader_align(r: Address) {
     bit_pos: u32 = load_u32_le(r, 12);
     if bit_pos != 0 {
         store_u32_le(r, 12, 0);
@@ -276,21 +276,21 @@ fn bit_reader_align(r: Address) {
     }
 }
 
-fn bit_reader_byte_pos(r: Address) -> u32 {
+transform bit_reader_byte_pos(r: Address) -> u32 {
     return load_u32_le(r, 8);
 }
 
 // Advance the byte read position by n (after consuming raw bytes directly).
-fn bit_reader_advance(r: Address, n: u32) {
+transform bit_reader_advance(r: Address, n: u32) {
     pos: u32 = load_u32_le(r, 8);
     store_u32_le(r, 8, pos + n);
 }
 
-fn bit_reader_error(r: Address) -> u32 {
+transform bit_reader_error(r: Address) -> u32 {
     return load_u32_le(r, 20);
 }
 
-fn bit_reader_free(r: Address) {
+transform bit_reader_free(r: Address) {
     free(r);
 }
 
@@ -309,7 +309,7 @@ fn bit_reader_free(r: Address) {
 //   [5..]   LEN bytes of literal data
 // ===========================================================================
 
-fn deflate_stored(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform deflate_stored(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     out_pos: u32 = 0;
 
     if input_len == 0 {
@@ -357,7 +357,7 @@ fn deflate_stored(input: Address, input_len: u32, output: Address, output_max: u
     return out_pos as i64;
 }
 
-fn inflate_stored(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform inflate_stored(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     in_pos: u32 = 0;
     out_pos: u32 = 0;
     done: u32 = 0;
@@ -426,7 +426,7 @@ fn inflate_stored(input: Address, input_len: u32, output: Address, output_max: u
 // ===========================================================================
 
 // Reverse the low `n` bits of `v` (MSB-first ↔ LSB-first).
-fn bit_reverse(v: u32, n: u32) -> u32 {
+transform bit_reverse(v: u32, n: u32) -> u32 {
     r: u32 = 0;
     x: u32 = v;
     i: u32 = 0;
@@ -440,7 +440,7 @@ fn bit_reverse(v: u32, n: u32) -> u32 {
 
 // Emit a literal/length symbol (0..287) using the fixed Huffman table.
 // Codes are written MSB-first by reversing the bits and using bit_writer_put.
-fn fixed_emit_symbol(w: Address, sym: u32) {
+transform fixed_emit_symbol(w: Address, sym: u32) {
     code: u32 = 0;
     nbits: u32 = 0;
     if sym <= 143 {
@@ -462,7 +462,7 @@ fn fixed_emit_symbol(w: Address, sym: u32) {
 // Emit a length/distance pair. `length` is 3..258; `distance` is 1..32768.
 // Length code (257..285) + extra bits (LSB-first), then 5-bit distance code
 // (MSB-first) + extra bits (LSB-first).
-fn fixed_emit_length(w: Address, length: u32) {
+transform fixed_emit_length(w: Address, length: u32) {
     // Look up the length code: base length, extra-bits count, code symbol.
     lcode: u32 = 0;
     lbase: u32 = 0;
@@ -507,7 +507,7 @@ fn fixed_emit_length(w: Address, length: u32) {
     }
 }
 
-fn fixed_emit_distance(w: Address, dist: u32) {
+transform fixed_emit_distance(w: Address, dist: u32) {
     dcode: u32 = 0;
     dbase: u32 = 0;
     debits: u32 = 0;
@@ -542,7 +542,7 @@ fn fixed_emit_distance(w: Address, dist: u32) {
 }
 
 // 3-byte hash for the match finder (15-bit hash, 32768 buckets).
-fn fixed_hash3(p: Address) -> u32 {
+transform fixed_hash3(p: Address) -> u32 {
     b0: u32 = *(p + 0);
     b1: u32 = *(p + 1);
     b2: u32 = *(p + 2);
@@ -552,7 +552,7 @@ fn fixed_hash3(p: Address) -> u32 {
 
 // Maximum common prefix length of input[p1..] and input[p2..], capped at 258
 // and at input_len-p2 (so we never read past the input). Caller ensures p1<p2.
-fn fixed_match_length(input: Address, p1: u32, p2: u32, input_len: u32) -> u32 {
+transform fixed_match_length(input: Address, p1: u32, p2: u32, input_len: u32) -> u32 {
     max: u32 = input_len - p2;
     if max > 258 { max = 258; }
     len: u32 = 0;
@@ -566,7 +566,7 @@ fn fixed_match_length(input: Address, p1: u32, p2: u32, input_len: u32) -> u32 {
 // Compress `input` (input_len bytes) into `output` (capacity output_max) using
 // a single DEFLATE fixed-Huffman block (BFINAL=1, BTYPE=01). Returns bytes
 // written, or -1 on overflow / input too large.
-fn deflate_fixed(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform deflate_fixed(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // Guard against input_len*4 overflowing u32 in the prev_chain allocation.
     if input_len > 268435456 { return -1; }   // 256 MiB cap
 
@@ -681,7 +681,7 @@ fn deflate_fixed(input: Address, input_len: u32, output: Address, output_max: u3
 // Decode one fixed-Huffman literal/length symbol from the bit reader.
 // Reads bits MSB-first into a running code and matches against the fixed
 // length-classes (7-bit, 8-bit, 9-bit).
-fn fixed_decode_symbol(r: Address) -> u32 {
+transform fixed_decode_symbol(r: Address) -> u32 {
     code: u32 = 0;
     i: u32 = 0;
     while i < 7 {
@@ -707,7 +707,7 @@ fn fixed_decode_symbol(r: Address) -> u32 {
 
 // Decode a match length given the length-code symbol (257..285) and the bit
 // reader positioned just past the symbol.
-fn fixed_decode_length(r: Address, sym: u32) -> u32 {
+transform fixed_decode_length(r: Address, sym: u32) -> u32 {
     idx: u32 = sym - 257;              // 0..28
     if idx < 8 {
         // 257..264: lengths 3..10, 0 extra bits.
@@ -739,7 +739,7 @@ fn fixed_decode_length(r: Address, sym: u32) -> u32 {
 
 // Decode a match distance given the distance code (0..29) and the bit reader
 // positioned just past the 5-bit code.
-fn fixed_decode_distance(r: Address, dcode: u32) -> u32 {
+transform fixed_decode_distance(r: Address, dcode: u32) -> u32 {
     if dcode < 4 {
         return dcode + 1;              // codes 0..3 -> distances 1..4, 0 extra
     }
@@ -754,7 +754,7 @@ fn fixed_decode_distance(r: Address, dcode: u32) -> u32 {
 // Decompress a single DEFLATE fixed-Huffman block from `input` into `output`.
 // Returns bytes written, or -1 if the block type is not 01 (fixed) or on
 // overflow / corruption.
-fn inflate_fixed(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform inflate_fixed(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     r = allocate(32);
     bit_reader_init(r, input, input_len);
 
@@ -832,7 +832,7 @@ fn inflate_fixed(input: Address, input_len: u32, output: Address, output_max: u3
 
 // Returns the gzip header size in bytes (>= 10), or 0 on error. Parses the
 // optional FEXTRA / FNAME / FCOMMENT / FHCRC fields described by FLG.
-fn gzip_header_size(input: Address, input_len: u32) -> u32 {
+transform gzip_header_size(input: Address, input_len: u32) -> u32 {
     if input_len < 10 { return 0; }
     flg: u32 = *(input + 3);
     if (flg & 240) != 0 { return 0; }     // reserved bits 4..7 must be zero
@@ -879,7 +879,7 @@ fn gzip_header_size(input: Address, input_len: u32) -> u32 {
     return pos;
 }
 
-fn gzip_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform gzip_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // Need at least 10-byte header + 8-byte trailer around the deflate stream.
     if output_max < 18 { return -1; }
 
@@ -911,7 +911,7 @@ fn gzip_compress(input: Address, input_len: u32, output: Address, output_max: u3
     return 10 + deflate_len + 8;
 }
 
-fn gzip_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform gzip_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     if input_len < 18 { return -1; }
 
     // Verify magic and CM.
@@ -969,13 +969,13 @@ fn gzip_decompress(input: Address, input_len: u32, output: Address, output_max: 
 // ===========================================================================
 
 // Number of literal-length extension bytes for a given literal count.
-fn lz4_lit_ext_count(lit_len: u32) -> u32 {
+transform lz4_lit_ext_count(lit_len: u32) -> u32 {
     if lit_len < 15 { return 0; }
     rem: u32 = lit_len - 15;
     return (rem / 255) + 1;
 }
 
-fn lz4_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform lz4_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // Need at least 6-byte frame header + 4-byte end mark.
     if output_max < 10 { return -1; }
 
@@ -1046,7 +1046,7 @@ fn lz4_compress(input: Address, input_len: u32, output: Address, output_max: u32
     return out_pos as i64;
 }
 
-fn lz4_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform lz4_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     if input_len < 10 { return -1; }
 
     // Verify magic 0x184D2204 (little-endian).
@@ -1180,7 +1180,7 @@ fn lz4_decompress(input: Address, input_len: u32, output: Address, output_max: u
 // Compressed block: requires FSE/Huffman — NOT supported (returns -1).
 // ===========================================================================
 
-fn zstd_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform zstd_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // Need at least magic(4) + descriptor(1) + FCS(4) + one block header(3).
     if output_max < 12 { return -1; }
 
@@ -1240,7 +1240,7 @@ fn zstd_compress(input: Address, input_len: u32, output: Address, output_max: u3
     return out_pos as i64;
 }
 
-fn zstd_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform zstd_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     if input_len < 8 { return -1; }
 
     // Verify magic 0xFD2FB528 (little-endian).
@@ -1351,7 +1351,7 @@ fn zstd_decompress(input: Address, input_len: u32, output: Address, output_max: 
 // modeling) are NOT supported and return -1 on decode.
 // ===========================================================================
 
-fn brotli_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform brotli_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // State lives in this frame so it stays valid across bit_writer_* calls.
     w = allocate(32);
     bit_writer_init(w, output, output_max);
@@ -1408,7 +1408,7 @@ fn brotli_compress(input: Address, input_len: u32, output: Address, output_max: 
     return total as i64;
 }
 
-fn brotli_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform brotli_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // State lives in this frame so it stays valid across bit_reader_* calls.
     r = allocate(32);
     bit_reader_init(r, input, input_len);

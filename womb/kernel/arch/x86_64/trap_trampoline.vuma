@@ -177,7 +177,7 @@ layout TrapFrame = {
 // the addition stays in u64.
 //
 // Byte-identical to R2a's tf_get_gpr (same param name, same body).
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -199,7 +199,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 // the masked u64 back to u8 for the array store.
 //
 // Byte-identical to R2a's tf_set_gpr (same param name, same body).
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -221,7 +221,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // contract).
 //
 // Byte-identical to R2a's tf_init (same param name, same body).
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -280,27 +280,27 @@ extern "C" {
     // Load the Interrupt Descriptor Table. `idt_ptr` is a SysV AMD64
     // RDI pointing at a 10-byte IDT descriptor struct (16-bit limit +
     // 64-bit base). K11 stub: `lidt [rdi]; ret`.
-    fn idt_load(idt_ptr: Address);
+    transform idt_load(idt_ptr: Address);
     // Mask an IRQ line at the 8259 PIC. `irq` is the IRQ number 0..15.
-    fn irq_mask(irq: u8);
+    transform irq_mask(irq: u8);
     // Unmask an IRQ line at the PIC. Pairs with irq_mask.
-    fn irq_unmask(irq: u8);
+    transform irq_unmask(irq: u8);
     // Send End-Of-Interrupt to the PIC. K11 stub: `mov al, 0x20;
     // out 0x20, al; ret` (non-specific EOI to the master PIC).
-    fn pic_eoi(irq: u8);
+    transform pic_eoi(irq: u8);
     // Read the CR2 register — the page-fault linear address. K11 stub:
     // `mov rax, cr2; ret`.
-    fn cr2_read() -> u64;
+    transform cr2_read() -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers.
 // ────────────────────────────────────────────────────────────────────────────
 // Init-style API (caller allocates `tf` via state_new, passes by reference).
-// The State<T> params here are regular VUMA-fn borrows (NOT extern
-// #[borrow] — VUMA fn calls don't need the attribute, only extern "C"
+// The State<T> params here are regular VUMA-transform borrows (NOT extern
+// #[borrow] — VUMA transform calls don't need the attribute, only extern "C"
 // calls do, because the codegen tracks the State's lifetime through
-// regular fn calls but conservatively invalidates on extern calls).
+// regular transform calls but conservatively invalidates on extern calls).
 
 // Initialize an X86TrapFrame to zeros. Writes all 22 fields to 0. Useful
 // both for the self-test and for the early-boot allocator (the trap
@@ -308,7 +308,7 @@ extern "C" {
 // from the live save area, so stale stack garbage in the unused-error-
 // code case can't leak into the handler). Kept verbatim from K3a — only
 // the param type name changes (TrapFrame → X86TrapFrame).
-fn trap_frame_init(tf: State<X86TrapFrame>) {
+transform trap_frame_init(tf: State<X86TrapFrame>) {
     tf.rax = 0;
     tf.rbx = 0;
     tf.rcx = 0;
@@ -339,7 +339,7 @@ fn trap_frame_init(tf: State<X86TrapFrame>) {
 // the faulting address lives in the CR2 register, not in the saved frame.
 // Kept verbatim from K3a — only the param type name changes (TrapFrame →
 // X86TrapFrame).
-fn trap_page_fault_addr(tf: State<X86TrapFrame>) -> u64 {
+transform trap_page_fault_addr(tf: State<X86TrapFrame>) -> u64 {
     return cr2_read();
 }
 
@@ -378,8 +378,8 @@ fn trap_page_fault_addr(tf: State<X86TrapFrame>) -> u64 {
 // The two State<T> params pattern is precedent-set by
 // womb/kernel/syscall/abi.vuma::syscall_args_from_frame
 // (tf: State<TrapFrame>, args: State<SyscallArgs>) — VUMA's codegen
-// tracks both States' lifetimes through regular fn calls.
-fn x86_trap_to_superset(old: State<X86TrapFrame>, sup: State<TrapFrame>) {
+// tracks both States' lifetimes through regular transform calls.
+transform x86_trap_to_superset(old: State<X86TrapFrame>, sup: State<TrapFrame>) {
     // 15 GP registers → slots 0..14 (ascending push order).
     tf_set_gpr(sup, 0, old.rax);
     tf_set_gpr(sup, 1, old.rbx);
@@ -426,7 +426,7 @@ fn x86_trap_to_superset(old: State<X86TrapFrame>, sup: State<TrapFrame>) {
 //
 // Per the R2b contract's "Use decimal constants" rule: all non-zero
 // constants in the self-test use DECIMAL (42, 4096 — not 0x2a, 0x1000).
-fn main() -> i32 {
+transform main() -> i32 {
     let old = state_new(X86TrapFrame);
     trap_frame_init(old);
     let sup = state_new(TrapFrame);

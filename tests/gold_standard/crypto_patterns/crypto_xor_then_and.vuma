@@ -6,7 +6,7 @@
 // bitwise drop bug workaround). Distinct from s14_crypto_xor_two_keys
 // (two-key XOR chain) and s11_crypto_xor_then_shl (XOR-then-shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 171;         // 0xAB
     k: u64 = 15;          // 0x0F
     m: u64 = 240;         // 0xF0

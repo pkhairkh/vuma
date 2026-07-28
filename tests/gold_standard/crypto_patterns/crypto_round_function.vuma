@@ -18,7 +18,7 @@
 // Final chosen inputs: x = 6, k = 12, c = 22.
 // All shift amounts and constants are loaded into named variables.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u64 = 6;
     k: u64 = 12;
     c: u64 = 22;

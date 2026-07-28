@@ -3,7 +3,7 @@
 //
 // digit_sum(123) = 1 + 2 + 3 = 6.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 123;
     ten: u32 = 10;
     zero: u32 = 0;

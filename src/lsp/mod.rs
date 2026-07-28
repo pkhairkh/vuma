@@ -2123,31 +2123,31 @@ fn float_builtin_hover(name: &str) -> Option<String> {
     let (sig, doc) = match name {
         // inttofloat — signed i64 -> f64, maps to CastKind::IntToFloat
         "inttofloat" => (
-            "fn inttofloat(x: i64) -> f64",
+            "transform inttofloat(x: i64) -> f64",
             "Convert a signed integer to `f64` (IEEE 754 double). \
              Maps to `CastKind::IntToFloat` in the IR.",
         ),
         // uinttofloat — unsigned u64 -> f64, maps to CastKind::UIntToFloat
         "uinttofloat" => (
-            "fn uinttofloat(x: u64) -> f64",
+            "transform uinttofloat(x: u64) -> f64",
             "Convert an unsigned integer to `f64` (IEEE 754 double). \
              Maps to `CastKind::UIntToFloat` in the IR.",
         ),
         // floattoint — f64 -> signed i64 (trunc), maps to CastKind::FloatToInt
         "floattoint" => (
-            "fn floattoint(x: f64) -> i64",
+            "transform floattoint(x: f64) -> i64",
             "Convert `f64` to signed `i64` by truncation (round toward zero). \
              Maps to `CastKind::FloatToInt` in the IR.",
         ),
         // floattouint — f64 -> unsigned u64 (trunc), maps to CastKind::FloatToUInt
         "floattouint" => (
-            "fn floattouint(x: f64) -> u64",
+            "transform floattouint(x: f64) -> u64",
             "Convert `f64` to unsigned `u64` by truncation (round toward zero). \
              Maps to `CastKind::FloatToUInt` in the IR.",
         ),
         // floattofloat — f32 <-> f64 widen/narrow, maps to CastKind::FloatToFloat
         "floattofloat" => (
-            "fn floattofloat(x: f32) -> f64  // widen\n\
+            "transform floattofloat(x: f32) -> f64  // widen\n\
              fn floattofloat(x: f64) -> f32  // narrow",
             "Widen `f32` -> `f64` or narrow `f64` -> `f32`. \
              Maps to `CastKind::FloatToFloat` in the IR.",
@@ -2204,7 +2204,7 @@ mod tests {
                 ("uri".to_string(), json_str("file:///test.vuma")),
                 ("languageId".to_string(), json_str("vuma")),
                 ("version".to_string(), JsonValue::U64(1)),
-                ("text".to_string(), json_str("fn main( { }")),
+                ("text".to_string(), json_str("transform main( { }")),
             ]),
         )]);
 
@@ -2224,7 +2224,7 @@ mod tests {
                 ("uri".to_string(), json_str("file:///test.vuma")),
                 ("languageId".to_string(), json_str("vuma")),
                 ("version".to_string(), JsonValue::U64(1)),
-                ("text".to_string(), json_str("fn main() {}")),
+                ("text".to_string(), json_str("transform main() {}")),
             ]),
         )]);
         server.handle_text_document_did_open(open_params);
@@ -2242,7 +2242,7 @@ mod tests {
                 "contentChanges".to_string(),
                 JsonValue::Array(vec![JsonValue::Object(vec![(
                     "text".to_string(),
-                    json_str("fn main() {\n    let x = 42;\n}"),
+                    json_str("transform main() {\n    let x = 42;\n}"),
                 )])]),
             ),
         ]);
@@ -2293,7 +2293,7 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        let open_params = make_text_document_params("file:///test.vuma", "fn main() {}");
+        let open_params = make_text_document_params("file:///test.vuma", "transform main() {}");
         server.handle_text_document_did_open(open_params);
 
         let completion_params = make_position_params("file:///test.vuma", 0, 0);
@@ -2323,7 +2323,7 @@ mod tests {
 
         let open_params = make_text_document_params(
             "file:///test.vuma",
-            "fn hello() {}\nstruct Foo {}\nfn pool() {}",
+            "transform hello() {}\nstruct Foo {}\nfn pool() {}",
         );
         server.handle_text_document_did_open(open_params);
 
@@ -2347,7 +2347,7 @@ mod tests {
 
         let open_params = make_text_document_params(
             "file:///test.vuma",
-            "fn add(a: u32, b: u32) -> u32 {\n    a + b\n}",
+            "transform add(a: u32, b: u32) -> u32 {\n    a + b\n}",
         );
         server.handle_text_document_did_open(open_params);
 
@@ -2371,7 +2371,7 @@ mod tests {
 
         let open_params = make_text_document_params(
             "file:///test.vuma",
-            "struct NodeHeader {\n    size: u32,\n}\nfn main() {}",
+            "struct NodeHeader {\n    size: u32,\n}\ntransform main() {}",
         );
         server.handle_text_document_did_open(open_params);
 
@@ -2389,7 +2389,7 @@ mod tests {
 
         let open_params = make_text_document_params(
             "file:///test.vuma",
-            "fn main() {}\nfn helper() {}\nstruct Data {\n    x: u32,\n}\nenum Color { Red, Blue }",
+            "transform main() {}\nfn helper() {}\nstruct Data {\n    x: u32,\n}\nenum Color { Red, Blue }",
         );
         server.handle_text_document_did_open(open_params);
 
@@ -2415,7 +2415,7 @@ mod tests {
         server.initialized = true;
 
         let open_params =
-            make_text_document_params("file:///test.vuma", "fn main() {\n    let x = 42;\n}");
+            make_text_document_params("file:///test.vuma", "transform main() {\n    let x = 42;\n}");
         server.handle_text_document_did_open(open_params);
 
         let tokens_params = make_doc_only_params("file:///test.vuma");
@@ -2431,7 +2431,7 @@ mod tests {
     #[test]
     fn test_position_conversion() {
         let server = LspServer::new();
-        let text = "fn main() {\n    let x = 42;\n}";
+        let text = "transform main() {\n    let x = 42;\n}";
 
         let pos = server.offset_to_position(text, 0);
         assert_eq!(pos.line, 0);
@@ -2450,7 +2450,7 @@ mod tests {
     #[test]
     fn test_word_at_position() {
         let server = LspServer::new();
-        let text = "fn main() {\n    let x = 42;\n}";
+        let text = "transform main() {\n    let x = 42;\n}";
 
         // "main" is at line 0, chars 3-6
         let word = server.word_at_position(text, 0, 4);
@@ -2492,7 +2492,7 @@ mod tests {
     fn test_diagnostic_from_parse_error() {
         let server = LspServer::new();
         // Use a more obviously broken input that the parser will flag
-        let text = "fn main( { }";
+        let text = "transform main( { }";
         let doc = VumaDocument {
             uri: "file:///test.vuma".to_string(),
             text: text.to_string(),
@@ -2609,12 +2609,12 @@ mod tests {
         let mut server = LspServer::new();
         server.initialized = true;
 
-        //        fn main() { let x = inttofloat(3); }
+        //        transform main() { let x = inttofloat(3); }
         // column 0123456789012345678901234567890123456
         //                 1111111111222222222233333333
         // `inttofloat` occupies columns 20..30 on line 0.
         let open_params =
-            make_text_document_params("file:///test.vuma", "fn main() { let x = inttofloat(3); }");
+            make_text_document_params("file:///test.vuma", "transform main() { let x = inttofloat(3); }");
         server.handle_text_document_did_open(open_params);
 
         let hover_params = make_position_params("file:///test.vuma", 0, 20);
@@ -2650,11 +2650,11 @@ mod tests {
         server.initialized = true;
 
         // `x` is at column 16 on line 0.
-        //        fn main() { let x: f32 = 3.0; }
+        //        transform main() { let x: f32 = 3.0; }
         // column 0123456789012345678901234567890123
         //                 1111111111222222222233333
         let open_params =
-            make_text_document_params("file:///test.vuma", "fn main() { let x: f32 = 3.0; }");
+            make_text_document_params("file:///test.vuma", "transform main() { let x: f32 = 3.0; }");
         server.handle_text_document_did_open(open_params);
 
         let hover_params = make_position_params("file:///test.vuma", 0, 16);
@@ -2690,7 +2690,7 @@ mod tests {
         // `3.0 & 1.0` — both operands are float literals adjacent to
         // the bitwise `&`.  F2a's `verify_float_op` rejects this at
         // compile time; the LSP mirrors with a token-level heuristic.
-        let text = "fn main() { let x = 3.0 & 1.0; }";
+        let text = "transform main() { let x = 3.0 & 1.0; }";
         let doc = VumaDocument {
             uri: "file:///test.vuma".to_string(),
             text: text.to_string(),
@@ -2729,7 +2729,7 @@ mod tests {
         // so `check_float_op_reject` can resolve `pi` to `f64`.
         let open_params = make_text_document_params(
             "file:///test.vuma",
-            "fn main() { let pi: f64 = 3.14; let y = pi << 1; }",
+            "transform main() { let pi: f64 = 3.14; let y = pi << 1; }",
         );
         server.handle_text_document_did_open(open_params);
 

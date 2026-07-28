@@ -7,12 +7,12 @@
 // s9_fn_zero_arg_const (no args) and s10_fn_square_then_add
 // (square-then-add, not square-diff).
 
-fn square(x: u32) -> u32 {
+transform square(x: u32) -> u32 {
     r: u32 = x * x;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = square(9);   // 81
     b: u32 = square(4);   // 16
     d: u32 = a - b;       // 65

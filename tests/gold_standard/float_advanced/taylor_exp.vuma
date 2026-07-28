@@ -9,7 +9,7 @@
 //   - floattoint (final truncation)
 //   - f64 multiplication (factorial accumulation)
 
-fn main() -> i32 {
+transform main() -> i32 {
     e: f64 = 1.0;          // k=0 term: 1/0! = 1
     factorial: f64 = 1.0;
     k: i64 = 1;

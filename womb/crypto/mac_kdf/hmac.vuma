@@ -16,7 +16,7 @@ const HMAC_MASK32: u32 = 4294967295;
 //   out:    pointer to 20-byte output buffer
 // ===========================================================================
 
-fn hmac_sha1(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+transform hmac_sha1(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
     block_size: u32 = 64;
     digest_size: u32 = 20;
 
@@ -72,7 +72,7 @@ fn hmac_sha1(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address)
 // HMAC-SHA-256 (32-byte digest, 64-byte block).
 // ===========================================================================
 
-fn hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+transform hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
     block_size: u32 = 64;
     digest_size: u32 = 32;
 
@@ -121,7 +121,7 @@ fn hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Addres
 // HMAC-SHA-512 (64-byte digest, 128-byte block).
 // ===========================================================================
 
-fn hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+transform hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
     block_size: u32 = 128;
     digest_size: u32 = 64;
 
@@ -172,7 +172,7 @@ fn hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Addres
 // running time does not depend on where the first mismatch occurs.
 // ===========================================================================
 
-fn ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
+transform ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
     diff: u32 = 0;
     i: u32 = 0;
     while i < n {
@@ -187,6 +187,6 @@ fn ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
 
 // Constant-time select: if mask == 0xFFFFFFFF, return a; if mask == 0,
 // return b. Used for side-channel-resistant conditional moves.
-fn hmac_ct_select(mask: u32, a: u32, b: u32) -> u32 {
+transform hmac_ct_select(mask: u32, a: u32, b: u32) -> u32 {
     return (a & mask) | (b & ((~mask) & HMAC_MASK32));
 }

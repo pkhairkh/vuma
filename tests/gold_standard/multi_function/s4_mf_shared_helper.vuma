@@ -6,21 +6,21 @@
 // sums them. Tests that a shared helper invoked from two distinct
 // callers works correctly.
 
-fn adder(x: u32) -> u32 {
+transform adder(x: u32) -> u32 {
     ten: u32 = 10;
     r: u32 = x + ten;
     return r;
 }
-fn caller_a(x: u32) -> u32 {
+transform caller_a(x: u32) -> u32 {
     r: u32 = adder(x);
     return r;
 }
-fn caller_b(x: u32) -> u32 {
+transform caller_b(x: u32) -> u32 {
     r: u32 = adder(x);
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = caller_a(30);
     b: u32 = caller_b(40);
     s: u32 = a + b;

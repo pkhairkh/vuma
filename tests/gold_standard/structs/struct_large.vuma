@@ -17,7 +17,7 @@ struct Large {
 }
 
 layout _L1 = { data: [u8; 64] }
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(_L1);
     p.data[56] = 42;
     val: u64 = p.data[56];

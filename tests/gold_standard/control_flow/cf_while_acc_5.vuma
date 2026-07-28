@@ -8,7 +8,7 @@
 // (6 iterations, count) and s5_cf_while_acc (acc accumulates 10s).
 // Expected exit code: 5
 
-fn main() -> i32 {
+transform main() -> i32 {
     i: u32 = 0;
     acc: u32 = 0;
     while i < 5 {

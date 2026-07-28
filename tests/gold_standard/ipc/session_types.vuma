@@ -14,7 +14,7 @@
 // linear-type checker accepts the program.
 //
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch1 = channel_open<i32>();
     ch2 = channel_open<i32>();
     pid = spawn_worker();

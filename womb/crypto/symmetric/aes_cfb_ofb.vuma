@@ -27,7 +27,7 @@ const CFB_BLOCK: u32 = 16;
 // into the register.
 // ===========================================================================
 
-fn aes_cfb128_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes_cfb128_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     if pt_len == 0 { return 0; }
 
     prev = allocate(CFB_BLOCK);
@@ -58,7 +58,7 @@ fn aes_cfb128_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
     return pt_len;
 }
 
-fn aes_cfb128_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes_cfb128_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     if ct_len == 0 { return 0; }
 
     prev = allocate(CFB_BLOCK);
@@ -106,7 +106,7 @@ fn aes_cfb128_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Addres
 //     I_{j+1} = I_j[1..15] || C_j
 // ===========================================================================
 
-fn aes_cfb8_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes_cfb8_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     if pt_len == 0 { return 0; }
 
     reg = allocate(CFB_BLOCK);
@@ -139,7 +139,7 @@ fn aes_cfb8_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, 
     return pt_len;
 }
 
-fn aes_cfb8_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes_cfb8_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     if ct_len == 0 { return 0; }
 
     reg = allocate(CFB_BLOCK);
@@ -191,7 +191,7 @@ fn aes_cfb8_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address,
 
 // Shift a 16-byte register left by 1 bit and place `bit` (0 or 1) into
 // the LSB of byte 15. Performed in place.
-fn cfb1_shift_left(reg: Address, bit: u32) {
+transform cfb1_shift_left(reg: Address, bit: u32) {
     i: u32 = 0;
     while i < 15 {
         cur: u32 = *(reg + i);
@@ -203,7 +203,7 @@ fn cfb1_shift_left(reg: Address, bit: u32) {
     *(reg + 15) = ((last << 1) | (bit & 1)) & 255;
 }
 
-fn aes_cfb1_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes_cfb1_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     if pt_len == 0 { return 0; }
 
     reg = allocate(CFB_BLOCK);
@@ -244,7 +244,7 @@ fn aes_cfb1_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, 
     return pt_len;
 }
 
-fn aes_cfb1_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes_cfb1_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     if ct_len == 0 { return 0; }
 
     reg = allocate(CFB_BLOCK);
@@ -291,7 +291,7 @@ fn aes_cfb1_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address,
 // only the leading bytes of O_i are consumed.
 // ===========================================================================
 
-fn aes_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
+transform aes_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
     if data_len == 0 { return 0; }
 
     prev = allocate(CFB_BLOCK);
@@ -330,14 +330,14 @@ fn aes_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output
 // the canonical aes128 block primitive.
 // ===========================================================================
 
-fn aes256_cfb_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes256_cfb_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     return aes_cfb128_encrypt(plaintext, pt_len, key, iv, ciphertext);
 }
 
-fn aes256_cfb_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes256_cfb_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     return aes_cfb128_decrypt(ciphertext, ct_len, key, iv, plaintext);
 }
 
-fn aes256_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
+transform aes256_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
     return aes_ofb_crypt(data, data_len, key, iv, output);
 }

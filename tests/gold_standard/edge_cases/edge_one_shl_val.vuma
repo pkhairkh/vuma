@@ -6,7 +6,7 @@
 // first (immediate-RHS bitwise drop bug workaround). Distinct from
 // s98_edge_one_or_val (15), s97_edge_one_xor_val (17) and
 // s94_edge_one_or_val (87).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     s: u32 = 4;
     r: u32 = a << s;       // 0x10 = 16

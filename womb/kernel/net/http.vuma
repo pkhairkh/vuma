@@ -157,12 +157,12 @@
 // `resp.data[i]` reads — same pattern as shell.vuma's
 // `read(fd, in_buf as Address, 256)` followed by `in_buf.data[j]`.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32;
-    fn connect(fd: i32, addr: Address, len: u32) -> i32;
-    fn send(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
-    fn recv(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
-    fn close(fd: i32) -> i32;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform socket(domain: i32, sock_type: i32, protocol: i32) -> i32;
+    transform connect(fd: i32, addr: Address, len: u32) -> i32;
+    transform send(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
+    transform recv(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
+    transform close(fd: i32) -> i32;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ layout SockAddrIn = {
 // All bytes are emitted decimal-ASCII-byte-by-byte (VUMA has no string
 // literals — see "Why no string literals?" in the file header). Sets
 // req.len to the total request length.
-fn http_build_get(req: State<HttpRequest>, path: State<HttpPath>, host: State<HttpHost>) {
+transform http_build_get(req: State<HttpRequest>, path: State<HttpPath>, host: State<HttpHost>) {
     let pos = 0;
     // "GET " — G=71, E=69, T=84, space=32.
     req.data[0] = 71; req.data[1] = 69; req.data[2] = 84; req.data[3] = 32;
@@ -323,7 +323,7 @@ fn http_build_get(req: State<HttpRequest>, path: State<HttpPath>, host: State<Ht
 // a negative code. The K9f self-test uses an EMPTY host (host_len==0) so
 // the guard returns 0 before any network call — the self-test passes
 // deterministically without depending on network availability.
-fn http_get(host: State<HttpHost>, port: u16, path: State<HttpPath>, resp: State<HttpResponse>) -> i64 {
+transform http_get(host: State<HttpHost>, port: u16, path: State<HttpPath>, resp: State<HttpResponse>) -> i64 {
     let req = state_new(HttpRequest);
     http_build_get(req, path, host);
 
@@ -413,7 +413,7 @@ fn http_get(host: State<HttpHost>, port: u16, path: State<HttpPath>, resp: State
 // (W47: the empty-host guard returns 0 before any network call — this
 // keeps the self-test deterministic regardless of network availability).
 // Returns 0 on success, 1..10 on the 10 individual check failures.
-fn main() -> i32 {
+transform main() -> i32 {
     // Self-test: build a GET request.
     let path = state_new(HttpPath);
     path.data[0] = 47;  // '/'

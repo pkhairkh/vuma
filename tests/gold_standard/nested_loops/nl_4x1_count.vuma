@@ -7,7 +7,7 @@
 // s5_nl_3x2_count (3x2).
 // Expected exit code: 4
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..4 {
         for j in 0..1 {

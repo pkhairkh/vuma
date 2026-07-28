@@ -294,14 +294,6 @@ fn parse_error_kind_maps_to_correct_codes() {
         "E010"
     );
     assert_eq!(
-        code_for_parse_error_kind(&ParseErrorKind::RegionError),
-        "E011"
-    );
-    assert_eq!(
-        code_for_parse_error_kind(&ParseErrorKind::BDAnnotationError),
-        "E012"
-    );
-    assert_eq!(
         code_for_parse_error_kind(&ParseErrorKind::InvalidCompoundOp),
         "E013"
     );
@@ -330,7 +322,7 @@ fn parse_error_kind_maps_to_correct_codes() {
 #[test]
 fn parse_errors_produce_diagnostics_with_source_location() {
     // Invalid function name triggers a parse error
-    let source = "fn 123invalid() {}";
+    let source = "transform 123invalid() {}";
     let diags = VumaForLLM::check(source);
     assert!(
         !diags.is_empty(),
@@ -860,7 +852,7 @@ fn unknown_location_for_pipeline_errors() {
 
 #[test]
 fn parse_errors_have_precise_locations() {
-    let source = "fn main() {\n    x = ;\n}";
+    let source = "transform main() {\n    x = ;\n}";
     let diags = VumaForLLM::check(source);
     if let Some(diag) = diags.first() {
         // Parse errors should have non-zero line/column info
@@ -1291,7 +1283,7 @@ fn summary_display_format() {
 
 #[test]
 fn explain_error_returns_human_readable_explanation() {
-    let diags = VumaForLLM::check("fn 123bad() {}");
+    let diags = VumaForLLM::check("transform 123bad() {}");
     if let Some(diag) = diags.first() {
         let explanation = VumaForLLM::explain_error(diag);
         assert!(!explanation.is_empty(), "Explanation should not be empty");
@@ -1383,7 +1375,7 @@ fn explain_error_includes_chain() {
 
 #[test]
 fn suggest_fixes_returns_actionable_suggestions() {
-    let diags = VumaForLLM::check("fn 123bad() {}");
+    let diags = VumaForLLM::check("transform 123bad() {}");
     if let Some(diag) = diags.first() {
         let fixes = VumaForLLM::suggest_fixes(diag);
         assert!(!fixes.is_empty(), "Should have at least one suggestion");
@@ -1479,7 +1471,7 @@ fn suggest_fixes_for_e023_unknown_type() {
 #[test]
 fn compile_for_all_eight_targets() {
     let compiler = VumaCompiler::new();
-    let source = "fn main() {}";
+    let source = "transform main() {}";
 
     let targets = [
         "x86_64",
@@ -1526,7 +1518,7 @@ fn compile_for_all_eight_targets() {
 #[test]
 fn compile_for_target_unknown_target_emits_e021() {
     let compiler = VumaCompiler::new();
-    let source = "fn main() {}";
+    let source = "transform main() {}";
     let result = compiler.compile_for_target(source, "nonexistent_arch");
     assert!(!result.success, "Unknown target should fail");
     assert!(
@@ -1541,7 +1533,7 @@ fn compile_for_target_unknown_target_emits_e021() {
 #[test]
 fn compile_for_target_valid_source_serializable() {
     let compiler = VumaCompiler::new();
-    let source = "fn main() {}";
+    let source = "transform main() {}";
     let result = compiler.compile_for_target(source, "x86_64");
     let json = result.to_json();
     assert!(
@@ -1553,7 +1545,7 @@ fn compile_for_target_valid_source_serializable() {
 #[test]
 fn compile_for_target_alternate_names() {
     let compiler = VumaCompiler::new();
-    let source = "fn main() {}";
+    let source = "transform main() {}";
 
     // Test alternate target name parsing
     let alternate_names = [
@@ -1883,7 +1875,7 @@ fn compile_result_from_invalid_source_has_diagnostics() {
 #[test]
 fn parse_result_from_invalid_source_has_diagnostics() {
     let compiler = VumaCompiler::new();
-    let result = compiler.parse("fn 123bad() {}");
+    let result = compiler.parse("transform 123bad() {}");
     assert!(!result.success, "Invalid source should fail parsing");
     assert!(!result.diagnostics.is_empty(), "Should have diagnostics");
 }
@@ -1891,14 +1883,14 @@ fn parse_result_from_invalid_source_has_diagnostics() {
 #[test]
 fn validate_returns_empty_for_valid_source() {
     let compiler = VumaCompiler::new();
-    let diags = compiler.validate("fn main() {}");
+    let diags = compiler.validate("transform main() {}");
     assert!(diags.is_empty(), "Valid source should have no diagnostics");
 }
 
 #[test]
 fn validate_returns_errors_for_invalid_source() {
     let compiler = VumaCompiler::new();
-    let diags = compiler.validate("fn 123bad() {}");
+    let diags = compiler.validate("transform 123bad() {}");
     assert!(!diags.is_empty(), "Invalid source should have diagnostics");
     assert!(diags
         .iter()

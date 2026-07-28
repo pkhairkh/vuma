@@ -6,7 +6,7 @@
 // Distinct from s6_u32_shift_left_3 (shift left) and
 // s5_u32_add_then_shift (add-then-shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = 200;
     sh: u32 = 2;
     r: u32 = v >> sh;

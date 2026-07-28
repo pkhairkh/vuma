@@ -218,7 +218,7 @@
 // passes them by reference to sock_init / sys_socket / ... / sys_recv
 // (init-style API — see "Why init-style?" in K4e's wait.vuma header for
 // the codegen rationale: the current codegen does NOT propagate State-
-// typedness through function return values, so `fn sock_new() ->
+// typedness through function return values, so `transform sock_new() ->
 // State<SocketTable>` would produce broken field-access code in
 // callers). No externs are declared in this file (the socket ops are
 // pure-PM — no syscalls, no context switch, no memory allocation). The
@@ -367,7 +367,7 @@ layout NetBuf = { data: [u8; 256] }
 // because u32 fits in 4 bytes — bytes 4..7 would be zero-shifted out.
 
 // Read the u32 `family` field of socket slot `idx` from SocketTable.families.
-fn sock_get_family(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_family(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -381,7 +381,7 @@ fn sock_get_family(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `family` field of socket slot `idx` into SocketTable.families.
-fn sock_set_family(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_family(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -393,7 +393,7 @@ fn sock_set_family(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `type` field of socket slot `idx` from SocketTable.types.
-fn sock_get_type(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_type(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -407,7 +407,7 @@ fn sock_get_type(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `type` field of socket slot `idx` into SocketTable.types.
-fn sock_set_type(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_type(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -419,7 +419,7 @@ fn sock_set_type(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `proto` field of socket slot `idx` from SocketTable.protos.
-fn sock_get_proto(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_proto(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -433,7 +433,7 @@ fn sock_get_proto(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `proto` field of socket slot `idx` into SocketTable.protos.
-fn sock_set_proto(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_proto(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -445,7 +445,7 @@ fn sock_set_proto(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `local_addr` field of socket slot `idx` from SocketTable.local_addrs.
-fn sock_get_local_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_local_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -459,7 +459,7 @@ fn sock_get_local_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `local_addr` field of socket slot `idx` into SocketTable.local_addrs.
-fn sock_set_local_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_local_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -471,7 +471,7 @@ fn sock_set_local_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `remote_addr` field of socket slot `idx` from SocketTable.remote_addrs.
-fn sock_get_remote_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_remote_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -485,7 +485,7 @@ fn sock_get_remote_addr(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `remote_addr` field of socket slot `idx` into SocketTable.remote_addrs.
-fn sock_set_remote_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_remote_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -497,7 +497,7 @@ fn sock_set_remote_addr(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `backlog` field of socket slot `idx` from SocketTable.backlogs.
-fn sock_get_backlog(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_backlog(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -511,7 +511,7 @@ fn sock_get_backlog(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `backlog` field of socket slot `idx` into SocketTable.backlogs.
-fn sock_set_backlog(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_backlog(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -523,7 +523,7 @@ fn sock_set_backlog(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `rx_waitq` field of socket slot `idx` from SocketTable.rx_waitqs.
-fn sock_get_rx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_rx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -537,7 +537,7 @@ fn sock_get_rx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `rx_waitq` field of socket slot `idx` into SocketTable.rx_waitqs.
-fn sock_set_rx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_rx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -549,7 +549,7 @@ fn sock_set_rx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `tx_waitq` field of socket slot `idx` from SocketTable.tx_waitqs.
-fn sock_get_tx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
+transform sock_get_tx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -563,7 +563,7 @@ fn sock_get_tx_waitq(tbl: State<SocketTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `tx_waitq` field of socket slot `idx` into SocketTable.tx_waitqs.
-fn sock_set_tx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
+transform sock_set_tx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -582,7 +582,7 @@ fn sock_set_tx_waitq(tbl: State<SocketTable>, idx: u32, val: u32) {
 // because u16 fits in 2 bytes — bytes 2..3 would be zero-shifted out.
 
 // Read the u16 `local_port` field of socket slot `idx` from SocketTable.local_ports.
-fn sock_get_local_port(tbl: State<SocketTable>, idx: u32) -> u16 {
+transform sock_get_local_port(tbl: State<SocketTable>, idx: u32) -> u16 {
     let off = idx * 2;
     let v: u16 = 0;
     let i = 0;
@@ -596,7 +596,7 @@ fn sock_get_local_port(tbl: State<SocketTable>, idx: u32) -> u16 {
 }
 
 // Write the u16 `local_port` field of socket slot `idx` into SocketTable.local_ports.
-fn sock_set_local_port(tbl: State<SocketTable>, idx: u32, val: u16) {
+transform sock_set_local_port(tbl: State<SocketTable>, idx: u32, val: u16) {
     let off = idx * 2;
     let i = 0;
     while i < 2 {
@@ -608,7 +608,7 @@ fn sock_set_local_port(tbl: State<SocketTable>, idx: u32, val: u16) {
 }
 
 // Read the u16 `remote_port` field of socket slot `idx` from SocketTable.remote_ports.
-fn sock_get_remote_port(tbl: State<SocketTable>, idx: u32) -> u16 {
+transform sock_get_remote_port(tbl: State<SocketTable>, idx: u32) -> u16 {
     let off = idx * 2;
     let v: u16 = 0;
     let i = 0;
@@ -622,7 +622,7 @@ fn sock_get_remote_port(tbl: State<SocketTable>, idx: u32) -> u16 {
 }
 
 // Write the u16 `remote_port` field of socket slot `idx` into SocketTable.remote_ports.
-fn sock_set_remote_port(tbl: State<SocketTable>, idx: u32, val: u16) {
+transform sock_set_remote_port(tbl: State<SocketTable>, idx: u32, val: u16) {
     let off = idx * 2;
     let i = 0;
     while i < 2 {
@@ -648,7 +648,7 @@ fn sock_set_remote_port(tbl: State<SocketTable>, idx: u32, val: u16) {
 // The byte-by-byte loop is the PMT-pure way to zero two 64-byte arrays
 // (states + used); same idiom as K8e's ipi_init (womb/kernel/smp/ipi.vuma
 // :315-322) zeroing handlers[0..128] — just two arrays instead of one.
-fn sock_init(tbl: State<SocketTable>) {
+transform sock_init(tbl: State<SocketTable>) {
     let i = 0;
     while i < 64 {
         tbl.states[i] = 0;
@@ -680,7 +680,7 @@ fn sock_init(tbl: State<SocketTable>) {
 // types[i*4..i*4+4], protos[i*4..i*4+4] (via the pack helpers), states[i]
 // (direct), used[i] (direct), count. No reads (the `used[i] == 0` check
 // is a direct array read, not a helper call).
-fn sys_socket(tbl: State<SocketTable>, family: u32, sock_type: u32, proto: u32) -> i64 {
+transform sys_socket(tbl: State<SocketTable>, family: u32, sock_type: u32, proto: u32) -> i64 {
     let i = 0;
     while i < 64 {
         if tbl.used[i] == 0 {
@@ -717,7 +717,7 @@ fn sys_socket(tbl: State<SocketTable>, family: u32, sock_type: u32, proto: u32) 
 // State<T> params: 1 (tbl). Writes 3 fields: local_addrs[fd*4..fd*4+4]
 // (via sock_set_local_addr), local_ports[fd*2..fd*2+2] (via
 // sock_set_local_port), states[fd] (direct). Reads used[fd] (direct).
-fn sys_bind(tbl: State<SocketTable>, fd: u32, addr: u32, port: u16) -> i64 {
+transform sys_bind(tbl: State<SocketTable>, fd: u32, addr: u32, port: u16) -> i64 {
     if fd >= 64 { return 22; }       // -EINVAL
     if tbl.used[fd] == 0 { return 9; }  // -EBADF
     sock_set_local_addr(tbl, fd, addr);
@@ -744,7 +744,7 @@ fn sys_bind(tbl: State<SocketTable>, fd: u32, addr: u32, port: u16) -> i64 {
 //
 // State<T> params: 1 (tbl). Writes 2 fields: backlogs[fd*4..fd*4+4]
 // (via sock_set_backlog), states[fd] (direct). Reads used[fd] (direct).
-fn sys_listen(tbl: State<SocketTable>, fd: u32, backlog: u32) -> i64 {
+transform sys_listen(tbl: State<SocketTable>, fd: u32, backlog: u32) -> i64 {
     if fd >= 64 { return 22; }
     if tbl.used[fd] == 0 { return 9; }
     sock_set_backlog(tbl, fd, backlog);
@@ -776,7 +776,7 @@ fn sys_listen(tbl: State<SocketTable>, fd: u32, backlog: u32) -> i64 {
 // sys_socket's State<T> note), then writes states[new_fd] = 3
 // (direct). The new_fd is a local i64 (sys_socket's return value,
 // not a State<T> field read) — no state-typedness concern.
-fn sys_accept(tbl: State<SocketTable>, fd: u32) -> i64 {
+transform sys_accept(tbl: State<SocketTable>, fd: u32) -> i64 {
     if fd >= 64 { return 22; }
     if tbl.used[fd] == 0 { return 9; }
     if tbl.states[fd] != 2 { return 22; }  // not listening
@@ -813,7 +813,7 @@ fn sys_accept(tbl: State<SocketTable>, fd: u32) -> i64 {
 // State<T> params: 2 (tbl + buf). K9a's stub reads nothing from either
 // (just returns len). K9b will read buf.data[0..len] + write to the
 // TCP send buffer; K9c will hand the segment to the NIC driver.
-fn sys_send(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i64 {
+transform sys_send(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i64 {
     if fd >= 64 { return 22; }
     if tbl.used[fd] == 0 { return 9; }
     // K9a stub: pretend all bytes were sent.
@@ -829,7 +829,7 @@ fn sys_send(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i
 // block or return -EAGAIN if the buffer is empty). K9a's stub just
 // verifies the fd validation logic + the syscall signature. See
 // sys_send's header for the State<T> rationale.
-fn sys_recv(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i64 {
+transform sys_recv(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i64 {
     if fd >= 64 { return 22; }
     if tbl.used[fd] == 0 { return 9; }
     // K9a stub: no data available (EOF — peer closed).
@@ -870,7 +870,7 @@ fn sys_recv(tbl: State<SocketTable>, fd: u32, buf: State<NetBuf>, len: u64) -> i
 // backlog, 1/2 = bound/listening states. Decimal avoids the parser's
 // hex-literal path (parse_int_radix width-extension subtleties — see
 // womb/kernel/arch/x86_64/pt.vuma header for the same rationale).
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(SocketTable);
     sock_init(tbl);
 

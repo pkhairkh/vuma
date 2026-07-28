@@ -6,7 +6,7 @@
 // into variables first to dodge the immediate-RHS bitwise drop bug.
 // Distinct from s4_bit_xor3_chain (3-operand single chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;    // 0xF0
     b: u64 = 15;     // 0x0F
     c: u64 = 255;    // 0xFF

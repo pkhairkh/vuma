@@ -6,7 +6,7 @@
 // workaround). Distinct from s49_edge_one_shl_six (64) and
 // s50_edge_one_shl_five (32).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 2;
     r: u32 = a << b;       // 4

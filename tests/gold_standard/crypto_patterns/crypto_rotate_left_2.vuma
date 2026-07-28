@@ -7,7 +7,7 @@
 // u64 variables first. Distinct from s5_crypto_rotate_left_4 (4 bits)
 // and s6_crypto_rotate_right_4 (rotate right).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 129;         // 0x81
     sh_l: u64 = 2;
     sh_r: u64 = 6;

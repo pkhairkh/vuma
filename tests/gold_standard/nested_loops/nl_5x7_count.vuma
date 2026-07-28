@@ -8,7 +8,7 @@
 // nl_5x2_count (10).
 // Expected exit code: 35
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..5 {
         for j in 0..7 {

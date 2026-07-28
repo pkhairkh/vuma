@@ -6,7 +6,7 @@
 // (immediate-RHS bitwise drop bug workaround). Distinct from s46_
 // crypto_shr_extract (11) and s42_crypto_shl_xor (47).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 9;            // 0x09
     b: u64 = 4;
     r: u64 = a << b;       // 0x90 = 144

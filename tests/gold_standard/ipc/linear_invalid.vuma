@@ -4,7 +4,7 @@
 // linear_check is advisory (logs warnings, doesn't abort), the program
 // still compiles and runs. The test verifies the pipeline doesn't crash.
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     x = 10;
     y = x + 1;
     z = x + 2;

@@ -118,7 +118,7 @@ fn build_regalloc_smoke_func() -> IRFunction {
 }
 
 /// Build a minimal IR function used for the **observable-output**
-/// cross-backend regression: `fn main() { print_int(42); print_newline(); }`.
+/// cross-backend regression: `transform main() { print_int(42); print_newline(); }`.
 ///
 /// The trailing `print_newline()` is important for the x86_64 execution
 /// sub-test: the `print_int` runtime stub writes the decimal digits of
@@ -1353,7 +1353,7 @@ fn test_wave50_uaf_pipeline_compiles_when_alloc_elided() {
 
 /// Cross-backend optimization regression.
 ///
-/// Compile a simple program (`fn main() { print_int(42); print_newline(); }`,
+/// Compile a simple program (`transform main() { print_int(42); print_newline(); }`,
 /// where `42` is `7 * 6` after constant folding) on each tier-1 backend
 /// and assert:
 ///
@@ -1845,36 +1845,36 @@ fn test_wave50_bootstrap_milestone() {
     // Use the `fn <name>(` prefix to avoid matching substring occurrences
     // inside comments or unrelated identifiers.
     assert!(
-        full_parser_src.contains("fn parse("),
+        full_parser_src.contains("transform parse("),
         "wave50 bootstrap milestone (sub-check B): full_parser.vuma does not define `fn parse(`"
     );
     assert!(
-        ir_builder_src.contains("fn irb_build_main("),
+        ir_builder_src.contains("transform irb_build_main("),
         "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
          `fn irb_build_main(`"
     );
     assert!(
-        ir_builder_src.contains("fn scg_construct("),
+        ir_builder_src.contains("transform scg_construct("),
         "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
          `fn scg_construct(` (Task 5-b real SCG implementation is missing)"
     );
     assert!(
-        ir_builder_src.contains("fn bd_infer("),
+        ir_builder_src.contains("transform bd_infer("),
         "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
          `fn bd_infer(` (Task 5-b real BD implementation is missing)"
     );
     assert!(
-        ir_builder_src.contains("fn ive_verify("),
+        ir_builder_src.contains("transform ive_verify("),
         "wave50 bootstrap milestone (sub-check B): ir_builder.vuma does not define \
          `fn ive_verify(` (Task 5-b real IVE implementation is missing)"
     );
     assert!(
-        codegen_src.contains("fn codegen_emit("),
+        codegen_src.contains("transform codegen_emit("),
         "wave50 bootstrap milestone (sub-check B): codegen.vuma does not define \
          `fn codegen_emit(`"
     );
     assert!(
-        elf_src.contains("fn write_elf64("),
+        elf_src.contains("transform write_elf64("),
         "wave50 bootstrap milestone (sub-check B): elf.vuma does not define \
          `fn write_elf64(`"
     );
