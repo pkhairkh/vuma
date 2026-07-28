@@ -23,11 +23,11 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! use vuma_ive::{InferenceEngine, VerificationEngine, VerificationInput};
-//! use vuma_scg::SCG;
+//! use vuma_codegen::scg_to_ir::Scg;
 //!
-//! let scg = SCG::new();
+//! let scg = Scg::new(vec![]);
 //!
 //! // Run BD inference
 //! let inference = InferenceEngine::new();

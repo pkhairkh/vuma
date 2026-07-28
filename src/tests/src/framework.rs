@@ -641,11 +641,33 @@ pub fn build_scg_from_source(source: &str) -> Result<SCG, Vec<ParseError>> {
 /// println!("Verdict: {}", result.overall);
 /// ```
 pub fn verify_program(source: &str) -> AggregatedResult {
-    // Build the vuma_scg::SCG (silently treating parse errors as empty programs).
-    let scg = build_scg_from_source(source).unwrap_or_default();
+    // Parse source -> AST (needed for pmt_layouts and the codegen Scg bridge).
+    let mut parser = Parser::new(source);
+    let parse_result = parser.parse_program();
 
-    // Build verification input from the SCG.
-    let input = VerificationInput::from_scg(scg);
+    // (Task 6-F) Build the codegen Scg directly from the AST via
+    // `bridge_ast_to_codegen_scg` and feed it to IVE via
+    // `from_codegen_scg`. IVE's `verify_pmt` now walks the codegen Scg's
+    // `node_payload` adapter (Task 6-A) rather than the semantic SCG's
+    // `nodes()` iterator. On parse error, fall back to an empty codegen
+    // Scg (mirrors the prior `unwrap_or_default()` on the semantic SCG).
+    let codegen_scg = if parse_result.has_errors() {
+        CodegenScg::new(Vec::new())
+    } else {
+        vuma::pipeline::bridge_ast_to_codegen_scg(&parse_result.clone().unwrap())
+    };
+
+    // Build pmt_layouts from the AST (needed for the field-list cross-check
+    // now that AstToScg emits typed-state StateRead/StateWrite nodes).
+    let pmt_layouts = if parse_result.has_errors() {
+        HashMap::new()
+    } else {
+        vuma::pipeline::build_pmt_layout_specs(&parse_result.unwrap())
+    };
+
+    // Build verification input from the codegen Scg + pmt_layouts.
+    let input =
+        VerificationInput::from_codegen_scg(codegen_scg).with_pmt_layouts(pmt_layouts);
 
     // Run all five invariant checks at Normal level.
     let aggregator = InvariantAggregator::new();
@@ -666,8 +688,22 @@ pub fn verify_program(source: &str) -> AggregatedResult {
 /// assert_eq!(result.per_invariant.len(), 1); // PMT runs a single state check
 /// ```
 pub fn verify_program_at_level(source: &str, level: VerificationLevel) -> AggregatedResult {
-    let scg = build_scg_from_source(source).unwrap_or_default();
-    let input = VerificationInput::from_scg(scg);
+    let mut parser = Parser::new(source);
+    let parse_result = parser.parse_program();
+    // (Task 6-F) Build the codegen Scg directly from the AST and feed it
+    // to IVE via `from_codegen_scg` (see `verify_program` for rationale).
+    let codegen_scg = if parse_result.has_errors() {
+        CodegenScg::new(Vec::new())
+    } else {
+        vuma::pipeline::bridge_ast_to_codegen_scg(&parse_result.clone().unwrap())
+    };
+    let pmt_layouts = if parse_result.has_errors() {
+        HashMap::new()
+    } else {
+        vuma::pipeline::build_pmt_layout_specs(&parse_result.unwrap())
+    };
+    let input =
+        VerificationInput::from_codegen_scg(codegen_scg).with_pmt_layouts(pmt_layouts);
 
     let aggregator = InvariantAggregator::new().with_level(level);
     aggregator.verify_all(&input)
@@ -742,7 +778,14 @@ pub fn verify_program_detailed(source: &str) -> PipelineResult {
     }
 
     // Stage 5: IVE verification.
-    let input = VerificationInput::from_scg(scg);
+    // (Task 6-F) Feed IVE a codegen Scg built directly from the AST via
+    // `bridge_ast_to_codegen_scg` (IVE now walks the codegen Scg's
+    // `node_payload` adapter rather than the semantic SCG). The semantic
+    // SCG built above is retained for `validate()` and `scg_result`
+    // storage (the PipelineResult's `scg` field still exposes the
+    // semantic SCG for downstream test assertions).
+    let codegen_scg = vuma::pipeline::bridge_ast_to_codegen_scg(&program);
+    let input = VerificationInput::from_codegen_scg(codegen_scg);
     let aggregator = InvariantAggregator::new();
     let aggregated = aggregator.verify_all(&input);
     stages.push((PipelineStage::IveVerification, StageOutcome::Passed));

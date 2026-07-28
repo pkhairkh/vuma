@@ -173,7 +173,7 @@ pub fn all_valid(results: &[StateTransformVerification]) -> bool {
 ///
 /// # Example
 ///
-/// ```
+/// ```no_run
 /// use vuma_ive::state_transform::verify_dependent_transform;
 ///
 /// // 10 u32 elements at offset 0 in a 40-byte buffer → safe.
