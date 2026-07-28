@@ -8296,6 +8296,44 @@ pub fn flatten_expr(
             }
         }
 
+        // ── Try operator (`expr?`): unwrap a Result<T,E> ──
+        //
+        // Follow-up F3. The `?` operator was added to the parser (Wave 9-A)
+        // and `IRBuilder::lower_try` was added to scg_to_ir.rs (Wave 9-B), but
+        // the AST→SCG bridge did not route `Expr::Try` through to codegen —
+        // it fell into the catch-all wildcard below and was silently dropped
+        // (warning + `ScgExpr::Int(0)`), making the AST variant dead. This
+        // arm wires the end-to-end path:
+        //
+        //   1. Flatten the inner expression to obtain the `Result<T,E>`
+        //      value (a pointer to the tagged union, per IRType::TaggedUnion
+        //      layout, or an opaque extern result).
+        //   2. Emit a `CallNode` to the runtime helper `__try`
+        //      ([`vuma_codegen::ir::TRY_RUNTIME_HELPER`]). The IRBuilder's
+        //      `lower_call` recognises this name and dispatches to
+        //      [`IRBuilder::lower_try`], which loads the discriminant at
+        //      offset 0 and branches: Ok → bind the payload (offset 8) to
+        //      `dst` and continue; Err → early-return the error from the
+        //      current function.
+        //
+        // This is the placeholder wiring documented in the Wave 9-B doc
+        // comment on `lower_try`: when the Result payload layout is opaque
+        // (e.g. extern results), emit a call to `__try`. Full in-line branch
+        // lowering (without the helper call) is a future follow-up once the
+        // bridge can prove the static TaggedUnion layout.
+        Expr::Try { expr: inner, .. } => {
+            let operand = flatten_expr(inner, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(dst.clone()),
+                func: vuma_codegen::ir::TRY_RUNTIME_HELPER.to_string(),
+                args: vec![operand],
+                is_extern: false,
+                reassigns: None,
+            }));
+            ScgExpr::Var(dst)
+        }
+
         // ── Fallback for unsupported expression types ──
         // Log a warning instead of silently returning 0. This makes
         // unsupported constructs visible during compilation.
