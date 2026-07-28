@@ -31,6 +31,48 @@ use vuma_scg::graph::SCG;
 use vuma_scg::node::{NodeId, NodePayload, NodeType};
 
 // ---------------------------------------------------------------------------
+// SCG-source migration status (Task 5-B)
+// ---------------------------------------------------------------------------
+// This engine reads the *semantic* `vuma_scg::SCG` (graph-shaped:
+// `NodePayload` + `NodeType` + `EdgeKind`), NOT the codegen
+// `vuma_codegen::scg_to_ir::Scg` (statement-list-shaped: `Vec<ScgStatement>`).
+// Task 5-B assessed migrating `derive_constraints`/`infer_bd` onto the codegen
+// `Scg`'s new graph layer (Task 4-A/4-B/4-C: `get_node`/`edges`/`nodes`/
+// `node_count`) and FELL BACK. Three blockers, all out of <=1-file scope here:
+//
+//   1. PAYLOAD ADAPTERS MISSING. `derive_constraints` matches
+//      `NodeType::{Control,Allocation,Deallocation}` and
+//      `NodePayload::Control(ctrl)` (with `ctrl.kind == ControlKind::LoopHeader`)
+//      on the nodes returned by `scg.nodes()`/`scg.get_node()`. The codegen
+//      `Scg::nodes()` yields `ScgNode::{Function,Data}` and `get_node()` yields
+//      `&ScgStatement` -- neither carries `node_type`/`payload`/`id` fields, and
+//      no adapter currently reconstructs them. Migrating would silently drop
+//      every complexity + liveness constraint.
+//
+//   2. EDGES UNPOPULATED. The codegen `Scg::edges()` (Task 4-C) returns an
+//      EMPTY iterator: 4-C populated only `node_index`, leaving
+//      `Scg.edges: Vec<CodegenEdge>` empty because the canonical AST->codegen
+//      bridge does not retain the semantic SCG's `EdgeData`. Migrating would
+//      silently drop every resource-flow / temporal / security constraint
+//      derived from `EdgeKind::{DataFlow,ControlFlow,Derivation,Dispatch,Call,
+//      Return,SyscallArg}`.
+//
+//   3. BD ENGINE TYPE BOUND. `vuma_bd::BDInferenceEngine::infer(&self,
+//      scg: &vuma_scg::graph::SCG)` (bd/src/inference.rs:305) is typed against
+//      the *semantic* SCG. `run_bd_inference` delegates the 3-phase BD
+//      propagation to it; switching this module's `&SCG` parameter to the
+//      codegen `Scg` would not compile without rewriting the BD engine's
+//      public API (multi-crate change).
+//
+// TODO: migrate to codegen Scg once (a) payload adapters exposing
+// `node_type`/`payload` over `ScgStatement` exist, (b) Task 4-C's edge
+// population is completed (semantic `EdgeData` threaded through the bridge
+// with a NodeId-correlation table), and (c) `vuma_bd` learns to read the
+// codegen `Scg` (or a shared graph trait). Until then the semantic SCG is the
+// authoritative source for BD propagation + constraint derivation.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // InferenceError
 // ---------------------------------------------------------------------------
 

@@ -8,6 +8,21 @@ use std::collections::HashMap;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::NodeId;
 
+// TODO: migrate to codegen Scg once payload adapters exist (Wave 4 graph
+// layer is ready). The codegen `vuma_codegen::Scg` now exposes the same
+// graph API this module relies on (`get_node` / `edges` / `nodes` /
+// `node_count`), and `compute_fingerprint` only reads `node.node_type` +
+// edge structure (it does NOT destructure `NodePayload`), so the read-side
+// graph contract is satisfied. However the codegen `ScgStatement` payloads
+// differ structurally from the semantic `NodePayload` -- e.g. codegen
+// `AllocationNode` is an enum `{Stack,Heap}` with no `region_id`, and the
+// codegen SCG has no `Deallocation` variant at all (arena/stack memory
+// model). Until a payload adapter maps codegen statement discriminants to
+// semantic `NodeType` values, IVE stays on the semantic SCG. The Wave 4
+// graph layer + Wave 3 hard gate already close the divergence
+// architecturally; this migration is an optimization, not a correctness
+// requirement.
+
 /// A structured invariant violation used by the batched violation system
 /// and the verification cache.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

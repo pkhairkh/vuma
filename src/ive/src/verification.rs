@@ -12,6 +12,48 @@
 //! 1. Accepts a `vuma_scg::SCG` and optional BD map
 //! 2. Delegates to `InvariantAggregator::verify_pmt` for PMT state verification
 //! 3. Aggregates results into a unified vector
+//!
+//! # Hybrid SCG state (Tasks 2-A / 3-A / 4-A-4-C)
+//!
+//! IVE currently runs on the **semantic** SCG ([`vuma_scg::graph::SCG`]),
+//! produced by `parser::to_scg::AstToScg`. The codegen `Scg`
+//! (`vuma_codegen::scg_to_ir::Scg`) is a parallel, structurally-typed
+//! lowering built by `pipeline::bridge_ast_to_codegen_scg_with_meta`; IVE
+//! does **not** yet consume it directly as its verification graph.
+//!
+//! To bridge the two without a full migration, the codegen Scg's
+//! typed-state information is threaded into IVE via the
+//! [`VerificationInput::typed_state_meta`] field
+//! (`Vec<vuma_codegen::scg_to_ir::TypedStateMeta>`), populated by the
+//! pipeline from `bridge_ast_to_codegen_scg_with_meta`. This carries every
+//! typed-state op (`state_new`, `p.field` read/write, `transform`,
+//! `#[foreign_consume]`) as a recoverable entry alongside the semantic SCG.
+//!
+//! [`InvariantAggregator::verify_pmt`] then runs a **hard-gate**
+//! dual-derivation cross-check (`verify_typed_state_conformance`, promoted
+//! to a hard `Violated` gate in Task 3-A) that proves the semantic SCG's
+//! `NodePayload` typed-state ops agree with the codegen-derived
+//! `typed_state_meta` list. A disagreement surfaces a divergence between
+//! the two SCG construction paths and is reported as a hard `Violated`
+//! result, mirroring the field-list cross-check. This cross-check is the
+//! current safety net that lets IVE stay on the semantic SCG while the
+//! codegen Scg matures.
+//!
+//! Full migration of IVE onto the codegen `Scg` (i.e. retyping
+//! [`VerificationInput::scg`] from `vuma_scg::SCG` to the codegen `Scg`) is
+//! **deferred** until payload adapters exist that lower the semantic SCG's
+//! `NodePayload` variants into the codegen `ScgStatement` shape, so that
+//! every verifier-relevant node carries the information IVE needs. The
+//! hard-gate cross-check above guarantees no silent divergence in the
+//! meantime.
+//!
+//! The graph layer for the codegen Scg (Task 4-A/4-B/4-C - `CodegenEdge`,
+//! `NodeLoc`, `Scg::edges`/`node_index`, accessors `edges()`/`nodes()`/
+//! `get_node()`/`successors()`/`predecessors()`, and `node_index`
+//! population in `bridge_ast_to_codegen_scg_with_meta`) is already in
+//! place and ready for that future migration; it is currently exercised
+//! only by the `node_index`/`get_node` path, with edge population pending
+//! a semantic-to-codegen NodeId correlation table (see Task 4-C follow-up).
 
 use crate::result::VerificationResult;
 use std::collections::{HashMap, HashSet};

@@ -16,6 +16,29 @@ use std::collections::{HashMap, HashSet};
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{NodeId, NodePayload};
 
+// TODO: migrate to codegen Scg once payload adapters exist (Wave 4 graph
+// layer is ready). The codegen `vuma_codegen::Scg` now exposes the same
+// graph API this module uses (`get_node` / `edges` / `nodes`), BUT its
+// `ScgStatement` payloads are structurally incompatible with the semantic
+// `NodePayload` this file pattern-matches on:
+//   * `Allocation(alloc)` reads `alloc.region_id` / `alloc.size` -- codegen
+//     `AllocationNode` is an enum `{Stack{name,size:u32,ty},Heap{...}}` with
+//     no `region_id`.
+//   * `Deallocation(dealloc)` reads `dealloc.region_id` -- there is NO
+//     `Deallocation` variant in codegen `ScgStatement` at all (arena/stack
+//     memory model; frees are `PmtOp::ArenaFree`).
+//   * `Access(access)` reads `access.region_id` / `access.mode` -- codegen
+//     `AccessNode` is an enum `{Load{..},Store{..}}` with no region/mode.
+//   * `Computation(comp)` calls `comp.kind.label()` -- codegen
+//     `ComputationNode` is `{dst,op,lhs,rhs,...}` with no `kind`/`label()`.
+// Additionally codegen `Scg::get_node` returns `&ScgStatement` directly (no
+// `NodeData` wrapper with `.payload`/`.node_type`), and `nodes()` yields
+// `ScgNode` (Function/Data) with no `.id`. A payload adapter layer is
+// required before IVE can verify the codegen SCG directly. Until then IVE
+// stays on the semantic SCG; the Wave 4 graph layer + Wave 3 hard gate
+// already close the divergence architecturally (this migration is an
+// optimization, not a correctness requirement).
+
 /// A cached query result.
 #[derive(Debug, Clone)]
 pub struct QueryResult {
