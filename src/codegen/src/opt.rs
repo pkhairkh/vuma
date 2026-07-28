@@ -3556,17 +3556,59 @@ pub fn build_happens_before_dag(
     edges
 }
 
-/// Dead store elimination pass.
+/// Dead store elimination pass (backward-compatible 2-arg entry point).
+///
+/// Delegates to [`dead_store_eliminate_with_linearity`] with
+/// `consumed_vregs = None` — i.e. no IVE linearity data — preserving the
+/// pre-Wave-0-A provenance-only behaviour.  This 2-arg signature is kept
+/// so existing call sites (the optimisation pipeline, the `dump_stages`
+/// binary, and the `ive_loop_tests` conformance suite) compile unchanged;
+/// Wave 4-A will route the IVE linearity report
+/// (`vuma_ive::verification::LinearityReport`) through the 3-arg variant
+/// instead.
 ///
 /// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
 /// non-aliasing to identify stores that are overwritten before any load
-/// reads them. The IVE enhancement allows DSE to prove
-/// non-aliasing across same-type pointers from different allocations —
-/// a case TBAA cannot handle.
+/// reads them. The IVE enhancement allows DSE to prove non-aliasing
+/// across same-type pointers from different allocations — a case TBAA
+/// cannot handle.
 ///
 /// The provenance map is passed explicitly (no thread-local) from
 /// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
-pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>) -> IRFunction {
+pub fn dead_store_eliminate(
+    mut func: IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> IRFunction {
+    dead_store_eliminate_with_linearity(func, provenance, None)
+}
+
+/// Dead store elimination pass, **IVE-linearity-aware** (Wave 0-A).
+///
+/// This is the extended, linearity-aware entry point of
+/// [`dead_store_eliminate`].  In addition to the provenance
+/// (non-aliasing) directed kill, it accepts an optional `consumed_vregs`
+/// set — the bare vregs the IVE proved were linearly consumed by a
+/// `StateTransform` / `ForeignConsume` in the verified SCG
+/// (`vuma_ive::verification::LinearityReport::consumed_vregs`).  When
+/// `Some(set)`, a `Store` whose address vreg is in `set` is treated as
+/// dead: the state was consumed (destroyed) by the IVE-proven linear
+/// lifecycle, so the store has no observable effect.  `None` ⇒ no
+/// linearity data ⇒ provenance-only DCE (the pre-Wave-0-A behaviour,
+/// identical to [`dead_store_eliminate`]).
+///
+/// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
+/// non-aliasing to identify stores that are overwritten before any load
+/// reads them. The IVE enhancement allows DSE to prove non-aliasing
+/// across same-type pointers from different allocations — a case TBAA
+/// cannot handle.
+///
+/// The provenance map is passed explicitly (no thread-local) from
+/// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
+pub fn dead_store_eliminate_with_linearity(
+    mut func: IRFunction,
+    provenance: &HashMap<u32, u32>,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRFunction {
     use crate::alias_analysis::AliasAnalysis;
 
     let aa = AliasAnalysis::analyze(&func);
@@ -3612,6 +3654,22 @@ pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>
                 } => (addr, *offset as i64, crate::ir::size_of(ty) as i64),
                 _ => continue,
             };
+
+            // ── Wave 0-A: linearity-directed DCE ──────────────────────────
+            // If the IVE proved this store's address vreg was linearly
+            // consumed (the state was used up by a `StateTransform` /
+            // `ForeignConsume`), the store writes to destroyed state with
+            // no observable effect → it is dead.  This is a strictly
+            // stronger kill than the overwrite scan below and complements
+            // the provenance (non-aliasing) check.  `None` ⇒ skip.
+            if let Some(consumed) = consumed_vregs {
+                if let Some(addr_id) = store_addr_i.as_register() {
+                    if consumed.contains(&addr_id) {
+                        to_remove.insert(i);
+                        continue;
+                    }
+                }
+            }
 
             // Check if this store's value is ever read before being overwritten.
             let mut is_dead = false;
@@ -3707,6 +3765,91 @@ pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>
 
         if !to_remove.is_empty() {
             let mut new_instrs = Vec::with_capacity(block.instructions.len() - to_remove.len());
+            for (i, instr) in block.instructions.drain(..).enumerate() {
+                if !to_remove.contains(&i) {
+                    new_instrs.push(instr);
+                }
+            }
+            block.instructions = new_instrs;
+        }
+    }
+
+    func
+}
+
+/// Linearity-directed **dead state** elimination (Wave 0-A).
+///
+/// For every vreg in `consumed_vregs` — i.e. every state vreg the IVE
+/// proved was linearly consumed by a `StateTransform` / `ForeignConsume`
+/// — remove its entire materialisation lifecycle from `func`:
+///
+/// - the `Alloc` that created the state buffer,
+/// - every `Store` whose address vreg is the consumed vreg, and
+/// - every `Load` whose address vreg is the consumed vreg (only when the
+///   load's destination is not read anywhere else, so the IR stays
+///   well-formed).
+///
+/// This is the aggressive counterpart to [`dead_store_eliminate`]'s
+/// linearity mode: instead of merely dropping the trailing stores to a
+/// consumed state, it drops the *whole* alloc/store/load chain.  It is
+/// sound only under the IVE consumption proof (the state is fully
+/// consumed and its materialisation has no externally-observable
+/// effect); the pipeline (Wave 4-A) is responsible for only calling it
+/// with a verified `consumed_vregs` set.
+///
+/// `consumed_vregs` may be empty, in which case `func` is returned
+/// unchanged.
+pub fn dead_state_eliminate(mut func: IRFunction, consumed_vregs: &HashSet<u32>) -> IRFunction {
+    if consumed_vregs.is_empty() {
+        return func;
+    }
+
+    // Global set of vregs *read* by some instruction or terminator.  A
+    // `Load` whose `dst` is in this set cannot be dropped without leaving
+    // a dangling use, so we keep it (conservative — the linearity proof
+    // should guarantee such loads don't exist for fully consumed state,
+    // but we never want to emit broken IR).
+    let mut globally_used: HashSet<u32> = HashSet::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.used_regs() {
+                globally_used.insert(id);
+            }
+        }
+        for id in terminator_used_regs(&block.terminator) {
+            globally_used.insert(id);
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut to_remove: HashSet<usize> = HashSet::new();
+        for i in 0..block.instructions.len() {
+            let drop_instr = match &block.instructions[i] {
+                IRInstr::Alloc { dst, .. } => dst
+                    .as_register()
+                    .map_or(false, |id| consumed_vregs.contains(&id)),
+                IRInstr::Store { addr, .. } => addr
+                    .as_register()
+                    .map_or(false, |id| consumed_vregs.contains(&id)),
+                IRInstr::Load { dst, addr, .. } => {
+                    let addr_consumed = addr
+                        .as_register()
+                        .map_or(false, |id| consumed_vregs.contains(&id));
+                    let dst_unused = dst
+                        .as_register()
+                        .map_or(true, |id| !globally_used.contains(&id));
+                    addr_consumed && dst_unused
+                }
+                _ => false,
+            };
+            if drop_instr {
+                to_remove.insert(i);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            let n = block.instructions.len();
+            let mut new_instrs = Vec::with_capacity(n - to_remove.len());
             for (i, instr) in block.instructions.drain(..).enumerate() {
                 if !to_remove.contains(&i) {
                     new_instrs.push(instr);
