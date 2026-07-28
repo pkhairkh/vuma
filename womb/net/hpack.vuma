@@ -75,14 +75,14 @@ const HPACK_CONTINUATION_PAYLOAD_MASK: u32 = 127;
 // assemble/disassemble multi-byte values in little-endian order. Offsets
 // are u32 to compose cleanly with the u32 index arithmetic used throughout.
 
-fn hpack_store_u32(ptr: Address, off: u32, val: u32) {
+transform hpack_store_u32(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn hpack_load_u32(ptr: Address, off: u32) -> u32 {
+transform hpack_load_u32(ptr: Address, off: u32) -> u32 {
     let b0: u32 = *(ptr + off);
     let b1: u32 = *(ptr + off + 1);
     let b2: u32 = *(ptr + off + 2);
@@ -90,7 +90,7 @@ fn hpack_load_u32(ptr: Address, off: u32) -> u32 {
     return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 4294967295;
 }
 
-fn hpack_store_addr(ptr: Address, off: u32, val: Address) {
+transform hpack_store_addr(ptr: Address, off: u32, val: Address) {
     let v: u64 = val as u64;
     *(ptr + off)     = v & 255;
     *(ptr + off + 1) = (v >> 8) & 255;
@@ -102,7 +102,7 @@ fn hpack_store_addr(ptr: Address, off: u32, val: Address) {
     *(ptr + off + 7) = (v >> 56) & 255;
 }
 
-fn hpack_load_addr(ptr: Address, off: u32) -> Address {
+transform hpack_load_addr(ptr: Address, off: u32) -> Address {
     let b0: u64 = *(ptr + off)     as u64;
     let b1: u64 = *(ptr + off + 1) as u64;
     let b2: u64 = *(ptr + off + 2) as u64;
@@ -122,7 +122,7 @@ fn hpack_load_addr(ptr: Address, off: u32) -> Address {
 // Returns the length of the name/value string at the given 1-based index.
 // Index 0 and indices > 30 return 0.
 
-fn hpack_static_name_len(idx: u32) -> u32 {
+transform hpack_static_name_len(idx: u32) -> u32 {
     if idx == 1  { return 10; }   // :authority
     if idx == 2  { return 7;  }   // :method
     if idx == 3  { return 7;  }   // :method
@@ -156,7 +156,7 @@ fn hpack_static_name_len(idx: u32) -> u32 {
     return 0;
 }
 
-fn hpack_static_value_len(idx: u32) -> u32 {
+transform hpack_static_value_len(idx: u32) -> u32 {
     if idx == 1  { return 0;  }   // (empty)
     if idx == 2  { return 3;  }   // GET
     if idx == 3  { return 4;  }   // POST
@@ -177,7 +177,7 @@ fn hpack_static_value_len(idx: u32) -> u32 {
 }
 
 // Helper: write ":method" (7 bytes)
-fn hpack_write_method(buf: Address) {
+transform hpack_write_method(buf: Address) {
     *(buf + 0) = 58;   // :
     *(buf + 1) = 109;  // m
     *(buf + 2) = 101;  // e
@@ -188,7 +188,7 @@ fn hpack_write_method(buf: Address) {
 }
 
 // Helper: write ":path" (5 bytes)
-fn hpack_write_path(buf: Address) {
+transform hpack_write_path(buf: Address) {
     *(buf + 0) = 58;   // :
     *(buf + 1) = 112;  // p
     *(buf + 2) = 97;   // a
@@ -197,7 +197,7 @@ fn hpack_write_path(buf: Address) {
 }
 
 // Helper: write ":scheme" (7 bytes)
-fn hpack_write_scheme(buf: Address) {
+transform hpack_write_scheme(buf: Address) {
     *(buf + 0) = 58;   // :
     *(buf + 1) = 115;  // s
     *(buf + 2) = 99;   // c
@@ -208,7 +208,7 @@ fn hpack_write_scheme(buf: Address) {
 }
 
 // Helper: write ":status" (7 bytes)
-fn hpack_write_status(buf: Address) {
+transform hpack_write_status(buf: Address) {
     *(buf + 0) = 58;   // :
     *(buf + 1) = 115;  // s
     *(buf + 2) = 116;  // t
@@ -219,7 +219,7 @@ fn hpack_write_status(buf: Address) {
 }
 
 // Helper: write a 3-digit status code (d0 d1 d2)
-fn hpack_write_status_value(buf: Address, d0: u32, d1: u32, d2: u32) {
+transform hpack_write_status_value(buf: Address, d0: u32, d1: u32, d2: u32) {
     *(buf + 0) = d0;
     *(buf + 1) = d1;
     *(buf + 2) = d2;
@@ -229,7 +229,7 @@ fn hpack_write_status_value(buf: Address, d0: u32, d1: u32, d2: u32) {
 // No-op for invalid indices. Caller must size buf to at least
 // hpack_static_name_len(idx) bytes.
 
-fn hpack_static_name_write(idx: u32, buf: Address) {
+transform hpack_static_name_write(idx: u32, buf: Address) {
     if idx == 1 {
         // :authority
         *(buf + 0) = 58;   // :
@@ -540,7 +540,7 @@ fn hpack_static_name_write(idx: u32, buf: Address) {
 }
 
 // Write the value bytes for the given 1-based static-table index into buf.
-fn hpack_static_value_write(idx: u32, buf: Address) {
+transform hpack_static_value_write(idx: u32, buf: Address) {
     if idx == 1  { return; }   // empty
     if idx == 2  {
         // GET
@@ -626,7 +626,7 @@ fn hpack_static_value_write(idx: u32, buf: Address) {
 // for the given index. Caller is responsible for freeing the returned buffer.
 // Returns 0 for idx == 0 or idx > 30.
 
-fn hpack_static_name(idx: u32) -> Address {
+transform hpack_static_name(idx: u32) -> Address {
     if idx == 0 { return 0 as Address; }
     if idx > HPACK_STATIC_TABLE_MAX { return 0 as Address; }
     let len: u32 = hpack_static_name_len(idx);
@@ -640,7 +640,7 @@ fn hpack_static_name(idx: u32) -> Address {
 // for the given index. Caller is responsible for freeing the returned buffer.
 // Returns 0 for idx == 0 or idx > 30.
 
-fn hpack_static_value(idx: u32) -> Address {
+transform hpack_static_value(idx: u32) -> Address {
     if idx == 0 { return 0 as Address; }
     if idx > HPACK_STATIC_TABLE_MAX { return 0 as Address; }
     let len: u32 = hpack_static_value_len(idx);
@@ -659,7 +659,7 @@ fn hpack_static_value(idx: u32) -> Address {
 // Create a new dynamic table with the given maximum size in bytes.
 // Returns an Address pointing to a 1568-byte allocation.
 
-fn hpack_table_create(max_size: u32) -> Address {
+transform hpack_table_create(max_size: u32) -> Address {
     let total: u32 = HPACK_TABLE_HEADER_SIZE + HPACK_DYNAMIC_TABLE_MAX_ENTRIES * HPACK_ENTRY_SIZE;
     let table: Address = allocate(total);
     hpack_store_u32(table, 0,  max_size);
@@ -672,7 +672,7 @@ fn hpack_table_create(max_size: u32) -> Address {
 // Free the table and all owned name/value buffers. The table handle is
 // invalid after this call.
 
-fn hpack_table_destroy(table: Address) {
+transform hpack_table_destroy(table: Address) {
     if table == 0 as Address { return; }
     let count: u32 = hpack_load_u32(table, 8);
     let mut_i: u32 = 0;
@@ -688,12 +688,12 @@ fn hpack_table_destroy(table: Address) {
 }
 
 // Internal: address of entry at 0-based internal index i (0 = most recent).
-fn hpack_table_entry_addr(table: Address, i: u32) -> Address {
+transform hpack_table_entry_addr(table: Address, i: u32) -> Address {
     return table + HPACK_TABLE_HEADER_SIZE + i * HPACK_ENTRY_SIZE;
 }
 
 // Internal: evict the oldest entry (at internal index count-1).
-fn hpack_table_evict_oldest(table: Address) {
+transform hpack_table_evict_oldest(table: Address) {
     let count: u32 = hpack_load_u32(table, 8);
     if count == 0 { return; }
     let entry: Address = hpack_table_entry_addr(table, count - 1);
@@ -723,7 +723,7 @@ fn hpack_table_evict_oldest(table: Address) {
 // current size, evict entries from the oldest end until it fits.
 // Implements RFC 7541 Section 4.2 / 4.3.
 
-fn hpack_table_set_max_size(table: Address, new_max: u32) {
+transform hpack_table_set_max_size(table: Address, new_max: u32) {
     hpack_store_u32(table, 0, new_max);
     let mut_cur: u32 = hpack_load_u32(table, 4);
     let mut_count: u32 = hpack_load_u32(table, 8);
@@ -741,7 +741,7 @@ fn hpack_table_set_max_size(table: Address, new_max: u32) {
 // table is emptied and the entry is not inserted (RFC 7541 Section 4.4).
 // Implements RFC 7541 Section 4.4.
 
-fn hpack_table_add(table: Address, name: Address, name_len: u32, value: Address, value_len: u32) {
+transform hpack_table_add(table: Address, name: Address, name_len: u32, value: Address, value_len: u32) {
     let max_size: u32 = hpack_load_u32(table, 0);
     let entry_size: u32 = name_len + value_len + HPACK_ENTRY_OVERHEAD;
     let mut_count: u32 = hpack_load_u32(table, 8);
@@ -815,7 +815,7 @@ fn hpack_table_add(table: Address, name: Address, name_len: u32, value: Address,
 // (62 = most recent entry) if found, or 0 if not found. Only name bytes
 // are compared; value bytes are not examined.
 
-fn hpack_table_lookup(table: Address, name: Address, name_len: u32) -> u32 {
+transform hpack_table_lookup(table: Address, name: Address, name_len: u32) -> u32 {
     let count: u32 = hpack_load_u32(table, 8);
     let i: u32 = 0;
     while i < count {
@@ -844,7 +844,7 @@ fn hpack_table_lookup(table: Address, name: Address, name_len: u32) -> u32 {
 // Internal: retrieve the Address of the entry at the given HPACK index
 // (62 = most recent). Returns 0 if the index is out of range.
 
-fn hpack_table_get_entry(table: Address, hpack_idx: u32) -> Address {
+transform hpack_table_get_entry(table: Address, hpack_idx: u32) -> Address {
     if hpack_idx < HPACK_DYNAMIC_INDEX_BASE { return 0 as Address; }
     let internal_idx: u32 = hpack_idx - HPACK_DYNAMIC_INDEX_BASE;
     let count: u32 = hpack_load_u32(table, 8);
@@ -861,7 +861,7 @@ fn hpack_table_get_entry(table: Address, hpack_idx: u32) -> Address {
 // past the encoded integer. Caller must ensure the buffer contains enough
 // bytes for the encoding (this implementation does no bounds checking).
 
-fn hpack_decode_int(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
+transform hpack_decode_int(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
     let p: u32 = hpack_load_u32(pos, 0);
     let one: u32 = 1;
     let M: u32 = ((one << prefix_bits) - 1) & 4294967295;
@@ -891,7 +891,7 @@ fn hpack_decode_int(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
 // must ensure buf has at least 5 bytes of headroom at pos (worst case for
 // a u32 value with prefix_bits = 1 is 5 bytes: 1 + 4 continuation).
 
-fn hpack_encode_int(buf: Address, pos: u32, value: u32, prefix_bits: u32, prefix_byte: u32) -> u32 {
+transform hpack_encode_int(buf: Address, pos: u32, value: u32, prefix_bits: u32, prefix_byte: u32) -> u32 {
     let one: u32 = 1;
     let M: u32 = ((one << prefix_bits) - 1) & 4294967295;
     let mut_p: u32 = pos;
@@ -927,7 +927,7 @@ fn hpack_encode_int(buf: Address, pos: u32, value: u32, prefix_bits: u32, prefix
 // to p_before so the caller can detect the error. The caller is responsible
 // for checking the return value against the sentinel.
 
-fn hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -> u32 {
+transform hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -> u32 {
     let p_before: u32 = hpack_load_u32(pos, 0);
     let first_byte: u32 = *(buf + p_before) & 255;
     let huffman_flag: u32 = first_byte & 128;
@@ -982,7 +982,7 @@ fn hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -
 // cleared, which is RFC 7541 compliant — Huffman encoding is optional.
 // Returns the new position past the encoded string.
 
-fn hpack_encode_string(buf: Address, pos: u32, str: Address, str_len: u32, use_huffman: u32) -> u32 {
+transform hpack_encode_string(buf: Address, pos: u32, str: Address, str_len: u32, use_huffman: u32) -> u32 {
     // Pass 1: scan the input to determine whether every symbol has a
     // Huffman code in the abbreviated table and, if so, accumulate the
     // total bit count so we can compute the encoded byte length.
@@ -1077,7 +1077,7 @@ fn hpack_encode_string(buf: Address, pos: u32, str: Address, str_len: u32, use_h
 // On Huffman-encoded input or output-buffer overflow, decoding stops and
 // the count so far is returned.
 
-fn hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, table: Address) -> u32 {
+transform hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, table: Address) -> u32 {
     // Position is tracked through a 4-byte allocation so we can pass its
     // address to hpack_decode_int / hpack_decode_string.
     let pos_buf: Address = allocate(4);
@@ -1340,7 +1340,7 @@ fn hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, t
 
 // Additional static table entries 31-61 (RFC 7541 Appendix A)
 // Names and values for entries 31-61
-fn hpack_static_name_len_ext(idx: u32) -> u32 {
+transform hpack_static_name_len_ext(idx: u32) -> u32 {
     if idx == 31 { return 10; }  // "location"
     if idx == 32 { return 6; }   // "from"
     if idx == 33 { return 4; }   // "host"
@@ -1379,7 +1379,7 @@ fn hpack_static_name_len_ext(idx: u32) -> u32 {
 // Returns the decoded length on success, or HPACK_HUFFMAN_NOT_IMPL on
 // failure (no canonical Huffman code matches the bit stream, or EOS is
 // encountered in the middle of the stream).
-fn hpack_huffman_decode(buf: Address, len: u32, out: Address) -> u32 {
+transform hpack_huffman_decode(buf: Address, len: u32, out: Address) -> u32 {
     let out_pos: u32 = 0;
     let bit_acc: u32 = 0;
     let bit_cnt: u32 = 0;
@@ -1432,7 +1432,7 @@ fn hpack_huffman_decode(buf: Address, len: u32, out: Address) -> u32 {
 
 // Huffman lookup: (code, code_len) -> symbol, or 0xFFFFFFFF if no match
 // Real RFC 7541 Appendix B table — 257 entries (0-255 + EOS=256)
-fn hpack_huffman_lookup(code: u32, code_len: u32) -> u32 {
+transform hpack_huffman_lookup(code: u32, code_len: u32) -> u32 {
     // 5-bit codes
     if code_len == 5 {
         if code == 0 { return 48; }   // '0'
@@ -1587,7 +1587,7 @@ fn hpack_huffman_lookup(code: u32, code_len: u32) -> u32 {
 }
 
 // Huffman encode: produces Huffman-coded bytes from input
-fn hpack_huffman_encode(str: Address, len: u32, out: Address) -> u32 {
+transform hpack_huffman_encode(str: Address, len: u32, out: Address) -> u32 {
     bit_acc: u32 = 0;
     bit_cnt: u32 = 0;
     out_pos: u32 = 0;
@@ -1627,7 +1627,7 @@ fn hpack_huffman_encode(str: Address, len: u32, out: Address) -> u32 {
 // sentinel; hpack_encode_string treats this as a request to fall back to
 // literal (uncompressed) string encoding with the Huffman bit cleared,
 // which is RFC 7541 compliant — Huffman encoding is optional.
-fn hpack_huffman_encode_lookup(sym: u32, code_out: Address, len_out: Address) {
+transform hpack_huffman_encode_lookup(sym: u32, code_out: Address, len_out: Address) {
     // ----- 5-bit codes (32 symbols) -----
     if sym == 48  { *(code_out) = 0;  *(len_out) = 5; return; }  // '0'
     if sym == 49  { *(code_out) = 1;  *(len_out) = 5; return; }  // '1'
@@ -1772,7 +1772,7 @@ fn hpack_huffman_encode_lookup(sym: u32, code_out: Address, len_out: Address) {
     *(len_out) = 0;
 }
 
-fn hpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32, index: u32) -> u32 {
+transform hpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32, index: u32) -> u32 {
     if index > 0 {
         // Indexed Header Field: prefix 0x80, 7-bit prefix.
         return hpack_encode_int(buf, pos, index, 7, 128);

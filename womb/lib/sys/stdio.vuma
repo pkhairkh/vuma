@@ -27,37 +27,37 @@ const STDIN: i64 = 0;
 // Output functions
 // ===========================================================================
 
-fn write_str(s: Address) -> i64 {
+transform write_str(s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return syscall(64, STDOUT, s, n as i64);
 }
 
-fn write_str_fd(fd: i64, s: Address) -> i64 {
+transform write_str_fd(fd: i64, s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return syscall(64, fd, s, n as i64);
 }
 
-fn write_bytes(fd: i64, buf: Address, len: u32) -> i64 {
+transform write_bytes(fd: i64, buf: Address, len: u32) -> i64 {
     return syscall(64, fd, buf, len as i64);
 }
 
-fn write_char(c: u32) -> i64 {
+transform write_char(c: u32) -> i64 {
     let buf = state_new(Buf1);
     buf.data[0] = c & 255;
     ret: i64 = syscall(64, STDOUT, buf, 1);
     return ret;
 }
 
-fn write_newline() -> i64 {
+transform write_newline() -> i64 {
     let buf = state_new(Buf1);
     buf.data[0] = 10;
     ret: i64 = syscall(64, STDOUT, buf, 1);
     return ret;
 }
 
-fn write_int(val: i64) -> i64 {
+transform write_int(val: i64) -> i64 {
     let buf = state_new(Buf24);
     if val == 0 {
         buf.data[0] = 48;
@@ -89,7 +89,7 @@ fn write_int(val: i64) -> i64 {
     return ret;
 }
 
-fn write_uint(val: u64) -> i64 {
+transform write_uint(val: u64) -> i64 {
     let buf = state_new(Buf24);
     if val == 0 {
         buf.data[0] = 48;
@@ -117,7 +117,7 @@ fn write_uint(val: u64) -> i64 {
     return ret;
 }
 
-fn write_hex(val: u64) -> i64 {
+transform write_hex(val: u64) -> i64 {
     let buf = state_new(Buf20);
     buf.data[0] = 48;  // '0'
     buf.data[1] = 120; // 'x'
@@ -156,7 +156,7 @@ fn write_hex(val: u64) -> i64 {
     return ret;
 }
 
-fn write_hex_u32(val: u32) -> i64 {
+transform write_hex_u32(val: u32) -> i64 {
     let buf = state_new(Buf12);
     buf.data[0] = 48;
     buf.data[1] = 120;
@@ -176,7 +176,7 @@ fn write_hex_u32(val: u32) -> i64 {
     return ret;
 }
 
-fn write_bin(val: u64) -> i64 {
+transform write_bin(val: u64) -> i64 {
     let buf = state_new(Buf68);
     buf.data[0] = 48;
     buf.data[1] = 98;
@@ -198,49 +198,49 @@ fn write_bin(val: u64) -> i64 {
 // printf-style formatted output
 // ===========================================================================
 
-fn printf_str(s: Address) -> i64 {
+transform printf_str(s: Address) -> i64 {
     return write_str(s);
 }
 
-fn printf_int(val: i64) -> i64 {
+transform printf_int(val: i64) -> i64 {
     return write_int(val);
 }
 
-fn printf_uint(val: u64) -> i64 {
+transform printf_uint(val: u64) -> i64 {
     return write_uint(val);
 }
 
-fn printf_hex(val: u64) -> i64 {
+transform printf_hex(val: u64) -> i64 {
     return write_hex(val);
 }
 
-fn printf_newline() -> i64 {
+transform printf_newline() -> i64 {
     return write_newline();
 }
 
-fn printf_str_int(str_part: Address, int_val: i64) -> i64 {
+transform printf_str_int(str_part: Address, int_val: i64) -> i64 {
     write_str(str_part);
     return write_int(int_val);
 }
 
-fn printf_int_str(int_val: i64, str_part: Address) -> i64 {
+transform printf_int_str(int_val: i64, str_part: Address) -> i64 {
     write_int(int_val);
     return write_str(str_part);
 }
 
-fn printf_str_int_str(part1: Address, val: i64, part2: Address) -> i64 {
+transform printf_str_int_str(part1: Address, val: i64, part2: Address) -> i64 {
     write_str(part1);
     write_int(val);
     return write_str(part2);
 }
 
-fn printf_str_uint_str(part1: Address, val: u64, part2: Address) -> i64 {
+transform printf_str_uint_str(part1: Address, val: u64, part2: Address) -> i64 {
     write_str(part1);
     write_uint(val);
     return write_str(part2);
 }
 
-fn printf_str_hex_str(part1: Address, val: u64, part2: Address) -> i64 {
+transform printf_str_hex_str(part1: Address, val: u64, part2: Address) -> i64 {
     write_str(part1);
     write_hex(val);
     return write_str(part2);
@@ -250,7 +250,7 @@ fn printf_str_hex_str(part1: Address, val: u64, part2: Address) -> i64 {
 // Input functions
 // ===========================================================================
 
-fn read_line(buf: Address, max_len: u32) -> u32 {
+transform read_line(buf: Address, max_len: u32) -> u32 {
     pos: u32 = 0;
     while pos < max_len - 1 {
         let char_buf = state_new(Buf1);
@@ -269,11 +269,11 @@ fn read_line(buf: Address, max_len: u32) -> u32 {
     return pos;
 }
 
-fn read_bytes(buf: Address, max_len: u32) -> i64 {
+transform read_bytes(buf: Address, max_len: u32) -> i64 {
     return syscall(63, STDIN, buf, max_len as i64);
 }
 
-fn read_byte() -> u32 {
+transform read_byte() -> u32 {
     let char_buf = state_new(Buf1);
     n: i64 = syscall(63, STDIN, char_buf, 1);
     if n <= 0 {
@@ -287,13 +287,13 @@ fn read_byte() -> u32 {
 // Error output (stderr)
 // ===========================================================================
 
-fn eprint_str(s: Address) -> i64 {
+transform eprint_str(s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return syscall(64, STDERR, s, n as i64);
 }
 
-fn eprint_int(val: i64) -> i64 {
+transform eprint_int(val: i64) -> i64 {
     let buf = state_new(Buf24);
     if val == 0 {
         buf.data[0] = 48;
@@ -323,7 +323,7 @@ fn eprint_int(val: i64) -> i64 {
     return ret;
 }
 
-fn eprintln_str(s: Address) -> i64 {
+transform eprintln_str(s: Address) -> i64 {
     eprint_str(s);
     let nl = state_new(Buf1);
     nl.data[0] = 10;

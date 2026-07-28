@@ -276,7 +276,7 @@
 //   (RDI); the u64 return value is currently discarded (POSIX signal
 //   handlers conventionally return void; K8+ may inspect the return
 //   for handler-fault reporting). The State<SignalTable> is preserved
-//   across the extern call because it is passed as a regular VUMA-fn
+//   across the extern call because it is passed as a regular VUMA-transform
 //   borrow, NOT as an extern #[borrow] State<T> param (only extern
 //   #[borrow] State<T> params are conservatively invalidated — see W5's
 //   dispatch.vuma for the same reasoning, and char.vuma:203-209 /
@@ -332,7 +332,7 @@
 //   signal_check_and_deliver (init-style API — see "Why init-style?"
 //   in K4e's wait.vuma header for the codegen rationale: the current
 //   codegen does NOT propagate State-typedness through function return
-//   values, so `fn signal_new() -> State<SignalTable>` would produce
+//   values, so `transform signal_new() -> State<SignalTable>` would produce
 //   broken field-access code in callers).
 //
 //   W40 adds ONE extern declaration: `__call_indirect1(ptr: u64, arg:
@@ -343,7 +343,7 @@
 //   invokes the function at `ptr` with `arg` in RDI per SysV AMD64).
 //   signal_deliver uses it to invoke the per-signal handler installed
 //   via signal_install. The State<SignalTable> is preserved across the
-//   extern call because it is passed as a regular VUMA-fn borrow, NOT
+//   extern call because it is passed as a regular VUMA-transform borrow, NOT
 //   as an extern #[borrow] State<T> param (only extern #[borrow]
 //   State<T> params are conservatively invalidated — see the extern
 //   block's comment above + W5's dispatch.vuma for the same reasoning).
@@ -353,7 +353,7 @@
 //   extern; everything else remains pure-PM.
 //
 //   The handler addresses installed by signal_install are u64 values
-//   (NOT first-class function-pointer types — VUMA has no fn-ptr type).
+//   (NOT first-class function-pointer types — VUMA has no transform-ptr type).
 //   The W40 self-test installs a REAL handler address via the
 //   FnAddr feature (`signal_test_handler as u64` — lowers to a
 //   compile-time `mov rax, imm64` constant load via IRInstr::GetAddress;
@@ -447,12 +447,12 @@ extern "C" {
     // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
     //
     // The State<SignalTable> is preserved across the extern call because
-    // it is passed as a regular VUMA-fn borrow, NOT as an extern #[borrow]
+    // it is passed as a regular VUMA-transform borrow, NOT as an extern #[borrow]
     // State<T> param (only extern #[borrow] State<T> params are
     // conservatively invalidated — see W5's dispatch.vuma for the same
     // reasoning, and char.vuma:203-209 for the same preservation argument
     // in the chardev_read dispatch wrapper).
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -498,7 +498,7 @@ layout SignalTable = {
 // State<T> params: 1 (tbl). Pure write — no reads, no helper calls.
 // The 256-byte handlers array is zeroed by a single while loop (the
 // same pattern as K7a's pipe_init zeroing the 256-byte ring buffer).
-fn signal_init(tbl: State<SignalTable>) {
+transform signal_init(tbl: State<SignalTable>) {
     // Zero all handler slots.
     let i = 0;
     while i < 256 {
@@ -530,7 +530,7 @@ fn signal_init(tbl: State<SignalTable>) {
 //
 // State<T> params: 1 (tbl). Pure write — writes 8 bytes into
 // tbl.handlers[off..off+8]. No reads, no helper calls.
-fn signal_install(tbl: State<SignalTable>, sig: u8, handler: u64) {
+transform signal_install(tbl: State<SignalTable>, sig: u8, handler: u64) {
     if sig == 0 { return; }
     if sig > 32 { return; }
     let off = (sig as u32 - 1) * 8;
@@ -556,7 +556,7 @@ fn signal_install(tbl: State<SignalTable>, sig: u8, handler: u64) {
 //
 // State<T> params: 1 (tbl). Pure read — reads 8 bytes from
 // tbl.handlers[off..off+8]. No writes, no helper calls.
-fn signal_get_handler(tbl: State<SignalTable>, sig: u8) -> u64 {
+transform signal_get_handler(tbl: State<SignalTable>, sig: u8) -> u64 {
     if sig == 0 { return 0; }
     if sig > 32 { return 0; }
     let off = (sig as u32 - 1) * 8;
@@ -594,7 +594,7 @@ fn signal_get_handler(tbl: State<SignalTable>, sig: u8) -> u64 {
 //       "Signal numbering" in the file header.)
 //
 // State<T> params: 1 (tbl). Reads tbl.pending, writes tbl.pending.
-fn signal_send(tbl: State<SignalTable>, sig: u8) -> i64 {
+transform signal_send(tbl: State<SignalTable>, sig: u8) -> i64 {
     if sig == 0 { return 22; }  // -EINVAL
     if sig > 32 { return 22; }  // -EINVAL
     let bit = 1 as u32 << (sig - 1);
@@ -630,7 +630,7 @@ fn signal_send(tbl: State<SignalTable>, sig: u8) -> i64 {
 // rq.head;` — direct field read into a local, then subsequent field
 // writes (in the loop body) don't affect the local (verified to work
 // by scheduler.vuma's self-test and by K7e's waitq_wake_all).
-fn signal_check(tbl: State<SignalTable>) -> u8 {
+transform signal_check(tbl: State<SignalTable>) -> u8 {
     let deliverable = tbl.pending & (~tbl.mask);
     if deliverable == 0 {
         return 0;
@@ -663,7 +663,7 @@ fn signal_check(tbl: State<SignalTable>) -> u8 {
 // doesn't enforce this; see "Signal numbering" in the file header.)
 //
 // State<T> params: 1 (tbl). Reads tbl.mask, writes tbl.mask.
-fn signal_block(tbl: State<SignalTable>, sig: u8) {
+transform signal_block(tbl: State<SignalTable>, sig: u8) {
     if sig == 0 { return; }
     if sig > 32 { return; }
     let bit = 1 as u32 << (sig - 1);
@@ -682,7 +682,7 @@ fn signal_block(tbl: State<SignalTable>, sig: u8) {
 // sigprocmask(SIG_UNBLOCK, ...).
 //
 // State<T> params: 1 (tbl). Reads tbl.mask, writes tbl.mask.
-fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
+transform signal_unblock(tbl: State<SignalTable>, sig: u8) {
     if sig == 0 { return; }
     if sig > 32 { return; }
     let bit = 1 as u32 << (sig - 1);
@@ -718,7 +718,7 @@ fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
 //       (POSIX signal handlers conventionally return void; K8+ may
 //       inspect the return for handler-fault reporting). The
 //       State<SignalTable> is preserved across the extern call
-//       because it is passed as a regular VUMA-fn borrow, NOT as an
+//       because it is passed as a regular VUMA-transform borrow, NOT as an
 //       extern #[borrow] State<T> param (only extern #[borrow]
 //       State<T> params are conservatively invalidated — same
 //       pattern as char.vuma's chardev_read / procfs.vuma's
@@ -743,7 +743,7 @@ fn signal_unblock(tbl: State<SignalTable>, sig: u8) {
 // State<T> params: 1 (tbl). Reads tbl.pending, reads tbl.handlers
 // (via signal_get_handler), writes tbl.pending (the clear-bit step).
 // Calls the __call_indirect1 extern (passes handler + sig as u64).
-fn signal_deliver(tbl: State<SignalTable>, sig: u32) -> u32 {
+transform signal_deliver(tbl: State<SignalTable>, sig: u32) -> u32 {
     if sig == 0 { return 0; }
     if sig > 32 { return 0; }
     let bit = 1 as u32 << (sig - 1);
@@ -758,7 +758,7 @@ fn signal_deliver(tbl: State<SignalTable>, sig: u32) -> u32 {
     // trampoline. The handler receives `sig as u64` as its first SysV
     // AMD64 argument (RDI). The u64 return is discarded (POSIX signal
     // handlers conventionally return void). The State<SignalTable> is
-    // preserved across the extern call (regular VUMA-fn borrow, not
+    // preserved across the extern call (regular VUMA-transform borrow, not
     // extern #[borrow] — see the extern-block comment above).
     let handler_ret = __call_indirect1(handler, sig as u64);
     // Clear the pending bit AFTER the handler returns. The W40 task
@@ -827,7 +827,7 @@ fn signal_deliver(tbl: State<SignalTable>, sig: u32) -> u32 {
 // writes tbl.pending (clear-bit step inside signal_deliver). Calls
 // signal_get_handler + signal_deliver (both 1-State<T>-param VUMA
 // fns) + __call_indirect1 (extern, inside signal_deliver).
-fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
+transform signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
     let count: u32 = 0;
     let i = 0;
     while i < 32 {
@@ -966,11 +966,11 @@ fn signal_check_and_deliver(tbl: State<SignalTable>) -> u32 {
 // IRInstr::GetAddress per the fix documented in
 // syscall_init.vuma's header, so even `return 0;` would survive — but
 // the non-trivial body makes the preservation belt-and-suspenders).
-fn signal_test_handler(sig: u64) -> u64 {
+transform signal_test_handler(sig: u64) -> u64 {
     return sig + 1000;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(SignalTable);
     signal_init(tbl);
 

@@ -11,7 +11,7 @@
 //
 // ── Why direct extern dispatch (not the SyscallTable indirection)? ──────────
 // Same rationale as io.vuma's header: K3e's dispatch.vuma uses a stub
-// return because VUMA has no fn-pointer call today. K11 will register
+// return because VUMA has no transform-pointer call today. K11 will register
 // sys_brk / sys_mmap / sys_munmap via syscall_register and wire up real
 // dispatch. For now, this file is self-testable: main() calls sys_mmap
 // + sys_munmap directly to verify the path works end-to-end.
@@ -116,7 +116,7 @@
 // applied to vector=14 and rip=4096).
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. The `extern "C" { fn mmap, fn munmap }`
+// This file is self-contained. The `extern "C" { transform mmap, transform munmap }`
 // declarations are byte-identical to:
 //   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
 //   - womb/kernel/hosted/host.vuma (K1a — host_alloc_pages / host_free_pages
@@ -141,8 +141,8 @@
 // 2 args, simple_stub form).
 
 extern "C" {
-    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
-    fn munmap(addr: Address, length: u64) -> i64;
+    transform mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    transform munmap(addr: Address, length: u64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -152,7 +152,7 @@ extern "C" {
 // — the host kernel manages its own brk). In bare-metal mode (K11), this
 // will manage the kernel heap boundary.
 
-fn sys_brk(addr: u64) -> u64 {
+transform sys_brk(addr: u64) -> u64 {
     return addr;
 }
 
@@ -174,7 +174,7 @@ fn sys_brk(addr: u64) -> u64 {
 // SyscallArgs return-value convention (K3e's syscall_write_ret writes
 // it to tf.rax).
 
-fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
+transform sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     let ret = mmap(addr as Address, len, prot as i32, flags as i32, fd as i32, offset as i64);
     return ret as u64;
 }
@@ -186,7 +186,7 @@ fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) ->
 // page-aligned and len should be a multiple of PAGE_SIZE (4096); the
 // kernel returns EINVAL otherwise.
 
-fn sys_munmap(addr: u64, len: u64) -> i64 {
+transform sys_munmap(addr: u64, len: u64) -> i64 {
     return munmap(addr as Address, len);
 }
 
@@ -216,7 +216,7 @@ fn sys_munmap(addr: u64, len: u64) -> i64 {
 // K3a's trap_trampoline.vuma for the same rule applied to vector=14
 // and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Compute fd = -1 as u64 via subtraction — see file header for the
     // parser/codegen limitation with the literal 18446744073709551615.
     let neg_one: u64 = 0 - 1;

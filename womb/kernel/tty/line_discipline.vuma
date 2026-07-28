@@ -241,7 +241,7 @@ layout LineBuf = { data: [u8; 256] }
 // the stale contents are unreachable (the next tty_push will overwrite
 // them in order). A defensive zeroing pass would be 256 byte-stores for
 // no observable benefit; skipped.
-fn tty_init(tty: State<TtyLine>) {
+transform tty_init(tty: State<TtyLine>) {
     tty.head = 0;
     tty.tail = 0;
     tty.count = 0;
@@ -264,7 +264,7 @@ fn tty_init(tty: State<TtyLine>) {
 // echo can call uart_putc_8250(base, c) themselves if tty.echo == 1 (K6b
 // doesn't wire this — it's a K6d concern, see the file header's "No
 // externs" note).
-fn tty_receive(tty: State<TtyLine>, c: u8) {
+transform tty_receive(tty: State<TtyLine>, c: u8) {
     if tty.raw == 1 {
         // Raw mode: push directly to buffer, no editing / translation.
         tty_push(tty, c);
@@ -389,7 +389,7 @@ fn tty_receive(tty: State<TtyLine>, c: u8) {
 // (mod 256), bumps count. Silently drops the byte if the buffer is full
 // (count == 256) — overflow protection. A real kernel would also raise
 // a "bell" / SIGQUIT here, but K6b's silent-drop matches the contract.
-fn tty_push(tty: State<TtyLine>, c: u8) {
+transform tty_push(tty: State<TtyLine>, c: u8) {
     if tty.count < 256 {
         tty.buf[tty.tail] = c;
         tty.tail = (tty.tail + 1) & 255;  // mod 256
@@ -400,7 +400,7 @@ fn tty_push(tty: State<TtyLine>, c: u8) {
 // Pop a byte from the ring buffer. Returns the byte (0..255), or 256 if
 // the buffer is empty (the sentinel value — see the file header's
 // "Empty-buffer sentinel" note for why 256, not -1 or a separate flag).
-fn tty_pop(tty: State<TtyLine>) -> u32 {
+transform tty_pop(tty: State<TtyLine>) -> u32 {
     if tty.count == 0 {
         return 256;  // empty
     }
@@ -429,7 +429,7 @@ fn tty_pop(tty: State<TtyLine>) -> u32 {
 // is safe because `n < max` and `max <= 256` for the LineBuf layout
 // (a larger max would just stop at the 256-byte LineBuf boundary, which
 // is fine — the function never writes out-of-bounds).
-fn tty_readline(tty: State<TtyLine>, out: State<LineBuf>, max: u64) -> i64 {
+transform tty_readline(tty: State<TtyLine>, out: State<LineBuf>, max: u64) -> i64 {
     let n: i64 = 0;
     while n < max as i64 {
         // Fast-path: if the ring is empty, return what we have. In a
@@ -492,7 +492,7 @@ fn tty_readline(tty: State<TtyLine>, out: State<LineBuf>, max: u64) -> i64 {
 // erasure check failed, return 18 = the Ctrl-R flag-set check failed,
 // etc.). Exit 0 = all checks passed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tty = state_new(TtyLine);
     let line = state_new(LineBuf);
     tty_init(tty);

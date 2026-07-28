@@ -143,7 +143,7 @@ extern "C" {
     // does not call exit() in the self-test path (it's declared because
     // the K12c contract specified it — future waves may add a pm_panic
     // helper that exits the kernel when suspend fails irrecoverably).
-    fn exit(code: i64);
+    transform exit(code: i64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ extern "C" {
     // instead); halt() is declared for K13+ bare-metal drivers that
     // want a "halt the CPU now" primitive without going through the
     // full pm_cpu_idle state-machine dance.
-    fn halt();
+    transform halt();
 
     // wfi: wait for interrupt. On aarch64/riscv64 this is the `wfi`
     // instruction (ARMv8 ARM §C6.2.4 / RISC-V Privileged ISA §3.3.1).
@@ -219,7 +219,7 @@ extern "C" {
     // self-test calls wfi() via pm_cpu_idle — the stub's no-op return
     // means cpu_state goes 0 → 1 → 0 in a single function call, and
     // wake_count bumps to 1.
-    fn wfi();
+    transform wfi();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -233,7 +233,7 @@ extern "C" {
 //
 // State<T> params: 1 (pm). Pure write — no reads, no helper calls.
 // The 3 field assignments are direct (no byte-packing needed).
-fn pm_init(pm: State<PmState>) {
+transform pm_init(pm: State<PmState>) {
     pm.cpu_state = 0;    // running
     pm.suspend_lvl = 0;
     pm.wake_count = 0;
@@ -263,7 +263,7 @@ fn pm_init(pm: State<PmState>) {
 // after wfi returns, which is post-wake. In hosted mode (stub wfi),
 // the wake is synchronous — the stub returns immediately, and the
 // cpu_state = 0 write happens on the next instruction.
-fn pm_cpu_idle(pm: State<PmState>) {
+transform pm_cpu_idle(pm: State<PmState>) {
     pm.cpu_state = 1;  // idle
     wfi();             // wait for interrupt (stub in hosted mode)
     pm.cpu_state = 0;  // running again
@@ -296,7 +296,7 @@ fn pm_cpu_idle(pm: State<PmState>) {
 // via specific hardware events (lid open, RTC alarm, power button).
 // The wfi instruction alone is NOT sufficient for suspend. K13+ will
 // add the real suspend driver.
-fn pm_suspend(pm: State<PmState>, level: u8) -> i64 {
+transform pm_suspend(pm: State<PmState>, level: u8) -> i64 {
     pm.suspend_lvl = level;
     pm.cpu_state = 2;  // suspended
     // In real kernel: enter suspend state (ACPI/PSCI).
@@ -333,7 +333,7 @@ fn pm_suspend(pm: State<PmState>, level: u8) -> i64 {
 //   pm_cpu_idle returns. On bare metal (K13+), wfi() would actually
 //   halt until an interrupt, and the self-test would need a way to
 //   synthesize a wake interrupt — out of scope for K12c's hosted test.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Init ──
     let pm = state_new(PmState);
     pm_init(pm);

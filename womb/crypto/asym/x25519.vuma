@@ -20,7 +20,7 @@ const MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
 // 4 × u64 limb load/store (little-endian byte order)
 // ===========================================================================
 
-fn load_u64_le(ptr: Address, off: u32) -> u64 {
+transform load_u64_le(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
@@ -28,7 +28,7 @@ fn load_u64_le(ptr: Address, off: u32) -> u64 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn store_u64_le(ptr: Address, off: u32, val: u64) {
+transform store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -43,22 +43,22 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
 // Field element basics (32 bytes, 4 × u64 little-endian)
 // ===========================================================================
 
-fn fe_zero(r: Address) {
+transform fe_zero(r: Address) {
     i: u32 = 0;
     while i < 32 { *(r + i) = 0; i = i + 1; }
 }
 
-fn fe_one(r: Address) {
+transform fe_one(r: Address) {
     fe_zero(r);
     *(r + 0) = 1;
 }
 
-fn fe_copy(r: Address, a: Address) {
+transform fe_copy(r: Address, a: Address) {
     i: u32 = 0;
     while i < 32 { *(r + i) = *(a + i); i = i + 1; }
 }
 
-fn fe_is_zero(a: Address) -> u32 {
+transform fe_is_zero(a: Address) -> u32 {
     i: u32 = 0;
     while i < 4 {
         if load_u64_le(a, i * 8) != 0 { return 0; }
@@ -71,7 +71,7 @@ fn fe_is_zero(a: Address) -> u32 {
 // Conditional swap (constant time): if swap==1, exchange a and b.
 // ===========================================================================
 
-fn fe_cswap(swap: u32, a: Address, b: Address) {
+transform fe_cswap(swap: u32, a: Address, b: Address) {
     mask: u32 = 0;
     if swap == 1 { mask = MASK32; }
     i: u32 = 0;
@@ -93,7 +93,7 @@ fn fe_cswap(swap: u32, a: Address, b: Address) {
 // 2^255 ≡ 19 mod p).
 // ===========================================================================
 
-fn fe_add(r: Address, a: Address, b: Address) {
+transform fe_add(r: Address, a: Address, b: Address) {
     carry: u64 = 0;
     i: u32 = 0;
     while i < 4 {
@@ -145,7 +145,7 @@ fn fe_add(r: Address, a: Address, b: Address) {
 // bit 255 and subtracting 19 (since p = 2^255 - 19).
 // ===========================================================================
 
-fn fe_sub(r: Address, a: Address, b: Address) {
+transform fe_sub(r: Address, a: Address, b: Address) {
     borrow: u64 = 0;
     i: u32 = 0;
     while i < 4 {
@@ -193,7 +193,7 @@ fn fe_sub(r: Address, a: Address, b: Address) {
 // 64 bytes wide). Limb 0 is the least significant.
 // ===========================================================================
 
-fn fe_mul_512(out: Address, a: Address, b: Address) {
+transform fe_mul_512(out: Address, a: Address, b: Address) {
     // Zero the 64-byte output
     i: u32 = 0;
     while i < 64 { *(out + i) = 0; i = i + 1; }
@@ -257,7 +257,7 @@ fn fe_mul_512(out: Address, a: Address, b: Address) {
 // Repeated twice to fully reduce (high part of the second add can carry again).
 // ===========================================================================
 
-fn fe_reduce_255(r: Address, prod_64: Address) {
+transform fe_reduce_255(r: Address, prod_64: Address) {
     // Step 1: r = x_lo (low 32 bytes, mask bit 255) + 19 * x_hi (high 32 bytes,
     // treated as a 256-bit number, plus the bit 255 of x_lo).
     // We compute c = bit 255 of low part; high part is bytes 32..63 plus c.
@@ -358,19 +358,19 @@ fn fe_reduce_255(r: Address, prod_64: Address) {
 // Modular multiplication: r = (a * b) mod p.
 // ===========================================================================
 
-fn fe_mul(r: Address, a: Address, b: Address) {
+transform fe_mul(r: Address, a: Address, b: Address) {
     prod = allocate(64);
     fe_mul_512(prod, a, b);
     fe_reduce_255(r, prod);
     free(prod);
 }
 
-fn fe_square(r: Address, a: Address) {
+transform fe_square(r: Address, a: Address) {
     fe_mul(r, a, a);
 }
 
 // r = (a * 121666) mod p. 121666 = 0x1DB42 — used for a24 * E in the ladder.
-fn fe_mul121666(r: Address, a: Address) {
+transform fe_mul121666(r: Address, a: Address) {
     b = allocate(32);
     fe_zero(b);
     *(b + 0) = 66;    // 0x42
@@ -388,7 +388,7 @@ fn fe_mul121666(r: Address, a: Address) {
 //   byte 31 = 0x7F with all middle bytes 0xFF.
 // ===========================================================================
 
-fn fe_invert(r: Address, a: Address) {
+transform fe_invert(r: Address, a: Address) {
     // p - 2 = 2^255 - 21 in LE: EB FF FF FF ... FF 7F (byte 0 = 0xEB, byte 31 = 0x7F)
     exp = allocate(32);
     *(exp + 0) = 235;  // 0xEB = -21 mod 256
@@ -431,7 +431,7 @@ fn fe_invert(r: Address, a: Address) {
 //   point  : 32-byte little-endian u-coordinate of the input point
 // ===========================================================================
 
-fn x25519_scalarmult(out: Address, scalar: Address, point: Address) {
+transform x25519_scalarmult(out: Address, scalar: Address, point: Address) {
     // Clamp scalar: clear bits 0..2, clear bit 255, set bit 254
     k = allocate(32);
     i: u32 = 0;
@@ -528,7 +528,7 @@ fn x25519_scalarmult(out: Address, scalar: Address, point: Address) {
 // function only computes the matching public key.
 // ===========================================================================
 
-fn x25519_keygen(privkey: Address, pubkey: Address) {
+transform x25519_keygen(privkey: Address, pubkey: Address) {
     base = allocate(32);
     fe_zero(base);
     *(base + 0) = 9;   // Base point u = 9 (RFC 7748)
@@ -546,7 +546,7 @@ fn x25519_keygen(privkey: Address, pubkey: Address) {
 // RFC 7748 Section 6.1).
 // ===========================================================================
 
-fn x25519_shared_secret(my_privkey: Address, their_pubkey: Address, shared: Address) -> u32 {
+transform x25519_shared_secret(my_privkey: Address, their_pubkey: Address, shared: Address) -> u32 {
     x25519_scalarmult(shared, my_privkey, their_pubkey);
     // RFC 7748 Section 6.1: reject all-zero shared secrets (low-order points).
     if fe_is_zero(shared) == 1 { return 0; }

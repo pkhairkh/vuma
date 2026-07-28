@@ -235,10 +235,10 @@ layout Pl011Regs = {
 //   mmio_write32(a, v) — `mov [rdi], esi; ret`.
 // On aarch64 the stubs use LDRB / STRB / LDR / STR with X0 = addr, X1 = val.
 extern "C" {
-    fn mmio_read8(addr: u64) -> u8;
-    fn mmio_write8(addr: u64, val: u8);
-    fn mmio_read32(addr: u64) -> u32;
-    fn mmio_write32(addr: u64, val: u32);
+    transform mmio_read8(addr: u64) -> u8;
+    transform mmio_write8(addr: u64, val: u8);
+    transform mmio_read32(addr: u64) -> u32;
+    transform mmio_write32(addr: u64, val: u32);
 }
 
 // VUMA intrinsic MMIO stubs (+). These are 3-byte runtime stubs
@@ -253,8 +253,8 @@ extern "C" {
 // self-test passes base=0 (otherwise a store to a low unmapped address
 // like 0x3F8 would segfault).
 extern "C" {
-    fn __vuma_store_u32(addr: u64, val: u32);
-    fn __vuma_load_u32(addr: u64) -> u32;
+    transform __vuma_store_u32(addr: u64, val: u32);
+    transform __vuma_load_u32(addr: u64) -> u32;
 }
 
 // Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
@@ -264,7 +264,7 @@ extern "C" {
 // state on the call — the Address is just a raw u64 pointer handed to
 // the syscall. This is the documented PMT "Borrowed read" pattern.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -304,7 +304,7 @@ extern "C" {
 // instead of the per-arch mmio_write8 trampoline — same bus effect (the
 // 8250 accepts 32-bit accesses to its byte registers, only the low 8
 // bits land on the bus), PMT-pure (no pointer dereference in source).
-fn uart_init_8250(base: u64) {
+transform uart_init_8250(base: u64) {
     // Hosted mode (base == 0): no real UART to configure — skip MMIO.
     // The __vuma_store_u32 stub is a real `mov [rdi], esi` instruction,
     // so calling it with an unmapped low address (e.g. 0x3F8) would
@@ -347,7 +347,7 @@ fn uart_init_8250(base: u64) {
 // write(1, addr, 1) to send exactly one byte to stdout. The ByteBuf is
 // freed automatically when the function returns (the FFI marshal's
 // drop-frame hook handles the ___pmt_buffer cleanup).
-fn uart_putc_8250(base: u64, c: u8) {
+transform uart_putc_8250(base: u64, c: u8) {
     // In bare-metal mode:
     // Wait for TX empty (LSR bit 5).
     // while (mmio_read8(base + 5) & 32) == 0 { }
@@ -381,7 +381,7 @@ fn uart_putc_8250(base: u64, c: u8) {
 // __vuma_load_u32 (3-byte `mov eax, [rdi]; ret` runtime stub) instead
 // of the per-arch mmio_read8 trampoline — PMT-pure (no pointer
 // dereference in source).
-fn uart_getc_8250(base: u64) -> u8 {
+transform uart_getc_8250(base: u64) -> u8 {
     // Hosted mode (base == 0): no real UART to read from — return 0.
     // The __vuma_load_u32 stub is a real `mov eax, [rdi]; ret`
     // instruction, so calling it with an unmapped low address would
@@ -412,7 +412,7 @@ fn uart_getc_8250(base: u64) -> u8 {
 // In bare-metal mode (K11), each uart_putc_8250 call will spin on LSR
 // + write to THR — the loop here stays byte-identical, only the per-byte
 // driver changes.
-fn uart_puts_8250(base: u64, s: State<String>) {
+transform uart_puts_8250(base: u64, s: State<String>) {
     let i = 0;
     while i < 256 {
         let c = s.data[i];
@@ -441,7 +441,7 @@ fn uart_puts_8250(base: u64, s: State<String>) {
 // The offsets 36 / 40 / 44 / 48 are byte offsets (= slot * 4) for the
 // PL011's IBRD / FBRD / LCR_H / CR registers per the layout above. K11
 // will replace `return;` with the five mmio_write32 calls.
-fn uart_init_pl011(base: u64) {
+transform uart_init_pl011(base: u64) {
     // In bare-metal mode: set baud rate, enable UART.
     // In hosted mode: no-op.
     return;
@@ -466,7 +466,7 @@ fn uart_init_pl011(base: u64) {
 // low 8 bits are the data, the high 24 bits are reserved / flag bits on
 // writes). K11's bare-metal version will do this cast; the hosted version
 // doesn't need it (write takes a u8 buffer pointer, not a u32 value).
-fn uart_putc_pl011(base: u64, c: u8) {
+transform uart_putc_pl011(base: u64, c: u8) {
     // In bare-metal mode:
     // while (mmio_read32(base + 24) & 32) != 0 { }  // wait for TX FIFO not full
     // mmio_write32(base + 0, c as u32);
@@ -508,7 +508,7 @@ fn uart_putc_pl011(base: u64, c: u8) {
 // — but verifying that BOTH arch-specific driver entry points route
 // through the hosted write is the K6a DoD.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Self-test: init + putc + puts (hosted mode = write to stdout).
     // W22S2: init/getc pass base=0 so the MMIO guard skips real MMIO
     // (which would segfault in hosted mode on the unmapped COM1 base).

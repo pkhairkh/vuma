@@ -331,7 +331,7 @@ layout Semaphore = {
 // self-evident. (If state_new ever stops zero-filling — e.g., a
 // future arena-recycling change — sema_init's explicit zero would
 // still produce correct behavior.)
-fn sema_init(s: State<Semaphore>, initial: u32) {
+transform sema_init(s: State<Semaphore>, initial: u32) {
     s.count = initial;
     s._pad0 = 0;
     s.waitq_count = 0;
@@ -417,7 +417,7 @@ fn sema_init(s: State<Semaphore>, initial: u32) {
 // when count == 1 — for count == 2 it would write 0 instead of 1
 // (decrementing by 2 instead of 1, corrupting the count). The
 // `cur - 1` form correctly handles any count > 0.
-fn sema_down(s: State<Semaphore>) -> i32 {
+transform sema_down(s: State<Semaphore>) -> i32 {
     // Loop until we successfully decrement count.
     //   `success` is 0 until the CAS(cur → cur-1) succeeds (old == cur).
     let success = 0;
@@ -579,7 +579,7 @@ fn sema_down(s: State<Semaphore>) -> i32 {
 //   In the hosted single-threaded self-test, this branch is never
 //   taken (waitq_count stays at 0 because the slow path is never
 //   entered).
-fn sema_up(s: State<Semaphore>) {
+transform sema_up(s: State<Semaphore>) {
     // Loop until we successfully increment count.
     //   `success` is 0 until the CAS(cur → cur+1) succeeds (old == cur).
     let success = 0;
@@ -667,7 +667,7 @@ fn sema_up(s: State<Semaphore>) {
 //   - The CAS retry loop (would require SMP contention — K8e covers).
 //   - Actual sleep_on / wake_one (hosted has no scheduler — K9 covers
 //     this with the bare-metal scheduler integration tests).
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Semaphore);
     // Init with count=2 — two units available.
     sema_init(s, 2);

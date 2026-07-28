@@ -110,25 +110,25 @@ import "../crypto/aes256.vuma" {
 // assembled/disassembled one byte at a time.
 // ===========================================================================
 
-fn store_u16_be(addr: Address, val: u32) {
+transform store_u16_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 8) & 255;
     *(addr + 1) = val & 255;
 }
 
-fn store_u24_be(addr: Address, val: u32) {
+transform store_u24_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 16) & 255;
     *(addr + 1) = (val >> 8) & 255;
     *(addr + 2) = val & 255;
 }
 
-fn store_u32_be(addr: Address, val: u32) {
+transform store_u32_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 24) & 255;
     *(addr + 1) = (val >> 16) & 255;
     *(addr + 2) = (val >> 8) & 255;
     *(addr + 3) = val & 255;
 }
 
-fn store_u64_be(addr: Address, val: u64) {
+transform store_u64_be(addr: Address, val: u64) {
     // Keep the whole expression in u64 to avoid any u32/u64 mixing in `&`.
     let m: u64 = 255;
     *(addr + 0) = ((val >> 56) & m) as u32;
@@ -141,24 +141,24 @@ fn store_u64_be(addr: Address, val: u64) {
     *(addr + 7) = (val & m) as u32;
 }
 
-fn load_u8(addr: Address) -> u32 {
+transform load_u8(addr: Address) -> u32 {
     return *(addr + 0);
 }
 
-fn load_u16_be(addr: Address) -> u32 {
+transform load_u16_be(addr: Address) -> u32 {
     let hi: u32 = *(addr + 0);
     let lo: u32 = *(addr + 1);
     return (hi << 8) | lo;
 }
 
-fn load_u24_be(addr: Address) -> u32 {
+transform load_u24_be(addr: Address) -> u32 {
     let b0: u32 = *(addr + 0);
     let b1: u32 = *(addr + 1);
     let b2: u32 = *(addr + 2);
     return (b0 << 16) | (b1 << 8) | b2;
 }
 
-fn load_u32_be(addr: Address) -> u32 {
+transform load_u32_be(addr: Address) -> u32 {
     let b0: u32 = *(addr + 0);
     let b1: u32 = *(addr + 1);
     let b2: u32 = *(addr + 2);
@@ -171,7 +171,7 @@ fn load_u32_be(addr: Address) -> u32 {
 // ===========================================================================
 
 // Copy `n` bytes from src to dst (no overlap assumed).
-fn tls12_memcpy(dst: Address, src: Address, n: u32) {
+transform tls12_memcpy(dst: Address, src: Address, n: u32) {
     let i: u32 = 0;
     while i < n {
         *(dst + i) = *(src + i);
@@ -180,7 +180,7 @@ fn tls12_memcpy(dst: Address, src: Address, n: u32) {
 }
 
 // Set `n` bytes of dst to `val & 255`.
-fn tls12_memset(dst: Address, val: u32, n: u32) {
+transform tls12_memset(dst: Address, val: u32, n: u32) {
     let i: u32 = 0;
     while i < n {
         *(dst + i) = val & 255;
@@ -191,7 +191,7 @@ fn tls12_memset(dst: Address, val: u32, n: u32) {
 // Length of a null-terminated ASCII label, capped at TLS_MAX_LABEL_LEN.
 // Returns the index of the first 0 byte (or TLS_MAX_LABEL_LEN if none found
 // within the cap, which is treated as an empty/invalid label by callers).
-fn tls12_strlen(s: Address) -> u32 {
+transform tls12_strlen(s: Address) -> u32 {
     let i: u32 = 0;
     let done: u32 = 0;
     while done == 0 {
@@ -218,7 +218,7 @@ fn tls12_strlen(s: Address) -> u32 {
 // ===========================================================================
 
 // P_hash with HMAC-SHA-256. Writes out_len bytes to `out`.
-fn tls12_p_hash(secret: Address, secret_len: u32, seed: Address, seed_len: u32, out: Address, out_len: u32) {
+transform tls12_p_hash(secret: Address, secret_len: u32, seed: Address, seed_len: u32, out: Address, out_len: u32) {
     let a: Address = allocate(SHA256_LEN);              // A(i) for i >= 1 (always 32 bytes)
     let a_next: Address = allocate(SHA256_LEN);         // temp for A(i+1) (avoid in-place aliasing)
     let buf: Address = allocate(SHA256_LEN + seed_len); // A(i) || seed
@@ -263,7 +263,7 @@ fn tls12_p_hash(secret: Address, secret_len: u32, seed: Address, seed_len: u32, 
 //   out        : output buffer (out_len bytes written)
 //   out_len    : desired output length
 // Returns 0 on success, nonzero on error (label too long).
-fn tls12_prf(secret: Address, secret_len: u32, label: Address, label_len: u32, seed: Address, seed_len: u32, out: Address, out_len: u32) -> u32 {
+transform tls12_prf(secret: Address, secret_len: u32, label: Address, label_len: u32, seed: Address, seed_len: u32, out: Address, out_len: u32) -> u32 {
     let status: u32 = 0;
     if label_len > TLS_MAX_LABEL_LEN { status = 1; }
 
@@ -290,7 +290,7 @@ fn tls12_prf(secret: Address, secret_len: u32, label: Address, label_len: u32, s
 // NOTE the seed order: client_random first, then server_random.
 // master_out must point to a 48-byte buffer.
 // Returns 0 on success, nonzero on error.
-fn tls12_compute_master_secret(pre_master: Address, pm_len: u32, client_random: Address, server_random: Address, master_out: Address) -> u32 {
+transform tls12_compute_master_secret(pre_master: Address, pm_len: u32, client_random: Address, server_random: Address, master_out: Address) -> u32 {
     // seed = client_random(32) || server_random(32)
     let seed: Address = allocate(64);
     tls12_memcpy(seed + 0, client_random, TLS_RANDOM_LEN);
@@ -326,7 +326,7 @@ fn tls12_compute_master_secret(pre_master: Address, pm_len: u32, client_random: 
 // server_random first, then client_random (RFC 5246 Section 6.3).
 // key_block must point to a key_block_len-byte buffer.
 // Returns 0 on success, nonzero on error.
-fn tls12_compute_keys(master: Address, client_random: Address, server_random: Address, key_block: Address, key_block_len: u32) -> u32 {
+transform tls12_compute_keys(master: Address, client_random: Address, server_random: Address, key_block: Address, key_block_len: u32) -> u32 {
     // seed = server_random(32) || client_random(32)
     let seed: Address = allocate(64);
     tls12_memcpy(seed + 0, server_random, TLS_RANDOM_LEN);
@@ -367,7 +367,7 @@ fn tls12_compute_keys(master: Address, client_random: Address, server_random: Ad
 //     [144..160) server_write_IV
 //
 // Each output Address must point to a buffer of the indicated size.
-fn tls12_extract_key_material(key_block: Address, client_mac: Address, server_mac: Address, client_key: Address, server_key: Address, client_iv: Address, server_iv: Address) {
+transform tls12_extract_key_material(key_block: Address, client_mac: Address, server_mac: Address, client_key: Address, server_key: Address, client_iv: Address, server_iv: Address) {
     tls12_memcpy(client_mac, key_block + 0, 32);
     tls12_memcpy(server_mac, key_block + 32, 32);
     tls12_memcpy(client_key, key_block + 64, 32);
@@ -400,14 +400,14 @@ fn tls12_extract_key_material(key_block: Address, client_mac: Address, server_ma
 // Adds PKCS#7 padding (one to sixteen bytes). Returns the number of
 // ciphertext bytes written (= pt_len rounded up to the next multiple of
 // AES_BLOCK_SIZE, at least pt_len + 1), or 0 on error.
-fn tls12_aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform tls12_aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     return aes256_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
 }
 
 // AES-256-CBC decrypt wrapper — canonical argument order.
 // Strips PKCS#7 padding. Returns the number of plaintext bytes written, or
 // 0 on error (bad padding, bad length).
-fn tls12_aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform tls12_aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     return aes256_cbc_decrypt(ciphertext, ct_len, key, iv, plaintext);
 }
 
@@ -415,7 +415,7 @@ fn tls12_aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: 
 //   pt_len must be a nonzero multiple of AES_BLOCK_SIZE.
 // Returns pt_len on success, 0 on error (bad length).
 // ciphertext must be sized to at least pt_len bytes.
-fn tls12_cbc_encrypt_raw(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform tls12_cbc_encrypt_raw(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     let status: u32 = 0;
     if pt_len == 0 { status = 1; }
     if status == 0 && (pt_len % AES_BLOCK_SIZE) != 0 { status = 2; }
@@ -452,7 +452,7 @@ fn tls12_cbc_encrypt_raw(plaintext: Address, pt_len: u32, key: Address, iv: Addr
 //   ct_len must be a nonzero multiple of AES_BLOCK_SIZE.
 // Returns ct_len on success, 0 on error (bad length).
 // plaintext must be sized to at least ct_len bytes.
-fn tls12_cbc_decrypt_raw(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform tls12_cbc_decrypt_raw(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     let status: u32 = 0;
     if ct_len == 0 { status = 1; }
     if status == 0 && (ct_len % AES_BLOCK_SIZE) != 0 { status = 2; }
@@ -525,7 +525,7 @@ fn tls12_cbc_decrypt_raw(ciphertext: Address, ct_len: u32, key: Address, iv: Add
 // header) — this is the "record encryption primitive" form. For full TLS
 // records with the seq_num/type/version MAC header, use
 // tls12_encrypt_record.
-fn tls12_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
+transform tls12_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
     let status: u32 = 0;
 
     // 1. MAC = HMAC-SHA-256(key, plaintext)
@@ -566,7 +566,7 @@ fn tls12_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u
 //   plaintext : output buffer; receives the recovered plaintext
 // Returns the recovered plaintext length on success, or 0 on any error
 // (bad length, bad padding, MAC mismatch).
-fn tls12_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+transform tls12_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
     let status: u32 = 0;
     if ct_len == 0 { status = 1; }
     if status == 0 && (ct_len % AES_BLOCK_SIZE) != 0 { status = 2; }
@@ -640,7 +640,7 @@ fn tls12_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: 
 //   ciphertext: output buffer; receives the encrypted bytes
 // Returns the number of ciphertext bytes written (= padded length), or 0 on
 // error.
-fn tls12_encrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u64, type: u32, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
+transform tls12_encrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u64, type: u32, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
     let status: u32 = 0;
 
     // 1. Build MAC input: seq_num(8) || type(1) || version(2) || length(2) || plaintext
@@ -686,7 +686,7 @@ fn tls12_encrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u6
 // verification. Returns the recovered plaintext length on success, or 0 on
 // any error (bad length, bad padding, MAC mismatch). All error paths run
 // the full comparison loop in constant time before reporting failure.
-fn tls12_decrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u64, type: u32, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+transform tls12_decrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u64, type: u32, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
     let status: u32 = 0;
     if ct_len == 0 { status = 1; }
     if status == 0 && (ct_len % AES_BLOCK_SIZE) != 0 { status = 2; }
@@ -779,7 +779,7 @@ fn tls12_decrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u6
 // Returns total message length (4-byte handshake header + body), or 0 on
 // error. The caller must size `out` to at least
 // 4 + 2 + 32 + 1 + sid_len + 2 + cs_len + 2 bytes.
-fn tls12_build_client_hello(version: u32, random: Address, session_id: Address, cipher_suites: Address, out: Address) -> u32 {
+transform tls12_build_client_hello(version: u32, random: Address, session_id: Address, cipher_suites: Address, out: Address) -> u32 {
     let status: u32 = 0;
 
     let sid_len: u32 = *(session_id + 0);
@@ -842,7 +842,7 @@ fn tls12_build_client_hello(version: u32, random: Address, session_id: Address, 
 // Returns the total number of bytes consumed (4 + body_len) on success, or
 // 0 on error (short buffer, wrong message type, truncated fields). Trailing
 // extensions are ignored.
-fn tls12_parse_server_hello(data: Address, len: u32, version: Address, random: Address, session_id: Address, cipher_suite: Address) -> u32 {
+transform tls12_parse_server_hello(data: Address, len: u32, version: Address, random: Address, session_id: Address, cipher_suite: Address) -> u32 {
     let status: u32 = 0;
     if len < 4 { status = 1; }
 
@@ -912,7 +912,7 @@ fn tls12_parse_server_hello(data: Address, len: u32, version: Address, random: A
 //                   via tls12_strlen (capped at TLS_MAX_LABEL_LEN)
 //   out           : output buffer; receives 12 bytes of verify_data
 // Returns 0 on success, nonzero on error.
-fn tls12_finished_verify_data(master_secret: Address, handshake_hash: Address, label: Address, out: Address) -> u32 {
+transform tls12_finished_verify_data(master_secret: Address, handshake_hash: Address, label: Address, out: Address) -> u32 {
     let label_len: u32 = tls12_strlen(label);
     let status: u32 = tls12_prf(master_secret, MASTER_SECRET_LEN, label, label_len, handshake_hash, SHA256_LEN, out, FINISHED_VERIFY_LEN);
     return status;
@@ -926,7 +926,7 @@ fn tls12_finished_verify_data(master_secret: Address, handshake_hash: Address, l
 //   out            : output buffer (must hold at least 16 bytes)
 // Returns 16 (4-byte handshake header + 12-byte verify_data) on success, or
 // 0 on error.
-fn tls12_build_finished(master: Address, handshake_hash: Address, is_client: u32, out: Address) -> u32 {
+transform tls12_build_finished(master: Address, handshake_hash: Address, is_client: u32, out: Address) -> u32 {
     // label = "client finished" (15) or "server finished" (15), plus a NUL
     // terminator so tls12_finished_verify_data can strlen it.
     let label: Address = allocate(16);

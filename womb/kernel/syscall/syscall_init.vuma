@@ -169,7 +169,7 @@
 // State<SyscallTable>; the CALLER (kmain, or this file's self-test)
 // allocates it via `state_new(SyscallTable)` and passes it by
 // reference to syscall_init. The State<SyscallTable> param is a
-// regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't
+// regular VUMA-transform borrow (NOT extern #[borrow] — VUMA transform calls don't
 // need the attribute). None of this file's functions call any extern,
 // so the codegen's conservative State-invalidation-on-extern-call
 // doesn't fire.
@@ -231,7 +231,7 @@ layout SyscallTable = {
 // Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
 // 8-byte LE unpack at byte offset `nr * 8`. Returns 0 if no handler is
 // registered for that syscall (the slot is all zero bytes).
-fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+transform syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
     let off = nr * 8;
     let v: u64 = 0;
     let i = 0;
@@ -248,7 +248,7 @@ fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
 // 8-byte LE pack at byte offset `nr * 8`. The mask-255 truncates each
 // shifted byte to its low 8 bits (the (handler >> sh) >> 8 path would
 // lose the high bits — same pattern as pmm.vuma's pool_set_base, K2a).
-fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+transform syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     let off = nr * 8;
     let i = 0;
     while i < 8 {
@@ -262,7 +262,7 @@ fn syscall_table_set(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // Register a syscall handler: pack the address into the table slot AND
 // increment tbl.count. Re-declared byte-identically to table.vuma.
 // No "unregister" — K11 may add one for runtime syscall-table patching.
-fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
+transform syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
     syscall_table_set(tbl, nr, handler);
     tbl.count = tbl.count + 1;
 }
@@ -274,7 +274,7 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // with their ORIGINAL SIGNATURES and STUB BODIES. K11's bare-metal build
 // will replace these stubs with the real implementations via VUMA's
 // (future) import mechanism OR via a linker layer that selects the
-// real-body version of each fn name.
+// real-body version of each transform name.
 //
 // The 17 NEW stub handlers (11 listed + 6 extras) are K11+ TODOs —
 // real implementations will live in their own handler files.
@@ -285,18 +285,18 @@ fn syscall_register(tbl: State<SyscallTable>, nr: u32, handler: u64) {
 // fd to host read/write or VFS read/write (K5 stub). The stubs here
 // just return 0 — the body is never invoked by this file's self-test.
 
-fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
+transform sys_read(fd: u64, buf: u64, count: u64) -> i64 {
     return 0;
 }
 
-fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+transform sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     return 0;
 }
 
 // sys_lseek — reposition read/write offset of a file descriptor.
 // Linux signature: lseek(fd, offset, whence). Stub returns 0.
 // K11+ TODO: implement in handlers/io.vuma (or a new handlers/fs2.vuma).
-fn sys_lseek(fd: u64, offset: u64, whence: u64) -> i64 {
+transform sys_lseek(fd: u64, offset: u64, whence: u64) -> i64 {
     return 0;
 }
 
@@ -307,15 +307,15 @@ fn sys_lseek(fd: u64, offset: u64, whence: u64) -> i64 {
 // The real mm.vuma implementations delegate to the host mmap/munmap
 // externs in hosted mode (and to pmm_alloc/vmm_map in bare-metal K11).
 
-fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
+transform sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     return 0;
 }
 
-fn sys_munmap(addr: u64, len: u64) -> i64 {
+transform sys_munmap(addr: u64, len: u64) -> i64 {
     return 0;
 }
 
-fn sys_brk(addr: u64) -> u64 {
+transform sys_brk(addr: u64) -> u64 {
     return addr;
 }
 
@@ -327,11 +327,11 @@ fn sys_brk(addr: u64) -> u64 {
 // proc.vuma sys_exit calls the host `exit` extern (which never returns);
 // the stub here just returns.
 
-fn sys_getpid() -> i64 {
+transform sys_getpid() -> i64 {
     return 0;
 }
 
-fn sys_exit(code: i64) {
+transform sys_exit(code: i64) {
     return;
 }
 
@@ -342,15 +342,15 @@ fn sys_exit(code: i64) {
 // x86_64 syscalls #39/110/102/108 — pre-registered runtime stubs in
 // src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs).
 
-fn sys_getppid() -> i64 {
+transform sys_getppid() -> i64 {
     return 0;
 }
 
-fn sys_getuid() -> i64 {
+transform sys_getuid() -> i64 {
     return 0;
 }
 
-fn sys_geteuid() -> i64 {
+transform sys_geteuid() -> i64 {
     return 0;
 }
 
@@ -363,15 +363,15 @@ fn sys_geteuid() -> i64 {
 //   - sys_execve: K4d's exec.vuma has sys_exec(tbl, task_idx, entry,
 //     stack) — K11 wraps it in a tf-style handler.
 
-fn sys_exit_group(code: i64) {
+transform sys_exit_group(code: i64) {
     return;
 }
 
-fn sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> i64 {
+transform sys_clone(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> i64 {
     return 0;
 }
 
-fn sys_execve(filename: u64, argv: u64, envp: u64) -> i64 {
+transform sys_execve(filename: u64, argv: u64, envp: u64) -> i64 {
     return 0;
 }
 
@@ -385,15 +385,15 @@ fn sys_execve(filename: u64, argv: u64, envp: u64) -> i64 {
 //     registered number is whatever the spec says (202); the handler
 //     is the same futex_wait/wake dispatch either way.
 
-fn sys_wait4(pid: u64, wstatus: u64, options: u64, rusage: u64) -> i64 {
+transform sys_wait4(pid: u64, wstatus: u64, options: u64, rusage: u64) -> i64 {
     return 0;
 }
 
-fn sys_kill(pid: u64, sig: u64) -> i64 {
+transform sys_kill(pid: u64, sig: u64) -> i64 {
     return 0;
 }
 
-fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64) -> i64 {
+transform sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64) -> i64 {
     return 0;
 }
 
@@ -404,19 +404,19 @@ fn sys_futex(uaddr: u64, op: u64, val: u64, timeout: u64, uaddr2: u64, val3: u64
 // per-task cred struct (K4a's ProcessTable extension or a separate
 // struct cred).
 
-fn sys_getgid() -> i64 {
+transform sys_getgid() -> i64 {
     return 0;
 }
 
-fn sys_getegid() -> i64 {
+transform sys_getegid() -> i64 {
     return 0;
 }
 
-fn sys_setuid(uid: u64) -> i64 {
+transform sys_setuid(uid: u64) -> i64 {
     return 0;
 }
 
-fn sys_setgid(gid: u64) -> i64 {
+transform sys_setgid(gid: u64) -> i64 {
     return 0;
 }
 
@@ -424,7 +424,7 @@ fn sys_setgid(gid: u64) -> i64 {
 // sys_umask — set the process file-creation mask. Extra (not in the
 // listed 24); included to reach 30 total.
 
-fn sys_umask(mask: u64) -> i64 {
+transform sys_umask(mask: u64) -> i64 {
     return 0;
 }
 
@@ -436,31 +436,31 @@ fn sys_umask(mask: u64) -> i64 {
 // host open/close/mkdir/rmdir/unlink/chdir/getcwd externs. The stubs
 // here just return 0.
 
-fn sys_open_handler(tf: Address) -> u64 {
+transform sys_open_handler(tf: Address) -> u64 {
     return 0;
 }
 
-fn sys_close_handler(tf: Address) -> u64 {
+transform sys_close_handler(tf: Address) -> u64 {
     return 0;
 }
 
-fn sys_mkdir_handler(tf: Address) -> u64 {
+transform sys_mkdir_handler(tf: Address) -> u64 {
     return 0;
 }
 
-fn sys_rmdir_handler(tf: Address) -> u64 {
+transform sys_rmdir_handler(tf: Address) -> u64 {
     return 0;
 }
 
-fn sys_unlink_handler(tf: Address) -> u64 {
+transform sys_unlink_handler(tf: Address) -> u64 {
     return 0;
 }
 
-fn sys_chdir_handler(tf: Address) -> u64 {
+transform sys_chdir_handler(tf: Address) -> u64 {
     return 0;
 }
 
-fn sys_getcwd_handler(tf: Address) -> u64 {
+transform sys_getcwd_handler(tf: Address) -> u64 {
     return 0;
 }
 
@@ -469,7 +469,7 @@ fn sys_getcwd_handler(tf: Address) -> u64 {
 // newpath). Stub returns 0. K11+ TODO: implement alongside the other
 // fs handlers in handlers/fs.vuma (or a new handlers/fs2.vuma).
 
-fn sys_rename(oldpath: u64, newpath: u64) -> i64 {
+transform sys_rename(oldpath: u64, newpath: u64) -> i64 {
     return 0;
 }
 
@@ -493,7 +493,7 @@ fn sys_rename(oldpath: u64, newpath: u64) -> i64 {
 //     syscall_init(tbl);
 //     // ... trap_entry routes syscalls via syscall_dispatch_from_trap(tbl, tf)
 
-fn syscall_init(tbl: State<SyscallTable>) {
+transform syscall_init(tbl: State<SyscallTable>) {
     // ── I/O (5) ──────────────────────────────────────────────────────────
     syscall_register(tbl, 63, sys_read as u64);       // __NR_read
     syscall_register(tbl, 64, sys_write as u64);      // __NR_write
@@ -573,7 +573,7 @@ fn syscall_init(tbl: State<SyscallTable>) {
 // this same registration, then wire up dispatch.vuma's
 // syscall_dispatch_from_trap to invoke the handlers.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(SyscallTable);
     tbl.count = 0;
 

@@ -14,7 +14,7 @@ const ARGON2_MASK32: u32 = 4294967295;
 // 64-bit little-endian byte helpers.
 // ===========================================================================
 
-fn argon2_load_u64(ptr: Address, off: u32) -> u64 {
+transform argon2_load_u64(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);
     b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2);
@@ -27,7 +27,7 @@ fn argon2_load_u64(ptr: Address, off: u32) -> u64 {
              | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn argon2_store_u64(ptr: Address, off: u32, val: u64) {
+transform argon2_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -39,7 +39,7 @@ fn argon2_store_u64(ptr: Address, off: u32, val: u64) {
 }
 
 // 64-bit rotate right.
-fn argon2_rotr64(x: u64, n: u32) -> u64 {
+transform argon2_rotr64(x: u64, n: u32) -> u64 {
     return (x >> n) | (x << (64 - n));
 }
 
@@ -51,7 +51,7 @@ fn argon2_rotr64(x: u64, n: u32) -> u64 {
 //                       output = first out_len bytes of V_1 || V_2 || ...
 // ===========================================================================
 
-fn argon2_h_prime(input: Address, input_len: u32, output: Address, out_len: u32) {
+transform argon2_h_prime(input: Address, input_len: u32, output: Address, out_len: u32) {
     // Prefix: 4-byte little-endian out_len.
     buf = allocate(4 + input_len);
     *(buf + 0) = out_len & 255;
@@ -109,7 +109,7 @@ fn argon2_h_prime(input: Address, input_len: u32, output: Address, out_len: u32)
 // where mul32(x, y) = (low_32(x) * low_32(y)) mod 2^64.
 // ===========================================================================
 
-fn argon2_gb(S: Address, a_off: u32, b_off: u32, c_off: u32, d_off: u32) {
+transform argon2_gb(S: Address, a_off: u32, b_off: u32, c_off: u32, d_off: u32) {
     a: u64 = argon2_load_u64(S, a_off);
     b: u64 = argon2_load_u64(S, b_off);
     c: u64 = argon2_load_u64(S, c_off);
@@ -146,7 +146,7 @@ fn argon2_gb(S: Address, a_off: u32, b_off: u32, c_off: u32, d_off: u32) {
 // of S starting at byte offset `off`. 8 GB rounds (4 column + 4 diagonal).
 // ===========================================================================
 
-fn argon2_p(S: Address, off: u32) {
+transform argon2_p(S: Address, off: u32) {
     // Each word is 8 bytes; word i is at off + i*8.
     w0: u32 = off + 0;
     w1: u32 = off + 8;
@@ -186,7 +186,7 @@ fn argon2_p(S: Address, off: u32) {
 //   5. Output = Z XOR R
 // ===========================================================================
 
-fn argon2_g(a: Address, b: Address, out: Address) {
+transform argon2_g(a: Address, b: Address, out: Address) {
     r = allocate(ARGON2_BLOCK_SIZE);
     z = allocate(ARGON2_BLOCK_SIZE);
 
@@ -244,7 +244,7 @@ fn argon2_g(a: Address, b: Address, out: Address) {
 }
 
 // Copy 8 bytes from src[off] into dst[off2].
-fn argon2_load_to_buf(src: Address, off: u32, dst: Address, off2: u32) {
+transform argon2_load_to_buf(src: Address, off: u32, dst: Address, off2: u32) {
     k: u32 = 0;
     while k < 8 {
         *(dst + off2 + k) = *(src + off + k);
@@ -253,7 +253,7 @@ fn argon2_load_to_buf(src: Address, off: u32, dst: Address, off2: u32) {
 }
 
 // Copy 8 bytes from src[off] into dst[off2].
-fn argon2_store_from_buf(dst: Address, off: u32, src: Address, off2: u32) {
+transform argon2_store_from_buf(dst: Address, off: u32, src: Address, off2: u32) {
     k: u32 = 0;
     while k < 8 {
         *(dst + off + k) = *(src + off2 + k);
@@ -269,7 +269,7 @@ fn argon2_store_from_buf(dst: Address, off: u32, src: Address, off2: u32) {
 // the pseudo-random dependence on the previous block's contents.
 // ===========================================================================
 
-fn argon2_ref_index(prev_block: Address, pass: u32, slice: u32,
+transform argon2_ref_index(prev_block: Address, pass: u32, slice: u32,
                     lane: u32, m_prime: u32, p: u32) -> u32 {
     j1: u32 = argon2_load_u64(prev_block, 0) & ARGON2_MASK32;
     j2: u32 = (argon2_load_u64(prev_block, 0) >> 32) & ARGON2_MASK32;
@@ -309,7 +309,7 @@ fn argon2_ref_index(prev_block: Address, pass: u32, slice: u32,
 //   out_len:   desired output length (tag length)
 // ===========================================================================
 
-fn argon2id(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+transform argon2id(password: Address, pass_len: u32, salt: Address, salt_len: u32,
             t: u32, m: u32, p: u32, out: Address, out_len: u32) {
     // 1. H0 = H'(p || tau || m || t || v || y || pass_len || password ||
     //              salt_len || salt || 0 || 0 || 0 || 0)

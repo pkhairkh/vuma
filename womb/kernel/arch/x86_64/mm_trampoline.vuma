@@ -6,10 +6,10 @@
 // This file is the x86_64-specific swap point for the MM externs declared
 // in womb/kernel/mm/vmm.vuma (K2b). vmm.vuma's extern block:
 //     extern "C" {
-//         #[borrow] fn pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
-//         #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
-//         fn tlb_flush();
-//         fn invlpg(vaddr: u64);
+//         #[borrow] transform pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
+//         #[borrow] transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+//         transform tlb_flush();
+//         transform invlpg(vaddr: u64);
 //     }
 // In hosted mode, those four names resolve to `__ffi_fallback_stub`
 // (xor eax, eax; ret — returns 0, no-op for void functions) at link time.
@@ -105,42 +105,42 @@ extern "C" {
     // header note); without it, vmm.vuma's walk would trip the
     // use-after-invalidate verifier after the first pte_read.
     #[borrow]
-    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
     // Write a page-table entry. Same address-resolution story as
     // pte_read; the write goes to the same 8-byte cell. Callers are
     // responsible for the appropriate tlb_flush / invlpg after a write
     // that changes an entry the hardware walker may have cached.
     #[borrow]
-    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
     // Full TLB flush — reload CR3 to flush all non-global TLB entries
     // for the current PCID. K11 stub: `mov rax, cr3; mov cr3, rax`.
-    fn tlb_flush();
+    transform tlb_flush();
     // Per-vaddr TLB invalidation — invalidate the TLB entry for `vaddr`
     // (if any) in the current address space. K11 stub: `invlpg [rdi]`
     // (RDI = vaddr under SysV AMD64).
-    fn invlpg(vaddr: u64);
+    transform invlpg(vaddr: u64);
     // CR3 read — returns the current CR3 value (physical address of the
     // current PML4 table, plus PCID / flag bits). K11 stub:
     // `mov rax, cr3; ret`. Used by the future scheduler (K4+) to save
     // the current address space before a context switch.
-    fn cr3_read() -> u64;
+    transform cr3_read() -> u64;
     // CR3 write — switches address spaces. K11 stub: `mov cr3, rdi; ret`
     // (RDI = new CR3 under SysV AMD64). Side-effect: flushes the TLB
     // (same as tlb_flush, but for the NEW address space — callers do
     // not need to call tlb_flush separately after cr3_write).
-    fn cr3_write(val: u64);
+    transform cr3_write(val: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // main entry stub.
 // ────────────────────────────────────────────────────────────────────────────
 // This file is a pure declaration module (extern block + layout only, no
-// top-level execution). The compiler requires a `fn main()` entry to
+// top-level execution). The compiler requires a `transform main()` entry to
 // compile as a standalone program; the real kmain (K1d) lives in
 // womb/kernel/kernel.vuma and will call the externs declared here via
 // womb/kernel/mm/vmm.vuma (pte_read / pte_write / tlb_flush / invlpg)
 // and directly (cr3_read / cr3_write) during context switches.
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

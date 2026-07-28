@@ -29,7 +29,7 @@
 //   - `arena_new(size) -> Address` is replaced by `arena_init(arena, size)`
 //     (caller does `let a = state_new(Arena); arena_init(a, size);`).
 //     Rationale: the current PMT codegen does not propagate State-typedness
-//     through function return values, so a `fn arena_new(...) -> State<Arena>`
+//     through function return values, so a `transform arena_new(...) -> State<Arena>`
 //     that returns a freshly-allocated state produces broken field-access
 //     code in downstream functions. The init-style API (state allocated at
 //     the call site, passed by reference to an init function) is the
@@ -52,7 +52,7 @@ layout Arena = { offset: u32, capacity: u32, data: [u8; 256] }
 // Replaces the original `arena_new(size) -> Address`. The caller allocates
 // the state with `let a = state_new(Arena);` and passes it here to set
 // the initial offset (0) and capacity (clamped to the data array size).
-fn arena_init(arena: State<Arena>, size: u32) {
+transform arena_init(arena: State<Arena>, size: u32) {
     arena.offset = 0;
     if size > 256 {
         arena.capacity = 256;
@@ -69,7 +69,7 @@ fn arena_init(arena: State<Arena>, size: u32) {
 // `arena_used` before/after to detect failure, or ensure `size` fits).
 // The original returned `base + aligned` as a raw Address; PMT callers
 // access the bytes via `arena.data[offset]`.
-fn arena_alloc(arena: State<Arena>, size: u32) -> u32 {
+transform arena_alloc(arena: State<Arena>, size: u32) -> u32 {
     let offset: u32 = arena.offset;
     let total: u32 = arena.capacity;
     let aligned: u32 = (offset + 7) & 0xFFFFFFF8;
@@ -80,7 +80,7 @@ fn arena_alloc(arena: State<Arena>, size: u32) -> u32 {
 
 // arena_reset: reset the bump offset to 0, allowing reuse of the data
 // block without reallocating.
-fn arena_reset(arena: State<Arena>) {
+transform arena_reset(arena: State<Arena>) {
     arena.offset = 0;
     return;
 }
@@ -88,16 +88,16 @@ fn arena_reset(arena: State<Arena>) {
 // arena_free: no-op in PMT. State buffers are automatically managed
 // (no `free` call site). Kept for source compatibility with the
 // pointer-based original.
-fn arena_free(arena: State<Arena>) {
+transform arena_free(arena: State<Arena>) {
     return;
 }
 
 // arena_used: return the current bump offset (bytes allocated so far).
-fn arena_used(arena: State<Arena>) -> u32 {
+transform arena_used(arena: State<Arena>) -> u32 {
     return arena.offset;
 }
 
 // arena_capacity: return the arena's total data capacity (bytes).
-fn arena_capacity(arena: State<Arena>) -> u32 {
+transform arena_capacity(arena: State<Arena>) -> u32 {
     return arena.capacity;
 }

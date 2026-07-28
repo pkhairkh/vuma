@@ -22,7 +22,7 @@
 // at which point the host event loop picks the next task.
 //
 // ── The host_yield contract ─────────────────────────────────────────────────
-// `host_yield()` is a wasm import (declared as `extern "C" fn host_yield()`
+// `host_yield()` is a wasm import (declared as `extern "C" transform host_yield()`
 // below — VUMA's `extern "C"` block is the canonical way to declare a
 // foreign import; the wasm32 backend lowers this to a wasm `import`
 // declaration in the import section of the wasm module). The host
@@ -103,7 +103,7 @@
 // NO `*ptr`, `&x`, `allocate`, or `free` anywhere in this file. Both
 // TrapFrame, Runqueue, and ProcessTable are ___pmt_buffer-backed
 // State<T>'s allocated by the CALLER via `state_new(...)`. The State<T>
-// params are regular VUMA-fn borrows (NOT extern #[borrow] — VUMA fn
+// params are regular VUMA-transform borrows (NOT extern #[borrow] — VUMA transform
 // calls don't need the attribute, only extern "C" calls do). The only
 // extern in this file is host_yield (which takes no State<T> params),
 // so the codegen's conservative State-invalidation-on-extern-call
@@ -210,7 +210,7 @@ layout ProcessTable = {
 
 // Read the u64 GPR at canonical slot `idx` from tf.gpr. 8-byte LE unpack
 // at byte offset `idx * 8`. Byte-identical to R2a's tf_get_gpr.
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -225,7 +225,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 
 // Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
 // at byte offset `idx * 8`. Byte-identical to R2a's tf_set_gpr.
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -238,7 +238,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 
 // Zero every field of a caller-allocated TrapFrame. Byte-identical to
 // R2a's tf_init.
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -266,18 +266,18 @@ fn tf_init(tf: State<TrapFrame>) {
 // fork/exec will re-declare the rest.
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
 // Read the u64 `vruntime` field of Task slot `idx` from
 // ProcessTable.vruntimes. 8-byte LE unpack loop.
-fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -292,7 +292,7 @@ fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
 
 // Write the u64 `vruntime` field of Task slot `idx` into
 // ProcessTable.vruntimes. 8-byte LE pack loop.
-fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -304,7 +304,7 @@ fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of Task slot `idx` from ProcessTable.nexts.
-fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -318,7 +318,7 @@ fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Task slot `idx` into ProcessTable.nexts.
-fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -339,7 +339,7 @@ fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
 // once VUMA gains an import mechanism.)
 
 // sched_init: initialize an empty runqueue. Idempotent.
-fn sched_init(rq: State<Runqueue>) {
+transform sched_init(rq: State<Runqueue>) {
     rq.head = 256;
     rq.tail = 256;
     rq.count = 0;
@@ -347,7 +347,7 @@ fn sched_init(rq: State<Runqueue>) {
 
 // sched_enqueue: add task `task_idx` to the tail of the runqueue. Sets
 // the task's state to READY (2). Bumps rq.count.
-fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
+transform sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
     if rq.head == 256 {
         rq.head = task_idx;
         rq.tail = task_idx;
@@ -363,7 +363,7 @@ fn sched_enqueue(rq: State<Runqueue>, tbl: State<ProcessTable>, task_idx: u32) {
 
 // sched_dequeue: remove and return the task with the LOWEST vruntime
 // (CFS "pick next" step). Returns 256 if the runqueue is empty.
-fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
+transform sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     if rq.head == 256 {
         return 256;
     }
@@ -400,7 +400,7 @@ fn sched_dequeue(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
 
 // schedule: pick the next task to run. CFS "pick min vruntime". Returns
 // the task index, or 256 if no tasks are runnable.
-fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
+transform schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
     return sched_dequeue(rq, tbl);
 }
 
@@ -408,7 +408,7 @@ fn schedule(rq: State<Runqueue>, tbl: State<ProcessTable>) -> u32 {
 // saved-context overload fields (mm_root, fs_root, fds). See R4a+b's
 // scheduler.vuma header "Saved-context overload" section for the field
 // mapping and the safety rationale.
-fn sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+transform sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
     pt_set_mm_root(tbl, task_idx, tf.pc);      // saved PC → mm_root
     pt_set_fs_root(tbl, task_idx, tf.sp);      // saved SP → fs_root
     pt_set_fds(tbl, task_idx, tf.status);      // saved status → fds
@@ -416,7 +416,7 @@ fn sched_save_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFra
 
 // sched_restore_context: copy the Task slot's saved-context overload
 // fields (mm_root, fs_root, fds) back into tf.{pc, sp, status}.
-fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
+transform sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<TrapFrame>) {
     tf.pc = pt_get_mm_root(tbl, task_idx);     // mm_root → saved PC
     tf.sp = pt_get_fs_root(tbl, task_idx);     // fs_root → saved SP
     tf.status = pt_get_fds(tbl, task_idx);     // fds → saved status
@@ -429,7 +429,7 @@ fn sched_restore_context(tbl: State<ProcessTable>, task_idx: u32, tf: State<Trap
 // sched_restore_context call them and VUMA has no import.)
 // ────────────────────────────────────────────────────────────────────────────
 
-fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -442,7 +442,7 @@ fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -453,7 +453,7 @@ fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     }
 }
 
-fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -466,7 +466,7 @@ fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -477,7 +477,7 @@ fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     }
 }
 
-fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -490,7 +490,7 @@ fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
     return v;
 }
 
-fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -521,7 +521,7 @@ extern "C" {
     // the wasm module at the instruction after the call when ready.
     // Browser: setTimeout-based yield. Wasmtime: immediate return.
     // Hosted x86_64: __ffi_fallback_stub (no-op).
-    fn host_yield();
+    transform host_yield();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -537,7 +537,7 @@ extern "C" {
 // + sched_restore_context, tf via sched_restore_context + sched_save_
 // context). The `current` local holds the task index that was just
 // restored (so we know which task to save back into on resume).
-fn wasm_sched_loop(rq: State<Runqueue>, tbl: State<ProcessTable>, tf: State<TrapFrame>) {
+transform wasm_sched_loop(rq: State<Runqueue>, tbl: State<ProcessTable>, tf: State<TrapFrame>) {
     // Single-iteration stub for hosted mode — see file header "Why does
     // the loop run at most once in hosted mode?". K13+ will replace
     // this `let iter = 0; while iter < 1 { ... iter = iter + 1; }`
@@ -576,10 +576,10 @@ fn wasm_sched_loop(rq: State<Runqueue>, tbl: State<ProcessTable>, tf: State<Trap
 // ────────────────────────────────────────────────────────────────────────────
 // Self-test (the R4d DoD).
 // ────────────────────────────────────────────────────────────────────────────
-// The contract specifies `fn main() -> i32 { return 0; }` stub — the
+// The contract specifies `transform main() -> i32 { return 0; }` stub — the
 // wasm_sched_loop body is verified by IVE Pass + compile, not by
 // execution (see file header "Why does the loop run at most once in
 // hosted mode?"). The stub returns 0 unconditionally.
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

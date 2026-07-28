@@ -9,7 +9,7 @@ const SCRYPT_MASK32: u32 = 4294967295;
 // 32-bit rotate left.
 // ===========================================================================
 
-fn scrypt_rotl32(x: u32, n: u32) -> u32 {
+transform scrypt_rotl32(x: u32, n: u32) -> u32 {
     return ((x << n) | (x >> (32 - n))) & SCRYPT_MASK32;
 }
 
@@ -17,7 +17,7 @@ fn scrypt_rotl32(x: u32, n: u32) -> u32 {
 // Little-endian 32-bit load/store.
 // ===========================================================================
 
-fn scrypt_load_u32_le(ptr: Address, off: u32) -> u32 {
+transform scrypt_load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -25,7 +25,7 @@ fn scrypt_load_u32_le(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn scrypt_store_u32_le(ptr: Address, off: u32, val: u32) {
+transform scrypt_store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -36,7 +36,7 @@ fn scrypt_store_u32_le(ptr: Address, off: u32, val: u32) {
 // Salsa20/8 quarter-round (operates on 4 u32 words via 16-byte block).
 // ===========================================================================
 
-fn scrypt_salsa20_quarterround(block: Address, a: u32, b: u32, c: u32, d: u32) {
+transform scrypt_salsa20_quarterround(block: Address, a: u32, b: u32, c: u32, d: u32) {
     va: u32 = scrypt_load_u32_le(block, a * 4);
     vb: u32 = scrypt_load_u32_le(block, b * 4);
     vc: u32 = scrypt_load_u32_le(block, c * 4);
@@ -60,7 +60,7 @@ fn scrypt_salsa20_quarterround(block: Address, a: u32, b: u32, c: u32, d: u32) {
 // back at the end. The block is modified in place.
 // ===========================================================================
 
-fn scrypt_salsa20_8_core(block: Address) {
+transform scrypt_salsa20_8_core(block: Address) {
     // Save the original input for the final addition.
     saved = allocate(64);
     i: u32 = 0;
@@ -100,7 +100,7 @@ fn scrypt_salsa20_8_core(block: Address) {
 //           Y'[r..2r-1] = Y[1], Y[3], ..., Y[2r-1]
 // ===========================================================================
 
-fn scrypt_blockmix(input: Address, output: Address, r: u32) {
+transform scrypt_blockmix(input: Address, output: Address, r: u32) {
     block_size: u32 = 64 * r;
     x = allocate(64);
     // X = B[2r-1] (last block)
@@ -151,7 +151,7 @@ fn scrypt_blockmix(input: Address, output: Address, r: u32) {
 // index into V mod N.
 // ===========================================================================
 
-fn scrypt_integerify(b: Address, r: u32) -> u32 {
+transform scrypt_integerify(b: Address, r: u32) -> u32 {
     off: u32 = 64 * (2 * r - 1);
     lo: u32 = scrypt_load_u32_le(b, off);
     // The high 32 bits are ignored because N <= 2^32 in practice.
@@ -164,7 +164,7 @@ fn scrypt_integerify(b: Address, r: u32) -> u32 {
 //   n:             CPU/memory cost (power of 2)
 // ===========================================================================
 
-fn scrypt_romix(input: Address, output: Address, r: u32, n: u32) {
+transform scrypt_romix(input: Address, output: Address, r: u32, n: u32) {
     block_size: u32 = 128 * r;
 
     // V = array of n blocks
@@ -218,7 +218,7 @@ fn scrypt_romix(input: Address, output: Address, r: u32, n: u32) {
 //   output = PBKDF2-HMAC-SHA256(password, B, 1, out_len)
 // ===========================================================================
 
-fn scrypt(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+transform scrypt(password: Address, pass_len: u32, salt: Address, salt_len: u32,
           n: u32, r: u32, p: u32, out: Address, out_len: u32) {
     b_len: u32 = p * 128 * r;
     b = allocate(b_len);

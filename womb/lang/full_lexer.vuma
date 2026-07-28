@@ -45,8 +45,8 @@
 //   5. Writes the resulting ELF to "a.out" and exits 0 on success.
 
 extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
+    transform __vuma_alloc(size: i64) -> Address;
+    transform __vuma_free(addr: Address, size: i64);
     // POSIX syscall stubs (linked by the codegen backend — see W45 std/io and
     // the per-ISA syscall stub tables in src/codegen/*). These replace the
     // hardcoded 47-byte source that lived in the deleted src/bootstrap POC.
@@ -54,10 +54,10 @@ extern "C" {
     // `open` now takes a 3rd `mode` arg (required for O_CREAT on
     // Linux; ignored when O_CREAT is not set, so existing O_RDONLY reads
     // still work by passing mode=0).
-    fn open(path: Address, flags: i32, mode: i32) -> i32;
-    fn read(fd: i32, buf: Address, count: i64) -> i64;
-    fn close(fd: i32) -> i32;
-    fn write(fd: i32, buf: Address, count: i64) -> i64;
+    transform open(path: Address, flags: i32, mode: i32) -> i32;
+    transform read(fd: i32, buf: Address, count: i64) -> i64;
+    transform close(fd: i32) -> i32;
+    transform write(fd: i32, buf: Address, count: i64) -> i64;
     // ── process startup argument access ──
     // __vuma_argc / __vuma_argv read from a runtime-managed 16-byte slot at
     // the start of BSS, populated by the `_start` stub (see
@@ -73,8 +73,8 @@ extern "C" {
     // input_path() below uses these to read argv[1] as the source file
     // path, falling back to the hardcoded "womb/lang/hello.vuma" when argc
     // < 2 (i.e., no path argument was provided).
-    fn __vuma_argc() -> i32;
-    fn __vuma_argv() -> Address;   // *const *const u8
+    transform __vuma_argc() -> i32;
+    transform __vuma_argv() -> Address;   // *const *const u8
 
     // ── cross-module pipeline entry points ──
     // Each lives in its own .vuma file; the runtime linker resolves the calls
@@ -89,66 +89,66 @@ extern "C" {
     // future runtime change outside the file ownership. The extern
     // declarations below are the contract; the bodies live in the named
     // .vuma files and are linked at compile time.
-    fn name_hash(src: Address, start: u32, len: u32) -> u32;       // full_parser.vuma
-    fn parse(tokens: Address, token_count: u32, src: Address, ast: Address, ast_cap: u32) -> u32;  // full_parser.vuma
-    fn scg_construct(ast: Address) -> u32;                          // ir_builder.vuma (stub)
-    fn irb_build_main(ast: Address, main_hash: u32, ir_buf: Address, alloc_h: u32, free_h: u32, valloc_h: u32, vfree_h: u32) -> u32;  // ir_builder.vuma (+4 alloc/free callee hashes)
-    fn bd_infer(ir_buf: Address) -> u32;                            // ir_builder.vuma (stub)
-    fn ive_verify(ir_buf: Address) -> u32;                          // ir_builder.vuma (stub)
-    fn codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32;  // codegen.vuma
-    fn emit_runtime_stubs(code: Address, code_cap: u32) -> u32;  // codegen.vuma
-    fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32;  // elf.vuma
-    fn __vuma_load_u8(addr: Address) -> u64;
-    fn __vuma_store_u8(addr: Address, val: u64);
+    transform name_hash(src: Address, start: u32, len: u32) -> u32;       // full_parser.vuma
+    transform parse(tokens: Address, token_count: u32, src: Address, ast: Address, ast_cap: u32) -> u32;  // full_parser.vuma
+    transform scg_construct(ast: Address) -> u32;                          // ir_builder.vuma (stub)
+    transform irb_build_main(ast: Address, main_hash: u32, ir_buf: Address, alloc_h: u32, free_h: u32, valloc_h: u32, vfree_h: u32) -> u32;  // ir_builder.vuma (+4 alloc/free callee hashes)
+    transform bd_infer(ir_buf: Address) -> u32;                            // ir_builder.vuma (stub)
+    transform ive_verify(ir_buf: Address) -> u32;                          // ir_builder.vuma (stub)
+    transform codegen_emit(ir_buf: Address, code: Address, code_cap: u32, start_offset: u32, print_int_offset: u32, print_int_hash: u32) -> u32;  // codegen.vuma
+    transform emit_runtime_stubs(code: Address, code_cap: u32) -> u32;  // codegen.vuma
+    transform write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32;  // elf.vuma
+    transform __vuma_load_u8(addr: Address) -> u64;
+    transform __vuma_store_u8(addr: Address, val: u64);
 }
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
     __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
     __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
     __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = __vuma_load_u8(ptr + offset); b1: u64 = __vuma_load_u8(ptr + offset + 1);
     b2: u64 = __vuma_load_u8(ptr + offset + 2); b3: u64 = __vuma_load_u8(ptr + offset + 3);
     b4: u64 = __vuma_load_u8(ptr + offset + 4); b5: u64 = __vuma_load_u8(ptr + offset + 5);
     b6: u64 = __vuma_load_u8(ptr + offset + 6); b7: u64 = __vuma_load_u8(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
     __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = __vuma_load_u8(ptr + offset); b1: u32 = __vuma_load_u8(ptr + offset + 1);
     b2: u32 = __vuma_load_u8(ptr + offset + 2); b3: u32 = __vuma_load_u8(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
 // Character classifiers
-fn is_alpha(c: u32) -> u32 {
+transform is_alpha(c: u32) -> u32 {
     if c >= 97 { if c <= 122 { return 1; } }
     if c >= 65 { if c <= 90 { return 1; } }
     if c == 95 { return 1; }
     return 0;
 }
-fn is_digit(c: u32) -> u32 {
+transform is_digit(c: u32) -> u32 {
     if c >= 48 { if c <= 57 { return 1; } }
     return 0;
 }
-fn is_alnum(c: u32) -> u32 {
+transform is_alnum(c: u32) -> u32 {
     if is_alpha(c) == 1 { return 1; }
     if is_digit(c) == 1 { return 1; }
     return 0;
 }
-fn is_space(c: u32) -> u32 {
+transform is_space(c: u32) -> u32 {
     if c == 32 { return 1; }
     if c == 9 { return 1; }
     if c == 10 { return 1; }
     if c == 13 { return 1; }
     return 0;
 }
-fn is_hex(c: u32) -> u32 {
+transform is_hex(c: u32) -> u32 {
     if is_digit(c) == 1 { return 1; }
     if c >= 97 { if c <= 102 { return 1; } }
     if c >= 65 { if c <= 70 { return 1; } }
@@ -156,7 +156,7 @@ fn is_hex(c: u32) -> u32 {
 }
 
 // Store token
-fn store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val: u64) {
+transform store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val: u64) {
     offset: u32 = idx * 24;
     store_u32(tokens, offset, ttype);
     store_u32(tokens, offset + 4, start);
@@ -165,7 +165,7 @@ fn store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val:
 }
 
 // Check if a substring matches a keyword
-fn match_keyword(src: Address, start: u32, len: u32, k1: u32, k2: u32, k3: u32, k4: u32, k5: u32, k6: u32) -> u32 {
+transform match_keyword(src: Address, start: u32, len: u32, k1: u32, k2: u32, k3: u32, k4: u32, k5: u32, k6: u32) -> u32 {
     if len != 6 { return 0; }
     if __vuma_load_u8(src + start) != k1 { return 0; }
     if __vuma_load_u8(src + start + 1) != k2 { return 0; }
@@ -178,7 +178,7 @@ fn match_keyword(src: Address, start: u32, len: u32, k1: u32, k2: u32, k3: u32, 
 
 // Full lexer: tokenizes VUMA source including string literals and all operators.
 // Returns token count.
-fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
+transform full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
     pos: u32 = 0;
     count: u32 = 0;
     
@@ -258,7 +258,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
             if len == 2 {
                 f: u32 = __vuma_load_u8(src + start);
                 s: u32 = __vuma_load_u8(src + start + 1);
-                if f == 102 { if s == 110 { ttype = 10; } }      // fn
+                if f == 102 { if s == 110 { ttype = 10; } }      // transform
                 else { if f == 105 { if s == 102 { ttype = 12; } } }  // if
                 else { if f == 97 { if s == 115 { ttype = 31; } } }   // as
                 else { if f == 105 { if s == 110 { ttype = 32; } } }  // in
@@ -532,7 +532,7 @@ fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32
 // into the buffer `buf`. Used by input_path() when argc < 2 (no path
 // argument provided) or when argv[1] is too long for the buffer. The caller
 // owns `buf` and frees it with __vuma_free(buf, 256).
-fn write_fallback_path(buf: Address) {
+transform write_fallback_path(buf: Address) {
     __vuma_store_u8(buf + 0, 119);   // w
     __vuma_store_u8(buf + 1, 111);   // o
     __vuma_store_u8(buf + 2, 109);   // m
@@ -567,7 +567,7 @@ fn write_fallback_path(buf: Address) {
 // The fallback path is relative to the process CWD; the test runs
 // the compiler from the repo root, so "womb/lang/hello.vuma" resolves
 // correctly.
-fn input_path() -> Address {
+transform input_path() -> Address {
     buf_size: i64 = 256;
     buf = __vuma_alloc(buf_size);
     argc: i32 = __vuma_argc();
@@ -603,7 +603,7 @@ fn input_path() -> Address {
 // read, or -1 on open failure. (VUMA has no out-params, so the caller owns the
 // buffer and we return only the length — same pattern as the W45 std/io
 // raw-syscall helpers.) `path` is freed by the caller.
-fn read_file_into(path: Address, buf: Address, cap: i64) -> i64 {
+transform read_file_into(path: Address, buf: Address, cap: i64) -> i64 {
     fd: i32 = open(path, 0, 0);   // O_RDONLY = 0, mode = 0 (ignored)
     if fd < 0 { return -1; }
     n: i64 = read(fd, buf, cap);
@@ -618,7 +618,7 @@ fn read_file_into(path: Address, buf: Address, cap: i64) -> i64 {
 // Build the NUL-terminated string "main" in a 5-byte heap buffer.
 // Used to compute main_hash = name_hash("main") so irb_build_main can
 // locate the entry function by hash. Caller frees with __vuma_free(ptr, 5).
-fn main_str() -> Address {
+transform main_str() -> Address {
     p = __vuma_alloc(5);
     __vuma_store_u8(p + 0, 109);  // m
     __vuma_store_u8(p + 1, 97);   // a
@@ -631,7 +631,7 @@ fn main_str() -> Address {
 // Build the NUL-terminated string "print_int" in a 10-byte heap buffer.
 // Used to compute print_int_hash = name_hash("print_int") so codegen_emit
 // can dispatch IR_CALL targets. Caller frees with __vuma_free(ptr, 10).
-fn print_int_str() -> Address {
+transform print_int_str() -> Address {
     p = __vuma_alloc(10);
     __vuma_store_u8(p + 0, 112);   // p
     __vuma_store_u8(p + 1, 114);   // r
@@ -655,7 +655,7 @@ fn print_int_str() -> Address {
 // a heap buffer; the caller frees with __vuma_free(ptr, <len+1>).
 
 // "allocate" (8 chars + NUL = 9 bytes).
-fn allocate_str() -> Address {
+transform allocate_str() -> Address {
     p = __vuma_alloc(9);
     __vuma_store_u8(p + 0, 97);    // a
     __vuma_store_u8(p + 1, 108);   // l
@@ -670,7 +670,7 @@ fn allocate_str() -> Address {
 }
 
 // "free" (4 chars + NUL = 5 bytes).
-fn free_str() -> Address {
+transform free_str() -> Address {
     p = __vuma_alloc(5);
     __vuma_store_u8(p + 0, 102);   // f
     __vuma_store_u8(p + 1, 114);   // r
@@ -681,7 +681,7 @@ fn free_str() -> Address {
 }
 
 // "__vuma_alloc" (12 chars + NUL = 13 bytes).
-fn vuma_alloc_str() -> Address {
+transform vuma_alloc_str() -> Address {
     p = __vuma_alloc(13);
     __vuma_store_u8(p + 0, 95);    // _
     __vuma_store_u8(p + 1, 95);    // _
@@ -700,7 +700,7 @@ fn vuma_alloc_str() -> Address {
 }
 
 // "__vuma_free" (11 chars + NUL = 12 bytes).
-fn vuma_free_str() -> Address {
+transform vuma_free_str() -> Address {
     p = __vuma_alloc(12);
     __vuma_store_u8(p + 0, 95);    // _
     __vuma_store_u8(p + 1, 95);    // _
@@ -721,7 +721,7 @@ fn vuma_free_str() -> Address {
 // This is the output path for the emitted ELF executable. The caller frees
 // with __vuma_free(ptr, 6). The file is created with mode 0o755 so it's
 // executable after the ELF write completes.
-fn output_path() -> Address {
+transform output_path() -> Address {
     p = __vuma_alloc(6);
     __vuma_store_u8(p + 0, 97);    // a
     __vuma_store_u8(p + 1, 46);    // .
@@ -745,7 +745,7 @@ fn output_path() -> Address {
 // fallback "womb/lang/hello.vuma" — see input_path() above. The output
 // path "a.out" could similarly become argv[2] (or a -o flag) in a future
 // wave; for now it remains fixed.
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Pipeline buffer sizes ──
     // These are conservative upper bounds for the hello.vuma subset. Larger
     // programs would need growing logic (the parser/IR builder currently

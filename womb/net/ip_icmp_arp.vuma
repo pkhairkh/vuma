@@ -88,19 +88,19 @@ const SPACE: u32 = 32;
 // Byte-level helpers (little-endian and big-endian)
 // ===========================================================================
 
-fn store_u16_be(addr: Address, off: u32, val: u32) {
+transform store_u16_be(addr: Address, off: u32, val: u32) {
     *(addr + off) = (val >> 8) & 255;
     *(addr + off + 1) = val & 255;
     return;
 }
 
-fn load_u16_be(addr: Address, off: u32) -> u32 {
+transform load_u16_be(addr: Address, off: u32) -> u32 {
     let hi: u32 = *(addr + off);
     let lo: u32 = *(addr + off + 1);
     return ((hi & 255) << 8) | (lo & 255);
 }
 
-fn store_u32_be(addr: Address, off: u32, val: u32) {
+transform store_u32_be(addr: Address, off: u32, val: u32) {
     *(addr + off)     = (val >> 24) & 255;
     *(addr + off + 1) = (val >> 16) & 255;
     *(addr + off + 2) = (val >> 8) & 255;
@@ -108,7 +108,7 @@ fn store_u32_be(addr: Address, off: u32, val: u32) {
     return;
 }
 
-fn load_u32_be(addr: Address, off: u32) -> u32 {
+transform load_u32_be(addr: Address, off: u32) -> u32 {
     let b0: u32 = *(addr + off);
     let b1: u32 = *(addr + off + 1);
     let b2: u32 = *(addr + off + 2);
@@ -116,7 +116,7 @@ fn load_u32_be(addr: Address, off: u32) -> u32 {
     return ((b0 & 255) << 24) | ((b1 & 255) << 16) | ((b2 & 255) << 8) | (b3 & 255);
 }
 
-fn store_u32_le(addr: Address, off: u32, val: u32) {
+transform store_u32_le(addr: Address, off: u32, val: u32) {
     *(addr + off)     = val & 255;
     *(addr + off + 1) = (val >> 8) & 255;
     *(addr + off + 2) = (val >> 16) & 255;
@@ -124,7 +124,7 @@ fn store_u32_le(addr: Address, off: u32, val: u32) {
     return;
 }
 
-fn load_u32_le(addr: Address, off: u32) -> u32 {
+transform load_u32_le(addr: Address, off: u32) -> u32 {
     let b0: u32 = *(addr + off);
     let b1: u32 = *(addr + off + 1);
     let b2: u32 = *(addr + off + 2);
@@ -136,7 +136,7 @@ fn load_u32_le(addr: Address, off: u32) -> u32 {
 // String helpers
 // ===========================================================================
 
-fn strlen(s: Address) -> u32 {
+transform strlen(s: Address) -> u32 {
     let n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return n;
@@ -144,7 +144,7 @@ fn strlen(s: Address) -> u32 {
 
 // Copy null-terminated src to dst+off. Returns bytes copied (excluding NUL).
 // Bounds-checked against max.
-fn copy_str(dst: Address, off: u32, src: Address, max: u32) -> u32 {
+transform copy_str(dst: Address, off: u32, src: Address, max: u32) -> u32 {
     let n: u32 = 0;
     while n < max {
         let b: u32 = *(src + n);
@@ -156,7 +156,7 @@ fn copy_str(dst: Address, off: u32, src: Address, max: u32) -> u32 {
 }
 
 // Write unsigned u32 as decimal ASCII at dst+off. Returns bytes written.
-fn write_u32_decimal(dst: Address, off: u32, val: u32) -> u32 {
+transform write_u32_decimal(dst: Address, off: u32, val: u32) -> u32 {
     if val == 0 {
         *(dst + off) = 48;
         return 1;
@@ -184,7 +184,7 @@ fn write_u32_decimal(dst: Address, off: u32, val: u32) -> u32 {
 // ===========================================================================
 
 // Number of bytes needed to DER-encode a length value.
-fn ber_length_size(len: u32) -> u32 {
+transform ber_length_size(len: u32) -> u32 {
     if len < 128 { return 1; }
     if len < 256 { return 2; }
     if len < 65536 { return 3; }
@@ -192,7 +192,7 @@ fn ber_length_size(len: u32) -> u32 {
 }
 
 // Write DER length at buf+off. Returns bytes written.
-fn ber_write_length(buf: Address, off: u32, len: u32) -> u32 {
+transform ber_write_length(buf: Address, off: u32, len: u32) -> u32 {
     if len < 128 {
         *(buf + off) = len & 255;
         return 1;
@@ -216,7 +216,7 @@ fn ber_write_length(buf: Address, off: u32, len: u32) -> u32 {
 }
 
 // Read DER length value at buf+off (returns just the length).
-fn ber_read_length(buf: Address, off: u32) -> u32 {
+transform ber_read_length(buf: Address, off: u32) -> u32 {
     let b: u32 = *(buf + off);
     if b < 128 { return b; }
     let n: u32 = b & 127;
@@ -232,14 +232,14 @@ fn ber_read_length(buf: Address, off: u32) -> u32 {
 }
 
 // Number of bytes consumed by the DER length encoding at buf+off.
-fn ber_read_length_consumed(buf: Address, off: u32) -> u32 {
+transform ber_read_length_consumed(buf: Address, off: u32) -> u32 {
     let b: u32 = *(buf + off);
     if b < 128 { return 1; }
     return 1 + (b & 127);
 }
 
 // Total bytes occupied by an INTEGER TLV encoding the given u32.
-fn ber_int_size(val: u32) -> u32 {
+transform ber_int_size(val: u32) -> u32 {
     let nbytes: u32 = 4;
     if val < 128 { nbytes = 1; }
     else {
@@ -258,7 +258,7 @@ fn ber_int_size(val: u32) -> u32 {
 
 // Write an INTEGER TLV (tag 0x02) for the given u32 at buf+off.
 // Returns bytes written.
-fn ber_write_integer(buf: Address, off: u32, val: u32) -> u32 {
+transform ber_write_integer(buf: Address, off: u32, val: u32) -> u32 {
     let nbytes: u32 = 4;
     if val < 128 { nbytes = 1; }
     else {
@@ -289,12 +289,12 @@ fn ber_write_integer(buf: Address, off: u32, val: u32) -> u32 {
 }
 
 // Total bytes occupied by an OCTET STRING TLV holding len bytes.
-fn ber_octet_string_size(len: u32) -> u32 {
+transform ber_octet_string_size(len: u32) -> u32 {
     return 1 + ber_length_size(len) + len;
 }
 
 // Write an OCTET STRING TLV (tag 0x04) at buf+off. Returns bytes written.
-fn ber_write_octet_string(buf: Address, off: u32, data: Address, data_len: u32) -> u32 {
+transform ber_write_octet_string(buf: Address, off: u32, data: Address, data_len: u32) -> u32 {
     *(buf + off) = BER_TAG_OCTET_STRING;
     let pos: u32 = off + 1 + ber_write_length(buf, off + 1, data_len);
     let i: u32 = 0;
@@ -306,7 +306,7 @@ fn ber_write_octet_string(buf: Address, off: u32, data: Address, data_len: u32) 
 }
 
 // Total length of a complete TLV at buf (1-byte tag + length + value).
-fn ber_tlv_total_len(buf: Address) -> u32 {
+transform ber_tlv_total_len(buf: Address) -> u32 {
     let val_len: u32 = ber_read_length(buf, 1);
     let consumed: u32 = ber_read_length_consumed(buf, 1);
     return 1 + consumed + val_len;
@@ -332,7 +332,7 @@ fn ber_tlv_total_len(buf: Address) -> u32 {
 // Client request: LI=0, VN=4, Mode=3, all other fields 0.
 // Transmit timestamp is extracted for clock-offset calculation.
 
-fn ntp_build_request(out: Address) -> u32 {
+transform ntp_build_request(out: Address) -> u32 {
     let i: u32 = 0;
     while i < NTP_PACKET_SIZE {
         *(out + i) = 0;
@@ -346,7 +346,7 @@ fn ntp_build_request(out: Address) -> u32 {
 // Parse NTP response: extract transmit timestamp (bytes 40-47).
 // transmit_secs and transmit_frac are Address out-params (4-byte u32 LE slots).
 // Returns 1 on success, 0 on error (buffer too small).
-fn ntp_parse_response(buf: Address, buf_len: u32, transmit_secs: Address, transmit_frac: Address) -> u32 {
+transform ntp_parse_response(buf: Address, buf_len: u32, transmit_secs: Address, transmit_frac: Address) -> u32 {
     if buf_len < NTP_PACKET_SIZE { return 0; }
     // Transmit timestamp: bytes 40-43 = seconds, 44-47 = fraction (big-endian).
     let secs: u32 = load_u32_be(buf, 40);
@@ -360,7 +360,7 @@ fn ntp_parse_response(buf: Address, buf_len: u32, transmit_secs: Address, transm
 // server_ip is host byte order (e.g. 0xC0A80101 = 192.168.1.1).
 // out_secs / out_frac are Address out-params (4-byte u32 LE slots).
 // Returns 1 on success, 0 on error.
-fn ntp_query(server_ip: u32, server_port: u32, out_secs: Address, out_frac: Address) -> u32 {
+transform ntp_query(server_ip: u32, server_port: u32, out_secs: Address, out_frac: Address) -> u32 {
     let fd: i64 = udp_socket();
     if fd < 0 { return 0; }
 
@@ -427,7 +427,7 @@ fn ntp_query(server_ip: u32, server_port: u32, out_secs: Address, out_frac: Addr
 // Read one FTP response line into buf (up to max bytes). Returns bytes read
 // (excludes the terminating CRLF which is replaced by NUL), or 0 on error.
 // Loops tcp_recv until a CRLF is encountered.
-fn ftp_read_line(fd: i64, buf: Address, max: u32) -> u32 {
+transform ftp_read_line(fd: i64, buf: Address, max: u32) -> u32 {
     let pos: u32 = 0;
     let prev_cr: u32 = 0;
     while pos < max - 1 {
@@ -451,7 +451,7 @@ fn ftp_read_line(fd: i64, buf: Address, max: u32) -> u32 {
 
 // Send a null-terminated command string + CRLF on the control connection.
 // Returns 1 on success, 0 on error.
-fn ftp_send_line(fd: i64, cmd: Address) -> u32 {
+transform ftp_send_line(fd: i64, cmd: Address) -> u32 {
     let len: u32 = strlen(cmd);
     let buf: Address = allocate(len + 2);
     let i: u32 = 0;
@@ -465,7 +465,7 @@ fn ftp_send_line(fd: i64, cmd: Address) -> u32 {
 }
 
 // Extract the 3-digit reply code from a response line. Returns code, or 0.
-fn ftp_reply_code(line: Address) -> u32 {
+transform ftp_reply_code(line: Address) -> u32 {
     let c0: u32 = *(line + 0);
     let c1: u32 = *(line + 1);
     let c2: u32 = *(line + 2);
@@ -479,7 +479,7 @@ fn ftp_reply_code(line: Address) -> u32 {
 }
 
 // Connect to FTP server, read greeting (220). Returns control fd or -1.
-fn ftp_connect(server_ip: u32, port: u32) -> i64 {
+transform ftp_connect(server_ip: u32, port: u32) -> i64 {
     let fd: i64 = tcp_connect(server_ip, port);
     if fd < 0 { return -1; }
     let resp: Address = allocate(FTP_RESP_MAX);
@@ -498,7 +498,7 @@ fn ftp_connect(server_ip: u32, port: u32) -> i64 {
 }
 
 // USER / PASS login. Returns 1 on success (230), 0 on failure.
-fn ftp_login(fd: i64, user: Address, pass: Address) -> u32 {
+transform ftp_login(fd: i64, user: Address, pass: Address) -> u32 {
     let cmd: Address = allocate(FTP_CMD_MAX);
     let resp: Address = allocate(FTP_RESP_MAX);
 
@@ -537,7 +537,7 @@ fn ftp_login(fd: i64, user: Address, pass: Address) -> u32 {
 // Send PASV, parse 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2).
 // Writes data_ip (u32 LE, host byte order) and data_port (u32 LE) to out-params.
 // Returns 1 on success, 0 on failure.
-fn ftp_pasv(fd: i64, data_ip: Address, data_port: Address) -> u32 {
+transform ftp_pasv(fd: i64, data_ip: Address, data_port: Address) -> u32 {
     let cmd: Address = allocate(FTP_CMD_MAX);
     *(cmd + 0) = 80; *(cmd + 1) = 65; *(cmd + 2) = 83; *(cmd + 3) = 86;
     *(cmd + 4) = 0;
@@ -598,7 +598,7 @@ fn ftp_pasv(fd: i64, data_ip: Address, data_port: Address) -> u32 {
 
 // Send "RETR <filename>", open data connection, read file into out (up to
 // max_len). Returns bytes read (0 on failure).
-fn ftp_retr(fd: i64, filename: Address, out: Address, max_len: u32) -> u32 {
+transform ftp_retr(fd: i64, filename: Address, out: Address, max_len: u32) -> u32 {
     let data_ip_box: Address = allocate(4);
     let data_port_box: Address = allocate(4);
     if ftp_pasv(fd, data_ip_box, data_port_box) == 0 {
@@ -652,7 +652,7 @@ fn ftp_retr(fd: i64, filename: Address, out: Address, max_len: u32) -> u32 {
 
 // Send "STOR <filename>", open data connection, send data, close data.
 // Returns 1 on success, 0 on failure.
-fn ftp_stor(fd: i64, filename: Address, data: Address, data_len: u32) -> u32 {
+transform ftp_stor(fd: i64, filename: Address, data: Address, data_len: u32) -> u32 {
     let data_ip_box: Address = allocate(4);
     let data_port_box: Address = allocate(4);
     if ftp_pasv(fd, data_ip_box, data_port_box) == 0 {
@@ -704,7 +704,7 @@ fn ftp_stor(fd: i64, filename: Address, data: Address, data_len: u32) -> u32 {
 
 // Send "LIST", open data connection, read listing into out (up to max_len).
 // Returns bytes read.
-fn ftp_list(fd: i64, out: Address, max_len: u32) -> u32 {
+transform ftp_list(fd: i64, out: Address, max_len: u32) -> u32 {
     let data_ip_box: Address = allocate(4);
     let data_port_box: Address = allocate(4);
     if ftp_pasv(fd, data_ip_box, data_port_box) == 0 {
@@ -749,7 +749,7 @@ fn ftp_list(fd: i64, out: Address, max_len: u32) -> u32 {
 }
 
 // Send "QUIT". (Response 221 is read but not checked — best effort.)
-fn ftp_quit(fd: i64) {
+transform ftp_quit(fd: i64) {
     let cmd: Address = allocate(FTP_CMD_MAX);
     *(cmd + 0) = 81; *(cmd + 1) = 85; *(cmd + 2) = 73; *(cmd + 3) = 84;
     *(cmd + 4) = 0;
@@ -797,7 +797,7 @@ fn ftp_quit(fd: i64) {
 
 // Build a BindRequest message. `dn` and `password` are null-terminated.
 // Returns total message length written to `out`.
-fn ldap_build_bind_request(version: u32, dn: Address, password: Address, msgid: u32, out: Address) -> u32 {
+transform ldap_build_bind_request(version: u32, dn: Address, password: Address, msgid: u32, out: Address) -> u32 {
     let dn_len: u32 = strlen(dn);
     let pw_len: u32 = strlen(password);
 
@@ -850,7 +850,7 @@ fn ldap_build_bind_request(version: u32, dn: Address, password: Address, msgid: 
 // length is derived by reading the tag and length bytes at `filter`.
 // `scope` is 0=base, 1=one-level, 2=subtree.
 // Returns total message length written to `out`.
-fn ldap_build_search_request(base_dn: Address, scope: u32, filter: Address, msgid: u32, out: Address) -> u32 {
+transform ldap_build_search_request(base_dn: Address, scope: u32, filter: Address, msgid: u32, out: Address) -> u32 {
     let base_len: u32 = strlen(base_dn);
     let filter_len: u32 = ber_tlv_total_len(filter);
 
@@ -931,7 +931,7 @@ fn ldap_build_search_request(base_dn: Address, scope: u32, filter: Address, msgi
 //       diagnosticMessage LDAPString,
 //       ...
 //   }
-fn ldap_parse_result(buf: Address, buf_len: u32, result_code: Address, dn: Address) -> u32 {
+transform ldap_parse_result(buf: Address, buf_len: u32, result_code: Address, dn: Address) -> u32 {
     if buf_len < 4 { return 0; }
     let pos: u32 = 0;
 
@@ -1005,7 +1005,7 @@ fn ldap_parse_result(buf: Address, buf_len: u32, result_code: Address, dn: Addre
 // Build an SNMPv1 GetRequest message. `community` is null-terminated.
 // `oid` points to the raw BER OID value bytes (without tag/length); oid_len is
 // the number of value bytes. Returns total message length written to `out`.
-fn snmp_build_get(community: Address, oid: Address, oid_len: u32, request_id: u32, out: Address) -> u32 {
+transform snmp_build_get(community: Address, oid: Address, oid_len: u32, request_id: u32, out: Address) -> u32 {
     let comm_len: u32 = strlen(community);
 
     // varbind = SEQUENCE { OID, NULL }
@@ -1083,7 +1083,7 @@ fn snmp_build_get(community: Address, oid: Address, oid_len: u32, request_id: u3
 // (null-terminated). Writes the value bytes (V of the first varbind's value TLV)
 // into `value` (up to the limit read from value_len) and writes the actual
 // value length back to `value_len` (4-byte u32 LE). Returns 1 on success, 0 on error.
-fn snmp_parse_response(buf: Address, buf_len: u32, community: Address, value: Address, value_len: Address) -> u32 {
+transform snmp_parse_response(buf: Address, buf_len: u32, community: Address, value: Address, value_len: Address) -> u32 {
     if buf_len < 2 { return 0; }
     let pos: u32 = 0;
 
@@ -1192,7 +1192,7 @@ fn snmp_parse_response(buf: Address, buf_len: u32, community: Address, value: Ad
 
 // Build a SIP request. All Address args are null-terminated strings.
 // Returns total bytes written to `out`.
-fn sip_build_request(method: Address, request_uri: Address, from: Address, to: Address, call_id: Address, cseq: u32, out: Address, max_len: u32) -> u32 {
+transform sip_build_request(method: Address, request_uri: Address, from: Address, to: Address, call_id: Address, cseq: u32, out: Address, max_len: u32) -> u32 {
     let pos: u32 = 0;
 
     // Request line: METHOD uri SIP/2.0 CRLF
@@ -1263,7 +1263,7 @@ fn sip_build_request(method: Address, request_uri: Address, from: Address, to: A
 // Parse a SIP response status line. Writes the 3-digit status code as u32 LE
 // to `status_code`, and copies the reason phrase (null-terminated) to `reason`.
 // Returns 1 on success, 0 on error.
-fn sip_parse_response(buf: Address, buf_len: u32, status_code: Address, reason: Address) -> u32 {
+transform sip_parse_response(buf: Address, buf_len: u32, status_code: Address, reason: Address) -> u32 {
     // Expect "SIP/2.0 " (7 bytes) then 3 digits, space, reason until CRLF.
     if buf_len < 12 { return 0; }
     if *(buf + 0) != 83 { return 0; }   // 'S'
@@ -1314,7 +1314,7 @@ fn sip_parse_response(buf: Address, buf_len: u32, status_code: Address, reason: 
 //   CSeq: <cseq>\r\n
 //   ...
 
-fn rtsp_build_request(method: Address, url: Address, cseq: u32, out: Address, max_len: u32) -> u32 {
+transform rtsp_build_request(method: Address, url: Address, cseq: u32, out: Address, max_len: u32) -> u32 {
     let pos: u32 = 0;
 
     // method url RTSP/2.0 CRLF
@@ -1342,7 +1342,7 @@ fn rtsp_build_request(method: Address, url: Address, cseq: u32, out: Address, ma
 
 // Parse an RTSP response. Writes the 3-digit status code (u32 LE) to
 // `status_code` and the CSeq value (u32 LE) to `cseq`. Returns 1 on success.
-fn rtsp_parse_response(buf: Address, buf_len: u32, status_code: Address, cseq: Address) -> u32 {
+transform rtsp_parse_response(buf: Address, buf_len: u32, status_code: Address, cseq: Address) -> u32 {
     if buf_len < 12 { return 0; }
     // Status line: "RTSP/2.0 <code> <reason> CRLF"
     if *(buf + 0) != 82 { return 0; }   // 'R'
@@ -1451,7 +1451,7 @@ fn rtsp_parse_response(buf: Address, buf_len: u32, status_code: Address, cseq: A
 // KEEPALIVE (type=4): header only, length = 19.
 
 // Write the 16-byte marker (all 0xFF) at buf+off.
-fn bgp_write_marker(buf: Address, off: u32) {
+transform bgp_write_marker(buf: Address, off: u32) {
     let i: u32 = 0;
     while i < 16 {
         *(buf + off + i) = BGP_MARKER_BYTE;
@@ -1461,7 +1461,7 @@ fn bgp_write_marker(buf: Address, off: u32) {
 }
 
 // Build a BGP OPEN message. Returns total bytes written to `out`.
-fn bgp_build_open(my_as: u32, hold_time: u32, router_id: u32, out: Address) -> u32 {
+transform bgp_build_open(my_as: u32, hold_time: u32, router_id: u32, out: Address) -> u32 {
     let body_len: u32 = 10;
     let total_len: u32 = BGP_HEADER_LEN + body_len;   // 29
 
@@ -1482,7 +1482,7 @@ fn bgp_build_open(my_as: u32, hold_time: u32, router_id: u32, out: Address) -> u
 // Build a BGP UPDATE message. `routes` is the raw NLRI bytes; this
 // builder sends an empty withdrawn-routes section and empty path-attributes
 // section, with `routes` as the NLRI payload. Returns total bytes written.
-fn bgp_build_update(routes: Address, routes_len: u32, out: Address) -> u32 {
+transform bgp_build_update(routes: Address, routes_len: u32, out: Address) -> u32 {
     let body_len: u32 = 2 + 2 + routes_len;
     let total_len: u32 = BGP_HEADER_LEN + body_len;
 
@@ -1506,7 +1506,7 @@ fn bgp_build_update(routes: Address, routes_len: u32, out: Address) -> u32 {
 }
 
 // Build a BGP KEEPALIVE message (header only). Returns 19.
-fn bgp_build_keepalive(out: Address) -> u32 {
+transform bgp_build_keepalive(out: Address) -> u32 {
     bgp_write_marker(out, 0);
     store_u16_be(out, 16, BGP_HEADER_LEN);
     *(out + 18) = BGP_TYPE_KEEPALIVE;
@@ -1516,7 +1516,7 @@ fn bgp_build_keepalive(out: Address) -> u32 {
 // Parse a BGP message. Verifies the 16-byte marker. Writes the type (1 byte at
 // `type`), the body Address (pointer into `buf` at offset 19) to `body`, and
 // the body length (u32 LE) to `body_len`. Returns 1 on success, 0 on error.
-fn bgp_parse_message(buf: Address, buf_len: u32, type: Address, body: Address, body_len: Address) -> u32 {
+transform bgp_parse_message(buf: Address, buf_len: u32, type: Address, body: Address, body_len: Address) -> u32 {
     if buf_len < BGP_HEADER_LEN { return 0; }
 
     // Verify marker
@@ -1582,7 +1582,7 @@ fn bgp_parse_message(buf: Address, buf_len: u32, type: Address, body: Address, b
 // Build a complete SCTP INIT packet (common header + INIT chunk).
 // src_port/dst_port are u16 in host order. init_tag is the local tag.
 // Returns total bytes written (32).
-fn sctp_build_init(src_port: u16, dst_port: u16, init_tag: u32, out: Address) -> u32 {
+transform sctp_build_init(src_port: u16, dst_port: u16, init_tag: u32, out: Address) -> u32 {
     // Common header
     store_u16_be(out, 0, src_port as u32);
     store_u16_be(out, 2, dst_port as u32);
@@ -1605,7 +1605,7 @@ fn sctp_build_init(src_port: u16, dst_port: u16, init_tag: u32, out: Address) ->
 // Build an SCTP DATA chunk (no common header — caller prepends header if
 // needed). Pads the chunk to a 4-byte boundary per RFC 4960. Returns total
 // bytes written (including padding).
-fn sctp_build_data(tsn: u32, stream_id: u16, ppid: u32, data: Address, data_len: u32, out: Address) -> u32 {
+transform sctp_build_data(tsn: u32, stream_id: u16, ppid: u32, data: Address, data_len: u32, out: Address) -> u32 {
     let chunk_len: u32 = 16 + data_len;
     let padded_len: u32 = (chunk_len + 3) & 4294967292;   // round up to multiple of 4
 
@@ -1634,7 +1634,7 @@ fn sctp_build_data(tsn: u32, stream_id: u16, ppid: u32, data: Address, data_len:
 // Parse a single SCTP chunk. Writes the type (1 byte), flags (1 byte),
 // length (u32 LE), value Address (pointer into buf at the chunk's value area),
 // and value_len (u32 LE = length - 4). Returns 1 on success, 0 on error.
-fn sctp_parse_chunk(buf: Address, buf_len: u32, type: Address, flags: Address, length: Address, value: Address, value_len: Address) -> u32 {
+transform sctp_parse_chunk(buf: Address, buf_len: u32, type: Address, flags: Address, length: Address, value: Address, value_len: Address) -> u32 {
     if buf_len < 4 { return 0; }
 
     let chunk_type: u32 = *(buf + 0) & 255;

@@ -6,15 +6,15 @@
 const MASK32: u32 = 4294967295;
 
 // Reuse the canonical S-box / inverse S-box / xtime / gmul from aes128.vuma.
-fn aes256_sbox(idx: u32) -> u32 { return sbox(idx); }
-fn aes256_inv_sbox(idx: u32) -> u32 { return inv_sbox(idx); }
-fn aes256_xtime(x: u32) -> u32 { return xtime(x); }
-fn aes256_gmul(a: u32, b: u32) -> u32 { return gmul(a, b); }
+transform aes256_sbox(idx: u32) -> u32 { return sbox(idx); }
+transform aes256_inv_sbox(idx: u32) -> u32 { return inv_sbox(idx); }
+transform aes256_xtime(x: u32) -> u32 { return xtime(x); }
+transform aes256_gmul(a: u32, b: u32) -> u32 { return gmul(a, b); }
 
 // ===========================================================================
 // Key expansion: Nk=8, Nr=14, 60 words = 240 bytes
 // ===========================================================================
-fn aes256_key_expansion(key: Address, rk: Address) {
+transform aes256_key_expansion(key: Address, rk: Address) {
     i: u32 = 0;
     while i < 32 { *(rk + i) = *(key + i); i = i + 1; }
     rcon: u32 = 1;
@@ -44,19 +44,19 @@ fn aes256_key_expansion(key: Address, rk: Address) {
     }
 }
 
-fn aes256_add_round_key(state: Address, rk_off: Address) {
+transform aes256_add_round_key(state: Address, rk_off: Address) {
     i: u32 = 0;
     while i < 16 { *(state + i) = *(state + i) ^ *(rk_off + i); i = i + 1; }
 }
-fn aes256_sub_bytes(state: Address) {
+transform aes256_sub_bytes(state: Address) {
     i: u32 = 0;
     while i < 16 { *(state + i) = sbox(*(state + i)); i = i + 1; }
 }
-fn aes256_inv_sub_bytes(state: Address) {
+transform aes256_inv_sub_bytes(state: Address) {
     i: u32 = 0;
     while i < 16 { *(state + i) = inv_sbox(*(state + i)); i = i + 1; }
 }
-fn aes256_shift_rows(state: Address) {
+transform aes256_shift_rows(state: Address) {
     t: u32 = *(state + 1);
     *(state + 1) = *(state + 5); *(state + 5) = *(state + 9);
     *(state + 9) = *(state + 13); *(state + 13) = t;
@@ -68,7 +68,7 @@ fn aes256_shift_rows(state: Address) {
     *(state + 15) = *(state + 11); *(state + 11) = *(state + 7);
     *(state + 7) = *(state + 3); *(state + 3) = t;
 }
-fn aes256_inv_shift_rows(state: Address) {
+transform aes256_inv_shift_rows(state: Address) {
     t: u32 = *(state + 13);
     *(state + 13) = *(state + 9); *(state + 9) = *(state + 5);
     *(state + 5) = *(state + 1); *(state + 1) = t;
@@ -80,7 +80,7 @@ fn aes256_inv_shift_rows(state: Address) {
     *(state + 3) = *(state + 7); *(state + 7) = *(state + 11);
     *(state + 11) = *(state + 15); *(state + 15) = t;
 }
-fn aes256_mix_columns(state: Address) {
+transform aes256_mix_columns(state: Address) {
     i: u32 = 0;
     while i < 16 {
         s0: u32 = *(state + i); s1: u32 = *(state + i + 1);
@@ -93,7 +93,7 @@ fn aes256_mix_columns(state: Address) {
         i = i + 4;
     }
 }
-fn aes256_inv_mix_columns(state: Address) {
+transform aes256_inv_mix_columns(state: Address) {
     i: u32 = 0;
     while i < 16 {
         s0: u32 = *(state + i); s1: u32 = *(state + i + 1);
@@ -106,7 +106,7 @@ fn aes256_inv_mix_columns(state: Address) {
     }
 }
 
-fn aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
+transform aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
     rk = allocate(240);
     aes256_key_expansion(key, rk);
     state = allocate(16);
@@ -128,7 +128,7 @@ fn aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
     while i < 16 { *(ciphertext + i) = *(state + i); i = i + 1; }
 }
 
-fn aes256_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
+transform aes256_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
     rk = allocate(240);
     aes256_key_expansion(key, rk);
     state = allocate(16);
@@ -150,7 +150,7 @@ fn aes256_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
     while i < 16 { *(plaintext + i) = *(state + i); i = i + 1; }
 }
 
-fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     pad: u32 = 16 - (pt_len & 15);
     if pad == 0 { pad = 16; }
     padded_len: u32 = pt_len + pad;
@@ -174,7 +174,7 @@ fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
     return padded_len;
 }
 
-fn aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     prev = allocate(16);
     i: u32 = 0;
     while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
@@ -196,7 +196,7 @@ fn aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Addres
     return ct_len - pad;
 }
 
-fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) {
+transform aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) {
     ctr = allocate(16);
     i: u32 = 0;
     while i < 12 { *(ctr + i) = *(nonce + i); i = i + 1; }

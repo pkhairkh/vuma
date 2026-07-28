@@ -95,7 +95,7 @@ extern "C" {
     // `fd`. SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three already
     // match the syscall ABI; the stub is "mov eax,#1; syscall; ret".
     // Returns the byte count written (or a negative errno on failure).
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 
     // sys_exit (nr 60): terminate the process with exit code `code`.
     // Does NOT return — the stub ends with INT3 as a safety guard so a
@@ -104,7 +104,7 @@ extern "C" {
     // path). The panic() function's `return 1;` after `exit(1);` is
     // unreachable in practice; it exists only to satisfy VUMA's parser
     // (every `-> i32` function must end with a return).
-    fn exit(code: i64);
+    transform exit(code: i64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -146,7 +146,7 @@ layout PanicMsg = {
 //      for handing a State<T> to an FFI callee that takes a raw buffer
 //      pointer — see docs/language-reference.md §14.5.)
 //   4. exit(1) — halt the kernel. Does not return.
-//   5. return 1 — unreachable; satisfies VUMA's "every -> i32 fn must
+//   5. return 1 — unreachable; satisfies VUMA's "every -> i32 transform must
 //      end with return" parser rule.
 //
 // PMT field access (`banner.data[0]`, `msg.len`) is typed and endian-safe
@@ -160,7 +160,7 @@ layout PanicMsg = {
 // a void function and discard the return — same void-caller-discards-
 // i32-callee pattern as K1d's kmain calling write (write returns i64,
 // kmain discards).
-fn panic(msg: State<PanicMsg>) -> i32 {
+transform panic(msg: State<PanicMsg>) -> i32 {
     // ── Build the banner "*** KERNEL PANIC ***\n" (21 bytes) ──
     // Decimal ASCII constants (per the K12a contract's "Use decimal
     // ASCII values" rule — VUMA has no char-literal syntax):
@@ -219,7 +219,7 @@ fn panic(msg: State<PanicMsg>) -> i32 {
 // pass path. On the fail path, calls panic(msg) which prints the banner +
 // msg + halts. The panic() return value (i32) is discarded (same pattern
 // as shell.vuma:314 calling write without assignment).
-fn assert(cond: u8, msg: State<PanicMsg>) {
+transform assert(cond: u8, msg: State<PanicMsg>) {
     if cond == 0 {
         panic(msg);
     }
@@ -248,7 +248,7 @@ fn assert(cond: u8, msg: State<PanicMsg>) {
 //   K13+ may add a `panic_mock` test mode that swaps exit(1) for a
 //   flag-set + return, allowing the self-test to verify the banner was
 //   emitted without actually halting.
-fn main() -> i32 {
+transform main() -> i32 {
     // Build a "test\n" message (5 bytes: 't' 'e' 's' 't' '\n').
     let msg = state_new(PanicMsg);
     msg.data[0] = 116;  // 't'

@@ -43,13 +43,13 @@ layout BootInfo = {
 // in womb/kernel/arch/x86_64/trampoline.vuma.
 
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn exit(code: i64);
-    fn mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
-    fn munmap(addr: Address, length: u64) -> i64;
-    fn __vuma_argc() -> i64;
-    fn __vuma_argv() -> Address;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
+    transform exit(code: i64);
+    transform mmap(addr: Address, length: u64, prot: i32, flags: i32, fd: i32, offset: i64) -> Address;
+    transform munmap(addr: Address, length: u64) -> i64;
+    transform __vuma_argc() -> i64;
+    transform __vuma_argv() -> Address;
 }
 
 // ── Argument-flag constants (decimal — matches womb/syscalls.vuma) ─────────
@@ -75,7 +75,7 @@ const HOST_PAGE_SIZE: u64 = 4096;
 // this first to obtain the boot environment before bringing up the console,
 // memory arenas, etc.
 
-fn host_init() -> State<BootInfo> {
+transform host_init() -> State<BootInfo> {
     let b = state_new(BootInfo);
     let ac: i64 = __vuma_argc();
     let av: Address = __vuma_argv();
@@ -95,7 +95,7 @@ fn host_init() -> State<BootInfo> {
 // written (or a negative errno on failure, propagated verbatim from
 // sys_write).
 
-fn host_console_write(buf: Address, len: u64) -> i64 {
+transform host_console_write(buf: Address, len: u64) -> i64 {
     let n: i64 = write(1, buf, len as i64);
     return n;
 }
@@ -104,7 +104,7 @@ fn host_console_write(buf: Address, len: u64) -> i64 {
 // Read up to `len` bytes from stdin (fd 0) into `buf`. Returns the byte
 // count read (0 on EOF, negative on error).
 
-fn host_console_read(buf: Address, len: u64) -> i64 {
+transform host_console_read(buf: Address, len: u64) -> i64 {
     let n: i64 = read(0, buf, len as i64);
     return n;
 }
@@ -116,7 +116,7 @@ fn host_console_read(buf: Address, len: u64) -> i64 {
 // mapped region, or MAP_FAILED (-1 cast to Address) on error — callers
 // must check for that sentinel before using the returned address.
 
-fn host_alloc_pages(count: u64) -> Address {
+transform host_alloc_pages(count: u64) -> Address {
     let bytes: u64 = count * HOST_PAGE_SIZE;
     let prot: i32 = HOST_PROT_READ | HOST_PROT_WRITE;
     let flags: i32 = HOST_MAP_PRIVATE | HOST_MAP_ANONYMOUS;
@@ -129,7 +129,7 @@ fn host_alloc_pages(count: u64) -> Address {
 // value of munmap is ignored here (the kernel has no good way to recover
 // from a failed unmap on hosted mode; a later effort may add a panic hook).
 
-fn host_free_pages(addr: Address, count: u64) {
+transform host_free_pages(addr: Address, count: u64) {
     let bytes: u64 = count * HOST_PAGE_SIZE;
     let _rc: i64 = munmap(addr, bytes);
     return;
@@ -139,18 +139,18 @@ fn host_free_pages(addr: Address, count: u64) {
 // Terminate the kernel process with the given exit code. The exit stub does
 // not return (it ends with INT3 as a safety guard).
 
-fn host_exit(code: i64) {
+transform host_exit(code: i64) {
     exit(code);
     return;
 }
 
 // ── main entry stub ──────────────────────────────────────────────────────────
 // Pure declaration + helper module (no top-level execution). The compiler
-// requires a `fn main()` entry to compile as a standalone program; the real
+// requires a `transform main()` entry to compile as a standalone program; the real
 // kmain (K1d) lives in womb/kernel/kernel.vuma and will call host_init()
 // first, then host_console_write to print "vuma kernel: hello\n", then
 // host_exit(0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

@@ -12,7 +12,7 @@
 // ===========================================================================
 
 // Base64URL encode (no padding)
-fn base64url_encode(input: Address, len: u32, output: Address) -> u32 {
+transform base64url_encode(input: Address, len: u32, output: Address) -> u32 {
     // First do standard base64
     enclen: u32 = base64_encode(input, len, output);
 
@@ -47,7 +47,7 @@ fn base64url_encode(input: Address, len: u32, output: Address) -> u32 {
 // Returns: token length
 // ===========================================================================
 
-fn jwt_sign_hs256(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, secret: Address, secret_len: u32, token_out: Address) -> u32 {
+transform jwt_sign_hs256(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, secret: Address, secret_len: u32, token_out: Address) -> u32 {
     // Base64URL encode header
     enc_header = allocate(header_len * 2);
     enc_header_len: u32 = base64url_encode(header_json, header_len, enc_header);
@@ -98,7 +98,7 @@ fn jwt_sign_hs256(header_json: Address, header_len: u32, payload_json: Address, 
 // Returns: 1 if valid, 0 if invalid
 // ===========================================================================
 
-fn jwt_verify_hs256(token: Address, token_len: u32, secret: Address, secret_len: u32) -> u32 {
+transform jwt_verify_hs256(token: Address, token_len: u32, secret: Address, secret_len: u32) -> u32 {
     // Find last '.' (separates payload from signature)
     last_dot: u32 = 0;
     i: u32 = 0;
@@ -143,7 +143,7 @@ fn jwt_verify_hs256(token: Address, token_len: u32, secret: Address, secret_len:
 // JWT Sign with HMAC-SHA512
 // ===========================================================================
 
-fn jwt_sign_hs512(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, secret: Address, secret_len: u32, token_out: Address) -> u32 {
+transform jwt_sign_hs512(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, secret: Address, secret_len: u32, token_out: Address) -> u32 {
     enc_header = allocate(header_len * 2);
     enc_header_len: u32 = base64url_encode(header_json, header_len, enc_header);
 
@@ -183,7 +183,7 @@ fn jwt_sign_hs512(header_json: Address, header_len: u32, payload_json: Address, 
 // JWT Sign with none (no signature — for debugging only!)
 // ===========================================================================
 
-fn jwt_sign_none(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, token_out: Address) -> u32 {
+transform jwt_sign_none(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, token_out: Address) -> u32 {
     enc_header = allocate(header_len * 2);
     enc_header_len: u32 = base64url_encode(header_json, header_len, enc_header);
 

@@ -133,14 +133,14 @@ const HTTP2_STREAM_ID_MASK: u32 = 2147483647;       // 2^31 - 1
 // Little-endian u32 store/load (for struct fields).
 // ===========================================================================
 
-fn http2_put_u32_le(addr: Address, val: u32) {
+transform http2_put_u32_le(addr: Address, val: u32) {
     *(addr + 0) = val & 255;
     *(addr + 1) = (val >> 8) & 255;
     *(addr + 2) = (val >> 16) & 255;
     *(addr + 3) = (val >> 24) & 255;
 }
 
-fn http2_get_u32_le(addr: Address) -> u32 {
+transform http2_get_u32_le(addr: Address) -> u32 {
     b0: u32 = *(addr + 0);
     b1: u32 = *(addr + 1);
     b2: u32 = *(addr + 2);
@@ -152,32 +152,32 @@ fn http2_get_u32_le(addr: Address) -> u32 {
 // Big-endian (network byte order) store/load for frame headers.
 // ===========================================================================
 
-fn http2_put_u16_be(addr: Address, val: u32) {
+transform http2_put_u16_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 8) & 255;
     *(addr + 1) = val & 255;
 }
 
-fn http2_put_u24_be(addr: Address, val: u32) {
+transform http2_put_u24_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 16) & 255;
     *(addr + 1) = (val >> 8) & 255;
     *(addr + 2) = val & 255;
 }
 
-fn http2_put_u32_be(addr: Address, val: u32) {
+transform http2_put_u32_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 24) & 255;
     *(addr + 1) = (val >> 16) & 255;
     *(addr + 2) = (val >> 8) & 255;
     *(addr + 3) = val & 255;
 }
 
-fn http2_get_u24_be(addr: Address) -> u32 {
+transform http2_get_u24_be(addr: Address) -> u32 {
     b0: u32 = *(addr + 0);
     b1: u32 = *(addr + 1);
     b2: u32 = *(addr + 2);
     return (b0 << 16) | (b1 << 8) | b2;
 }
 
-fn http2_get_u32_be(addr: Address) -> u32 {
+transform http2_get_u32_be(addr: Address) -> u32 {
     b0: u32 = *(addr + 0);
     b1: u32 = *(addr + 1);
     b2: u32 = *(addr + 2);
@@ -189,7 +189,7 @@ fn http2_get_u32_be(addr: Address) -> u32 {
 // Frame header write (RFC 9113 §4.1).
 // ===========================================================================
 
-fn http2_write_frame_header(buf: Address, length: u32, frame_type: u32,
+transform http2_write_frame_header(buf: Address, length: u32, frame_type: u32,
                             flags: u32, stream_id: u32) {
     http2_put_u24_be(buf + 0, length);
     *(buf + 3) = frame_type & 255;
@@ -207,7 +207,7 @@ fn http2_write_frame_header(buf: Address, length: u32, frame_type: u32,
 // Returns 1 on success, 0 on error (len < 9).
 // ===========================================================================
 
-fn http2_parse_frame(data: Address, len: u32, length: Address, type: Address,
+transform http2_parse_frame(data: Address, len: u32, length: Address, type: Address,
                     flags: Address, stream_id: Address) -> u32 {
     status: u32 = 0;
     if len < HTTP2_FRAME_HEADER_SIZE { status = 1; }
@@ -239,7 +239,7 @@ fn http2_parse_frame(data: Address, len: u32, length: Address, type: Address,
 // Returns total frame size (9 + length), or 0 on error.
 // ===========================================================================
 
-fn http2_build_frame(type: u32, flags: u32, stream_id: u32,
+transform http2_build_frame(type: u32, flags: u32, stream_id: u32,
                     payload: Address, length: u32, out: Address) -> u32 {
     status: u32 = 0;
     if length > HTTP2_MAX_FRAME_PAYLOAD { status = 1; }
@@ -261,16 +261,16 @@ fn http2_build_frame(type: u32, flags: u32, stream_id: u32,
 // Settings (RFC 9113 §6.5).
 // ===========================================================================
 
-fn http2_settings_init(settings: Address) {
+transform http2_settings_init(settings: Address) {
     http2_put_u32_le(settings + 0, 0);  // count = 0
 }
 
-fn http2_settings_count(settings: Address) -> u32 {
+transform http2_settings_count(settings: Address) -> u32 {
     return http2_get_u32_le(settings + 0);
 }
 
 // Add a setting (id, value) to the struct. Returns 1 on success, 0 on full.
-fn http2_settings_add(settings: Address, id: u32, value: u32) -> u32 {
+transform http2_settings_add(settings: Address, id: u32, value: u32) -> u32 {
     count: u32 = http2_get_u32_le(settings + 0);
     ok: u32 = 1;
     if count >= HTTP2_MAX_SETTINGS { ok = 0; }
@@ -287,7 +287,7 @@ fn http2_settings_add(settings: Address, id: u32, value: u32) -> u32 {
 // Parses a SETTINGS payload (sequence of 6-byte pairs) into the struct.
 // Returns 1 on success, 0 on error (len not a multiple of 6, too many
 // entries, or null pointers).
-fn http2_parse_settings(data: Address, len: u32, settings: Address) -> u32 {
+transform http2_parse_settings(data: Address, len: u32, settings: Address) -> u32 {
     status: u32 = 0;
     if settings == 0 { status = 1; }
     if status == 0 {
@@ -316,7 +316,7 @@ fn http2_parse_settings(data: Address, len: u32, settings: Address) -> u32 {
 // http2_build_settings(settings, out) -> u32
 // Builds a SETTINGS frame from the struct (RFC 9113 §6.5.1).
 // Returns total frame size (9 + count*6), or 0 on error.
-fn http2_build_settings(settings: Address, out: Address) -> u32 {
+transform http2_build_settings(settings: Address, out: Address) -> u32 {
     status: u32 = 0;
     if settings == 0 { status = 1; }
     if out == 0 { status = 2; }
@@ -350,7 +350,7 @@ fn http2_build_settings(settings: Address, out: Address) -> u32 {
 
 // Build a SETTINGS ACK frame (empty payload, ACK flag set).
 // RFC 9113 §6.5: SETTINGS frames MUST be acknowledged.
-fn http2_build_settings_ack(out: Address) -> u32 {
+transform http2_build_settings_ack(out: Address) -> u32 {
     http2_write_frame_header(out, 0, HTTP2_SETTINGS, HTTP2_FLAG_ACK, 0);
     return HTTP2_FRAME_HEADER_SIZE;
 }
@@ -361,7 +361,7 @@ fn http2_build_settings_ack(out: Address) -> u32 {
 // ===========================================================================
 
 // Write the 24-byte magic connection preface to `buf`.
-fn http2_write_preface(buf: Address) -> u32 {
+transform http2_write_preface(buf: Address) -> u32 {
     // "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
     *(buf + 0)  = 80;   // 'P'
     *(buf + 1)  = 82;   // 'R'
@@ -394,7 +394,7 @@ fn http2_write_preface(buf: Address) -> u32 {
 // Writes the 24-byte connection preface followed by a SETTINGS frame built
 // from `settings` (a settings struct).
 // Returns total bytes written (24 + frame size), or 0 on error.
-fn http2_build_client_preface(settings: Address, out: Address) -> u32 {
+transform http2_build_client_preface(settings: Address, out: Address) -> u32 {
     status: u32 = 0;
     total: u32 = 0;
     if out == 0 { status = 1; }
@@ -413,7 +413,7 @@ fn http2_build_client_preface(settings: Address, out: Address) -> u32 {
 //   Payload: arbitrary application data (optional padding if PADDED flag).
 // ===========================================================================
 
-fn http2_build_data_frame(stream_id: u32, data: Address, data_len: u32,
+transform http2_build_data_frame(stream_id: u32, data: Address, data_len: u32,
                          end_stream: u32, out: Address) -> u32 {
     flags: u32 = 0;
     if end_stream == 1 { flags = flags | HTTP2_FLAG_END_STREAM; }
@@ -425,7 +425,7 @@ fn http2_build_data_frame(stream_id: u32, data: Address, data_len: u32,
 //   Payload: HPACK-encoded header block (provided pre-encoded by the caller).
 // ===========================================================================
 
-fn http2_build_headers_frame(stream_id: u32, headers: Address, headers_len: u32,
+transform http2_build_headers_frame(stream_id: u32, headers: Address, headers_len: u32,
                             end_stream: u32, end_headers: u32, out: Address) -> u32 {
     flags: u32 = 0;
     if end_stream == 1 { flags = flags | HTTP2_FLAG_END_STREAM; }
@@ -439,7 +439,7 @@ fn http2_build_headers_frame(stream_id: u32, headers: Address, headers_len: u32,
 //   [4]   weight (1 byte; actual weight = value + 1)
 // ===========================================================================
 
-fn http2_build_priority_frame(stream_id: u32, exclusive: u32, dep_stream_id: u32,
+transform http2_build_priority_frame(stream_id: u32, exclusive: u32, dep_stream_id: u32,
                              weight: u32, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     dep: u32 = dep_stream_id & HTTP2_STREAM_ID_MASK;
@@ -455,7 +455,7 @@ fn http2_build_priority_frame(stream_id: u32, exclusive: u32, dep_stream_id: u32
 // RST_STREAM frame (RFC 9113 §6.4) — 4-byte payload (error code)
 // ===========================================================================
 
-fn http2_build_rst_stream(stream_id: u32, error_code: u32, out: Address) -> u32 {
+transform http2_build_rst_stream(stream_id: u32, error_code: u32, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     http2_put_u32_be(out + pos, error_code);
     pos = pos + 4;
@@ -469,7 +469,7 @@ fn http2_build_rst_stream(stream_id: u32, error_code: u32, out: Address) -> u32 
 //   [4..]  HPACK-encoded header block fragment
 // ===========================================================================
 
-fn http2_build_push_promise(stream_id: u32, promised_stream_id: u32,
+transform http2_build_push_promise(stream_id: u32, promised_stream_id: u32,
                            headers: Address, headers_len: u32, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     http2_put_u32_be(out + pos, promised_stream_id & HTTP2_STREAM_ID_MASK);
@@ -490,7 +490,7 @@ fn http2_build_push_promise(stream_id: u32, promised_stream_id: u32,
 // PING frame (RFC 9113 §6.7) — 8-byte payload
 // ===========================================================================
 
-fn http2_build_ping(payload: Address, out: Address) -> u32 {
+transform http2_build_ping(payload: Address, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     i: u32 = 0;
     while i < 8 {
@@ -503,7 +503,7 @@ fn http2_build_ping(payload: Address, out: Address) -> u32 {
 }
 
 // PING ACK — same payload echoed back with the ACK flag set.
-fn http2_build_ping_ack(payload: Address, out: Address) -> u32 {
+transform http2_build_ping_ack(payload: Address, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     i: u32 = 0;
     while i < 8 {
@@ -522,7 +522,7 @@ fn http2_build_ping_ack(payload: Address, out: Address) -> u32 {
 //   [8..]  debug data (optional, opaque)
 // ===========================================================================
 
-fn http2_build_goaway(last_stream_id: u32, error_code: u32, debug_data: Address,
+transform http2_build_goaway(last_stream_id: u32, error_code: u32, debug_data: Address,
                      debug_len: u32, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     http2_put_u32_be(out + pos, last_stream_id & HTTP2_STREAM_ID_MASK);
@@ -545,7 +545,7 @@ fn http2_build_goaway(last_stream_id: u32, error_code: u32, debug_data: Address,
 //   Stream ID N → per-stream flow control.
 // ===========================================================================
 
-fn http2_build_window_update(stream_id: u32, increment: u32, out: Address) -> u32 {
+transform http2_build_window_update(stream_id: u32, increment: u32, out: Address) -> u32 {
     pos: u32 = HTTP2_FRAME_HEADER_SIZE;
     http2_put_u32_be(out + pos, increment & HTTP2_STREAM_ID_MASK);
     pos = pos + 4;
@@ -557,7 +557,7 @@ fn http2_build_window_update(stream_id: u32, increment: u32, out: Address) -> u3
 // CONTINUATION frame (RFC 9113 §6.10) — header block fragment
 // ===========================================================================
 
-fn http2_build_continuation(stream_id: u32, fragment: Address, frag_len: u32,
+transform http2_build_continuation(stream_id: u32, fragment: Address, frag_len: u32,
                            end_headers: u32, out: Address) -> u32 {
     flags: u32 = 0;
     if end_headers == 1 { flags = flags | HTTP2_FLAG_END_HEADERS; }
@@ -569,13 +569,13 @@ fn http2_build_continuation(stream_id: u32, fragment: Address, frag_len: u32,
 // Streams are stored in a fixed-size table at HTTP2_STREAM_TABLE.
 // ===========================================================================
 
-fn http2_stream_entry(idx: u32) -> Address {
+transform http2_stream_entry(idx: u32) -> Address {
     return HTTP2_STREAM_TABLE + idx * HTTP2_STREAM_ENTRY_SIZE;
 }
 
 // Find the index of `stream_id` in the table.
 // Returns the index, or HTTP2_MAX_STREAMS if not found.
-fn http2_stream_find(stream_id: u32) -> u32 {
+transform http2_stream_find(stream_id: u32) -> u32 {
     idx: u32 = 0;
     found: u32 = HTTP2_MAX_STREAMS;
     done: u32 = 0;
@@ -589,7 +589,7 @@ fn http2_stream_find(stream_id: u32) -> u32 {
 
 // Find the first free slot (stream_id == 0).
 // Returns the index, or HTTP2_MAX_STREAMS if table is full.
-fn http2_stream_find_free() -> u32 {
+transform http2_stream_find_free() -> u32 {
     idx: u32 = 0;
     found: u32 = HTTP2_MAX_STREAMS;
     done: u32 = 0;
@@ -609,7 +609,7 @@ fn http2_stream_find_free() -> u32 {
 // or received a HEADERS frame).
 // Returns 1 on success, 0 on error (stream_id == 0, stream already
 // exists, or table full).
-fn http2_stream_init(stream_id: u32) -> u32 {
+transform http2_stream_init(stream_id: u32) -> u32 {
     status: u32 = 0;
     if stream_id == 0 { status = 1; }  // stream 0 is the connection itself
     if status == 0 {
@@ -637,7 +637,7 @@ fn http2_stream_init(stream_id: u32) -> u32 {
 // MUST NOT cause the window to exceed 2^31 - 1.
 // Returns total frame size (13), or 0 on error (unknown stream,
 // increment == 0, or window overflow).
-fn http2_stream_send_window_update(stream_id: u32, increment: u32, out: Address) -> u32 {
+transform http2_stream_send_window_update(stream_id: u32, increment: u32, out: Address) -> u32 {
     status: u32 = 0;
     frame_size: u32 = 0;
     if increment == 0 { status = 1; }  // RFC 9113 §6.9.1
@@ -666,7 +666,7 @@ fn http2_stream_send_window_update(stream_id: u32, increment: u32, out: Address)
 // ===========================================================================
 
 // Mark a stream as closed. Returns 1 on success, 0 if unknown.
-fn http2_stream_close(stream_id: u32) -> u32 {
+transform http2_stream_close(stream_id: u32) -> u32 {
     status: u32 = 0;
     idx: u32 = http2_stream_find(stream_id);
     if idx >= HTTP2_MAX_STREAMS { status = 1; }
@@ -679,7 +679,7 @@ fn http2_stream_close(stream_id: u32) -> u32 {
 }
 
 // Read the send window for a stream. Returns 0 if unknown stream.
-fn http2_stream_send_window(stream_id: u32) -> u32 {
+transform http2_stream_send_window(stream_id: u32) -> u32 {
     idx: u32 = http2_stream_find(stream_id);
     if idx >= HTTP2_MAX_STREAMS { return 0; }
     entry: Address = http2_stream_entry(idx);
@@ -687,7 +687,7 @@ fn http2_stream_send_window(stream_id: u32) -> u32 {
 }
 
 // Read the recv window for a stream. Returns 0 if unknown stream.
-fn http2_stream_recv_window(stream_id: u32) -> u32 {
+transform http2_stream_recv_window(stream_id: u32) -> u32 {
     idx: u32 = http2_stream_find(stream_id);
     if idx >= HTTP2_MAX_STREAMS { return 0; }
     entry: Address = http2_stream_entry(idx);

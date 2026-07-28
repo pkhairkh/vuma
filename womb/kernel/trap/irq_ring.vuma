@@ -177,7 +177,7 @@
 //   R2a's trap_frame.vuma tf_init, R1a's bootinfo_init, K2a's pmm_init).
 //
 //   The State<IrqRing> params to irq_ring_init / irq_ring_push /
-//   irq_ring_pop are regular VUMA-fn borrows (NOT extern #[borrow] —
+//   irq_ring_pop are regular VUMA-transform borrows (NOT extern #[borrow] —
 //   only extern FFI calls conservatively invalidate). The 3 helpers
 //   touch only the IrqRing's own fields — no extern calls, no other
 //   State<T> references, so the codegen can keep all 3 State<IrqRing>
@@ -254,7 +254,7 @@ layout IrqRing = {
 // State<T> params: 1 (ring). Pure write — no reads, no helper calls. The
 // 256-iteration byte-zeroing loop + 3 scalar-field assignments are direct
 // typed-memory writes; no `*ptr`/`&ring`/`allocate` anywhere.
-fn irq_ring_init(ring: State<IrqRing>) {
+transform irq_ring_init(ring: State<IrqRing>) {
     ring.head = 0;
     ring.tail = 0;
     ring.count = 0;
@@ -289,7 +289,7 @@ fn irq_ring_init(ring: State<IrqRing>) {
 // State<T> params: 1 (ring). Reads ring.count + ring.tail; writes
 // ring.buf[tail*8..tail*8+8] + ring.tail + ring.count. No helper calls,
 // no extern calls — the entire push is direct typed-memory ops.
-fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
+transform irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
     if ring.count >= 32 {
         return 0 - 1;  // -1 (full)
     }
@@ -335,7 +335,7 @@ fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
 // State<T> params: 1 (ring). Reads ring.count + ring.head +
 // ring.buf[head*8..head*8+8]; writes ring.head + ring.count. No helper
 // calls, no extern calls.
-fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
+transform irq_ring_pop(ring: State<IrqRing>) -> u64 {
     if ring.count == 0 {
         return 9999;  // empty sentinel
     }
@@ -412,7 +412,7 @@ fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
 // constants in the self-test use DECIMAL — see the Decimal-constants
 // table in the file header for the rationale. The `0 - 1` form for
 // push's -1 return is the same idiom K7e's waitq.vuma uses.
-fn main() -> i32 {
+transform main() -> i32 {
     let ring = state_new(IrqRing);
     irq_ring_init(ring);
 

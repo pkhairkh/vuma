@@ -6,10 +6,10 @@
 // This file is the riscv64-specific swap point for the MM externs
 // declared in womb/kernel/mm/vmm.vuma (K2b). vmm.vuma's extern block:
 //     extern "C" {
-//         #[borrow] fn pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
-//         #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
-//         fn tlb_flush();
-//         fn invlpg(vaddr: u64);
+//         #[borrow] transform pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
+//         #[borrow] transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+//         transform tlb_flush();
+//         transform invlpg(vaddr: u64);
 //     }
 // In hosted mode (this file compiles on x86_64 — the declarations are
 // pure type + extern, no arch-specific code), those four names resolve
@@ -190,7 +190,7 @@ extern "C" {
     // would trip the use-after-invalidate verifier after the first
     // pte_read.
     #[borrow]
-    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
     // Write a page-table entry. Same address-resolution story as
     // pte_read; the write goes to the same 8-byte cell. Callers are
     // responsible for the appropriate fence_io() + tlb_flush() /
@@ -201,7 +201,7 @@ extern "C" {
     // mandatory (and sfence.vma's broadcast handles cross-hart TLB
     // coherency).
     #[borrow]
-    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
     // Full TLB flush — `sfence.vma zero, zero` (flush ALL TLB entries
     // across ALL ASIDs — the rs1=zero, rs2=zero form per RISC-V
     // Privileged ISA Vol. II §4.2.1). K11 stub: same instruction.
@@ -212,7 +212,7 @@ extern "C" {
     // instruction fetch — so NO trailing fence / fence.i is needed
     // (this is the riscv64 advantage over aarch64, which needs
     // separate `dsb nsh; isb` after `tlbi vmalle1is`).
-    fn tlb_flush();
+    transform tlb_flush();
     // Per-vaddr TLB invalidation — `sfence.vma vaddr, zero` (single-
     // page invalidation for vaddr, all-ASID — the rs1=vaddr, rs2=zero
     // form). RISC-V does NOT have a cheaper per-ASID single-page
@@ -223,7 +223,7 @@ extern "C" {
     // vaddr argument is the rs1 operand; under the RISC-V calling
     // convention it arrives in a0, and the stub moves it to the
     // rs1 field of the sfence.vma encoding.)
-    fn invlpg(vaddr: u64);
+    transform invlpg(vaddr: u64);
     // SATP read — returns the current satp CSR value. K11 stub:
     // `csrr a0, satp; ret`. The returned value encodes:
     //     bits [63:60]  Mode  (0 = bare/no-paging, 8 = Sv39,
@@ -234,7 +234,7 @@ extern "C" {
     //                          page table — address = PPN << 12)
     // Used by the future scheduler (K4+) to save the current address
     // space before a context switch.
-    fn satp_read() -> u64;
+    transform satp_read() -> u64;
     // SATP write — switches address spaces. K11 stub:
     // `csrw satp, a0; sfence.vma zero, zero; ret` (a0 = new satp
     // under the RISC-V calling convention). The RISC-V Privileged
@@ -249,7 +249,7 @@ extern "C" {
     // global across ASIDs by default unless rs2=asid is used. K4+
     // may add a satp_write_asid variant that uses `sfence.vma zero,
     // asid` for finer-grained flush when ASID-reuse semantics apply.)
-    fn satp_write(val: u64);
+    transform satp_write(val: u64);
     // Memory barrier — `fence iorw, iorw` (full memory barrier; the
     // strongest form of the RISC-V `fence` instruction per §2.7 of
     // the Unprivileged ISA). Orders ALL prior memory accesses before
@@ -264,20 +264,20 @@ extern "C" {
     // — if a code page's mapping changes, the caller also needs
     // `fence.i` to flush the I-cache. K4+ may add a separate
     // `fence_i` extern if code-page re-mapping becomes a use case.)
-    fn fence_io();
+    transform fence_io();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // main entry stub.
 // ────────────────────────────────────────────────────────────────────────────
 // This file is a pure declaration module (extern block + layout only, no
-// top-level execution). The compiler requires a `fn main()` entry to
+// top-level execution). The compiler requires a `transform main()` entry to
 // compile as a standalone program; the real kmain (K1d) lives in
 // womb/kernel/kernel.vuma and will call the externs declared here via
 // womb/kernel/mm/vmm.vuma (pte_read / pte_write / tlb_flush / invlpg)
 // and directly (satp_read / satp_write / fence_io) during context
 // switches.
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

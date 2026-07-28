@@ -19,18 +19,18 @@ const KC2: u32 = 2400959708;   // 0x8F1BBCDC (rounds 40..59)
 const KC3: u32 = 3395469782;   // 0xCA62C1D6 (rounds 60..79)
 
 // Rotate-left guarded against n==0 (32-n would shift by full word)
-fn rotl32(x: u32, n: u32) -> u32 {
+transform rotl32(x: u32, n: u32) -> u32 {
     if n == 0 { return x; }
     return ((x << n) | (x >> (32 - n))) & MASK32;
 }
 
-fn load_u32_be(ptr: Address, off: u32) -> u32 {
+transform load_u32_be(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
 }
 
-fn store_u32_be(ptr: Address, off: u32, val: u32) {
+transform store_u32_be(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = (val >> 24) & 255;
     *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255;
@@ -43,7 +43,7 @@ fn store_u32_be(ptr: Address, off: u32, val: u32) {
 //   [24.. 27] bit_hi    high 32 bits of total message length in bits
 //   [28.. 31] buf_len   bytes currently in the message buffer
 //   [32.. 95] buf[64]   partial block accumulator
-fn sha1_init(ctx: Address) {
+transform sha1_init(ctx: Address) {
     store_u32_be(ctx, 0,  H0I);
     store_u32_be(ctx, 4,  H1I);
     store_u32_be(ctx, 8,  H2I);
@@ -55,7 +55,7 @@ fn sha1_init(ctx: Address) {
 }
 
 // Core compression: 80 rounds over a single 512-bit block.
-fn sha1_compress(ctx: Address, block: Address) {
+transform sha1_compress(ctx: Address, block: Address) {
     a: u32 = load_u32_be(ctx, 0);
     b: u32 = load_u32_be(ctx, 4);
     c: u32 = load_u32_be(ctx, 8);
@@ -131,7 +131,7 @@ fn sha1_compress(ctx: Address, block: Address) {
 
 // Increment the 64-bit bit counter by `bits` (1 <= bits <= 512), carrying
 // into the high word when the low word wraps.
-fn sha1_add_bits(ctx: Address, bits: u32) {
+transform sha1_add_bits(ctx: Address, bits: u32) {
     lo: u32 = load_u32_be(ctx, 20);
     hi: u32 = load_u32_be(ctx, 24);
     new_lo: u32 = (lo + bits) & MASK32;
@@ -140,7 +140,7 @@ fn sha1_add_bits(ctx: Address, bits: u32) {
     store_u32_be(ctx, 24, hi);
 }
 
-fn sha1_update(ctx: Address, data: Address, len: u32) {
+transform sha1_update(ctx: Address, data: Address, len: u32) {
     buf_len: u32 = load_u32_be(ctx, 28);
     i: u32 = 0;
     while i < len {
@@ -158,7 +158,7 @@ fn sha1_update(ctx: Address, data: Address, len: u32) {
 
 // Pad the buffered message per FIPS 180-4 Section 5.1.1, run the final
 // compression, and write the 20-byte digest to `out`.
-fn sha1_final(ctx: Address, out: Address) {
+transform sha1_final(ctx: Address, out: Address) {
     buf_len: u32 = load_u32_be(ctx, 28);
 
     // Account for the unprocessed buffered bytes in the bit counter
@@ -197,7 +197,7 @@ fn sha1_final(ctx: Address, out: Address) {
     }
 }
 
-fn sha1_oneshot(data: Address, len: u32, out: Address) {
+transform sha1_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(96);
     sha1_init(ctx);
     sha1_update(ctx, data, len);

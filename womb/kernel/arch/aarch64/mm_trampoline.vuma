@@ -6,10 +6,10 @@
 // This file is the aarch64-specific swap point for the MM externs
 // declared in womb/kernel/mm/vmm.vuma (K2b). vmm.vuma's extern block:
 //     extern "C" {
-//         #[borrow] fn pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
-//         #[borrow] fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
-//         fn tlb_flush();
-//         fn invlpg(vaddr: u64);
+//         #[borrow] transform pte_read (pt: State<PageTable>, level: u8, idx: u32) -> u64;
+//         #[borrow] transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+//         transform tlb_flush();
+//         transform invlpg(vaddr: u64);
 //     }
 // In hosted mode (this file compiles on x86_64 — the declarations are
 // pure type + extern, no arch-specific code), those four names resolve
@@ -157,7 +157,7 @@ extern "C" {
     // walk would trip the use-after-invalidate verifier after the
     // first pte_read.
     #[borrow]
-    fn pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
+    transform pte_read(pt: State<PageTable>, level: u8, idx: u32) -> u64;
     // Write a page-table entry. Same address-resolution story as
     // pte_read; the write goes to the same 8-byte cell. Callers are
     // responsible for the appropriate dsb() + tlb_flush() / invlpg()
@@ -166,14 +166,14 @@ extern "C" {
     // PTE write may be visible to OTHER PEs before the writer's TLB
     // flush, so the dsb() before tlb_flush() is mandatory.
     #[borrow]
-    fn pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
+    transform pte_write(pt: State<PageTable>, level: u8, idx: u32, val: u64);
     // Full TLB flush — `tlbi vmalle1is; dsb nsh; isb` (flush all TLB
     // entries for EL1, Inner-Shareable, then barrier completion, then
     // instruction re-fetch). K11 stub: same sequence. The dsb+isb
     // tail is what makes the flush "complete" from the CPU's POV —
     // without it, the next instruction could speculatively execute
     // against a stale TLB entry.
-    fn tlb_flush();
+    transform tlb_flush();
     // Per-vaddr TLB invalidation — aarch64 has no single-page
     // invlpg instruction; this stub currently calls tlb_flush under
     // the hood (full flush — safe but coarse). K11 will refine this
@@ -184,7 +184,7 @@ extern "C" {
     // ignored in the current hosted-mode __ffi_fallback_stub body and
     // in the K11 fallback body; K11's refined body uses it as the
     // `tlbi vaae1is` operand.)
-    fn invlpg(vaddr: u64);
+    transform invlpg(vaddr: u64);
     // TTBR0_EL1 read — returns the current TTBR0_EL1 (physical address
     // of the EL0/EL1 user VA root page table, plus ASID and CnP bits).
     // K11 stub: `mrs x0, ttbr0_el1; ret`. Used by the future scheduler
@@ -192,7 +192,7 @@ extern "C" {
     // switch. (TTBR1_EL1 — the kernel VA root — is typically constant
     // after boot, so we don't expose a ttbr1 pair here; K4+ may add
     // one if a kernel-VA-space switch ever becomes necessary.)
-    fn ttbr0_el1_read() -> u64;
+    transform ttbr0_el1_read() -> u64;
     // TTBR0_EL1 write — switches user VA spaces. K11 stub:
     // `msr ttbr0_el1, x0; isb; ret` (x0 = new TTBR0 under AAPCS64).
     // Side-effect: the isb forces the next instruction fetch to use
@@ -201,7 +201,7 @@ extern "C" {
     // (ARMv8 hardware automatically tags TLB entries by ASID); for
     // an ASID-reuse switch, callers should follow ttbr0_el1_write
     // with a tlb_flush to clear stale entries from the old ASID.
-    fn ttbr0_el1_write(val: u64);
+    transform ttbr0_el1_write(val: u64);
     // Data Synchronization Barrier (Non-shareable) — `dsb nsh`. Waits
     // for all memory accesses issued before the barrier to complete
     // (within the current PE's local domain) before any subsequent
@@ -211,27 +211,27 @@ extern "C" {
     // `tlbi vmalle1IS` form already broadcasts to all PEs in the
     // Inner-Shareable domain; the dsb here is for the WRITER's local
     // store-to-broadcast ordering, not for cross-PE visibility.)
-    fn dsb();
+    transform dsb();
     // Instruction Synchronization Barrier — `isb`. Flushes the PE
     // instruction pipeline so that any subsequent instruction fetch
     // comes from the new translation. Used after tlb_flush /
     // ttbr0_el1_write / any system-register write that affects
     // translation (TCR_EL1, SCTLR_EL1, MAIR_EL1, etc.) so the very
     // next instruction executes in the new context.
-    fn isb();
+    transform isb();
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // main entry stub.
 // ────────────────────────────────────────────────────────────────────────────
 // This file is a pure declaration module (extern block + layout only, no
-// top-level execution). The compiler requires a `fn main()` entry to
+// top-level execution). The compiler requires a `transform main()` entry to
 // compile as a standalone program; the real kmain (K1d) lives in
 // womb/kernel/kernel.vuma and will call the externs declared here via
 // womb/kernel/mm/vmm.vuma (pte_read / pte_write / tlb_flush / invlpg)
 // and directly (ttbr0_el1_read / ttbr0_el1_write / dsb / isb) during
 // context switches.
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

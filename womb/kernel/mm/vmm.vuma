@@ -181,22 +181,22 @@ extern "C" {
     // source). Used by the local x86_map_page / x86_translate walkers
     // for PTE access. Same stubs as womb/kernel/arch/x86_64/vmm_hal.vuma
     // (W34) and womb/kernel/syscall/handlers/fs.vuma.
-    fn __vuma_load_u64(addr: u64) -> u64;
-    fn __vuma_store_u64(addr: u64, val: u64);
+    transform __vuma_load_u64(addr: u64) -> u64;
+    transform __vuma_store_u64(addr: u64, val: u64);
 
     // aarch64 (arch == 1): 4-level paging walker (4 KB granule).
-    fn arm_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
-    fn arm_unmap_page(root: u64, vaddr: u64);
+    transform arm_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
+    transform arm_unmap_page(root: u64, vaddr: u64);
 
     // riscv64 (arch == 2): Sv39 3-level walker.
-    fn riscv_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
-    fn riscv_unmap_page(root: u64, vaddr: u64);
+    transform riscv_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8);
+    transform riscv_unmap_page(root: u64, vaddr: u64);
 
     // x86_64 unmap (arch == 0): W34 implements map + translate locally
     // but leaves unmap as an extern stub — the walk + clear-leaf-PTE +
     // invlpg logic is a follow-up wave. Resolves to __ffi_fallback_stub
     // (no-op) in hosted mode.
-    fn x86_unmap_page(root: u64, vaddr: u64);
+    transform x86_unmap_page(root: u64, vaddr: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ extern "C" {
 // The zero-arg signature keeps the walker PMT-pure (no State<T>
 // plumbing through the arch layer) and matches the "give me a page"
 // concept. Same stub as womb/kernel/arch/x86_64/vmm_hal.vuma (W34).
-fn pmm_alloc() -> u64 {
+transform pmm_alloc() -> u64 {
     return 0;
 }
 
@@ -224,7 +224,7 @@ fn pmm_alloc() -> u64 {
 // `import` (Open Work §7), so the walker is duplicated byte-identically
 // in both files (same pattern as mmap.vuma re-declaring pmm_alloc).
 
-fn x86_idx(vaddr: u64, level: u32) -> u64 {
+transform x86_idx(vaddr: u64, level: u32) -> u64 {
     let sh = 12 + 9 * level;
     return (vaddr >> sh) & 511;
 }
@@ -251,7 +251,7 @@ fn x86_idx(vaddr: u64, level: u32) -> u64 {
 // spec, implemented as the local x86_map_page walker that vmm_map_page
 // dispatches to in arch==0.
 
-fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
+transform x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
     if root == 0 {
         return;
     }
@@ -299,7 +299,7 @@ fn x86_map_page(root: u64, vaddr: u64, paddr: u64, flags: u64, levels: u8) {
 // mapped paddr when the page table is set up (verified by the Part 3
 // self-test below).
 
-fn x86_translate(root: u64, vaddr: u64) -> u64 {
+transform x86_translate(root: u64, vaddr: u64) -> u64 {
     if root == 0 {
         return 0;
     }
@@ -341,7 +341,7 @@ fn x86_translate(root: u64, vaddr: u64) -> u64 {
 // the walk off to the per-arch walker (x86_map_page etc.) which uses its
 // own native bit extraction.
 
-fn vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
+transform vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
     out.level3 = ((vaddr >> 39) as u32) & 511;
     out.level2 = ((vaddr >> 30) as u32) & 511;
     out.level1 = ((vaddr >> 21) as u32) & 511;
@@ -365,7 +365,7 @@ fn vaddr_parts(out: State<VaddrParts>, vaddr: u64) {
 // the walk off to the per-arch walker (x86_map_page etc.) which uses its
 // own native bit extraction. Kept for self-test compatibility (K2b → R3b).
 
-fn vmm_walk_idx(vaddr: u64, level: u8) -> u32 {
+transform vmm_walk_idx(vaddr: u64, level: u8) -> u32 {
     let sh = (level as u32) * 9 + 12;
     let shifted = vaddr >> sh;
     return (shifted as u32) & 511;
@@ -389,7 +389,7 @@ fn vmm_walk_idx(vaddr: u64, level: u8) -> u32 {
 // Init-style: caller allocates `space` via state_new(VmmSpace), sets
 // space.root / space.levels / space.arch, passes by reference.
 
-fn vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64) {
+transform vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64) {
     if space.arch == 0 {
         // x86_64: 4-level paging — call x86_map_page (extern stub in hosted mode).
         x86_map_page(space.root, vaddr, paddr, flags, space.levels);
@@ -414,7 +414,7 @@ fn vmm_map_page(space: State<VmmSpace>, vaddr: u64, paddr: u64, flags: u64) {
 // the caller's responsibility — call pmm_free with the physical address
 // returned by vmm_translate BEFORE unmapping, once vmm_translate is real).
 
-fn vmm_unmap_page(space: State<VmmSpace>, vaddr: u64) {
+transform vmm_unmap_page(space: State<VmmSpace>, vaddr: u64) {
     if space.arch == 0 {
         // x86_64: walk + clear leaf PTE + invlpg.
         x86_unmap_page(space.root, vaddr);
@@ -450,7 +450,7 @@ fn vmm_unmap_page(space: State<VmmSpace>, vaddr: u64) {
 //
 // Returns u64 (not State<T>) — no state-typedness propagation issue.
 
-fn vmm_translate(space: State<VmmSpace>, vaddr: u64) -> u64 {
+transform vmm_translate(space: State<VmmSpace>, vaddr: u64) -> u64 {
     if space.arch == 0 {
         // x86_64: real walker (W34) — walks PML4→PDPT→PD→PT, returns paddr.
         return x86_translate(space.root, vaddr);
@@ -501,7 +501,7 @@ fn vmm_translate(space: State<VmmSpace>, vaddr: u64) -> u64 {
 // Returns 0 on pass, 1..9 on the corresponding index-extraction failure,
 // 10 on the null-root check, 11/12 on the real-translate check.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Part 1: vaddr_parts + vmm_walk_idx (K2b compatibility) ──────────────
     let parts = state_new(VaddrParts);
     vaddr_parts(parts, 0x123456789ABC);

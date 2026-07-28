@@ -6,31 +6,31 @@
 //   offset 8-11: len (u32, byte count)
 //   offset 12-15: cap (u32, allocated capacity)
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
 // Create a new empty VStr with given initial capacity
-fn vstr_new(cap: u32) -> Address {
+transform vstr_new(cap: u32) -> Address {
     s = allocate(16);
     if cap == 0 { cap = 64; }
     data = allocate(cap);
@@ -41,7 +41,7 @@ fn vstr_new(cap: u32) -> Address {
 }
 
 // Create a VStr from a C-style null-terminated string (copies data)
-fn vstr_from_cstr(cstr: Address) -> Address {
+transform vstr_from_cstr(cstr: Address) -> Address {
     // Find length
     len: u32 = 0;
     while *(cstr + len) != 0 { len = len + 1; }
@@ -56,7 +56,7 @@ fn vstr_from_cstr(cstr: Address) -> Address {
 }
 
 // Create a VStr from a byte slice (ptr, len)
-fn vstr_from_bytes(ptr: Address, len: u32) -> Address {
+transform vstr_from_bytes(ptr: Address, len: u32) -> Address {
     s = vstr_new(len + 1);
     i: u32 = 0;
     while i < len {
@@ -66,12 +66,12 @@ fn vstr_from_bytes(ptr: Address, len: u32) -> Address {
     return s;
 }
 
-fn vstr_len(s: Address) -> u32 { return load_u32(s, 8); }
-fn vstr_cap(s: Address) -> u32 { return load_u32(s, 12); }
-fn vstr_data(s: Address) -> u64 { return load_u64(s, 0); }
+transform vstr_len(s: Address) -> u32 { return load_u32(s, 8); }
+transform vstr_cap(s: Address) -> u32 { return load_u32(s, 12); }
+transform vstr_data(s: Address) -> u64 { return load_u64(s, 0); }
 
 // Internal: ensure capacity
-fn vstr_reserve(s: Address, needed: u32) {
+transform vstr_reserve(s: Address, needed: u32) {
     cap: u32 = vstr_cap(s);
     if needed <= cap { return; }
     new_cap: u32 = cap; if new_cap == 0 { new_cap = 64; }
@@ -85,7 +85,7 @@ fn vstr_reserve(s: Address, needed: u32) {
 }
 
 // Push a single byte/ASCII char
-fn vstr_push_byte(s: Address, byte: u32) {
+transform vstr_push_byte(s: Address, byte: u32) {
     len: u32 = vstr_len(s); cap: u32 = vstr_cap(s);
     if len >= cap { vstr_reserve(s, len + 1); }
     data: u64 = vstr_data(s);
@@ -94,7 +94,7 @@ fn vstr_push_byte(s: Address, byte: u32) {
 }
 
 // Append another VStr
-fn vstr_append_vstr(s: Address, other: Address) {
+transform vstr_append_vstr(s: Address, other: Address) {
     other_data: u64 = vstr_data(other);
     other_len: u32 = vstr_len(other);
     i: u32 = 0;
@@ -102,19 +102,19 @@ fn vstr_append_vstr(s: Address, other: Address) {
 }
 
 // Append a C-style string
-fn vstr_append_cstr(s: Address, cstr: Address) {
+transform vstr_append_cstr(s: Address, cstr: Address) {
     i: u32 = 0;
     while *(cstr + i) != 0 { vstr_push_byte(s, *(cstr + i)); i = i + 1; }
 }
 
 // Append a byte slice
-fn vstr_append_bytes(s: Address, ptr: Address, len: u32) {
+transform vstr_append_bytes(s: Address, ptr: Address, len: u32) {
     i: u32 = 0;
     while i < len { vstr_push_byte(s, *(ptr + i)); i = i + 1; }
 }
 
 // Append a u64 as decimal
-fn vstr_append_u64(s: Address, val: u64) {
+transform vstr_append_u64(s: Address, val: u64) {
     if val == 0 { vstr_push_byte(s, 48); return; }
     digits = allocate(32);
     n: u64 = val; pos: u32 = 0;
@@ -128,7 +128,7 @@ fn vstr_append_u64(s: Address, val: u64) {
 }
 
 // Append a u32 as hex (0x prefixed)
-fn vstr_append_hex_u32(s: Address, val: u32) {
+transform vstr_append_hex_u32(s: Address, val: u32) {
     vstr_push_byte(s, 48); vstr_push_byte(s, 120);  // "0x"
     i: u32 = 0;
     while i < 8 {
@@ -141,7 +141,7 @@ fn vstr_append_hex_u32(s: Address, val: u32) {
 }
 
 // Compare two VStrs. Returns 1 if equal, 0 if not.
-fn vstr_eq(a: Address, b: Address) -> u32 {
+transform vstr_eq(a: Address, b: Address) -> u32 {
     alen: u32 = vstr_len(a); blen: u32 = vstr_len(b);
     if alen != blen { return 0; }
     ad: u64 = vstr_data(a); bd: u64 = vstr_data(b);
@@ -151,7 +151,7 @@ fn vstr_eq(a: Address, b: Address) -> u32 {
 }
 
 // Compare VStr with C-string
-fn vstr_eq_cstr(s: Address, cstr: Address) -> u32 {
+transform vstr_eq_cstr(s: Address, cstr: Address) -> u32 {
     sd: u64 = vstr_data(s); slen: u32 = vstr_len(s);
     i: u32 = 0;
     while i < slen {
@@ -165,7 +165,7 @@ fn vstr_eq_cstr(s: Address, cstr: Address) -> u32 {
 }
 
 // Get byte at index
-fn vstr_get(s: Address, idx: u32) -> u32 {
+transform vstr_get(s: Address, idx: u32) -> u32 {
     len: u32 = vstr_len(s);
     if idx >= len { return 0; }
     data: u64 = vstr_data(s);
@@ -173,15 +173,15 @@ fn vstr_get(s: Address, idx: u32) -> u32 {
 }
 
 // Clear (keep capacity)
-fn vstr_clear(s: Address) { store_u32(s, 8, 0); }
+transform vstr_clear(s: Address) { store_u32(s, 8, 0); }
 
 // Check if empty
-fn vstr_is_empty(s: Address) -> u32 {
+transform vstr_is_empty(s: Address) -> u32 {
     if vstr_len(s) == 0 { return 1; } return 0;
 }
 
 // Null-terminate (writes 0 at data[len], does not change len)
-fn vstr_null_terminate(s: Address) {
+transform vstr_null_terminate(s: Address) {
     len: u32 = vstr_len(s); cap: u32 = vstr_cap(s);
     if len >= cap { vstr_reserve(s, len + 1); }
     data: u64 = vstr_data(s);
@@ -189,7 +189,7 @@ fn vstr_null_terminate(s: Address) {
 }
 
 // Free
-fn vstr_free(s: Address) {
+transform vstr_free(s: Address) {
     data: u64 = vstr_data(s); cap: u32 = vstr_cap(s);
     free(data); free(s);
 }
@@ -198,7 +198,7 @@ fn vstr_free(s: Address) {
 // Decode the next UTF-8 codepoint at position `pos`.
 // Returns { codepoint: u32 (low 21 bits), next_pos: u32 (high 32 bits) }
 // as a u64. If invalid, codepoint = 0xFFFD (replacement char).
-fn utf8_decode_next(str: Address, pos: u32, len: u32) -> u64 {
+transform utf8_decode_next(str: Address, pos: u32, len: u32) -> u64 {
     if pos >= len { return 0; }
     b0: u32 = *(str + pos);
     
@@ -240,7 +240,7 @@ fn utf8_decode_next(str: Address, pos: u32, len: u32) -> u64 {
 }
 
 // Count UTF-8 codepoints (character count, not byte count)
-fn vstr_char_count(s: Address) -> u32 {
+transform vstr_char_count(s: Address) -> u32 {
     data: u64 = vstr_data(s); len: u32 = vstr_len(s);
     count: u32 = 0; pos: u32 = 0;
     while pos < len {

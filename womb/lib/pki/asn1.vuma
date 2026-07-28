@@ -108,14 +108,14 @@ const TAG_CONTEXT_3: u32 = 163;     // 0xA3
 // Little-endian u32 store/load (VUMA exposes only byte-granular access).
 // ===========================================================================
 
-fn asn1_put_u32_le(addr: Address, val: u32) {
+transform asn1_put_u32_le(addr: Address, val: u32) {
     *(addr + 0) = val & 255;
     *(addr + 1) = (val >> 8) & 255;
     *(addr + 2) = (val >> 16) & 255;
     *(addr + 3) = (val >> 24) & 255;
 }
 
-fn asn1_get_u32_le(addr: Address) -> u32 {
+transform asn1_get_u32_le(addr: Address) -> u32 {
     b0: u32 = *(addr + 0);
     b1: u32 = *(addr + 1);
     b2: u32 = *(addr + 2);
@@ -133,7 +133,7 @@ fn asn1_get_u32_le(addr: Address) -> u32 {
 //   constructed[0..3] — 0 or 1
 //   number[0..3]      — tag number (0..30 for low-form; up to 2^28 for high-form)
 // Returns bytes consumed (1 for low-form, 2+ for high-form), 0 on error.
-fn asn1_decode_tag(buf: Address, len: u32, tag: Address, cls: Address, constructed: Address, number: Address) -> u32 {
+transform asn1_decode_tag(buf: Address, len: u32, tag: Address, cls: Address, constructed: Address, number: Address) -> u32 {
     status: u32 = 0;
     first: u32 = 0;
     cls_val: u32 = 0;
@@ -183,7 +183,7 @@ fn asn1_decode_tag(buf: Address, len: u32, tag: Address, cls: Address, construct
 }
 
 // Encode a DER tag. Writes to out[0..]. Returns bytes written, 0 on error.
-fn asn1_encode_tag(cls: u32, constructed: u32, number: u32, out: Address) -> u32 {
+transform asn1_encode_tag(cls: u32, constructed: u32, number: u32, out: Address) -> u32 {
     status: u32 = 1;
     written: u32 = 0;
     first: u32 = 0;
@@ -239,7 +239,7 @@ fn asn1_encode_tag(cls: u32, constructed: u32, number: u32, out: Address) -> u32
 // Decode DER length. Writes u32 LE length to `length`. Returns bytes consumed
 // (1 for short form, 1+n for long form), 0 on error. Rejects indefinite
 // (0x80) and non-minimal long-form encodings per DER.
-fn asn1_decode_length(buf: Address, len: u32, length: Address) -> u32 {
+transform asn1_decode_length(buf: Address, len: u32, length: Address) -> u32 {
     status: u32 = 0;
     value: u32 = 0;
     consumed: u32 = 0;
@@ -291,7 +291,7 @@ fn asn1_decode_length(buf: Address, len: u32, length: Address) -> u32 {
 
 // Encode DER length (minimal form). Writes to out. Returns bytes written
 // (1 for short form, 2..5 for long form).
-fn asn1_encode_length(length: u32, out: Address) -> u32 {
+transform asn1_encode_length(length: u32, out: Address) -> u32 {
     written: u32 = 0;
     if length < 128 {
         *(out + 0) = length & 255;
@@ -333,7 +333,7 @@ fn asn1_encode_length(length: u32, out: Address) -> u32 {
 // Used internally by the typed decoders below.
 // ===========================================================================
 
-fn asn1_decode_tlv_header(buf: Address, len: u32, tag: Address, cls: Address, constructed: Address, number: Address, content_off: Address, content_len: Address) -> u32 {
+transform asn1_decode_tlv_header(buf: Address, len: u32, tag: Address, cls: Address, constructed: Address, number: Address, content_off: Address, content_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -377,7 +377,7 @@ fn asn1_decode_tlv_header(buf: Address, len: u32, tag: Address, cls: Address, co
 // Negative integers (high bit set on first content byte with no 0x00 sign
 // padding) are rejected since u32 cannot represent them; the magnitude of
 // a positive integer is returned directly. Magnitudes > 2^32-1 are rejected.
-fn asn1_decode_integer(buf: Address, len: u32, val_out: Address) -> u32 {
+transform asn1_decode_integer(buf: Address, len: u32, val_out: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -444,7 +444,7 @@ fn asn1_decode_integer(buf: Address, len: u32, val_out: Address) -> u32 {
 
 // Encode a non-negative integer as a DER INTEGER. `val` points at a u32 LE
 // value. Writes TLV to out. Returns bytes written, 0 on error.
-fn asn1_encode_integer(val: Address, out: Address) -> u32 {
+transform asn1_encode_integer(val: Address, out: Address) -> u32 {
     v: u32 = asn1_get_u32_le(val);
     content_len: u32 = 0;
     pos: u32 = 0;
@@ -506,7 +506,7 @@ fn asn1_encode_integer(val: Address, out: Address) -> u32 {
 // Decode OID (tag 0x06). Writes OID arcs as u32 LE array to oid_out (caller
 // allocates 4*max_arcs bytes; we cap at 16 arcs = 64 bytes). Writes arc
 // count (u32 LE) to oid_len. Returns bytes consumed, 0 on error.
-fn asn1_decode_oid(buf: Address, len: u32, oid_out: Address, oid_len: Address) -> u32 {
+transform asn1_decode_oid(buf: Address, len: u32, oid_out: Address, oid_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -591,7 +591,7 @@ fn asn1_decode_oid(buf: Address, len: u32, oid_out: Address, oid_len: Address) -
 
 // Encode OID from a u32 LE arc array. `count` must be >= 2. Writes TLV to
 // out. Returns bytes written, 0 on error.
-fn asn1_encode_oid(oid_components: Address, count: u32, out: Address) -> u32 {
+transform asn1_encode_oid(oid_components: Address, count: u32, out: Address) -> u32 {
     status: u32 = 1;
     pos: u32 = 0;
     content_pos: u32 = 0;
@@ -669,7 +669,7 @@ fn asn1_encode_oid(oid_components: Address, count: u32, out: Address) -> u32 {
 // OCTET STRING (X.690 §8.7)
 // ===========================================================================
 
-fn asn1_decode_octet_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_octet_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -715,7 +715,7 @@ fn asn1_decode_octet_string(buf: Address, len: u32, out: Address, out_len: Addre
     return tag_consumed + len_consumed + content_len;
 }
 
-fn asn1_encode_octet_string(data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_octet_string(data: Address, len: u32, out: Address) -> u32 {
     pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, ASN1_TAG_OCTET_STRING, out);
     pos = pos + asn1_encode_length(len, out + pos);
     i: u32 = 0;
@@ -734,7 +734,7 @@ fn asn1_encode_octet_string(data: Address, len: u32, out: Address) -> u32 {
 // byte) to `out` and the byte count (u32 LE) to `out_len`. The unused-bits
 // count is written to out_len + 4 (so callers can recover the true bit
 // length as out_len*8 - unused_bits if needed).
-fn asn1_decode_bit_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_bit_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -792,7 +792,7 @@ fn asn1_decode_bit_string(buf: Address, len: u32, out: Address, out_len: Address
 
 // Encode BIT STRING. `bit_len` is the total number of bits. Writes TLV to
 // out. Returns bytes written, 0 on error.
-fn asn1_encode_bit_string(data: Address, bit_len: u32, out: Address) -> u32 {
+transform asn1_encode_bit_string(data: Address, bit_len: u32, out: Address) -> u32 {
     status: u32 = 1;
     byte_len: u32 = 0;
     unused: u32 = 0;
@@ -831,7 +831,7 @@ fn asn1_encode_bit_string(data: Address, bit_len: u32, out: Address) -> u32 {
 // Decode SEQUENCE. Writes content bytes (the sequence body) to `content`
 // and the byte count (u32 LE) to `content_len`. Returns bytes consumed by
 // the full TLV, 0 on error.
-fn asn1_decode_sequence(buf: Address, len: u32, content: Address, content_len: Address) -> u32 {
+transform asn1_decode_sequence(buf: Address, len: u32, content: Address, content_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -879,7 +879,7 @@ fn asn1_decode_sequence(buf: Address, len: u32, content: Address, content_len: A
     return tag_consumed + len_consumed + c_len;
 }
 
-fn asn1_encode_sequence(content: Address, content_len: u32, out: Address) -> u32 {
+transform asn1_encode_sequence(content: Address, content_len: u32, out: Address) -> u32 {
     pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 1, ASN1_TAG_SEQUENCE, out);
     pos = pos + asn1_encode_length(content_len, out + pos);
     i: u32 = 0;
@@ -891,7 +891,7 @@ fn asn1_encode_sequence(content: Address, content_len: u32, out: Address) -> u32
 }
 
 // Decode SET — same semantics as asn1_decode_sequence but expects tag 0x31.
-fn asn1_decode_set(buf: Address, len: u32, content: Address, content_len: Address) -> u32 {
+transform asn1_decode_set(buf: Address, len: u32, content: Address, content_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -939,7 +939,7 @@ fn asn1_decode_set(buf: Address, len: u32, content: Address, content_len: Addres
     return tag_consumed + len_consumed + c_len;
 }
 
-fn asn1_encode_set(content: Address, content_len: u32, out: Address) -> u32 {
+transform asn1_encode_set(content: Address, content_len: u32, out: Address) -> u32 {
     pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 1, ASN1_TAG_SET, out);
     pos = pos + asn1_encode_length(content_len, out + pos);
     i: u32 = 0;
@@ -954,7 +954,7 @@ fn asn1_encode_set(content: Address, content_len: u32, out: Address) -> u32 {
 // BOOLEAN (X.690 §8.2) — 0x00 = FALSE, any non-zero = TRUE (DER mandates 0xFF)
 // ===========================================================================
 
-fn asn1_decode_boolean(buf: Address, len: u32, val: Address) -> u32 {
+transform asn1_decode_boolean(buf: Address, len: u32, val: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -1001,7 +1001,7 @@ fn asn1_decode_boolean(buf: Address, len: u32, val: Address) -> u32 {
 
 // Encode BOOLEAN. `val` points at u32 LE (0 = FALSE, non-zero = TRUE).
 // Writes TLV to out (always 3 bytes: 01 01 FF or 01 01 00).
-fn asn1_encode_boolean(val: Address, out: Address) -> u32 {
+transform asn1_encode_boolean(val: Address, out: Address) -> u32 {
     v: u32 = asn1_get_u32_le(val);
     *(out + 0) = ASN1_TAG_BOOLEAN;
     *(out + 1) = 1;
@@ -1017,7 +1017,7 @@ fn asn1_encode_boolean(val: Address, out: Address) -> u32 {
 // NULL (X.690 §8.8) — 05 00
 // ===========================================================================
 
-fn asn1_encode_null(out: Address) -> u32 {
+transform asn1_encode_null(out: Address) -> u32 {
     *(out + 0) = ASN1_TAG_NULL;
     *(out + 1) = 0;
     return 2;
@@ -1025,7 +1025,7 @@ fn asn1_encode_null(out: Address) -> u32 {
 
 // Decode NULL — verifies tag 0x05 and zero-length content. Returns bytes
 // consumed (always 2), 0 on error.
-fn asn1_decode_null(buf: Address, len: u32) -> u32 {
+transform asn1_decode_null(buf: Address, len: u32) -> u32 {
     status: u32 = 0;
     if len >= 2 {
         status = 1;
@@ -1045,7 +1045,7 @@ fn asn1_decode_null(buf: Address, len: u32) -> u32 {
 
 // Generic string decoder. Verifies the expected universal tag, copies the
 // content bytes to `out`, writes byte count (u32 LE) to `out_len`.
-fn asn1_decode_string_tlv(buf: Address, len: u32, expected_tag: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_string_tlv(buf: Address, len: u32, expected_tag: u32, out: Address, out_len: Address) -> u32 {
     status: u32 = 0;
     tag_consumed: u32 = 0;
     len_consumed: u32 = 0;
@@ -1093,7 +1093,7 @@ fn asn1_decode_string_tlv(buf: Address, len: u32, expected_tag: u32, out: Addres
     return tag_consumed + len_consumed + content_len;
 }
 
-fn asn1_encode_string_tlv(tag: u32, data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_string_tlv(tag: u32, data: Address, len: u32, out: Address) -> u32 {
     pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, tag, out);
     pos = pos + asn1_encode_length(len, out + pos);
     i: u32 = 0;
@@ -1104,27 +1104,27 @@ fn asn1_encode_string_tlv(tag: u32, data: Address, len: u32, out: Address) -> u3
     return pos + len;
 }
 
-fn asn1_decode_printable_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_printable_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     return asn1_decode_string_tlv(buf, len, ASN1_TAG_PRINTABLE_STRING, out, out_len);
 }
 
-fn asn1_encode_printable_string(data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_printable_string(data: Address, len: u32, out: Address) -> u32 {
     return asn1_encode_string_tlv(ASN1_TAG_PRINTABLE_STRING, data, len, out);
 }
 
-fn asn1_decode_utf8_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_utf8_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     return asn1_decode_string_tlv(buf, len, ASN1_TAG_UTF8_STRING, out, out_len);
 }
 
-fn asn1_encode_utf8_string(data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_utf8_string(data: Address, len: u32, out: Address) -> u32 {
     return asn1_encode_string_tlv(ASN1_TAG_UTF8_STRING, data, len, out);
 }
 
-fn asn1_decode_ia5_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_ia5_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     return asn1_decode_string_tlv(buf, len, ASN1_TAG_IA5_STRING, out, out_len);
 }
 
-fn asn1_encode_ia5_string(data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_ia5_string(data: Address, len: u32, out: Address) -> u32 {
     return asn1_encode_string_tlv(ASN1_TAG_IA5_STRING, data, len, out);
 }
 
@@ -1133,19 +1133,19 @@ fn asn1_encode_ia5_string(data: Address, len: u32, out: Address) -> u32 {
 // GeneralizedTime (X.690 §8.6.2) — YYYYMMDDHHMMSSZ (15 bytes, trailing 'Z')
 // ===========================================================================
 
-fn asn1_decode_utc_time(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_utc_time(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     return asn1_decode_string_tlv(buf, len, ASN1_TAG_UTC_TIME, out, out_len);
 }
 
-fn asn1_encode_utc_time(data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_utc_time(data: Address, len: u32, out: Address) -> u32 {
     return asn1_encode_string_tlv(ASN1_TAG_UTC_TIME, data, len, out);
 }
 
-fn asn1_decode_generalized_time(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+transform asn1_decode_generalized_time(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
     return asn1_decode_string_tlv(buf, len, ASN1_TAG_GENERALIZED_TIME, out, out_len);
 }
 
-fn asn1_encode_generalized_time(data: Address, len: u32, out: Address) -> u32 {
+transform asn1_encode_generalized_time(data: Address, len: u32, out: Address) -> u32 {
     return asn1_encode_string_tlv(ASN1_TAG_GENERALIZED_TIME, data, len, out);
 }
 
@@ -1155,7 +1155,7 @@ fn asn1_encode_generalized_time(data: Address, len: u32, out: Address) -> u32 {
 
 // SHA-256 OID: 2.16.840.1.101.3.4.2.1
 // DER: 06 09 60 86 48 01 65 03 04 02 01
-fn oid_sha256() -> Address {
+transform oid_sha256() -> Address {
     buf = allocate(9);
     *(buf + 0) = 96;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 1;   *(buf + 4) = 101; *(buf + 5) = 3;
@@ -1165,7 +1165,7 @@ fn oid_sha256() -> Address {
 
 // SHA-1 OID: 1.3.14.3.2.26
 // DER: 06 05 2B 0E 03 02 1A
-fn oid_sha1() -> Address {
+transform oid_sha1() -> Address {
     buf = allocate(5);
     *(buf + 0) = 43;  *(buf + 1) = 14;  *(buf + 2) = 3;
     *(buf + 3) = 2;   *(buf + 4) = 26;
@@ -1174,7 +1174,7 @@ fn oid_sha1() -> Address {
 
 // RSA encryption OID: 1.2.840.113549.1.1.1
 // DER: 06 09 2A 86 48 86 F7 0D 01 01 01
-fn oid_rsa() -> Address {
+transform oid_rsa() -> Address {
     buf = allocate(9);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
@@ -1184,7 +1184,7 @@ fn oid_rsa() -> Address {
 
 // sha256WithRSAEncryption OID: 1.2.840.113549.1.1.11
 // DER: 06 09 2A 86 48 86 F7 0D 01 01 0B
-fn oid_sha256_rsa() -> Address {
+transform oid_sha256_rsa() -> Address {
     buf = allocate(9);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
@@ -1194,7 +1194,7 @@ fn oid_sha256_rsa() -> Address {
 
 // ECDSA with SHA-256 OID: 1.2.840.10045.4.3.2
 // DER: 06 08 2A 86 48 CE 3D 04 03 02
-fn oid_ecdsa_sha256() -> Address {
+transform oid_ecdsa_sha256() -> Address {
     buf = allocate(8);
     *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
     *(buf + 3) = 206; *(buf + 4) = 61;  *(buf + 5) = 4;
@@ -1204,7 +1204,7 @@ fn oid_ecdsa_sha256() -> Address {
 
 // Ed25519 OID: 1.3.101.112
 // DER: 06 03 2B 65 70
-fn oid_ed25519() -> Address {
+transform oid_ed25519() -> Address {
     buf = allocate(3);
     *(buf + 0) = 43;  *(buf + 1) = 101; *(buf + 2) = 112;
     return buf;
@@ -1212,7 +1212,7 @@ fn oid_ed25519() -> Address {
 
 // commonName (X.520 attribute): 2.5.4.3
 // DER: 06 03 55 04 03
-fn oid_common_name() -> Address {
+transform oid_common_name() -> Address {
     buf = allocate(3);
     *(buf + 0) = 85;  *(buf + 1) = 4;   *(buf + 2) = 3;
     return buf;
@@ -1220,7 +1220,7 @@ fn oid_common_name() -> Address {
 
 // subjectKeyIdentifier OID: 2.5.29.14
 // DER: 06 03 55 1D 0E
-fn oid_subject_key_id() -> Address {
+transform oid_subject_key_id() -> Address {
     buf = allocate(3);
     *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 14;
     return buf;
@@ -1228,7 +1228,7 @@ fn oid_subject_key_id() -> Address {
 
 // authorityKeyIdentifier OID: 2.5.29.35
 // DER: 06 03 55 1D 23
-fn oid_authority_key_id() -> Address {
+transform oid_authority_key_id() -> Address {
     buf = allocate(3);
     *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 35;
     return buf;
@@ -1236,7 +1236,7 @@ fn oid_authority_key_id() -> Address {
 
 // basicConstraints OID: 2.5.29.19
 // DER: 06 03 55 1D 13
-fn oid_basic_constraints() -> Address {
+transform oid_basic_constraints() -> Address {
     buf = allocate(3);
     *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 19;
     return buf;
@@ -1244,7 +1244,7 @@ fn oid_basic_constraints() -> Address {
 
 // keyUsage OID: 2.5.29.15
 // DER: 06 03 55 1D 0F
-fn oid_key_usage() -> Address {
+transform oid_key_usage() -> Address {
     buf = allocate(3);
     *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 15;
     return buf;
@@ -1252,7 +1252,7 @@ fn oid_key_usage() -> Address {
 
 // subjectAltName OID: 2.5.29.17
 // DER: 06 03 55 1D 11
-fn oid_subject_alt_name() -> Address {
+transform oid_subject_alt_name() -> Address {
     buf = allocate(3);
     *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 17;
     return buf;
@@ -1265,7 +1265,7 @@ fn oid_subject_alt_name() -> Address {
 // ===========================================================================
 
 // Write DER length at buf[offset]. Returns bytes written (1..3).
-fn der_write_length(buf: Address, offset: u32, len: u32) -> u32 {
+transform der_write_length(buf: Address, offset: u32, len: u32) -> u32 {
     written: u32 = 3;
     if len < 128 {
         *(buf + offset) = len & 255;
@@ -1290,7 +1290,7 @@ fn der_write_length(buf: Address, offset: u32, len: u32) -> u32 {
 // (indefinite length or >4-byte form). Note: length 0 is also returned as 0,
 // matching the historical convention — callers that need to distinguish
 // "empty content" from "error" should use der_read_length_consumed in tandem.
-fn der_read_length(buf: Address, offset: u32) -> u32 {
+transform der_read_length(buf: Address, offset: u32) -> u32 {
     b: u32 = *(buf + offset);
     status: u32 = 1;
     value: u32 = 0;
@@ -1316,7 +1316,7 @@ fn der_read_length(buf: Address, offset: u32) -> u32 {
 
 // Returns how many bytes der_read_length will consume at buf[offset]
 // (1 for short form, 1+n for long form, 0 if the encoding is invalid).
-fn der_read_length_consumed(buf: Address, offset: u32) -> u32 {
+transform der_read_length_consumed(buf: Address, offset: u32) -> u32 {
     b: u32 = *(buf + offset);
     result: u32 = 0;
     n: u32 = 0;
@@ -1332,7 +1332,7 @@ fn der_read_length_consumed(buf: Address, offset: u32) -> u32 {
 }
 
 // Write SEQUENCE header (tag + length, no content). Returns bytes written.
-fn der_write_sequence_header(buf: Address, offset: u32, content_len: u32) -> u32 {
+transform der_write_sequence_header(buf: Address, offset: u32, content_len: u32) -> u32 {
     *(buf + offset) = TAG_SEQUENCE;
     return 1 + der_write_length(buf, offset + 1, content_len);
 }
@@ -1340,7 +1340,7 @@ fn der_write_sequence_header(buf: Address, offset: u32, content_len: u32) -> u32
 // Write INTEGER from a big-endian byte buffer. Strips leading zeros, adds
 // 0x00 sign-pad byte when the magnitude's high bit is set. Returns bytes
 // written (full TLV size).
-fn der_write_integer(buf: Address, offset: u32, val: Address, val_len: u32) -> u32 {
+transform der_write_integer(buf: Address, offset: u32, val: Address, val_len: u32) -> u32 {
     status: u32 = 1;
     start: u32 = 0;
     found_nonzero: u32 = 0;
@@ -1386,7 +1386,7 @@ fn der_write_integer(buf: Address, offset: u32, val: Address, val_len: u32) -> u
 }
 
 // Write OCTET STRING (tag + length + raw bytes).
-fn der_write_octet_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
+transform der_write_octet_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
     *(buf + offset) = TAG_OCTET_STRING;
     pos: u32 = offset + 1 + der_write_length(buf, offset + 1, data_len);
     i: u32 = 0;
@@ -1398,14 +1398,14 @@ fn der_write_octet_string(buf: Address, offset: u32, data: Address, data_len: u3
 }
 
 // Write NULL (05 00).
-fn der_write_null(buf: Address, offset: u32) -> u32 {
+transform der_write_null(buf: Address, offset: u32) -> u32 {
     *(buf + offset) = TAG_NULL;
     *(buf + offset + 1) = 0;
     return 2;
 }
 
 // Write BIT STRING (tag + length + 0 unused-bits byte + raw bytes).
-fn der_write_bit_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
+transform der_write_bit_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
     content_len: u32 = data_len + 1;  // +1 for unused-bits byte (always 0)
     *(buf + offset) = TAG_BIT_STRING;
     pos: u32 = offset + 1 + der_write_length(buf, offset + 1, content_len);
@@ -1422,7 +1422,7 @@ fn der_write_bit_string(buf: Address, offset: u32, data: Address, data_len: u32)
 // Write OID from a pre-encoded content-byte buffer. The caller passes the
 // raw OID body bytes (the bytes that follow the 06 LL prefix on the wire);
 // this primitive prepends the OID tag and length. Caller frees oid_bytes.
-fn der_write_oid(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
+transform der_write_oid(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
     *(buf + offset) = TAG_OID;
     pos: u32 = offset + 1 + der_write_length(buf, offset + 1, oid_len);
     i: u32 = 0;
@@ -1434,14 +1434,14 @@ fn der_write_oid(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) ->
 }
 
 // Read tag byte at buf[offset].
-fn der_read_tag(buf: Address, offset: u32) -> u32 {
+transform der_read_tag(buf: Address, offset: u32) -> u32 {
     return *(buf + offset);
 }
 
 // Read a TLV at buf[offset] expecting `expected_tag`. On success writes the
 // value offset (u32 LE) to val_offset_out[0..3] and value length (u32 LE)
 // to val_len_out[0..3]. Returns 1 on success, 0 on mismatch / error.
-fn der_read_tlv(buf: Address, offset: u32, expected_tag: u32, val_offset_out: Address, val_len_out: Address) -> u32 {
+transform der_read_tlv(buf: Address, offset: u32, expected_tag: u32, val_offset_out: Address, val_len_out: Address) -> u32 {
     tag: u32 = *(buf + offset);
     status: u32 = 1;
     len_consumed: u32 = 0;
@@ -1469,7 +1469,7 @@ fn der_read_tlv(buf: Address, offset: u32, expected_tag: u32, val_offset_out: Ad
 }
 
 // Load u32 LE from ptr[off..off+3].
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
+transform load_u32_le(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);

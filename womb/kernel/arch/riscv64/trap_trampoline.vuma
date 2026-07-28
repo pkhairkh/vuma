@@ -182,7 +182,7 @@ layout TrapFrame = {
 // 8-byte little-endian unpack at byte offset `idx * 8`. Same loop pattern
 // as task.vuma's pt_get_pid but with a u64 accumulator and an 8-byte loop
 // bound. Byte-identical to R2a's tf_get_gpr (same param name, same body).
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -201,7 +201,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 // 8-byte little-endian pack at byte offset `idx * 8`. Same loop pattern
 // as task.vuma's pt_set_pid but with an 8-byte loop bound. Byte-identical
 // to R2a's tf_set_gpr (same param name, same body).
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -218,7 +218,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // Called once per TrapFrame before riscv_trap_to_superset (or any other
 // arch's adapter) populates the arch-specific fields. Byte-identical to
 // R2a's tf_init (same param name, same body).
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -291,37 +291,37 @@ layout RiscVTrapFrame = {
 extern "C" {
     // Load the Supervisor Trap Vector Base Address Register. K11 stub:
     // `csrw stvec, a0; ret`.
-    fn stvec_load(stvec_ptr: Address);
+    transform stvec_load(stvec_ptr: Address);
     // End-Of-Interrupt to the PLIC. K11 stub:
     // `sw a0, PLIC_CLAIM_OFFSET(hart_ctx_base); ret`.
-    fn plic_eoi(irq: u32);
+    transform plic_eoi(irq: u32);
     // Mask an IRQ source at the PLIC. K11 stub: compute register bank =
     // irq / 32, mask bit = 1 << (irq % 32), then CLEAR the bit in the
     // PLIC's ENABLE register for that bank.
-    fn plic_mask(irq: u32);
+    transform plic_mask(irq: u32);
     // Unmask an IRQ source at the PLIC. Pairs with plic_mask.
-    fn plic_unmask(irq: u32);
+    transform plic_unmask(irq: u32);
     // Read the PLIC claim register — returns the active IRQ source ID
     // (1..1023) or 0 if no IRQ is pending. K11 stub:
     // `lw a0, PLIC_CLAIM_OFFSET(hart_ctx_base); ret`.
-    fn plic_get_irq() -> u32;
+    transform plic_get_irq() -> u32;
     // Read STVAL — the Supervisor Trap Value Register. K11 stub:
     // `csrr a0, stval; ret`.
-    fn stval_read() -> u64;
+    transform stval_read() -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers.
 // ────────────────────────────────────────────────────────────────────────────
 // Init-style API (caller allocates via state_new, passes by reference).
-// The State<T> params here are regular VUMA-fn borrows (NOT extern
-// #[borrow] — VUMA fn calls don't need the attribute, only extern "C"
+// The State<T> params here are regular VUMA-transform borrows (NOT extern
+// #[borrow] — VUMA transform calls don't need the attribute, only extern "C"
 // calls do).
 
 // Initialize a RiscVTrapFrame to zeros. Writes all 35 fields to 0. Kept
 // verbatim from K3c — only the param type name changes (TrapFrame →
 // RiscVTrapFrame).
-fn trap_frame_init(tf: State<RiscVTrapFrame>) {
+transform trap_frame_init(tf: State<RiscVTrapFrame>) {
     tf.ra = 0;
     tf.sp = 0;
     tf.gp = 0;
@@ -373,7 +373,7 @@ fn trap_frame_init(tf: State<RiscVTrapFrame>) {
 // dispatcher do its own EC/SCAUSE switching), but the helper is kept
 // here so any arch-specific caller that still has a RiscVTrapFrame can
 // use it.
-fn trap_is_syscall(tf: State<RiscVTrapFrame>) -> u8 {
+transform trap_is_syscall(tf: State<RiscVTrapFrame>) -> u8 {
     return (tf.scause == 8) as u8;
 }
 
@@ -392,7 +392,7 @@ fn trap_is_syscall(tf: State<RiscVTrapFrame>) -> u8 {
 // Kept verbatim from K3c — only the param type name changes (TrapFrame →
 // RiscVTrapFrame). Same rationale as trap_is_syscall: kept for arch-
 // specific callers that have a RiscVTrapFrame in hand.
-fn trap_is_page_fault(tf: State<RiscVTrapFrame>) -> u8 {
+transform trap_is_page_fault(tf: State<RiscVTrapFrame>) -> u8 {
     let c = tf.scause;
     if c >= 12 {
         if c <= 15 {
@@ -442,8 +442,8 @@ fn trap_is_page_fault(tf: State<RiscVTrapFrame>) -> u8 {
 // The two State<T> params pattern is precedent-set by
 // womb/kernel/syscall/abi.vuma::syscall_args_from_frame
 // (tf: State<TrapFrame>, args: State<SyscallArgs>) — VUMA's codegen
-// tracks both States' lifetimes through regular fn calls.
-fn riscv_trap_to_superset(old: State<RiscVTrapFrame>, sup: State<TrapFrame>) {
+// tracks both States' lifetimes through regular transform calls.
+transform riscv_trap_to_superset(old: State<RiscVTrapFrame>, sup: State<TrapFrame>) {
     // 31 GP registers → slots 0..30 (ABI-order save order).
     tf_set_gpr(sup, 0, old.ra);
     tf_set_gpr(sup, 1, old.sp);
@@ -507,7 +507,7 @@ fn riscv_trap_to_superset(old: State<RiscVTrapFrame>, sup: State<TrapFrame>) {
 //
 // Per the R2d contract's "Use decimal constants" rule: all non-zero
 // constants in the self-test use DECIMAL (42, 4096 — not 0x2a, 0x1000).
-fn main() -> i32 {
+transform main() -> i32 {
     let old = state_new(RiscVTrapFrame);
     trap_frame_init(old);
     let sup = state_new(TrapFrame);

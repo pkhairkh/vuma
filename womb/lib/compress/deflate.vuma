@@ -39,14 +39,14 @@ const INV32: u32      = 4294967295;     // 0xFFFFFFFF (CRC init / final XOR)
 // assemble/disassemble multi-byte values in little-endian byte order.
 // ===========================================================================
 
-fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+transform store_u32_le(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset + 0) = val & 255;
     *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255;
     *(ptr + offset + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+transform load_u32_le(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset + 0);
     b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2);
@@ -56,7 +56,7 @@ fn load_u32_le(ptr: Address, offset: u32) -> u32 {
 
 // Store an Address as 8 little-endian bytes. Address is treated as u64
 // for byte extraction.
-fn store_addr_le(ptr: Address, offset: u32, val: Address) {
+transform store_addr_le(ptr: Address, offset: u32, val: Address) {
     v: u64 = val as u64;
     *(ptr + offset + 0) = v & 255;
     *(ptr + offset + 1) = (v >> 8) & 255;
@@ -69,7 +69,7 @@ fn store_addr_le(ptr: Address, offset: u32, val: Address) {
 }
 
 // Load an Address from 8 little-endian bytes.
-fn load_addr_le(ptr: Address, offset: u32) -> Address {
+transform load_addr_le(ptr: Address, offset: u32) -> Address {
     b0: u64 = *(ptr + offset + 0);
     b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2);
@@ -89,7 +89,7 @@ fn load_addr_le(ptr: Address, offset: u32) -> Address {
 // init = 0xFFFFFFFF, final XOR = 0xFFFFFFFF.
 // ===========================================================================
 
-fn crc32_table_entry(idx: u32) -> u32 {
+transform crc32_table_entry(idx: u32) -> u32 {
     crc: u32 = idx;
     i: u32 = 0;
     while i < 8 {
@@ -103,7 +103,7 @@ fn crc32_table_entry(idx: u32) -> u32 {
     return crc;
 }
 
-fn crc32(data: Address, len: u32) -> u32 {
+transform crc32(data: Address, len: u32) -> u32 {
     // Build the 256-entry table once per call for speed.
     table = allocate(1024);           // 256 * 4 bytes
     i: u32 = 0;
@@ -132,7 +132,7 @@ fn crc32(data: Address, len: u32) -> u32 {
 // Result = (s2 << 16) | s1.
 // ===========================================================================
 
-fn adler32(data: Address, len: u32) -> u32 {
+transform adler32(data: Address, len: u32) -> u32 {
     s1: u32 = 1;
     s2: u32 = 0;
     i: u32 = 0;
@@ -156,7 +156,7 @@ fn adler32(data: Address, len: u32) -> u32 {
 //   [20..23] error     (u32)     — 0 = OK, 1 = past end of input
 // ===========================================================================
 
-fn bit_reader_create(data: Address, len: u32) -> Address {
+transform bit_reader_create(data: Address, len: u32) -> Address {
     state = allocate(32);
     store_addr_le(state, 0, data);
     store_u32_le(state, 8, 0);         // byte_pos
@@ -168,7 +168,7 @@ fn bit_reader_create(data: Address, len: u32) -> Address {
 
 // Read a single bit (LSB first). Returns the bit (0 or 1). If the reader
 // is past the end of input, sets the error flag and returns 0.
-fn bit_read_bit(reader: Address) -> u32 {
+transform bit_read_bit(reader: Address) -> u32 {
     byte_pos: u32 = load_u32_le(reader, 8);
     bit_pos: u32 = load_u32_le(reader, 12);
     len: u32 = load_u32_le(reader, 16);
@@ -194,7 +194,7 @@ fn bit_read_bit(reader: Address) -> u32 {
 }
 
 // Read n bits (LSB first). The first bit read becomes the LSB of the result.
-fn bit_read_bits(reader: Address, n: u32) -> u32 {
+transform bit_read_bits(reader: Address, n: u32) -> u32 {
     result: u32 = 0;
     i: u32 = 0;
     while i < n {
@@ -223,7 +223,7 @@ fn bit_read_bits(reader: Address, n: u32) -> u32 {
 // (code length > 15). The caller must allocate at least
 //   64 + num_codes * 4
 // bytes for the tree.
-fn huffman_build(lengths: Address, num_codes: u32, tree: Address) -> u32 {
+transform huffman_build(lengths: Address, num_codes: u32, tree: Address) -> u32 {
     // Zero the counts[0..15]
     i: u32 = 0;
     while i < 16 {
@@ -273,7 +273,7 @@ fn huffman_build(lengths: Address, num_codes: u32, tree: Address) -> u32 {
 // Decode one symbol from the reader using the tree. Returns the symbol.
 // On error (invalid code or past-end-of-input), sets the reader error flag
 // and returns 0.
-fn huffman_decode(reader: Address, tree: Address) -> u32 {
+transform huffman_decode(reader: Address, tree: Address) -> u32 {
     code: u32 = 0;
     first: u32 = 0;
     index: u32 = 0;
@@ -305,7 +305,7 @@ fn huffman_decode(reader: Address, tree: Address) -> u32 {
 // Distance codes 0..29: each has a base distance and extra bits.
 // ===========================================================================
 
-fn length_base(sym: u32) -> u32 {
+transform length_base(sym: u32) -> u32 {
     if sym == 257 { return 3; }
     if sym == 258 { return 4; }
     if sym == 259 { return 5; }
@@ -338,7 +338,7 @@ fn length_base(sym: u32) -> u32 {
     return 0;
 }
 
-fn length_extra_bits(sym: u32) -> u32 {
+transform length_extra_bits(sym: u32) -> u32 {
     if sym == 257 { return 0; }
     if sym == 258 { return 0; }
     if sym == 259 { return 0; }
@@ -371,7 +371,7 @@ fn length_extra_bits(sym: u32) -> u32 {
     return 0;
 }
 
-fn dist_base(sym: u32) -> u32 {
+transform dist_base(sym: u32) -> u32 {
     if sym == 0 { return 1; }
     if sym == 1 { return 2; }
     if sym == 2 { return 3; }
@@ -405,7 +405,7 @@ fn dist_base(sym: u32) -> u32 {
     return 0;
 }
 
-fn dist_extra_bits(sym: u32) -> u32 {
+transform dist_extra_bits(sym: u32) -> u32 {
     if sym == 0 { return 0; }
     if sym == 1 { return 0; }
     if sym == 2 { return 0; }
@@ -447,7 +447,7 @@ fn dist_extra_bits(sym: u32) -> u32 {
 // the end-of-block symbol (256) is seen. Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn inflate_decode_body(reader: Address, output: Address, out_pos_ptr: Address, out_max: u32, lit_tree: Address, dist_tree: Address) -> u32 {
+transform inflate_decode_body(reader: Address, output: Address, out_pos_ptr: Address, out_max: u32, lit_tree: Address, dist_tree: Address) -> u32 {
     out_pos: u32 = load_u32_le(out_pos_ptr, 0);
 
     done: u32 = 0;
@@ -534,7 +534,7 @@ fn inflate_decode_body(reader: Address, output: Address, out_pos_ptr: Address, o
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn inflate_block_stored(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
+transform inflate_block_stored(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
     // Stored blocks start on a byte boundary: discard remaining bits.
     bit_pos: u32 = load_u32_le(reader, 12);
     if bit_pos > 0 {
@@ -604,7 +604,7 @@ fn inflate_block_stored(reader: Address, output: Address, out_pos: Address, out_
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn inflate_block_fixed(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
+transform inflate_block_fixed(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
     // Build fixed literal/length code lengths (288 entries).
     lit_lengths = allocate(288);
     i: u32 = 0;
@@ -664,7 +664,7 @@ fn inflate_block_fixed(reader: Address, output: Address, out_pos: Address, out_m
 // on every path.
 // ===========================================================================
 
-fn inflate_block_dynamic(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
+transform inflate_block_dynamic(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
     hlit: u32 = bit_read_bits(reader, 5) + 257;
     hdist: u32 = bit_read_bits(reader, 5) + 1;
     hclen: u32 = bit_read_bits(reader, 4) + 4;
@@ -821,7 +821,7 @@ fn inflate_block_dynamic(reader: Address, output: Address, out_pos: Address, out
 // overflow, bad checksum is not checked here — that's the zlib layer).
 // ===========================================================================
 
-fn inflate(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform inflate(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     reader = bit_reader_create(input, input_len);
     out_pos_holder = allocate(8);
     store_u32_le(out_pos_holder, 0, 0);
@@ -891,7 +891,7 @@ fn inflate(input: Address, input_len: u32, output: Address, output_max: u32) -> 
 // Returns the compressed length, or -1 on output overflow.
 // ===========================================================================
 
-fn deflate(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform deflate(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     out_pos: u32 = 0;
     in_pos: u32 = 0;
 
@@ -973,7 +973,7 @@ fn deflate(input: Address, input_len: u32, output: Address, output_max: u32) -> 
 // (bad header, inflate failure, or Adler-32 mismatch).
 // ===========================================================================
 
-fn zlib_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform zlib_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     cmf: u32 = 120;                    // 0x78: CM=8, CINFO=7
     flg: u32 = 156;                    // 0x9C: FLEVEL=2, FDICT=0, FCHECK=28
 
@@ -1007,7 +1007,7 @@ fn zlib_compress(input: Address, input_len: u32, output: Address, output_max: u3
     return 2 + deflate_len + 4;
 }
 
-fn zlib_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+transform zlib_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
     // Need at least 2 (header) + 1 (min deflate) + 4 (adler) = 7 bytes,
     // but require 6 to avoid underflow on input_len - 6 below; inflate will
     // reject a zero-length deflate stream.

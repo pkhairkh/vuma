@@ -17,24 +17,24 @@
 // edges (via next_out) and incoming edges (via next_in).
 
 // ── LE helpers ──
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
@@ -46,7 +46,7 @@ const GRAPH_SIZE: u32 = 48;
 
 // Create a new directed graph with given capacities.
 // Uses allocate() for heap-backed storage (persists across calls).
-fn digraph_new(node_cap: u32, edge_cap: u32) -> Address {
+transform digraph_new(node_cap: u32, edge_cap: u32) -> Address {
     g = allocate(GRAPH_SIZE);
     if node_cap == 0 { node_cap = 1024; }
     if edge_cap == 0 { edge_cap = 4096; }
@@ -68,7 +68,7 @@ fn digraph_new(node_cap: u32, edge_cap: u32) -> Address {
 }
 
 // Grow the node array (2x capacity)
-fn digraph_grow_nodes(g: Address) {
+transform digraph_grow_nodes(g: Address) {
     old_cap: u32 = load_u32(g, 24);
     new_cap: u32 = old_cap * 2;
     old_nodes: u64 = load_u64(g, 0);
@@ -90,7 +90,7 @@ fn digraph_grow_nodes(g: Address) {
 }
 
 // Grow the edge array (2x capacity)
-fn digraph_grow_edges(g: Address) {
+transform digraph_grow_edges(g: Address) {
     old_cap: u32 = load_u32(g, 28);
     new_cap: u32 = old_cap * 2;
     old_edges: u64 = load_u64(g, 8);
@@ -110,7 +110,7 @@ fn digraph_grow_edges(g: Address) {
 }
 
 // Add a node with a payload tag. Returns node index.
-fn digraph_add_node(g: Address, payload_tag: u32) -> u32 {
+transform digraph_add_node(g: Address, payload_tag: u32) -> u32 {
     count: u32 = load_u32(g, 16);
     cap: u32 = load_u32(g, 24);
     if count >= cap { digraph_grow_nodes(g); }
@@ -124,7 +124,7 @@ fn digraph_add_node(g: Address, payload_tag: u32) -> u32 {
 }
 
 // Add a directed edge from src to dst. Returns edge index.
-fn digraph_add_edge(g: Address, src: u32, dst: u32) -> u32 {
+transform digraph_add_edge(g: Address, src: u32, dst: u32) -> u32 {
     edge_count: u32 = load_u32(g, 20);
     edge_cap: u32 = load_u32(g, 28);
     if edge_count >= edge_cap { digraph_grow_edges(g); }
@@ -151,53 +151,53 @@ fn digraph_add_edge(g: Address, src: u32, dst: u32) -> u32 {
     return edge_count;
 }
 
-fn digraph_node_count(g: Address) -> u32 { return load_u32(g, 16); }
-fn digraph_edge_count(g: Address) -> u32 { return load_u32(g, 20); }
+transform digraph_node_count(g: Address) -> u32 { return load_u32(g, 16); }
+transform digraph_edge_count(g: Address) -> u32 { return load_u32(g, 20); }
 
 // Get node payload tag
-fn digraph_node_payload(g: Address, node: u32) -> u32 {
+transform digraph_node_payload(g: Address, node: u32) -> u32 {
     nodes: u64 = load_u64(g, 0);
     return load_u32(nodes, node * NODE_SIZE);
 }
 
 // Get first outgoing edge (returns 0xFFFFFFFF if none)
-fn digraph_first_out(g: Address, node: u32) -> u32 {
+transform digraph_first_out(g: Address, node: u32) -> u32 {
     nodes: u64 = load_u64(g, 0);
     return load_u32(nodes, node * NODE_SIZE + 8);
 }
 
 // Get first incoming edge (returns 0xFFFFFFFF if none)
-fn digraph_first_in(g: Address, node: u32) -> u32 {
+transform digraph_first_in(g: Address, node: u32) -> u32 {
     nodes: u64 = load_u64(g, 0);
     return load_u32(nodes, node * NODE_SIZE + 4);
 }
 
 // Get next outgoing edge
-fn digraph_next_out(g: Address, edge: u32) -> u32 {
+transform digraph_next_out(g: Address, edge: u32) -> u32 {
     edges: u64 = load_u64(g, 8);
     return load_u32(edges, edge * EDGE_SIZE + 8);
 }
 
 // Get next incoming edge
-fn digraph_next_in(g: Address, edge: u32) -> u32 {
+transform digraph_next_in(g: Address, edge: u32) -> u32 {
     edges: u64 = load_u64(g, 8);
     return load_u32(edges, edge * EDGE_SIZE + 12);
 }
 
 // Get edge source
-fn digraph_edge_src(g: Address, edge: u32) -> u32 {
+transform digraph_edge_src(g: Address, edge: u32) -> u32 {
     edges: u64 = load_u64(g, 8);
     return load_u32(edges, edge * EDGE_SIZE);
 }
 
 // Get edge destination
-fn digraph_edge_dst(g: Address, edge: u32) -> u32 {
+transform digraph_edge_dst(g: Address, edge: u32) -> u32 {
     edges: u64 = load_u64(g, 8);
     return load_u32(edges, edge * EDGE_SIZE + 4);
 }
 
 // Free the graph
-fn digraph_free(g: Address) {
+transform digraph_free(g: Address) {
     nodes: u64 = load_u64(g, 0);
     edges: u64 = load_u64(g, 8);
     node_cap: u32 = load_u32(g, 24);

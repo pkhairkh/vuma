@@ -144,7 +144,7 @@ layout BootInfo = {
 // re-declared here so this file compiles standalone. arm64_bootinfo_init
 // calls this first to get a clean slate before populating aarch64-specific
 // fields.
-fn bootinfo_init(bi: State<BootInfo>) {
+transform bootinfo_init(bi: State<BootInfo>) {
     bi.mem_start = 0;
     bi.mem_size = 0;
     bi.cmdline = 0;
@@ -188,7 +188,7 @@ fn bootinfo_init(bi: State<BootInfo>) {
 // State<T> params: 1 (bi). The dtb_addr / mem_start / mem_size params are
 // pure u64 values (no State indirection). The body is 4 field writes after
 // the bootinfo_init call — pure typed-memory writes, no pointer ops.
-fn arm64_bootinfo_init(bi: State<BootInfo>, dtb_addr: u64, mem_start: u64, mem_size: u64) {
+transform arm64_bootinfo_init(bi: State<BootInfo>, dtb_addr: u64, mem_start: u64, mem_size: u64) {
     bootinfo_init(bi);
     bi.boot_type = 1;            // dtb (aarch64)
     bi.dtb_addr = dtb_addr;
@@ -219,7 +219,7 @@ fn arm64_bootinfo_init(bi: State<BootInfo>, dtb_addr: u64, mem_start: u64, mem_s
 //   2: dtb_addr  != 1073741824
 //   3: mem_start != 1073741824
 //   4: mem_size  != 268435456
-fn main() -> i32 {
+transform main() -> i32 {
     let bi = state_new(BootInfo);
     arm64_bootinfo_init(bi, 1073741824, 1073741824, 268435456);
     if bi.boot_type != 1 { return 1; }

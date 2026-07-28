@@ -44,7 +44,7 @@
 //
 // ── Why init-style? ─────────────────────────────────────────────────────────
 // The K2a contract specifies:
-//     fn pmm_init(pool, mem_start, mem_size) -> State<PmmState>
+//     transform pmm_init(pool, mem_start, mem_size) -> State<PmmState>
 // i.e. pmm_init allocates the PmmState internally and returns it. The
 // current VUMA codegen (verified via /home/z/probes/probe_return_state2.vuma)
 // does NOT propagate State-typedness through function return values: a
@@ -54,7 +54,7 @@
 // src/pipeline.rs::flatten_expr and silently return 0. This is the same
 // caveat documented in womb/alloc/arena.vuma:
 //   "the current PMT codegen does not propagate State-typedness through
-//    function return values, so a `fn arena_new(...) -> State<Arena>`
+//    function return values, so a `transform arena_new(...) -> State<Arena>`
 //    that returns a freshly-allocated state produces broken field-access
 //    code in downstream functions. The init-style API (state allocated
 //    at the call site, passed by reference to an init function) is the
@@ -156,7 +156,7 @@ layout PmmState = {
 // backends the symbol resolves to `__ffi_fallback_stub` (returns 0),
 // which is a safe no-op for the store.
 extern "C" {
-    fn __vuma_store_u32(addr: u64, val: u32);
+    transform __vuma_store_u32(addr: u64, val: u32);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ extern "C" {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Read the u64 `base` field of FreeNode slot `idx` from FlatPool.bases.
-fn pool_get_base(pool: State<FlatPool>, idx: u32) -> u64 {
+transform pool_get_base(pool: State<FlatPool>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -179,7 +179,7 @@ fn pool_get_base(pool: State<FlatPool>, idx: u32) -> u64 {
 }
 
 // Write the u64 `base` field of FreeNode slot `idx` into FlatPool.bases.
-fn pool_set_base(pool: State<FlatPool>, idx: u32, val: u64) {
+transform pool_set_base(pool: State<FlatPool>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -192,7 +192,7 @@ fn pool_set_base(pool: State<FlatPool>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of FreeNode slot `idx` from FlatPool.nexts.
-fn pool_get_next(pool: State<FlatPool>, idx: u32) -> u64 {
+transform pool_get_next(pool: State<FlatPool>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -207,7 +207,7 @@ fn pool_get_next(pool: State<FlatPool>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of FreeNode slot `idx` into FlatPool.nexts.
-fn pool_set_next(pool: State<FlatPool>, idx: u32, val: u64) {
+transform pool_set_next(pool: State<FlatPool>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -220,12 +220,12 @@ fn pool_set_next(pool: State<FlatPool>, idx: u32, val: u64) {
 }
 
 // Read the u8 `order` field of FreeNode slot `idx` from FlatPool.orders.
-fn pool_get_order(pool: State<FlatPool>, idx: u32) -> u8 {
+transform pool_get_order(pool: State<FlatPool>, idx: u32) -> u8 {
     return pool.orders[idx];
 }
 
 // Write the u8 `order` field of FreeNode slot `idx` into FlatPool.orders.
-fn pool_set_order(pool: State<FlatPool>, idx: u32, val: u8) {
+transform pool_set_order(pool: State<FlatPool>, idx: u32, val: u8) {
     pool.orders[idx] = val;
 }
 
@@ -241,7 +241,7 @@ fn pool_set_order(pool: State<FlatPool>, idx: u32, val: u8) {
 // pool sustain an unbounded alloc/free cycle without growing count past
 // the steady-state high-water mark (rather than monotonically consuming
 // all 4096 slots and leaking buddy blocks once exhausted).
-fn pool_alloc_node(pool: State<FlatPool>) -> u32 {
+transform pool_alloc_node(pool: State<FlatPool>) -> u32 {
     // Try to reuse a freed node first.
     if pool.free_head < 4096 {
         let node = pool.free_head;
@@ -271,7 +271,7 @@ fn pool_alloc_node(pool: State<FlatPool>) -> u32 {
 // each slot's `nexts` field (read by pool_alloc_node). After this call,
 // `node` is NO LONGER on any free_list — the caller must have already
 // unlinked it (e.g. via the prev2/cur2 walk in pmm_free's coalesce path).
-fn pool_free_node(pool: State<FlatPool>, node: u32) {
+transform pool_free_node(pool: State<FlatPool>, node: u32) {
     pool_set_next(pool, node, pool.free_head as u64);
     pool.free_head = node;
 }
@@ -282,7 +282,7 @@ fn pool_free_node(pool: State<FlatPool>, node: u32) {
 
 // Read the head FreeNode index for buddy `order` from PmmState.free_lists.
 // Returns 4096 (EMPTY sentinel) if the list is empty.
-fn pmm_get_free_list(pmm: State<PmmState>, order: u8) -> u64 {
+transform pmm_get_free_list(pmm: State<PmmState>, order: u8) -> u64 {
     let off = (order as u32) * 8;
     let v: u64 = 0;
     let i = 0;
@@ -297,7 +297,7 @@ fn pmm_get_free_list(pmm: State<PmmState>, order: u8) -> u64 {
 }
 
 // Write the head FreeNode index for buddy `order` into PmmState.free_lists.
-fn pmm_set_free_list(pmm: State<PmmState>, order: u8, val: u64) {
+transform pmm_set_free_list(pmm: State<PmmState>, order: u8, val: u64) {
     let off = (order as u32) * 8;
     let i = 0;
     while i < 8 {
@@ -315,14 +315,14 @@ fn pmm_set_free_list(pmm: State<PmmState>, order: u8, val: u64) {
 
 // Return the page size (in bytes) for a buddy order.
 // page_size = 4096 << order.
-fn pmm_order_size(order: u8) -> u64 {
+transform pmm_order_size(order: u8) -> u64 {
     let sz = 4096 as u64;
     return sz << order;
 }
 
 // Return the buddy address for a given (addr, order).
 // buddy = addr XOR (4096 << order).
-fn pmm_buddy(addr: u64, order: u8) -> u64 {
+transform pmm_buddy(addr: u64, order: u8) -> u64 {
     let mask = pmm_order_size(order);
     return addr ^ mask;
 }
@@ -339,7 +339,7 @@ fn pmm_buddy(addr: u64, order: u8) -> u64 {
 //
 // pmm_alloc documents (but does not yet call) this stub — see the
 // "page should be zeroed" comments at each return path in pmm_alloc.
-fn pmm_zero_page(addr: u64) {
+transform pmm_zero_page(addr: u64) {
     __vuma_store_u32(addr, 0);
 }
 
@@ -361,7 +361,7 @@ fn pmm_zero_page(addr: u64) {
 // diagnostic use (the implementation uses the explicit `pool` parameter
 // to access the pool, not the pmm.pool field).
 
-fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>, mem_start: u64, mem_size: u64) {
+transform pmm_init(pool: State<FlatPool>, pmm: State<PmmState>, mem_start: u64, mem_size: u64) {
     // Reset pool: count = 0 (no slots bump-allocated yet) and free_head
     // = 4096 (recycle list empty — Fix 4). Both fields are u32.
     pool.count = 0;
@@ -452,7 +452,7 @@ fn pmm_init(pool: State<FlatPool>, pmm: State<PmmState>, mem_start: u64, mem_siz
 // Returns the physical address, or 0 if out of memory. Splits a larger
 // block if needed (recursive buddy split).
 
-fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
+transform pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
     // Invalid order — OOM.
     if order > 10 {
         return 0;
@@ -526,7 +526,7 @@ fn pmm_alloc(pool: State<FlatPool>, pmm: State<PmmState>, order: u8) -> u64 {
 // order. At max order (10), no coalescing is attempted (free_lists has
 // no order-11 slot).
 
-fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
+transform pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
     // At max order or above, just prepend to free_lists[order] without
     // attempting coalescing.
     if order >= 10 {
@@ -626,7 +626,7 @@ fn pmm_free(pool: State<FlatPool>, pmm: State<PmmState>, addr: u64, order: u8) {
 // triggers recursive coalescing all the way back up to order 10, at
 // which point all 4096 pages are free again.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pool = state_new(FlatPool);
     let pmm = state_new(PmmState);
     pmm_init(pool, pmm, 1048576, 16777216);  // 1 MB start, 16 MB size

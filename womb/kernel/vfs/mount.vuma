@@ -206,7 +206,7 @@ layout MountTable = {
 // writes, sum-of-shifted-bytes on reads.
 
 // Read the u64 `dentry` field of Mount slot `idx` from MountTable.dentries.
-fn mount_get_dentry(tbl: State<MountTable>, idx: u32) -> u64 {
+transform mount_get_dentry(tbl: State<MountTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -220,7 +220,7 @@ fn mount_get_dentry(tbl: State<MountTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `dentry` field of Mount slot `idx` into MountTable.dentries.
-fn mount_set_dentry(tbl: State<MountTable>, idx: u32, val: u64) {
+transform mount_set_dentry(tbl: State<MountTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -232,7 +232,7 @@ fn mount_set_dentry(tbl: State<MountTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `sb` field of Mount slot `idx` from MountTable.sbs.
-fn mount_get_sb(tbl: State<MountTable>, idx: u32) -> u64 {
+transform mount_get_sb(tbl: State<MountTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -246,7 +246,7 @@ fn mount_get_sb(tbl: State<MountTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `sb` field of Mount slot `idx` into MountTable.sbs.
-fn mount_set_sb(tbl: State<MountTable>, idx: u32, val: u64) {
+transform mount_set_sb(tbl: State<MountTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -258,7 +258,7 @@ fn mount_set_sb(tbl: State<MountTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `parent` field of Mount slot `idx` from MountTable.parents.
-fn mount_get_parent(tbl: State<MountTable>, idx: u32) -> u64 {
+transform mount_get_parent(tbl: State<MountTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -272,7 +272,7 @@ fn mount_get_parent(tbl: State<MountTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `parent` field of Mount slot `idx` into MountTable.parents.
-fn mount_set_parent(tbl: State<MountTable>, idx: u32, val: u64) {
+transform mount_set_parent(tbl: State<MountTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -284,7 +284,7 @@ fn mount_set_parent(tbl: State<MountTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of Mount slot `idx` from MountTable.nexts.
-fn mount_get_next(tbl: State<MountTable>, idx: u32) -> u64 {
+transform mount_get_next(tbl: State<MountTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -298,7 +298,7 @@ fn mount_get_next(tbl: State<MountTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Mount slot `idx` into MountTable.nexts.
-fn mount_set_next(tbl: State<MountTable>, idx: u32, val: u64) {
+transform mount_set_next(tbl: State<MountTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -335,7 +335,7 @@ fn mount_set_next(tbl: State<MountTable>, idx: u32, val: u64) {
 // IN USE to mount_find_free). Zeroing sbs is required for the free
 // marker to work; zeroing dentries too is a defensive belt-and-
 // suspenders measure that costs only 16 extra 8-byte writes at boot.
-fn mount_table_init(tbl: State<MountTable>) {
+transform mount_table_init(tbl: State<MountTable>) {
     let i = 0;
     while i < 16 {
         mount_set_dentry(tbl, i, 0);
@@ -357,7 +357,7 @@ fn mount_table_init(tbl: State<MountTable>) {
 // dentry = 0 and would look free). See "Why sb == 0 as the free-slot
 // marker?" in the file header for the full rationale. The sb == 0
 // test is unambiguous because a valid mount always has a non-zero sb.
-fn mount_find_free(tbl: State<MountTable>) -> u32 {
+transform mount_find_free(tbl: State<MountTable>) -> u32 {
     let i = 0;
     while i < 16 {
         if mount_get_sb(tbl, i) == 0 {
@@ -380,7 +380,7 @@ fn mount_find_free(tbl: State<MountTable>) -> u32 {
 // sys_mount is responsible for that check (calling vfs_mounted_at first
 // and returning -EBUSY = 0 - 16 if already mounted). The K5e layer
 // keeps the primitive simple: mount_find_free + set fields + bump count.
-fn vfs_mount(tbl: State<MountTable>, dentry_idx: u64, sb: u64) -> u32 {
+transform vfs_mount(tbl: State<MountTable>, dentry_idx: u64, sb: u64) -> u32 {
     let slot = mount_find_free(tbl);
     if slot == 16 {
         return 16;
@@ -428,7 +428,7 @@ fn vfs_mount(tbl: State<MountTable>, dentry_idx: u64, sb: u64) -> u32 {
 // the slot (vfs_mount writes all four fields, so the stale values are
 // overwritten before use). This matches K5a's file_free (which only
 // clears `used`, leaving the other File fields stale).
-fn vfs_umount(tbl: State<MountTable>, dentry_idx: u64) -> i64 {
+transform vfs_umount(tbl: State<MountTable>, dentry_idx: u64) -> i64 {
     let i = 0;
     while i < 16 {
         if mount_get_sb(tbl, i) != 0 {
@@ -471,7 +471,7 @@ fn vfs_umount(tbl: State<MountTable>, dentry_idx: u64) -> i64 {
 // K5e contract and is consistent with mount_find_free's "table full"
 // sentinel — both use 16 (the slot count) as the out-of-band value,
 // since valid slot indices are 0..15.
-fn vfs_mounted_at(tbl: State<MountTable>, dentry_idx: u64) -> u32 {
+transform vfs_mounted_at(tbl: State<MountTable>, dentry_idx: u64) -> u32 {
     let i = 0;
     while i < 16 {
         if mount_get_sb(tbl, i) != 0 {
@@ -511,7 +511,7 @@ fn vfs_mounted_at(tbl: State<MountTable>, dentry_idx: u64) -> u32 {
 // not read sb back (K6's follow_mount will). The dentry values 0 and 5
 // exercise both the low-byte-only path (0, 5) and the "already used"
 // path (slot 0 reused after umount in a real K6 scenario).
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(MountTable);
     mount_table_init(tbl);
 

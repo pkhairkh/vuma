@@ -37,7 +37,7 @@
 //   Plus the 16 pack/unpack/accessor helpers used by register/lookup and
 //   exposed for future waves (K7+ will add cdev_open / cdev_ioctl /
 //   cdev_close dispatch wrappers that look up a slot, fetch the
-//   corresponding fn pointer, and call it).
+//   corresponding transform pointer, and call it).
 //
 // ── Why a registry, not a flat array of CharDevice structs? ─────────────────
 // VUMA has no struct arrays — there is no `[CharDevice; 32]` syntax. The
@@ -66,26 +66,26 @@
 // mmio_write8 with explicit offsets.
 //
 // ── Function pointers as u64 ────────────────────────────────────────────────
-// VUMA has no first-class function-pointer call (no `(*fn)(arg)` syntax).
+// VUMA has no first-class function-pointer call (no `(*transform)(arg)` syntax).
 // Each cdev slot stores its 5 ops as u64 values — in hosted mode these
 // are typically 0 (no dispatch; the registry is a name→index table only).
 // K11 will swap them for real function-pointer values (resolved at link
 // time) AND add the dispatch wrappers:
-//     fn cdev_open(tbl, slot, ...) -> i64 {
+//     transform cdev_open(tbl, slot, ...) -> i64 {
 //         let fn_ptr = cdev_get_open_fn(tbl, slot);
 //         // K11: dispatch via the new `extern_call` builtin:
 //         //   return extern_call(fn_ptr, ...);
 //         // For now (K6d): no dispatch — return 0.
 //         return 0;
 //     }
-// The K6d registry stores the fn pointers verbatim (LE-packed u64 into
+// The K6d registry stores the transform pointers verbatim (LE-packed u64 into
 // the *_fns arrays) so K11 can read them back out without re-parsing.
 //
 // ── Pack/unpack pattern ─────────────────────────────────────────────────────
 // Identical to K5a's file.vuma (FileTable) — 8-iteration LE loop for u64
 // fields, 4-iteration LE loop for u32 fields, direct u8 index for `used`
 // and per-byte `names` access. The 8-iteration pattern:
-//     fn cdev_get_open_fn(tbl, idx) -> u64 {
+//     transform cdev_get_open_fn(tbl, idx) -> u64 {
 //         let off = idx * 8;
 //         let v: u64 = 0;
 //         let i = 0;
@@ -98,7 +98,7 @@
 //         return v;
 //     }
 // And the 4-iteration u32 variant (e.g. major):
-//     fn cdev_get_major(tbl, idx) -> u32 {
+//     transform cdev_get_major(tbl, idx) -> u32 {
 //         let off = idx * 4;
 //         let v: u32 = 0;
 //         let i = 0;
@@ -136,7 +136,7 @@
 // update (lowered to a load-modify-store through the State pointer —
 // the K4a task.vuma `tbl.count = tbl.count + 1` pattern). No `extern`
 // declarations: K6d is purely computational, like K6b (line_discipline)
-// and K6c (vt100). The actual fn-pointer dispatch is a K11 concern.
+// and K6c (vt100). The actual transform-pointer dispatch is a K11 concern.
 //
 // ── Decimal-constants discipline ────────────────────────────────────────────
 // All non-zero constants in this file use DECIMAL per the K5a contract's
@@ -150,7 +150,7 @@
 //     16     = bytes per CharDevice name (also the per-slot stride in
 //              the names array, and the loop bound for name copy/compare
 //              in chardev_register / chardev_lookup_name).
-//     8      = bytes per u64 field (loop bound for fn-pointer
+//     8      = bytes per u64 field (loop bound for transform-pointer
 //              pack/unpack — open_fn / read_fn / write_fn / ioctl_fn /
 //              close_fn).
 //     4      = bytes per u32 field (loop bound for major / minor
@@ -179,7 +179,7 @@
 // arg: u64) -> u64`. It lowers to `mov rax, rdi; mov rdi, rsi; jmp rax` —
 // a tail call that invokes the function at `ptr` with `arg` in RDI (SysV
 // AMD64 first-argument register). This is the VUMA-pure way to perform an
-// indirect function-pointer call: the language has no first-class fn-ptr
+// indirect function-pointer call: the language has no first-class transform-ptr
 // type, so indirect dispatch is delegated to a runtime stub (same category
 // as write/read/exit — NOT a C library function; real asm body registered
 // in src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs).
@@ -201,7 +201,7 @@
 //         the handler's first instruction.
 //
 // The `tbl` (State<CharDevTable>) is preserved across the extern call
-// because it is passed as a regular VUMA-fn borrow, NOT as an extern
+// because it is passed as a regular VUMA-transform borrow, NOT as an extern
 // #[borrow] State<T> param (only extern #[borrow] State<T> params are
 // conservatively invalidated — see W5's dispatch.vuma for the same
 // reasoning). `buf` and `count` are part of the API signature for K7+
@@ -236,7 +236,7 @@ extern "C" {
     // category as write/read/exit — NOT a C library function. Real asm
     // body registered in src/codegen/src/x86_64/mod.rs::build_runtime_
     // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -318,12 +318,12 @@ layout DevName = { data: [u8; 16] }
 // K6d contract template exactly.
 
 // Read byte `off` (0..15) of slot `idx`'s name from CharDevTable.names.
-fn cdev_get_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32) -> u8 {
+transform cdev_get_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32) -> u8 {
     return tbl.names[idx * 16 + off];
 }
 
 // Write byte `off` (0..15) of slot `idx`'s name into CharDevTable.names.
-fn cdev_set_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32, val: u8) {
+transform cdev_set_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32, val: u8) {
     tbl.names[idx * 16 + off] = val;
 }
 
@@ -337,7 +337,7 @@ fn cdev_set_name_byte(tbl: State<CharDevTable>, idx: u32, off: u32, val: u8) {
 
 // Read the u32 `major` field of CharDevice slot `idx` from
 // CharDevTable.majors.
-fn cdev_get_major(tbl: State<CharDevTable>, idx: u32) -> u32 {
+transform cdev_get_major(tbl: State<CharDevTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -352,7 +352,7 @@ fn cdev_get_major(tbl: State<CharDevTable>, idx: u32) -> u32 {
 
 // Write the u32 `major` field of CharDevice slot `idx` into
 // CharDevTable.majors.
-fn cdev_set_major(tbl: State<CharDevTable>, idx: u32, val: u32) {
+transform cdev_set_major(tbl: State<CharDevTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -365,7 +365,7 @@ fn cdev_set_major(tbl: State<CharDevTable>, idx: u32, val: u32) {
 
 // Read the u32 `minor` field of CharDevice slot `idx` from
 // CharDevTable.minors.
-fn cdev_get_minor(tbl: State<CharDevTable>, idx: u32) -> u32 {
+transform cdev_get_minor(tbl: State<CharDevTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -380,7 +380,7 @@ fn cdev_get_minor(tbl: State<CharDevTable>, idx: u32) -> u32 {
 
 // Write the u32 `minor` field of CharDevice slot `idx` into
 // CharDevTable.minors.
-fn cdev_set_minor(tbl: State<CharDevTable>, idx: u32, val: u32) {
+transform cdev_set_minor(tbl: State<CharDevTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -399,11 +399,11 @@ fn cdev_set_minor(tbl: State<CharDevTable>, idx: u32, val: u32) {
 // file_set_ops / file_get_private / file_set_private (file.vuma) and K2a's
 // pool_get_base / pool_set_base (pmm.vuma): 8-iteration while loop, shift
 // by i*8, mask 255 on writes, sum-of-shifted-bytes on reads. Five pairs
-// (one per fn-pointer field) — byte-identical except for the field array.
+// (one per transform-pointer field) — byte-identical except for the field array.
 
 // Read the u64 `open_fn` field of CharDevice slot `idx` from
 // CharDevTable.open_fns.
-fn cdev_get_open_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+transform cdev_get_open_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -418,7 +418,7 @@ fn cdev_get_open_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
 
 // Write the u64 `open_fn` field of CharDevice slot `idx` into
 // CharDevTable.open_fns.
-fn cdev_set_open_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+transform cdev_set_open_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -431,7 +431,7 @@ fn cdev_set_open_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
 
 // Read the u64 `read_fn` field of CharDevice slot `idx` from
 // CharDevTable.read_fns.
-fn cdev_get_read_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+transform cdev_get_read_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -446,7 +446,7 @@ fn cdev_get_read_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
 
 // Write the u64 `read_fn` field of CharDevice slot `idx` into
 // CharDevTable.read_fns.
-fn cdev_set_read_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+transform cdev_set_read_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -459,7 +459,7 @@ fn cdev_set_read_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
 
 // Read the u64 `write_fn` field of CharDevice slot `idx` from
 // CharDevTable.write_fns.
-fn cdev_get_write_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+transform cdev_get_write_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -474,7 +474,7 @@ fn cdev_get_write_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
 
 // Write the u64 `write_fn` field of CharDevice slot `idx` into
 // CharDevTable.write_fns.
-fn cdev_set_write_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+transform cdev_set_write_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -487,7 +487,7 @@ fn cdev_set_write_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
 
 // Read the u64 `ioctl_fn` field of CharDevice slot `idx` from
 // CharDevTable.ioctl_fns.
-fn cdev_get_ioctl_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+transform cdev_get_ioctl_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -502,7 +502,7 @@ fn cdev_get_ioctl_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
 
 // Write the u64 `ioctl_fn` field of CharDevice slot `idx` into
 // CharDevTable.ioctl_fns.
-fn cdev_set_ioctl_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+transform cdev_set_ioctl_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -515,7 +515,7 @@ fn cdev_set_ioctl_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
 
 // Read the u64 `close_fn` field of CharDevice slot `idx` from
 // CharDevTable.close_fns.
-fn cdev_get_close_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
+transform cdev_get_close_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -530,7 +530,7 @@ fn cdev_get_close_fn(tbl: State<CharDevTable>, idx: u32) -> u64 {
 
 // Write the u64 `close_fn` field of CharDevice slot `idx` into
 // CharDevTable.close_fns.
-fn cdev_set_close_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
+transform cdev_set_close_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -550,12 +550,12 @@ fn cdev_set_close_fn(tbl: State<CharDevTable>, idx: u32, val: u64) {
 // loop. The byte IS the value.
 
 // Read the u8 `used` flag of CharDevice slot `idx` from CharDevTable.used.
-fn cdev_get_used(tbl: State<CharDevTable>, idx: u32) -> u8 {
+transform cdev_get_used(tbl: State<CharDevTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of CharDevice slot `idx` into CharDevTable.used.
-fn cdev_set_used(tbl: State<CharDevTable>, idx: u32, val: u8) {
+transform cdev_set_used(tbl: State<CharDevTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
@@ -570,7 +570,7 @@ fn cdev_set_used(tbl: State<CharDevTable>, idx: u32, val: u8) {
 // zeroing them here would be wasted work (and VUMA has no memset). The
 // stale contents are unreachable (cdev_get_used == 0 guarantees no slot
 // will be read until chardev_register populates it).
-fn cdev_table_init(tbl: State<CharDevTable>) {
+transform cdev_table_init(tbl: State<CharDevTable>) {
     let i = 0;
     while i < 32 {
         cdev_set_used(tbl, i, 0);
@@ -581,7 +581,7 @@ fn cdev_table_init(tbl: State<CharDevTable>) {
 
 // chardev_register: register a character device. Finds the first FREE
 // slot (used == 0), copies the name byte-by-byte (stopping at NUL),
-// packs the major / minor / fn pointers, marks the slot used, bumps
+// packs the major / minor / transform pointers, marks the slot used, bumps
 // count, and returns the slot index. Returns 32 if the table is full
 // (the caller MUST check — K7's sys_mknod returns -ENOSPC in that
 // case, or whatever errno the syscall layer picks).
@@ -598,7 +598,7 @@ fn cdev_table_init(tbl: State<CharDevTable>) {
 //
 // The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
 // and K5a's file_alloc / inode_alloc / dentry_alloc.
-fn chardev_register(tbl: State<CharDevTable>, name: State<DevName>, major: u32, minor: u32, open_fn: u64, read_fn: u64, write_fn: u64, ioctl_fn: u64, close_fn: u64) -> u32 {
+transform chardev_register(tbl: State<CharDevTable>, name: State<DevName>, major: u32, minor: u32, open_fn: u64, read_fn: u64, write_fn: u64, ioctl_fn: u64, close_fn: u64) -> u32 {
     // Find a free slot.
     let slot = 32;
     let i = 0;
@@ -647,7 +647,7 @@ fn chardev_register(tbl: State<CharDevTable>, name: State<DevName>, major: u32, 
 // function receives the minor and decides what to do). K7+ may add a
 // chardev_lookup_full(tbl, major, minor) variant if multi-minor support
 // is needed.
-fn chardev_lookup(tbl: State<CharDevTable>, major: u32) -> u32 {
+transform chardev_lookup(tbl: State<CharDevTable>, major: u32) -> u32 {
     let i = 0;
     while i < 32 {
         if cdev_get_used(tbl, i) == 1 {
@@ -683,7 +683,7 @@ fn chardev_lookup(tbl: State<CharDevTable>, major: u32) -> u32 {
 // slot longer — both are "no match"). This matches POSIX strcmp
 // semantics: two NUL-terminated strings are equal iff they have the
 // same length and the same bytes.
-fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
+transform chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
     let i = 0;
     while i < 32 {
         if cdev_get_used(tbl, i) == 1 {
@@ -726,7 +726,7 @@ fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
 // will call after resolving a file descriptor to a (major, minor) pair
 // (sys_read → fdtable lookup → chardev_lookup → chardev_read). The
 // dispatch mirrors R5e's syscall_dispatch_from_trap pattern: look up the
-// slot, fetch the fn pointer, guard against 0 (no handler registered —
+// slot, fetch the transform pointer, guard against 0 (no handler registered —
 // hosted-mode stub), and invoke the __call_indirect1 trampoline.
 //
 // The single SysV AMD64 argument passed to the handler is `minor as u64`.
@@ -757,7 +757,7 @@ fn chardev_lookup_name(tbl: State<CharDevTable>, name: State<DevName>) -> u32 {
 // chardev_read: look up the cdev for `major`, fetch its read_fn, and
 // invoke it via __call_indirect1(read_fn, minor as u64). See the block
 // comment above for the full contract.
-fn chardev_read(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, count: u64) -> i64 {
+transform chardev_read(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, count: u64) -> i64 {
     let slot = chardev_lookup(tbl, major);
     if slot == 32 {
         return 0 - 19;  // -ENODEV: no such major
@@ -778,7 +778,7 @@ fn chardev_read(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, coun
 // chardev_write: look up the cdev for `major`, fetch its write_fn, and
 // invoke it via __call_indirect1(write_fn, minor as u64). Byte-identical
 // to chardev_read except for the slot field (write_fns vs read_fns).
-fn chardev_write(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, count: u64) -> i64 {
+transform chardev_write(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, count: u64) -> i64 {
     let slot = chardev_lookup(tbl, major);
     if slot == 32 {
         return 0 - 19;  // -ENODEV: no such major
@@ -818,11 +818,11 @@ fn chardev_write(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, cou
 //   (8) chardev_write(tbl, 1, 3, 0, 0) returns -38 (-ENOSYS — same guard
 //       on the write_fn slot field).
 //
-// The fn pointers are all 0 in this self-test (hosted mode — the
+// The transform pointers are all 0 in this self-test (hosted mode — the
 // read_fn == 0 / write_fn == 0 guard short-circuits to -ENOSYS before
 // the __call_indirect1 trampoline is reached, so the IVE-verified binary
 // compiles cleanly AND runs to exit 0 without faulting). K7+ will
-// register real cdevs with non-zero fn pointers and exercise the full
+// register real cdevs with non-zero transform pointers and exercise the full
 // indirect-call dispatch.
 //
 // Per the K6d contract's "Use decimal ASCII values" rule: the name
@@ -831,12 +831,12 @@ fn chardev_write(tbl: State<CharDevTable>, major: u32, minor: u32, buf: u64, cou
 // support `'n'` syntax, but the decimal form is unambiguous and
 // matches the K6d contract template byte-for-byte.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(CharDevTable);
     cdev_table_init(tbl);
 
     // Register /dev/null (major=1, minor=3) — the historical Linux
-    // /dev/null major/minor. The fn pointers are all 0 in hosted mode
+    // /dev/null major/minor. The transform pointers are all 0 in hosted mode
     // (no dispatch — K11 will swap them for real function pointers).
     let name = state_new(DevName);
     name.data[0] = 110;  // 'n'

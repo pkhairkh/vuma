@@ -47,7 +47,7 @@ const SHUT_RDWR: i64 = 2;
 //   [8..15]  sin_zero (8 bytes padding)
 // ===========================================================================
 
-fn make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
+transform make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
     addr.data[0] = AF_INET & 255;
     addr.data[1] = (AF_INET >> 8) & 255;
     // port in network byte order (big-endian)
@@ -66,11 +66,11 @@ fn make_sockaddr_in(addr: State<SockaddrIn>, port: u32, ip: u32) {
 // TCP Client API
 // ===========================================================================
 
-fn tcp_socket() -> i64 {
+transform tcp_socket() -> i64 {
     return syscall(198, AF_INET, SOCK_STREAM, IPPROTO_TCP);
 }
 
-fn tcp_connect(ip: u32, port: u32) -> i64 {
+transform tcp_connect(ip: u32, port: u32) -> i64 {
     sockfd: i64 = tcp_socket();
     if sockfd < 0 { return -1; }
     let addr = state_new(SockaddrIn);
@@ -83,7 +83,7 @@ fn tcp_connect(ip: u32, port: u32) -> i64 {
     return sockfd;
 }
 
-fn tcp_connect_timeout(ip: u32, port: u32, timeout_ms: u32) -> i64 {
+transform tcp_connect_timeout(ip: u32, port: u32, timeout_ms: u32) -> i64 {
     // Real implementation — see code above
     return tcp_connect(ip, port);
 }
@@ -92,7 +92,7 @@ fn tcp_connect_timeout(ip: u32, port: u32, timeout_ms: u32) -> i64 {
 // TCP Server API
 // ===========================================================================
 
-fn tcp_listen(port: u32) -> i64 {
+transform tcp_listen(port: u32) -> i64 {
     sockfd: i64 = tcp_socket();
     if sockfd < 0 { return -1; }
 
@@ -117,7 +117,7 @@ fn tcp_listen(port: u32) -> i64 {
     return sockfd;
 }
 
-fn tcp_accept(listen_fd: i64) -> i64 {
+transform tcp_accept(listen_fd: i64) -> i64 {
     let client_addr = state_new(SockaddrIn);
     let addrlen = state_new(SockLen);
     addrlen.data[0] = 16;
@@ -125,7 +125,7 @@ fn tcp_accept(listen_fd: i64) -> i64 {
     return client_fd;
 }
 
-fn tcp_accept_addr(listen_fd: i64, client_ip: Address) -> i64 {
+transform tcp_accept_addr(listen_fd: i64, client_ip: Address) -> i64 {
     let client_addr = state_new(SockaddrIn);
     let addrlen = state_new(SockLen);
     addrlen.data[0] = 16;
@@ -150,15 +150,15 @@ fn tcp_accept_addr(listen_fd: i64, client_ip: Address) -> i64 {
 // Data transfer
 // ===========================================================================
 
-fn tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
+transform tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
     return syscall(206, sockfd, data, len as i64, MSG_NOSIGNAL, 0, 0);
 }
 
-fn tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
+transform tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
     return syscall(207, sockfd, buf, len as i64, 0, 0, 0);
 }
 
-fn tcp_send_all(sockfd: i64, data: Address, len: u32) -> i64 {
+transform tcp_send_all(sockfd: i64, data: Address, len: u32) -> i64 {
     sent: u32 = 0;
     while sent < len {
         n: i64 = syscall(206, sockfd, data + sent, (len - sent) as i64, MSG_NOSIGNAL, 0, 0);
@@ -168,7 +168,7 @@ fn tcp_send_all(sockfd: i64, data: Address, len: u32) -> i64 {
     return len;
 }
 
-fn tcp_recv_all(sockfd: i64, buf: Address, len: u32) -> i64 {
+transform tcp_recv_all(sockfd: i64, buf: Address, len: u32) -> i64 {
     received: u32 = 0;
     while received < len {
         n: i64 = syscall(207, sockfd, buf + received, (len - received) as i64, 0, 0, 0);
@@ -178,13 +178,13 @@ fn tcp_recv_all(sockfd: i64, buf: Address, len: u32) -> i64 {
     return len;
 }
 
-fn tcp_send_str(sockfd: i64, s: Address) -> i64 {
+transform tcp_send_str(sockfd: i64, s: Address) -> i64 {
     n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return tcp_send_all(sockfd, s, n);
 }
 
-fn tcp_close(sockfd: i64) {
+transform tcp_close(sockfd: i64) {
     syscall(210, sockfd, SHUT_RDWR);
     syscall(57, sockfd);
 }
@@ -193,21 +193,21 @@ fn tcp_close(sockfd: i64) {
 // Socket options
 // ===========================================================================
 
-fn set_reuseaddr(sockfd: i64) -> i64 {
+transform set_reuseaddr(sockfd: i64) -> i64 {
     let optval = state_new(SockLen);
     optval.data[0] = 1;
     ret: i64 = syscall(208, sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
     return ret;
 }
 
-fn set_keepalive(sockfd: i64) -> i64 {
+transform set_keepalive(sockfd: i64) -> i64 {
     let optval = state_new(SockLen);
     optval.data[0] = 1;
     ret: i64 = syscall(208, sockfd, SOL_SOCKET, SO_KEEPALIVE, optval, 4);
     return ret;
 }
 
-fn set_recv_bufsize(sockfd: i64, size: u32) -> i64 {
+transform set_recv_bufsize(sockfd: i64, size: u32) -> i64 {
     let optval = state_new(SockLen);
     optval.data[0] = size & 255;
     optval.data[1] = (size >> 8) & 255;
@@ -217,7 +217,7 @@ fn set_recv_bufsize(sockfd: i64, size: u32) -> i64 {
     return ret;
 }
 
-fn set_send_bufsize(sockfd: i64, size: u32) -> i64 {
+transform set_send_bufsize(sockfd: i64, size: u32) -> i64 {
     let optval = state_new(SockLen);
     optval.data[0] = size & 255;
     optval.data[1] = (size >> 8) & 255;
@@ -231,11 +231,11 @@ fn set_send_bufsize(sockfd: i64, size: u32) -> i64 {
 // UDP API
 // ===========================================================================
 
-fn udp_socket() -> i64 {
+transform udp_socket() -> i64 {
     return syscall(198, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 }
 
-fn udp_bind(port: u32) -> i64 {
+transform udp_bind(port: u32) -> i64 {
     sockfd: i64 = udp_socket();
     if sockfd < 0 { return -1; }
     set_reuseaddr(sockfd);
@@ -249,14 +249,14 @@ fn udp_bind(port: u32) -> i64 {
     return sockfd;
 }
 
-fn udp_sendto(sockfd: i64, data: Address, len: u32, ip: u32, port: u32) -> i64 {
+transform udp_sendto(sockfd: i64, data: Address, len: u32, ip: u32, port: u32) -> i64 {
     let dest = state_new(SockaddrIn);
     make_sockaddr_in(dest, port, ip);
     ret: i64 = syscall(206, sockfd, data, len as i64, 0, dest, 16);
     return ret;
 }
 
-fn udp_recvfrom(sockfd: i64, buf: Address, len: u32, src_ip: Address, src_port: Address) -> i64 {
+transform udp_recvfrom(sockfd: i64, buf: Address, len: u32, src_ip: Address, src_port: Address) -> i64 {
     let src_addr = state_new(SockaddrIn);
     let addrlen = state_new(SockLen);
     addrlen.data[0] = 16;
@@ -292,7 +292,7 @@ fn udp_recvfrom(sockfd: i64, buf: Address, len: u32, src_ip: Address, src_port: 
 // Parse "192.168.1.1" → u32 (host byte order)
 // ===========================================================================
 
-fn inet_pton_ipv4(str: Address) -> u32 {
+transform inet_pton_ipv4(str: Address) -> u32 {
     result: u32 = 0;
     i: u32 = 0;
     octet: u32 = 0;
@@ -330,7 +330,7 @@ fn inet_pton_ipv4(str: Address) -> u32 {
 }
 
 // Format u32 → "a.b.c.d" (inet_ntop for IPv4)
-fn inet_ntop_ipv4(ip: u32, buf: Address) -> Address {
+transform inet_ntop_ipv4(ip: u32, buf: Address) -> Address {
     pos: u32 = 0;
     octet: u32 = 0;
     i: u32 = 0;

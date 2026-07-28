@@ -110,10 +110,10 @@
 // pmm_init(pool, pmm, ...), K3d's trap_frame_init(tf), K4a's pt_init(tbl))
 // — see womb/kernel/mm/pmm.vuma header "Why init-style?" for the codegen
 // rationale: the current codegen does NOT propagate State-typedness
-// through function return values, so `fn percpu_new() -> State<PerCpu>`
+// through function return values, so `transform percpu_new() -> State<PerCpu>`
 // would produce broken field-access code in callers). All percpu.vuma
-// helpers take `pcpu: State<PerCpu>` by regular VUMA-fn borrow (NOT
-// extern #[borrow] — VUMA fn calls don't need the attribute; only
+// helpers take `pcpu: State<PerCpu>` by regular VUMA-transform borrow (NOT
+// extern #[borrow] — VUMA transform calls don't need the attribute; only
 // extern "C" calls do, and none of these helpers call any extern).
 //
 // ── State<T> params: 1 per function ─────────────────────────────────────────
@@ -184,7 +184,7 @@
 // wrgsbase / rd_tpidr_el0 / wr_tpidr_el0 / rd_tp / wr_tp) are
 // DECLARED but NOT CALLED in this file (see "Arch-specific externs"
 // above) — they're the K11 hooks for bare-metal per-CPU bring-up.
-// None of the VUMA-fn helpers in this file call any extern, so the
+// None of the VUMA-transform helpers in this file call any extern, so the
 // codegen's conservative State-invalidation-on-extern-call doesn't
 // fire. K4g's syscall handler will call rdgsbase / rd_tpidr_el0 /
 // rd_tp to fetch the calling CPU's PerCpu base, then call into this
@@ -226,8 +226,8 @@
 // Verified: no `*ptr`, `&x`, `allocate(`, or `free(` anywhere in this
 // file. The 6 externs take / return plain scalars (u64) — no Address
 // params, no State<T> params — so there's no `c as Address` cast and
-// no `&state` borrow. The VUMA-fn helpers all take State<PerCpu> by
-// regular VUMA-fn borrow (NOT extern #[borrow] — see "Why init-style?"
+// no `&state` borrow. The VUMA-transform helpers all take State<PerCpu> by
+// regular VUMA-transform borrow (NOT extern #[borrow] — see "Why init-style?"
 // above), so no `&` borrow syntax. The only non-scalar access is the
 // direct field access (`pcpu.current_task`, `pcpu.preempt_count`, etc.)
 // which is the standard PMT pattern (K2a, K3d, K4a all use it).
@@ -258,7 +258,7 @@
 // → preemptable).
 //
 // ── Cross-arch note ─────────────────────────────────────────────────────────
-// This file is arch-AGNOSTIC in its VUMA-fn helpers (percpu_init,
+// This file is arch-AGNOSTIC in its VUMA-transform helpers (percpu_init,
 // percpu_get_current, etc. operate on State<PerCpu> the same way on
 // all 3 arches — same field offsets, same access patterns). The 6
 // arch-specific externs are DECLARED in a single block at the top of
@@ -315,25 +315,25 @@ extern "C" {
     // x86_64: read GS base (KernelGSbase MSR). Returns the address of
     // this CPU's PerCpu block. K11 stub: `rdgsbase rax; ret` (requires
     // CR4.FSGSBASE=1).
-    fn rdgsbase() -> u64;
+    transform rdgsbase() -> u64;
     // x86_64: write GS base. Sets KernelGSbase to `val` (the address of
     // this CPU's PerCpu block). Called by the AP bring-up stub on CPU
     // N to switch from CPU 0's PerCpu to CPU N's PerCpu.
     // K11 stub: `wrgsbase rdi; ret` (RDI = val).
-    fn wrgsbase(val: u64);
+    transform wrgsbase(val: u64);
     // aarch64: read TPIDR_EL0 (thread pointer register). Returns the
     // address of this CPU's PerCpu block. K11 stub:
     // `mrs x0, tpidr_el0; ret`.
-    fn rd_tpidr_el0() -> u64;
+    transform rd_tpidr_el0() -> u64;
     // aarch64: write TPIDR_EL0. Sets the thread pointer to `val`.
     // K11 stub: `msr tpidr_el0, x0; ret` (X0 = val).
-    fn wr_tpidr_el0(val: u64);
+    transform wr_tpidr_el0(val: u64);
     // riscv64: read tp (thread pointer register, x4). Returns the
     // address of this CPU's PerCpu block. K11 stub: `mv a0, tp; ret`.
-    fn rd_tp() -> u64;
+    transform rd_tp() -> u64;
     // riscv64: write tp. Sets the thread pointer to `val`.
     // K11 stub: `mv tp, a0; ret` (A0 = val).
-    fn wr_tp(val: u64);
+    transform wr_tp(val: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -373,7 +373,7 @@ extern "C" {
 // In hosted mode, this function is just a sequence of field writes —
 // no externs called, no per-CPU segment register to write (hosted
 // mode is single-CPU, so the State<PerCpu> is just a single global).
-fn percpu_init(pcpu: State<PerCpu>, cpu_id: u32, kernel_stack: u64, idle_task: u32) {
+transform percpu_init(pcpu: State<PerCpu>, cpu_id: u32, kernel_stack: u64, idle_task: u32) {
     pcpu.cpu_id = cpu_id;
     pcpu.current_task = idle_task;  // start with idle
     pcpu.kernel_stack = kernel_stack;
@@ -394,7 +394,7 @@ fn percpu_init(pcpu: State<PerCpu>, cpu_id: u32, kernel_stack: u64, idle_task: u
 // is inlined into the scheduler / IRQ entry as a single asm load.
 //
 // Returns 256 if the CPU is currently idle (no real task running).
-fn percpu_get_current(pcpu: State<PerCpu>) -> u32 {
+transform percpu_get_current(pcpu: State<PerCpu>) -> u32 {
     return pcpu.current_task;
 }
 
@@ -414,7 +414,7 @@ fn percpu_get_current(pcpu: State<PerCpu>) -> u32 {
 // relative store). K11 may inline this as a single asm store in
 // context_switch rather than calling the function (the function call
 // overhead is significant on the hot path).
-fn percpu_set_current(pcpu: State<PerCpu>, task_idx: u32) {
+transform percpu_set_current(pcpu: State<PerCpu>, task_idx: u32) {
     pcpu.current_task = task_idx;
 }
 
@@ -438,7 +438,7 @@ fn percpu_set_current(pcpu: State<PerCpu>, task_idx: u32) {
 // semantics (Linux uses a per-CPU __preempt_count, incremented by
 // preempt_disable and decremented by preempt_enable, with the IRQ
 // path adding PREEMPT_MASK bits on top).
-fn percpu_preempt_disable(pcpu: State<PerCpu>) {
+transform percpu_preempt_disable(pcpu: State<PerCpu>) {
     pcpu.preempt_count = pcpu.preempt_count + 1;
 }
 
@@ -464,7 +464,7 @@ fn percpu_preempt_disable(pcpu: State<PerCpu>) {
 // (preempt_count stays at 0, preemption stays enabled) — still a bug
 // (the caller's enable/disable bookkeeping is wrong), but not a
 // scheduler-lockup bug.
-fn percpu_preempt_enable(pcpu: State<PerCpu>) {
+transform percpu_preempt_enable(pcpu: State<PerCpu>) {
     if pcpu.preempt_count > 0 {
         pcpu.preempt_count = pcpu.preempt_count - 1;
     }
@@ -485,7 +485,7 @@ fn percpu_preempt_enable(pcpu: State<PerCpu>) {
 // Returns u8 (not bool — VUMA has no bool; the convention is 1=true,
 // 0=false, matching K4a's state==0 check, K4b's sched_dequeue's
 // 256-return, K3e's syscall_table_get's u8 return).
-fn percpu_preemptable(pcpu: State<PerCpu>) -> u8 {
+transform percpu_preemptable(pcpu: State<PerCpu>) -> u8 {
     if pcpu.preempt_count == 0 {
         return 1;
     }
@@ -525,7 +525,7 @@ fn percpu_preemptable(pcpu: State<PerCpu>) -> u8 {
 // applied to vector=14 and rip=4096). The 131072 value is 128 KB
 // (0x20000), the typical Linux THREAD_SIZE / kernel-stack-top value.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pcpu = state_new(PerCpu);
     percpu_init(pcpu, 0, 131072, 0);  // CPU 0, stack at 128KB, idle=task 0
 

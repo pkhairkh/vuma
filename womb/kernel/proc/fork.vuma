@@ -132,10 +132,10 @@
 // trap_frame_init(tf), K4a's pt_init(tbl) — see K2a's pmm.vuma header
 // "Why init-style?" for the codegen rationale: the current codegen does
 // NOT propagate State-typedness through function return values, so
-// `fn fork_new() -> State<ProcessTable>` would produce broken field-
+// `transform fork_new() -> State<ProcessTable>` would produce broken field-
 // access code in callers). All fork.vuma functions take
-// `tbl: State<ProcessTable>` by regular VUMA-fn borrow (NOT extern
-// #[borrow] — VUMA fn calls don't need the attribute; only extern "C"
+// `tbl: State<ProcessTable>` by regular VUMA-transform borrow (NOT extern
+// #[borrow] — VUMA transform calls don't need the attribute; only extern "C"
 // calls do, and none of these functions call any extern).
 //
 // State<T> params: per the K4b contract's "Keep State<T> params to 1-2
@@ -252,13 +252,13 @@ layout ProcessTable = {
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
@@ -266,7 +266,7 @@ fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
 // Re-declared byte-identically to K4a's task.vuma (4-byte little-endian
 // unpack loop — same pattern as K3e's syscall_table_get but with a 4-byte
 // loop bound for u32).
-fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -281,7 +281,7 @@ fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 
 // Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -294,7 +294,7 @@ fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 
 // Read the u32 `ppid` field of Task slot `idx` from ProcessTable.ppids.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -310,7 +310,7 @@ fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 // Write the u32 `ppid` field of Task slot `idx` into ProcessTable.ppids.
 // Re-declared byte-identically to K4a's task.vuma. fork calls this to
 // set the child's PPID to the parent's PID.
-fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -325,7 +325,7 @@ fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 // ProcessTable.mm_roots. Re-declared byte-identically to K4a's task.vuma
 // (8-byte little-endian unpack loop — same pattern as K2a's pool_get_base
 // and K3e's syscall_table_get).
-fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -344,7 +344,7 @@ fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 // fork() duplicates the address space — in a real kernel this would
 // involve COW page-table duplication; the stub just copies the root
 // pointer).
-fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -357,7 +357,7 @@ fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u64 `fs_root` field of Task slot `idx` from
 // ProcessTable.fs_roots. Re-declared byte-identically to K4a's task.vuma.
-fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -374,7 +374,7 @@ fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 // ProcessTable.fs_roots. Re-declared byte-identically to K4a's task.vuma.
 // fork calls this to copy the parent's fs_root into the child (the child
 // inherits the parent's VFS root dentry — same chroot context).
-fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -387,7 +387,7 @@ fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u64 `fds` field of Task slot `idx` from ProcessTable.fds.
 // Re-declared byte-identically to K4a's task.vuma.
-fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -405,7 +405,7 @@ fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
 // copy the parent's fds into the child (Unix fork() duplicates the file
 // descriptor table — in a real kernel this involves refcounting the
 // underlying file objects; the stub just copies the table pointer).
-fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -444,7 +444,7 @@ fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // Read the u32 `refcount` field of Task slot `idx` from
 // ProcessTable.refcounts. W37-new (same pattern as pt_get_pid).
-fn pt_get_refcount(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_refcount(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -462,7 +462,7 @@ fn pt_get_refcount(tbl: State<ProcessTable>, idx: u32) -> u32 {
 // sys_fork calls this to increment refcount[parent_idx] and
 // refcount[child_idx]; sys_exit calls this to decrement
 // refcount[task_idx].
-fn pt_set_refcount(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_refcount(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -484,7 +484,7 @@ fn pt_set_refcount(tbl: State<ProcessTable>, idx: u32, val: u32) {
 
 // pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
 // Idempotent. Re-declared byte-identically to K4a's task.vuma.
-fn pt_init(tbl: State<ProcessTable>) {
+transform pt_init(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
         pt_set_state(tbl, i, 0);
@@ -505,7 +505,7 @@ fn pt_init(tbl: State<ProcessTable>) {
 // set READY, the child wouldn't be on the runqueue either, and the
 // scheduler would never pick it up; the sys_fork caller would catch
 // this via the child never running, not via a state check).
-fn task_alloc(tbl: State<ProcessTable>) -> u32 {
+transform task_alloc(tbl: State<ProcessTable>) -> u32 {
     let i = 0;
     while i < 256 {
         if pt_get_state(tbl, i) == 0 {
@@ -739,7 +739,7 @@ transform sys_exit(tbl: State<ProcessTable>, task_idx: u32) -> u32 {
 // e.g. if sys_fork copied fs_root into child.mm_root, check 8 would
 // see 2000 instead of 1000 and return 8).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(ProcessTable);
     pt_init(tbl);
 

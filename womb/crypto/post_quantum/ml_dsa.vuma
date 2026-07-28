@@ -19,25 +19,25 @@ const MLDSA_BETA: u32 = 196;        // TAU * ETA
 const MLDSA_OMEGA: u32 = 55;
 const MASK32: u32 = 4294967295;
 
-fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+transform store_u32_le_at(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+transform load_u32_le_at(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn poly_zero(a: Address) {
+transform poly_zero(a: Address) {
     i: u32 = 0;
     while i < MLDSA_N { store_u32_le_at(a, i * 4, 0); i = i + 1; }
 }
 
-fn poly_add(r: Address, a: Address, b: Address) {
+transform poly_add(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < MLDSA_N {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -47,7 +47,7 @@ fn poly_add(r: Address, a: Address, b: Address) {
     }
 }
 
-fn poly_sub(r: Address, a: Address, b: Address) {
+transform poly_sub(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < MLDSA_N {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -59,7 +59,7 @@ fn poly_sub(r: Address, a: Address, b: Address) {
 }
 
 // Schoolbook polynomial multiplication mod (X^256 + 1, q)
-fn poly_mul(r: Address, a: Address, b: Address) {
+transform poly_mul(r: Address, a: Address, b: Address) {
     temp = allocate(MLDSA_N * 4);
     poly_zero(temp);
     i: u32 = 0;
@@ -89,7 +89,7 @@ fn poly_mul(r: Address, a: Address, b: Address) {
 }
 
 // Pointwise multiplication of two polynomials
-fn poly_pointwise(r: Address, a: Address, b: Address) {
+transform poly_pointwise(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < MLDSA_N {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -101,7 +101,7 @@ fn poly_pointwise(r: Address, a: Address, b: Address) {
 
 // Generate matrix A from seed using SHAKE-128 expansion
 // A is k×l polynomials, each 256 coefficients mod q
-fn expand_a(seed: Address, matrix: Address) {
+transform expand_a(seed: Address, matrix: Address) {
     row: u32 = 0;
     while row < MLDSA_K {
         col: u32 = 0;
@@ -140,7 +140,7 @@ fn expand_a(seed: Address, matrix: Address) {
 }
 
 // CBD sampling (centered binomial distribution with eta)
-fn cbd_sample(buf: Address, eta: u32, r: Address) {
+transform cbd_sample(buf: Address, eta: u32, r: Address) {
     i: u32 = 0;
     while i < MLDSA_N {
         off: u32 = i * 2;  // 2 bytes per coefficient for eta=4
@@ -158,7 +158,7 @@ fn cbd_sample(buf: Address, eta: u32, r: Address) {
 }
 
 // Matrix-vector multiply: v = A * s
-fn matvec_mul(v: Address, matrix: Address, s: Address) {
+transform matvec_mul(v: Address, matrix: Address, s: Address) {
     row: u32 = 0;
     while row < MLDSA_K {
         poly_zero(v + row * MLDSA_N * 4);
@@ -175,7 +175,7 @@ fn matvec_mul(v: Address, matrix: Address, s: Address) {
 }
 
 // Inner product of two vectors (k polynomials each)
-fn inner_product(r: Address, a: Address, b: Address, len: u32) {
+transform inner_product(r: Address, a: Address, b: Address, len: u32) {
     poly_zero(r);
     i: u32 = 0;
     while i < len {
@@ -189,21 +189,21 @@ fn inner_product(r: Address, a: Address, b: Address, len: u32) {
 
 // Power2round: decompose a into a1 (high) and a0 (low)
 // a1 = (a + 127) >> 13 (approximate — for gamma2 decomposition)
-fn power2_round(a: u32) -> u32 {
+transform power2_round(a: u32) -> u32 {
     return (a + 127) / 256;
 }
 
 // HighBits and LowBits decomposition
-fn high_bits(a: u32) -> u32 {
+transform high_bits(a: u32) -> u32 {
     return a / (2 * MLDSA_GAMMA2);
 }
 
-fn low_bits(a: u32) -> u32 {
+transform low_bits(a: u32) -> u32 {
     return a % (2 * MLDSA_GAMMA2);
 }
 
 // Make hint: determine which coefficients need hint correction
-fn make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
+transform make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
     hint_count: u32 = 0;
     i: u32 = 0;
     while i < len {
@@ -229,7 +229,7 @@ fn make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
 // SampleInBall: produce a sparse polynomial c with exactly TAU non-zero
 // coefficients (+/-1) derived deterministically from a seed.
 // Per FIPS 204 Algorithm 9 (SampleInBall).
-fn sample_in_ball(seed: Address, c_out: Address) {
+transform sample_in_ball(seed: Address, c_out: Address) {
     // Init c to all zeros
     i: u32 = 0;
     while i < MLDSA_N {
@@ -280,7 +280,7 @@ fn sample_in_ball(seed: Address, c_out: Address) {
     }
 }
 
-fn ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
+transform ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
     // 1. Generate seed expansion: (rho, rho', K) = SHAKE-256(seed, 128 bytes)
     seed_exp = allocate(128);
     shake256(seed, 32, seed_exp, 128);
@@ -360,7 +360,7 @@ fn ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
 // ML-DSA Sign (FIPS 204, Section 6.2)
 // ===========================================================================
 
-fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
+transform ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
     // Extract secret key components
     rho = sk;
     s1 = sk + 32;
@@ -507,7 +507,7 @@ fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig
 // ML-DSA Verify (FIPS 204, Section 6.3)
 // ===========================================================================
 
-fn ml_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
+transform ml_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
     // Extract pk: t and rho
     t = pk;
     rho = pk + MLDSA_K * MLDSA_N * 4;

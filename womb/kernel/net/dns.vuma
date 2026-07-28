@@ -110,7 +110,7 @@
 // reference to dns_build_query / dns_parse_response / dns_resolve
 // (init-style API — see "Why init-style?" in K4e's wait.vuma header for
 // the codegen rationale: the current codegen does NOT propagate State-
-// typedness through function return values, so `fn dns_new() ->
+// typedness through function return values, so `transform dns_new() ->
 // State<DnsQuery>` would produce broken field-access code in callers).
 //
 // State<T> params: 1-2 per function (query/name or just name or just buf),
@@ -163,12 +163,12 @@
 // same pattern as shell.vuma's `read(fd, in_buf as Address, 256)`
 // followed by `in_buf.data[j]`.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32;
-    fn sendto(fd: i32, buf: Address, len: i64, flags: i32, addr: Address, addrlen: u32) -> i64;
-    fn recv(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
-    fn close(fd: i32) -> i32;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
+    transform socket(domain: i32, sock_type: i32, protocol: i32) -> i32;
+    transform sendto(fd: i32, buf: Address, len: i64, flags: i32, addr: Address, addrlen: u32) -> i64;
+    transform recv(fd: i32, buf: Address, len: i64, flags: i32) -> i64;
+    transform close(fd: i32) -> i32;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -247,7 +247,7 @@ layout SockAddrIn = {
 //
 // Sets query.len to the total packet length. No return value (the
 // caller checks query.len + query.data[] after the call).
-fn dns_build_query(query: State<DnsQuery>, name: State<DnsName>, id: u16) {
+transform dns_build_query(query: State<DnsQuery>, name: State<DnsName>, id: u16) {
     // Header: ID, flags=0x0100 (standard query, recursion desired),
     // qdcount=1, ancount=0, nscount=0, arcount=0.
     query.data[0] = (id >> 8) as u8;
@@ -320,7 +320,7 @@ fn dns_build_query(query: State<DnsQuery>, name: State<DnsName>, id: u16) {
 //
 // All multi-byte fields are big-endian (network byte order) per RFC 1035.
 // Decimal multipliers (no hex literals) per the K9e decimal-constants rule.
-fn dns_parse_response(buf: State<DnsQuery>) -> u32 {
+transform dns_parse_response(buf: State<DnsQuery>) -> u32 {
     // (1) Need at least 12 bytes for the DNS header.
     if buf.len < 12 { return 0; }
 
@@ -411,7 +411,7 @@ fn dns_parse_response(buf: State<DnsQuery>) -> u32 {
 // returns 0 (lookup failed). The K9e self-test does NOT call dns_resolve
 // (it only tests dns_build_query), so the self-test is unaffected by
 // network availability.
-fn dns_resolve(name: State<DnsName>) -> u32 {
+transform dns_resolve(name: State<DnsName>) -> u32 {
     let query = state_new(DnsQuery);
     dns_build_query(query, name, 1234);
 
@@ -466,7 +466,7 @@ fn dns_resolve(name: State<DnsName>) -> u32 {
 // "example.com" with id=1234, then verify the header (id bytes, qdcount)
 // + the encoded domain name (label lengths + label bytes). Returns 0 on
 // success, 1..7 on the 7 individual check failures.
-fn main() -> i32 {
+transform main() -> i32 {
     // Self-test: build a DNS query for "example.com".
     let name = state_new(DnsName);
     name.data[0] = 101;  // 'e'

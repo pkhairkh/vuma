@@ -23,7 +23,7 @@ const PBKDF2_MASK32: u32 = 4294967295;
 //   U_j = HMAC(password, U_{j-1})    for j = 2..c
 // ===========================================================================
 
-fn pbkdf2_hmac_sha1(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+transform pbkdf2_hmac_sha1(password: Address, pass_len: u32, salt: Address, salt_len: u32,
                     iterations: u32, out: Address, out_len: u32) {
     hlen: u32 = 20;  // SHA-1 output size
 
@@ -86,7 +86,7 @@ fn pbkdf2_hmac_sha1(password: Address, pass_len: u32, salt: Address, salt_len: u
 // PBKDF2-HMAC-SHA256
 // ===========================================================================
 
-fn pbkdf2_hmac_sha256(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+transform pbkdf2_hmac_sha256(password: Address, pass_len: u32, salt: Address, salt_len: u32,
                       iterations: u32, out: Address, out_len: u32) {
     hlen: u32 = 32;  // SHA-256 output size
 
@@ -146,7 +146,7 @@ fn pbkdf2_hmac_sha256(password: Address, pass_len: u32, salt: Address, salt_len:
 // PBKDF2-HMAC-SHA512 (bonus variant, used by some scrypt/Argon2 callers).
 // ===========================================================================
 
-fn pbkdf2_hmac_sha512(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+transform pbkdf2_hmac_sha512(password: Address, pass_len: u32, salt: Address, salt_len: u32,
                       iterations: u32, out: Address, out_len: u32) {
     hlen: u32 = 64;  // SHA-512 output size
 
