@@ -4,11 +4,11 @@
 // Tests passing two u32 parameters to a function and returning their
 // sum. Verifies the calling convention for two-argument leaf functions.
 
-fn add(a: u32, b: u32) -> u32 {
+transform add(a: u32, b: u32) -> u32 {
     return a + b;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = add(3, 4);
     return v;
 }

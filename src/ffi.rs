@@ -31,7 +31,7 @@
 //!     fn some_user_declared_extern(x: i64) -> i64;
 //! }
 //!
-//! fn main() {
+//! transform main() {
 //!     // Syscalls are emitted by the codegen as IRInstr::Syscall, not as
 //!     // extern calls — the kernel is trusted (residual TCB).
 //!     let n = 0;

@@ -5,25 +5,25 @@
 // Each helper performs a distinct op (mul, add, inc). Distinct from
 // s5_mf_three_chain (all adders) and s4_mf_chain_3 (3 helpers, same op).
 
-fn double(x: u32) -> u32 {
+transform double(x: u32) -> u32 {
     c: u32 = 2;
     r: u32 = x * c;
     return r;
 }
 
-fn add5(x: u32) -> u32 {
+transform add5(x: u32) -> u32 {
     c: u32 = 5;
     r: u32 = x + c;
     return r;
 }
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     c: u32 = 1;
     r: u32 = x + c;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = double(5);   // 10
     b: u32 = add5(a);     // 15
     c: u32 = inc(b);      // 16

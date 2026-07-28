@@ -4,11 +4,11 @@
 // Tests a void function (no return type) called for its side effect.
 // The function does nothing and returns no value; main returns 0.
 
-fn noop() {
+transform noop() {
     return;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     noop();
     return 0;
 }

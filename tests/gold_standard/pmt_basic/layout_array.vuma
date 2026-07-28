@@ -12,6 +12,6 @@
 
 layout Buf = { len: u32, data: [u8; 16] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     return 0;
 }

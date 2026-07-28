@@ -22,7 +22,7 @@ struct Node {
 }
 
 layout _L1 = { data: [u8; 24] }
-fn main() -> i32 {
+transform main() -> i32 {
     // Single allocation: s1 @ 0, s2 @ 8, s3 @ 16
     let block = state_new(_L1);
 

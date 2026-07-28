@@ -13,10 +13,10 @@
 //
 // ── Why direct extern dispatch (not the SyscallTable indirection)? ──────────
 // K3e's dispatch.vuma uses a SyscallTable of u64 handler addresses plus a
-// stub-return path (VUMA has no fn-pointer call today — see dispatch.vuma's
+// stub-return path (VUMA has no transform-pointer call today — see dispatch.vuma's
 // "Why is the handler-call a stub?" header). K3e's stub returns 0; it does
 // NOT actually invoke the handler. The handler dispatch is a K11 task (real
-// fn-pointer dispatch via a new call_indirect intrinsic or a trap.S switch
+// transform-pointer dispatch via a new call_indirect intrinsic or a trap.S switch
 // statement).
 //
 // This file's sys_write / sys_read are the actual handler bodies. K11 will
@@ -44,7 +44,7 @@
 // layout (buf at offset 0, len following).
 //
 // ── Why the `buf as Address` cast on a u64 arg works ───────────────────────
-// sys_write's signature is `fn sys_write(fd: u64, buf: u64, count: u64) ->
+// sys_write's signature is `transform sys_write(fd: u64, buf: u64, count: u64) ->
 // i64`. The `buf` arg is u64 (the SyscallArgs field type — see K3e's
 // abi.vuma SyscallArgs layout, all 7 fields are u64). Inside sys_write, the
 // `buf as Address` cast reinterprets the u64 as an Address (raw pointer).
@@ -94,7 +94,7 @@
 // applied to vector=14 and rip=4096).
 //
 // ── VUMA has no `import` ────────────────────────────────────────────────────
-// This file is self-contained. The `extern "C" { fn write, fn read }`
+// This file is self-contained. The `extern "C" { transform write, transform read }`
 // declarations are byte-identical to:
 //   - womb/kernel/arch/x86_64/trampoline.vuma (K1a)
 //   - womb/kernel/tty/console.vuma (K1d)
@@ -156,16 +156,16 @@ extern "C" {
     // to the scratchpad before the call, preserving PMT purity (the
     // ___pmt_buffer is never aliased by C). See src/codegen/src/marshal.rs
     // ArgMode::Marshal — precedence: may_retain > marshal > borrow >
-    // foreign > default(Invalidate). With #[marshal] on the fn-level
+    // foreign > default(Invalidate). With #[marshal] on the transform-level
     // (the "shorthand form" per validate_extern_fn_ffi_attrs in
     // src/parser/src/parser.rs:1247), the mode applies to ALL State-typed
     // params — here just `buf`.
     #[marshal]
-    fn write_marshal(fd: i64, buf: State<ByteBuf>, count: i64) -> i64;
+    transform write_marshal(fd: i64, buf: State<ByteBuf>, count: i64) -> i64;
     // Keep the raw version for non-state buffers (backward compat — the
     // existing sys_write below calls this with `buf as Address`).
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -195,7 +195,7 @@ layout ByteBuf = {
 // the host `write` extern. No bounds-checking — K12 (panic/log) will add
 // user-space-address validation.
 
-fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
+transform sys_write(fd: u64, buf: u64, count: u64) -> i64 {
     if fd == 1 {
         return write(1, buf as Address, count as i64);
     }
@@ -236,7 +236,7 @@ fn sys_write(fd: u64, buf: u64, count: u64) -> i64 {
 // handle is a pointer into ___pmt_buffer); the marshal pass copies the
 // bytes to the scratchpad before the call. The State is PRESERVED after
 // the call (Marshal mode is non-consuming — see marshal.rs::ArgMode).
-fn sys_write_state(fd: u64, buf: State<ByteBuf>, count: u64) -> i64 {
+transform sys_write_state(fd: u64, buf: State<ByteBuf>, count: u64) -> i64 {
     if fd == 1 {
         return write_marshal(1, buf, count as i64);
     }
@@ -255,7 +255,7 @@ fn sys_write_state(fd: u64, buf: State<ByteBuf>, count: u64) -> i64 {
 //   else    → VFS read (K5 — stub returns 0 for now)
 // Returns the byte count read (0 on EOF, negative on error).
 
-fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
+transform sys_read(fd: u64, buf: u64, count: u64) -> i64 {
     if fd == 0 {
         return read(0, buf as Address, count as i64);
     }
@@ -295,7 +295,7 @@ fn sys_read(fd: u64, buf: u64, count: u64) -> i64 {
 // and K3a's trap_trampoline.vuma for the same rule applied to vector=14
 // and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let buf_state = state_new(ByteBuf);
     buf_state.data[0] = 104;  // 'h'
     buf_state.data[1] = 105;  // 'i'

@@ -83,7 +83,7 @@ const MODE_G_UP: u32 = 4;
 // ===========================================================================
 
 // Store a u32 as 4 little-endian bytes into buf at byte offset `off`.
-fn store_u32(buf: Address, off: u32, val: u32) {
+transform store_u32(buf: Address, off: u32, val: u32) {
     *(buf + off)     = val & 255;
     *(buf + off + 1) = (val >> 8) & 255;
     *(buf + off + 2) = (val >> 16) & 255;
@@ -92,7 +92,7 @@ fn store_u32(buf: Address, off: u32, val: u32) {
 }
 
 // Load a little-endian u32 from buf at byte offset `off`.
-fn load_u32(buf: Address, off: u32) -> u32 {
+transform load_u32(buf: Address, off: u32) -> u32 {
     let b0: u32 = *(buf + off);
     let b1: u32 = *(buf + off + 1);
     let b2: u32 = *(buf + off + 2);
@@ -101,7 +101,7 @@ fn load_u32(buf: Address, off: u32) -> u32 {
 }
 
 // Null-terminated string length.
-fn strlen(s: Address) -> u32 {
+transform strlen(s: Address) -> u32 {
     let n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return n;
@@ -110,7 +110,7 @@ fn strlen(s: Address) -> u32 {
 // Reinterpret an Address as a u64 by writing it byte-by-byte to a
 // scratch buffer and reading it back. This avoids relying on implicit
 // Address→u64 conversion semantics.
-fn addr_to_u64(a: Address) -> u64 {
+transform addr_to_u64(a: Address) -> u64 {
     let buf: Address = allocate(8);
     *(buf + 0) = a & 255;
     *(buf + 1) = (a >> 8) & 255;
@@ -136,38 +136,38 @@ fn addr_to_u64(a: Address) -> u64 {
 // Float helpers
 // ===========================================================================
 
-fn fabs_f64(x: f64) -> f64 {
+transform fabs_f64(x: f64) -> f64 {
     if x < 0.0 { return 0.0 - x; }
     return x;
 }
 
 // Floor of a non-negative f64 (used after abs).
-fn floor_f64_pos(x: f64) -> f64 {
+transform floor_f64_pos(x: f64) -> f64 {
     let i: u64 = x;        // truncate toward zero (x >= 0)
     let fi: f64 = i;
     return fi;
 }
 
-fn pow10_f64(p: u32) -> f64 {
+transform pow10_f64(p: u32) -> f64 {
     let r: f64 = 1.0;
     let i: u32 = 0;
     while i < p { r = r * 10.0; i = i + 1; }
     return r;
 }
 
-fn pow10_u64(p: u32) -> u64 {
+transform pow10_u64(p: u32) -> u64 {
     let r: u64 = 1;
     let i: u32 = 0;
     while i < p { r = r * 10; i = i + 1; }
     return r;
 }
 
-fn isnan_f64(x: f64) -> u32 {
+transform isnan_f64(x: f64) -> u32 {
     if x != x { return 1; }
     return 0;
 }
 
-fn isinf_f64(x: f64) -> u32 {
+transform isinf_f64(x: f64) -> u32 {
     if x > 1.0e308 * 10.0 { return 1; }
     if x < 0.0 - 1.0e308 * 10.0 { return 1; }
     return 0;
@@ -189,7 +189,7 @@ fn isinf_f64(x: f64) -> u32 {
 // as SPEC_INVALID and returns the position past the unknown char so
 // the caller can recover.
 
-fn parse_spec(fmt: Address, pos_in: u32, spec_buf: Address) -> u32 {
+transform parse_spec(fmt: Address, pos_in: u32, spec_buf: Address) -> u32 {
     let p: u32 = pos_in;
 
     // Reset fields.
@@ -329,7 +329,7 @@ fn parse_spec(fmt: Address, pos_in: u32, spec_buf: Address) -> u32 {
 
 // Format signed integer with the given base, width, and padding options.
 // Writes to buf starting at pos and returns the new pos.
-fn fmt_int(buf: Address, pos: u32, val: i64, base: u32, width: u32,
+transform fmt_int(buf: Address, pos: u32, val: i64, base: u32, width: u32,
            zero_pad: u32, left_align: u32) -> u32 {
     let digits: Address = allocate(80);
     let n_digits: u32 = 0;
@@ -416,7 +416,7 @@ fn fmt_int(buf: Address, pos: u32, val: i64, base: u32, width: u32,
 }
 
 // Format unsigned integer with the given base, case, width, and padding.
-fn fmt_uint(buf: Address, pos: u32, val: u64, base: u32, upper: u32,
+transform fmt_uint(buf: Address, pos: u32, val: u64, base: u32, upper: u32,
             width: u32, zero_pad: u32, left_align: u32) -> u32 {
     let digits: Address = allocate(80);
     let n_digits: u32 = 0;
@@ -477,7 +477,7 @@ fn fmt_uint(buf: Address, pos: u32, val: u64, base: u32, upper: u32,
 // Character, string, pointer formatters
 // ===========================================================================
 
-fn fmt_char(buf: Address, pos: u32, c: u32, width: u32, left_align: u32) -> u32 {
+transform fmt_char(buf: Address, pos: u32, c: u32, width: u32, left_align: u32) -> u32 {
     let out_pos: u32 = pos;
     let n_lead: u32 = 0;
     let n_trail: u32 = 0;
@@ -506,7 +506,7 @@ fn fmt_char(buf: Address, pos: u32, c: u32, width: u32, left_align: u32) -> u32 
 
 // Format a null-terminated string with optional precision cap (max chars)
 // and width padding.
-fn fmt_string(buf: Address, pos: u32, str: Address, width: u32,
+transform fmt_string(buf: Address, pos: u32, str: Address, width: u32,
               precision: u32, left_align: u32) -> u32 {
     let len: u32 = 0;
     if precision == PREC_UNSPEC {
@@ -550,7 +550,7 @@ fn fmt_string(buf: Address, pos: u32, str: Address, width: u32,
 
 // Format a pointer (u64) as 0x-prefixed lowercase hex, right-aligned
 // with spaces.
-fn fmt_ptr(buf: Address, pos: u32, val: u64, width: u32) -> u32 {
+transform fmt_ptr(buf: Address, pos: u32, val: u64, width: u32) -> u32 {
     let digits: Address = allocate(20);
     let n_digits: u32 = 0;
     let v: u64 = val;
@@ -599,7 +599,7 @@ fn fmt_ptr(buf: Address, pos: u32, val: u64, width: u32) -> u32 {
 
 // Strip trailing '0' chars (and a trailing '.') from temp[start..end).
 // Returns the new end position.
-fn strip_trailing_zeros(temp: Address, start: u32, end_in: u32) -> u32 {
+transform strip_trailing_zeros(temp: Address, start: u32, end_in: u32) -> u32 {
     let p: u32 = end_in;
     while p > start {
         let c: u32 = *(temp + p - 1);
@@ -619,7 +619,7 @@ fn strip_trailing_zeros(temp: Address, start: u32, end_in: u32) -> u32 {
 
 // Copy temp[0..tlen) to buf[pos..), with optional width padding.
 // left_align == 0 → leading spaces; else trailing spaces.
-fn emit_with_width(buf: Address, pos: u32, temp: Address, tlen: u32,
+transform emit_with_width(buf: Address, pos: u32, temp: Address, tlen: u32,
                    width: u32, left_align: u32) -> u32 {
     let n_lead: u32 = 0;
     let n_trail: u32 = 0;
@@ -654,7 +654,7 @@ fn emit_with_width(buf: Address, pos: u32, temp: Address, tlen: u32,
 // Body for %f: writes sign + integer part + '.' + frac digits to temp
 // starting at tpos_in. Returns new tpos. `x` must be non-negative.
 // `neg` controls whether a leading '-' is written.
-fn fmt_f_body(temp: Address, tpos_in: u32, x: f64, precision: u32, neg: u32) -> u32 {
+transform fmt_f_body(temp: Address, tpos_in: u32, x: f64, precision: u32, neg: u32) -> u32 {
     let tpos: u32 = tpos_in;
 
     if neg != 0 {
@@ -736,7 +736,7 @@ fn fmt_f_body(temp: Address, tpos_in: u32, x: f64, precision: u32, neg: u32) -> 
 
 // Body for %e / %E: writes sign + 1-digit mantissa + '.' + frac + 'e' + exp.
 // `x` must be non-negative. `mode` is MODE_E_LO or MODE_E_UP.
-fn fmt_e_body(temp: Address, tpos_in: u32, x: f64, precision: u32,
+transform fmt_e_body(temp: Address, tpos_in: u32, x: f64, precision: u32,
               neg: u32, mode: u32) -> u32 {
     let tpos: u32 = tpos_in;
 
@@ -843,7 +843,7 @@ fn fmt_e_body(temp: Address, tpos_in: u32, x: f64, precision: u32,
 
 // Body for %g / %G: chooses %e or %f based on the exponent, then strips
 // trailing zeros from the mantissa.
-fn fmt_g_body(temp: Address, tpos_in: u32, x: f64, precision_in: u32,
+transform fmt_g_body(temp: Address, tpos_in: u32, x: f64, precision_in: u32,
               neg: u32, mode: u32) -> u32 {
     let prec: u32 = precision_in;
     let p: u32 = prec;
@@ -919,7 +919,7 @@ fn fmt_g_body(temp: Address, tpos_in: u32, x: f64, precision_in: u32,
 // rendering, then dispatches to fmt_f_body / fmt_e_body / fmt_g_body.
 // Applies width padding (right-align with spaces by default; left-align
 // when the spec had '-').
-fn fmt_float_full(buf: Address, pos: u32, val: f64, precision: u32,
+transform fmt_float_full(buf: Address, pos: u32, val: f64, precision: u32,
                   width: u32, mode: u32, left_align: u32) -> u32 {
     let temp: Address = allocate(80);
     let tpos: u32 = 0;
@@ -1013,12 +1013,12 @@ fn fmt_float_full(buf: Address, pos: u32, val: f64, precision: u32,
 }
 
 // Public %f helper (right-aligned, no left-align flag).
-fn fmt_float(buf: Address, pos: u32, val: f64, precision: u32, width: u32) -> u32 {
+transform fmt_float(buf: Address, pos: u32, val: f64, precision: u32, width: u32) -> u32 {
     return fmt_float_full(buf, pos, val, precision, width, MODE_F, 0);
 }
 
 // Map a SPEC_* float type to an internal MODE_*.
-fn mode_from_spec(st: u32) -> u32 {
+transform mode_from_spec(st: u32) -> u32 {
     if st == SPEC_FLOAT    { return MODE_F; }
     if st == SPEC_EXP_LO   { return MODE_E_LO; }
     if st == SPEC_EXP_UP   { return MODE_E_UP; }
@@ -1035,7 +1035,7 @@ fn mode_from_spec(st: u32) -> u32 {
 // is handled inside emit_int and emit_float.
 
 // Dispatch a string-typed argument.
-fn emit_str(buf: Address, pos: u32, spec_buf: Address, s: Address) -> u32 {
+transform emit_str(buf: Address, pos: u32, spec_buf: Address, s: Address) -> u32 {
     let st: u32 = load_u32(spec_buf, 0);
     let w: u32 = load_u32(spec_buf, 4);
     let pr: u32 = load_u32(spec_buf, 8);
@@ -1063,7 +1063,7 @@ fn emit_str(buf: Address, pos: u32, spec_buf: Address, s: Address) -> u32 {
 }
 
 // Dispatch an i64 argument.
-fn emit_int(buf: Address, pos: u32, spec_buf: Address, v: i64) -> u32 {
+transform emit_int(buf: Address, pos: u32, spec_buf: Address, v: i64) -> u32 {
     let st: u32 = load_u32(spec_buf, 0);
     let w: u32 = load_u32(spec_buf, 4);
     let pr: u32 = load_u32(spec_buf, 8);
@@ -1121,7 +1121,7 @@ fn emit_int(buf: Address, pos: u32, spec_buf: Address, v: i64) -> u32 {
 }
 
 // Dispatch a u64 argument.
-fn emit_uint(buf: Address, pos: u32, spec_buf: Address, v: u64) -> u32 {
+transform emit_uint(buf: Address, pos: u32, spec_buf: Address, v: u64) -> u32 {
     let st: u32 = load_u32(spec_buf, 0);
     let w: u32 = load_u32(spec_buf, 4);
     let pr: u32 = load_u32(spec_buf, 8);
@@ -1173,7 +1173,7 @@ fn emit_uint(buf: Address, pos: u32, spec_buf: Address, v: u64) -> u32 {
 }
 
 // Dispatch an f64 argument.
-fn emit_float(buf: Address, pos: u32, spec_buf: Address, v: f64) -> u32 {
+transform emit_float(buf: Address, pos: u32, spec_buf: Address, v: f64) -> u32 {
     let st: u32 = load_u32(spec_buf, 0);
     let w: u32 = load_u32(spec_buf, 4);
     let pr: u32 = load_u32(spec_buf, 8);
@@ -1228,7 +1228,7 @@ fn emit_float(buf: Address, pos: u32, spec_buf: Address, v: f64) -> u32 {
 // integer / float args. The output is null-terminated; the returned
 // count excludes the null terminator.
 
-fn sprintf_str(buf: Address, fmt: Address, s1: Address) -> u32 {
+transform sprintf_str(buf: Address, fmt: Address, s1: Address) -> u32 {
     let spec_buf: Address = allocate(20);
     let empty: Address = allocate(1);
     *(empty + 0) = 0;
@@ -1287,7 +1287,7 @@ fn sprintf_str(buf: Address, fmt: Address, s1: Address) -> u32 {
     return out_pos;
 }
 
-fn sprintf_int(buf: Address, fmt: Address, v1: i64) -> u32 {
+transform sprintf_int(buf: Address, fmt: Address, v1: i64) -> u32 {
     let spec_buf: Address = allocate(20);
 
     let p: u32 = 0;
@@ -1333,7 +1333,7 @@ fn sprintf_int(buf: Address, fmt: Address, v1: i64) -> u32 {
     return out_pos;
 }
 
-fn sprintf_uint(buf: Address, fmt: Address, v1: u64) -> u32 {
+transform sprintf_uint(buf: Address, fmt: Address, v1: u64) -> u32 {
     let spec_buf: Address = allocate(20);
 
     let p: u32 = 0;
@@ -1378,11 +1378,11 @@ fn sprintf_uint(buf: Address, fmt: Address, v1: u64) -> u32 {
 
 // sprintf_hex is identical to sprintf_uint in dispatch — both consume a
 // u64 argument. Kept as a distinct entry point for API clarity.
-fn sprintf_hex(buf: Address, fmt: Address, v1: u64) -> u32 {
+transform sprintf_hex(buf: Address, fmt: Address, v1: u64) -> u32 {
     return sprintf_uint(buf, fmt, v1);
 }
 
-fn sprintf_float(buf: Address, fmt: Address, v1: f64) -> u32 {
+transform sprintf_float(buf: Address, fmt: Address, v1: f64) -> u32 {
     let spec_buf: Address = allocate(20);
 
     let p: u32 = 0;
@@ -1427,7 +1427,7 @@ fn sprintf_float(buf: Address, fmt: Address, v1: f64) -> u32 {
 
 // ---- multi-argument variants ---------------------------------------------
 
-fn sprintf_str_int(buf: Address, fmt: Address, s1: Address, v1: i64) -> u32 {
+transform sprintf_str_int(buf: Address, fmt: Address, s1: Address, v1: i64) -> u32 {
     let spec_buf: Address = allocate(20);
     let empty: Address = allocate(1);
     *(empty + 0) = 0;
@@ -1490,7 +1490,7 @@ fn sprintf_str_int(buf: Address, fmt: Address, s1: Address, v1: i64) -> u32 {
     return out_pos;
 }
 
-fn sprintf_str_str(buf: Address, fmt: Address, s1: Address, s2: Address) -> u32 {
+transform sprintf_str_str(buf: Address, fmt: Address, s1: Address, s2: Address) -> u32 {
     let spec_buf: Address = allocate(20);
     let empty: Address = allocate(1);
     *(empty + 0) = 0;
@@ -1550,7 +1550,7 @@ fn sprintf_str_str(buf: Address, fmt: Address, s1: Address, s2: Address) -> u32 
     return out_pos;
 }
 
-fn sprintf_int_str(buf: Address, fmt: Address, v1: i64, s1: Address) -> u32 {
+transform sprintf_int_str(buf: Address, fmt: Address, v1: i64, s1: Address) -> u32 {
     let spec_buf: Address = allocate(20);
     let empty: Address = allocate(1);
     *(empty + 0) = 0;
@@ -1613,7 +1613,7 @@ fn sprintf_int_str(buf: Address, fmt: Address, v1: i64, s1: Address) -> u32 {
     return out_pos;
 }
 
-fn sprintf_str_int_str(buf: Address, fmt: Address, s1: Address, v1: i64, s2: Address) -> u32 {
+transform sprintf_str_int_str(buf: Address, fmt: Address, s1: Address, v1: i64, s2: Address) -> u32 {
     let spec_buf: Address = allocate(20);
     let empty: Address = allocate(1);
     *(empty + 0) = 0;
@@ -1686,7 +1686,7 @@ fn sprintf_str_int_str(buf: Address, fmt: Address, s1: Address, v1: i64, s2: Add
 // At most max_len-1 chars are written, plus a null terminator.
 // If max_len is 0, nothing is written and the would-be length is returned.
 
-fn snprintf_str(buf: Address, max_len: u32, fmt: Address, s1: Address) -> u32 {
+transform snprintf_str(buf: Address, max_len: u32, fmt: Address, s1: Address) -> u32 {
     // Format into a temporary buffer, then copy with the size limit.
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str(temp, fmt, s1);
@@ -1714,7 +1714,7 @@ fn snprintf_str(buf: Address, max_len: u32, fmt: Address, s1: Address) -> u32 {
 // a single write() syscall on fd=1. The return value is the result of
 // write() (bytes written, or -1 on error).
 
-fn printf_str(fmt: Address, s1: Address) -> i64 {
+transform printf_str(fmt: Address, s1: Address) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str(temp, fmt, s1);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
@@ -1722,7 +1722,7 @@ fn printf_str(fmt: Address, s1: Address) -> i64 {
     return wr;
 }
 
-fn printf_int(fmt: Address, v1: i64) -> i64 {
+transform printf_int(fmt: Address, v1: i64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_int(temp, fmt, v1);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
@@ -1730,7 +1730,7 @@ fn printf_int(fmt: Address, v1: i64) -> i64 {
     return wr;
 }
 
-fn printf_uint(fmt: Address, v1: u64) -> i64 {
+transform printf_uint(fmt: Address, v1: u64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_uint(temp, fmt, v1);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
@@ -1738,7 +1738,7 @@ fn printf_uint(fmt: Address, v1: u64) -> i64 {
     return wr;
 }
 
-fn printf_hex(fmt: Address, v1: u64) -> i64 {
+transform printf_hex(fmt: Address, v1: u64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_hex(temp, fmt, v1);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
@@ -1746,7 +1746,7 @@ fn printf_hex(fmt: Address, v1: u64) -> i64 {
     return wr;
 }
 
-fn printf_float(fmt: Address, v1: f64) -> i64 {
+transform printf_float(fmt: Address, v1: f64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_float(temp, fmt, v1);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
@@ -1754,7 +1754,7 @@ fn printf_float(fmt: Address, v1: f64) -> i64 {
     return wr;
 }
 
-fn printf_str_int(fmt: Address, s1: Address, v1: i64) -> i64 {
+transform printf_str_int(fmt: Address, s1: Address, v1: i64) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str_int(temp, fmt, s1, v1);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);
@@ -1762,7 +1762,7 @@ fn printf_str_int(fmt: Address, s1: Address, v1: i64) -> i64 {
     return wr;
 }
 
-fn printf_str_str(fmt: Address, s1: Address, s2: Address) -> i64 {
+transform printf_str_str(fmt: Address, s1: Address, s2: Address) -> i64 {
     let temp: Address = allocate(65536);
     let n: u32 = sprintf_str_str(temp, fmt, s1, s2);
     let wr: i64 = syscall(64, STDOUT_FD, temp, n as i64);

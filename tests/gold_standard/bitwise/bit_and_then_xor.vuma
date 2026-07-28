@@ -5,7 +5,7 @@
 // operands loaded into u64 variables first. Distinct from
 // s5_bit_and_or_chain (AND-then-OR) and s6_bit_and_chain_3 (AND chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 170;         // 0xAA
     b: u64 = 15;          // 0x0F
     c: u64 = 5;           // 0x05

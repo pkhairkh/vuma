@@ -10,11 +10,11 @@
 // Note: the `transform` keyword is parsed by VUMA but not yet lowered
 // to a callable form. To exercise the same state-operation pipeline
 // that the (future) transform elision will run on, this test uses a
-// regular `fn set_x(p: State<Point>, v: u32)` that mutates p.x —
+// regular `transform set_x(p: State<Point>, v: u32)` that mutates p.x —
 // semantically equivalent to a transform `to_set_x(p: State<Point>)
 // -> State<Point>` that writes v to p.x. The state-operation lowering
 // (StateInit → Alloc, StateWrite → Store, StateRead → Load) is the
-// same regardless of whether the mutation is in a `fn` or a
+// same regardless of whether the mutation is in a `transform` or a
 // `transform` body.
 //
 // Under the *current* optimizer (which feeds only BinOps to the
@@ -31,12 +31,12 @@
 
 layout Point = { x: u32, y: u32 }
 
-fn set_x(p: State<Point>, v: u32) {
+transform set_x(p: State<Point>, v: u32) {
     p.x = v;
     return;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     set_x(p, 7);
     return p.x;

@@ -10,7 +10,7 @@
 // assignments in true branch).
 // Expected exit code: 50
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 50;

@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s22_crypto_xor_three (3-way xor, value
 // 105) and s24_crypto_and_xor_low (and-then-xor with low byte).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;         // 0xFF
     b: u64 = 60;          // 0x3C
     c: u64 = 3;           // 0x03

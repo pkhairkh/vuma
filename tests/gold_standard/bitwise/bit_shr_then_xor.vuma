@@ -7,7 +7,7 @@
 // s5_bit_shr_mask (shift then AND mask, not XOR) and s5_bit_xor_then_not
 // (XOR then XOR, no shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 240;    // 0xF0
     sh: u64 = 4;
     x: u64 = 5;      // 0x05

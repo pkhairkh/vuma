@@ -95,7 +95,7 @@ fn expected_output_format(kind: BackendKind) -> OutputFormat {
 // Helpers
 // ===========================================================================
 
-/// Build a simple codegen-level SCG representing `fn main() -> i64 { return 42; }`.
+/// Build a simple codegen-level SCG representing `transform main() -> i64 { return 42; }`.
 fn make_simple_codegen_scg() -> Scg {
     Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
@@ -106,7 +106,7 @@ fn make_simple_codegen_scg() -> Scg {
         })])
 }
 
-/// Build an arithmetic codegen-level SCG: `fn main() -> i64 { return (10+20)*3-5; }`.
+/// Build an arithmetic codegen-level SCG: `transform main() -> i64 { return (10+20)*3-5; }`.
 fn make_arithmetic_codegen_scg() -> Scg {
     Scg::new(vec![ScgNode::Function(ScgFunction {
             name: "main".to_string(),
@@ -328,7 +328,7 @@ fn test_full_pipeline_all_backends_arithmetic() {
 /// Test: Parse VUMA source → pipeline compile() → verify output is valid ELF.
 #[test]
 fn test_full_pipeline_parse_to_elf() {
-    let source = "fn main() {}";
+    let source = "transform main() {}";
     let config = CompileConfig::default();
     let result = compile(source, &config);
 
@@ -568,7 +568,7 @@ fn test_full_pipeline_sha256d_all_backends() {
 /// Test: VumaForLLM::compile() returns success for valid code.
 #[test]
 fn test_llm_compile_valid() {
-    let result = VumaForLLM::compile("fn main() {}");
+    let result = VumaForLLM::compile("transform main() {}");
     assert!(result.success, "compile() should succeed for valid code");
     assert!(!result.explanation.is_empty(), "should have explanation");
     assert!(
@@ -580,7 +580,7 @@ fn test_llm_compile_valid() {
 /// Test: VumaForLLM::compile() returns failure for invalid code.
 #[test]
 fn test_llm_compile_invalid() {
-    let result = VumaForLLM::compile("fn 123bad() {}");
+    let result = VumaForLLM::compile("transform 123bad() {}");
     assert!(!result.success, "compile() should fail for invalid code");
     assert!(!result.diagnostics.is_empty(), "should have diagnostics");
     assert!(
@@ -592,7 +592,7 @@ fn test_llm_compile_invalid() {
 /// Test: VumaForLLM::check() returns diagnostics for invalid code.
 #[test]
 fn test_llm_check_invalid() {
-    let diags = VumaForLLM::check("fn 123bad() {}");
+    let diags = VumaForLLM::check("transform 123bad() {}");
     assert!(
         !diags.is_empty(),
         "check() should return diagnostics for invalid code"
@@ -610,7 +610,7 @@ fn test_llm_check_invalid() {
 /// Test: VumaForLLM::check() returns empty errors for valid code.
 #[test]
 fn test_llm_check_valid() {
-    let diags = VumaForLLM::check("fn main() {}");
+    let diags = VumaForLLM::check("transform main() {}");
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == DiagnosticSeverity::Error)
@@ -624,7 +624,7 @@ fn test_llm_check_valid() {
 /// Test: VumaForLLM::analyze() returns SCG JSON.
 #[test]
 fn test_llm_analyze_returns_scg_json() {
-    let result = VumaForLLM::analyze("fn main() { x = 1 + 2; }");
+    let result = VumaForLLM::analyze("transform main() { x = 1 + 2; }");
     assert!(result.is_ok(), "analyze() should succeed for valid code");
     let json = result.unwrap();
     assert!(json.is_object(), "SCG JSON should be an object");
@@ -636,7 +636,7 @@ fn test_llm_analyze_returns_scg_json() {
 /// Test: VumaForLLM::to_wasm() returns valid Wasm binary.
 #[test]
 fn test_llm_to_wasm_valid() {
-    let result = VumaForLLM::to_wasm("fn main() {}");
+    let result = VumaForLLM::to_wasm("transform main() {}");
     match result {
         Ok(wasm_bytes) => {
             assert!(!wasm_bytes.is_empty(), "Wasm binary should be non-empty");
@@ -669,7 +669,7 @@ fn test_llm_to_wasm_valid() {
 /// Test: VumaForLLM::explain_error() produces human-readable text.
 #[test]
 fn test_llm_explain_error() {
-    let diags = VumaForLLM::check("fn 123bad() {}");
+    let diags = VumaForLLM::check("transform 123bad() {}");
     if let Some(diag) = diags.first() {
         let explanation = VumaForLLM::explain_error(diag);
         assert!(!explanation.is_empty(), "explanation should not be empty");
@@ -699,7 +699,7 @@ fn test_llm_explain_error() {
 /// Test: VumaForLLM::suggest_fixes() returns suggestions.
 #[test]
 fn test_llm_suggest_fixes() {
-    let diags = VumaForLLM::check("fn 123bad() {}");
+    let diags = VumaForLLM::check("transform 123bad() {}");
     if let Some(diag) = diags.first() {
         let fixes = VumaForLLM::suggest_fixes(diag);
         assert!(!fixes.is_empty(), "should have at least one suggestion");
@@ -726,12 +726,12 @@ fn test_module_system_import_resolution() {
     let main_path = tmp_dir.join("main.vuma");
 
     // helper.vuma: defines a utility function
-    let helper_source = r#"fn double(x: i64) -> i64 { return x + x; }"#;
+    let helper_source = r#"transform double(x: i64) -> i64 { return x + x; }"#;
     std::fs::write(&helper_path, helper_source).expect("should write helper.vuma");
 
     // main.vuma: imports and uses helper
     let main_source = r#"import "helper.vuma"
-fn main() -> i64 { let y = double(21); return y; }"#;
+transform main() -> i64 { let y = double(21); return y; }"#;
     std::fs::write(&main_path, main_source).expect("should write main.vuma");
 
     // Compile main.vuma with import resolution
@@ -788,7 +788,7 @@ fn test_module_system_missing_import() {
 
     let main_path = tmp_dir.join("main_missing.vuma");
     let main_source = r#"import "nonexistent.vuma"
-fn main() {}"#;
+transform main() {}"#;
     std::fs::write(&main_path, main_source).expect("should write main_missing.vuma");
 
     let config = CompileConfig::default();
@@ -850,7 +850,7 @@ fn test_error_recovery_multiple_errors() {
 #[test]
 fn test_error_recovery_llm_mistake_detection() {
     // Code with `mut` keyword — VUMA variables are mutable by default
-    let mut_source = r#"fn main() { mut x = 42; }"#;
+    let mut_source = r#"transform main() { mut x = 42; }"#;
     let diags = VumaForLLM::check(mut_source);
     // The parser may or may not detect `mut` specifically; it depends on
     // whether `mut` triggers an LlmMistake error. At minimum, it should
@@ -860,7 +860,7 @@ fn test_error_recovery_llm_mistake_detection() {
     let _ = diags; // Don't crash; that's the key assertion
 
     // Code with `println!` macro — Rust-specific, not VUMA
-    let println_source = r#"fn main() { println!("hello"); }"#;
+    let println_source = r#"transform main() { println!("hello"); }"#;
     let diags = VumaForLLM::check(println_source);
     // Should produce diagnostics (parse error or LLM mistake)
     assert!(
@@ -869,7 +869,7 @@ fn test_error_recovery_llm_mistake_detection() {
     );
 
     // Code with `int` type — C/Rust-style, VUMA uses i32/i64
-    let int_source = r#"fn main() { let x: int = 42; }"#;
+    let int_source = r#"transform main() { let x: int = 42; }"#;
     let diags = VumaForLLM::check(int_source);
     // Should produce diagnostics about unknown type or LLM mistake
     assert!(
@@ -895,7 +895,7 @@ fn test_error_recovery_llm_mistake_detection() {
 #[test]
 fn test_error_recovery_suggestions() {
     // `int` type should trigger a suggestion like "use i32 instead"
-    let int_source = r#"fn main() { let x: int = 42; }"#;
+    let int_source = r#"transform main() { let x: int = 42; }"#;
     let diags = VumaForLLM::check(int_source);
 
     let has_suggestion = diags.iter().any(|d| {
@@ -933,7 +933,7 @@ fn test_error_recovery_suggestions() {
 /// Test: Run verify() on a program and check the VerificationReport.
 #[test]
 fn test_verification_report_structure() {
-    let source = "fn main() {}";
+    let source = "transform main() {}";
     let compiler = VumaCompiler::new();
     let report = compiler.verify(source);
 
@@ -976,7 +976,7 @@ fn test_verification_safe_program() {
 /// Test: Verification report has invariants with appropriate structure.
 #[test]
 fn test_verification_invariants() {
-    let source = "fn main() {}";
+    let source = "transform main() {}";
     let compiler = VumaCompiler::new();
     let report = compiler.verify(source);
 
@@ -1011,7 +1011,7 @@ fn test_verification_invariants() {
 /// Test: VerificationReport Display formatting.
 #[test]
 fn test_verification_report_display() {
-    let source = "fn main() {}";
+    let source = "transform main() {}";
     let compiler = VumaCompiler::new();
     let report = compiler.verify(source);
 

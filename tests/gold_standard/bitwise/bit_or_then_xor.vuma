@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s10_bit_xor_then_or (XOR-then-OR,
 // different operand order) and s6_bit_or_chain_3 (pure OR chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 192;         // 0xC0
     b: u64 = 48;          // 0x30
     c: u64 = 15;          // 0x0F

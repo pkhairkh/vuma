@@ -6,7 +6,7 @@
 // Distinct from s30_edge_one_shl_three (1 << 3 = 8) and s27_edge_
 // half_max (127).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 5;
     r: u32 = a << b;       // 32

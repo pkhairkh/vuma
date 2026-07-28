@@ -7,7 +7,7 @@
 
 layout Buf_s = { data: [u8; 24] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Buf_s);
     s.data[0] = 10;
     s.data[8] = 30;

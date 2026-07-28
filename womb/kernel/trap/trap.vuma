@@ -125,7 +125,7 @@
 // Address`), and dispatch.vuma's `__call_indirect1(handler, tf as Address)`.
 //
 // The sub-handlers (trap_panic, trap_syscall, trap_irq) take State<TrapFrame>
-// by regular VUMA-fn borrow (NOT an extern #[borrow] — VUMA fn calls don't
+// by regular VUMA-transform borrow (NOT an extern #[borrow] — VUMA transform calls don't
 // need the attribute). trap_panic reads tf.vector / tf.pc into locals BEFORE
 // the first extern write call (so the post-extern invalidation of tf is
 // harmless — the locals hold the values). trap_syscall passes tf to
@@ -213,24 +213,24 @@ extern "C" {
     // invalidate any state on the call — the Address is just a raw u64
     // pointer handed to the syscall. Same declaration as panic.vuma:98,
     // shell.vuma:268.
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 
     // sys_exit (nr 60): terminate the process with exit code `code`.
     // Does NOT return — the stub ends with INT3 as a safety guard. Same
     // declaration as panic.vuma:107.
-    fn exit(code: i64);
+    transform exit(code: i64);
 
     // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by
     // syscall_dispatch_from_trap (to invoke per-syscall handlers) and
     // irq_dispatch_loop (to invoke per-vector IRQ handlers). Same
     // declaration as dispatch.vuma:226, irq.vuma:276.
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 
     // Send End-Of-Interrupt to the 8259 PIC. K11 stub: `mov al, 0x20;
     // out 0x20, al; ret`. Hosted: __ffi_fallback_stub (no-op). Same
     // declaration as irq.vuma:269.
-    fn pic_eoi(irq: u8);
+    transform pic_eoi(irq: u8);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -302,7 +302,7 @@ layout IrqTable = {
 // at byte offset `idx * 8`. Same loop pattern as task.vuma's pt_get_pid
 // but with a u64 accumulator and 8-byte loop bound. No `*ptr` / `&tf` /
 // `allocate` anywhere.
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -318,7 +318,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 // Write the u64 `val` to canonical slot `idx` in tf.gpr. 8-byte LE pack
 // at byte offset `idx * 8`. Same loop pattern as task.vuma's pt_set_pid
 // but with 8-byte loop bound + u64 mask. No `*ptr` / `&tf` / `allocate`.
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -334,7 +334,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // R2d) populates the arch-specific fields. Explicit byte-zeroing loops
 // for gpr/fpu/_pad (not relying on state_new's zero-fill) — same pattern
 // as R1a's bootinfo_init. No `*ptr` / `&tf` / `allocate` anywhere.
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -361,7 +361,7 @@ fn tf_init(tf: State<TrapFrame>) {
 //
 // The caller (trap_panic) passes `buf as Address` + the returned count to
 // write(1, buf_as_addr, n). 32 bytes is enough for any u64 (max 20 digits).
-fn trap_put_dec(buf: State<PanicBuf>, val: u64) -> u32 {
+transform trap_put_dec(buf: State<PanicBuf>, val: u64) -> u32 {
     // Special case: val == 0 → single '0' digit.
     if val == 0 {
         buf.data[0] = 48;  // '0'
@@ -401,7 +401,7 @@ fn trap_put_dec(buf: State<PanicBuf>, val: u64) -> u32 {
 
 // Read the u64 handler address for syscall `nr` from SyscallTable.handlers.
 // Re-declared byte-identically to dispatch.vuma:321.
-fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
+transform syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
     let off = nr * 8;
     let v: u64 = 0;
     let i = 0;
@@ -421,7 +421,7 @@ fn syscall_table_get(tbl: State<SyscallTable>, nr: u32) -> u64 {
 // invalidates tf (conservative codegen rule), but the post-call
 // tf_set_gpr(tf, 7, result) is a fresh write — safe per dispatch.vuma's
 // documented pattern.
-fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) -> u64 {
+transform syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) -> u64 {
     let nr = tf_get_gpr(tf, 0);
     if nr >= 512 {
         tf_set_gpr(tf, 7, 38);
@@ -448,7 +448,7 @@ fn syscall_dispatch_from_trap(tbl: State<SyscallTable>, tf: State<TrapFrame>) ->
 // Enqueue one IRQ vector into the ring. Producer side. Returns 0 on
 // success, -1 (written as `0 - 1`) if the ring is full. Re-declared
 // byte-identically to irq.vuma:308.
-fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
+transform irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
     if ring.count >= 32 {
         return 0 - 1;  // -1 (full)
     }
@@ -469,7 +469,7 @@ fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
 // Dequeue one IRQ vector from the ring. Consumer side. Returns the u64
 // vector, or 9999 (empty sentinel) if the ring is empty. Re-declared
 // byte-identically to irq.vuma:333.
-fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
+transform irq_ring_pop(ring: State<IrqRing>) -> u64 {
     if ring.count == 0 {
         return 9999;  // empty sentinel
     }
@@ -490,7 +490,7 @@ fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
 
 // Read the u64 handler address for IRQ `irq` from IrqTable.handlers.
 // Re-declared byte-identically to irq.vuma:366.
-fn irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
+transform irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
     let off = (irq as u32) * 8;
     let v: u64 = 0;
     let i = 0;
@@ -509,7 +509,7 @@ fn irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
 // identically to irq.vuma:461. The externs (__call_indirect1, pic_eoi)
 // take only u64/u8 scalars — neither IrqRing nor IrqTable is passed as
 // an extern arg, so neither State is invalidated across the calls.
-fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
+transform irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
     while true {
         let v = irq_ring_pop(ring);
         if v == 9999 {
@@ -549,7 +549,7 @@ fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
 //   everything else → IRQ          → trap_irq
 // W13S1: syscall_tbl / irq_ring / irq_tbl threaded through so the
 // sub-handlers can reach the per-CPU dispatch state.
-fn trap_handler(tf: State<TrapFrame>, syscall_tbl: State<SyscallTable>, irq_ring: State<IrqRing>, irq_tbl: State<IrqTable>) {
+transform trap_handler(tf: State<TrapFrame>, syscall_tbl: State<SyscallTable>, irq_ring: State<IrqRing>, irq_tbl: State<IrqTable>) {
     let v = tf.vector;
     if v < 32 {
         // CPU exception — panic path.
@@ -590,7 +590,7 @@ fn trap_handler(tf: State<TrapFrame>, syscall_tbl: State<SyscallTable>, irq_ring
 //
 // The self-test does NOT call trap_panic (vector=0 would exit(1) and
 // abort the test). The IVE verifier still statically checks this body.
-fn trap_panic(tf: State<TrapFrame>) {
+transform trap_panic(tf: State<TrapFrame>) {
     // Cache tf.vector + tf.pc into locals BEFORE the first extern call.
     let vec_val: u64 = tf.vector;
     let pc_val: u64 = tf.pc;
@@ -623,7 +623,7 @@ fn trap_panic(tf: State<TrapFrame>) {
 // it via __call_indirect1 if registered (writes result to slot 7), or
 // writes 38 (-ENOSYS) to slot 7 if out-of-range / unregistered.
 // Previously a bare `return;` stub.
-fn trap_syscall(tf: State<TrapFrame>, tbl: State<SyscallTable>) {
+transform trap_syscall(tf: State<TrapFrame>, tbl: State<SyscallTable>) {
     syscall_dispatch_from_trap(tbl, tf);
 }
 
@@ -633,7 +633,7 @@ fn trap_syscall(tf: State<TrapFrame>, tbl: State<SyscallTable>) {
 // the drain is the consumer side — pops each vector, looks up the handler
 // in tbl, invokes + EOIs if registered, skips if spurious. Previously a
 // bare `return;` stub.
-fn trap_irq(tf: State<TrapFrame>, ring: State<IrqRing>, tbl: State<IrqTable>) {
+transform trap_irq(tf: State<TrapFrame>, ring: State<IrqRing>, tbl: State<IrqTable>) {
     irq_ring_push(ring, tf.vector);
     irq_dispatch_loop(ring, tbl);
 }
@@ -658,7 +658,7 @@ fn trap_irq(tf: State<TrapFrame>, ring: State<IrqRing>, tbl: State<IrqTable>) {
 // Per the R2f contract's "Use decimal constants" rule: all non-zero
 // constants in the self-test use DECIMAL (32, 128).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tf = state_new(TrapFrame);
     let syscall_tbl = state_new(SyscallTable);
     let irq_ring = state_new(IrqRing);

@@ -155,25 +155,25 @@ import "../crypto/aes_modes.vuma" { aes256_gcm_encrypt, aes256_gcm_decrypt };
 // assembled/disassembled one byte at a time.
 // ===========================================================================
 
-fn tls13_store_u16_be(addr: Address, val: u32) {
+transform tls13_store_u16_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 8) & 255;
     *(addr + 1) = val & 255;
 }
 
-fn tls13_store_u24_be(addr: Address, val: u32) {
+transform tls13_store_u24_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 16) & 255;
     *(addr + 1) = (val >> 8) & 255;
     *(addr + 2) = val & 255;
 }
 
-fn tls13_store_u32_be(addr: Address, val: u32) {
+transform tls13_store_u32_be(addr: Address, val: u32) {
     *(addr + 0) = (val >> 24) & 255;
     *(addr + 1) = (val >> 16) & 255;
     *(addr + 2) = (val >> 8) & 255;
     *(addr + 3) = val & 255;
 }
 
-fn tls13_store_u64_be(addr: Address, val: u64) {
+transform tls13_store_u64_be(addr: Address, val: u64) {
     let m: u64 = 255;
     *(addr + 0) = ((val >> 56) & m) as u32;
     *(addr + 1) = ((val >> 48) & m) as u32;
@@ -185,20 +185,20 @@ fn tls13_store_u64_be(addr: Address, val: u64) {
     *(addr + 7) = (val & m) as u32;
 }
 
-fn tls13_load_u16_be(addr: Address) -> u32 {
+transform tls13_load_u16_be(addr: Address) -> u32 {
     let hi: u32 = *(addr + 0);
     let lo: u32 = *(addr + 1);
     return (hi << 8) | lo;
 }
 
-fn tls13_load_u24_be(addr: Address) -> u32 {
+transform tls13_load_u24_be(addr: Address) -> u32 {
     let b0: u32 = *(addr + 0);
     let b1: u32 = *(addr + 1);
     let b2: u32 = *(addr + 2);
     return (b0 << 16) | (b1 << 8) | b2;
 }
 
-fn tls13_load_u32_be(addr: Address) -> u32 {
+transform tls13_load_u32_be(addr: Address) -> u32 {
     let b0: u32 = *(addr + 0);
     let b1: u32 = *(addr + 1);
     let b2: u32 = *(addr + 2);
@@ -211,7 +211,7 @@ fn tls13_load_u32_be(addr: Address) -> u32 {
 // ===========================================================================
 
 // Copy `n` bytes from src to dst (no overlap assumed).
-fn tls13_memcpy(dst: Address, src: Address, n: u32) {
+transform tls13_memcpy(dst: Address, src: Address, n: u32) {
     let i: u32 = 0;
     while i < n {
         *(dst + i) = *(src + i);
@@ -220,7 +220,7 @@ fn tls13_memcpy(dst: Address, src: Address, n: u32) {
 }
 
 // Set `n` bytes of dst to `val & 255`.
-fn tls13_memset(dst: Address, val: u32, n: u32) {
+transform tls13_memset(dst: Address, val: u32, n: u32) {
     let i: u32 = 0;
     while i < n {
         *(dst + i) = val & 255;
@@ -231,7 +231,7 @@ fn tls13_memset(dst: Address, val: u32, n: u32) {
 // Constant-time equality check: returns 1 if all n bytes match, 0 otherwise.
 // The loop always runs to completion (no short-circuit) so timing does not
 // leak information about the position of the first mismatch.
-fn tls13_ct_eq(a: Address, b: Address, n: u32) -> u32 {
+transform tls13_ct_eq(a: Address, b: Address, n: u32) -> u32 {
     let diff: u32 = 0;
     let i: u32 = 0;
     while i < n {
@@ -245,7 +245,7 @@ fn tls13_ct_eq(a: Address, b: Address, n: u32) -> u32 {
 // Length of a null-terminated ASCII label, capped at TLS13_MAX_LABEL_LEN.
 // Returns the index of the first 0 byte (or TLS13_MAX_LABEL_LEN if none
 // found within the cap).
-fn tls13_strlen(s: Address) -> u32 {
+transform tls13_strlen(s: Address) -> u32 {
     let i: u32 = 0;
     let done: u32 = 0;
     while done == 0 {
@@ -289,7 +289,7 @@ fn tls13_strlen(s: Address) -> u32 {
 // Returns 0 on success, nonzero on error.
 // ===========================================================================
 
-fn tls13_hkdf_expand_label(secret: Address, label: Address, context: Address, out: Address, out_len: u32) -> u32 {
+transform tls13_hkdf_expand_label(secret: Address, label: Address, context: Address, out: Address, out_len: u32) -> u32 {
     let status: u32 = 0;
 
     let label_len: u32 = tls13_strlen(label);
@@ -354,7 +354,7 @@ fn tls13_hkdf_expand_label(secret: Address, label: Address, context: Address, ou
 // Returns 0 on success, nonzero on error.
 // ===========================================================================
 
-fn tls13_derive_secret(secret: Address, label: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+transform tls13_derive_secret(secret: Address, label: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // Hash(Messages) — for an empty buffer this is SHA-256("").
@@ -383,7 +383,7 @@ fn tls13_derive_secret(secret: Address, label: Address, messages: Address, msg_l
 // Returns the number of ASCII bytes written (excluding NUL).
 // ===========================================================================
 
-fn tls13_set_ascii_label(buf: Address, text_bytes: Address, text_len: u32) -> u32 {
+transform tls13_set_ascii_label(buf: Address, text_bytes: Address, text_len: u32) -> u32 {
     tls13_memcpy(buf, text_bytes, text_len);
     *(buf + text_len) = 0;
     return text_len;
@@ -405,7 +405,7 @@ fn tls13_set_ascii_label(buf: Address, text_bytes: Address, text_len: u32) -> u3
 //   psk_len : length of psk in bytes (0 for no PSK)
 //   out     : output buffer; receives 32 bytes (Early Secret)
 // Returns 0 on success.
-fn tls13_compute_early_secret(psk: Address, psk_len: u32, out: Address) -> u32 {
+transform tls13_compute_early_secret(psk: Address, psk_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // RFC 5869 Section 2.2: salt of length 0 is treated as HashLen zeros
@@ -440,7 +440,7 @@ fn tls13_compute_early_secret(psk: Address, psk_len: u32, out: Address) -> u32 {
 //   ecdhe_len    : length of ECDHE shared secret in bytes (e.g. 32 for X25519)
 //   out          : output buffer; receives 32 bytes (Handshake Secret)
 // Returns 0 on success.
-fn tls13_compute_handshake_secret(early_secret: Address, ecdhe: Address, ecdhe_len: u32, out: Address) -> u32 {
+transform tls13_compute_handshake_secret(early_secret: Address, ecdhe: Address, ecdhe_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // Derive-Secret(Early Secret, "derived", "") — empty transcript.
@@ -493,7 +493,7 @@ fn tls13_compute_handshake_secret(early_secret: Address, ecdhe: Address, ecdhe_l
 //   handshake_secret : 32-byte Handshake Secret
 //   out              : output buffer; receives 32 bytes (Master Secret)
 // Returns 0 on success.
-fn tls13_compute_master_secret(handshake_secret: Address, out: Address) -> u32 {
+transform tls13_compute_master_secret(handshake_secret: Address, out: Address) -> u32 {
     let status: u32 = 0;
 
     // Derive-Secret(Handshake Secret, "derived", "")
@@ -540,7 +540,7 @@ fn tls13_compute_master_secret(handshake_secret: Address, out: Address) -> u32 {
 //   messages         : handshake transcript buffer (concatenated ClientHello..ServerHello)
 //   msg_len          : length of transcript in bytes
 //   out              : output buffer; receives 32 bytes
-fn tls13_compute_client_handshake_traffic_secret(handshake_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+transform tls13_compute_client_handshake_traffic_secret(handshake_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // "c hs traffic" — ASCII bytes (12): c=99, space=32, h=104, s=115, space=32,
@@ -573,7 +573,7 @@ fn tls13_compute_client_handshake_traffic_secret(handshake_secret: Address, mess
 
 // Compute Server Handshake Traffic Secret =
 //   Derive-Secret(Handshake Secret, "s hs traffic", Transcript)
-fn tls13_compute_server_handshake_traffic_secret(handshake_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+transform tls13_compute_server_handshake_traffic_secret(handshake_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // "s hs traffic" — ASCII bytes (12): s=115, space=32, h=104, s=115, space=32,
@@ -606,7 +606,7 @@ fn tls13_compute_server_handshake_traffic_secret(handshake_secret: Address, mess
 
 // Compute Client Application Traffic Secret =
 //   Derive-Secret(Master Secret, "c ap traffic", Transcript)
-fn tls13_compute_client_application_traffic_secret(master_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+transform tls13_compute_client_application_traffic_secret(master_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // "c ap traffic" — ASCII bytes (12): c=99, space=32, a=97, p=112, space=32,
@@ -639,7 +639,7 @@ fn tls13_compute_client_application_traffic_secret(master_secret: Address, messa
 
 // Compute Server Application Traffic Secret =
 //   Derive-Secret(Master Secret, "s ap traffic", Transcript)
-fn tls13_compute_server_application_traffic_secret(master_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+transform tls13_compute_server_application_traffic_secret(master_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
     let status: u32 = 0;
 
     // "s ap traffic" — ASCII bytes (12): s=115, space=32, a=97, p=112, space=32,
@@ -685,7 +685,7 @@ fn tls13_compute_server_application_traffic_secret(master_secret: Address, messa
 // Returns 0 on success.
 // ===========================================================================
 
-fn tls13_derive_traffic_keys(secret: Address, key: Address, iv: Address, hp_key: Address) -> u32 {
+transform tls13_derive_traffic_keys(secret: Address, key: Address, iv: Address, hp_key: Address) -> u32 {
     let status: u32 = 0;
 
     // "key" label — ASCII bytes (3): k=107, e=101, y=121.
@@ -780,7 +780,7 @@ fn tls13_derive_traffic_keys(secret: Address, key: Address, iv: Address, hp_key:
 // Returns ct_len + 16 on success, 0 on error.
 // ===========================================================================
 
-fn tls13_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address) -> u32 {
+transform tls13_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address) -> u32 {
     let status: u32 = 0;
 
     if pt_len > TLS13_MAX_RECORD_PAYLOAD { status = 1; }
@@ -819,7 +819,7 @@ fn tls13_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u
 // to `plaintext` (which must be at least ct_len - 16 bytes).
 // Returns the recovered plaintext length on success, 0 on AEAD failure
 // (tag mismatch) or any input error.
-fn tls13_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: u32, aad: Address, aad_len: u32, plaintext: Address) -> u32 {
+transform tls13_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: u32, aad: Address, aad_len: u32, plaintext: Address) -> u32 {
     let status: u32 = 0;
 
     // ct_len must be at least tag_len; otherwise the record is malformed.
@@ -848,7 +848,7 @@ fn tls13_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: 
 // `nonce_out` (12 bytes). This helper is provided so callers that hold the
 // static write_iv and a sequence number can derive the per-record nonce
 // before calling tls13_record_encrypt / tls13_record_decrypt.
-fn tls13_record_nonce(write_iv: Address, seq_num: u64, nonce_out: Address) {
+transform tls13_record_nonce(write_iv: Address, seq_num: u64, nonce_out: Address) {
     let i: u32 = 0;
     while i < TLS13_IV_LEN {
         *(nonce_out + i) = *(write_iv + i);
@@ -868,7 +868,7 @@ fn tls13_record_nonce(write_iv: Address, seq_num: u64, nonce_out: Address) {
 // Build the 5-byte TLS record header AAD for a given content type and
 // plaintext length. The length field is pt_len + TLS13_TAG_LEN (the
 // on-wire TLSCiphertext.length). Writes 5 bytes to `aad_out`.
-fn tls13_record_header_aad(content_type: u32, pt_len: u32, aad_out: Address) {
+transform tls13_record_header_aad(content_type: u32, pt_len: u32, aad_out: Address) {
     *(aad_out + 0) = content_type & 255;
     tls13_store_u16_be(aad_out + 1, TLS_LEGACY_VERSION);
     tls13_store_u16_be(aad_out + 3, pt_len + TLS13_TAG_LEN);
@@ -901,7 +901,7 @@ fn tls13_record_header_aad(content_type: u32, pt_len: u32, aad_out: Address) {
 //   out        : output buffer; receives the full handshake message
 // Returns total message length (4-byte handshake header + body) on success,
 // or 0 on error.
-fn tls13_build_client_hello(version: u32, random: Address, session_id: Address, suites: Address, key_share: Address, out: Address) -> u32 {
+transform tls13_build_client_hello(version: u32, random: Address, session_id: Address, suites: Address, key_share: Address, out: Address) -> u32 {
     let status: u32 = 0;
 
     // Validate legacy_session_id.
@@ -1073,7 +1073,7 @@ fn tls13_build_client_hello(version: u32, random: Address, session_id: Address, 
 // Returns the total number of bytes consumed (4 + body_len) on success, or
 // 0 on error (short buffer, wrong message type, truncated fields, missing
 // supported_versions or key_share extension).
-fn tls13_parse_server_hello(data: Address, len: u32, version: Address, random: Address, session_id: Address, suite: Address, key_share: Address) -> u32 {
+transform tls13_parse_server_hello(data: Address, len: u32, version: Address, random: Address, session_id: Address, suite: Address, key_share: Address) -> u32 {
     let status: u32 = 0;
     if len < 4 { status = 1; }
 
@@ -1236,7 +1236,7 @@ fn tls13_parse_server_hello(data: Address, len: u32, version: Address, random: A
 // Returns 0 on success, nonzero on error.
 // ===========================================================================
 
-fn tls13_finished_verify_data(base_key: Address, transcript: Address, out: Address) -> u32 {
+transform tls13_finished_verify_data(base_key: Address, transcript: Address, out: Address) -> u32 {
     let status: u32 = 0;
 
     // "finished" label — ASCII bytes (8): f=102, i=105, n=110, i=105,

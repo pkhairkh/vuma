@@ -7,7 +7,7 @@
 // operands loaded into variables first. Distinct from
 // s5_crypto_nibble_extract (extracts, doesn't construct).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 3;
     sh: u64 = 4;
     mask: u64 = 255;        // 0xFF

@@ -6,7 +6,7 @@
 
 layout Buffer16 = { data: [u8; 16] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let src = state_new(Buffer16);
     let dst = state_new(Buffer16);
     // Fill src with pattern

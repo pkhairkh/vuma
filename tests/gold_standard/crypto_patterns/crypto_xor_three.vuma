@@ -7,7 +7,7 @@
 // 0xA5^0x3C = 153) and s14_crypto_xor_two_keys (three-way xor, different
 // values).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 85;          // 0x55
     b: u64 = 51;          // 0x33
     c: u64 = 15;          // 0x0F

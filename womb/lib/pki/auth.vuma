@@ -93,7 +93,7 @@ const AUTH_ERR: u32 = 4294967295;  // 0xFFFFFFFF
 // alongside them.
 // ===========================================================================
 
-fn auth_load_u32(ptr: Address, off: u32) -> u32 {
+transform auth_load_u32(ptr: Address, off: u32) -> u32 {
     let b0: u32 = *(ptr + off);
     let b1: u32 = *(ptr + off + 1);
     let b2: u32 = *(ptr + off + 2);
@@ -101,14 +101,14 @@ fn auth_load_u32(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn auth_store_u32(ptr: Address, off: u32, val: u32) {
+transform auth_store_u32(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn auth_load_u64(ptr: Address, off: u32) -> u64 {
+transform auth_load_u64(ptr: Address, off: u32) -> u64 {
     let b0: u64 = *(ptr + off)     as u64;
     let b1: u64 = *(ptr + off + 1) as u64;
     let b2: u64 = *(ptr + off + 2) as u64;
@@ -121,7 +121,7 @@ fn auth_load_u64(ptr: Address, off: u32) -> u64 {
          | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn auth_store_u64(ptr: Address, off: u32, val: u64) {
+transform auth_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -132,7 +132,7 @@ fn auth_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn auth_load_addr(ptr: Address, off: u32) -> Address {
+transform auth_load_addr(ptr: Address, off: u32) -> Address {
     let v: u64 = auth_load_u64(ptr, off);
     return v as Address;
 }
@@ -141,13 +141,13 @@ fn auth_load_addr(ptr: Address, off: u32) -> Address {
 // Inline string helpers
 // ===========================================================================
 
-fn auth_strlen(s: Address) -> u32 {
+transform auth_strlen(s: Address) -> u32 {
     let n: u32 = 0;
     while *(s + n) != 0 { n = n + 1; }
     return n;
 }
 
-fn auth_strcmp(a: Address, b: Address) -> u32 {
+transform auth_strcmp(a: Address, b: Address) -> u32 {
     // Returns 0 if equal, 1 if a > b, 2 if a < b (avoiding i32 to keep
     // the module within the u32/u64/Address type family).
     let i: u32 = 0;
@@ -167,7 +167,7 @@ fn auth_strcmp(a: Address, b: Address) -> u32 {
 }
 
 // Copy len bytes from src to dst.
-fn auth_memcpy(dst: Address, src: Address, len: u32) {
+transform auth_memcpy(dst: Address, src: Address, len: u32) {
     let i: u32 = 0;
     while i < len {
         *(dst + i) = *(src + i);
@@ -177,7 +177,7 @@ fn auth_memcpy(dst: Address, src: Address, len: u32) {
 
 // Copy at most max-1 bytes from src to dst, then null-terminate.
 // Returns the number of bytes copied (excluding the null terminator).
-fn auth_strlcpy(dst: Address, src: Address, max: u32) -> u32 {
+transform auth_strlcpy(dst: Address, src: Address, max: u32) -> u32 {
     if max == 0 { return 0; }
     let i: u32 = 0;
     while i < max - 1 {
@@ -195,14 +195,14 @@ fn auth_strlcpy(dst: Address, src: Address, max: u32) -> u32 {
 // ===========================================================================
 
 // Append a single byte. Returns the new position (unchanged if at max).
-fn auth_putc(out: Address, pos: u32, max: u32, c: u32) -> u32 {
+transform auth_putc(out: Address, pos: u32, max: u32, c: u32) -> u32 {
     if pos >= max { return pos; }
     *(out + pos) = c;
     return pos + 1;
 }
 
 // Append slen bytes from src. Returns the new position.
-fn auth_puts(out: Address, pos: u32, max: u32, src: Address, slen: u32) -> u32 {
+transform auth_puts(out: Address, pos: u32, max: u32, src: Address, slen: u32) -> u32 {
     let p: u32 = pos;
     let i: u32 = 0;
     while i < slen {
@@ -223,7 +223,7 @@ fn auth_puts(out: Address, pos: u32, max: u32, src: Address, slen: u32) -> u32 {
 // Lookup table for one base64url character.
 // Returns 0..63 for valid chars, AUTH_B64_PADDING for '=', AUTH_B64_INVALID
 // for anything else. Also tolerates the standard-base64 alphabet ('+' '/').
-fn auth_b64url_lookup(c: u32) -> u32 {
+transform auth_b64url_lookup(c: u32) -> u32 {
     if c >= 65 { if c <= 90 { return c - 65; } }            // A-Z → 0..25
     if c >= 97 { if c <= 122 { return c - 97 + 26; } }      // a-z → 26..51
     if c >= 48 { if c <= 57 { return c - 48 + 52; } }       // 0-9 → 52..61
@@ -237,7 +237,7 @@ fn auth_b64url_lookup(c: u32) -> u32 {
 
 // Decode base64url input[0..len] into output. Whitespace (LF/CR/space) is
 // skipped. Returns the decoded byte length, or AUTH_ERR on invalid input.
-fn auth_b64url_decode(input: Address, len: u32, output: Address) -> u32 {
+transform auth_b64url_decode(input: Address, len: u32, output: Address) -> u32 {
     let out_idx: u32 = 0;
     let i: u32 = 0;
     let acc: u32 = 0;
@@ -272,7 +272,7 @@ fn auth_b64url_decode(input: Address, len: u32, output: Address) -> u32 {
 // ===========================================================================
 
 // If node is a JSON_STRING, return its null-terminated string Address; else 0.
-fn auth_json_string_ptr(node: Address) -> Address {
+transform auth_json_string_ptr(node: Address) -> Address {
     if node == 0 { return 0; }
     let t: u32 = auth_load_u32(node, 0);
     if t != AUTH_JSON_STRING { return 0; }
@@ -280,7 +280,7 @@ fn auth_json_string_ptr(node: Address) -> Address {
 }
 
 // If node is JSON_INT, return its value as u64; else 0.
-fn auth_json_int_val(node: Address) -> u64 {
+transform auth_json_int_val(node: Address) -> u64 {
     if node == 0 { return 0; }
     let t: u32 = auth_load_u32(node, 0);
     if t != AUTH_JSON_INT { return 0; }
@@ -289,7 +289,7 @@ fn auth_json_int_val(node: Address) -> u64 {
 
 // Return the string value of a node, handling the OIDC `aud` case where the
 // claim may be either a single string or an array of strings (take the first).
-fn auth_json_string_or_first_array_elem(node: Address) -> Address {
+transform auth_json_string_or_first_array_elem(node: Address) -> Address {
     if node == 0 { return 0; }
     let t: u32 = auth_load_u32(node, 0);
     if t == AUTH_JSON_STRING { return auth_load_addr(node, 8); }
@@ -308,7 +308,7 @@ fn auth_json_string_or_first_array_elem(node: Address) -> Address {
 
 // Copy a JSON string node's value into dst (null-terminated, truncated to max).
 // Returns 1 on success (even if truncated), 0 if node is not a string.
-fn auth_json_string_into(node: Address, dst: Address, max: u32) -> u32 {
+transform auth_json_string_into(node: Address, dst: Address, max: u32) -> u32 {
     let s: Address = auth_json_string_ptr(node);
     if s == 0 { return 0; }
     auth_strlcpy(dst, s, max);
@@ -351,7 +351,7 @@ fn auth_json_string_into(node: Address, dst: Address, max: u32) -> u32 {
 // ("RSA" or "EC"); caller allocates >= 8 bytes.
 // ===========================================================================
 
-fn jwk_encode_rsa(n: Address, n_len: u32, e: Address, e_len: u32,
+transform jwk_encode_rsa(n: Address, n_len: u32, e: Address, e_len: u32,
                   out: Address, max_len: u32) -> u32 {
     // base64url expands 3 bytes → 4 chars; allocate with slack.
     let n_cap: u32 = ((n_len + 2) / 3) * 4 + 4;
@@ -400,7 +400,7 @@ fn jwk_encode_rsa(n: Address, n_len: u32, e: Address, e_len: u32,
     return p29;
 }
 
-fn jwk_encode_ec(x: Address, y: Address, curve: Address,
+transform jwk_encode_ec(x: Address, y: Address, curve: Address,
                  out: Address, max_len: u32) -> u32 {
     // P-256 coordinates are 32 bytes each. The JWK spec requires that the
     // base64url-encoded coordinate carry the full field-length byte string,
@@ -466,7 +466,7 @@ fn jwk_encode_ec(x: Address, y: Address, curve: Address,
 
 // Internal: copy up to `cap` bytes from JSON string node into dst, store the
 // copied length at *out_len. Returns 1 on success, 0 if node is not a string.
-fn auth_jwk_copy_field(node: Address, dst: Address, cap: u32, out_len: Address) -> u32 {
+transform auth_jwk_copy_field(node: Address, dst: Address, cap: u32, out_len: Address) -> u32 {
     let s: Address = auth_json_string_ptr(node);
     if s == 0 { return 0; }
     let slen: u32 = auth_strlen(s);
@@ -477,7 +477,7 @@ fn auth_jwk_copy_field(node: Address, dst: Address, cap: u32, out_len: Address) 
     return 1;
 }
 
-fn jwk_decode(jwk: Address, jwk_len: u32, kty: Address, key_data: Address) -> u32 {
+transform jwk_decode(jwk: Address, jwk_len: u32, kty: Address, key_data: Address) -> u32 {
     // Zero out the key_data header.
     auth_store_u32(key_data, 0, AUTH_KTY_UNKNOWN);
     // Default kty output to empty string.
@@ -602,7 +602,7 @@ fn jwk_decode(jwk: Address, jwk_len: u32, kty: Address, key_data: Address) -> u3
 // serialization, used verbatim — not re-encoded).
 // ===========================================================================
 
-fn jwe_encrypt(plaintext: Address, pt_len: u32, cek: Address, iv: Address,
+transform jwe_encrypt(plaintext: Address, pt_len: u32, cek: Address, iv: Address,
                protected_header: Address, ph_len: u32,
                out: Address, max_len: u32) -> u32 {
     // --- Part 0: base64url(protected_header) — this is also the AAD. ---
@@ -660,7 +660,7 @@ fn jwe_encrypt(plaintext: Address, pt_len: u32, cek: Address, iv: Address,
 // Find the indices of the four '.' separators in the compact JWE string.
 // Writes the four dot offsets into d0/d1/d2/d3. Returns 1 on success,
 // 0 if there are not exactly four dots.
-fn jwe_find_dots(compact: Address, len: u32,
+transform jwe_find_dots(compact: Address, len: u32,
                  d0: Address, d1: Address, d2: Address, d3: Address) -> u32 {
     let count: u32 = 0;
     let i: u32 = 0;
@@ -678,7 +678,7 @@ fn jwe_find_dots(compact: Address, len: u32,
     return 1;
 }
 
-fn jwe_decrypt(compact: Address, compact_len: u32, cek: Address,
+transform jwe_decrypt(compact: Address, compact_len: u32, cek: Address,
                plaintext: Address, max_len: u32) -> u32 {
     // Locate the four dots.
     let dbuf: Address = allocate(16);
@@ -754,7 +754,7 @@ fn jwe_decrypt(compact: Address, compact_len: u32, cek: Address,
 // `sep` is the byte to emit before the first parameter ('?' for query strings,
 // 0 to emit nothing for form bodies).
 // Returns (new_pos << 1) | new_first, packed into a u32. Caller unpacks.
-fn oauth2_emit_kv(out: Address, pos: u32, max: u32, first: u32, sep: u32,
+transform oauth2_emit_kv(out: Address, pos: u32, max: u32, first: u32, sep: u32,
                   key: Address, key_len: u32,
                   val: Address, val_len: u32) -> u64 {
     let p: u32 = pos;
@@ -778,7 +778,7 @@ fn oauth2_emit_kv(out: Address, pos: u32, max: u32, first: u32, sep: u32,
     return packed;
 }
 
-fn oauth2_build_auth_url(auth_endpoint: Address, client_id: Address,
+transform oauth2_build_auth_url(auth_endpoint: Address, client_id: Address,
                          redirect_uri: Address, scope: Address, state: Address,
                          out: Address, max_len: u32) -> u32 {
     let ep_len: u32 = auth_strlen(auth_endpoint);
@@ -887,7 +887,7 @@ fn oauth2_build_auth_url(auth_endpoint: Address, client_id: Address,
     return p5;
 }
 
-fn oauth2_build_token_request(token_endpoint: Address, code: Address,
+transform oauth2_build_token_request(token_endpoint: Address, code: Address,
                               client_id: Address, client_secret: Address,
                               redirect_uri: Address,
                               out: Address, max_len: u32) -> u32 {
@@ -1027,7 +1027,7 @@ fn oauth2_build_token_request(token_endpoint: Address, code: Address,
 // expires_in: caller-allocated 4-byte buffer; receives the u32 little-endian
 //   number of seconds until expiry (0 if the field is absent).
 // Returns 1 on success (access_token present), 0 on failure.
-fn oauth2_parse_token_response(response: Address, resp_len: u32,
+transform oauth2_parse_token_response(response: Address, resp_len: u32,
                                access_token: Address, token_type: Address,
                                expires_in: Address,
                                refresh_token: Address) -> u32 {
@@ -1128,7 +1128,7 @@ fn oauth2_parse_token_response(response: Address, resp_len: u32,
     return result;
 }
 
-fn oauth2_refresh_token(token_endpoint: Address, refresh_token: Address,
+transform oauth2_refresh_token(token_endpoint: Address, refresh_token: Address,
                         client_id: Address, client_secret: Address,
                         out: Address, max_len: u32) -> u32 {
     // token_endpoint is not part of the refresh POST body (only the form
@@ -1255,7 +1255,7 @@ fn oauth2_refresh_token(token_endpoint: Address, refresh_token: Address,
 // otherwise. (The header `alg` is not enforced here.)
 // ===========================================================================
 
-fn oidc_build_auth_url(auth_endpoint: Address, client_id: Address,
+transform oidc_build_auth_url(auth_endpoint: Address, client_id: Address,
                        redirect_uri: Address, scope: Address, state: Address,
                        nonce: Address, out: Address, max_len: u32) -> u32 {
     let ep_len: u32 = auth_strlen(auth_endpoint);
@@ -1381,7 +1381,7 @@ fn oidc_build_auth_url(auth_endpoint: Address, client_id: Address,
 
 // Locate the first two '.' separators in a JWT (header.payload.signature).
 // Writes offsets to d0 and d1. Returns 1 on success, 0 if not exactly 2 dots.
-fn oidc_find_jwt_dots(token: Address, len: u32,
+transform oidc_find_jwt_dots(token: Address, len: u32,
                       d0: Address, d1: Address) -> u32 {
     let count: u32 = 0;
     let i: u32 = 0;
@@ -1397,7 +1397,7 @@ fn oidc_find_jwt_dots(token: Address, len: u32,
     return 1;
 }
 
-fn oidc_parse_id_token(id_token: Address, token_len: u32,
+transform oidc_parse_id_token(id_token: Address, token_len: u32,
                        claims: Address) -> u32 {
     // Zero the claims buffer regions we own.
     let i: u32 = 0;

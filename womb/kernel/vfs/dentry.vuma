@@ -115,10 +115,10 @@
 // trap_frame_init(tf), K4a's pt_init(tbl), K5a's own inode_init —
 // see womb/kernel/mm/pmm.vuma header "Why init-style?" for the
 // codegen rationale: the current codegen does NOT propagate State-
-// typedness through function return values, so `fn dentry_new() ->
+// typedness through function return values, so `transform dentry_new() ->
 // State<DentryTable>` would produce broken field-access code in
 // callers). All dentry.vuma helpers take `tbl: State<DentryTable>` by
-// regular VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't
+// regular VUMA-transform borrow (NOT extern #[borrow] — VUMA transform calls don't
 // need the attribute; only extern "C" calls do, and none of these
 // helpers call any extern).
 //
@@ -296,14 +296,14 @@ layout DentryTable = {
 
 // Read byte `off` (0..63) of the name field of Dentry slot `idx` from
 // DentryTable.names.
-fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+transform dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
     let base = idx * 64;
     return tbl.names[base + off];
 }
 
 // Write byte `off` (0..63) of the name field of Dentry slot `idx` into
 // DentryTable.names.
-fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+transform dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
     let base = idx * 64;
     tbl.names[base + off] = val;
 }
@@ -319,7 +319,7 @@ fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
 // shifted-bytes on reads.
 
 // Read the u64 `parent` field of Dentry slot `idx` from DentryTable.parents.
-fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -333,7 +333,7 @@ fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `parent` field of Dentry slot `idx` into DentryTable.parents.
-fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -345,7 +345,7 @@ fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `inode` field of Dentry slot `idx` from DentryTable.inodes.
-fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -359,7 +359,7 @@ fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `inode` field of Dentry slot `idx` into DentryTable.inodes.
-fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -371,7 +371,7 @@ fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of Dentry slot `idx` from DentryTable.nexts.
-fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -385,7 +385,7 @@ fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Dentry slot `idx` into DentryTable.nexts.
-fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -397,7 +397,7 @@ fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `child` field of Dentry slot `idx` from DentryTable.children.
-fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -411,7 +411,7 @@ fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `child` field of Dentry slot `idx` into DentryTable.children.
-fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -431,12 +431,12 @@ fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
 // The byte IS the value.
 
 // Read the u8 `mounted` field of Dentry slot `idx` from DentryTable.mounteds.
-fn dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.mounteds[idx];
 }
 
 // Write the u8 `mounted` field of Dentry slot `idx` into DentryTable.mounteds.
-fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.mounteds[idx] = val;
 }
 
@@ -444,12 +444,12 @@ fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
 // Internal helper — only used by dentry_alloc / dentry_free / dentry_init
 // (not part of the K5a contract's helper list, but exposed for K5b's
 // dentry_lookup to skip free slots during a name-search walk).
-fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of Dentry slot `idx` into DentryTable.used.
-fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
@@ -464,7 +464,7 @@ fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
 // (names, parents, etc.) — those are populated by dentry_alloc's
 // caller, so zeroing them here would be wasted work (and VUMA has no
 // memset).
-fn dentry_init(tbl: State<DentryTable>) {
+transform dentry_init(tbl: State<DentryTable>) {
     let i = 0;
     while i < 64 {
         dentry_set_used(tbl, i, 0);
@@ -487,7 +487,7 @@ fn dentry_init(tbl: State<DentryTable>) {
 //
 // The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
 // (verified by the self-test: free slot 0, alloc → returns 0, not 2).
-fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
+transform dentry_alloc(tbl: State<DentryTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if dentry_get_used(tbl, i) == 0 {
@@ -513,7 +513,7 @@ fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
 // K5b's dentry_evict calls this when a dentry is removed from the
 // dcache (link count reaches 0 AND the dcache is under memory
 // pressure); K5d's tmpfs_rmdir calls this when a directory is removed.
-fn dentry_free(tbl: State<DentryTable>, idx: u32) {
+transform dentry_free(tbl: State<DentryTable>, idx: u32) {
     dentry_set_used(tbl, idx, 0);
     tbl.count = tbl.count - 1;
 }
@@ -555,7 +555,7 @@ fn dentry_free(tbl: State<DentryTable>, idx: u32) {
 // ASCII codes for 'a'/'b'/'c' (Linux uses the same values internally
 // — names are byte arrays, and 'a' is universally 97 in ASCII / UTF-8).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(DentryTable);
     dentry_init(tbl);
 

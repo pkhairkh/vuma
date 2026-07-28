@@ -58,7 +58,7 @@ fn edge_deeply_nested_braces() {
         inner = format!("{{ let x = {};", inner);
     }
     let closing = "}".repeat(30);
-    let source = format!("fn f() {}{}", inner, closing);
+    let source = format!("transform f() {}{}", inner, closing);
     assert_no_panic(&source);
 }
 
@@ -66,7 +66,7 @@ fn edge_deeply_nested_braces() {
 fn edge_deeply_nested_brackets() {
     let depth = 30;
     let source = format!("let x = {}0{}", "[".repeat(depth), "]".repeat(depth));
-    assert_no_panic(&format!("fn f() {{ {} }}", source));
+    assert_no_panic(&format!("transform f() {{ {} }}", source));
 }
 
 #[test]
@@ -223,20 +223,27 @@ fn edge_keywords_as_expressions() {
 #[test]
 fn edge_keywords_in_unusual_positions() {
     // Keywords as type names
-    assert_no_panic("fn f(x: fn) {}");
+    assert_no_panic("transform f(x: fn) {}");
     // Keywords in match patterns
     assert_no_panic("match x { struct => 1, enum => 2 }");
 }
 
 #[test]
 fn edge_all_keywords_sequential() {
+    // (Wave 1-A) 8 cosplay keywords deleted from the lexer (safe, ptr,
+    // alloc, lock, unlock, use, self, ref); the surviving real keywords
+    // are exercised here. Deleted keywords now lex as plain identifiers.
+    // (Wave 3-C) `fn` also removed -- it now lexes as a plain Ident.
     let keywords = [
-        "fn", "let", "pub", "crate", "ptr", "region", "alloc", "allocate", "free", "derive",
-        "cast", "read", "write", "sync", "if", "else", "while", "for", "return", "struct", "enum",
-        "match", "unsafe", "safe", "bd", "repd", "capd", "reld", "import", "export", "mod", "use",
-        "self", "super", "async", "await", "spawn", "lock", "unlock", "channel", "send", "recv",
-        "true", "false", "null", "as", "sizeof", "alignof", "break", "continue", "where", "impl",
-        "trait", "type", "const", "static", "mut", "ref",
+        // (Wave 3-C) `fn` removed from the lexer -- now a plain Ident;
+        // `transform` is the sole function keyword.
+        "transform", "let", "pub", "crate", "region", "allocate", "free", "derive",
+        "cast", "read", "write", "sync", "if", "else", "while", "for", "return",
+        "struct", "enum", "match", "unsafe", "bd", "repd", "capd", "reld",
+        "import", "export", "mod", "super", "async", "await", "spawn",
+        "channel", "send", "recv",
+        "true", "false", "null", "as", "sizeof", "alignof", "break", "continue",
+        "where", "impl", "trait", "type", "const", "static", "mut",
     ];
     let source = keywords.join(";\n");
     assert_no_panic(&source);
@@ -248,7 +255,7 @@ fn edge_all_keywords_sequential() {
 fn edge_expression_depth_limit() {
     let depth = 300;
     let source = format!("let x = {}1{}", "+(".repeat(depth), ")".repeat(depth));
-    assert_no_panic(&format!("fn f() {{ {} }}", source));
+    assert_no_panic(&format!("transform f() {{ {} }}", source));
 }
 
 // ---- Incomplete constructs ----
@@ -256,10 +263,10 @@ fn edge_expression_depth_limit() {
 #[test]
 fn edge_incomplete_fn() {
     assert_no_panic("fn");
-    assert_no_panic("fn(");
-    assert_no_panic("fn foo(");
-    assert_no_panic("fn foo()");
-    assert_no_panic("fn foo() {");
+    assert_no_panic("transform(");
+    assert_no_panic("transform foo(");
+    assert_no_panic("transform foo()");
+    assert_no_panic("transform foo() {");
 }
 
 #[test]
@@ -309,7 +316,7 @@ fn edge_null_bytes_in_source() {
 
 #[test]
 fn test_parse_empty_function_body() {
-    let mut parser = Parser::new("fn foo() {}");
+    let mut parser = Parser::new("transform foo() {}");
     let result = parser.parse_program();
     assert!(
         result.is_ok(),
@@ -321,7 +328,7 @@ fn test_parse_empty_function_body() {
 
 #[test]
 fn test_parse_nested_let_bindings() {
-    let source = "fn f() { let x = 1; let y = x; let z = y; }";
+    let source = "transform f() { let x = 1; let y = x; let z = y; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -335,7 +342,7 @@ fn test_parse_nested_let_bindings() {
 #[test]
 fn test_parse_unsafe_block() {
     // `unsafe` is a keyword; the parser should handle it without panicking.
-    let source = "fn f() { unsafe { let x = 1; } }";
+    let source = "transform f() { unsafe { let x = 1; } }";
     assert_no_panic(source);
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
@@ -347,7 +354,7 @@ fn test_parse_unsafe_block() {
 
 #[test]
 fn test_parse_loop_keyword() {
-    let source = "fn f() { loop { break; } }";
+    let source = "transform f() { loop { break; } }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(result.is_ok(), "loop with break should parse successfully");
@@ -360,7 +367,7 @@ fn test_parse_loop_keyword() {
 #[test]
 fn test_parse_syscall_basic() {
     // syscall(1, fd, buf, count) — write syscall
-    let source = "fn f() { let ret = syscall(1, fd, buf, count); }";
+    let source = "transform f() { let ret = syscall(1, fd, buf, count); }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(result.is_ok(), "syscall with args should parse");
@@ -369,7 +376,7 @@ fn test_parse_syscall_basic() {
 #[test]
 fn test_parse_syscall_no_args() {
     // syscall(60) — exit syscall (no args, no return)
-    let source = "fn f() { syscall(60); }";
+    let source = "transform f() { syscall(60); }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(result.is_ok(), "syscall with no args should parse");
@@ -378,7 +385,7 @@ fn test_parse_syscall_no_args() {
 #[test]
 fn test_parse_syscall_as_statement() {
     // syscall as a bare statement (void return)
-    let source = "fn f() { syscall(60, 0); }";
+    let source = "transform f() { syscall(60, 0); }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(result.is_ok(), "syscall as statement should parse");
@@ -387,7 +394,7 @@ fn test_parse_syscall_as_statement() {
 #[test]
 fn test_parse_syscall_in_expression() {
     // syscall used in a larger expression
-    let source = "fn f() { let x = syscall(1, fd, buf, count) + 1; }";
+    let source = "transform f() { let x = syscall(1, fd, buf, count) + 1; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(result.is_ok(), "syscall in expression should parse");
@@ -413,7 +420,7 @@ fn test_parse_syscall_in_expression() {
 #[test]
 fn test_parse_else_block_with_nested_if_chain_balanced() {
     let source = r#"
-        fn match_kw(c: i32, d: i32) -> i32 {
+        transform match_kw(c: i32, d: i32) -> i32 {
             if c == 99 {
                 if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }
                 else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } } }
@@ -443,7 +450,7 @@ fn test_parse_else_block_with_nested_if_chain_balanced() {
 #[test]
 fn test_parse_else_if_block_chain_five_branches() {
     let source = r#"
-        fn classify(c: i32, d: i32) -> i32 {
+        transform classify(c: i32, d: i32) -> i32 {
             if c == 119 {
                 if d == 104 { if d == 105 { if d == 108 { if d == 101 { return 14; } } } }
             }
@@ -484,7 +491,7 @@ fn test_parse_else_if_block_chain_five_branches() {
 #[test]
 fn test_parse_else_block_unbalanced_braces_does_not_panic() {
     // Unbalanced: 5 opens, 4 closes (missing one closing brace).
-    let source = "fn f(c: i32, d: i32) -> i32 {\n    if c == 99 {\n        if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }\n        else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } }\n    }\n    return 0;\n}\nfn main() -> i32 { return 0; }\n";
+    let source = "transform f(c: i32, d: i32) -> i32 {\n    if c == 99 {\n        if d == 111 { if d == 110 { if d == 115 { if d == 116 { return 25; } } } }\n        else { if d == 97 { if d == 116 { if d == 99 { if d == 104 { return 34; } } } }\n    }\n    return 0;\n}\ntransform main() -> i32 { return 0; }\n";
     assert_no_panic(source);
 }
 
@@ -519,7 +526,7 @@ use vuma_parser::ast::BdDirectiveKind;
 /// that broke the bootstrap at `womb/lang/ir_builder.vuma:593`.
 #[test]
 fn test_repd_as_identifier_in_let() {
-    let source = "fn main() { repd: i32 = 5; return repd; }";
+    let source = "transform main() { repd: i32 = 5; return repd; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -557,7 +564,7 @@ fn test_repd_as_identifier_in_let() {
 /// `bd` used as an identifier in a type-ascription let-statement.
 #[test]
 fn test_bd_as_identifier_in_let() {
-    let source = "fn main() { bd: i32 = 5; return bd; }";
+    let source = "transform main() { bd: i32 = 5; return bd; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -583,7 +590,7 @@ fn test_bd_as_identifier_in_let() {
 /// `capd` used as an identifier in a type-ascription let-statement.
 #[test]
 fn test_capd_as_identifier_in_let() {
-    let source = "fn main() { capd: i32 = 5; return capd; }";
+    let source = "transform main() { capd: i32 = 5; return capd; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -609,7 +616,7 @@ fn test_capd_as_identifier_in_let() {
 /// `reld` used as an identifier in a type-ascription let-statement.
 #[test]
 fn test_reld_as_identifier_in_let() {
-    let source = "fn main() { reld: i32 = 5; return reld; }";
+    let source = "transform main() { reld: i32 = 5; return reld; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -715,7 +722,7 @@ fn test_repd_as_bd_directive_still_works() {
 /// "expected '('" error in `parse_program`; now it should parse cleanly.
 #[test]
 fn test_bd_keyword_as_identifier_in_assign_and_expr() {
-    let source = "fn main() { repd = 11; repd = repd + 1; return repd; }";
+    let source = "transform main() { repd = 11; repd = repd + 1; return repd; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -749,7 +756,7 @@ fn test_bd_keyword_as_identifier_in_assign_and_expr() {
 /// `repd + 1;` parses as an expression statement (next token `+`).
 #[test]
 fn test_wave48_repd_as_expression_statement() {
-    let source = "fn f() { repd + 1; }";
+    let source = "transform f() { repd + 1; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -762,7 +769,7 @@ fn test_wave48_repd_as_expression_statement() {
 /// `capd` used as the LHS of a compound assignment (`capd += 1;`).
 #[test]
 fn test_wave48_capd_as_compound_assignment() {
-    let source = "fn f() { capd += 1; }";
+    let source = "transform f() { capd += 1; }";
     let mut parser = Parser::new(source);
     let result = parser.parse_program();
     assert!(
@@ -778,7 +785,7 @@ fn test_wave48_capd_as_compound_assignment() {
 #[test]
 fn test_wave48_reld_as_variable_mixed_with_bd_directive() {
     let source = r#"
-        fn f() {
+        transform f() {
             reld: u32 = 5;
             bd(Secure);
             reld = reld + 1;

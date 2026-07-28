@@ -52,7 +52,7 @@
 //       with AESE + AESMC instructions (ld1 + aese + aesmc + st1).
 //
 // ── VUMA Key Concepts ──────────────────────────────────────────────────────
-//   - `extern "C" { fn ... }` block declares external ABI functions
+//   - `extern "C" { transform ... }` block declares external ABI functions
 //   - `Address` type for raw pointer-typed arguments (no `*T` / `&x`)
 //   - `state_param as Address` cast: convert a State<T> parameter to its
 //     raw arena address (same pattern as womb/kernel/mm/pmm.vuma:306
@@ -125,12 +125,12 @@ extern "C" {
     // "movdqu xmm0, [rsi] ; movdqu xmm1, [rdi] ; pxor xmm0, xmm1 ;
     //  aesenc xmm0, xmm1 ; ... ; movdqu [rdx], xmm0 ; ret" (10 rounds
     //  of AESENC + 1 round of AESENCLAST for AES-128).
-    fn aesni_encrypt_block(key: Address, input: Address, output: Address);
+    transform aesni_encrypt_block(key: Address, input: Address, output: Address);
 
     // x86_64: check if AES-NI is available via CPUID.01H:ECX.AESNI[bit 25].
     // Returns 1 if available, 0 if not. The K11 stub will be
     // "mov eax, 1 ; cpuid ; bt ecx, 25 ; setc al ; movzx eax, al ; ret".
-    fn aesni_available() -> u8;
+    transform aesni_available() -> u8;
 
     // aarch64 ARMv8 Crypto: encrypt one 16-byte block using the AESE +
     // AESMC instructions (plus the AES key schedule).
@@ -141,14 +141,14 @@ extern "C" {
     // "ld1 {v0.16b}, [x1] ; ld1 {v1.16b}, [x0] ; aese v0.16b, v1.16b ;
     //  aesmc v0.16b, v0.16b ; ... ; st1 {v0.16b}, [x2] ; ret" (10 rounds
     //  of AESE+AESMC + 1 final AESE for AES-128).
-    fn aes_arm_encrypt_block(key: Address, input: Address, output: Address);
+    transform aes_arm_encrypt_block(key: Address, input: Address, output: Address);
 
     // aarch64: check if ARMv8 crypto extensions are available via
     // ID_AA64ISAR0_EL1.AES. Returns 1 if available, 0 if not. The K11
     // stub will be "mrs x0, ID_AA64ISAR0_EL1 ; ubfx x0, x0, #4, #4 ;
     //  cmp x0, #2 ; cset x0, ge ; ret" (the AES field is bits [7:4],
     //  value 0b0010+ means AES is implemented).
-    fn aes_arm_available() -> u8;
+    transform aes_arm_available() -> u8;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -187,7 +187,7 @@ layout HwAesBlock = {
 // K11 will add arch dispatch (compile-time #ifdef or runtime CPUID) to
 // pick the right aesni_available vs aes_arm_available call — for K10e's
 // hosted-mode test, the dispatch is hardwired to aesni_available.
-fn hw_aes_available() -> u8 {
+transform hw_aes_available() -> u8 {
     // In hosted mode: aesni_available returns 0 (stub).
     // On real x86_64 with AES-NI: returns 1.
     return aesni_available();
@@ -211,7 +211,7 @@ fn hw_aes_available() -> u8 {
 // XORs each input byte with the corresponding key byte — identical to
 // K10b's aes_encrypt_block stub. This preserves cross-stage behavioral
 // parity (see file header "Why 99 XOR 42 == 73?").
-fn hw_aes_encrypt(key: State<HwAesKey>, input: State<HwAesBlock>, output: State<HwAesBlock>) {
+transform hw_aes_encrypt(key: State<HwAesKey>, input: State<HwAesBlock>, output: State<HwAesBlock>) {
     if hw_aes_available() == 1 {
         // Use hardware acceleration.
         // Cast each State<T> parameter to its raw arena Address for the
@@ -250,7 +250,7 @@ fn hw_aes_encrypt(key: State<HwAesKey>, input: State<HwAesBlock>, output: State<
 // key[0]=42 + in[0]=99, NOT 73 — K11 will update this self-test to
 // dispatch on the availability check rather than hard-wiring the
 // expected fallback value).
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Availability check ──
     // In hosted mode: hw_aes_available() returns 0 (aesni_available is
     // the __ffi_fallback_stub).

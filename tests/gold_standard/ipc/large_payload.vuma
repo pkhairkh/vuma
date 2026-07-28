@@ -9,7 +9,7 @@
 // A single CRC mismatch would cause a recv to return -6, breaking the sum.
 //
 // Expected exit code: 45
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

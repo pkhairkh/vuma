@@ -6,7 +6,7 @@
 // Distinct from s10_crypto_xor_chain_4 (4-way XOR, no shift) and
 // s9_crypto_shl_mask_byte (shift-then-mask, no XOR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 85;          // 0x55
     b: u64 = 170;         // 0xAA
     sh: u64 = 1;

@@ -5,12 +5,12 @@
 // that the codegen can return a function-local constant even when
 // the function takes a parameter that's unused.
 
-fn get_const(unused: u32) -> u32 {
+transform get_const(unused: u32) -> u32 {
     c: u32 = 77;
     return c;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = get_const(0);
     return v;
 }

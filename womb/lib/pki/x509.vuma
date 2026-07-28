@@ -190,14 +190,14 @@ const X509_F_CERT_RAW: u32 = 96;            // Address (u64 LE), 8 bytes
 // Little-endian u32 / Address store/load helpers
 // ===========================================================================
 
-fn x509_store_u32(buf: Address, off: u32, val: u32) {
+transform x509_store_u32(buf: Address, off: u32, val: u32) {
     *(buf + off)     = val & 255;
     *(buf + off + 1) = (val >> 8) & 255;
     *(buf + off + 2) = (val >> 16) & 255;
     *(buf + off + 3) = (val >> 24) & 255;
 }
 
-fn x509_load_u32(buf: Address, off: u32) -> u32 {
+transform x509_load_u32(buf: Address, off: u32) -> u32 {
     b0: u32 = *(buf + off);
     b1: u32 = *(buf + off + 1);
     b2: u32 = *(buf + off + 2);
@@ -208,7 +208,7 @@ fn x509_load_u32(buf: Address, off: u32) -> u32 {
 // Store an Address as a 8-byte u64 LE value. Works on both 32-bit and
 // 64-bit VUMA backends (high bytes are zero on 32-bit targets). Precedent:
 // auth.vuma's auth_store_addr.
-fn x509_store_addr(buf: Address, off: u32, val: Address) {
+transform x509_store_addr(buf: Address, off: u32, val: Address) {
     v: u64 = val as u64;
     *(buf + off)     = v & 255;
     *(buf + off + 1) = (v >> 8) & 255;
@@ -220,7 +220,7 @@ fn x509_store_addr(buf: Address, off: u32, val: Address) {
     *(buf + off + 7) = (v >> 56) & 255;
 }
 
-fn x509_load_addr(buf: Address, off: u32) -> Address {
+transform x509_load_addr(buf: Address, off: u32) -> Address {
     b0: u64 = *(buf + off) as u64;
     b1: u64 = *(buf + off + 1) as u64;
     b2: u64 = *(buf + off + 2) as u64;
@@ -244,7 +244,7 @@ fn x509_load_addr(buf: Address, off: u32) -> Address {
 // Valid for dates >= 1970-01-01 (returns 0 for the epoch). For dates before
 // the epoch the u32 arithmetic underflows (wraps to a large value), which
 // causes x509_check_validity to reject the cert — the safe behavior.
-fn x509_days_from_civil(y: u32, m: u32, d: u32) -> u32 {
+transform x509_days_from_civil(y: u32, m: u32, d: u32) -> u32 {
     y_adj: u32 = y;
     if m <= 2 { y_adj = y - 1; }
     era: u32 = y_adj / 400;
@@ -257,14 +257,14 @@ fn x509_days_from_civil(y: u32, m: u32, d: u32) -> u32 {
 }
 
 // Convert a 2-digit ASCII decimal to its numeric value.
-fn x509_dec2(s: Address) -> u32 {
+transform x509_dec2(s: Address) -> u32 {
     hi: u32 = *(s + 0) - 48;
     lo: u32 = *(s + 1) - 48;
     return hi * 10 + lo;
 }
 
 // Convert a 4-digit ASCII decimal to its numeric value.
-fn x509_dec4(s: Address) -> u32 {
+transform x509_dec4(s: Address) -> u32 {
     d0: u32 = *(s + 0) - 48;
     d1: u32 = *(s + 1) - 48;
     d2: u32 = *(s + 2) - 48;
@@ -276,7 +276,7 @@ fn x509_dec4(s: Address) -> u32 {
 // (YYYYMMDDHHMMSSZ, 15 bytes) string into a Unix epoch timestamp.
 // Writes u32 LE to `out`. Returns 1 on success, 0 on error.
 // RFC 5280 §4.1.2.5.1: UTCTime years YY < 50 → 20YY, YY >= 50 → 19YY.
-fn x509_parse_time(time_str: Address, time_len: u32, out: Address) -> u32 {
+transform x509_parse_time(time_str: Address, time_len: u32, out: Address) -> u32 {
     status: u32 = 1;
     year: u32 = 0;
     month: u32 = 0;
@@ -343,7 +343,7 @@ fn x509_parse_time(time_str: Address, time_len: u32, out: Address) -> u32 {
 // Returns 1 on success, 0 on parse error.
 // ===========================================================================
 
-fn x509_parse_certificate(der: Address, der_len: u32, cert_fields: Address) -> u32 {
+transform x509_parse_certificate(der: Address, der_len: u32, cert_fields: Address) -> u32 {
     status: u32 = 1;
     pos: u32 = 0;
     tbs_start: u32 = 0;
@@ -691,7 +691,7 @@ fn x509_parse_certificate(der: Address, der_len: u32, cert_fields: Address) -> u
 }
 
 // Legacy alias used by pki.vuma — identical to x509_parse_certificate.
-fn x509_parse(cert_raw: Address, cert_len: u32, fields: Address) -> u32 {
+transform x509_parse(cert_raw: Address, cert_len: u32, fields: Address) -> u32 {
     return x509_parse_certificate(cert_raw, cert_len, fields);
 }
 
@@ -712,7 +712,7 @@ fn x509_parse(cert_raw: Address, cert_len: u32, fields: Address) -> u32 {
 // the OID bytes in the output after building).
 // ===========================================================================
 
-fn x509_strlen(s: Address) -> u32 {
+transform x509_strlen(s: Address) -> u32 {
     n: u32 = 0;
     done: u32 = 0;
     while done == 0 {
@@ -722,7 +722,7 @@ fn x509_strlen(s: Address) -> u32 {
     return n;
 }
 
-fn x509_build_tbs(subject: Address, issuer: Address, pubkey: Address,
+transform x509_build_tbs(subject: Address, issuer: Address, pubkey: Address,
                   serial: Address, validity_start: Address, validity_end: Address,
                   out: Address) -> u32 {
     status: u32 = 1;
@@ -866,7 +866,7 @@ fn x509_build_tbs(subject: Address, issuer: Address, pubkey: Address,
 // Returns 1 on success, 0 on error.
 // ===========================================================================
 
-fn x509_parse_name(der: Address, len: u32, name_out: Address) -> u32 {
+transform x509_parse_name(der: Address, len: u32, name_out: Address) -> u32 {
     status: u32 = 1;
     pos: u32 = 0;
     end: u32 = 0;
@@ -987,7 +987,7 @@ fn x509_parse_name(der: Address, len: u32, name_out: Address) -> u32 {
 // Returns 1 if not_before <= current_time <= not_after, 0 otherwise.
 // ===========================================================================
 
-fn x509_check_validity(not_before: Address, not_after: Address, current_time: u32) -> u32 {
+transform x509_check_validity(not_before: Address, not_after: Address, current_time: u32) -> u32 {
     nb: u32 = x509_load_u32(not_before, 0);
     na: u32 = x509_load_u32(not_after, 0);
     valid: u32 = 1;
@@ -1027,7 +1027,7 @@ fn x509_check_validity(not_before: Address, not_after: Address, current_time: u3
 
 // Match an OID at (der + off, len bytes) against the well-known extension OIDs.
 // Returns the X509_EXT_* constant, or X509_EXT_UNKNOWN.
-fn x509_classify_ext_oid(der: Address, off: u32, oid_len: u32) -> u32 {
+transform x509_classify_ext_oid(der: Address, off: u32, oid_len: u32) -> u32 {
     result: u32 = X509_EXT_UNKNOWN;
     // 2.5.29.14 → 55 1D 0E  (subjectKeyIdentifier)
     if oid_len == 3 {
@@ -1050,7 +1050,7 @@ fn x509_classify_ext_oid(der: Address, off: u32, oid_len: u32) -> u32 {
     return result;
 }
 
-fn x509_parse_extensions(der: Address, len: u32, exts: Address) -> u32 {
+transform x509_parse_extensions(der: Address, len: u32, exts: Address) -> u32 {
     status: u32 = 1;
     pos: u32 = 0;
     end: u32 = 0;
@@ -1174,7 +1174,7 @@ fn x509_parse_extensions(der: Address, len: u32, exts: Address) -> u32 {
 // Returns 1 if issuer and subject Name DER bytes are identical, 0 otherwise.
 // ===========================================================================
 
-fn x509_is_self_signed(cert: Address) -> u32 {
+transform x509_is_self_signed(cert: Address) -> u32 {
     cert_raw: Address = x509_load_addr(cert, X509_F_CERT_RAW);
     iss_off: u32 = x509_load_u32(cert, X509_F_ISSUER_OFF);
     iss_len: u32 = x509_load_u32(cert, X509_F_ISSUER_LEN);
@@ -1210,7 +1210,7 @@ fn x509_is_self_signed(cert: Address) -> u32 {
 
 // Compare an OID at (der + off, oid_len) against a reference byte buffer.
 // Returns 1 if equal, 0 otherwise.
-fn x509_oid_eq(der: Address, off: u32, oid_len: u32, ref: Address, ref_len: u32) -> u32 {
+transform x509_oid_eq(der: Address, off: u32, oid_len: u32, ref: Address, ref_len: u32) -> u32 {
     eq: u32 = 1;
     if oid_len != ref_len { eq = 0; }
     i: u32 = 0;
@@ -1221,7 +1221,7 @@ fn x509_oid_eq(der: Address, off: u32, oid_len: u32, ref: Address, ref_len: u32)
     return eq;
 }
 
-fn x509_verify_signature(cert: Address, issuer_pubkey: Address) -> u32 {
+transform x509_verify_signature(cert: Address, issuer_pubkey: Address) -> u32 {
     status: u32 = 1;
     result: u32 = 0;
     cert_raw: Address = x509_load_addr(cert, X509_F_CERT_RAW);
@@ -1334,7 +1334,7 @@ fn x509_verify_signature(cert: Address, issuer_pubkey: Address) -> u32 {
 // Returns 32 (the SHA-256 digest size) on success, 0 on error.
 // ===========================================================================
 
-fn x509_fingerprint_sha256(cert: Address, der_len: u32, out: Address) -> u32 {
+transform x509_fingerprint_sha256(cert: Address, der_len: u32, out: Address) -> u32 {
     status: u32 = 1;
     if der_len == 0 { status = 0; }
     if status == 1 {
@@ -1352,7 +1352,7 @@ fn x509_fingerprint_sha256(cert: Address, der_len: u32, out: Address) -> u32 {
 // issuer's RSA public key (e, n as big-endian byte arrays, key_size in bytes).
 // Returns 1 on success, 0 on failure. This is the historical entry point
 // used before x509_verify_signature gained multi-algorithm support.
-fn x509_verify_rsa_sha256(cert_raw: Address, cert_len: u32, fields: Address,
+transform x509_verify_rsa_sha256(cert_raw: Address, cert_len: u32, fields: Address,
                           issuer_pubkey_e: Address, issuer_pubkey_n: Address,
                           key_size: u32) -> u32 {
     status: u32 = 1;
@@ -1396,7 +1396,7 @@ fn x509_verify_rsa_sha256(cert_raw: Address, cert_len: u32, fields: Address,
 // Extract an RSA public key (n, e) from the SubjectPublicKeyInfo of a
 // parsed certificate. Writes n bytes to n_out, e bytes to e_out. Returns
 // the key size in bytes (n_len), or 0 on error.
-fn x509_extract_rsa_pubkey(cert_raw: Address, fields: Address,
+transform x509_extract_rsa_pubkey(cert_raw: Address, fields: Address,
                            n_out: Address, e_out: Address) -> u32 {
     status: u32 = 1;
     result: u32 = 0;

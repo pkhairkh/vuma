@@ -117,14 +117,14 @@ const DIV_ERROR: u32 = 0xFFFFFFFE;
 // Byte load/store helpers (little-endian u32)
 // ===========================================================================
 
-fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+transform store_u32_le_at(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+transform load_u32_le_at(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -137,28 +137,28 @@ fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
 // All arithmetic is mod FALCON_Q in the ring Z[x]/(x^N + 1).
 // ===========================================================================
 
-fn poly_zero(a: Address) {
+transform poly_zero(a: Address) {
     i: u32 = 0;
     while i < FALCON_N { store_u32_le_at(a, i * 4, 0); i = i + 1; }
 }
 
-fn poly_zero_sized(a: Address, m: u32) {
+transform poly_zero_sized(a: Address, m: u32) {
     i: u32 = 0;
     while i < m { store_u32_le_at(a, i * 4, 0); i = i + 1; }
 }
 
-fn poly_copy(dst: Address, src: Address) {
+transform poly_copy(dst: Address, src: Address) {
     i: u32 = 0;
     while i < FALCON_POLY_BYTES { *(dst + i) = *(src + i); i = i + 1; }
 }
 
-fn poly_copy_sized(dst: Address, src: Address, m: u32) {
+transform poly_copy_sized(dst: Address, src: Address, m: u32) {
     i: u32 = 0;
     while i < m * 4 { *(dst + i) = *(src + i); i = i + 1; }
 }
 
 // r = (a + b) mod q
-fn poly_add(r: Address, a: Address, b: Address) {
+transform poly_add(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < FALCON_N {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -169,7 +169,7 @@ fn poly_add(r: Address, a: Address, b: Address) {
 }
 
 // r = (a - b) mod q
-fn poly_sub(r: Address, a: Address, b: Address) {
+transform poly_sub(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < FALCON_N {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -183,7 +183,7 @@ fn poly_sub(r: Address, a: Address, b: Address) {
 // Schoolbook polynomial multiplication: r = a * b mod (x^N + 1, q)
 // Negacyclic reduction: x^N = -1, so coefficient index i+j >= N wraps
 // to i+j-N with sign negated.
-fn poly_mul(r: Address, a: Address, b: Address) {
+transform poly_mul(r: Address, a: Address, b: Address) {
     temp = allocate(FALCON_POLY_BYTES);
     poly_zero(temp);
     i: u32 = 0;
@@ -220,7 +220,7 @@ fn poly_mul(r: Address, a: Address, b: Address) {
 // Returns 0 if a is 0 (not invertible).
 // ===========================================================================
 
-fn mod_inv(a: u32) -> u32 {
+transform mod_inv(a: u32) -> u32 {
     a_red: u32 = a % FALCON_Q;
     if a_red == 0 { return 0; }
     result: u32 = 1;
@@ -244,7 +244,7 @@ fn mod_inv(a: u32) -> u32 {
 // Returns DEG_ZERO (0xFFFFFFFF) if the polynomial is all zeros.
 // ===========================================================================
 
-fn poly_degree(p: Address, max_deg: u32) -> u32 {
+transform poly_degree(p: Address, max_deg: u32) -> u32 {
     i: u32 = max_deg + 1;
     while i > 0 {
         i = i - 1;
@@ -266,7 +266,7 @@ fn poly_degree(p: Address, max_deg: u32) -> u32 {
 //     r   -= q[i] * b * x^i
 // ===========================================================================
 
-fn poly_divmod(q_out: Address, r_out: Address, a: Address, deg_a: u32,
+transform poly_divmod(q_out: Address, r_out: Address, a: Address, deg_a: u32,
                b: Address, deg_b: u32) -> u32 {
     // Case deg_a < deg_b: quotient is 0, remainder is a.
     if deg_a < deg_b {
@@ -352,7 +352,7 @@ fn poly_divmod(q_out: Address, r_out: Address, a: Address, deg_a: u32,
 // Returns 1 on success, 0 if f is not invertible.
 // ===========================================================================
 
-fn poly_mod_inv(out: Address, f: Address) -> u32 {
+transform poly_mod_inv(out: Address, f: Address) -> u32 {
     // Handle trivial case: f is a constant.
     deg_f: u32 = poly_degree(f, FALCON_N - 1);
     if deg_f == DEG_ZERO { return 0; }
@@ -452,7 +452,7 @@ fn poly_mod_inv(out: Address, f: Address) -> u32 {
 //   Used by falcon_bdd_sign to obtain g^{-1} (and hence h^{-1} = f*g^{-1}).
 // ===========================================================================
 
-fn falcon_poly_inv_mod_q(a: Address, q: u32, out: Address) -> u32 {
+transform falcon_poly_inv_mod_q(a: Address, q: u32, out: Address) -> u32 {
     if q != FALCON_Q { return 0; }
     return poly_mod_inv(out, a);
 }
@@ -472,7 +472,7 @@ fn falcon_poly_inv_mod_q(a: Address, q: u32, out: Address) -> u32 {
 // ===========================================================================
 
 // CBD-sample a polynomial from a byte buffer (1 byte per coefficient).
-fn poly_sample_cbd_bytes(buf: Address, out: Address) {
+transform poly_sample_cbd_bytes(buf: Address, out: Address) {
     i: u32 = 0;
     while i < FALCON_N {
         b: u32 = *(buf + i);
@@ -520,7 +520,7 @@ fn poly_sample_cbd_bytes(buf: Address, out: Address) {
 //   half-Gaussian with σ = 1.278461 (Falcon-512 spec).  Values for
 //   k ≥ 4 saturate at 2^32 − 1 (cumulative probability ≈ 1).  Computed
 //   offline; see the comment block above for the formulas.
-fn falcon_gauss_cdt_value(k: u32) -> u32 {
+transform falcon_gauss_cdt_value(k: u32) -> u32 {
     if k == 0 { return 1340761009; }   // 0.3122 · 2^32  — P(|X| ≤ 0)
     if k == 1 { return 3316088903; }   // 0.7721 · 2^32  — P(|X| ≤ 1)
     if k == 2 { return 4104530856; }   // 0.9556 · 2^32  — P(|X| ≤ 2)
@@ -535,7 +535,7 @@ fn falcon_gauss_cdt_value(k: u32) -> u32 {
 //   consumes them.  For polynomial-level sampling use
 //   poly_sample_gaussian below, which amortises one SHAKE-256 expansion
 //   across all N coefficients.
-fn falcon_gaussian_sample(prng_state: Address) -> i32 {
+transform falcon_gaussian_sample(prng_state: Address) -> i32 {
     u_bytes = allocate(8);
     shake256(prng_state, 64, u_bytes, 8);
     u: u32 = load_u32_le_at(u_bytes, 0);
@@ -574,7 +574,7 @@ fn falcon_gaussian_sample(prng_state: Address) -> i32 {
 //   A (seed, counter) pair is taken so the signer can derive deterministic
 //   per-message noise; without it every signature would share the same
 //   Gaussian perturbation.
-fn poly_sample_gaussian(seed: Address, counter: u32, out: Address) {
+transform poly_sample_gaussian(seed: Address, counter: u32, out: Address) {
     seed_ext = allocate(33);
     i: u32 = 0;
     while i < 32 { *(seed_ext + i) = *(seed + i); i = i + 1; }
@@ -644,7 +644,7 @@ fn poly_sample_gaussian(seed: Address, counter: u32, out: Address) {
 //   short enough for the ||s||_2 verification bound to be meaningful.
 // ===========================================================================
 
-fn hash_to_poly(msg: Address, msg_len: u32, out: Address) {
+transform hash_to_poly(msg: Address, msg_len: u32, out: Address) {
     cbd_bytes = allocate(FALCON_N);
     shake256(msg, msg_len, cbd_bytes, FALCON_N);
     poly_sample_cbd_bytes(cbd_bytes, out);
@@ -657,7 +657,7 @@ fn hash_to_poly(msg: Address, msg_len: u32, out: Address) {
 //   Returns sqrt(sum of squared centered coefficients) as f64.
 // ===========================================================================
 
-fn poly_norm(a: Address) -> f64 {
+transform poly_norm(a: Address) -> f64 {
     sum: f64 = 0.0;
     i: u32 = 0;
     while i < FALCON_N {
@@ -681,7 +681,7 @@ fn poly_norm(a: Address) -> f64 {
 //   and keeps the bound comparison in pure integer arithmetic.
 // ===========================================================================
 
-fn falcon_compute_norm(s: Address) -> u32 {
+transform falcon_compute_norm(s: Address) -> u32 {
     sum: u64 = 0;
     i: u32 = 0;
     while i < FALCON_N {
@@ -705,7 +705,7 @@ fn falcon_compute_norm(s: Address) -> u32 {
 // Returns 1 if within bound, 0 otherwise.
 // ===========================================================================
 
-fn poly_check_centered_inf(a: Address, b: Address, bound: u32) -> u32 {
+transform poly_check_centered_inf(a: Address, b: Address, bound: u32) -> u32 {
     i: u32 = 0;
     while i < FALCON_N {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -732,7 +732,7 @@ fn poly_check_centered_inf(a: Address, b: Address, bound: u32) -> u32 {
 //     Returns 1 on success, 0 if f is not invertible.
 // ===========================================================================
 
-fn falcon_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
+transform falcon_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
     f = allocate(FALCON_POLY_BYTES);
     g = allocate(FALCON_POLY_BYTES);
     f_inv = allocate(FALCON_POLY_BYTES);
@@ -792,7 +792,7 @@ fn falcon_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
 //     Returns FALCON_SIG_BYTES on success, 0 if g is not invertible.
 // ===========================================================================
 
-fn falcon_bdd_sign(sk: Address, msg: Address, msg_len: u32,
+transform falcon_bdd_sign(sk: Address, msg: Address, msg_len: u32,
                    sig: Address) -> u32 {
     f = sk;                              // first N coefs of sk (not owned)
     g = sk + FALCON_POLY_BYTES;          // next  N coefs of sk (not owned)
@@ -857,7 +857,7 @@ fn falcon_bdd_sign(sk: Address, msg: Address, msg_len: u32,
 //     Returns FALCON_SIG_BYTES on success, 0 on failure.
 // ===========================================================================
 
-fn falcon_sign(sk: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
+transform falcon_sign(sk: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
     return falcon_bdd_sign(sk, msg, msg_len, sig);
 }
 
@@ -873,7 +873,7 @@ fn falcon_sign(sk: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
 //     Returns 1 if valid, 0 if invalid.
 // ===========================================================================
 
-fn falcon_verify(pk: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
+transform falcon_verify(pk: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
     h = pk;   // h is the first N coefficients of pk (not owned)
     s = sig;  // s is the signature (not owned)
 

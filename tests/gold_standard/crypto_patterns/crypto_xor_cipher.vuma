@@ -7,7 +7,7 @@
 // RHS bitwise ops are dropped by the current codegen, so both operands
 // are first loaded into named variables per the documented workaround).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 0xFF;
     b: u64 = 0xAA;
     c: u64 = a ^ b;          // 0xFF ^ 0xAA = 0x55 = 85

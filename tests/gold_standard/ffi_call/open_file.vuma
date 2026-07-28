@@ -11,10 +11,10 @@
 layout Path = { bytes: [u8; 256], len: u64 }
 
 extern "C" {
-    fn open(path: Address, flags: i32) -> i32;
+    transform open(path: Address, flags: i32) -> i32;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let path = state_new(Path);
     path.len = 9;
     path.bytes[0] = 47; // '/'

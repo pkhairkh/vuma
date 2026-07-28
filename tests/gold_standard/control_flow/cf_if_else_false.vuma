@@ -1,7 +1,7 @@
 // cf_if_else_false — if/else with false condition takes else-branch
 // Expected exit code: 2
 
-fn main() -> i32 {
+transform main() -> i32 {
     if false {
         return 1;
     } else {

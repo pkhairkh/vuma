@@ -12,10 +12,10 @@ layout Ev = { events: u32, data: u64 }
 
 extern "C" {
     #[may_retain]
-    fn epoll_ctl(epfd: i32, op: i32, fd: i32, ev: Address) -> i32;
+    transform epoll_ctl(epfd: i32, op: i32, fd: i32, ev: Address) -> i32;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let ev = state_new(Ev);
     ev.events = 1;
     ev.data = 42;

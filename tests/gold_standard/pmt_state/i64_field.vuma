@@ -16,7 +16,7 @@
 
 layout Big = { v: i64 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let b = state_new(Big);
     b.v = 1000000;
     return b.v;

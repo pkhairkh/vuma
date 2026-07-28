@@ -27,7 +27,7 @@ const KC_MASK32: u32 = 4294967295;
 // Byte-level big-endian helpers + memory primitives
 // ===========================================================================
 
-fn kc_load_u32_be(ptr: Address, off: u32) -> u32 {
+transform kc_load_u32_be(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -35,14 +35,14 @@ fn kc_load_u32_be(ptr: Address, off: u32) -> u32 {
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
 
-fn kc_store_u32_be(ptr: Address, off: u32, val: u32) {
+transform kc_store_u32_be(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = (val >> 24) & 255;
     *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255;
     *(ptr + off + 3) = val & 255;
 }
 
-fn kc_memcpy(dst: Address, src: Address, n: u32) {
+transform kc_memcpy(dst: Address, src: Address, n: u32) {
     i: u32 = 0;
     while i < n {
         *(dst + i) = *(src + i);
@@ -50,7 +50,7 @@ fn kc_memcpy(dst: Address, src: Address, n: u32) {
     }
 }
 
-fn kc_memzero(dst: Address, n: u32) {
+transform kc_memzero(dst: Address, n: u32) {
     i: u32 = 0;
     while i < n {
         *(dst + i) = 0;
@@ -64,12 +64,12 @@ fn kc_memzero(dst: Address, n: u32) {
 //   hash_func == 1 -> HMAC-SHA-512 (hLen = 64)
 // ===========================================================================
 
-fn kc_hlen(hash_func: u32) -> u32 {
+transform kc_hlen(hash_func: u32) -> u32 {
     if hash_func == 0 { return 32; }
     return 64;
 }
 
-fn kc_prf(hash_func: u32, key: Address, key_len: u32,
+transform kc_prf(hash_func: u32, key: Address, key_len: u32,
           msg: Address, msg_len: u32, out: Address) {
     if hash_func == 0 {
         hmac_sha256(key, key_len, msg, msg_len, out);
@@ -84,7 +84,7 @@ fn kc_prf(hash_func: u32, key: Address, key_len: u32,
 //    Output = K(1) || K(2) || ... truncated to out_len.
 // ===========================================================================
 
-fn kdf_counter(kin: Address, kin_len: u32,
+transform kdf_counter(kin: Address, kin_len: u32,
                label: Address, label_len: u32,
                context: Address, context_len: u32,
                out: Address, out_len: u32, hash_func: u32) {
@@ -132,7 +132,7 @@ fn kdf_counter(kin: Address, kin_len: u32,
 //    K(i) = PRF(Kin, K(i-1) || [i]_2 || Label || 0x00 || Context || [L]_2).
 // ===========================================================================
 
-fn kdf_feedback(kin: Address, kin_len: u32,
+transform kdf_feedback(kin: Address, kin_len: u32,
                 label: Address, label_len: u32,
                 context: Address, context_len: u32,
                 out: Address, out_len: u32) {
@@ -182,7 +182,7 @@ fn kdf_feedback(kin: Address, kin_len: u32,
 //    K(i) = PRF(Kin, A(i-1) || [i]_2 || Label || 0x00 || Context || [L]_2)
 // ===========================================================================
 
-fn kdf_pipeline(kin: Address, kin_len: u32,
+transform kdf_pipeline(kin: Address, kin_len: u32,
                 label: Address, label_len: u32,
                 context: Address, context_len: u32,
                 out: Address, out_len: u32) {
@@ -248,7 +248,7 @@ fn kdf_pipeline(kin: Address, kin_len: u32,
 
 // Shift a 16-byte big-endian value left by 1 bit. Returns the bit shifted
 // out of the most-significant end (byte 0, bit 7).
-fn cmac_shift_left(in_addr: Address, out_addr: Address) -> u32 {
+transform cmac_shift_left(in_addr: Address, out_addr: Address) -> u32 {
     carry: u32 = 0;
     j: u32 = 0;
     while j < 16 {
@@ -262,7 +262,7 @@ fn cmac_shift_left(in_addr: Address, out_addr: Address) -> u32 {
     return carry;
 }
 
-fn aes_cmac_kdf(key: Address, msg: Address, msg_len: u32, out: Address) {
+transform aes_cmac_kdf(key: Address, msg: Address, msg_len: u32, out: Address) {
     // Subkey generation
     zero = allocate(16);
     kc_memzero(zero, 16);
@@ -365,25 +365,25 @@ const BF_S_OFFSET: u32 = 72;
 const BF_CTX_SIZE: u32 = 4168;
 const BF_ROUNDS: u32 = 16;
 
-fn bf_get_p(ctx: Address, i: u32) -> u32 {
+transform bf_get_p(ctx: Address, i: u32) -> u32 {
     return kc_load_u32_be(ctx, BF_P_OFFSET + i * 4);
 }
 
-fn bf_set_p(ctx: Address, i: u32, v: u32) {
+transform bf_set_p(ctx: Address, i: u32, v: u32) {
     kc_store_u32_be(ctx, BF_P_OFFSET + i * 4, v);
 }
 
-fn bf_get_s(ctx: Address, box_idx: u32, j: u32) -> u32 {
+transform bf_get_s(ctx: Address, box_idx: u32, j: u32) -> u32 {
     return kc_load_u32_be(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4);
 }
 
-fn bf_set_s(ctx: Address, box_idx: u32, j: u32, v: u32) {
+transform bf_set_s(ctx: Address, box_idx: u32, j: u32, v: u32) {
     kc_store_u32_be(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4, v);
 }
 
 // 32-bit LCG (Numerical Recipes constants). Seeded with 0x243F6A88, the
 // first standard Blowfish P-array word.
-fn bf_lcg_next(state_addr: Address) -> u32 {
+transform bf_lcg_next(state_addr: Address) -> u32 {
     s: u32 = kc_load_u32_be(state_addr, 0);
     s = (s * 1664525 + 1013904223) & KC_MASK32;
     kc_store_u32_be(state_addr, 0, s);
@@ -391,7 +391,7 @@ fn bf_lcg_next(state_addr: Address) -> u32 {
 }
 
 // Blowfish F function: F(x) = ((S0[a] + S1[b]) XOR S2[c]) + S3[d] mod 2^32
-fn bf_f(ctx: Address, x: u32) -> u32 {
+transform bf_f(ctx: Address, x: u32) -> u32 {
     a: u32 = (x >> 24) & 255;
     b: u32 = (x >> 16) & 255;
     c: u32 = (x >> 8) & 255;
@@ -408,7 +408,7 @@ fn bf_f(ctx: Address, x: u32) -> u32 {
 
 // Standard 16-round Blowfish encryption of a 64-bit block held as two
 // big-endian u32 words at *left and *right. In-place.
-fn blowfish_encrypt(ctx: Address, left: Address, right: Address) {
+transform blowfish_encrypt(ctx: Address, left: Address, right: Address) {
     L: u32 = kc_load_u32_be(left, 0);
     R: u32 = kc_load_u32_be(right, 0);
     tmp: u32 = 0;
@@ -429,7 +429,7 @@ fn blowfish_encrypt(ctx: Address, left: Address, right: Address) {
 // Eksblowfish state expansion with salt. Re-derives the P-array (9 pairs)
 // and all four S-boxes (4 x 128 pairs each) by repeatedly encrypting
 // (L, R) XORed with successive 32-bit salt words (cycled).
-fn blowfish_expand_state(ctx: Address, salt: Address) {
+transform blowfish_expand_state(ctx: Address, salt: Address) {
     L: u32 = 0;
     R: u32 = 0;
     salt_idx: u32 = 0;
@@ -486,7 +486,7 @@ fn blowfish_expand_state(ctx: Address, salt: Address) {
 //   1. Deterministic LCG fill of P and S (seed = 0x243F6A88).
 //   2. XOR the key bytes into the P-array (cycling, byte-level).
 //   3. One salted state expansion (the first of the 2^cost Eksblowfish rounds).
-fn blowfish_init(ctx: Address, key: Address, key_len: u32, salt: Address) {
+transform blowfish_init(ctx: Address, key: Address, key_len: u32, salt: Address) {
     state = allocate(4);
     kc_store_u32_be(state, 0, 608135816);   // 0x243F6A88
     i: u32 = 0;
@@ -520,7 +520,7 @@ fn blowfish_init(ctx: Address, key: Address, key_len: u32, salt: Address) {
 
 // Eksblowfish key schedule: blowfish_init (1 salted expand) followed by
 // (2^cost - 1) more salted expands, for a total of 2^cost expansions.
-fn eks_blowfish_setup(cost: u32, salt: Address,
+transform eks_blowfish_setup(cost: u32, salt: Address,
                       password: Address, pass_len: u32, ctx: Address) {
     blowfish_init(ctx, password, pass_len, salt);
 
@@ -543,7 +543,7 @@ fn eks_blowfish_setup(cost: u32, salt: Address,
 //   salt:      16-byte (128-bit) salt
 //   cost:      exponent; setup runs 2^cost salted expansions
 //   hash_out:  24-byte output buffer
-fn bcrypt_hash(password: Address, pass_len: u32, salt: Address,
+transform bcrypt_hash(password: Address, pass_len: u32, salt: Address,
                cost: u32, hash_out: Address) -> u32 {
     ctx = allocate(BF_CTX_SIZE);
     eks_blowfish_setup(cost, salt, password, pass_len, ctx);

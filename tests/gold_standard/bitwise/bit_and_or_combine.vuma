@@ -7,7 +7,7 @@
 // drop bug. Distinct from s5_bit_and_or_chain (single AND then OR
 // with a constant) and s4_bit_or_then_and (OR then single AND).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;    // 0xFF
     b: u64 = 15;     // 0x0F
     c: u64 = 240;    // 0xF0

@@ -8,7 +8,7 @@
 // All shift amounts and the final byte mask are loaded into named
 // variables per the bitwise-immediate-RHS workaround.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 21;                   // 0b00010101
     one: u64 = 1;
     seven: u64 = 7;

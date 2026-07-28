@@ -7,7 +7,7 @@
 // drop bug. Distinct from s5_crypto_nibble_extract (sums nibbles,
 // not XORs) and s6_crypto_nibble_swap (swaps nibbles).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 171;       // 0xAB
     four: u64 = 4;
     mask: u64 = 15;     // 0x0F

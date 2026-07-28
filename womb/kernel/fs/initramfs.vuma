@@ -237,7 +237,7 @@ layout DentryTable = {
 // to zero).
 
 // Read the u64 `ino` field of Inode slot `idx`.
-fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
+transform inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -251,7 +251,7 @@ fn inode_get_ino(tbl: State<InodeTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `ino` field of Inode slot `idx`.
-fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
+transform inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -263,7 +263,7 @@ fn inode_set_ino(tbl: State<InodeTable>, idx: u32, val: u64) {
 }
 
 // Read the u32 `mode` field of Inode slot `idx`.
-fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
+transform inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -277,7 +277,7 @@ fn inode_get_mode(tbl: State<InodeTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `mode` field of Inode slot `idx`.
-fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
+transform inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -293,7 +293,7 @@ fn inode_set_mode(tbl: State<InodeTable>, idx: u32, val: u32) {
 // (modulo the smaller table). Safe to call on a fresh state_new(InodeTable)
 // (which is already zeroed), but explicit init makes the "fresh unpack"
 // semantics clear.
-fn inode_init(tbl: State<InodeTable>) {
+transform inode_init(tbl: State<InodeTable>) {
     let i = 0;
     while i < 64 {
         inode_set_ino(tbl, i, 0);
@@ -306,7 +306,7 @@ fn inode_init(tbl: State<InodeTable>) {
 // count, return the slot index. Returns 64 if the table is full. Byte-
 // identical to K5a's inode.vuma. Lowest-free-slot-wins policy matches
 // Linux's find_first_zero_bit.
-fn inode_alloc(tbl: State<InodeTable>) -> u32 {
+transform inode_alloc(tbl: State<InodeTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if inode_get_ino(tbl, i) == 0 {
@@ -329,31 +329,31 @@ fn inode_alloc(tbl: State<InodeTable>) -> u32 {
 // next/child/mounted to zero).
 
 // Read byte `off` (0..63) of the name field of Dentry slot `idx`.
-fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+transform dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
     let base = idx * 64;
     return tbl.names[base + off];
 }
 
 // Write byte `off` (0..63) of the name field of Dentry slot `idx`.
-fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+transform dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
     let base = idx * 64;
     tbl.names[base + off] = val;
 }
 
 // Read the u8 `used` flag of Dentry slot `idx` (1 = in use, 0 = free).
-fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of Dentry slot `idx`.
-fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
 // dentry_init: zero all 64 used flags (mark every slot FREE) and set
 // count = 0. Idempotent. Byte-identical to K5a's dentry.vuma (modulo the
 // smaller table).
-fn dentry_init(tbl: State<DentryTable>) {
+transform dentry_init(tbl: State<DentryTable>) {
     let i = 0;
     while i < 64 {
         dentry_set_used(tbl, i, 0);
@@ -365,7 +365,7 @@ fn dentry_init(tbl: State<DentryTable>) {
 // dentry_alloc: find the first FREE slot (used == 0), set used = 1, bump
 // count, return the slot index. Returns 64 if the table is full. Byte-
 // identical to K5a's dentry.vuma.
-fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
+transform dentry_alloc(tbl: State<DentryTable>) -> u32 {
     let i = 0;
     while i < 64 {
         if dentry_get_used(tbl, i) == 0 {
@@ -397,7 +397,7 @@ fn dentry_alloc(tbl: State<DentryTable>) -> u32 {
 // read for ASCII-range checks). The `let d: u32 = 0;` default before the
 // cascade means a non-hex byte leaves d = 0 (the byte contributes nothing to
 // the accumulator — same as if it were '0').
-fn parse_hex8(img: State<InitramfsImage>, offset: u32) -> u32 {
+transform parse_hex8(img: State<InitramfsImage>, offset: u32) -> u32 {
     let v: u32 = 0;
     let i = 0;
     while i < 8 {
@@ -449,7 +449,7 @@ fn parse_hex8(img: State<InitramfsImage>, offset: u32) -> u32 {
 // 8 bytes each; 8 = namesize field width). `check` (offset 102) is not
 // parsed — newc format defines it as 0 (CRC is the "newcrc" format variant,
 // magic "070702", which this parser doesn't support).
-fn cpio_parse_header(img: State<InitramfsImage>, offset: u32, hdr: State<CpioHeader>) {
+transform cpio_parse_header(img: State<InitramfsImage>, offset: u32, hdr: State<CpioHeader>) {
     // Skip the 6-byte magic ("070701") to reach the first hex field (ino).
     let field_off = offset + 6;
     // Fields 0..6: ino, mode, uid, gid, nlink, mtime, filesize (8 bytes each).
@@ -494,7 +494,7 @@ fn cpio_parse_header(img: State<InitramfsImage>, offset: u32, hdr: State<CpioHea
 //
 // Returns the number of entries extracted (0 on an empty archive, 1 on the
 // self-test's single-file archive, up to 10 on a multi-entry archive).
-fn initramfs_unpack(img: State<InitramfsImage>, inodes: State<InodeTable>, dentries: State<DentryTable>, root_idx: u32) -> u32 {
+transform initramfs_unpack(img: State<InitramfsImage>, inodes: State<InodeTable>, dentries: State<DentryTable>, root_idx: u32) -> u32 {
     let count: u32 = 0;
     let offset: u32 = 0;
 
@@ -623,7 +623,7 @@ fn initramfs_unpack(img: State<InitramfsImage>, inodes: State<InodeTable>, dentr
 // count / namesize, 1 = expected ino / nlink / count, 0 = null terminator /
 // initial offset / root_idx).
 
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Build the InitramfsImage: a single cpio newc entry. ─────────────
     // The entry describes a regular file named "test" with no data:
     //   - magic "070701" (6 bytes)

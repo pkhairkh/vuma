@@ -5,11 +5,11 @@
 // to a helper which further transforms it. helper(x) = x + 3; main
 // passes 7, so result = 10.
 
-fn add_three(x: u32) -> u32 {
+transform add_three(x: u32) -> u32 {
     return x + 3;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 3 + 4;
     v: u32 = add_three(a);
     return v;

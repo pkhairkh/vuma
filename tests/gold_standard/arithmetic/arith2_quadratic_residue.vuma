@@ -5,7 +5,7 @@
 // We compute (3*3) % 7 = 2, compare to target 2 (equal → diff 0),
 // and return 1 - 0 = 1 to encode "is a QR" in straight-line code (no if).
 
-fn main() -> i32 {
+transform main() -> i32 {
     p: u32 = 7;
     x: u32 = 3;
     target: u32 = 2;

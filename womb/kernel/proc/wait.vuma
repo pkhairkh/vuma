@@ -210,10 +210,10 @@
 // sys_exit(tbl, ..., zombie: State<ZombieTask>) — see K2a's pmm.vuma
 // header "Why init-style?" for the codegen rationale: the current
 // codegen does NOT propagate State-typedness through function return
-// values, so `fn waitpid_new() -> State<Status>` would produce broken
+// values, so `transform waitpid_new() -> State<Status>` would produce broken
 // field-access code in callers). All wait.vuma functions take their
-// State<T> params by regular VUMA-fn borrow (NOT extern #[borrow] —
-// VUMA fn calls don't need the attribute; only extern "C" calls do,
+// State<T> params by regular VUMA-transform borrow (NOT extern #[borrow] —
+// VUMA transform calls don't need the attribute; only extern "C" calls do,
 // and none of these functions call any extern).
 //
 // State<T> params: per the K4b contract's "Keep State<T> params to 1-2
@@ -429,7 +429,7 @@ layout Status = {
 // calls this in its ZOMBIE scan (state == 4); wait_has_children calls
 // this in its "not FREE" check (state != 0); task_free calls this with
 // val=0 to reap the zombie.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
@@ -438,7 +438,7 @@ fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
 // with val=0 to mark a reaped slot as FREE. The self-test calls this
 // directly to set up the parent (state=1 RUNNING) and child (state=4
 // ZOMBIE) tasks.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
@@ -447,7 +447,7 @@ fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
 // unpack loop — same pattern as K3e's syscall_table_get but with a 4-byte
 // loop bound for u32). wait_reap_zombie calls this to read the reaped
 // child's PID for its return value.
-fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -463,7 +463,7 @@ fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 // Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
 // Re-declared byte-identically to K4a's task.vuma. The self-test calls
 // this to set up the parent (pid=1) and child (pid=2) PIDs.
-fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -479,7 +479,7 @@ fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 // calls this to match the zombie's PPID against the waiting parent's
 // PID (only reap children of THIS parent); wait_has_children calls
 // this for the same match.
-fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -495,7 +495,7 @@ fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 // Write the u32 `ppid` field of Task slot `idx` into ProcessTable.ppids.
 // Re-declared byte-identically to K4a's task.vuma. The self-test calls
 // this to set the child's PPID to 1 (the parent's PID).
-fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -512,7 +512,7 @@ fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 // and K3e's syscall_table_get). wait_reap_zombie calls this to read the
 // exit code stored in vruntime (the K4d hack — see "ZombieTask layout"
 // in the file header).
-fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -529,7 +529,7 @@ fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
 // ProcessTable.vruntimes. Re-declared byte-identically to K4a's task.vuma.
 // The self-test calls this to store the exit code (42) in the child's
 // vruntime slot, simulating K4d's sys_exit write.
-fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -555,7 +555,7 @@ fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
 
 // pt_init: zero all 256 states (mark every slot FREE) and set count = 0.
 // Idempotent. Re-declared byte-identically to K4a's task.vuma.
-fn pt_init(tbl: State<ProcessTable>) {
+transform pt_init(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
         pt_set_state(tbl, i, 0);
@@ -571,7 +571,7 @@ fn pt_init(tbl: State<ProcessTable>) {
 // vruntime, etc. stay stale until task_alloc reuses the slot —
 // task_alloc only writes state + pid, leaving the other fields for
 // K4d's fork to repopulate).
-fn task_free(tbl: State<ProcessTable>, idx: u32) {
+transform task_free(tbl: State<ProcessTable>, idx: u32) {
     pt_set_state(tbl, idx, 0);
     tbl.count = tbl.count - 1;
 }
@@ -615,8 +615,8 @@ fn task_free(tbl: State<ProcessTable>, idx: u32) {
 // function" rule. The function reads tbl.{states, ppids, vruntimes,
 // pids} (via the helpers) and writes status.code and tbl.{states,
 // count} (via task_free). Both State<T> params are borrowed for the
-// duration of the call (regular VUMA-fn borrow, not extern #[borrow]).
-fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32, status: State<Status>) -> i64 {
+// duration of the call (regular VUMA-transform borrow, not extern #[borrow]).
+transform wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32, status: State<Status>) -> i64 {
     let i = 0;
     while i < 256 {
         let state = pt_get_state(tbl, i);
@@ -669,7 +669,7 @@ fn wait_reap_zombie(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32, 
 // State<T> params: 1 (tbl), per the K4b contract's "1-2 per function"
 // rule. wait_has_children only reads tbl.{ppids, pids, states} (via
 // the helpers). The function is a pure read — no writes to tbl.
-fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32) -> u8 {
+transform wait_has_children(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32) -> u8 {
     let i = 0;
     while i < 256 {
         let child_ppid = pt_get_ppid(tbl, i);
@@ -750,7 +750,7 @@ fn wait_has_children(tbl: State<ProcessTable>, parent_pid: u32, target_pid: u32)
 // State<T> params: 2 (tbl + status), per the K4b contract's "1-2 per
 // function" rule. sys_waitpid passes both through to wait_reap_zombie
 // (which writes status.code and frees the slot via task_free).
-fn sys_waitpid(tbl: State<ProcessTable>, parent_idx: u32, pid: u64, status: State<Status>) -> i64 {
+transform sys_waitpid(tbl: State<ProcessTable>, parent_idx: u32, pid: u64, status: State<Status>) -> i64 {
     // Resolve the calling parent's PID from its task index (W12S4).
     // Previously this was hardcoded to 1 (init), which silently reaped
     // init's children regardless of the actual caller.
@@ -859,7 +859,7 @@ fn sys_waitpid(tbl: State<ProcessTable>, parent_idx: u32, pid: u64, status: Stat
 // header for the same rationale, and K3a's trap_trampoline.vuma for
 // the same rule applied to vector=14 and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(ProcessTable);
     let status = state_new(Status);
     pt_init(tbl);

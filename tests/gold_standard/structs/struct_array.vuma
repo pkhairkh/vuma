@@ -14,7 +14,7 @@ struct Array {
 }
 
 layout _L1 = { data: [u8; 40] }
-fn main() -> i32 {
+transform main() -> i32 {
     let a = state_new(_L1);
     a.data[0] = 1;
     a.data[8] = 1;

@@ -5,12 +5,12 @@
 // arguments, one addition. Distinct from s9_fn_one_arg_sub (one arg,
 // subtract) and s10_fn_three_args_mul (three args, multiply).
 
-fn inc_by(x: u32, n: u32) -> u32 {
+transform inc_by(x: u32, n: u32) -> u32 {
     r: u32 = x + n;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = inc_by(40, 17);
     return v;
 }

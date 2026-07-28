@@ -11,7 +11,7 @@
 // loaded into a named variable; each shift-then-mask is split into
 // its own statement.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u64 = 0xFF;
     m1: u64 = 0x5555555555555555;
     m2: u64 = 0x3333333333333333;

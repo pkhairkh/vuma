@@ -23,7 +23,7 @@ struct NodeHeader {
     data: u64,       // 8 bytes - payload
 }
 
-fn new_list() -> Address {
+transform new_list() -> Address {
     // Sentinel node — its prev/next point to itself when list is empty
     // IVE verifies: allocation is live, size matches struct layout
     node = allocate(24);  // size of NodeHeader
@@ -31,7 +31,7 @@ fn new_list() -> Address {
     return node;
 }
 
-fn push_back(list: Address, value: u64) {
+transform push_back(list: Address, value: u64) {
     // Insert a new node at the tail of the list
     //
     // This is the critical operation that Rust's borrow checker rejects:
@@ -51,7 +51,7 @@ fn push_back(list: Address, value: u64) {
     (*sentinel).prev = node;
 }
 
-fn traverse_forward(list: Address) {
+transform traverse_forward(list: Address) {
     // Walk the list from head to tail, printing each value
     // IVE verifies: each (*current).data dereference is safe
     // IVE verifies: loop terminates because list structure is acyclic
@@ -63,7 +63,7 @@ fn traverse_forward(list: Address) {
     }
 }
 
-fn free_list(list: Address) {
+transform free_list(list: Address) {
     // Walk and free every node, then free the sentinel
     // IVE verifies: each free() releases a live, unique allocation
     // IVE verifies: no use-after-free (Cleanup invariant)
@@ -76,7 +76,7 @@ fn free_list(list: Address) {
     free(list);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     list = new_list();
     push_back(list, 10);
     push_back(list, 20);

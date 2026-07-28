@@ -6,7 +6,7 @@
 // first. Distinct from s20_arith_sub_then_mod (sub-then-mod, value 50)
 // and s14_arith_mod_then_add (mod-then-add, value 13).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 240;
     b: u32 = 60;
     c: u32 = 30;

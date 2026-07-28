@@ -7,7 +7,7 @@
 // s18_bit_and_or_xor (AND-then-OR, no XOR framing) and
 // s14_bit_xor_chain_3 (xor chain, no OR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 165;         // 0xA5
     b: u64 = 51;          // 0x33
     c: u64 = 15;          // 0x0F

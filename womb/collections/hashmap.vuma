@@ -6,24 +6,24 @@
 // Uses allocate() for persistent heap memory.
 
 // ── LE helpers ──
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
@@ -34,7 +34,7 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 const ENTRY_SIZE: u32 = 32;
 
 // FNV-1a hash
-fn hash_fnv1a(data: Address, len: u32) -> u32 {
+transform hash_fnv1a(data: Address, len: u32) -> u32 {
     h: u32 = 2166136261;
     i: u32 = 0;
     while i < len {
@@ -47,7 +47,7 @@ fn hash_fnv1a(data: Address, len: u32) -> u32 {
 }
 
 // Create a new hash map with given capacity (must be power of 2)
-fn hashmap_new(cap: u32) -> Address {
+transform hashmap_new(cap: u32) -> Address {
     m = allocate(16);
     if cap == 0 { cap = 16; }
     entries = allocate(cap * ENTRY_SIZE);
@@ -63,14 +63,14 @@ fn hashmap_new(cap: u32) -> Address {
     return m;
 }
 
-fn hashmap_count(m: Address) -> u32 {
+transform hashmap_count(m: Address) -> u32 {
     return load_u32(m, 12);
 }
 
 // Grow the hash table: double capacity, rehash all entries into the new table.
 // Recomputes each entry's slot with the new capacity mask (h & (new_cap - 1)).
 // Count is unchanged by rehash (same entries, just relocated).
-fn hashmap_grow(m: Address) {
+transform hashmap_grow(m: Address) {
     old_cap: u32 = load_u32(m, 8);
     old_entries: u64 = load_u64(m, 0);
     new_cap: u32 = old_cap * 2;
@@ -120,7 +120,7 @@ fn hashmap_grow(m: Address) {
 }
 
 // Insert key->val. Key is a (ptr, len) pair. Val is a u64.
-fn hashmap_insert(m: Address, key: Address, key_len: u32, val: u64) {
+transform hashmap_insert(m: Address, key: Address, key_len: u32, val: u64) {
     cap: u32 = load_u32(m, 8);
     cur_count: u32 = load_u32(m, 12);
     // Grow when load factor >= 75% to avoid the silent-drop bug (the
@@ -177,7 +177,7 @@ fn hashmap_insert(m: Address, key: Address, key_len: u32, val: u64) {
 }
 
 // Lookup: returns val or 0 if not found
-fn hashmap_get(m: Address, key: Address, key_len: u32) -> u64 {
+transform hashmap_get(m: Address, key: Address, key_len: u32) -> u64 {
     cap: u32 = load_u32(m, 8);
     entries: u64 = load_u64(m, 0);
     h: u32 = hash_fnv1a(key, key_len);
@@ -212,7 +212,7 @@ fn hashmap_get(m: Address, key: Address, key_len: u32) -> u64 {
     return 0;
 }
 
-fn hashmap_free(m: Address) {
+transform hashmap_free(m: Address) {
     cap: u32 = load_u32(m, 8);
     entries: u64 = load_u64(m, 0);
     free(entries);

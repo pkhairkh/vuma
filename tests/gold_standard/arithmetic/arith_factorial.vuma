@@ -3,7 +3,7 @@
 //
 // 5! = 5 * 4 * 3 * 2 * 1 = 120.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 5;
     result: u32 = 1;
     i: u32 = 1;

@@ -6,7 +6,7 @@
 // bitwise drop bug workaround). Distinct from s74_edge_max_xor_
 // eight (247), s73_edge_max_xor_ten (245) and s72_edge_max_xor_
 // nine (246).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;
     b: u32 = 12;
     r: u32 = a ^ b;        // 243

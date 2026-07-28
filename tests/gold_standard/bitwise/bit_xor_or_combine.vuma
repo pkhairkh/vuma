@@ -6,7 +6,7 @@
 // bug workaround). Distinct from s14_bit_or_then_xor (OR-then-XOR) and
 // s7_bit_and_or_combine (AND-then-OR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;         // 0xF0
     b: u64 = 48;          // 0x30
     c: u64 = 15;          // 0x0F

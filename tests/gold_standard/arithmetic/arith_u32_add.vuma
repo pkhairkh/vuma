@@ -3,7 +3,7 @@
 //
 // 0xFFFFFFFF + 2 = 0x100000001. Masked to u32 = 1.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 4294967295;   // 0xFFFFFFFF
     b: u32 = 2;
     sum: u32 = (a + b) & 4294967295;

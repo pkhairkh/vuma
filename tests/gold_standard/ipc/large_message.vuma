@@ -6,7 +6,7 @@
 // 0x123456789ABCDEF0 has all 8 bytes distinct, so any byte-swap or
 // truncation bug would produce a wrong exit code. The program computes
 // (sent == recv) ? 1 : 0 and exits that value.
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i64>();
     pid = spawn_worker();
     if pid == 0 {

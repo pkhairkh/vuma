@@ -133,7 +133,7 @@ extern "C" {
     // `fd`. SysV AMD64: RDI=fd, RSI=buf, RDX=count — all three already
     // match the syscall ABI; the stub is "mov eax,#1; syscall; ret".
     // Returns the byte count written (or a negative errno on failure).
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ layout KmsgBuf = {
 // the entire arena slot on allocation (same convention as K7a's
 // pipe_init, K8a's spinlock_init). K12b's self-test only reads buf[i]
 // for i < count, so the stale bytes beyond count are never observed.
-fn kmsg_init(kmsg: State<KmsgBuf>) {
+transform kmsg_init(kmsg: State<KmsgBuf>) {
     kmsg.head = 0;
     kmsg.tail = 0;
     kmsg.count = 0;
@@ -236,7 +236,7 @@ fn kmsg_init(kmsg: State<KmsgBuf>) {
 //
 // State<T> params: 2 (kmsg + msg). One read (msg.data[i]) + one write
 // (kmsg.buf[tail]) per byte — pure state manipulation, no I/O.
-fn kmsg_write(kmsg: State<KmsgBuf>, msg: State<KmsgMsg>, len: u32) {
+transform kmsg_write(kmsg: State<KmsgBuf>, msg: State<KmsgMsg>, len: u32) {
     let i = 0;
     while i < len {
         kmsg.buf[kmsg.tail] = msg.data[i];
@@ -278,7 +278,7 @@ fn kmsg_write(kmsg: State<KmsgBuf>, msg: State<KmsgMsg>, len: u32) {
 // State<T> params: 1 (kmsg). State<T> locals: 1 (out — the scratch
 // buffer). The `write(1, ...)` return value (i64) is discarded (same
 // pattern as shell.vuma:314 calling write without assignment).
-fn dmesg(kmsg: State<KmsgBuf>) {
+transform dmesg(kmsg: State<KmsgBuf>) {
     if kmsg.count == 0 { return; }
 
     // Copy the ring into a linear scratch buffer.
@@ -317,7 +317,7 @@ fn dmesg(kmsg: State<KmsgBuf>) {
 // is observable but not verified by the self-test's return code (verifying
 // stdout would require capturing fd 1, which needs K9a's socket layer or
 // a fork+pipe dance — out of scope for K12b's hosted self-test).
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Init ──
     let kmsg = state_new(KmsgBuf);
     kmsg_init(kmsg);

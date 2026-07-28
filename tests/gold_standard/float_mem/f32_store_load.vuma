@@ -3,7 +3,7 @@
 
 layout Cell = { v: f64 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let c = state_new(Cell);
     c.v = 7.25;
     let val = c.v;

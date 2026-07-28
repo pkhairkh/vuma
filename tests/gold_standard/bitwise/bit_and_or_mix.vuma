@@ -6,7 +6,7 @@
 // Distinct from s10_bit_and_then_xor (AND-then-XOR) and
 // s6_bit_and_chain_3 (pure AND chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 170;         // 0xAA
     b: u64 = 15;          // 0x0F
     c: u64 = 240;         // 0xF0

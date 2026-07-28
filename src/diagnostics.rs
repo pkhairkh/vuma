@@ -478,8 +478,8 @@ impl Suggestion {
 /// | E008  | —                       | Unreachable code                |
 /// | E009  | UnexpectedToken         | Unexpected token                |
 /// | E010  | ExpectedToken           | Expected token                  |
-/// | E011  | RegionError             | Region error                    |
-/// | E012  | BDAnnotationError       | BD annotation error             |
+/// | E011  | —                       | Region error                    |
+/// | E012  | —                       | BD annotation error             |
 /// | E013  | InvalidCompoundOp       | Invalid compound operator       |
 /// | E014  | MissingSemicolon        | Missing semicolon               |
 /// | E015  | InvalidAddress          | Invalid address literal         |
@@ -506,8 +506,6 @@ pub fn code_for_parse_error_kind(kind: &ParseErrorKind) -> &'static str {
         ParseErrorKind::DuplicateDefinition => "E004",
         ParseErrorKind::UnexpectedToken => "E009",
         ParseErrorKind::ExpectedToken => "E010",
-        ParseErrorKind::RegionError => "E011",
-        ParseErrorKind::BDAnnotationError => "E012",
         ParseErrorKind::InvalidCompoundOp => "E013",
         ParseErrorKind::MissingSemicolon => "E014",
         ParseErrorKind::InvalidAddress => "E015",
@@ -3532,7 +3530,7 @@ mod tests {
     fn from_parse_error_integration() {
         use vuma_parser::Span;
 
-        let source = "fn main() { x }";
+        let source = "transform main() { x }";
         let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
         let diag = from_parse_error(&err, source, Some("main.vu"));
 

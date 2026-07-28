@@ -4,7 +4,7 @@
 // A power of 2 has exactly one bit set, so (n & (n - 1)) == 0.
 // 64 = 2^6 is a power of two, so the test returns 1.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 64;
     zero: u32 = 0;
     one: u32 = 1;

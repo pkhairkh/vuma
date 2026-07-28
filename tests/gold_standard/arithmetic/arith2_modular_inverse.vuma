@@ -6,7 +6,7 @@
 // confirming it equals 1. Straight-line code only — no loops or ifs
 // (which are subject to the known VUMA codegen propagation bugs).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 3;
     m: u32 = 8;
     inv: u32 = 3;

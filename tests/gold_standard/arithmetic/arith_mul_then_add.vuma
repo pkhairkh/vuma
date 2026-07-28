@@ -3,7 +3,7 @@
 //
 // Two-stage u32 computation: mul then add. 15 * 7 = 105; 105 + 8 = 113. All operands loaded into u32 variables first. Distinct from s26_arith_add_mul_sub (add-mul-sub, 85) and s22_arith_add_then_mul (add-then-mul, 160).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 15;
     b: u32 = 7;
     c: u32 = 8;

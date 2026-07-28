@@ -5,7 +5,7 @@
 // All operands loaded into u32 variables first. Distinct from
 // s9_u32_and_mask (two-way AND) and s10_u32_or_then_and (OR-then-AND).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;         // 0xFF
     b: u32 = 170;         // 0xAA
     c: u32 = 15;          // 0x0F

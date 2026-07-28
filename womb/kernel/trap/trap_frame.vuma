@@ -227,7 +227,7 @@ layout TrapFrame = {
 //
 // State<T> params: 1 (tf). Pure read — no writes. The 8-iteration byte
 // loop is direct typed-memory reads; no `*ptr`/`&tf`/`allocate` anywhere.
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -250,7 +250,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 //
 // State<T> params: 1 (tf). Pure write to tf.gpr[off..off+8]. No reads
 // of other tf fields, no helper calls.
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -310,7 +310,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // State<T> params: 1 (tf). Pure write — no reads, no helper calls. The
 // 5 scalar-field assignments are direct typed-memory writes; no
 // `*ptr`/`&tf`/`allocate` anywhere.
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     // Only zero scalar fields — leave arrays uninitialized so the e-graph
     // can eliminate dead init when the caller immediately overwrites.
     // state_new(TrapFrame) already zero-fills the entire buffer; the
@@ -362,7 +362,7 @@ fn tf_init(tf: State<TrapFrame>) {
 // Per the R2a contract's "Use decimal constants" rule: all non-zero
 // constants in the self-test use DECIMAL — see the Decimal-constants
 // table in the file header for the rationale.
-fn main() -> i32 {
+transform main() -> i32 {
     let tf = state_new(TrapFrame);
     tf_init(tf);
     if tf.pc != 0 { return 1; }

@@ -93,11 +93,11 @@
 //
 // ── Hosted vs bare-metal dispatch ───────────────────────────────────────────
 // procfs is the first VWK filesystem whose READ op is dispatched via a
-// per-entry function pointer (read_fn). VUMA has no first-class fn-ptr
+// per-entry function pointer (read_fn). VUMA has no first-class transform-ptr
 // type and no `&function` syntax — there is no way to take the address
 // of `procfs_read_meminfo` in source. So in hosted mode:
 //   - procfs_init stores read_fn = 0 for all 4 entries (the same "hosted
-//     stub" convention K6d's char.vuma uses for its 5 cdev fn pointers).
+//     stub" convention K6d's char.vuma uses for its 5 cdev transform pointers).
 //   - procfs_read checks `read_fn != 0`; if true, it invokes
 //     __call_indirect1(read_fn, buf as u64) (the indirect-call
 //     trampoline — same stub declared in dispatch.vuma / irq.vuma /
@@ -272,7 +272,7 @@ extern "C" {
     // by the 4 procfs_read_<name> functions to emit their file content
     // via string literals. The `buf: Address` accepts a .rodata
     // literal address directly (no State<T> marshal).
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 
     // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by procfs_read to
@@ -280,7 +280,7 @@ extern "C" {
     // as write — NOT a C library function. Real asm body registered in
     // src/codegen/src/x86_64/mod.rs::build_runtime_syscall_stubs (8
     // bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -359,12 +359,12 @@ layout ProcfsName = { data: [u8; 32] }
 // tmpfs name byte accessors.
 
 // Read byte `off` (0..31) of slot `idx`'s name from ProcfsData.names.
-fn procfs_get_name_byte(data: State<ProcfsData>, idx: u32, off: u32) -> u8 {
+transform procfs_get_name_byte(data: State<ProcfsData>, idx: u32, off: u32) -> u8 {
     return data.names[idx * 32 + off];
 }
 
 // Write byte `off` (0..31) of slot `idx`'s name into ProcfsData.names.
-fn procfs_set_name_byte(data: State<ProcfsData>, idx: u32, off: u32, val: u8) {
+transform procfs_set_name_byte(data: State<ProcfsData>, idx: u32, off: u32, val: u8) {
     data.names[idx * 32 + off] = val;
 }
 
@@ -380,7 +380,7 @@ fn procfs_set_name_byte(data: State<ProcfsData>, idx: u32, off: u32, val: u8) {
 
 // Read the u64 `read_fn` field of ProcfsEntry slot `idx` from
 // ProcfsData.read_fns.
-fn procfs_get_read_fn(data: State<ProcfsData>, idx: u32) -> u64 {
+transform procfs_get_read_fn(data: State<ProcfsData>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -395,7 +395,7 @@ fn procfs_get_read_fn(data: State<ProcfsData>, idx: u32) -> u64 {
 
 // Write the u64 `read_fn` field of ProcfsEntry slot `idx` into
 // ProcfsData.read_fns.
-fn procfs_set_read_fn(data: State<ProcfsData>, idx: u32, val: u64) {
+transform procfs_set_read_fn(data: State<ProcfsData>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -418,7 +418,7 @@ fn procfs_set_read_fn(data: State<ProcfsData>, idx: u32, val: u64) {
 
 // Read the u32 `parent_ino` field of ProcfsEntry slot `idx` from
 // ProcfsData.parent_inos.
-fn procfs_get_parent_ino(data: State<ProcfsData>, idx: u32) -> u32 {
+transform procfs_get_parent_ino(data: State<ProcfsData>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -433,7 +433,7 @@ fn procfs_get_parent_ino(data: State<ProcfsData>, idx: u32) -> u32 {
 
 // Write the u32 `parent_ino` field of ProcfsEntry slot `idx` into
 // ProcfsData.parent_inos.
-fn procfs_set_parent_ino(data: State<ProcfsData>, idx: u32, val: u32) {
+transform procfs_set_parent_ino(data: State<ProcfsData>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -446,7 +446,7 @@ fn procfs_set_parent_ino(data: State<ProcfsData>, idx: u32, val: u32) {
 
 // Read the u32 `ino` field of ProcfsEntry slot `idx` from
 // ProcfsData.inos.
-fn procfs_get_ino(data: State<ProcfsData>, idx: u32) -> u32 {
+transform procfs_get_ino(data: State<ProcfsData>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -461,7 +461,7 @@ fn procfs_get_ino(data: State<ProcfsData>, idx: u32) -> u32 {
 
 // Write the u32 `ino` field of ProcfsEntry slot `idx` into
 // ProcfsData.inos.
-fn procfs_set_ino(data: State<ProcfsData>, idx: u32, val: u32) {
+transform procfs_set_ino(data: State<ProcfsData>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -482,12 +482,12 @@ fn procfs_set_ino(data: State<ProcfsData>, idx: u32, val: u32) {
 // the value.
 
 // Read the u8 `used` flag of ProcfsEntry slot `idx` from ProcfsData.used.
-fn procfs_get_used(data: State<ProcfsData>, idx: u32) -> u8 {
+transform procfs_get_used(data: State<ProcfsData>, idx: u32) -> u8 {
     return data.used[idx];
 }
 
 // Write the u8 `used` flag of ProcfsEntry slot `idx` into ProcfsData.used.
-fn procfs_set_used(data: State<ProcfsData>, idx: u32, val: u8) {
+transform procfs_set_used(data: State<ProcfsData>, idx: u32, val: u8) {
     data.used[idx] = val;
 }
 
@@ -503,7 +503,7 @@ fn procfs_set_used(data: State<ProcfsData>, idx: u32, val: u8) {
 // stale contents are unreachable (procfs_get_used == 0 guarantees no
 // slot will be read until procfs_register populates it). Same pattern
 // as K6d's cdev_table_init (char.vuma:573).
-fn procfs_data_init(data: State<ProcfsData>) {
+transform procfs_data_init(data: State<ProcfsData>) {
     let i = 0;
     while i < 16 {
         procfs_set_used(data, i, 0);
@@ -519,7 +519,7 @@ fn procfs_data_init(data: State<ProcfsData>) {
 // K7+ may add a hash index if procfs grows beyond 16 entries (Linux's
 // procfs uses a per-PID radix tree for /proc/<pid>/, but the static
 // /proc/<name> entries use a small linear array — same as this).
-fn procfs_find_by_ino(data: State<ProcfsData>, ino: u32) -> u32 {
+transform procfs_find_by_ino(data: State<ProcfsData>, ino: u32) -> u32 {
     let i = 0;
     while i < 16 {
         if procfs_get_used(data, i) == 1 {
@@ -553,7 +553,7 @@ fn procfs_find_by_ino(data: State<ProcfsData>, ino: u32) -> u32 {
 //
 // The lowest-free-slot-wins policy matches Linux's find_first_zero_bit
 // and K5c's tmpfs_create / K6d's chardev_register.
-fn procfs_register(data: State<ProcfsData>, name: State<ProcfsName>, ino: u32, parent_ino: u32, read_fn: u64) -> u32 {
+transform procfs_register(data: State<ProcfsData>, name: State<ProcfsName>, ino: u32, parent_ino: u32, read_fn: u64) -> u32 {
     let i = 0;
     while i < 16 {
         if procfs_get_used(data, i) == 0 {
@@ -605,7 +605,7 @@ fn procfs_register(data: State<ProcfsData>, name: State<ProcfsName>, ino: u32, p
 // 102='f', 117='u', 118='v', 115='s', 116='t'. The 1/2/3/4 inos and
 // the 0 parent_ino / read_fn are also decimal.
 
-fn procfs_init(data: State<ProcfsData>) {
+transform procfs_init(data: State<ProcfsData>) {
     procfs_data_init(data);
 
     // ── Entry 0: /proc/meminfo (ino=1) → procfs_read_meminfo ───────────
@@ -734,7 +734,7 @@ fn procfs_init(data: State<ProcfsData>) {
 // char.vuma's chardev_read documents (char.vuma:751-755).
 //
 // The `data` (State<ProcfsData>) is preserved across the extern call
-// because it is passed as a regular VUMA-fn borrow, NOT as an extern
+// because it is passed as a regular VUMA-transform borrow, NOT as an extern
 // #[borrow] State<T> param (only extern #[borrow] State<T> params are
 // conservatively invalidated — see W5's dispatch.vuma for the same
 // reasoning). `buf` and `count` are passed through to the read_fn
@@ -742,7 +742,7 @@ fn procfs_init(data: State<ProcfsData>) {
 // hosted-mode read_fns ignore `buf` and `count` in their bodies — they
 // use string literals for content (see procfs_read_meminfo below).
 
-fn procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i64 {
+transform procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i64 {
     // Look up the entry by ino. procfs_find_by_ino returns 16 if no
     // USED slot matches — that's the "not found" sentinel.
     let idx = procfs_find_by_ino(data, ino);
@@ -756,7 +756,7 @@ fn procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i
     // procfs_set_read_fn).
     let read_fn = procfs_get_read_fn(data, idx);
 
-    // K11+ path: real fn pointer dispatch via __call_indirect1. The
+    // K11+ path: real transform pointer dispatch via __call_indirect1. The
     // guard `read_fn != 0` short-circuits in hosted mode (read_fn is
     // always 0), so the trampoline is never reached — the binary does
     // NOT fault on a NULL indirect call. K11+ will populate read_fn
@@ -819,7 +819,7 @@ fn procfs_read(data: State<ProcfsData>, ino: u32, buf: Address, count: u64) -> i
 //   " kB"        = 3
 //   "\n"         = 1
 //   total        = 36
-fn procfs_read_meminfo(buf: Address, count: u64) -> i64 {
+transform procfs_read_meminfo(buf: Address, count: u64) -> i64 {
     write(1, "MemTotal: 16384 kB\nMemFree: 8192 kB\n", 36);
     return 36;
 }
@@ -838,7 +838,7 @@ fn procfs_read_meminfo(buf: Address, count: u64) -> i64 {
 //   "VWK"         = 3
 //   "\n"          = 1
 //   total         = 28
-fn procfs_read_cpuinfo(buf: Address, count: u64) -> i64 {
+transform procfs_read_cpuinfo(buf: Address, count: u64) -> i64 {
     write(1, "processor: 0\nvendor_id: VWK\n", 28);
     return 28;
 }
@@ -856,7 +856,7 @@ fn procfs_read_cpuinfo(buf: Address, count: u64) -> i64 {
 //   "PMT"          = 3
 //   "\n"           = 1
 //   total          = 23
-fn procfs_read_version(buf: Address, count: u64) -> i64 {
+transform procfs_read_version(buf: Address, count: u64) -> i64 {
     write(1, "VWK 0.1.0-alpha #1 PMT\n", 23);
     return 23;
 }
@@ -873,7 +873,7 @@ fn procfs_read_version(buf: Address, count: u64) -> i64 {
 //   "0.00"     = 4
 //   "\n"       = 1
 //   total      = 13
-fn procfs_read_uptime(buf: Address, count: u64) -> i64 {
+transform procfs_read_uptime(buf: Address, count: u64) -> i64 {
     write(1, "uptime: 0.00\n", 13);
     return 13;
 }
@@ -908,11 +908,11 @@ fn procfs_read_uptime(buf: Address, count: u64) -> i64 {
 // (36 + 28 + 23 + 13 = 100 bytes of /proc content). The byte-count
 // return values are verified by the if checks.
 //
-// The fn pointers (read_fn) are all 0 in this self-test (hosted mode —
+// The transform pointers (read_fn) are all 0 in this self-test (hosted mode —
 // the `read_fn != 0` guard short-circuits to the ino-switch fallback
 // before the __call_indirect1 trampoline is reached, so the IVE-
 // verified binary compiles cleanly AND runs to exit 0 without
-// faulting). K11+ will register real read_fns with non-zero fn
+// faulting). K11+ will register real read_fns with non-zero transform
 // pointers and the `read_fn != 0` branch will exercise the full
 // indirect-call dispatch.
 //
@@ -925,7 +925,7 @@ fn procfs_read_uptime(buf: Address, count: u64) -> i64 {
 // 36 / 28 / 23 / 13 / 16 / 1 / 2 / 3 / 4 / 99 / 0 constants are also
 // decimal.
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate the ProcfsData via state_new (zero-initialized by the
     // ___pmt_buffer). procfs_init re-initializes it explicitly via
     // procfs_data_init (idempotent — safe on a fresh table).

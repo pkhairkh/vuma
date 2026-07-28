@@ -35,7 +35,7 @@
 // scheduler.vuma, fork.vuma, exit.vuma, wait.vuma, futex.vuma, waitq.vuma,
 // signal.vuma, file.vuma, percpu.vuma, abi.vuma, pmm.vuma, arena.vuma —
 // see exec.vuma's "Why init-style?" header for the codegen rationale: a
-// `fn foo() -> State<T>` that allocates via `state_new` inside the
+// `transform foo() -> State<T>` that allocates via `state_new` inside the
 // function body produces broken field-access code in callers because the
 // per-function scratchpad that backs the state_new allocation is
 // invalidated when the function returns, so the caller's `ret.field`
@@ -47,7 +47,7 @@
 //     elf_get_phdr(buf, phoff, idx, phdr: State<Elf64Phdr>)
 // The other three functions (elf_validate, elf_get_entry,
 // elf_count_load_segments) match the spec signatures verbatim — they
-// take State<Elf64Ehdr> by regular VUMA-fn borrow (no allocation, no
+// take State<Elf64Ehdr> by regular VUMA-transform borrow (no allocation, no
 // return of State<T>), so the typedness-survives-calls property holds.
 //
 // ── e_ident[8..15] buf-address cache (side-channel for count_load_segments)
@@ -237,9 +237,9 @@ layout ElfBuf = {
 // header is 64 bytes (always aligned + always fully populated), so the
 // extra 2 bytes are within the buffer and belong to the next field.
 extern "C" {
-    fn __vuma_load_u64(addr: u64) -> u64;
-    fn __vuma_load_u32(addr: u64) -> u32;
-    fn __vuma_load_u16(addr: u64) -> u16;
+    transform __vuma_load_u64(addr: u64) -> u64;
+    transform __vuma_load_u32(addr: u64) -> u32;
+    transform __vuma_load_u16(addr: u64) -> u16;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ extern "C" {
 // __vuma_load_u16 (a 3-byte `mov ax, [rdi]; ret` stub — 66 8B 07 C3),
 // this helper can be replaced with direct __vuma_load_u16 calls. The
 // extern declaration above is already in place for that swap.
-fn elf_load_u16(addr: u64) -> u16 {
+transform elf_load_u16(addr: u64) -> u16 {
     let v = __vuma_load_u32(addr);
     return (v & 65535) as u16;
 }
@@ -297,7 +297,7 @@ const ELF_MAGIC3: u8 = 70;     // 0x46 — 'F'
 // State<T> params: 1 (ehdr — read/write). Pure write — no reads from
 // ehdr, only writes from buf. The buf Address is a raw u64 pointer (no
 // State<T> invalidation — Address is a value type, per the marshal pass).
-fn elf_parse_header(buf: Address, ehdr: State<Elf64Ehdr>) {
+transform elf_parse_header(buf: Address, ehdr: State<Elf64Ehdr>) {
     // Read e_ident[0..15] via two u64 loads + a byte-unpack loop. The
     // u64 loads read 8 bytes each at buf+0 and buf+8; the loop shifts +
     // masks each u64 into 8 individual bytes and stores them into
@@ -370,7 +370,7 @@ fn elf_parse_header(buf: Address, ehdr: State<Elf64Ehdr>) {
 // (ELFCLASS64) and EI_DATA == 1 (ELFDATA2LSB) here; K11 will add those.
 //
 // State<T> params: 1 (ehdr — read-only). Pure read — no writes.
-fn elf_validate(ehdr: State<Elf64Ehdr>) -> i32 {
+transform elf_validate(ehdr: State<Elf64Ehdr>) -> i32 {
     if ehdr.e_ident[0] != 127 { return 0 - 1; }
     if ehdr.e_ident[1] != 69 { return 0 - 1; }
     if ehdr.e_ident[2] != 76 { return 0 - 1; }
@@ -391,7 +391,7 @@ fn elf_validate(ehdr: State<Elf64Ehdr>) -> i32 {
 // elf_count_load_segments).
 //
 // State<T> params: 1 (ehdr — read-only). Pure read — no writes.
-fn elf_get_entry(ehdr: State<Elf64Ehdr>) -> u64 {
+transform elf_get_entry(ehdr: State<Elf64Ehdr>) -> u64 {
     return ehdr.e_entry;
 }
 
@@ -418,7 +418,7 @@ fn elf_get_entry(ehdr: State<Elf64Ehdr>) -> u64 {
 // State<T> params: 1 (phdr — read/write). Pure write — no reads from
 // phdr, only writes from buf. The buf Address + phoff u64 + idx u32 are
 // raw integers (no State<T> invalidation).
-fn elf_get_phdr(buf: Address, phoff: u64, idx: u32, phdr: State<Elf64Phdr>) {
+transform elf_get_phdr(buf: Address, phoff: u64, idx: u32, phdr: State<Elf64Phdr>) {
     let base: u64 = (buf as u64) + phoff + (idx as u64) * 56;
     phdr.p_type = __vuma_load_u32(base + 0);
     phdr.p_flags = __vuma_load_u32(base + 4);
@@ -451,7 +451,7 @@ fn elf_get_phdr(buf: Address, phoff: u64, idx: u32, phdr: State<Elf64Phdr>) {
 // fresh State<Elf64Phdr> per loop iteration (init-style for
 // elf_get_phdr) — same pattern as K5d's initramfs.vuma allocating a
 // fresh State<CpioHeader> per loop iteration in initramfs_unpack.
-fn elf_count_load_segments(ehdr: State<Elf64Ehdr>) -> u32 {
+transform elf_count_load_segments(ehdr: State<Elf64Ehdr>) -> u32 {
     // Recover the buf Address from the e_ident[8..15] side-channel
     // cache. Same byte-loop unpack pattern as elf_parse_header's
     // e_ident write, reversed — read 8 bytes from e_ident[8..15],
@@ -510,7 +510,7 @@ fn elf_count_load_segments(ehdr: State<Elf64Ehdr>) -> u32 {
 // table is at the conventional offset (e_phoff = 64 = sizeof(ehdr)).
 // It's NOT a runnable program — there's no code segment — but the
 // parser doesn't care; it just reads the header + phdrs.
-fn main() -> i32 {
+transform main() -> i32 {
     let buf = state_new(ElfBuf);
 
     // ── ELF header (64 bytes) ──────────────────────────────────────────

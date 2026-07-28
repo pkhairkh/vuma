@@ -6,7 +6,7 @@
 // bitwise drop bug workaround). Distinct from s22_crypto_or_xor_chain
 // (or-then-xor, value 83) and s18_crypto_high_nibble_extract.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 16;          // 0x10
     b: u64 = 15;          // 0x0F
     c: u64 = 64;          // 0x40

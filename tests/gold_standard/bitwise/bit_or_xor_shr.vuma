@@ -6,7 +6,7 @@
 // first. Distinct from s7_bit_and_or_combine (AND-then-OR) and
 // s10_bit_xor_then_or (XOR-then-OR).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;         // 0xF0
     b: u64 = 15;          // 0x0F
     c: u64 = 85;          // 0x55

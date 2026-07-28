@@ -145,7 +145,7 @@ layout BootInfo = {
 // re-declared here so this file compiles standalone. riscv_bootinfo_init
 // calls this first to get a clean slate before populating riscv64-specific
 // fields.
-fn bootinfo_init(bi: State<BootInfo>) {
+transform bootinfo_init(bi: State<BootInfo>) {
     bi.mem_start = 0;
     bi.mem_size = 0;
     bi.cmdline = 0;
@@ -202,7 +202,7 @@ fn bootinfo_init(bi: State<BootInfo>) {
 // params are pure u64 values (no State indirection). The body is 4 field
 // writes after the bootinfo_init call — pure typed-memory writes, no
 // pointer ops.
-fn riscv_bootinfo_init(bi: State<BootInfo>, hartid: u64, dtb_addr: u64, mem_start: u64, mem_size: u64) {
+transform riscv_bootinfo_init(bi: State<BootInfo>, hartid: u64, dtb_addr: u64, mem_start: u64, mem_size: u64) {
     bootinfo_init(bi);
     bi.boot_type = 2;            // sbi (riscv64)
     bi.dtb_addr = dtb_addr;
@@ -242,7 +242,7 @@ fn riscv_bootinfo_init(bi: State<BootInfo>, hartid: u64, dtb_addr: u64, mem_star
 //   2: dtb_addr  != 2181038080
 //   3: mem_start != 2149580800
 //   4: mem_size  != 268435456
-fn main() -> i32 {
+transform main() -> i32 {
     let bi = state_new(BootInfo);
     riscv_bootinfo_init(bi, 0, 2181038080, 2149580800, 268435456);
     if bi.boot_type != 2 { return 1; }

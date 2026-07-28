@@ -2,4 +2,4 @@
 // DoH port
 // Expected exit code: 187
 
-fn main() -> i32 { return 443; }
+transform main() -> i32 { return 443; }

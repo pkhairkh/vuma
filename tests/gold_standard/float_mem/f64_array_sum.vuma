@@ -3,7 +3,7 @@
 
 layout Array5 = { data: [f64; 5] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let a = state_new(Array5);
     let i = 0;
     while i < 5 {

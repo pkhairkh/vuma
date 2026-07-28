@@ -6,7 +6,7 @@
 // AST → IR → x86_64 codegen → ELF64) end-to-end.
 //
 // The bootstrap compiler (womb/lang/{full_lexer,full_parser,ir_builder,
-// codegen,elf}.vuma) supports a V1.0-era grammar subset (fn, let, if,
+// codegen,elf}.vuma) supports a V1.0-era grammar subset (transform, let, if,
 // while, print_int, return, integer literals, binary ops, allocate/free
 // interception). VUMA 2.0 PMT constructs (layout, state_new, field
 // access, transforms) are not yet supported by the bootstrap's lexer/
@@ -19,7 +19,7 @@
 // self-host test can verify the ported bootstrap still emits a working
 // x86_64 ELF that prints "42".
 
-fn main() -> i32 {
+transform main() -> i32 {
     print_int(42);
     return 0;
 }

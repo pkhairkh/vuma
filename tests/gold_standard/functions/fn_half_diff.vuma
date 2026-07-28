@@ -6,13 +6,13 @@
 // (inc helper, sum not diff) and s5_fn_call_chain_diff_funcs
 // (chain, not two independent calls).
 
-fn half(x: u32) -> u32 {
+transform half(x: u32) -> u32 {
     two: u32 = 2;
     r: u32 = x / two;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = half(40);   // 20
     b: u32 = half(20);   // 10
     d: u32 = a - b;      // 10

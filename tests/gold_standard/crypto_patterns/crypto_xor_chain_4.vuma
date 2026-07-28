@@ -6,7 +6,7 @@
 // Distinct from s6_crypto_xor_chain_3 (three operands) and
 // s10_crypto_xor_inverse (self-cancelling pair).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 171;         // 0xAB
     b: u64 = 205;         // 0xCD
     c: u64 = 18;          // 0x12

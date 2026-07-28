@@ -7,14 +7,14 @@
 // Exercises self-contained buffer lifetime inside a single function.
 
 layout _L1 = { v: u32 }
-fn make_and_load() -> i32 {
+transform make_and_load() -> i32 {
     let buf = state_new(_L1);
     buf.v = 42;
     val: i32 = buf.v;
     return val;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     result: i32 = make_and_load();
     return result;
 }

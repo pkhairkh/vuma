@@ -5,7 +5,7 @@
 // loaded into u64 variables first. Distinct from s6_bit_shl_then_shr
 // (shl-then-shr, no mask) and s10_bit_shl_and_mask (shl-then-mask).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 240;         // 0xF0
     s: u64 = 2;
     m: u64 = 63;          // 0x3F

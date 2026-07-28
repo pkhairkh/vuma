@@ -23,7 +23,7 @@
 //!
 //! let compiler = VumaCompiler::new();
 //! let source = r#"
-//!     fn main() {
+//!     transform main() {
 //!         x = 1 + 2;
 //!     }
 //! "#;
@@ -497,7 +497,7 @@ impl VumaCompiler {
     /// use vuma::api::VumaCompiler;
     ///
     /// let compiler = VumaCompiler::new();
-    /// let source = "fn main() {}";
+    /// let source = "transform main() {}";
     /// let report = compiler.verify(source);
     /// println!("Overall verdict: {}", report.overall_verdict);
     /// for inv in &report.invariants {
@@ -1880,7 +1880,7 @@ mod tests {
     #[test]
     fn test_validate_valid() {
         let compiler = VumaCompiler::new();
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let diags = compiler.validate(source);
         assert!(diags.is_empty(), "Valid source should have no diagnostics");
     }
@@ -1888,7 +1888,7 @@ mod tests {
     #[test]
     fn test_validate_invalid() {
         let compiler = VumaCompiler::new();
-        let source = "fn 123invalid() {}";
+        let source = "transform 123invalid() {}";
         let diags = compiler.validate(source);
         assert!(!diags.is_empty(), "Invalid source should have diagnostics");
         assert!(diags
@@ -1910,7 +1910,7 @@ mod tests {
     #[test]
     fn test_compile_for_unknown_target() {
         let compiler = VumaCompiler::new();
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let result = compiler.compile_for_target(source, "unknown_arch");
         assert!(!result.success, "Should fail for unknown target");
         assert!(result
@@ -1922,7 +1922,7 @@ mod tests {
     #[test]
     fn test_compile_result_serializable() {
         let compiler = VumaCompiler::new();
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let result = compiler.compile(source);
         let json = result.to_json();
         assert!(!json.is_empty(), "CompileResult should be serializable");
@@ -1931,7 +1931,7 @@ mod tests {
     #[test]
     fn test_metadata() {
         let compiler = VumaCompiler::new();
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let result = compiler.compile(source);
         assert!(result.metadata.source_lines > 0);
         assert!(result.metadata.source_bytes > 0);
@@ -1940,7 +1940,7 @@ mod tests {
     #[test]
     fn test_verify_simple() {
         let compiler = VumaCompiler::new();
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let report = compiler.verify(source);
         // A simple empty function should parse and verify without errors.
         assert!(
@@ -1965,7 +1965,7 @@ mod tests {
     #[test]
     fn test_verify_report_serializable() {
         let compiler = VumaCompiler::new();
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let report = compiler.verify(source);
         let json = report.to_json();
         assert!(
@@ -1977,7 +1977,7 @@ mod tests {
     #[test]
     fn test_verify_invalid_source() {
         let compiler = VumaCompiler::new();
-        let source = "fn 123invalid() {}";
+        let source = "transform 123invalid() {}";
         let report = compiler.verify(source);
         assert_eq!(
             report.overall_verdict,

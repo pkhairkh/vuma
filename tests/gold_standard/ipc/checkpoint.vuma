@@ -24,7 +24,7 @@
 //      integrity hash verified — exit 1.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     checkpoint_save(42424242);
     v = checkpoint_restore();
     if v == 42424242 { return 1; }

@@ -7,7 +7,7 @@
 // Distinct from s12_crypto_nibble_swap (decomposes a byte) and
 // s6_bit_or_chain_3 (pure OR chain, no shift).
 
-fn main() -> i32 {
+transform main() -> i32 {
     hi_nib: u64 = 15;     // 0x0F
     lo_nib: u64 = 5;      // 0x05
     sh: u64 = 4;

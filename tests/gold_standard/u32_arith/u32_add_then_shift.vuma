@@ -5,7 +5,7 @@
 // shift amount is loaded into a variable to dodge the immediate-RHS
 // bitwise drop bug. Distinct from s4_u32_shift_add (shift first).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 50;
     b: u32 = 30;
     sh: u32 = 1;

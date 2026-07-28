@@ -7,7 +7,7 @@
 // (operands 0xC0|0x30=0xF0, ^0x0F=0xFF) and s10_bit_xor_then_or
 // (XOR-then-OR, different op order).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 240;         // 0xF0
     b: u64 = 15;          // 0x0F
     c: u64 = 51;          // 0x33

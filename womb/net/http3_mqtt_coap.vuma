@@ -91,14 +91,14 @@ const AP_U32_MAX: u32 = 4294967295;
 // are u32 to compose cleanly with the u32 index arithmetic used
 // throughout the module.
 
-fn ap_store_u32(ptr: Address, off: u32, val: u32) {
+transform ap_store_u32(ptr: Address, off: u32, val: u32) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn ap_load_u32(ptr: Address, off: u32) -> u32 {
+transform ap_load_u32(ptr: Address, off: u32) -> u32 {
     let b0: u32 = *(ptr + off);
     let b1: u32 = *(ptr + off + 1);
     let b2: u32 = *(ptr + off + 2);
@@ -106,7 +106,7 @@ fn ap_load_u32(ptr: Address, off: u32) -> u32 {
     return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & AP_U32_MAX;
 }
 
-fn ap_store_u64(ptr: Address, off: u32, val: u64) {
+transform ap_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -117,7 +117,7 @@ fn ap_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn ap_load_u64(ptr: Address, off: u32) -> u64 {
+transform ap_load_u64(ptr: Address, off: u32) -> u64 {
     let b0: u64 = *(ptr + off)     as u64;
     let b1: u64 = *(ptr + off + 1) as u64;
     let b2: u64 = *(ptr + off + 2) as u64;
@@ -131,19 +131,19 @@ fn ap_load_u64(ptr: Address, off: u32) -> u64 {
     return v;
 }
 
-fn ap_store_addr(ptr: Address, off: u32, val: Address) {
+transform ap_store_addr(ptr: Address, off: u32, val: Address) {
     let v: u64 = val as u64;
     ap_store_u64(ptr, off, v);
 }
 
-fn ap_load_addr(ptr: Address, off: u32) -> Address {
+transform ap_load_addr(ptr: Address, off: u32) -> Address {
     let v: u64 = ap_load_u64(ptr, off);
     return v as Address;
 }
 
 // Compute the length of a null-terminated string.
 
-fn ap_strlen(s: Address) -> u32 {
+transform ap_strlen(s: Address) -> u32 {
     let n: u32 = 0;
     while *(s + n) != 0 {
         n = n + 1;
@@ -175,7 +175,7 @@ fn ap_strlen(s: Address) -> u32 {
 // the new position. Supports values up to 30 bits (4-byte form); larger
 // values fall back to the 8-byte form using the low 30 bits.
 
-fn http3_encode_varint(buf: Address, pos: u32, value: u32) -> u32 {
+transform http3_encode_varint(buf: Address, pos: u32, value: u32) -> u32 {
     if value < 64 {
         *(buf + pos) = value & 255;
         return pos + 1;
@@ -197,7 +197,7 @@ fn http3_encode_varint(buf: Address, pos: u32, value: u32) -> u32 {
 // u32 cell at Address pos). *pos is advanced past the integer. Returns
 // the decoded value.
 
-fn http3_decode_varint(buf: Address, pos: Address) -> u32 {
+transform http3_decode_varint(buf: Address, pos: Address) -> u32 {
     let p: u32 = ap_load_u32(pos, 0);
     let first: u32 = *(buf + p) & 255;
     let prefix: u32 = (first >> 6) & 3;
@@ -231,7 +231,7 @@ fn http3_decode_varint(buf: Address, pos: Address) -> u32 {
 // `payload` may be 0 / payload_len 0 to emit a frame with an empty payload.
 // Returns the total number of bytes written to `out`.
 
-fn http3_build_frame(out: Address, frame_type: u32, payload: Address, payload_len: u32) -> u32 {
+transform http3_build_frame(out: Address, frame_type: u32, payload: Address, payload_len: u32) -> u32 {
     let after_type: u32 = http3_encode_varint(out, 0, frame_type);
     let after_len: u32 = http3_encode_varint(out, after_type, payload_len);
     let i: u32 = 0;
@@ -245,13 +245,13 @@ fn http3_build_frame(out: Address, frame_type: u32, payload: Address, payload_le
 // HEADERS frame (type 0x01). Payload is the QPACK-encoded header block
 // passed in as `headers` (headers_len bytes). Returns total frame size.
 
-fn http3_build_headers_frame(headers: Address, headers_len: u32, out: Address) -> u32 {
+transform http3_build_headers_frame(headers: Address, headers_len: u32, out: Address) -> u32 {
     return http3_build_frame(out, HTTP3_FRAME_HEADERS, headers, headers_len);
 }
 
 // DATA frame (type 0x00). Payload is the raw body bytes.
 
-fn http3_build_data_frame(data: Address, data_len: u32, out: Address) -> u32 {
+transform http3_build_data_frame(data: Address, data_len: u32, out: Address) -> u32 {
     return http3_build_frame(out, HTTP3_FRAME_DATA, data, data_len);
 }
 
@@ -261,7 +261,7 @@ fn http3_build_data_frame(data: Address, data_len: u32, out: Address) -> u32 {
 //   *payload_len ← u32 payload length
 // Returns the total frame size (header + payload), or 0 on error.
 
-fn http3_parse_frame(buf: Address, buf_len: u32, type: Address, payload: Address, payload_len: Address) -> u32 {
+transform http3_parse_frame(buf: Address, buf_len: u32, type: Address, payload: Address, payload_len: Address) -> u32 {
     if buf_len < 2 { return 0; }
     let pos_cell: Address = allocate(4);
     ap_store_u32(pos_cell, 0, 0);
@@ -282,7 +282,7 @@ fn http3_parse_frame(buf: Address, buf_len: u32, type: Address, payload: Address
 // GOAWAY frame (type 0x07). Payload is a single varint: the largest stream
 // ID that was processed. Returns total frame size.
 
-fn http3_build_goaway(stream_id: u64, out: Address) -> u32 {
+transform http3_build_goaway(stream_id: u64, out: Address) -> u32 {
     // Encode stream_id as a QUIC varint into a temporary buffer. We only
     // use the low 30 bits since the rest of the module uses u32 lengths.
     let payload: Address = allocate(8);
@@ -298,7 +298,7 @@ fn http3_build_goaway(stream_id: u64, out: Address) -> u32 {
 // Emits QPACK_MAX_TABLE_CAPACITY and MAX_FIELD_SECTION_SIZE with the
 // default values. Returns total frame size.
 
-fn http3_build_settings(out: Address) -> u32 {
+transform http3_build_settings(out: Address) -> u32 {
     let payload: Address = allocate(32);
     let p1: u32 = http3_encode_varint(payload, 0, HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY);
     let p2: u32 = http3_encode_varint(payload, p1, HTTP3_DEFAULT_TABLE_CAPACITY);
@@ -324,7 +324,7 @@ fn http3_build_settings(out: Address) -> u32 {
 // bits (e.g. the 001 pattern for a literal-without-name-ref) afterwards.
 // Returns the new position.
 
-fn qpack_encode_integer(buf: Address, pos: u32, value: u32, prefix_bits: u32) -> u32 {
+transform qpack_encode_integer(buf: Address, pos: u32, value: u32, prefix_bits: u32) -> u32 {
     let one: u32 = 1;
     let M: u32 = ((one << prefix_bits) - 1) & AP_U32_MAX;
     if value < M {
@@ -348,7 +348,7 @@ fn qpack_encode_integer(buf: Address, pos: u32, value: u32, prefix_bits: u32) ->
 // Address pos). *pos is advanced past the integer. The first byte's high
 // (8 - prefix_bits) bits are ignored. Returns the decoded value.
 
-fn qpack_decode_integer(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
+transform qpack_decode_integer(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
     let one: u32 = 1;
     let M: u32 = ((one << prefix_bits) - 1) & AP_U32_MAX;
     let p: u32 = ap_load_u32(pos, 0);
@@ -382,7 +382,7 @@ fn qpack_decode_integer(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
 //   value bytes  (value_len bytes)
 // Returns the new position.
 
-fn qpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32) -> u32 {
+transform qpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32) -> u32 {
     // Reserve the first byte for the 001 prefix + name length integer.
     let name_first: u32 = pos;
     let after_name_len: u32 = qpack_encode_integer(buf, pos, name_len, QPACK_LITERAL_NO_REF_PREFIX_BITS);
@@ -413,7 +413,7 @@ fn qpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, val
 // qpack_decode_header can recover name bytes for indexed / literal-with-
 // name-ref representations of the most common pseudo-headers.
 
-fn qpack_static_name(idx: u32, name_out: Address, name_len: Address) -> u32 {
+transform qpack_static_name(idx: u32, name_out: Address, name_len: Address) -> u32 {
     if idx == 1 {
         // :authority
         *(name_out + 0) = 58; *(name_out + 1) = 97; *(name_out + 2) = 117;
@@ -473,7 +473,7 @@ fn qpack_static_name(idx: u32, name_out: Address, name_len: Address) -> u32 {
 // Indexed entries whose static-table index we don't recognize are still
 // counted but written with empty name/value.
 
-fn qpack_decode_header(buf: Address, buf_len: u32, headers: Address, max_headers: u32) -> u32 {
+transform qpack_decode_header(buf: Address, buf_len: u32, headers: Address, max_headers: u32) -> u32 {
     let pos_cell: Address = allocate(4);
     ap_store_u32(pos_cell, 0, 0);
 
@@ -600,7 +600,7 @@ fn qpack_decode_header(buf: Address, buf_len: u32, headers: Address, max_headers
 // Encode `value` as an MQTT remaining length into buf at pos. Returns the
 // new position. Caller must ensure buf has at least 4 bytes free.
 
-fn mqtt_encode_remaining_length(buf: Address, pos: u32, value: u32) -> u32 {
+transform mqtt_encode_remaining_length(buf: Address, pos: u32, value: u32) -> u32 {
     let mut_p: u32 = pos;
     let mut_v: u32 = value;
     while 1 == 1 {
@@ -621,7 +621,7 @@ fn mqtt_encode_remaining_length(buf: Address, pos: u32, value: u32) -> u32 {
 // advanced past the length. Returns the decoded value, or AP_U32_MAX on
 // error (malformed encoding or more than 4 bytes).
 
-fn mqtt_decode_remaining_length(buf: Address, pos: Address) -> u32 {
+transform mqtt_decode_remaining_length(buf: Address, pos: Address) -> u32 {
     let mut_p: u32 = ap_load_u32(pos, 0);
     let multiplier: u32 = 1;
     let value: u32 = 0;
@@ -651,7 +651,7 @@ fn mqtt_decode_remaining_length(buf: Address, pos: Address) -> u32 {
 // 4, connect flags 0x02 (clean session only), keep-alive (2 bytes BE).
 // Payload: client_id (length-prefixed, null-terminated input).
 
-fn mqtt_build_connect(client_id: Address, keepalive: u16, out: Address) -> u32 {
+transform mqtt_build_connect(client_id: Address, keepalive: u16, out: Address) -> u32 {
     let client_id_len: u32 = ap_strlen(client_id);
     let ka: u32 = keepalive as u32;
 
@@ -697,7 +697,7 @@ fn mqtt_build_connect(client_id: Address, keepalive: u16, out: Address) -> u32 {
 // Fixed header byte 0 = 0x30 | (qos << 1) (retain = 0). If qos > 0, a
 // 2-byte packet ID is inserted after the topic (defaults to 0x0001).
 
-fn mqtt_build_publish(topic: Address, payload: Address, payload_len: u32, qos: u8, out: Address) -> u32 {
+transform mqtt_build_publish(topic: Address, payload: Address, payload_len: u32, qos: u8, out: Address) -> u32 {
     let topic_len: u32 = ap_strlen(topic);
     let q: u32 = qos as u32;
 
@@ -743,7 +743,7 @@ fn mqtt_build_publish(topic: Address, payload: Address, payload_len: u32, qos: u
 // Variable header: packet ID (2 BE). Payload: topic filter length (2 BE) +
 // topic filter bytes + requested QoS (1 byte).
 
-fn mqtt_build_subscribe(packet_id: u16, topic: Address, qos: u8, out: Address) -> u32 {
+transform mqtt_build_subscribe(packet_id: u16, topic: Address, qos: u8, out: Address) -> u32 {
     let topic_len: u32 = ap_strlen(topic);
     let q: u32 = qos as u32;
     let pid: u32 = packet_id as u32;
@@ -777,7 +777,7 @@ fn mqtt_build_subscribe(packet_id: u16, topic: Address, qos: u8, out: Address) -
 
 // PINGREQ: type=12, remaining length=0. Two bytes total.
 
-fn mqtt_build_pingreq(out: Address) -> u32 {
+transform mqtt_build_pingreq(out: Address) -> u32 {
     *(out + 0) = (MQTT_TYPE_PINGREQ << 4) & 255;
     *(out + 1) = 0;
     return 2;
@@ -785,7 +785,7 @@ fn mqtt_build_pingreq(out: Address) -> u32 {
 
 // DISCONNECT: type=14, remaining length=0. Two bytes total.
 
-fn mqtt_build_disconnect(out: Address) -> u32 {
+transform mqtt_build_disconnect(out: Address) -> u32 {
     *(out + 0) = (MQTT_TYPE_DISCONNECT << 4) & 255;
     *(out + 1) = 0;
     return 2;
@@ -798,7 +798,7 @@ fn mqtt_build_disconnect(out: Address) -> u32 {
 // Returns the total packet size (fixed header + remaining length), or 0
 // on error.
 
-fn mqtt_parse_packet(buf: Address, buf_len: u32, type: Address, payload: Address, payload_len: Address) -> u32 {
+transform mqtt_parse_packet(buf: Address, buf_len: u32, type: Address, payload: Address, payload_len: Address) -> u32 {
     if buf_len < 2 { return 0; }
     let first: u32 = *(buf + 0) & 255;
     let ptype: u32 = (first >> 4) & 15;
@@ -843,7 +843,7 @@ fn mqtt_parse_packet(buf: Address, buf_len: u32, type: Address, payload: Address
 // option number itself for the first option). `value` is value_len bytes.
 // Returns the new position.
 
-fn coap_build_option(buf: Address, pos: u32, delta: u32, value: Address, value_len: u32) -> u32 {
+transform coap_build_option(buf: Address, pos: u32, delta: u32, value: Address, value_len: u32) -> u32 {
     // Compute delta encoding.
     let delta_nibble: u32 = 15;
     let delta_ext_bytes: u32 = 0;
@@ -923,7 +923,7 @@ fn coap_build_option(buf: Address, pos: u32, delta: u32, value: Address, value_l
 //   out        — caller-allocated output buffer
 // Returns total message size.
 
-fn coap_build_request(method: u32, uri_path: Address, payload: Address, payload_len: u32, message_id: u16, token: Address, token_len: u8, out: Address) -> u32 {
+transform coap_build_request(method: u32, uri_path: Address, payload: Address, payload_len: u32, message_id: u16, token: Address, token_len: u8, out: Address) -> u32 {
     let tkl: u32 = token_len as u32;
     let mid: u32 = message_id as u32;
 
@@ -990,7 +990,7 @@ fn coap_build_request(method: u32, uri_path: Address, payload: Address, payload_
 // Returns 1 on success, 0 on error (buffer too small, wrong version, or
 // malformed option).
 
-fn coap_parse_response(buf: Address, buf_len: u32, code: Address, payload: Address, payload_len: Address) -> u32 {
+transform coap_parse_response(buf: Address, buf_len: u32, code: Address, payload: Address, payload_len: Address) -> u32 {
     if buf_len < COAP_HEADER_SIZE { return 0; }
     let b0: u32 = *(buf + 0) & 255;
     let ver: u32 = (b0 >> 6) & 3;

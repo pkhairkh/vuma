@@ -181,7 +181,7 @@ layout TrapFrame = {
 // 8-byte little-endian unpack at byte offset `idx * 8`. Same loop pattern
 // as task.vuma's pt_get_pid but with a u64 accumulator and an 8-byte loop
 // bound. Byte-identical to R2a's tf_get_gpr (same param name, same body).
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -200,7 +200,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 // 8-byte little-endian pack at byte offset `idx * 8`. Same loop pattern
 // as task.vuma's pt_set_pid but with an 8-byte loop bound. Byte-identical
 // to R2a's tf_set_gpr (same param name, same body).
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -217,7 +217,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 // Called once per TrapFrame before arm64_trap_to_superset (or any other
 // arch's adapter) populates the arch-specific fields. Byte-identical to
 // R2a's tf_init (same param name, same body).
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -288,37 +288,37 @@ layout Arm64TrapFrame = {
 extern "C" {
     // Load the Vector Base Address Register. K11 stub:
     // `msr vbar_el1, x0; isb; ret`.
-    fn vbar_load(vbar_ptr: Address);
+    transform vbar_load(vbar_ptr: Address);
     // End-Of-Interrupt to the GIC. K11 stub (GICv3):
     // `msr icc_eoir1_el1, x0; ret`.
-    fn gic_eoi(irq: u32);
+    transform gic_eoi(irq: u32);
     // Mask an IRQ line at the GIC distributor. K11 stub: compute
     // register bank = irq / 32, mask bit = 1 << (irq % 32), then
     // GICD_ICENABLER<bank> = bit.
-    fn gic_mask(irq: u32);
+    transform gic_mask(irq: u32);
     // Unmask an IRQ line at the GIC distributor. Pairs with gic_mask.
-    fn gic_unmask(irq: u32);
+    transform gic_unmask(irq: u32);
     // Read the Interrupt Acknowledge Register — returns the active
     // IRQ number (low 24 bits) or 1023 (spurious). K11 stub (GICv3):
     // `mrs x0, icc_iar1_el1; ret`.
-    fn gic_get_irq() -> u32;
+    transform gic_get_irq() -> u32;
     // Read FAR_EL1 — the Fault Address Register. K11 stub:
     // `mrs x0, far_el1; ret`.
-    fn far_el1_read() -> u64;
+    transform far_el1_read() -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers.
 // ────────────────────────────────────────────────────────────────────────────
 // Init-style API (caller allocates via state_new, passes by reference).
-// The State<T> params here are regular VUMA-fn borrows (NOT extern
-// #[borrow] — VUMA fn calls don't need the attribute, only extern "C"
+// The State<T> params here are regular VUMA-transform borrows (NOT extern
+// #[borrow] — VUMA transform calls don't need the attribute, only extern "C"
 // calls do).
 
 // Initialize an Arm64TrapFrame to zeros. Writes all 35 fields to 0. Kept
 // verbatim from K3b — only the param type name changes (TrapFrame →
 // Arm64TrapFrame).
-fn trap_frame_init(tf: State<Arm64TrapFrame>) {
+transform trap_frame_init(tf: State<Arm64TrapFrame>) {
     tf.x0 = 0;
     tf.x1 = 0;
     tf.x2 = 0;
@@ -382,7 +382,7 @@ fn trap_frame_init(tf: State<Arm64TrapFrame>) {
 // Kept verbatim from K3b — only the param type name changes
 // (TrapFrame → Arm64TrapFrame). The arm64_trap_to_superset adapter below
 // calls this to populate sup.vector.
-fn trap_exception_class(tf: State<Arm64TrapFrame>) -> u32 {
+transform trap_exception_class(tf: State<Arm64TrapFrame>) -> u32 {
     return ((tf.esr_el1 >> 26) & 63) as u32;
 }
 
@@ -418,8 +418,8 @@ fn trap_exception_class(tf: State<Arm64TrapFrame>) -> u32 {
 // The two State<T> params pattern is precedent-set by
 // womb/kernel/syscall/abi.vuma::syscall_args_from_frame
 // (tf: State<TrapFrame>, args: State<SyscallArgs>) — VUMA's codegen
-// tracks both States' lifetimes through regular fn calls.
-fn arm64_trap_to_superset(old: State<Arm64TrapFrame>, sup: State<TrapFrame>) {
+// tracks both States' lifetimes through regular transform calls.
+transform arm64_trap_to_superset(old: State<Arm64TrapFrame>, sup: State<TrapFrame>) {
     // 31 GP registers → slots 0..30 (ascending save order).
     tf_set_gpr(sup, 0, old.x0);
     tf_set_gpr(sup, 1, old.x1);
@@ -483,7 +483,7 @@ fn arm64_trap_to_superset(old: State<Arm64TrapFrame>, sup: State<TrapFrame>) {
 //
 // Per the R2c contract's "Use decimal constants" rule: all non-zero
 // constants in the self-test use DECIMAL (42, 8192 — not 0x2a, 0x2000).
-fn main() -> i32 {
+transform main() -> i32 {
     let old = state_new(Arm64TrapFrame);
     trap_frame_init(old);
     let sup = state_new(TrapFrame);

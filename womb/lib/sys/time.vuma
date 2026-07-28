@@ -20,29 +20,29 @@ const CLOCK_MONOTONIC: i64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: i64 = 2;
 const CLOCK_THREAD_CPUTIME_ID: i64 = 3;
 
-fn time_now() -> u64 {
+transform time_now() -> u64 {
     let ts = state_new(Timespec);
     syscall(113, CLOCK_REALTIME, ts);
     return ts.sec as u64;
 }
 
-fn time_monotonic() -> u64 {
+transform time_monotonic() -> u64 {
     let ts = state_new(Timespec);
     syscall(113, CLOCK_MONOTONIC, ts);
     return ts.sec as u64;
 }
 
-fn time_monotonic_ns() -> u64 {
+transform time_monotonic_ns() -> u64 {
     let ts = state_new(Timespec);
     syscall(113, CLOCK_MONOTONIC, ts);
     return (ts.sec as u64) * 1000000000 + (ts.nsec as u64);
 }
 
-fn time_monotonic_us() -> u64 {
+transform time_monotonic_us() -> u64 {
     return time_monotonic_ns() / 1000;
 }
 
-fn time_monotonic_ms() -> u64 {
+transform time_monotonic_ms() -> u64 {
     return time_monotonic_ns() / 1000000;
 }
 
@@ -50,7 +50,7 @@ fn time_monotonic_ms() -> u64 {
 // Sleep functions
 // ===========================================================================
 
-fn sleep_ms(ms: u32) -> i64 {
+transform sleep_ms(ms: u32) -> i64 {
     let req = state_new(Timespec);
     req.sec = (ms / 1000) as i64;
     req.nsec = ((ms % 1000) * 1000000) as i64;
@@ -60,11 +60,11 @@ fn sleep_ms(ms: u32) -> i64 {
     return ret;
 }
 
-fn sleep_us(us: u32) -> i64 {
+transform sleep_us(us: u32) -> i64 {
     return sleep_ms(us / 1000);
 }
 
-fn sleep_s(secs: u32) -> i64 {
+transform sleep_s(secs: u32) -> i64 {
     return sleep_ms(secs * 1000);
 }
 
@@ -72,15 +72,15 @@ fn sleep_s(secs: u32) -> i64 {
 // Timestamp helpers
 // ===========================================================================
 
-fn time_diff_ms(start: u64, end: u64) -> u64 {
+transform time_diff_ms(start: u64, end: u64) -> u64 {
     return (end - start) / 1000000;
 }
 
-fn time_diff_us(start: u64, end: u64) -> u64 {
+transform time_diff_us(start: u64, end: u64) -> u64 {
     return (end - start) / 1000;
 }
 
-fn time_diff_ns(start: u64, end: u64) -> u64 {
+transform time_diff_ns(start: u64, end: u64) -> u64 {
     return end - start;
 }
 
@@ -88,11 +88,11 @@ fn time_diff_ns(start: u64, end: u64) -> u64 {
 // Epoch conversion helpers (Unix epoch)
 // ===========================================================================
 
-fn epoch_seconds() -> u64 {
+transform epoch_seconds() -> u64 {
     return time_now();
 }
 
-fn epoch_millis() -> u64 {
+transform epoch_millis() -> u64 {
     let ts = state_new(Timespec);
     syscall(113, CLOCK_REALTIME, ts);
     return (ts.sec as u64) * 1000 + (ts.nsec as u64) / 1000000;

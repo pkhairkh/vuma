@@ -23,7 +23,7 @@
 
 layout Point = { x: u32, y: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let p = state_new(Point);
     // p is never read or written — it's a dead state.
     return 0;

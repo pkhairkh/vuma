@@ -5,11 +5,11 @@
 // main can return that u32 as an i32 (via implicit conversion). The
 // u8 value 42 is widened to u32 and then to i32.
 
-fn widen(x: u8) -> u32 {
+transform widen(x: u8) -> u32 {
     return x;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = widen(42);
     return v;
 }

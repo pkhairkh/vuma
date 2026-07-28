@@ -168,7 +168,7 @@
 // `state_new(DentryTable)` (and namei allocates the temp `comp` PathBuf
 // via `state_new(PathBuf)` inside its outer loop — one fresh PathBuf per
 // path component). All helpers take `tbl: State<DentryTable>` by regular
-// VUMA-fn borrow (NOT extern #[borrow] — VUMA fn calls don't need the
+// VUMA-transform borrow (NOT extern #[borrow] — VUMA transform calls don't need the
 // attribute; only extern "C" calls do, and none of these helpers call
 // any extern). No externs are declared in this file (namei is pure-PMT
 // — K5c's sys_open will declare its own externs for copying the user-
@@ -264,13 +264,13 @@ layout DentryTable = {
 // Byte-identical to K5a's dentry.vuma.
 
 // Read byte `off` (0..63) of the name field of Dentry slot `idx`.
-fn dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
+transform dentry_get_name_byte(tbl: State<DentryTable>, idx: u32, off: u32) -> u8 {
     let base = idx * 64;
     return tbl.names[base + off];
 }
 
 // Write byte `off` (0..63) of the name field of Dentry slot `idx`.
-fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
+transform dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
     let base = idx * 64;
     tbl.names[base + off] = val;
 }
@@ -287,7 +287,7 @@ fn dentry_set_name_byte(tbl: State<DentryTable>, idx: u32, off: u32, val: u8) {
 // dentry_set_child and dentry_set_parent to build the test tree.
 
 // Read the u64 `parent` field of Dentry slot `idx`.
-fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -301,7 +301,7 @@ fn dentry_get_parent(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `parent` field of Dentry slot `idx`.
-fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -313,7 +313,7 @@ fn dentry_set_parent(tbl: State<DentryTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `inode` field of Dentry slot `idx`.
-fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -327,7 +327,7 @@ fn dentry_get_inode(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `inode` field of Dentry slot `idx`.
-fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -340,7 +340,7 @@ fn dentry_set_inode(tbl: State<DentryTable>, idx: u32, val: u64) {
 
 // Read the u64 `next` field of Dentry slot `idx` (next sibling in the
 // parent's child list — 0 means "end of list").
-fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -354,7 +354,7 @@ fn dentry_get_next(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Dentry slot `idx`.
-fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -367,7 +367,7 @@ fn dentry_set_next(tbl: State<DentryTable>, idx: u32, val: u64) {
 
 // Read the u64 `child` field of Dentry slot `idx` (first child in this
 // directory — 0 means "no children" i.e. leaf directory or regular file).
-fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
+transform dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -381,7 +381,7 @@ fn dentry_get_child(tbl: State<DentryTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `child` field of Dentry slot `idx`.
-fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
+transform dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -404,22 +404,22 @@ fn dentry_set_child(tbl: State<DentryTable>, idx: u32, val: u64) {
 // it wires a filesystem onto a directory).
 
 // Read the u8 `mounted` field of Dentry slot `idx`.
-fn dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_mounted(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.mounteds[idx];
 }
 
 // Write the u8 `mounted` field of Dentry slot `idx`.
-fn dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_mounted(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.mounteds[idx] = val;
 }
 
 // Read the u8 `used` flag of Dentry slot `idx` (1 = in use, 0 = free).
-fn dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
+transform dentry_get_used(tbl: State<DentryTable>, idx: u32) -> u8 {
     return tbl.used[idx];
 }
 
 // Write the u8 `used` flag of Dentry slot `idx`.
-fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
+transform dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
     tbl.used[idx] = val;
 }
 
@@ -441,7 +441,7 @@ fn dentry_set_used(tbl: State<DentryTable>, idx: u32, val: u8) {
 // same byte-by-byte compare pattern as libc's strncmp, but with an
 // explicit 64-byte upper bound.
 
-fn name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
+transform name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
     let i = 0;
     while i < 64 {
         let c = dentry_get_name_byte(tbl, idx, i);
@@ -493,7 +493,7 @@ fn name_matches(tbl: State<DentryTable>, idx: u32, name: State<PathBuf>) -> u8 {
 // task.vuma, K5a's own dentry_alloc, and many others — see
 // womb/crypto/x25519.vuma:177 for a nested-while-with-break example).
 
-fn namei(tbl: State<DentryTable>, path: State<PathBuf>, root_idx: u32) -> u32 {
+transform namei(tbl: State<DentryTable>, path: State<PathBuf>, root_idx: u32) -> u32 {
     // Start at the root.
     let cur = root_idx;
     let path_pos = 0;
@@ -576,7 +576,7 @@ fn namei(tbl: State<DentryTable>, path: State<PathBuf>, root_idx: u32) -> u32 {
 // 99='c', 109='m', 111='o', 100='d', 120='x'. The 256 sentinel and the
 // 0/1/2/3 return codes are also decimal.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(DentryTable);
 
     // ── Dentry 0 (root): name = "/" ──────────────────────────────────────

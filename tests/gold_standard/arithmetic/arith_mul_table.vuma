@@ -5,7 +5,7 @@
 // nested while loops with the verified counter pattern.
 // Products: 1,2,3,2,4,6,3,6,9 — sum = 36.
 
-fn main() -> i32 {
+transform main() -> i32 {
     total: u32 = 0;
     i: u32 = 1;
     one: u32 = 1;

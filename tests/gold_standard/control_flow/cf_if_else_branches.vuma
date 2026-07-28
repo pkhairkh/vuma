@@ -11,7 +11,7 @@
 // and s6_cf_if_two_branches_const (values 42/99).
 // Expected exit code: 30
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 30;

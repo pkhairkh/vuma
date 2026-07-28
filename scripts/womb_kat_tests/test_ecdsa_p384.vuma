@@ -2,4 +2,4 @@
 // ECDSA P-384
 // Expected exit code: 30
 
-fn main() -> i32 { return (10+20)&255; }
+transform main() -> i32 { return (10+20)&255; }

@@ -4,18 +4,18 @@
 // `inc(x) = x + 1`, `dec(x) = x - 1`. main calls inc(39) → 40 and
 // dec(61) → 60, sums them. Two distinct helpers, each called once.
 
-fn inc(x: u32) -> u32 {
+transform inc(x: u32) -> u32 {
     one: u32 = 1;
     r: u32 = x + one;
     return r;
 }
-fn dec(x: u32) -> u32 {
+transform dec(x: u32) -> u32 {
     one: u32 = 1;
     r: u32 = x - one;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = inc(39);
     b: u32 = dec(61);
     s: u32 = a + b;

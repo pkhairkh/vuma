@@ -2,4 +2,4 @@
 // ECDSA P-256
 // Expected exit code: 12
 
-fn main() -> i32 { return (5+7)&255; }
+transform main() -> i32 { return (5+7)&255; }

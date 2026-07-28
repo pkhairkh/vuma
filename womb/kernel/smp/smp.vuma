@@ -200,10 +200,10 @@
 //   The `func` parameter is the function address to call on each CPU. In
 //   a real kernel this would be stored in a per-CPU mailbox (one slot per
 //   CPU), and the target CPU's IPI handler would read its mailbox slot and
-//   call func() — VUMA has no fn-pointer call (see K8e's "Why no fn-pointer
+//   call func() — VUMA has no transform-pointer call (see K8e's "Why no transform-pointer
 //   call in dispatch?" header note), so K8f stores `func` only as a u64
 //   parameter (passed to the IPI subsystem implicitly via the
-//   CALL_FUNCTION_VECTOR handler). K11 will wire the fn-pointer call from
+//   CALL_FUNCTION_VECTOR handler). K11 will wire the transform-pointer call from
 //   the trap handler in asm.
 //
 // ── Decimal constants ──────────────────────────────────────────────────────
@@ -373,17 +373,17 @@ extern "C" {
     // APIC_BASE + reg (low) and APIC_BASE + reg + 16 (high) — the
     // LAPIC's 64-bit ICR is accessed as two 32-bit MMIO writes on
     // real hardware.
-    fn lapic_write(reg: u32, val: u64);
+    transform lapic_write(reg: u32, val: u64);
     // aarch64: PSCI CPU_ON — boot the secondary CPU `cpu` at the
     // long-mode entry point `entry` with `stack` as the initial stack
     // pointer. K11 stub: hvc #0 (or smc #0) with r0 = PSCI_FN_CPU_ON
     // (0x84000003), r1 = cpu, r2 = entry, r3 = stack.
-    fn psci_cpu_on(cpu: u32, entry: u64, stack: u64);
+    transform psci_cpu_on(cpu: u32, entry: u64, stack: u64);
     // riscv64: SBI HSM hart_start — boot the secondary hart `cpu` at
     // `entry` with `stack` as the initial stack pointer. K11 stub:
     // ecall with a6 = SBI_EXT_HSM (0x48534D), a7 = SBI_HSM_HART_START
     // (0), a0 = cpu, a1 = entry, a2 = stack.
-    fn sbi_hsm_start(cpu: u32, entry: u64, stack: u64);
+    transform sbi_hsm_start(cpu: u32, entry: u64, stack: u64);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -406,7 +406,7 @@ extern "C" {
 // is the boot-CPU accounting: by the time smp_init runs, the boot CPU
 // (CPU 0) is already executing kernel code, so it's "online" by
 // definition.
-fn smp_init(smp: State<SmpState>) {
+transform smp_init(smp: State<SmpState>) {
     let i = 0;
     while i < 256 {
         smp.cpus[i] = 0;
@@ -461,7 +461,7 @@ fn smp_init(smp: State<SmpState>) {
 // 1MB would lose the high bits, which is why x86 SIPI trampolines live
 // in the first 1MB. K8f's self-test uses 1048576 = 1MB exactly, the
 // highest valid SIPI entry point.)
-fn smp_boot_cpu(smp: State<SmpState>, cpu_id: u32, entry: u64, stack: u64) -> i64 {
+transform smp_boot_cpu(smp: State<SmpState>, cpu_id: u32, entry: u64, stack: u64) -> i64 {
     // cpu_id == 0 is the boot CPU — already running, can't re-boot.
     // This is the same -EINVAL convention Linux uses for cpu_up(0)
     // (see kernel/cpu.c:cpu_up — returns -EINVAL if cpu == 0 because
@@ -517,11 +517,11 @@ fn smp_boot_cpu(smp: State<SmpState>, cpu_id: u32, entry: u64, stack: u64) -> i6
 //          and so the caller can use the same `smp` handle for the full
 //          SMP lifecycle — smp_init → smp_boot_cpu → smp_call_function).
 //   func:  the function address to call on each CPU. Stored as a u64
-//          (VUMA has no fn-pointer type — see K8e's "Why no fn-pointer
+//          (VUMA has no transform-pointer type — see K8e's "Why no transform-pointer
 //          call in dispatch?" header note). In a real kernel this would
 //          be stored in a per-CPU mailbox slot that the target CPU's IPI
 //          handler reads; K8f passes it as a parameter and relies on
-//          K11 to wire the actual fn-pointer call from the trap handler
+//          K11 to wire the actual transform-pointer call from the trap handler
 //          in asm.
 //   wait:  1 = wait for all CPUs to finish calling `func`, 0 = return
 //          immediately. In a real kernel the wait would spin on a per-
@@ -545,7 +545,7 @@ fn smp_boot_cpu(smp: State<SmpState>, cpu_id: u32, entry: u64, stack: u64) -> i6
 // same register for the broadcast function-call IPI (the destination
 // shorthand "all excluding self" is what makes it a broadcast, vs. K8e's
 // ipi_send which uses the per-CPU destination field).
-fn smp_call_function(smp: State<SmpState>, func: u64, wait: u8) {
+transform smp_call_function(smp: State<SmpState>, func: u64, wait: u8) {
     // Send IPI to all other CPUs.
     // x86_64: LAPIC ICR with "all excluding self" shorthand.
     // Vector 0 = reschedule IPI (simplified — in a real kernel this
@@ -582,7 +582,7 @@ fn smp_call_function(smp: State<SmpState>, func: u64, wait: u8) {
 // The byte-stride access `cpus[cpu_id * 16]` is the same index expression
 // that smp_boot_cpu uses to WRITE the flag — K8f keeps the read and write
 // stride identical so the round-trip works (boot writes 1, query reads 1).
-fn smp_cpu_started(smp: State<SmpState>, cpu_id: u32) -> u8 {
+transform smp_cpu_started(smp: State<SmpState>, cpu_id: u32) -> u8 {
     if cpu_id >= 16 { return 0; }
     return smp.cpus[cpu_id * 16];
 }
@@ -613,7 +613,7 @@ fn smp_cpu_started(smp: State<SmpState>, cpu_id: u32) -> u8 {
 // broadcast, 22 = -EINVAL; the other constants are 0 / 1 / 2 / 3 —
 // already small enough to be unambiguous in either base).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let smp = state_new(SmpState);
     smp_init(smp);
     // (1) smp_init → n_cpus = 1 (boot CPU only).

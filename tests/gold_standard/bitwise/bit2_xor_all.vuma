@@ -8,7 +8,7 @@
 //
 // Workaround note: bitwise ops with an immediate RHS are silently dropped by
 // the current codegen, so all operands are loaded into variables first.
-fn main() -> i32 {
+transform main() -> i32 {
     val: u64 = 0xFFFF;
     eight: u64 = 8;
     byte_mask: u64 = 0xFF;

@@ -4,12 +4,12 @@
 // Helper mul(a, b) = a * b. main calls mul(6, 7) -> 42. Distinct
 // from s5_fn_three_args_sum (three args, sum, not mul).
 
-fn mul(a: u32, b: u32) -> u32 {
+transform mul(a: u32, b: u32) -> u32 {
     r: u32 = a * b;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u32 = mul(6, 7);
     return v;
 }

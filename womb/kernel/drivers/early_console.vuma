@@ -168,8 +168,8 @@ layout ByteBuf = { data: [u8; 1] }
 //   mmio_write32(a, v) — x86_64: `mov [rdi], esi; ret`; aarch64: `str
 //                        w1, [x0]`; riscv64: `sw a1, 0(a0)`.
 extern "C" {
-    fn mmio_write8(addr: u64, val: u8);
-    fn mmio_write32(addr: u64, val: u32);
+    transform mmio_write8(addr: u64, val: u8);
+    transform mmio_write32(addr: u64, val: u32);
 }
 
 // Hosted-mode I/O (uses the pre-registered `write` extern — resolves to
@@ -179,7 +179,7 @@ extern "C" {
 // a raw u64 pointer handed to the syscall. This is the documented PMT
 // "Borrowed read" pattern.
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -198,7 +198,7 @@ extern "C" {
 // State<T> params: 1 (ec). The `base` and `con_type` params are pure
 // values (no State indirection). The body is 2 field writes + a 7-iter
 // pad-zeroing loop — pure typed-memory writes, no pointer ops.
-fn early_console_init(ec: State<EarlyConsole>, base: u64, con_type: u8) {
+transform early_console_init(ec: State<EarlyConsole>, base: u64, con_type: u8) {
     ec.base = base;
     ec.con_type = con_type;
     let i = 0;
@@ -246,7 +246,7 @@ fn early_console_init(ec: State<EarlyConsole>, base: u64, con_type: u8) {
 // (the FFI marshal frees it via the standard drop-frame hook on function
 // return). No pointer ops; the `buf as Address` cast is the documented
 // PMT zero-copy-borrow pattern.
-fn early_console_write_byte(ec: State<EarlyConsole>, c: u8) {
+transform early_console_write_byte(ec: State<EarlyConsole>, c: u8) {
     if ec.con_type == 0 {
         // 16550 UART: write byte to data register at base+0
         mmio_write8(ec.base, c);
@@ -285,7 +285,7 @@ fn early_console_write_byte(ec: State<EarlyConsole>, c: u8) {
 //
 // State<T> params: 2 (ec, s). The body is a 256-iter loop with a NUL
 // check + a write_byte call per iteration. No pointer ops.
-fn early_console_write_str(ec: State<EarlyConsole>, s: State<ConsoleStr>) {
+transform early_console_write_str(ec: State<EarlyConsole>, s: State<ConsoleStr>) {
     let i = 0;
     while i < 256 {
         let c = s.data[i];
@@ -312,7 +312,7 @@ fn early_console_write_str(ec: State<EarlyConsole>, s: State<ConsoleStr>) {
 // Expected stdout: "Hi\nok\n" (5 bytes total — the 'X' is silently dropped
 // by the mmio_write8 no-op stub). Returns 0 on success, 1 if the wasm
 // con_type wasn't set, 2 if the 16550 con_type wasn't set.
-fn main() -> i32 {
+transform main() -> i32 {
     // Test: init type 4 (wasm/host), write "Hi\n"
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);

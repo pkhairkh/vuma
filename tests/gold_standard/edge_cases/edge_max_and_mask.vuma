@@ -6,7 +6,7 @@
 // first (immediate-RHS bitwise drop bug workaround). Distinct
 // from s78_edge_max_and (6), s74_edge_max_and_low (5) and
 // s72_edge_max_and_low (5).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 255;          // 0xFF
     b: u32 = 157;          // 0x9D
     r: u32 = a & b;        // 0x9D = 157

@@ -8,7 +8,7 @@
 // dims) and s38_nl_2x5_count (10).
 // Expected exit code: 20
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..5 {
         for j in 0..4 {

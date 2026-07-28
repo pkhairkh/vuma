@@ -4,7 +4,7 @@
 // Three-way OR chain. Bits 0, 6, 7 set -> 1 | 64 | 128 = 193 (0xC1).
 // All operands loaded into variables first. Distinct from s5_bit_and_or_chain.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 1;     // 0x01
     b: u64 = 64;    // 0x40
     c: u64 = 128;   // 0x80

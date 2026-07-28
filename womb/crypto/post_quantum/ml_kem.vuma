@@ -89,7 +89,7 @@ const MLKEM_ENTROPY_COUNTER: Address = 0x5A5A0020;
 // Computed deterministically from the primitive 512th root of unity zeta=17.
 // ===========================================================================
 
-fn mlkem_zeta(k: u32) -> u32 {
+transform mlkem_zeta(k: u32) -> u32 {
     if k == 0 { return 1; }
     if k == 1 { return 1729; }
     if k == 2 { return 2580; }
@@ -225,14 +225,14 @@ fn mlkem_zeta(k: u32) -> u32 {
 // Byte load/store helpers (little-endian u32)
 // ===========================================================================
 
-fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+transform store_u32_le_at(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+transform load_u32_le_at(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -244,18 +244,18 @@ fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
 // Modular arithmetic in Z_q (q = 3329)
 // ===========================================================================
 
-fn mlkem_mod_add(a: u32, b: u32) -> u32 {
+transform mlkem_mod_add(a: u32, b: u32) -> u32 {
     s: u32 = a + b;
     if s >= MLKEM_Q { s = s - MLKEM_Q; }
     return s;
 }
 
-fn mlkem_mod_sub(a: u32, b: u32) -> u32 {
+transform mlkem_mod_sub(a: u32, b: u32) -> u32 {
     if a >= b { return a - b; }
     return a + MLKEM_Q - b;
 }
 
-fn mlkem_mod_mul(a: u32, b: u32) -> u32 {
+transform mlkem_mod_mul(a: u32, b: u32) -> u32 {
     return (a * b) % MLKEM_Q;
 }
 
@@ -263,7 +263,7 @@ fn mlkem_mod_mul(a: u32, b: u32) -> u32 {
 // Polynomial helpers (256 coefficients mod q, 1024 bytes per polynomial)
 // ===========================================================================
 
-fn poly_zero(a: Address) {
+transform poly_zero(a: Address) {
     i: u32 = 0;
     while i < 256 {
         store_u32_le_at(a, i * 4, 0);
@@ -271,7 +271,7 @@ fn poly_zero(a: Address) {
     }
 }
 
-fn poly_copy(dst: Address, src: Address) {
+transform poly_copy(dst: Address, src: Address) {
     i: u32 = 0;
     while i < 1024 {
         *(dst + i) = *(src + i);
@@ -279,7 +279,7 @@ fn poly_copy(dst: Address, src: Address) {
     }
 }
 
-fn poly_add(r: Address, a: Address, b: Address) {
+transform poly_add(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < 256 {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -289,7 +289,7 @@ fn poly_add(r: Address, a: Address, b: Address) {
     }
 }
 
-fn poly_sub(r: Address, a: Address, b: Address) {
+transform poly_sub(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < 256 {
         av: u32 = load_u32_le_at(a, i * 4);
@@ -307,7 +307,7 @@ fn poly_sub(r: Address, a: Address, b: Address) {
 // values from the precomputed table.
 // ===========================================================================
 
-fn ntt(poly: Address) {
+transform ntt(poly: Address) {
     len: u32 = 128;
     k: u32 = 1;
     while len >= 2 {
@@ -337,7 +337,7 @@ fn ntt(poly: Address) {
 // 128^{-1} mod q to compensate for the transform length factor.
 // ===========================================================================
 
-fn intt(poly: Address) {
+transform intt(poly: Address) {
     len: u32 = 2;
     k: u32 = 127;
     while len <= 128 {
@@ -375,7 +375,7 @@ fn intt(poly: Address) {
 //   h[2i+1] = f[2i] * g[2i+1] + f[2i+1] * g[2i]
 // ===========================================================================
 
-fn ntt_mul(r: Address, a: Address, b: Address) {
+transform ntt_mul(r: Address, a: Address, b: Address) {
     i: u32 = 0;
     while i < 128 {
         a0: u32 = load_u32_le_at(a, (2 * i) * 4);
@@ -400,7 +400,7 @@ fn ntt_mul(r: Address, a: Address, b: Address) {
 // All arithmetic fits in u32 (max intermediate is q * 2^12 ≈ 13.6M).
 // ===========================================================================
 
-fn compress_val(x: u32, d: u32) -> u32 {
+transform compress_val(x: u32, d: u32) -> u32 {
     pow2d: u32 = 1;
     i: u32 = 0;
     while i < d {
@@ -414,7 +414,7 @@ fn compress_val(x: u32, d: u32) -> u32 {
     return result & mask;
 }
 
-fn decompress_val(y: u32, d: u32) -> u32 {
+transform decompress_val(y: u32, d: u32) -> u32 {
     pow2d: u32 = 1;
     i: u32 = 0;
     while i < d {
@@ -428,7 +428,7 @@ fn decompress_val(y: u32, d: u32) -> u32 {
 }
 
 // In-place: replace each coefficient of `poly` with Compress_d(coef).
-fn compress(poly: Address, d: u32) {
+transform compress(poly: Address, d: u32) {
     i: u32 = 0;
     while i < 256 {
         v: u32 = load_u32_le_at(poly, i * 4);
@@ -438,7 +438,7 @@ fn compress(poly: Address, d: u32) {
 }
 
 // In-place: replace each coefficient of `poly` with Decompress_d(coef).
-fn decompress(poly: Address, d: u32) {
+transform decompress(poly: Address, d: u32) {
     i: u32 = 0;
     while i < 256 {
         v: u32 = load_u32_le_at(poly, i * 4);
@@ -455,7 +455,7 @@ fn decompress(poly: Address, d: u32) {
 // Supported d values: 1, 4, 5, 10, 11, 12.
 // ===========================================================================
 
-fn byte_encode(out: Address, poly: Address, d: u32) {
+transform byte_encode(out: Address, poly: Address, d: u32) {
     out_len: u32 = (256 * d) / 8;
     // Zero the output buffer.
     i: u32 = 0;
@@ -486,7 +486,7 @@ fn byte_encode(out: Address, poly: Address, d: u32) {
     }
 }
 
-fn byte_decode(out: Address, bytes: Address, d: u32) {
+transform byte_decode(out: Address, bytes: Address, d: u32) {
     acc: u32 = 0;
     acc_bits: u32 = 0;
     in_pos: u32 = 0;
@@ -517,14 +517,14 @@ fn byte_decode(out: Address, bytes: Address, d: u32) {
 // The input must contain at least 64*eta bytes (128 for eta=2, 192 for eta=3).
 // ===========================================================================
 
-fn cbd_get_bit(buf: Address, bit_pos: u32) -> u32 {
+transform cbd_get_bit(buf: Address, bit_pos: u32) -> u32 {
     byte_idx: u32 = bit_pos / 8;
     bit_idx: u32 = bit_pos - byte_idx * 8;
     byte_val: u32 = *(buf + byte_idx);
     return (byte_val >> bit_idx) & 1;
 }
 
-fn cbd(bytes: Address, eta: u32, out: Address) {
+transform cbd(bytes: Address, eta: u32, out: Address) {
     i: u32 = 0;
     while i < 256 {
         bit_pos: u32 = i * 2 * eta;
@@ -555,7 +555,7 @@ fn cbd(bytes: Address, eta: u32, out: Address) {
 // Produces 64*eta bytes (the input length CBD needs to sample one polynomial).
 // ===========================================================================
 
-fn prf(seed: Address, nonce: u32, out_len: u32, out: Address) {
+transform prf(seed: Address, nonce: u32, out_len: u32, out: Address) {
     in_buf = allocate(33);
     i: u32 = 0;
     while i < 32 {
@@ -575,16 +575,16 @@ fn prf(seed: Address, nonce: u32, out_len: u32, out: Address) {
 //   KDF(s) = SHA3-256(s)    — 32-byte output (input is 64 bytes: K_bar || H(c))
 // ===========================================================================
 
-fn mlkem_g(in_buf: Address, in_len: u32, out: Address) {
+transform mlkem_g(in_buf: Address, in_len: u32, out: Address) {
     sha3_512_oneshot(in_buf, in_len, out);
 }
 
-fn mlkem_h(in_buf: Address, in_len: u32, out: Address) {
+transform mlkem_h(in_buf: Address, in_len: u32, out: Address) {
     sha3_256_oneshot(in_buf, in_len, out);
 }
 
 // KDF: SHA3-256 over a 64-byte input buffer (K_bar || H(ct)).
-fn kdf(buf64: Address, out: Address) {
+transform kdf(buf64: Address, out: Address) {
     sha3_256_oneshot(buf64, 64, out);
 }
 
@@ -596,7 +596,7 @@ fn kdf(buf64: Address, out: Address) {
 // derives two 12-bit candidates d1, d2; accepts those < q.
 // ===========================================================================
 
-fn sample_ntt(rho: Address, i: u32, j: u32, out: Address) {
+transform sample_ntt(rho: Address, i: u32, j: u32, out: Address) {
     seed = allocate(34);
     k: u32 = 0;
     while k < 32 {
@@ -665,7 +665,7 @@ fn sample_ntt(rho: Address, i: u32, j: u32, out: Address) {
 
 // Sample matrix A in NTT domain: A[i][j] = SampleNTT(rho, i, j).
 // Output: matrix is k*k*1024 bytes, each polynomial in NTT form.
-fn mlkem_sample_matrix_a(matrix: Address, rho: Address, k: u32) {
+transform mlkem_sample_matrix_a(matrix: Address, rho: Address, k: u32) {
     i: u32 = 0;
     while i < k {
         j: u32 = 0;
@@ -679,7 +679,7 @@ fn mlkem_sample_matrix_a(matrix: Address, rho: Address, k: u32) {
 
 // Compute v = A * s in NTT domain (no transpose).
 //   v[i] = sum_{j=0..k-1} A[i][j] • s[j]   (• = NTT-domain pointwise mul)
-fn mlkem_matvec_ntt(v: Address, matrix: Address, s: Address, k: u32) {
+transform mlkem_matvec_ntt(v: Address, matrix: Address, s: Address, k: u32) {
     i: u32 = 0;
     while i < k {
         poly_zero(v + i * MLKEM_POLY_BYTES);
@@ -701,7 +701,7 @@ fn mlkem_matvec_ntt(v: Address, matrix: Address, s: Address, k: u32) {
 
 // Compute v = A^T * s in NTT domain (transposed).
 //   v[i] = sum_{j=0..k-1} A[j][i] • s[j]
-fn mlkem_matvec_ntt_transpose(v: Address, matrix: Address, s: Address, k: u32) {
+transform mlkem_matvec_ntt_transpose(v: Address, matrix: Address, s: Address, k: u32) {
     i: u32 = 0;
     while i < k {
         poly_zero(v + i * MLKEM_POLY_BYTES);
@@ -722,7 +722,7 @@ fn mlkem_matvec_ntt_transpose(v: Address, matrix: Address, s: Address, k: u32) {
 }
 
 // Inner product in NTT domain: r = sum_i a[i] • s[i]
-fn mlkem_inner_product_ntt(r: Address, a: Address, s: Address, k: u32) {
+transform mlkem_inner_product_ntt(r: Address, a: Address, s: Address, k: u32) {
     poly_zero(r);
     i: u32 = 0;
     while i < k {
@@ -735,7 +735,7 @@ fn mlkem_inner_product_ntt(r: Address, a: Address, s: Address, k: u32) {
 }
 
 // Vector add in NTT domain: r = a + b
-fn mlkem_vec_add(r: Address, a: Address, b: Address, k: u32) {
+transform mlkem_vec_add(r: Address, a: Address, b: Address, k: u32) {
     i: u32 = 0;
     while i < k {
         poly_add(r + i * MLKEM_POLY_BYTES,
@@ -751,7 +751,7 @@ fn mlkem_vec_add(r: Address, a: Address, b: Address, k: u32) {
 
 // pk = ByteEncode_12(t_hat) || rho
 //   t_hat is k polynomials in NTT domain, each 384 bytes packed.
-fn mlkem_encode_pk(pk: Address, t_hat: Address, rho: Address, k: u32) {
+transform mlkem_encode_pk(pk: Address, t_hat: Address, rho: Address, k: u32) {
     i: u32 = 0;
     while i < k {
         byte_encode(pk + i * MLKEM_COEF_BYTES_12,
@@ -767,7 +767,7 @@ fn mlkem_encode_pk(pk: Address, t_hat: Address, rho: Address, k: u32) {
 }
 
 // Inverse of encode_pk: parse pk into (t_hat, rho).
-fn mlkem_decode_pk(t_hat: Address, rho: Address, pk: Address, k: u32) {
+transform mlkem_decode_pk(t_hat: Address, rho: Address, pk: Address, k: u32) {
     i: u32 = 0;
     while i < k {
         byte_decode(t_hat + i * MLKEM_POLY_BYTES,
@@ -786,7 +786,7 @@ fn mlkem_decode_pk(t_hat: Address, rho: Address, pk: Address, k: u32) {
 //   s_hat is k polynomials in NTT domain.
 //   pk_hash = H(pk) is precomputed (32 bytes).
 //   z is the implicit-rejection seed (32 bytes).
-fn mlkem_encode_sk(sk: Address, s_hat: Address, pk: Address, pk_hash: Address, z: Address, k: u32) {
+transform mlkem_encode_sk(sk: Address, s_hat: Address, pk: Address, pk_hash: Address, z: Address, k: u32) {
     pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
     i: u32 = 0;
     while i < k {
@@ -813,7 +813,7 @@ fn mlkem_encode_sk(sk: Address, s_hat: Address, pk: Address, pk_hash: Address, z
 }
 
 // Parse sk into (s_hat, pk, pk_hash, z).
-fn mlkem_decode_sk(s_hat: Address, pk: Address, pk_hash: Address, z: Address, sk: Address, k: u32) {
+transform mlkem_decode_sk(s_hat: Address, pk: Address, pk_hash: Address, z: Address, sk: Address, k: u32) {
     pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
     i: u32 = 0;
     while i < k {
@@ -841,7 +841,7 @@ fn mlkem_decode_sk(s_hat: Address, pk: Address, pk_hash: Address, z: Address, sk
 
 // ct = ByteEncode_du(Compress_du(u)) || ByteEncode_dv(Compress_dv(v))
 //   u is k polynomials; v is a single polynomial.
-fn mlkem_encode_ct(ct: Address, u: Address, v: Address, k: u32, du: u32, dv: u32) {
+transform mlkem_encode_ct(ct: Address, u: Address, v: Address, k: u32, du: u32, dv: u32) {
     u_bytes: u32 = (256 * du) / 8;
     i: u32 = 0;
     while i < k {
@@ -860,7 +860,7 @@ fn mlkem_encode_ct(ct: Address, u: Address, v: Address, k: u32, du: u32, dv: u32
 }
 
 // Parse ct into (u, v): decompress after byte-decoding.
-fn mlkem_decode_ct(u: Address, v: Address, ct: Address, k: u32, du: u32, dv: u32) {
+transform mlkem_decode_ct(u: Address, v: Address, ct: Address, k: u32, du: u32, dv: u32) {
     u_bytes: u32 = (256 * du) / 8;
     i: u32 = 0;
     while i < k {
@@ -883,7 +883,7 @@ fn mlkem_decode_ct(u: Address, v: Address, ct: Address, k: u32, du: u32, dv: u32
 // each key generation / encapsulation operation.
 // ===========================================================================
 
-fn ml_kem_seed_entropy(seed: Address, len: u32) {
+transform ml_kem_seed_entropy(seed: Address, len: u32) {
     i: u32 = 0;
     while i < 32 {
         if i < len {
@@ -900,7 +900,7 @@ fn ml_kem_seed_entropy(seed: Address, len: u32) {
     *(MLKEM_ENTROPY_COUNTER + 3) = 0;
 }
 
-fn _ml_kem_get_entropy(out: Address, len: u32) {
+transform _ml_kem_get_entropy(out: Address, len: u32) {
     counter: u32 = *(MLKEM_ENTROPY_COUNTER)
                  | (*(MLKEM_ENTROPY_COUNTER + 1) << 8)
                  | (*(MLKEM_ENTROPY_COUNTER + 2) << 16)
@@ -941,7 +941,7 @@ fn _ml_kem_get_entropy(out: Address, len: u32) {
 //   9. sk = ByteEncode_12(s_hat) || pk || H(pk) || z
 // ===========================================================================
 
-fn _ml_kem_keygen(k: u32, eta1: u32, pk: Address, sk: Address) {
+transform _ml_kem_keygen(k: u32, eta1: u32, pk: Address, sk: Address) {
     // 1. Pull 32 bytes of seed from the entropy pool, then G(.) it.
     seed = allocate(32);
     _ml_kem_get_entropy(seed, 32);
@@ -1032,7 +1032,7 @@ fn _ml_kem_keygen(k: u32, eta1: u32, pk: Address, sk: Address) {
 
 // Internal encapsulation: takes pre-sampled message m and precomputed pk_hash.
 // Used by both ml_kem_encaps (fresh m) and ml_kem_decaps (re-encryption check).
-fn _ml_kem_encaps_with_m(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
+transform _ml_kem_encaps_with_m(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
                          pk: Address, pk_hash: Address, m: Address,
                          ct: Address, ss: Address) {
     // 2. (K_bar, r) = G(m || H(pk))
@@ -1166,7 +1166,7 @@ fn _ml_kem_encaps_with_m(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
 //      Else:        ss = KDF(z || H(ct))     — implicit rejection
 // ===========================================================================
 
-fn _ml_kem_decaps(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
+transform _ml_kem_decaps(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
                   sk: Address, ct: Address, ss: Address) {
     pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
 
@@ -1279,19 +1279,19 @@ fn _ml_kem_decaps(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
 // to 64 via G), and each call to encaps pulls 32 bytes (the message m).
 // ===========================================================================
 
-fn ml_kem_keygen_512(pk: Address, sk: Address) {
+transform ml_kem_keygen_512(pk: Address, sk: Address) {
     _ml_kem_keygen(MLKEM_512_K, MLKEM_512_ETA1, pk, sk);
 }
 
-fn ml_kem_keygen_768(pk: Address, sk: Address) {
+transform ml_kem_keygen_768(pk: Address, sk: Address) {
     _ml_kem_keygen(MLKEM_768_K, MLKEM_768_ETA1, pk, sk);
 }
 
-fn ml_kem_keygen_1024(pk: Address, sk: Address) {
+transform ml_kem_keygen_1024(pk: Address, sk: Address) {
     _ml_kem_keygen(MLKEM_1024_K, MLKEM_1024_ETA1, pk, sk);
 }
 
-fn ml_kem_encaps_512(pk: Address, ct: Address, ss: Address) {
+transform ml_kem_encaps_512(pk: Address, ct: Address, ss: Address) {
     pk_size: u32 = MLKEM_512_PK_SIZE;
     pk_hash = allocate(MLKEM_PK_HASH_BYTES);
     mlkem_h(pk, pk_size, pk_hash);
@@ -1303,7 +1303,7 @@ fn ml_kem_encaps_512(pk: Address, ct: Address, ss: Address) {
     free(m);
 }
 
-fn ml_kem_encaps_768(pk: Address, ct: Address, ss: Address) {
+transform ml_kem_encaps_768(pk: Address, ct: Address, ss: Address) {
     pk_size: u32 = MLKEM_768_PK_SIZE;
     pk_hash = allocate(MLKEM_PK_HASH_BYTES);
     mlkem_h(pk, pk_size, pk_hash);
@@ -1315,7 +1315,7 @@ fn ml_kem_encaps_768(pk: Address, ct: Address, ss: Address) {
     free(m);
 }
 
-fn ml_kem_encaps_1024(pk: Address, ct: Address, ss: Address) {
+transform ml_kem_encaps_1024(pk: Address, ct: Address, ss: Address) {
     pk_size: u32 = MLKEM_1024_PK_SIZE;
     pk_hash = allocate(MLKEM_PK_HASH_BYTES);
     mlkem_h(pk, pk_size, pk_hash);
@@ -1327,17 +1327,17 @@ fn ml_kem_encaps_1024(pk: Address, ct: Address, ss: Address) {
     free(m);
 }
 
-fn ml_kem_decaps_512(sk: Address, ct: Address, ss: Address) {
+transform ml_kem_decaps_512(sk: Address, ct: Address, ss: Address) {
     _ml_kem_decaps(MLKEM_512_K, MLKEM_512_ETA1, MLKEM_512_ETA2,
                    MLKEM_512_DU, MLKEM_512_DV, sk, ct, ss);
 }
 
-fn ml_kem_decaps_768(sk: Address, ct: Address, ss: Address) {
+transform ml_kem_decaps_768(sk: Address, ct: Address, ss: Address) {
     _ml_kem_decaps(MLKEM_768_K, MLKEM_768_ETA1, MLKEM_768_ETA2,
                    MLKEM_768_DU, MLKEM_768_DV, sk, ct, ss);
 }
 
-fn ml_kem_decaps_1024(sk: Address, ct: Address, ss: Address) {
+transform ml_kem_decaps_1024(sk: Address, ct: Address, ss: Address) {
     _ml_kem_decaps(MLKEM_1024_K, MLKEM_1024_ETA1, MLKEM_1024_ETA2,
                    MLKEM_1024_DU, MLKEM_1024_DV, sk, ct, ss);
 }

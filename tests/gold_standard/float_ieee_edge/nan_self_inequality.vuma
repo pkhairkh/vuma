@@ -10,7 +10,7 @@
 // CRITICAL for G1: this test FAILS if the backend's != uses integer CMP
 // on the raw bits (NaN bits == NaN bits, so CMP=equal, != = false = 0).
 
-fn main() -> i32 {
+transform main() -> i32 {
     zero: f64 = 0.0;
     nan: f64 = zero / zero;   // NaN
     if nan != nan {

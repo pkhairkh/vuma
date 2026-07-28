@@ -16,11 +16,11 @@
 // Read/write u32 from array at given index (4-byte stride)
 // ===========================================================================
 
-fn arr_read(arr: Address, idx: u64) -> u32 {
+transform arr_read(arr: Address, idx: u64) -> u32 {
     return *(arr + idx * 4);
 }
 
-fn arr_write_val(arr: Address, idx: u64, val: u32) {
+transform arr_write_val(arr: Address, idx: u64, val: u32) {
     *(arr + idx * 4) = val;
 }
 
@@ -28,7 +28,7 @@ fn arr_write_val(arr: Address, idx: u64, val: u32) {
 // Binary search: returns index of target, or 0xFFFFFFFF if not found
 // ===========================================================================
 
-fn binary_search(arr: Address, len: u64, target: u32) -> u64 {
+transform binary_search(arr: Address, len: u64, target: u32) -> u64 {
     lo: u64 = 0;
     hi: u64 = len;
     while lo < hi {
@@ -52,7 +52,7 @@ fn binary_search(arr: Address, len: u64, target: u32) -> u64 {
 // Search for target 42 → found at index 7
 // Exit code: 7 (index of 42 in the array)
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate array of 13 u32 elements (52 bytes)
     arr = allocate(52);
 

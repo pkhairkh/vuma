@@ -8,7 +8,7 @@
 // ===========================================================================
 
 // Compute one entry of the CRC-32 lookup table (for index `idx`).
-fn crc32_table_entry(idx: u32) -> u32 {
+transform crc32_table_entry(idx: u32) -> u32 {
     crc: u32 = idx;
     i: u32 = 0;
     while i < 8 {
@@ -23,7 +23,7 @@ fn crc32_table_entry(idx: u32) -> u32 {
 }
 
 // One-shot CRC-32 over `len` bytes at `data`. Returns the final CRC value.
-fn crc32(data: Address, len: u32) -> u32 {
+transform crc32(data: Address, len: u32) -> u32 {
     crc: u32 = 4294967295;  // 0xFFFFFFFF
     i: u32 = 0;
     while i < len {
@@ -36,7 +36,7 @@ fn crc32(data: Address, len: u32) -> u32 {
 }
 
 // Incremental CRC-32 update. Continue a CRC computation with additional data.
-fn crc32_update(crc: u32, data: Address, len: u32) -> u32 {
+transform crc32_update(crc: u32, data: Address, len: u32) -> u32 {
     r: u32 = crc;
     i: u32 = 0;
     while i < len {
@@ -49,7 +49,7 @@ fn crc32_update(crc: u32, data: Address, len: u32) -> u32 {
 }
 
 // Finalize an incremental CRC-32 (apply the final XOR).
-fn crc32_final(crc: u32) -> u32 {
+transform crc32_final(crc: u32) -> u32 {
     return crc ^ 4294967295;
 }
 
@@ -58,7 +58,7 @@ fn crc32_final(crc: u32) -> u32 {
 // Polynomial: 0x1021, init = 0xFFFF, no final XOR.
 // ===========================================================================
 
-fn crc16_ccitt(data: Address, len: u32) -> u32 {
+transform crc16_ccitt(data: Address, len: u32) -> u32 {
     crc: u32 = 65535;  // 0xFFFF
     i: u32 = 0;
     while i < len {
@@ -82,7 +82,7 @@ fn crc16_ccitt(data: Address, len: u32) -> u32 {
 // CRC-16 (Modbus) — init = 0xFFFF, polynomial 0x8005 (reversed 0xA001).
 // ===========================================================================
 
-fn crc16_modbus(data: Address, len: u32) -> u32 {
+transform crc16_modbus(data: Address, len: u32) -> u32 {
     crc: u32 = 65535;
     i: u32 = 0;
     while i < len {
@@ -107,7 +107,7 @@ fn crc16_modbus(data: Address, len: u32) -> u32 {
 // Polynomial: 0x42F0E1EBA9EA3693, init = 0, final XOR = 0.
 // ===========================================================================
 
-fn crc64(data: Address, len: u32) -> u64 {
+transform crc64(data: Address, len: u32) -> u64 {
     crc: u64 = 0;
     i: u32 = 0;
     while i < len {

@@ -6,7 +6,7 @@
 
 layout Arena = { base: u64, offset: u64, capacity: u64 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let arena = arena_new(64);
     let arena = arena_grow(arena, 65536);
     arena_free(arena);

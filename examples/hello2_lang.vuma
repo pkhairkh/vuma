@@ -9,7 +9,7 @@
 // Expected output: "Hi\n" (bytes 72, 105, 10)
 // Expected exit code: 0
 
-fn main() -> i32 {
+transform main() -> i32 {
     buf: Address = allocate(3);
     *(buf + 0) = 72;
     *(buf + 1) = 105;

@@ -2,4 +2,4 @@
 // X25519 p mod 256
 // Expected exit code: 237
 
-fn main() -> i32 { return 237; }
+transform main() -> i32 { return 237; }

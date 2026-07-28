@@ -12,7 +12,7 @@
 // loaded into a named variable; each shift-then-OR is split into its
 // own statement to dodge the nested-shift-mask miscompilation.
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 0x0F;
     one: u64 = 1;
     two: u64 = 2;

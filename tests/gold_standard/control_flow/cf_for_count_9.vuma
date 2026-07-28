@@ -7,7 +7,7 @@
 // s14_cf_for_count_8 (8 iterations) and s10_cf_for_count_3 (3).
 // Expected exit code: 9
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..9 {
         count = count + 1;

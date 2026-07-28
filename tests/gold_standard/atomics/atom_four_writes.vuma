@@ -7,7 +7,7 @@
 // (three writes) and s8_atom_three_diff_values (three writes, diff vals).
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let c = state_new(_L1);
     c.v = 10;
     c.v = 20;

@@ -3,7 +3,7 @@
 //
 // Exposes: if-body assignments dropped even when condition is a variable.
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     cond: bool = true;
     if cond {

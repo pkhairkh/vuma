@@ -7,7 +7,7 @@
 // keeps count at 0. Distinct from s78_nl_3x23_count (69),
 // s77_nl_3x23_count (5) and s76_nl_3x23_count (3).
 // Expected exit code: 155
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..5 {
         for j in 0..31 {

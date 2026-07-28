@@ -5,7 +5,7 @@
 // on buggy codegen, control falls through past the if/else and exit is 0
 // (the implicit return).
 
-fn main() -> i32 {
+transform main() -> i32 {
     if true {
         return 1;
     } else {

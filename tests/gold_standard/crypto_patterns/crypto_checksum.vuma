@@ -5,7 +5,7 @@
 // zero-initialized accumulator. Real checksums iterate over a buffer;
 // this single-value form isolates the additive-accumulate codegen path.
 
-fn main() -> i32 {
+transform main() -> i32 {
     acc: u64 = 0;
     v: u64 = 42;
     sum: u64 = acc + v;            // 0 + 42 = 42

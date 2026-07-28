@@ -25,8 +25,8 @@
 //!
 //! | # | Program        | Semantics                                        | Expected result |
 //! |---|----------------|--------------------------------------------------|-----------------|
-//! | 1 | Simple         | `fn main() -> i64 { return 42; }`               | 42              |
-//! | 2 | Arithmetic     | `fn main() -> i64 { return (10+20)*3 - 5; }`    | 85              |
+//! | 1 | Simple         | `transform main() -> i64 { return 42; }`               | 42              |
+//! | 2 | Arithmetic     | `transform main() -> i64 { return (10+20)*3 - 5; }`    | 85              |
 //! | 3 | Memory         | alloc 8B, store 0x42424242, load, return low byte| 66 (0x42)       |
 //! | 4 | Function call  | helper() returns 7; main returns helper()        | 7               |
 //!
@@ -301,7 +301,7 @@ fn validate_binary(bytes: &[u8], kind: BackendKind, min_size: usize) {
 /// Program 1: Simple — a function that returns 42.
 ///
 /// ```text
-/// fn main() -> i64 { return 42; }
+/// transform main() -> i64 { return 42; }
 /// ```
 fn make_simple_function() -> IRFunction {
     let mut func = IRFunction::new("main");
@@ -317,7 +317,7 @@ fn make_simple_function() -> IRFunction {
 /// Program 2: Arithmetic — computes (10 + 20) * 3 - 5 = 85.
 ///
 /// ```text
-/// fn main() -> i64 {
+/// transform main() -> i64 {
 ///     let a = 10 + 20;   // 30
 ///     let b = a * 3;     // 90
 ///     let c = b - 5;     // 85
@@ -371,7 +371,7 @@ fn make_arithmetic_function() -> IRFunction {
 /// returns the low byte (0x42 = 66).
 ///
 /// ```text
-/// fn main() -> i64 {
+/// transform main() -> i64 {
 ///     let ptr = alloc 8;
 ///     store 0x42424242 at ptr;
 ///     let val = load ptr as i64;
@@ -432,7 +432,7 @@ fn make_memory_function() -> IRFunction {
 ///
 /// ```text
 /// fn helper() -> i64 { return 7; }
-/// fn main() -> i64 { return helper(); }
+/// transform main() -> i64 { return helper(); }
 /// ```
 fn make_function_call_program() -> Vec<IRFunction> {
     // Helper function: returns 7
@@ -467,7 +467,7 @@ fn make_function_call_program() -> Vec<IRFunction> {
 // Phase A Tests (1–9): Hand-crafted IR programs
 // ===========================================================================
 
-/// Test 1: Simple program — `fn main() -> i64 { return 42; }`
+/// Test 1: Simple program — `transform main() -> i64 { return 42; }`
 ///
 /// Validates that all 10 backends can compile a trivial return-constant
 /// function and produce structurally valid output.

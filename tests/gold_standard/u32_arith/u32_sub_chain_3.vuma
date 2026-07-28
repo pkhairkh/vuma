@@ -5,7 +5,7 @@
 // 150 - 30 = 120, 120 - 20 = 100. All values within U8 range.
 // Distinct from s4_u32_sub_chain (2-step chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 50;
     c: u32 = 30;

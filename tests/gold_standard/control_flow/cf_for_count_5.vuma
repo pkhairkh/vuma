@@ -6,7 +6,7 @@
 // Will pass (exit 5) once that bug is fixed.
 // Expected exit code: 5
 
-fn main() -> i32 {
+transform main() -> i32 {
     count: u32 = 0;
     for i in 0..5 {
         count = count + 1;

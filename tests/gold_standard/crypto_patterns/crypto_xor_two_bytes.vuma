@@ -6,7 +6,7 @@
 // immediate-RHS bitwise drop bug. Distinct from s4_crypto_byte_mix
 // (different operands + result).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 51;     // 0x33
     b: u64 = 15;     // 0x0F
     one: u64 = 1;

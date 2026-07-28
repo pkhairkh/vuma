@@ -12,7 +12,7 @@
 // division fallback would give 0, failing the > 0 check... actually 0 >
 // 0 is false, so it'd return 0.  Good.)
 
-fn main() -> i32 {
+transform main() -> i32 {
     one: f64 = 1.0;
     three: f64 = 3.0;
     third: f64 = one / three;   // 0.333...

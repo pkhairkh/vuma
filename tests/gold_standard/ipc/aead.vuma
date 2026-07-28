@@ -14,7 +14,7 @@
 // exits 1 if it matches.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate 64 bytes via shared_memory_open (need >= 8+8+4 = 20 bytes
     // for the wire format: 8 nonce + 8 ciphertext + 4 tag).
     buf = shared_memory_open(64);

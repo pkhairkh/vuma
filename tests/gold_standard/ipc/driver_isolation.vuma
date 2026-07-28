@@ -30,10 +30,10 @@
 //   4. The parent verifies all three paths and exits 42 on success.
 //
 // Expected exit code: 42
-fn my_handler() -> i64 {
+transform my_handler() -> i64 {
     return 42;
 }
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

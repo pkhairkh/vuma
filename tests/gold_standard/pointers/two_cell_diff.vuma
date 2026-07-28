@@ -6,7 +6,7 @@
 
 layout Pair = { a: u32, b: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let __s = state_new(Pair);
     __s.a = 53;
     __s.b = 1;

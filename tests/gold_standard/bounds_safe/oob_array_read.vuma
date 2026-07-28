@@ -26,7 +26,7 @@
 
 layout Buf = { data: [u8; 4] }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let b = state_new(Buf);
     // Read past the 4-byte array — should trap with exit 134 when --safe
     let idx = 10;

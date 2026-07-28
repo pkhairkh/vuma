@@ -5,18 +5,18 @@
 // calls both and adds: f1(18) + f2(19) = 19 + 20 = 39.
 // Distinct from s78_mf_two_helpers_add (4),
 // s74_mf_two_helpers_add (130) and s73_mf_two_helpers_add (148).
-fn f1(x: u32) -> u32 {
+transform f1(x: u32) -> u32 {
     k: u32 = 1;
     r: u32 = x + k;
     return r;
 }
-fn f2(y: u32) -> u32 {
+transform f2(y: u32) -> u32 {
     k: u32 = 1;
     r: u32 = y + k;
     return r;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = f1(18);          // 19
     b: u32 = f2(19);          // 20
     s: u32 = a + b;            // 39

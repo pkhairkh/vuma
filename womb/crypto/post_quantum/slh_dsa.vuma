@@ -19,7 +19,7 @@ const SLH_W: u32 = 4;         // Winternitz parameter (WOTS+)
 // H = SHA-256, H_msg = SHAKE-256, PRF = SHA-256
 // ===========================================================================
 
-fn slh_hash(pk_seed: Address, adrs: Address, msg: Address, msg_len: u32, out: Address) {
+transform slh_hash(pk_seed: Address, adrs: Address, msg: Address, msg_len: u32, out: Address) {
     // H(pk_seed || adrs || msg) — SHA-256
     input = allocate(32 + 32 + msg_len);
     i: u32 = 0;
@@ -33,7 +33,7 @@ fn slh_hash(pk_seed: Address, adrs: Address, msg: Address, msg_len: u32, out: Ad
     free(input);
 }
 
-fn slh_prg(seed: Address, adrs: Address, out: Address, out_len: u32) {
+transform slh_prg(seed: Address, adrs: Address, out: Address, out_len: u32) {
     // PRG(seed || adrs) — SHAKE-256
     input = allocate(32 + 32);
     i: u32 = 0;
@@ -44,7 +44,7 @@ fn slh_prg(seed: Address, adrs: Address, out: Address, out_len: u32) {
     free(input);
 }
 
-fn slh_hash_msg(r: Address, pk_seed: Address, pk_root: Address, msg: Address, msg_len: u32, out: Address, out_len: u32) {
+transform slh_hash_msg(r: Address, pk_seed: Address, pk_root: Address, msg: Address, msg_len: u32, out: Address, out_len: u32) {
     // H_msg(r || pk_seed || pk_root || msg) — SHAKE-256
     input = allocate(32 + 32 + 32 + msg_len);
     i: u32 = 0;
@@ -64,7 +64,7 @@ fn slh_hash_msg(r: Address, pk_seed: Address, pk_root: Address, msg: Address, ms
 // ===========================================================================
 
 // Chain function: iteratively hash a value n times
-fn wots_chain(pk_seed: Address, adrs: Address, x: Address, start: u32, steps: u32, out: Address) {
+transform wots_chain(pk_seed: Address, adrs: Address, x: Address, start: u32, steps: u32, out: Address) {
     // Copy x to out
     i: u32 = 0;
     while i < SLH_N { *(out + i) = *(x + i); i = i + 1; }
@@ -79,7 +79,7 @@ fn wots_chain(pk_seed: Address, adrs: Address, x: Address, start: u32, steps: u3
 }
 
 // WOTS+ key generation
-fn wots_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
+transform wots_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
     // Generate w private key elements, chain each to get public key
     w: u32 = 16;  // 2^W for W=4
     i: u32 = 0;
@@ -95,7 +95,7 @@ fn wots_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
 }
 
 // WOTS+ sign
-fn wots_sign(pk_seed: Address, sk_seed: Address, msg: Address, adrs: Address, sig: Address) {
+transform wots_sign(pk_seed: Address, sk_seed: Address, msg: Address, adrs: Address, sig: Address) {
     w: u32 = 16;
     i: u32 = 0;
     while i < w {
@@ -116,7 +116,7 @@ fn wots_sign(pk_seed: Address, sk_seed: Address, msg: Address, adrs: Address, si
 }
 
 // WOTS+ verify
-fn wots_verify(pk_seed: Address, msg: Address, sig: Address, adrs: Address, pk: Address) {
+transform wots_verify(pk_seed: Address, msg: Address, sig: Address, adrs: Address, pk: Address) {
     w: u32 = 16;
     i: u32 = 0;
     while i < w {
@@ -134,13 +134,13 @@ fn wots_verify(pk_seed: Address, msg: Address, sig: Address, adrs: Address, pk: 
 // FORS (Forest of Random Subsets) — few-time signature
 // ===========================================================================
 
-fn fors_skgen(pk_seed: Address, sk_seed: Address, adrs: Address, idx: u32, sk: Address) {
+transform fors_skgen(pk_seed: Address, sk_seed: Address, adrs: Address, idx: u32, sk: Address) {
     // Set FORS tree index in ADRS
     *(adrs + 24) = idx & 255;
     slh_prg(sk_seed, adrs, sk, SLH_N);
 }
 
-fn fors_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
+transform fors_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
     // Generate leaves and compute Merkle tree root
     // Compute Merkle root by pairwise hashing leaves per FIPS 205
     temp = allocate(SLH_K * SLH_N);
@@ -157,7 +157,7 @@ fn fors_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
 // SLH-DSA Key Generation (FIPS 205, Section 9.1)
 // ===========================================================================
 
-fn slh_dsa_keygen(seed: Address, pk: Address, sk: Address) {
+transform slh_dsa_keygen(seed: Address, pk: Address, sk: Address) {
     // sk.seed = seed[0..31]
     // pk.seed = seed[32..63]
     // sk.prsf = seed[64..95]
@@ -198,7 +198,7 @@ fn slh_dsa_keygen(seed: Address, pk: Address, sk: Address) {
 // SLH-DSA Sign (FIPS 205, Section 9.2)
 // ===========================================================================
 
-fn slh_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
+transform slh_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
     sk_seed = sk;
     prf_key = sk + 32;
     pk_seed = sk + 64;
@@ -265,7 +265,7 @@ fn slh_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, si
 // SLH-DSA Verify (FIPS 205, Section 9.3)
 // ===========================================================================
 
-fn slh_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
+transform slh_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
     pk_seed = pk;
     pk_root = pk + 32;
 

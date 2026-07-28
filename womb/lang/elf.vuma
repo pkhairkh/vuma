@@ -17,24 +17,24 @@
 // So the driver calls write_elf64(code, code_size, fd, 86).
 
 extern "C" {
-    fn __vuma_alloc(size: i64) -> Address;
-    fn __vuma_free(addr: Address, size: i64);
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn __vuma_load_u8(addr: Address) -> u64;
-    fn __vuma_store_u8(addr: Address, val: u64);
+    transform __vuma_alloc(size: i64) -> Address;
+    transform __vuma_free(addr: Address, size: i64);
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform __vuma_load_u8(addr: Address) -> u64;
+    transform __vuma_store_u8(addr: Address, val: u64);
 }
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
     __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
     __vuma_store_u8(ptr + offset + 4, (val >> 32) & 255); __vuma_store_u8(ptr + offset + 5, (val >> 40) & 255);
     __vuma_store_u8(ptr + offset + 6, (val >> 48) & 255); __vuma_store_u8(ptr + offset + 7, (val >> 56) & 255);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
     __vuma_store_u8(ptr + offset + 2, (val >> 16) & 255); __vuma_store_u8(ptr + offset + 3, (val >> 24) & 255);
 }
-fn store_u16(ptr: Address, offset: u32, val: u32) {
+transform store_u16(ptr: Address, offset: u32, val: u32) {
     __vuma_store_u8(ptr + offset, val & 255); __vuma_store_u8(ptr + offset + 1, (val >> 8) & 255);
 }
 
@@ -53,7 +53,7 @@ const ELFMAG: u32 = 0x464C457F;  // \x7FELF
 //                  in rdi.)
 //
 // Returns 1 on success, 0 on write failure.
-fn write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32 {
+transform write_elf64(code: Address, code_size: u32, out_fd: i64, entry_offset: u32, bss_size: u32) -> u32 {
     // ELF header: 64 bytes
     // Program header: 56 bytes
     // Total header: 120 bytes

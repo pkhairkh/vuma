@@ -5,7 +5,7 @@
 // first. Distinct from s38_edge_zero_plus_one (1) and s34_edge_max_
 // minus_one (254).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 0;
     b: u32 = 2;
     r: u32 = a + b;        // 2

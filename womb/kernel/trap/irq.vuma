@@ -49,7 +49,7 @@
 //        b. If v == 9999 (empty sentinel): return — ring drained.
 //        c. Else: look up the handler via `irq_get_handler(tbl, v as u8)`.
 //           If non-zero: send EOI via `pic_eoi(v as u8)` (simplified —
-//           K11 adds the real fn-pointer handler call before the EOI).
+//           K11 adds the real transform-pointer handler call before the EOI).
 //           If zero (spurious IRQ): still send EOI (the 8259 PIC will
 //           re-deliver spurious IRQ 7 / 15 if you don't EOI them).
 //        d. Repeat from (a).
@@ -73,7 +73,7 @@
 //
 // ── Why is the handler-call still a stub (just EOI)? ────────────────────────
 //   VUMA has no function-pointer call today: `handler()` where `handler`
-//   is a u64 won't compile (the parser only accepts direct fn-identifier
+//   is a u64 won't compile (the parser only accepts direct transform-identifier
 //   calls, not indirect calls through a u64). The contract's "Note" for
 //   R2f says: "look up handler in IrqTable for vector v (simplified: just
 //   call pic_eoi if registered)". So the loop:
@@ -124,8 +124,8 @@
 // disable_irq helpers don't take a State<T> at all — they're thin
 // wrappers around the irq_unmask / irq_mask externs (each takes only the
 // irq number as a u8). The State<IrqTable> + State<IrqRing> params to
-// the helpers are regular VUMA-fn borrows (NOT extern #[borrow] — VUMA
-// fn calls don't need the attribute, only extern "C" calls do).
+// the helpers are regular VUMA-transform borrows (NOT extern #[borrow] — VUMA
+// transform calls don't need the attribute, only extern "C" calls do).
 // register_irq and irq_dispatch_loop DO call externs (irq_unmask, pic_eoi)
 // — but the State<IrqTable> + State<IrqRing> are preserved across the
 // extern call because the codegen's conservative invalidation only fires
@@ -257,23 +257,23 @@ extern "C" {
     // Mask an IRQ line at the 8259 PIC. `irq` is the IRQ number 0..15.
     // K11 stub: `mov al, 0xFF; out 0x21, al` (mask all — refined in K11
     // to per-IRQ bit-masking via `mov al, ~(1 << irq); out 0x21, al`).
-    fn irq_mask(irq: u8);
+    transform irq_mask(irq: u8);
     // Unmask an IRQ line at the PIC. K11 stub:
     // `mov al, 0xFE; out 0x21, al` (unmask IRQ 0 — refined in K11 to
     // per-IRQ bit-clearing). Pairs with irq_mask.
-    fn irq_unmask(irq: u8);
+    transform irq_unmask(irq: u8);
     // Send End-Of-Interrupt to the PIC. Must be called at the end of
     // every hardware-IRQ handler so the PIC will deliver the next one.
     // K11 stub: `mov al, 0x20; out 0x20, al; ret` (non-specific EOI to
     // the master PIC's command port).
-    fn pic_eoi(irq: u8);
+    transform pic_eoi(irq: u8);
     // indirect function call trampoline. Tail-calls the function
     // at `ptr` with `arg` in RDI (SysV AMD64). Used by irq_dispatch_loop
     // to invoke the per-vector IRQ handler before sending EOI. Same stub
     // category as write/read/exit — NOT a C library function. Real asm
     // body registered in src/codegen/src/x86_64/mod.rs::build_runtime_
     // syscall_stubs (8 bytes: mov rax,rdi; mov rdi,rsi; jmp rax).
-    fn __call_indirect1(ptr: u64, arg: u64) -> u64;
+    transform __call_indirect1(ptr: u64, arg: u64) -> u64;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -289,7 +289,7 @@ extern "C" {
 // from a prior use don't leak through if a future caller forgets to
 // check count before popping), then sets head/tail/count to 0 (empty
 // ring). Same explicit-zeroing shape as R2a's tf_init.
-fn irq_ring_init(ring: State<IrqRing>) {
+transform irq_ring_init(ring: State<IrqRing>) {
     ring.head = 0;
     ring.tail = 0;
     ring.count = 0;
@@ -305,7 +305,7 @@ fn irq_ring_init(ring: State<IrqRing>) {
 // consumer (which checks count > 0 before reading) can never observe a
 // stale vector. See irq_ring.vuma's header for the full ordering
 // rationale.
-fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
+transform irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
     if ring.count >= 32 {
         return 0 - 1;  // -1 (full)
     }
@@ -330,7 +330,7 @@ fn irq_ring_push(ring: State<IrqRing>, vector: u64) -> i64 {
 // SPSC invariant: read vector BEFORE decrementing count, so the producer
 // (which checks count < 32 before writing) can never overwrite a slot
 // the consumer is still reading.
-fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
+transform irq_ring_pop(ring: State<IrqRing>) -> u64 {
     if ring.count == 0 {
         return 9999;  // empty sentinel
     }
@@ -363,7 +363,7 @@ fn irq_ring_pop(ring: State<IrqRing>) -> u64 {
 // Returns 0 if no handler is registered for that IRQ (the slot is all
 // zero bytes — register_irq hasn't been called for that IRQ yet, or the
 // IRQ was never registered in the first place).
-fn irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
+transform irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
     let off = (irq as u32) * 8;
     let v: u64 = 0;
     let i = 0;
@@ -381,7 +381,7 @@ fn irq_get_handler(tbl: State<IrqTable>, irq: u8) -> u64 {
 // 63..56). The mask-255 truncates each shifted byte to its low 8 bits
 // (the (handler >> sh) >> 8 path would lose the high bits — same
 // pattern as pmm.vuma's pool_set_base).
-fn irq_set_handler(tbl: State<IrqTable>, irq: u8, handler: u64) {
+transform irq_set_handler(tbl: State<IrqTable>, irq: u8, handler: u64) {
     let off = (irq as u32) * 8;
     let i = 0;
     while i < 8 {
@@ -404,7 +404,7 @@ fn irq_set_handler(tbl: State<IrqTable>, irq: u8, handler: u64) {
 // In hosted mode, irq_unmask is __ffi_fallback_stub (no-op), so this is
 // just a pack-and-count-increment. In bare-metal (K11), irq_unmask
 // actually writes the PIC's mask register.
-fn register_irq(tbl: State<IrqTable>, irq: u8, handler: u64) {
+transform register_irq(tbl: State<IrqTable>, irq: u8, handler: u64) {
     irq_set_handler(tbl, irq, handler);
     tbl.count = tbl.count + 1;
     irq_unmask(irq);
@@ -453,12 +453,12 @@ fn register_irq(tbl: State<IrqTable>, irq: u8, handler: u64) {
 // ring.buf[head*8..head*8+8] via irq_ring_pop, reads tbl.handlers via
 // irq_get_handler, and calls pic_eoi (an extern "C" trampoline). The
 // State<IrqRing> + State<IrqTable> are preserved across the pic_eoi
-// extern call because they're passed as regular VUMA-fn borrows (NOT
+// extern call because they're passed as regular VUMA-transform borrows (NOT
 // extern #[borrow] — only extern #[borrow] State<T> params are
 // conservatively invalidated; pic_eoi takes only the u8 irq number, so
 // neither State is at risk). The same pattern K3d's pre-R2f irq_dispatch
 // used (it also called pic_eoi with a State<IrqTable> in scope).
-fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
+transform irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
     while true {
         let v = irq_ring_pop(ring);
         if v == 9999 {
@@ -473,7 +473,7 @@ fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
             // u64 return is currently ignored — IRQ handlers conventionally
             // return void or a status the dispatcher does not act on.
             // `tbl` (State<IrqTable>) is preserved across the extern call
-            // because it is passed as a regular VUMA-fn borrow, NOT as an
+            // because it is passed as a regular VUMA-transform borrow, NOT as an
             // extern #[borrow] param (only extern #[borrow] State<T>
             // params are conservatively invalidated).
             let handler_ret = __call_indirect1(handler, irq as u64);
@@ -490,7 +490,7 @@ fn irq_dispatch_loop(ring: State<IrqRing>, tbl: State<IrqTable>) {
 // Enable an IRQ (thin wrapper around irq_unmask). Kept verbatim from K3d.
 // `irq` is the IRQ number 0..15 (the 8259 PIC only has 16 lines). K11
 // may extend this to handle the slave PIC's IRQs 8..15 via the cascade.
-fn enable_irq(irq: u8) {
+transform enable_irq(irq: u8) {
     irq_unmask(irq);
 }
 
@@ -498,7 +498,7 @@ fn enable_irq(irq: u8) {
 // Pairs with enable_irq. Used by drivers to temporarily mask an IRQ
 // during critical sections (e.g. while modifying a shared data structure
 // the IRQ handler also touches).
-fn disable_irq(irq: u8) {
+transform disable_irq(irq: u8) {
     irq_mask(irq);
 }
 
@@ -532,7 +532,7 @@ fn disable_irq(irq: u8) {
 // rationale, and K3a's trap_trampoline.vuma for the same rule applied
 // to rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let ring = state_new(IrqRing);
     let tbl = state_new(IrqTable);
     irq_ring_init(ring);

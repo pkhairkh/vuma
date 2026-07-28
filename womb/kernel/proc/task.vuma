@@ -122,10 +122,10 @@
 // trap_frame_init(tf), K3e's syscall_args_from_frame(tf, args) — see
 // womb/kernel/mm/pmm.vuma header "Why init-style?" for the codegen
 // rationale: the current codegen does NOT propagate State-typedness
-// through function return values, so `fn pt_new() -> State<ProcessTable>`
+// through function return values, so `transform pt_new() -> State<ProcessTable>`
 // would produce broken field-access code in callers). All task.vuma
-// helpers take `tbl: State<ProcessTable>` by regular VUMA-fn borrow (NOT
-// extern #[borrow] — VUMA fn calls don't need the attribute; only extern
+// helpers take `tbl: State<ProcessTable>` by regular VUMA-transform borrow (NOT
+// extern #[borrow] — VUMA transform calls don't need the attribute; only extern
 // "C" calls do, and none of these helpers call any extern).
 //
 // ── Pack/unpack helpers ─────────────────────────────────────────────────────
@@ -319,7 +319,7 @@ layout ProcessTable = {
 // bytes — bytes 4..7 would be zero-shifted out anyway.
 
 // Read the u32 `pid` field of Task slot `idx` from ProcessTable.pids.
-fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -333,7 +333,7 @@ fn pt_get_pid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `pid` field of Task slot `idx` into ProcessTable.pids.
-fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -345,7 +345,7 @@ fn pt_set_pid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 }
 
 // Read the u32 `ppid` field of Task slot `idx` from ProcessTable.ppids.
-fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
+transform pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
     let off = idx * 4;
     let v: u32 = 0;
     let i = 0;
@@ -359,7 +359,7 @@ fn pt_get_ppid(tbl: State<ProcessTable>, idx: u32) -> u32 {
 }
 
 // Write the u32 `ppid` field of Task slot `idx` into ProcessTable.ppids.
-fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
+transform pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
     let off = idx * 4;
     let i = 0;
     while i < 4 {
@@ -375,22 +375,22 @@ fn pt_set_ppid(tbl: State<ProcessTable>, idx: u32, val: u32) {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Read the u8 `state` field of Task slot `idx` from ProcessTable.states.
-fn pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_state(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.states[idx];
 }
 
 // Write the u8 `state` field of Task slot `idx` into ProcessTable.states.
-fn pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_state(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.states[idx] = val;
 }
 
 // Read the u8 `prio` field of Task slot `idx` from ProcessTable.prios.
-fn pt_get_prio(tbl: State<ProcessTable>, idx: u32) -> u8 {
+transform pt_get_prio(tbl: State<ProcessTable>, idx: u32) -> u8 {
     return tbl.prios[idx];
 }
 
 // Write the u8 `prio` field of Task slot `idx` into ProcessTable.prios.
-fn pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
+transform pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
     tbl.prios[idx] = val;
 }
 
@@ -403,7 +403,7 @@ fn pt_set_prio(tbl: State<ProcessTable>, idx: u32, val: u8) {
 // loop, shift by i*8, mask 255 on writes, sum-of-shifted-bytes on reads.
 
 // Read the u64 `vruntime` field of Task slot `idx` from ProcessTable.vruntimes.
-fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -417,7 +417,7 @@ fn pt_get_vruntime(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `vruntime` field of Task slot `idx` into ProcessTable.vruntimes.
-fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -429,7 +429,7 @@ fn pt_set_vruntime(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `mm_root` field of Task slot `idx` from ProcessTable.mm_roots.
-fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -443,7 +443,7 @@ fn pt_get_mm_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `mm_root` field of Task slot `idx` into ProcessTable.mm_roots.
-fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -455,7 +455,7 @@ fn pt_set_mm_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `fs_root` field of Task slot `idx` from ProcessTable.fs_roots.
-fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -469,7 +469,7 @@ fn pt_get_fs_root(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `fs_root` field of Task slot `idx` into ProcessTable.fs_roots.
-fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -481,7 +481,7 @@ fn pt_set_fs_root(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `fds` field of Task slot `idx` from ProcessTable.fds.
-fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -495,7 +495,7 @@ fn pt_get_fds(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `fds` field of Task slot `idx` into ProcessTable.fds.
-fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -507,7 +507,7 @@ fn pt_set_fds(tbl: State<ProcessTable>, idx: u32, val: u64) {
 }
 
 // Read the u64 `next` field of Task slot `idx` from ProcessTable.nexts.
-fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
+transform pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -521,7 +521,7 @@ fn pt_get_next(tbl: State<ProcessTable>, idx: u32) -> u64 {
 }
 
 // Write the u64 `next` field of Task slot `idx` into ProcessTable.nexts.
-fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
+transform pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -545,7 +545,7 @@ fn pt_set_next(tbl: State<ProcessTable>, idx: u32, val: u64) {
 // be wasted work (and VUMA has no memset). next_pid is the exception
 // because task_alloc READS it before writing any pid field — if pt_init
 // left it as garbage, the first PID handed out would be garbage too.
-fn pt_init(tbl: State<ProcessTable>) {
+transform pt_init(tbl: State<ProcessTable>) {
     let i = 0;
     while i < 256 {
         pt_set_state(tbl, i, 0);
@@ -569,7 +569,7 @@ fn pt_init(tbl: State<ProcessTable>) {
 // The PID, however, is NOT recycled: if slot 0 held PID 1, was freed,
 // and is re-allocated, the new PID is whatever next_pid has reached —
 // monotonicity across slot reuse is the whole point of W10S4-S5.
-fn task_alloc(tbl: State<ProcessTable>) -> u32 {
+transform task_alloc(tbl: State<ProcessTable>) -> u32 {
     let i = 0;
     while i < 256 {
         if pt_get_state(tbl, i) == 0 {
@@ -598,7 +598,7 @@ fn task_alloc(tbl: State<ProcessTable>) -> u32 {
 // count. K4e (exit/wait) will flip state to ZOMBIE first (state = 4)
 // and only call task_free (full zero) when the parent reaps via
 // waitpid.
-fn task_free(tbl: State<ProcessTable>, idx: u32) {
+transform task_free(tbl: State<ProcessTable>, idx: u32) {
     pt_set_pid(tbl, idx, 0);
     pt_set_ppid(tbl, idx, 0);
     pt_set_state(tbl, idx, 0);
@@ -641,7 +641,7 @@ fn task_free(tbl: State<ProcessTable>, idx: u32) {
 // same rationale, and K3a's trap_trampoline.vuma for the same rule
 // applied to vector=14 and rip=4096).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let tbl = state_new(ProcessTable);
     pt_init(tbl);
 

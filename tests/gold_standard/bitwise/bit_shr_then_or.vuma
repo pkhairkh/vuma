@@ -6,7 +6,7 @@
 // workaround). Distinct from s20_bit_shr_xor_chain (shr-then-xor, value
 // 45) and s21_bit_shr_then_shl (shr-then-shl).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 255;         // 0xFF
     sh: u64 = 4;
     b: u64 = 16;          // 0x10

@@ -3,7 +3,7 @@
 //
 // Exposes: return inside nested if doesn't actually return.
 
-fn main() -> i32 {
+transform main() -> i32 {
     if true {
         if true {
             return 1;

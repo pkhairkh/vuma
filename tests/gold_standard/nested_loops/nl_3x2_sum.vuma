@@ -7,7 +7,7 @@
 // s26_nl_3x3_acc (3x3=9) and s22_nl_2x4_count (2x4=8).
 // Expected exit code: 60
 
-fn main() -> i32 {
+transform main() -> i32 {
     acc: u32 = 0;
     for i in 0..3 {
         for j in 0..2 {

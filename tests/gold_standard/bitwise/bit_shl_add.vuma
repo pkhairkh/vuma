@@ -7,7 +7,7 @@
 // s5_bit_shr_mask (shift then mask, no add) and s6_bit_shl_then_shr
 // (shl then shr, no add).
 
-fn main() -> i32 {
+transform main() -> i32 {
     one: u64 = 1;
     sh3: u64 = 3;
     sh2: u64 = 2;

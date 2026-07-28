@@ -6,7 +6,7 @@
 // sum = 0+1+2+...+9 = 45.
 // NOW PASSING until the for-body assignment propagation bug is fixed.
 
-fn main() -> i32 {
+transform main() -> i32 {
     sum: u32 = 0;
     for i in 0..10 {
         for k in 0..1 {

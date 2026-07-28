@@ -1,7 +1,7 @@
 // KAT test for bignum
 // Bignum 1+1=2
 // Expected exit code: 2
-fn main() -> i32 {
+transform main() -> i32 {
     a = allocate(32); b = allocate(32); r = allocate(32);
     i: u32 = 0;
     while i < 32 { *(a + i) = 0; *(b + i) = 0; *(r + i) = 0; i = i + 1; }

@@ -3,7 +3,7 @@
 //
 // Each addition is masked to u32. The final sum is 10.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 2;
     c: u32 = 3;

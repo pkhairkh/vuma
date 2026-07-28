@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_item_name() {
-        let source = "fn hello() {}";
+        let source = "transform hello() {}";
         let mut parser = Parser::new(source);
         let program = parser.parse_program().unwrap();
         let name = item_name(&program.items[0]);
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_no_imports_returns_unchanged() {
-        let source = "fn main() {}";
+        let source = "transform main() {}";
         let mut resolver = ModuleResolver::new();
         let result = resolver.resolve_source(source, None);
         assert!(result.is_ok());

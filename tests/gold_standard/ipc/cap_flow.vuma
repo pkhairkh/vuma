@@ -2,7 +2,7 @@
 // Verifies that capability tokens flow correctly between processes.
 // The parent grants a capability, sends with it, and the child receives.
 // Expected exit code: 42
-fn main() -> i32 {
+transform main() -> i32 {
     ch = channel_open<i32>();
     pid = spawn_worker();
     if pid == 0 {

@@ -169,7 +169,7 @@ layout PageTableEntry = { raw: u64 }
 //     pte_addr(pte_make(p, f)) == p
 // for any p in the 44-bit PPN range (i.e. any 4 KB-aligned physical
 // address below 2^56). The self-test asserts this round-trip.
-fn pte_addr(pte: u64) -> u64 {
+transform pte_addr(pte: u64) -> u64 {
     let ppn = (pte >> 10) & 17592186044415;  // 44-bit PPN
     return ppn << 12;
 }
@@ -178,7 +178,7 @@ fn pte_addr(pte: u64) -> u64 {
 // RISC-V §4.3.2: "When V=0, the PTE is invalid (the rest of the bits
 // are available for OS use, typically to point at a swap entry or a
 // wait list)." The walker stops descending as soon as it sees V=0.
-fn pte_valid(pte: u64) -> u8 {
+transform pte_valid(pte: u64) -> u8 {
     return (pte & 1) as u8;
 }
 
@@ -186,20 +186,20 @@ fn pte_valid(pte: u64) -> u8 {
 // For leaf PTEs: R=1 means user-mode reads are allowed (subject to the
 // U bit). For non-leaf PTEs: R must be 0 (a non-leaf PTE has no
 // permissions; it only points at the next-level table).
-fn pte_readable(pte: u64) -> u8 {
+transform pte_readable(pte: u64) -> u8 {
     return ((pte >> 1) & 1) as u8;
 }
 
 // Check if the Writable bit (bit 2) is set.
 // Reserved if R=0 and X=0 (the walker faults on this combination).
-fn pte_writable(pte: u64) -> u8 {
+transform pte_writable(pte: u64) -> u8 {
     return ((pte >> 2) & 1) as u8;
 }
 
 // Check if the Executable bit (bit 3) is set.
 // For leaf PTEs: X=1 means user-mode instruction fetches are allowed
 // (subject to the U bit). For non-leaf PTEs: X must be 0.
-fn pte_executable(pte: u64) -> u8 {
+transform pte_executable(pte: u64) -> u8 {
     return ((pte >> 3) & 1) as u8;
 }
 
@@ -207,7 +207,7 @@ fn pte_executable(pte: u64) -> u8 {
 // U=1 means the page is accessible from U-mode (userland). U=0 means
 // the page is S-mode / M-mode only (kernel). This is the RISC-V
 // analogue of x86_64's U/S bit (bit 2) and aarch64's AP[2] (bit 6).
-fn pte_user(pte: u64) -> u8 {
+transform pte_user(pte: u64) -> u8 {
     return ((pte >> 4) & 1) as u8;
 }
 
@@ -235,7 +235,7 @@ fn pte_user(pte: u64) -> u8 {
 // pre-mark A/D=1 (e.g. for prefaulted pages), OR in 192 (= 64 | 128)
 // on the result. The Linux convention is to leave A/D=0 at
 // PTE-construction time and let hardware fault them in.
-fn pte_make(paddr: u64, flags: u64) -> u64 {
+transform pte_make(paddr: u64, flags: u64) -> u64 {
     let ppn = paddr >> 12;
     return (ppn << 10) | (flags & 1023) | 1;  // 1023 = 0x3FF (low 10 bits), 1 = Valid
 }
@@ -300,7 +300,7 @@ fn pte_make(paddr: u64, flags: u64) -> u64 {
 // Returns 0 on success, 1..4 on the corresponding failure (so a future
 // CI failure pinpoints the broken helper).
 
-fn main() -> i32 {
+transform main() -> i32 {
     let pte = pte_make(1048576, 14);  // paddr=1MB, flags=R|W|X (bits 1,2,3)
     if pte_valid(pte) != 1 { return 1; }
     if pte_readable(pte) != 1 { return 2; }

@@ -43,7 +43,7 @@ struct Receiver<T> {
     channel: Address,     // Shared channel reference
 }
 
-fn channel_new(capacity: u64) -> (Address, Address) {
+transform channel_new(capacity: u64) -> (Address, Address) {
     // Create a bounded MPSC channel, returning (sender, receiver)
     //
     // IVE verifies:
@@ -72,7 +72,7 @@ fn channel_new(capacity: u64) -> (Address, Address) {
     return (sender, receiver);
 }
 
-fn sender_clone(sender: Address) -> Address {
+transform sender_clone(sender: Address) -> Address {
     // Clone a sender for use in another producer thread
     //
     // IVE verifies: sender_count increment is atomic (no data race)
@@ -86,7 +86,7 @@ fn sender_clone(sender: Address) -> Address {
     return new_sender;
 }
 
-fn sender_send(sender: Address, payload: u64, timestamp: u64) -> bool {
+transform sender_send(sender: Address, payload: u64, timestamp: u64) -> bool {
     // Send a message through the channel (blocking if full)
     //
     // IVE verifies concurrent safety:
@@ -131,7 +131,7 @@ fn sender_send(sender: Address, payload: u64, timestamp: u64) -> bool {
     return true;
 }
 
-fn receiver_recv(receiver: Address) -> Option<Address> {
+transform receiver_recv(receiver: Address) -> Option<Address> {
     // Receive a message from the channel
     //
     // IVE verifies:
@@ -164,7 +164,7 @@ fn receiver_recv(receiver: Address) -> Option<Address> {
     return Some(msg);
 }
 
-fn sender_drop(sender: Address) {
+transform sender_drop(sender: Address) {
     // Drop a sender — decrement sender count
     // IVE verifies: atomic decrement prevents data race
     chan = (*sender).channel;
@@ -177,7 +177,7 @@ fn sender_drop(sender: Address) {
     free(sender);
 }
 
-fn channel_destroy(receiver: Address) {
+transform channel_destroy(receiver: Address) {
     // Destroy the channel after all messages are consumed
     // IVE verifies: all allocations freed (Cleanup invariant)
     // IVE verifies: no senders remain (closed == 1)
@@ -187,7 +187,7 @@ fn channel_destroy(receiver: Address) {
     free(receiver);         // Free receiver struct
 }
 
-fn producer_task(sender: Address, start: u64, count: u64) {
+transform producer_task(sender: Address, start: u64, count: u64) {
     // Producer thread: send `count` messages starting from `start`
     // IVE verifies: concurrent sender_clone'd senders don't race
     i: u64 = 0;
@@ -200,7 +200,7 @@ fn producer_task(sender: Address, start: u64, count: u64) {
     sender_drop(sender);
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Create a bounded channel with capacity 8
     (tx, rx) = channel_new(8);
 

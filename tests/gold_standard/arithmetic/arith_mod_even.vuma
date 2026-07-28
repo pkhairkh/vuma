@@ -3,7 +3,7 @@
 //
 // Returns (n % 2) where n=14, so the result is 0 (and indicates evenness).
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 14;
     parity: u32 = n % 2;
     return parity;

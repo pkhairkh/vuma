@@ -5,7 +5,7 @@
 // 12 * 5 = 60. Distinct from s6_u32_add_pair (addition, not mul)
 // and s4_u32_mul_add (mul then add, not pure mul chain).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 3;
     b: u32 = 4;
     c: u32 = 5;

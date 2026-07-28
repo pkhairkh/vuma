@@ -6,7 +6,7 @@
 // s6_edge_zero_mul (0 * anything = 0) and s6_edge_ones_constant
 // (literal ones, not multiplication).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 88;
     r: u32 = a * b;   // 88

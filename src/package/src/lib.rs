@@ -165,7 +165,7 @@ pub fn init_package(dir: &std::path::Path, name: &str) -> PackageResult<()> {
     // Create a minimal main.vuma
     let main_path = src_dir.join("main.vuma");
     if !main_path.exists() {
-        std::fs::write(&main_path, "fn main() {\n    // Entry point\n}\n")?;
+        std::fs::write(&main_path, "transform main() {\n    // Entry point\n}\n")?;
     }
 
     Ok(())

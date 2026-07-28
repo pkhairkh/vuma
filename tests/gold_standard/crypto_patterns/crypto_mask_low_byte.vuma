@@ -7,7 +7,7 @@
 // s9_u32_and_mask (u32, 0xFF & 0x0F) and s5_crypto_mask_high_nibble
 // (high nibble, not low).
 
-fn main() -> i32 {
+transform main() -> i32 {
     v: u64 = 171;         // 0xAB
     m: u64 = 15;          // 0x0F
     r: u64 = v & m;       // 0x0B = 11

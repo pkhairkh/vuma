@@ -2,4 +2,4 @@
 // MQTT port
 // Expected exit code: 91
 
-fn main() -> i32 { return 1883; }
+transform main() -> i32 { return 1883; }

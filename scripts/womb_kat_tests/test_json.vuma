@@ -2,4 +2,4 @@
 // JSON '{'
 // Expected exit code: 123
 
-fn main() -> i32 { return 123; }
+transform main() -> i32 { return 123; }

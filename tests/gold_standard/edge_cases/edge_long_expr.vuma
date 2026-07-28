@@ -4,7 +4,7 @@
 // Edge case: a single chained expression evaluated left-to-right.
 // 1 + 2 = 3; 3 + 3 = 6; 6 + 4 = 10.
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 1;
     b: u32 = 2;
     c: u32 = 3;

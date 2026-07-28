@@ -9,7 +9,7 @@ layout Arena = { base: u64, offset: u64, capacity: u64 }
 layout Point = { x: u32, y: u32 }
 layout Rect = { w: u32, h: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let arena = arena_new(4096);
     let p = arena_alloc(arena, Point);
     let r = arena_alloc(arena, Rect);

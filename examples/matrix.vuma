@@ -17,13 +17,13 @@
 // ===========================================================================
 // Index formula: offset = (row * 4 + col) * 4
 
-fn mat_read(mat: Address, row: u64, col: u64) -> u32 {
+transform mat_read(mat: Address, row: u64, col: u64) -> u32 {
     offset: u64 = (row * 4 + col) * 4;
     val: u32 = *(mat + offset);
     return val;
 }
 
-fn mat_write(mat: Address, row: u64, col: u64, val: u32) {
+transform mat_write(mat: Address, row: u64, col: u64, val: u32) {
     offset: u64 = (row * 4 + col) * 4;
     *(mat + offset) = val;
 }
@@ -34,7 +34,7 @@ fn mat_write(mat: Address, row: u64, col: u64, val: u32) {
 // Standard algorithm: C[i][j] = Σ(k=0..3) A[i][k] * B[k][j]
 // All intermediate sums are masked to u32.
 
-fn mat_mul(a: Address, b: Address, c: Address) {
+transform mat_mul(a: Address, b: Address, c: Address) {
     i: u64 = 0;
     while i < 4 {
         j: u64 = 0;
@@ -57,7 +57,7 @@ fn mat_mul(a: Address, b: Address, c: Address) {
 // Compute XOR checksum of all 16 elements in a 4×4 matrix
 // ===========================================================================
 
-fn mat_checksum(mat: Address) -> u32 {
+transform mat_checksum(mat: Address) -> u32 {
     checksum: u32 = 0;
     i: u64 = 0;
     while i < 4 {
@@ -80,7 +80,7 @@ fn mat_checksum(mat: Address) -> u32 {
 // XOR checksum of A = 1^2^3^4^5^6^7^8^9^10^11^12^13^14^15^16 = 0
 // Exit code: 0
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate three 4×4 u32 matrices (64 bytes each)
     a = allocate(64);
     b = allocate(64);

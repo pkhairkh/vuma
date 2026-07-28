@@ -27,7 +27,7 @@ const MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
 // 384-bit bignum primitives (6 × u64 limbs, little-endian)
 // ===========================================================================
 
-fn bn384_load_u64(ptr: Address, off: u32) -> u64 {
+transform bn384_load_u64(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
@@ -35,7 +35,7 @@ fn bn384_load_u64(ptr: Address, off: u32) -> u64 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn bn384_store_u64(ptr: Address, off: u32, val: u64) {
+transform bn384_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -46,17 +46,17 @@ fn bn384_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn bn384_zero(a: Address) {
+transform bn384_zero(a: Address) {
     i: u32 = 0;
     while i < 48 { *(a + i) = 0; i = i + 1; }
 }
 
-fn bn384_copy(r: Address, a: Address) {
+transform bn384_copy(r: Address, a: Address) {
     i: u32 = 0;
     while i < 48 { *(r + i) = *(a + i); i = i + 1; }
 }
 
-fn bn384_is_zero(a: Address) -> u32 {
+transform bn384_is_zero(a: Address) -> u32 {
     i: u32 = 0;
     while i < 6 {
         if bn384_load_u64(a, i * 8) != 0 { return 0; }
@@ -65,7 +65,7 @@ fn bn384_is_zero(a: Address) -> u32 {
     return 1;
 }
 
-fn bn384_set_u32(r: Address, val: u32) {
+transform bn384_set_u32(r: Address, val: u32) {
     bn384_zero(r);
     *(r + 0) = val & 255;
     *(r + 1) = (val >> 8) & 255;
@@ -73,7 +73,7 @@ fn bn384_set_u32(r: Address, val: u32) {
     *(r + 3) = (val >> 24) & 255;
 }
 
-fn bn384_cmp(a: Address, b: Address) -> i32 {
+transform bn384_cmp(a: Address, b: Address) -> i32 {
     i: u32 = 5;
     while 1 == 1 {
         av: u64 = bn384_load_u64(a, i * 8);
@@ -86,7 +86,7 @@ fn bn384_cmp(a: Address, b: Address) -> i32 {
     return 0;
 }
 
-fn bn384_add(r: Address, a: Address, b: Address) -> u32 {
+transform bn384_add(r: Address, a: Address, b: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < 6 {
@@ -101,7 +101,7 @@ fn bn384_add(r: Address, a: Address, b: Address) -> u32 {
     return carry;
 }
 
-fn bn384_sub(r: Address, a: Address, b: Address) -> u32 {
+transform bn384_sub(r: Address, a: Address, b: Address) -> u32 {
     borrow: u64 = 0;
     i: u32 = 0;
     while i < 6 {
@@ -116,7 +116,7 @@ fn bn384_sub(r: Address, a: Address, b: Address) -> u32 {
     return borrow;
 }
 
-fn bn384_lshift1(r: Address, a: Address) {
+transform bn384_lshift1(r: Address, a: Address) {
     carry: u64 = 0;
     i: u32 = 0;
     while i < 6 {
@@ -127,7 +127,7 @@ fn bn384_lshift1(r: Address, a: Address) {
     }
 }
 
-fn bn384_rshift1(r: Address, a: Address) {
+transform bn384_rshift1(r: Address, a: Address) {
     i: u32 = 5;
     while i > 0 {
         hi: u64 = bn384_load_u64(a, i * 8);
@@ -139,7 +139,7 @@ fn bn384_rshift1(r: Address, a: Address) {
     bn384_store_u64(r, 0, v0 >> 1);
 }
 
-fn bn384_get_bit(a: Address, bit: u32) -> u32 {
+transform bn384_get_bit(a: Address, bit: u32) -> u32 {
     limb: u32 = bit / 64;
     pos: u32 = bit % 64;
     if limb >= 6 { return 0; }
@@ -147,7 +147,7 @@ fn bn384_get_bit(a: Address, bit: u32) -> u32 {
     return (v >> pos) & 1;
 }
 
-fn bn384_bitlen(a: Address) -> u32 {
+transform bn384_bitlen(a: Address) -> u32 {
     i: u32 = 5;
     while 1 == 1 {
         v: u64 = bn384_load_u64(a, i * 8);
@@ -165,7 +165,7 @@ fn bn384_bitlen(a: Address) -> u32 {
     return 0;
 }
 
-fn bn384_mod_add(r: Address, a: Address, b: Address, m: Address) {
+transform bn384_mod_add(r: Address, a: Address, b: Address, m: Address) {
     carry: u32 = bn384_add(r, a, b);
     if carry == 1 { bn384_sub(r, r, m); }
     else {
@@ -173,12 +173,12 @@ fn bn384_mod_add(r: Address, a: Address, b: Address, m: Address) {
     }
 }
 
-fn bn384_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+transform bn384_mod_sub(r: Address, a: Address, b: Address, m: Address) {
     borrow: u32 = bn384_sub(r, a, b);
     if borrow == 1 { bn384_add(r, r, m); }
 }
 
-fn bn384_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+transform bn384_mod_mul(r: Address, a: Address, b: Address, m: Address) {
     bn384_zero(r);
     temp = allocate(48);
     bn384_copy(temp, a);
@@ -195,7 +195,7 @@ fn bn384_mod_mul(r: Address, a: Address, b: Address, m: Address) {
     free(temp);
 }
 
-fn bn384_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+transform bn384_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
     bn384_zero(r);
     *(r + 0) = 1;
     base = allocate(48);
@@ -219,7 +219,7 @@ fn bn384_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
 }
 
 // Binary extended GCD modular inverse: r = a^(-1) mod m.
-fn bn384_mod_inv(r: Address, a: Address, m: Address) {
+transform bn384_mod_inv(r: Address, a: Address, m: Address) {
     u = allocate(48); v = allocate(48);
     x1 = allocate(48); x2 = allocate(48);
     bn384_copy(u, a);
@@ -263,7 +263,7 @@ fn bn384_mod_inv(r: Address, a: Address, m: Address) {
 // P-384 curve constants (big-endian, 48 bytes each)
 // ===========================================================================
 
-fn p384_p_be() -> Address {
+transform p384_p_be() -> Address {
     // p = 2^384 - 2^128 - 2^96 + 2^32 - 1
     buf = allocate(48);
     *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
@@ -281,7 +281,7 @@ fn p384_p_be() -> Address {
     return buf;
 }
 
-fn p384_n_be() -> Address {
+transform p384_n_be() -> Address {
     buf = allocate(48);
     *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
     *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
@@ -298,7 +298,7 @@ fn p384_n_be() -> Address {
     return buf;
 }
 
-fn p384_b_be() -> Address {
+transform p384_b_be() -> Address {
     buf = allocate(48);
     *(buf +  0) = 179; *(buf +  1) =  49; *(buf +  2) =  47; *(buf +  3) = 167;
     *(buf +  4) = 226; *(buf +  5) =  62; *(buf +  6) = 231; *(buf +  7) = 228;
@@ -316,7 +316,7 @@ fn p384_b_be() -> Address {
     return buf;
 }
 
-fn p384_gx_be() -> Address {
+transform p384_gx_be() -> Address {
     buf = allocate(48);
     *(buf +  0) = 170; *(buf +  1) = 135; *(buf +  2) = 202; *(buf +  3) =  34;
     *(buf +  4) = 190; *(buf +  5) = 139; *(buf +  6) =   5; *(buf +  7) =  55;
@@ -334,7 +334,7 @@ fn p384_gx_be() -> Address {
     return buf;
 }
 
-fn p384_gy_be() -> Address {
+transform p384_gy_be() -> Address {
     buf = allocate(48);
     *(buf +  0) =  54; *(buf +  1) =  23; *(buf +  2) = 222; *(buf +  3) =  74;
     *(buf +  4) = 150; *(buf +  5) =  38; *(buf +  6) =  44; *(buf +  7) = 111;
@@ -352,7 +352,7 @@ fn p384_gy_be() -> Address {
     return buf;
 }
 
-fn swap_endian_48(dst: Address, src: Address) {
+transform swap_endian_48(dst: Address, src: Address) {
     i: u32 = 0;
     while i < 48 {
         *(dst + i) = *(src + 47 - i);
@@ -364,7 +364,7 @@ fn swap_endian_48(dst: Address, src: Address) {
 // Point operations (affine, mod p)
 // ===========================================================================
 
-fn p384_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
+transform p384_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
     y_sq = allocate(48);
     bn384_mod_mul(y_sq, py, py, p_le);
     x_sq = allocate(48);
@@ -388,7 +388,7 @@ fn p384_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u
     return result;
 }
 
-fn p384_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
+transform p384_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
     if bn384_is_zero(px) == 1 {
         if bn384_is_zero(py) == 1 {
             bn384_zero(rx);
@@ -432,7 +432,7 @@ fn p384_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: A
     free(slope); free(slope_sq); free(two_x); free(x_minus_rx); free(slope_x);
 }
 
-fn p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
+transform p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
     if bn384_is_zero(px) == 1 {
         if bn384_is_zero(py) == 1 {
             bn384_copy(rx, qx);
@@ -475,7 +475,7 @@ fn p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Addres
     free(slope_sq); free(temp); free(x_diff); free(slope_x);
 }
 
-fn p384_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
+transform p384_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
     bn384_zero(rx);
     bn384_zero(ry);
     tx = allocate(48); ty = allocate(48);
@@ -501,7 +501,7 @@ fn p384_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Addres
 // The 64-byte HMAC output is reduced mod n with rejection.
 // ===========================================================================
 
-fn rfc6979_p384_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
+transform rfc6979_p384_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
     hlen: u32 = 64;
     qlen: u32 = 48;
 
@@ -610,7 +610,7 @@ fn rfc6979_p384_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
 //   pubkey_y_be (out)   : 48-byte big-endian Q.y
 // ===========================================================================
 
-fn ecdsa_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+transform ecdsa_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
     n_be = p384_n_be();
     n_le = allocate(48);
     swap_endian_48(n_le, n_be);
@@ -652,7 +652,7 @@ fn ecdsa_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Add
 // ECDSA P-384 Sign (uses SHA-384 to match curve strength)
 // ===========================================================================
 
-fn ecdsa_p384_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
+transform ecdsa_p384_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
     h = allocate(48);
     sha384_oneshot(msg, msg_len, h);
 
@@ -701,7 +701,7 @@ fn ecdsa_p384_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addre
 // ECDSA P-384 Verify
 // ===========================================================================
 
-fn ecdsa_p384_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
+transform ecdsa_p384_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
     n_be = p384_n_be();
     n_le = allocate(48);
     swap_endian_48(n_le, n_be);
@@ -773,10 +773,10 @@ fn ecdsa_p384_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_
 }
 
 // Expose scalar_mul and byte-swap for callers like ecdh_p384 / key_agreement.
-fn p384_scalar_mul_wrap(rx: Address, ry: Address, k: Address, px: Address, py: Address, p: Address) {
+transform p384_scalar_mul_wrap(rx: Address, ry: Address, k: Address, px: Address, py: Address, p: Address) {
     p384_scalar_mul(rx, ry, k, px, py, p);
 }
 
-fn swap_endian_48_wrap(dst: Address, src: Address) {
+transform swap_endian_48_wrap(dst: Address, src: Address) {
     swap_endian_48(dst, src);
 }

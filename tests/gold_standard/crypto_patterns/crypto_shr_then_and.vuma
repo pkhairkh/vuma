@@ -6,7 +6,7 @@
 // variables first (immediate-RHS bitwise drop bug workaround).
 // Distinct from s98_crypto_and_then_xor (42),
 // s97_crypto_shr_then_xor (67) and s94_crypto_and_then_shr (30).
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     s: u32 = 3;
     b: u32 = 31;           // 0x1F

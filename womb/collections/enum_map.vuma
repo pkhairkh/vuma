@@ -6,24 +6,24 @@
 //   Header: { entries_ptr: u64, count: u32, capacity: u32, _pad: u32, _pad: u32 }
 //   Entry:  [tag: u32][payload: 32 bytes] = 36 bytes (round to 40 for alignment)
 
-fn store_u64(ptr: Address, offset: u32, val: u64) {
+transform store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
     *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
     *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-fn load_u64(ptr: Address, offset: u32) -> u64 {
+transform load_u64(ptr: Address, offset: u32) -> u64 {
     b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
     b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
     b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
     b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-fn store_u32(ptr: Address, offset: u32, val: u32) {
+transform store_u32(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
     *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-fn load_u32(ptr: Address, offset: u32) -> u32 {
+transform load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
@@ -32,7 +32,7 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
 const ENTRY_SIZE: u32 = 40;  // 4 (tag) + 32 (payload) + 4 (padding)
 
 // Create a new enum_map with given capacity
-fn enum_map_new(capacity: u32) -> Address {
+transform enum_map_new(capacity: u32) -> Address {
     if capacity == 0 { capacity = 256; }
     m = allocate(24);
     entries = allocate(capacity * ENTRY_SIZE);
@@ -48,7 +48,7 @@ fn enum_map_new(capacity: u32) -> Address {
 }
 
 // Grow the entries array (2x)
-fn enum_map_grow(m: Address) {
+transform enum_map_grow(m: Address) {
     old_cap: u32 = load_u32(m, 12);
     new_cap: u32 = old_cap * 2;
     old_entries: u64 = load_u64(m, 0);
@@ -66,7 +66,7 @@ fn enum_map_grow(m: Address) {
 
 // Add an entry with tag and payload data (up to 32 bytes).
 // Returns the entry index.
-fn enum_map_add(m: Address, tag: u32, payload: Address, payload_len: u32) -> u32 {
+transform enum_map_add(m: Address, tag: u32, payload: Address, payload_len: u32) -> u32 {
     count: u32 = load_u32(m, 8);
     cap: u32 = load_u32(m, 12);
     if count >= cap { enum_map_grow(m); }
@@ -86,7 +86,7 @@ fn enum_map_add(m: Address, tag: u32, payload: Address, payload_len: u32) -> u32
 }
 
 // Get the tag of an entry
-fn enum_map_tag(m: Address, idx: u32) -> u32 {
+transform enum_map_tag(m: Address, idx: u32) -> u32 {
     count: u32 = load_u32(m, 8);
     if idx >= count { return 0; }
     entries: u64 = load_u64(m, 0);
@@ -94,7 +94,7 @@ fn enum_map_tag(m: Address, idx: u32) -> u32 {
 }
 
 // Get the payload pointer (points into the entries array, 32 bytes max)
-fn enum_map_payload(m: Address, idx: u32) -> u64 {
+transform enum_map_payload(m: Address, idx: u32) -> u64 {
     count: u32 = load_u32(m, 8);
     if idx >= count { return 0; }
     entries: u64 = load_u64(m, 0);
@@ -102,22 +102,22 @@ fn enum_map_payload(m: Address, idx: u32) -> u64 {
 }
 
 // Get a u64 from the payload at byte offset
-fn enum_map_payload_u64(m: Address, idx: u32, offset: u32) -> u64 {
+transform enum_map_payload_u64(m: Address, idx: u32, offset: u32) -> u64 {
     ptr: u64 = enum_map_payload(m, idx);
     if ptr == 0 { return 0; }
     return load_u64(ptr, offset);
 }
 
 // Get a u32 from the payload at byte offset
-fn enum_map_payload_u32(m: Address, idx: u32, offset: u32) -> u32 {
+transform enum_map_payload_u32(m: Address, idx: u32, offset: u32) -> u32 {
     ptr: u64 = enum_map_payload(m, idx);
     if ptr == 0 { return 0; }
     return load_u32(ptr, offset);
 }
 
-fn enum_map_count(m: Address) -> u32 { return load_u32(m, 8); }
+transform enum_map_count(m: Address) -> u32 { return load_u32(m, 8); }
 
-fn enum_map_free(m: Address) {
+transform enum_map_free(m: Address) {
     entries: u64 = load_u64(m, 0);
     cap: u32 = load_u32(m, 12);
     free(entries);

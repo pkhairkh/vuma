@@ -131,7 +131,7 @@ layout BootInfo = {
 // re-declared here so this file compiles standalone. x86_bootinfo_init
 // calls this first to get a clean slate before populating x86-specific
 // fields.
-fn bootinfo_init(bi: State<BootInfo>) {
+transform bootinfo_init(bi: State<BootInfo>) {
     bi.mem_start = 0;
     bi.mem_size = 0;
     bi.cmdline = 0;
@@ -172,7 +172,7 @@ fn bootinfo_init(bi: State<BootInfo>) {
 // State<T> params: 1 (bi). The `magic` and `mbi_addr` params are pure
 // u64 values (no State indirection). The body is 5 field writes after
 // the bootinfo_init call — pure typed-memory writes, no pointer ops.
-fn x86_bootinfo_init(bi: State<BootInfo>, magic: u64, mbi_addr: u64) {
+transform x86_bootinfo_init(bi: State<BootInfo>, magic: u64, mbi_addr: u64) {
     bootinfo_init(bi);
     bi.boot_type = 0;          // x86_multiboot
     bi.multiboot_magic = magic;
@@ -202,7 +202,7 @@ fn x86_bootinfo_init(bi: State<BootInfo>, magic: u64, mbi_addr: u64) {
 //   1: boot_type != 0
 //   2: mem_start != 1048576
 //   3: mem_size  != 134217728
-fn main() -> i32 {
+transform main() -> i32 {
     let bi = state_new(BootInfo);
     x86_bootinfo_init(bi, 920085129, 0);  // multiboot2 magic 0x36d76289
     if bi.boot_type != 0 { return 1; }

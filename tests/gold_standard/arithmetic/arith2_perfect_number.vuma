@@ -6,7 +6,7 @@
 // This test returns the divisor sum (6), which equals the input number.
 // Straight-line code only.
 
-fn main() -> i32 {
+transform main() -> i32 {
     n: u32 = 6;
     d1: u32 = 1;
     d2: u32 = 2;

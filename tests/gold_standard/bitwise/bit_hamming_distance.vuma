@@ -11,7 +11,7 @@
 // popcount is computed by summing each bit individually (8-bit unrolled),
 // which is simpler than the SWAR algorithm and avoids the nested
 // (shift) & mask codegen bug.
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 0xFF;
     b: u64 = 0xFC;
     one: u64 = 1;

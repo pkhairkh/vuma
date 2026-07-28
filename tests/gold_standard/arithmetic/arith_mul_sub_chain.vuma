@@ -7,7 +7,7 @@
 // `*(ptr + offset)` indexing. Distinct from s30_arith_mul_then_add (mul-
 // then-add, 110) and s26_arith_mul_sub_chain (different operands).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 15;
     b: u32 = 5;
     c: u32 = 25;

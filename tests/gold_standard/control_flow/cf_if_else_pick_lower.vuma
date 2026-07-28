@@ -8,7 +8,7 @@
 // (picks higher value) and s13_cf_if_two_branches_const (values 60/240).
 // Expected exit code: 30
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: u32 = 0;
     if true {
         x = 30;

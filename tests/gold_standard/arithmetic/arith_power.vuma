@@ -3,7 +3,7 @@
 //
 // 2^10 = 1024 = 0x400. The exit code is the low byte, which is 0.
 
-fn main() -> i32 {
+transform main() -> i32 {
     base: u32 = 2;
     exp: u32 = 10;
     result: u32 = 1;

@@ -19,7 +19,7 @@ const AES_BLOCK_SIZE: u32 = 16;
 // plaintext can have any non-zero length.
 // ===========================================================================
 
-fn aes_ecb_encrypt(plaintext: Address, pt_len: u32, key: Address, ciphertext: Address) -> u32 {
+transform aes_ecb_encrypt(plaintext: Address, pt_len: u32, key: Address, ciphertext: Address) -> u32 {
     pad_byte: u32 = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
     if pad_byte == 0 { pad_byte = AES_BLOCK_SIZE; }
     padded_len: u32 = pt_len + pad_byte;
@@ -39,7 +39,7 @@ fn aes_ecb_encrypt(plaintext: Address, pt_len: u32, key: Address, ciphertext: Ad
     return padded_len;
 }
 
-fn aes_ecb_decrypt(ciphertext: Address, ct_len: u32, key: Address, plaintext: Address) -> u32 {
+transform aes_ecb_decrypt(ciphertext: Address, ct_len: u32, key: Address, plaintext: Address) -> u32 {
     // ct_len must be a positive multiple of 16 for valid ECB ciphertext.
     if ct_len == 0 { return 0; }
 
@@ -65,7 +65,7 @@ fn aes_ecb_decrypt(ciphertext: Address, ct_len: u32, key: Address, plaintext: Ad
 // Decrypt: P_i = AES_dec(C_i) XOR C_{i-1}
 // ===========================================================================
 
-fn aes_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     pad_byte: u32 = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
     if pad_byte == 0 { pad_byte = AES_BLOCK_SIZE; }
     padded_len: u32 = pt_len + pad_byte;
@@ -105,7 +105,7 @@ fn aes_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, c
     return padded_len;
 }
 
-fn aes_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     if ct_len == 0 { return 0; }
 
     prev = allocate(AES_BLOCK_SIZE);
@@ -147,7 +147,7 @@ fn aes_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, 
 // operation, so a single function serves both directions.
 // ===========================================================================
 
-fn aes_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+transform aes_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
     counter_block = allocate(AES_BLOCK_SIZE);
     i: u32 = 0;
     while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }
@@ -198,15 +198,15 @@ fn aes_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, out
 // key buffer is supplied.
 // ===========================================================================
 
-fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     return aes_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
 }
 
-fn aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+transform aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
     return aes_cbc_decrypt(ciphertext, ct_len, key, iv, plaintext);
 }
 
-fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+transform aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
     return aes_ctr_crypt(data, data_len, key, nonce, output);
 }
 
@@ -230,7 +230,7 @@ fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, 
 // integers and produces Z = X * Y mod (x^128 + x^7 + x^2 + x + 1).
 // The GCM polynomial's leading coefficient sits at the MSB of byte 0,
 // so the reduction constant is 0xE1 in byte 0.
-fn ghash_mul(x: Address, y: Address, out: Address) {
+transform ghash_mul(x: Address, y: Address, out: Address) {
     z = allocate(16);
     v = allocate(16);
     i: u32 = 0;
@@ -279,7 +279,7 @@ fn ghash_mul(x: Address, y: Address, out: Address) {
     free(z); free(v);
 }
 
-fn ghash_update(y: Address, block: Address, h: Address) {
+transform ghash_update(y: Address, block: Address, h: Address) {
     xored = allocate(16);
     i: u32 = 0;
     while i < 16 {
@@ -292,7 +292,7 @@ fn ghash_update(y: Address, block: Address, h: Address) {
 
 // Increment the rightmost 32 bits of a 16-byte block (mod 2^32), leaving
 // the leftmost 96 bits unchanged. Used by GCM's CTR mode.
-fn gcm_inc32(counter: Address) {
+transform gcm_inc32(counter: Address) {
     carry: u32 = 1;
     j: u32 = 15;
     while j >= 12 {
@@ -308,7 +308,7 @@ fn gcm_inc32(counter: Address) {
 // output. Both inputs are zero-padded to 16-byte boundaries, then a
 // final length block holds the 64-bit big-endian bit-lengths of AAD
 // and ciphertext.
-fn gcm_ghash(h: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len: u32, out: Address) {
+transform gcm_ghash(h: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len: u32, out: Address) {
     y = allocate(16);
     i: u32 = 0;
     while i < 16 { *(y + i) = 0; i = i + 1; }
@@ -375,7 +375,7 @@ fn gcm_ghash(h: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len
     free(y); free(len_block);
 }
 
-fn aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
+transform aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
     // 1. H = AES_enc(K, 0^128)
     h = allocate(16);
     zero_block = allocate(16);
@@ -432,7 +432,7 @@ fn aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
     return pt_len;
 }
 
-fn aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
+transform aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
     // 1. H = AES_enc(K, 0^128)
     h = allocate(16);
     zero_block = allocate(16);
@@ -503,6 +503,6 @@ fn aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Addres
 // Some callers (tls12.vuma) invoke the CBC routines with the legacy
 // argument order (key, iv, plaintext, pt_len, ciphertext). Provide thin
 // shims that match those call sites.
-fn aes256_cbc_encrypt_kv(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+transform aes256_cbc_encrypt_kv(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
     return aes_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
 }

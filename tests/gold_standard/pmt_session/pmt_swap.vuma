@@ -22,7 +22,7 @@
 
 layout Swap = { a: u32, b: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let s = state_new(Swap);
     s.a = 2;
     s.b = 1;

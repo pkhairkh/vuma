@@ -15,7 +15,7 @@
 // Read a u64 from array at given index (8-byte stride)
 // ===========================================================================
 
-fn arr_read(arr: Address, idx: u64) -> u64 {
+transform arr_read(arr: Address, idx: u64) -> u64 {
     // Each element is 8 bytes (u64)
     return *(arr + idx * 8);
 }
@@ -24,7 +24,7 @@ fn arr_read(arr: Address, idx: u64) -> u64 {
 // Write a u64 to array at given index (8-byte stride)
 // ===========================================================================
 
-fn arr_write(arr: Address, idx: u64, val: u64) {
+transform arr_write(arr: Address, idx: u64, val: u64) {
     *(arr + idx * 8) = val;
 }
 
@@ -32,7 +32,7 @@ fn arr_write(arr: Address, idx: u64, val: u64) {
 // Swap two elements in the array
 // ===========================================================================
 
-fn arr_swap(arr: Address, i: u64, j: u64) {
+transform arr_swap(arr: Address, i: u64, j: u64) {
     temp: u64 = arr_read(arr, i);
     arr_write(arr, i, arr_read(arr, j));
     arr_write(arr, j, temp);
@@ -44,7 +44,7 @@ fn arr_swap(arr: Address, i: u64, j: u64) {
 // Rearranges elements so that arr[lo..pivot] <= pivot < arr[pivot+1..hi]
 // Returns the final index of the pivot element.
 
-fn partition(arr: Address, lo: u64, hi: u64) -> u64 {
+transform partition(arr: Address, lo: u64, hi: u64) -> u64 {
     pivot: u64 = arr_read(arr, hi);
     i: u64 = lo;
     j: u64 = lo;
@@ -64,7 +64,7 @@ fn partition(arr: Address, lo: u64, hi: u64) -> u64 {
 // ===========================================================================
 // Sorts arr[lo..hi] inclusive using partition-then-recurse.
 
-fn quicksort(arr: Address, lo: u64, hi: u64) {
+transform quicksort(arr: Address, lo: u64, hi: u64) {
     if lo < hi {
         p: u64 = partition(arr, lo, hi);
         if p > 0 {
@@ -83,7 +83,7 @@ fn quicksort(arr: Address, lo: u64, hi: u64) {
 // Median (index 5): 33
 // Exit code: 33
 
-fn main() -> i32 {
+transform main() -> i32 {
     // Allocate array of 10 u64 elements (80 bytes)
     arr = allocate(80);
 

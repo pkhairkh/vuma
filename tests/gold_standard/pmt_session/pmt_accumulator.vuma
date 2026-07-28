@@ -21,7 +21,7 @@
 
 layout Acc = { sum: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let acc = state_new(Acc);
     acc.sum = 0;
     acc.sum = acc.sum + 10;

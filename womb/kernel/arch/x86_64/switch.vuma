@@ -9,7 +9,7 @@
 // fields (rsp, rip, rbp, rbx, r12-r15). R4a+b narrows the surface to the
 // superset TrapFrame (R2a) ONLY:
 //
-//   * `arch_context_switch(prev_tf, next_tf)` — a VUMA fn (not an extern).
+//   * `arch_context_switch(prev_tf, next_tf)` — a VUMA transform (not an extern).
 //     In hosted mode it is a no-op: the scheduler's sched_save_context /
 //     sched_restore_context (womb/kernel/proc/scheduler.vuma, R4a+b) have
 //     already copied the prev task's PC/SP/status into its Task slot and
@@ -21,7 +21,7 @@
 //     implementation (the hosted self-test just verifies the call site
 //     doesn't crash).
 //
-//   * `extern "C" fn arch_load_context(tf)` — the bare-metal asm stub that
+//   * `extern "C" transform arch_load_context(tf)` — the bare-metal asm stub that
 //     loads tf's GPRs (r86_64: rax..r15 + rip + rsp + rflags) into the CPU.
 //     Hosted: __ffi_fallback_stub (no-op). Bare-metal (K11): the asm stub
 //     in womb/kernel/arch/x86_64/switch.S reads tf at the superset
@@ -133,7 +133,7 @@ layout TrapFrame = {
 
 // Read the u64 GPR at canonical slot `idx` from tf.gpr. Byte-identical to
 // R2a's tf_get_gpr.
-fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
+transform tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
     let off = idx * 8;
     let v: u64 = 0;
     let i = 0;
@@ -148,7 +148,7 @@ fn tf_get_gpr(tf: State<TrapFrame>, idx: u32) -> u64 {
 
 // Write the u64 `val` to canonical slot `idx` in tf.gpr. Byte-identical
 // to R2a's tf_set_gpr.
-fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
+transform tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
     let off = idx * 8;
     let i = 0;
     while i < 8 {
@@ -161,7 +161,7 @@ fn tf_set_gpr(tf: State<TrapFrame>, idx: u32, val: u64) {
 
 // Zero every field of a caller-allocated TrapFrame. Byte-identical to
 // R2a's tf_init.
-fn tf_init(tf: State<TrapFrame>) {
+transform tf_init(tf: State<TrapFrame>) {
     let i = 0;
     while i < 256 { tf.gpr[i] = 0; i = i + 1; }
     tf.pc = 0;
@@ -176,7 +176,7 @@ fn tf_init(tf: State<TrapFrame>) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// arch_context_switch — VUMA fn (no-op in hosted mode).
+// arch_context_switch — VUMA transform (no-op in hosted mode).
 // ────────────────────────────────────────────────────────────────────────────
 // Per the R4a+b contract: "In hosted mode: no-op (the scheduler's
 // save/restore already copied the data). Just return."
@@ -192,11 +192,11 @@ fn tf_init(tf: State<TrapFrame>) {
 // VUMA builtin for `iretq` / `mov cr3, reg` / direct GPR write).
 //
 // State<T> params: 2 (prev_tf + next_tf). Both are #[borrow]-style
-// borrows (regular VUMA-fn borrow — no extern attribute needed because
-// this is a regular VUMA fn, not an extern "C" call). No reads, no
+// borrows (regular VUMA-transform borrow — no extern attribute needed because
+// this is a regular VUMA transform, not an extern "C" call). No reads, no
 // writes — the function body is empty. The params are kept in the
 // signature so the call site compiles + links against the no-op stub.
-fn arch_context_switch(prev_tf: State<TrapFrame>, next_tf: State<TrapFrame>) {
+transform arch_context_switch(prev_tf: State<TrapFrame>, next_tf: State<TrapFrame>) {
     // Hosted-mode no-op. Bare-metal (K11) implementation will:
     //   1. cr3_write(pt_get_mm_root(tbl, next_idx))  — switch address
     //      spaces (the saved PC is currently in mm_root per R4a+b's
@@ -207,7 +207,7 @@ fn arch_context_switch(prev_tf: State<TrapFrame>, next_tf: State<TrapFrame>) {
     //      into the CPU via the asm stub (reads the TrapFrame, NOT the
     //      Task slot — the sched_restore_context call has already
     //      populated next_tf from the Task slot's saved fields).
-    //   3. (the asm stub ends with `iretq`, so this fn never returns
+    //   3. (the asm stub ends with `iretq`, so this transform never returns
     //      in bare-metal mode — control transfers to next_tf.pc).
     return;
 }
@@ -227,14 +227,14 @@ extern "C" {
     // TrapFrame at R2a's field offsets, NOT the old K4c flat-fields
     // Task). Hosted stub: no-op.
     #[borrow]
-    fn arch_load_context(tf: State<TrapFrame>);
+    transform arch_load_context(tf: State<TrapFrame>);
     // Load CR3 (page table root) for the new task. `val` is the
     // physical address of the new PML4 table (plus PCID/flag bits).
     // K11 stub: `mov cr3, rdi; ret` (RDI = val under SysV AMD64).
     // Side effect: flushes the TLB for the OLD address space.
     // (Preserved from K4c for K11's switch.S to call — R4a+b's
     // arch_context_switch no-op does NOT call this, but K11's will.)
-    fn cr3_write(val: u64);
+    transform cr3_write(val: u64);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -308,7 +308,7 @@ extern "C" {
 // rationale). The values are the contract's hex values 0x1000, 0x8000,
 // 0x2000, 0x9000 expressed in decimal.
 
-fn main() -> i32 {
+transform main() -> i32 {
     let prev_tf = state_new(TrapFrame);
     let next_tf = state_new(TrapFrame);
     tf_init(prev_tf);
@@ -322,7 +322,7 @@ fn main() -> i32 {
     if prev_tf.sp != 32768 { return 3; }
     if next_tf.sp != 36864 { return 4; }
     // Hosted-mode no-op. Both TrapFrames survive the call (regular VUMA
-    // fn — no #[borrow] needed; the State<T> lifetime is tracked through
+    // transform — no #[borrow] needed; the State<T> lifetime is tracked through
     // the call).
     arch_context_switch(prev_tf, next_tf);
     return 0;

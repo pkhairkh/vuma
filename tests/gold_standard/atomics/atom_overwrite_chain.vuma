@@ -8,7 +8,7 @@
 // 17/73) and s10_atom_overwrite_twice (three writes 10/80/90).
 
 layout _L1 = { v: u32 }
-fn main() -> i32 {
+transform main() -> i32 {
     let c = state_new(_L1);
     c.v = 5;
     c.v = 50;

@@ -2,4 +2,4 @@
 // AES-CFB XOR
 // Expected exit code: 255
 
-fn main() -> i32 { return (170 ^ 85) & 255; }
+transform main() -> i32 { return (170 ^ 85) & 255; }

@@ -1,7 +1,7 @@
 // ffi_wave3/foreign_arg_pass — #[foreign(raw)] arg passes the raw field value
 // Expected exit code: 0
 //
-// Test: when a State<ForeignLayout> is passed to an extern fn, the
+// Test: when a State<ForeignLayout> is passed to an extern transform, the
 // `raw` field value (the C pointer) is passed — NOT the ___pmt_buffer
 // pointer. This test declares the extern and the foreign layout; the
 // marshal module's classify_arg_mode returns ForeignPass for such args.
@@ -10,10 +10,10 @@
 layout DbHandle = { raw: u64 }
 
 extern "C" {
-    fn use_db(db: State<DbHandle>) -> i64;
+    transform use_db(db: State<DbHandle>) -> i64;
 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let db = state_new(DbHandle);
     db.raw = 0;
     // Hypothetically: use_db(db) — db.raw (the C pointer) is passed, not

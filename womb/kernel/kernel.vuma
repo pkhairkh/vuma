@@ -23,10 +23,10 @@ import "shell/shell.vuma";
 import "panic/panic.vuma";
 
 extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn exit(code: i64);
-    fn ioctl(fd: i64, request: i64, arg: Address) -> i64;
+    transform write(fd: i64, buf: Address, count: i64) -> i64;
+    transform read(fd: i64, buf: Address, count: i64) -> i64;
+    transform exit(code: i64);
+    transform ioctl(fd: i64, request: i64, arg: Address) -> i64;
 }
 
 layout KBuf = { data: [u8; 256] }
@@ -75,16 +75,16 @@ layout History = {
     count: u32,
 }
 
-fn kprint(ec: State<EarlyConsole>, c: u8) {
+transform kprint(ec: State<EarlyConsole>, c: u8) {
     early_console_write_byte(ec, c);
 }
 
-fn kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 13); kprint(ec, 10); }
+transform kputs_nl(ec: State<EarlyConsole>) { kprint(ec, 13); kprint(ec, 10); }
 
 // ── ANSI color helpers ─────────────────────────────────────────────────
 // ESC [ N m  — set color.  0=reset, 1=bold, 31=red, 32=green, 33=yellow,
 // 34=blue, 35=magenta, 36=cyan, 37=white, 90=gray
-fn kcolor(ec: State<EarlyConsole>, code: u8) {
+transform kcolor(ec: State<EarlyConsole>, code: u8) {
     kprint(ec, 27); kprint(ec, 91);
     // Print code as decimal (1-2 digits)
     if code >= 10 { kprint(ec, 48 + code / 10); }
@@ -92,11 +92,11 @@ fn kcolor(ec: State<EarlyConsole>, code: u8) {
     kprint(ec, 109);
 }
 
-fn kreset(ec: State<EarlyConsole>) {
+transform kreset(ec: State<EarlyConsole>) {
     kprint(ec, 27); kprint(ec, 91); kprint(ec, 48); kprint(ec, 109);
 }
 
-fn kputs_banner(ec: State<EarlyConsole>) {
+transform kputs_banner(ec: State<EarlyConsole>) {
     // Cyan bold: "VWK" + reset + " kernel booted"
     kcolor(ec, 36); kcolor(ec, 1);
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75);  // VWK
@@ -108,7 +108,7 @@ fn kputs_banner(ec: State<EarlyConsole>) {
     kprint(ec, 101); kprint(ec, 100); kputs_nl(ec);
 }
 
-fn kputs_prompt(ec: State<EarlyConsole>) {
+transform kputs_prompt(ec: State<EarlyConsole>) {
     // Magenta "vwk" + yellow "> " + reset
     kcolor(ec, 35); kcolor(ec, 1);
     kprint(ec, 118); kprint(ec, 119); kprint(ec, 107);  // vwk
@@ -116,7 +116,7 @@ fn kputs_prompt(ec: State<EarlyConsole>) {
     kreset(ec);
 }
 
-fn kputs_shutdown(ec: State<EarlyConsole>) {
+transform kputs_shutdown(ec: State<EarlyConsole>) {
     kcolor(ec, 31); kcolor(ec, 1);
     kprint(ec, 86); kprint(ec, 87); kprint(ec, 75); kprint(ec, 32);
     kprint(ec, 115); kprint(ec, 104); kprint(ec, 117); kprint(ec, 116);
@@ -125,19 +125,19 @@ fn kputs_shutdown(ec: State<EarlyConsole>) {
     kprint(ec, 110); kreset(ec); kputs_nl(ec);
 }
 
-fn kputs_ok(ec: State<EarlyConsole>) {
+transform kputs_ok(ec: State<EarlyConsole>) {
     kcolor(ec, 32);  // green
     kprint(ec, 79); kprint(ec, 75);  // OK
     kreset(ec); kputs_nl(ec);
 }
 
-fn kputs_err(ec: State<EarlyConsole>) {
+transform kputs_err(ec: State<EarlyConsole>) {
     kcolor(ec, 31);  // red
     kprint(ec, 69); kprint(ec, 82); kprint(ec, 82);  // ERR
     kreset(ec); kputs_nl(ec);
 }
 
-fn kputs_num(ec: State<EarlyConsole>, n: u64) {
+transform kputs_num(ec: State<EarlyConsole>, n: u64) {
     if n == 0 { kprint(ec, 48); return; }
     let digits = state_new(KBuf);
     let pos: u32 = 0;
@@ -162,7 +162,7 @@ fn kputs_num(ec: State<EarlyConsole>, n: u64) {
 // We set VMIN=1 (c_cc6) and VTIME=0 (c_cc5) so read() returns 1 byte at a time.
 
 // Save original termios into `saved`, then switch to raw mode.
-fn termios_enable_raw(saved: State<Termios>) -> i64 {
+transform termios_enable_raw(saved: State<Termios>) -> i64 {
     // Save original settings
     let ret = ioctl(0, 0x5401, saved as Address);
     if ret != 0 { return ret; }
@@ -184,18 +184,18 @@ fn termios_enable_raw(saved: State<Termios>) -> i64 {
     return ioctl(0, 0x5402, raw as Address);
 }
 
-fn termios_restore(saved: State<Termios>) {
+transform termios_restore(saved: State<Termios>) {
     ioctl(0, 0x5402, saved as Address);
 }
 
 // ── History helpers ────────────────────────────────────────────────────
-fn history_init(h: State<History>) {
+transform history_init(h: State<History>) {
     h.count = 0;
     let i = 0;
     while i < 8 { h.lens[i] = 0; i = i + 1; }
 }
 
-fn history_push(h: State<History>, cbuf: State<KBuf>, len: u32) {
+transform history_push(h: State<History>, cbuf: State<KBuf>, len: u32) {
     if len == 0 { return; }
     // Skip duplicate of last command
     if h.count > 0 {
@@ -231,7 +231,7 @@ fn history_push(h: State<History>, cbuf: State<KBuf>, len: u32) {
     }
 }
 
-fn history_load(h: State<History>, cbuf: State<KBuf>, idx: u32) -> u32 {
+transform history_load(h: State<History>, cbuf: State<KBuf>, idx: u32) -> u32 {
     if idx >= h.count { return 0; }
     let len = h.lens[idx];
     let k = 0;
@@ -242,7 +242,7 @@ fn history_load(h: State<History>, cbuf: State<KBuf>, idx: u32) -> u32 {
 // ── Redraw the current line from scratch ───────────────────────────────
 // Erases everything on the line, reprints prompt + cbuf[0..pos], then
 // moves cursor back to `cursor` position.
-fn redraw_line(ec: State<EarlyConsole>, cbuf: State<KBuf>, pos: u32, cursor: u32) {
+transform redraw_line(ec: State<EarlyConsole>, cbuf: State<KBuf>, pos: u32, cursor: u32) {
     // Move cursor to beginning of line (CR)
     kprint(ec, 13);
     // Print prompt
@@ -261,7 +261,7 @@ fn redraw_line(ec: State<EarlyConsole>, cbuf: State<KBuf>, pos: u32, cursor: u32
     }
 }
 
-fn kmain() -> i32 {
+transform kmain() -> i32 {
     let ec = state_new(EarlyConsole);
     early_console_init(ec, 0, 4);
 
@@ -939,4 +939,4 @@ fn kmain() -> i32 {
     return 0;
 }
 
-fn main() -> i32 { return kmain(); }
+transform main() -> i32 { return kmain(); }

@@ -6,7 +6,7 @@
 // u64 variables first. Distinct from s14_bit_shl_then_shr (no XOR
 // middle stage) and s11_bit_shl_or_clear (shl-or-clear).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u64 = 5;           // 0x05
     s1: u64 = 4;
     b: u64 = 51;          // 0x33

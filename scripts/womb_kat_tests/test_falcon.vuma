@@ -2,4 +2,4 @@
 // Falcon q
 // Expected exit code: 1
 
-fn main() -> i32 { return 12289 & 255; }
+transform main() -> i32 { return 12289 & 255; }

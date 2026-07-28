@@ -27,7 +27,7 @@
 
 layout Node = { val: u32, next_val: u32 }
 
-fn main() -> i32 {
+transform main() -> i32 {
     let head = state_new(Node);
     let tail = state_new(Node);
     head.val = 10;

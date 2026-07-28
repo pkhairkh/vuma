@@ -7,7 +7,7 @@
 // (div-then-mod chain, no final sum) and s9_arith_mod_then_add
 // (mod-then-add with a separate addend).
 
-fn main() -> i32 {
+transform main() -> i32 {
     a: u32 = 200;
     b: u32 = 6;
     q: u32 = a / b;       // 33

@@ -2,4 +2,4 @@
 // SHA-384 IV[0]
 // Expected exit code: 203
 
-fn main() -> i32 { return (3418070365 >> 24) & 255; }
+transform main() -> i32 { return (3418070365 >> 24) & 255; }

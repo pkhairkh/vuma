@@ -2,7 +2,7 @@
 // womb/syscalls.vuma — VUMA-generic syscall number reference (DOCUMENTATION)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This file is a DOCUMENTATION-ONLY reference. It contains no `fn` definitions
+// This file is a DOCUMENTATION-ONLY reference. It contains no `transform` definitions
 // and no `extern` blocks — only `//` comments and a handful of `const`
 // declarations for argument-flag values. Womb has no `import` mechanism yet
 // (Open Work §7), so this file is NOT imported by other womb modules. Programmers

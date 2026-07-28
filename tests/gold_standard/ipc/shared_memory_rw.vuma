@@ -7,7 +7,7 @@
 // readable by the writer and that the write/read offsets are consistent.
 //
 // Expected exit code: 1
-fn main() -> i32 {
+transform main() -> i32 {
     shm = shared_memory_open(64);
     // Write a distinctive 64-bit value at offset 0.
     shared_memory_write(shm, 0, 4242424242);

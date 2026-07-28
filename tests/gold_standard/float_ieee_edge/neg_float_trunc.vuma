@@ -10,7 +10,7 @@
 // CRITICAL: distinguishes truncation (toward zero) from floor (toward
 // -Inf).  floor(-2.9) = -3 (= 253 as u8).  trunc(-2.9) = -2 (= 254).
 
-fn main() -> i32 {
+transform main() -> i32 {
     x: f64 = -2.9;
     result: i64 = floattoint(x);   // -2
     return result;

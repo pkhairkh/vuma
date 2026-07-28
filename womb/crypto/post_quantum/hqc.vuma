@@ -177,35 +177,35 @@ const H7_INIT: u32 = 1541459225;
 //   [44..107] buffer    (64 bytes)
 const SHA256_CTX_SIZE: u32 = 112;
 
-fn rotr32(x: u32, n: u32) -> u32 {
+transform rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & MASK32;
 }
 
-fn ch(x: u32, y: u32, z: u32) -> u32 {
+transform ch(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((x ^ MASK32) & z);
 }
 
-fn maj(x: u32, y: u32, z: u32) -> u32 {
+transform maj(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
-fn big_sigma0(x: u32) -> u32 {
+transform big_sigma0(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
-fn big_sigma1(x: u32) -> u32 {
+transform big_sigma1(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
-fn small_sigma0(x: u32) -> u32 {
+transform small_sigma0(x: u32) -> u32 {
     return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
 }
 
-fn small_sigma1(x: u32) -> u32 {
+transform small_sigma1(x: u32) -> u32 {
     return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
 }
 
-fn load_u32_be(ptr: Address, offset: u32) -> u32 {
+transform load_u32_be(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset);
     b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2);
@@ -213,14 +213,14 @@ fn load_u32_be(ptr: Address, offset: u32) -> u32 {
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
 
-fn store_u32_be(ptr: Address, offset: u32, val: u32) {
+transform store_u32_be(ptr: Address, offset: u32, val: u32) {
     *(ptr + offset) = (val >> 24) & 255;
     *(ptr + offset + 1) = (val >> 16) & 255;
     *(ptr + offset + 2) = (val >> 8) & 255;
     *(ptr + offset + 3) = val & 255;
 }
 
-fn sha256_init(ctx: Address) {
+transform sha256_init(ctx: Address) {
     store_u32_be(ctx, 0, H0_INIT);
     store_u32_be(ctx, 4, H1_INIT);
     store_u32_be(ctx, 8, H2_INIT);
@@ -234,7 +234,7 @@ fn sha256_init(ctx: Address) {
     store_u32_be(ctx, 40, 0);
 }
 
-fn sha256_compress(ctx: Address, block: Address) {
+transform sha256_compress(ctx: Address, block: Address) {
     a: u32 = load_u32_be(ctx, 0);
     b: u32 = load_u32_be(ctx, 4);
     c: u32 = load_u32_be(ctx, 8);
@@ -357,7 +357,7 @@ fn sha256_compress(ctx: Address, block: Address) {
     free(wbuf);
 }
 
-fn sha256_update(ctx: Address, data: Address, len: u32) {
+transform sha256_update(ctx: Address, data: Address, len: u32) {
     buf_len: u32 = load_u32_be(ctx, 40);
     i: u32 = 0;
     while i < len {
@@ -375,7 +375,7 @@ fn sha256_update(ctx: Address, data: Address, len: u32) {
     store_u32_be(ctx, 40, buf_len);
 }
 
-fn sha256_final(ctx: Address, out: Address) {
+transform sha256_final(ctx: Address, out: Address) {
     buf_len: u32 = load_u32_be(ctx, 40);
     bit_lo: u32 = load_u32_be(ctx, 36);
     total_bits: u32 = (bit_lo + (buf_len * 8)) & MASK32;
@@ -397,7 +397,7 @@ fn sha256_final(ctx: Address, out: Address) {
     }
 }
 
-fn sha256_oneshot(data: Address, len: u32, out: Address) {
+transform sha256_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(SHA256_CTX_SIZE);
     sha256_init(ctx);
     sha256_update(ctx, data, len);
@@ -409,7 +409,7 @@ fn sha256_oneshot(data: Address, len: u32, out: Address) {
 // Little-endian u32 helpers (for sparse-index storage)
 // ===========================================================================
 
-fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+transform load_u32_le_at(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2);
@@ -417,7 +417,7 @@ fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+transform store_u32_le_at(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -430,7 +430,7 @@ fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
 
 // gf2_vec_add: out[i] = a[i] XOR b[i] for i in [0, n).
 // Vectors are stored 1 byte per bit (each byte is 0 or 1).
-fn gf2_vec_add(out: Address, a: Address, b: Address, n: u32) {
+transform gf2_vec_add(out: Address, a: Address, b: Address, n: u32) {
     i: u32 = 0;
     while i < n {
         av: u32 = *(a + i);
@@ -445,7 +445,7 @@ fn gf2_vec_add(out: Address, a: Address, b: Address, n: u32) {
 //   out[k] = XOR_{i+j == k (mod n)} (a[i] AND b[j])
 // Schoolbook O(n^2); skips zero coefficients so it is fast when either
 // operand is sparse.
-fn gf2_vec_mul(out: Address, a: Address, b: Address, n: u32) {
+transform gf2_vec_mul(out: Address, a: Address, b: Address, n: u32) {
     i: u32 = 0;
     while i < n {
         *(out + i) = 0;
@@ -481,7 +481,7 @@ fn gf2_vec_mul(out: Address, a: Address, b: Address, n: u32) {
 // which is the cyclic convolution of the sparse vector with `dense`.
 // Entries with sparse_val[s] == 0 contribute nothing and are skipped.
 // Complexity O(len * n) — far cheaper than gf2_vec_mul when len << n.
-fn sparse_vec_mul(out: Address, sparse_idx: Address, sparse_val: Address,
+transform sparse_vec_mul(out: Address, sparse_idx: Address, sparse_val: Address,
                   len: u32, dense: Address, n: u32) {
     i: u32 = 0;
     while i < n {
@@ -512,7 +512,7 @@ fn sparse_vec_mul(out: Address, sparse_idx: Address, sparse_val: Address,
 }
 
 // weight: Hamming weight of a binary vector (number of non-zero bytes).
-fn weight(v: Address, n: u32) -> u32 {
+transform weight(v: Address, n: u32) -> u32 {
     w: u32 = 0;
     i: u32 = 0;
     while i < n {
@@ -553,7 +553,7 @@ fn weight(v: Address, n: u32) -> u32 {
 // codeword.
 //   msg  : 5 bytes (msg[0]=c, msg[1]=v_0, msg[2]=v_1, msg[3]=v_2, msg[4]=v_3)
 //   out  : 16 bytes (one bit per evaluation point, byte 0/1)
-fn reed_muller_encode(msg: Address, out: Address) {
+transform reed_muller_encode(msg: Address, out: Address) {
     c: u32 = *(msg + 0) & 1;
     v0: u32 = *(msg + 1) & 1;
     v1: u32 = *(msg + 2) & 1;
@@ -576,7 +576,7 @@ fn reed_muller_encode(msg: Address, out: Address) {
 // to a 5-bit message.
 //   received : 16 bytes (noisy codeword, one bit per byte)
 //   out      : 5 bytes  (decoded message: c, v_0, v_1, v_2, v_3)
-fn reed_muller_decode(received: Address, out: Address) {
+transform reed_muller_decode(received: Address, out: Address) {
     // Recover v_0..v_3 by majority vote over pairwise checks.
     v: u32 = 0;  // packed: bit i holds v_i
     i: u32 = 0;
@@ -644,7 +644,7 @@ fn reed_muller_decode(received: Address, out: Address) {
 // length-n vector (zero elsewhere).
 //   msg    : HQC_K bytes (one bit per byte)
 //   m_enc  : HQC_N bytes (encoded message, zero-padded)
-fn hqc_encode_message(msg: Address, m_enc: Address) {
+transform hqc_encode_message(msg: Address, m_enc: Address) {
     i: u32 = 0;
     while i < HQC_N {
         *(m_enc + i) = 0;
@@ -682,7 +682,7 @@ fn hqc_encode_message(msg: Address, m_enc: Address) {
 //   m_enc : HQC_N bytes (noisy encoded message)
 //   msg   : HQC_K bytes (output message, one bit per byte)
 // Returns 0 on completion.
-fn hqc_decode_message(m_enc: Address, msg: Address) -> u32 {
+transform hqc_decode_message(m_enc: Address, msg: Address) -> u32 {
     msg_buf = allocate(RM_DIM);
     rm_in = allocate(RM_LEN);
     block: u32 = 0;
@@ -715,7 +715,7 @@ fn hqc_decode_message(m_enc: Address, msg: Address) -> u32 {
 
 // hqc_prg: SHA-256 counter-mode PRG. Produces out_len pseudo-random bytes
 // from (seed, counter). Each 32-byte block is SHA-256(seed || counter+i).
-fn hqc_prg(seed: Address, seed_len: u32, counter: u32, out: Address, out_len: u32) {
+transform hqc_prg(seed: Address, seed_len: u32, counter: u32, out: Address, out_len: u32) {
     buf = allocate(seed_len + 4);
     i: u32 = 0;
     while i < seed_len {
@@ -744,7 +744,7 @@ fn hqc_prg(seed: Address, seed_len: u32, counter: u32, out: Address, out_len: u3
 
 // hqc_sample_random: fill `out` with n uniform pseudo-random bits
 // (each byte is 0 or 1).
-fn hqc_sample_random(seed: Address, seed_len: u32, counter: u32, out: Address, n: u32) {
+transform hqc_sample_random(seed: Address, seed_len: u32, counter: u32, out: Address, n: u32) {
     hqc_prg(seed, seed_len, counter, out, n);
     i: u32 = 0;
     while i < n {
@@ -758,7 +758,7 @@ fn hqc_sample_random(seed: Address, seed_len: u32, counter: u32, out: Address, n
 // `out_vec` (n bytes, 0/1) and its support to `out_idx` (4*wt bytes,
 // little-endian u32 array). Uses rejection sampling on a PRG stream so
 // the result is deterministic given (seed, counter).
-fn hqc_sample_sparse(seed: Address, seed_len: u32, counter: u32,
+transform hqc_sample_sparse(seed: Address, seed_len: u32, counter: u32,
                      out_vec: Address, out_idx: Address,
                      wt: u32, n: u32) {
     i: u32 = 0;
@@ -807,7 +807,7 @@ fn hqc_sample_sparse(seed: Address, seed_len: u32, counter: u32,
 
 // hqc_derive_message: derive the k-bit message from `randomness`.
 // Uses SHA-256(randomness) and takes the first k bits.
-fn hqc_derive_message(randomness: Address, msg: Address) {
+transform hqc_derive_message(randomness: Address, msg: Address) {
     digest = allocate(32);
     sha256_oneshot(randomness, 32, digest);
     i: u32 = 0;
@@ -833,7 +833,7 @@ fn hqc_derive_message(randomness: Address, msg: Address) {
 //
 // Returns 0 on success.
 
-fn hqc_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
+transform hqc_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
     h = pk;
     s = pk + HQC_N;
     x = sk;
@@ -894,7 +894,7 @@ fn hqc_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
 //
 // Returns 0 on success.
 
-fn hqc_encaps(pk: Address, randomness: Address, ct: Address, ss: Address) -> u32 {
+transform hqc_encaps(pk: Address, randomness: Address, ct: Address, ss: Address) -> u32 {
     h = pk;
 
     // Derive message and (deterministically) the noise vectors.
@@ -982,7 +982,7 @@ fn hqc_encaps(pk: Address, randomness: Address, ct: Address, ss: Address) -> u32
 //
 // Returns 0 if re-encryption verified, 1 on verification failure.
 
-fn hqc_decaps(sk: Address, pk: Address, ct: Address, ss: Address) -> u32 {
+transform hqc_decaps(sk: Address, pk: Address, ct: Address, ss: Address) -> u32 {
     h_sk = sk + 2 * HQC_N;
     s_sk = sk + 3 * HQC_N;
     u = ct;

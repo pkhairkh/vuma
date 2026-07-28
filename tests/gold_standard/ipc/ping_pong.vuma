@@ -1,6 +1,6 @@
 // ping_pong — Parent sends 42, child echoes back 84
 // Expected exit code: 84
-fn main() -> i32 {
+transform main() -> i32 {
     ch1 = channel_open<i32>();
     ch2 = channel_open<i32>();
     pid = spawn_worker();

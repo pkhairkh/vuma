@@ -141,7 +141,7 @@
 //   and passes them by reference to cipher_* / hash_* (init-style API
 //   — see "Why init-style?" in K4e's wait.vuma header for the codegen
 //   rationale: the current codegen does NOT propagate State-typedness
-//   through function return values, so `fn cipher_new() ->
+//   through function return values, so `transform cipher_new() ->
 //   State<CipherCtx>` would produce broken field-access code in
 //   callers).
 //
@@ -294,7 +294,7 @@ layout CryptoBuf = {
 // (K10b's real AES will reject unknown algos with -EINVAL). W29S5
 // also zeroes the 176-byte round_keys field (added in W29S5 so
 // cipher_encrypt can mirror aes_encrypt_block's AddRoundKey XOR).
-fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
+transform cipher_init(ctx: State<CipherCtx>, algo: u32) {
     ctx.algo = algo;
     ctx.len = 0;
     // Zero the 32-byte key.
@@ -334,7 +334,7 @@ fn cipher_init(ctx: State<CipherCtx>, algo: u32) {
 // ..., round_keys[160..175] = key). K11 will replace this with the
 // real Rijndael key expansion (RotWord + SubWord + Rcon per FIPS-197
 // §5.2).
-fn cipher_set_key(ctx: State<CipherCtx>, key: State<CipherKey>) {
+transform cipher_set_key(ctx: State<CipherCtx>, key: State<CipherKey>) {
     // Copy all 32 raw key bytes into ctx.key.
     let i = 0;
     while i < 32 {
@@ -371,7 +371,7 @@ fn cipher_set_key(ctx: State<CipherCtx>, key: State<CipherKey>) {
 // (K10d's real ChaCha20 will only read the first 12 bytes of
 // CipherCtx.iv for its nonce, but the layout reserves 16 for
 // uniformity with AES's 16-byte IV).
-fn cipher_set_iv(ctx: State<CipherCtx>, iv: State<CipherIV>) {
+transform cipher_set_iv(ctx: State<CipherCtx>, iv: State<CipherIV>) {
     let i = 0;
     while i < 16 {
         ctx.iv[i] = iv.data[i];
@@ -399,7 +399,7 @@ fn cipher_set_iv(ctx: State<CipherCtx>, iv: State<CipherIV>) {
 // streaming-API contract is preserved — callers can swap W29S5's
 // inline XOR for K11's real AES by replacing just the body of
 // cipher_encrypt (same signature, same return convention).
-fn cipher_encrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
+transform cipher_encrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
     // W29S5: real AddRoundKey round 0 — XOR each input byte with the
     // corresponding round_keys byte (mirrors aes.vuma's
     // aes_encrypt_block). K11 will wrap this in the real 10-round
@@ -425,7 +425,7 @@ fn cipher_encrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<
 // stub). K10b's real AES-CBC will invert the round-key schedule (last
 // round first) for decrypt; K10d's ChaCha20 will use the identical
 // codepath as encrypt (XOR-keystream is symmetric).
-fn cipher_decrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
+transform cipher_decrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<CryptoBuf>, len: u64) -> i64 {
     return cipher_encrypt(ctx, input, output, len);
 }
 
@@ -450,7 +450,7 @@ fn cipher_decrypt(ctx: State<CipherCtx>, input: State<CryptoBuf>, output: State<
 // with a u64 store). K10a does NOT seed the SHA-512 IVs (algo == 3) —
 // K10c+ will add the SHA-512 IV seeding when the SHA-512 compression
 // path lands.
-fn hash_init(ctx: State<HashCtx>, algo: u32) {
+transform hash_init(ctx: State<HashCtx>, algo: u32) {
     ctx.algo = algo;
     ctx.len = 0;
     ctx.total = 0;
@@ -499,7 +499,7 @@ fn hash_init(ctx: State<HashCtx>, algo: u32) {
 // SHA-256 would invoke the 64-round compression (FIPS-180-4 §6.2.2)
 // and reset ctx.len = 0 — W29S5 does NOT do this (K11 will). The
 // digest therefore still equals the IV regardless of input.
-fn hash_update(ctx: State<HashCtx>, data: State<CryptoBuf>, len: u64) {
+transform hash_update(ctx: State<HashCtx>, data: State<CryptoBuf>, len: u64) {
     // W29S5: buffer bytes into ctx.buf (mirror sha256_update's stub).
     let i = 0;
     while i < len {
@@ -539,7 +539,7 @@ fn hash_update(ctx: State<HashCtx>, data: State<CryptoBuf>, len: u64) {
 // digest will be computed from the compressed state, not copied from
 // the IV). The stub preserves the API contract (always writes 32
 // bytes to out — the digest size for SHA-256).
-fn hash_final(ctx: State<HashCtx>, out: State<CryptoBuf>) {
+transform hash_final(ctx: State<HashCtx>, out: State<CryptoBuf>) {
     // W29S5 STUB: write 32 zero bytes. Should call sha.vuma's
     // sha256_final — VUMA has no import, so the call is documented
     // here but not wired. K11 will inline the real SHA-256 padding +
@@ -578,7 +578,7 @@ fn hash_final(ctx: State<HashCtx>, out: State<CryptoBuf>) {
 //   futex self-test (which verifies uaddr bytes 0..7 individually
 //   rather than the full u64) + K9e's dns self-test (which verifies
 //   header bytes 0..11 individually rather than the full u128).
-fn main() -> i32 {
+transform main() -> i32 {
     // ── Cipher path: init + set_key + encrypt ──
     let cctx = state_new(CipherCtx);
     cipher_init(cctx, 0);  // AES-128

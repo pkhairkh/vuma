@@ -1471,7 +1471,7 @@ Expressions:
         }
 
         let json_output = build_object(vec![
-            ("version".to_string(), json_str("0.1.0-alpha.1")),
+            ("version".to_string(), json_str(env!("CARGO_PKG_VERSION"))),
             (
                 "session_source_bytes".to_string(),
                 json_usize(self.session_source.len()),
@@ -1607,7 +1607,7 @@ Expressions:
         }
 
         // Strategy 2: Try to parse as a VUMA expression wrapped in a function.
-        let wrapped = format!("fn _type_query() {{ let _result = {}; }}", expr.trim());
+        let wrapped = format!("transform _type_query() {{ let _result = {}; }}", expr.trim());
         let mut parser = Parser::new(&wrapped);
         let result = parser.parse_program();
         if !result.has_errors() {
@@ -1907,7 +1907,7 @@ Expressions:
     /// Supports basic up/down arrow key history navigation via ANSI
     /// escape sequences.
     pub fn run(&mut self) -> Result<(), ReplError> {
-        println!("{}", color!(ansi::BOLD_CYAN, "VUMA REPL v0.1.0-alpha.1"));
+        println!("{}", color!(ansi::BOLD_CYAN, format!("VUMA REPL v{}", env!("CARGO_PKG_VERSION"))));
         println!("Type :help for available commands. Tab completes commands/keywords.\n");
 
         while self.running {
