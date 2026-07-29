@@ -1452,14 +1452,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 } else {
                                     code.extend_from_slice(&Instruction::FCmpD { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
                                 }
-                                let movcf2gr_word: u32 = 0x0114DC00u32 | ((S0.encoding() as u32) & 0x1F);
+                                // MOVCF2GR writes the 0/1 comparison result to a GPR. Use S2
+                                // (NOT S0/S1, which hold the just-loaded float operands) so a
+                                // subsequent comparison that reloads the same operand from its
+                                // stack slot is not clobbered by this result landing in S0.
+                                let movcf2gr_word: u32 = 0x0114DC00u32 | ((S2.encoding() as u32) & 0x1F);
                                 code.extend_from_slice(&movcf2gr_word.to_le_bytes());
+                                code.extend(encode_store_to_vreg(S2, dst_id, fp, &vreg_slots));
                             } else {
                                 code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                                 code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
                                 code.extend(encode_cmp(&cmp_kind, S0, S0, S1));
+                                code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                             }
-                            code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                     }
                     } // end if !fp_handled
@@ -1529,14 +1534,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         //   0000 0001 0001 0100 1101 11 cj(4:0) rd(4:0)
                         //   bits[31:10] = 0x004537 ; cj in bits[9:5] ; rd in bits[4:0]
                         // For cd=0 (fcc0): 0x0114DC00 | rd
-                        let movcf2gr_word: u32 = 0x0114DC00u32 | ((S0.encoding() as u32) & 0x1F);
+                        // MOVCF2GR writes the 0/1 comparison result to a GPR. Use S2
+                        // (NOT S0/S1, which hold the just-loaded float operands) so a
+                        // subsequent comparison that reloads the same operand from its
+                        // stack slot is not clobbered by this result landing in S0.
+                        let movcf2gr_word: u32 = 0x0114DC00u32 | ((S2.encoding() as u32) & 0x1F);
                         code.extend_from_slice(&movcf2gr_word.to_le_bytes());
+                        code.extend(encode_store_to_vreg(S2, dst_id, fp, &vreg_slots));
                     } else {
                         code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                         code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
                         code.extend(encode_cmp(kind, S0, S0, S1));
+                        code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     }
-                    code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
 
