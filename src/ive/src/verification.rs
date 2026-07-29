@@ -2124,12 +2124,136 @@ impl VerificationEngine {
         }
     }
 
+    /// Run PMT verification and also return the IVE-derived **linearity
+    /// report** — the set of bare vregs linearly consumed by
+    /// `StateTransform` / `ForeignConsume` nodes in the SCG — for
+    /// downstream codegen dead-code elimination.
+    ///
+    /// This is the **IVE→codegen linearity export** entry point
+    /// (Wave 0-A).  It lets the pipeline obtain the consumed-vreg set
+    /// computed during [`Self::verify_pmt`] and thread it into codegen's
+    /// DCE passes (`dead_store_eliminate`, `dead_state_eliminate`),
+    /// enabling *linearity-directed* DCE on top of the existing
+    /// *provenance-directed* (non-aliasing) DCE.
+    ///
+    /// Wiring the returned [`LinearityReport`] through the full pipeline
+    /// (`run_optimizations`) is deferred to Wave 4-A; this method plus
+    /// the standalone [`collect_consumed_vregs`] extractor provide the
+    /// contract for that wiring.
+    pub fn verify_pmt_with_linearity(
+        &self,
+        input: &VerificationInput,
+    ) -> (VerificationResult, LinearityReport) {
+        let result = self.verify_pmt(input);
+        let consumed_vregs = collect_consumed_vregs(&input.scg);
+        (result, LinearityReport { consumed_vregs })
+    }
+
     /// Run the PMT state verification check and return the result in a
     /// single-element vector.  (Legacy pointer-invariant verifiers have
     /// been removed; only PMT state verification is performed.)
     pub fn verify_all(&self, input: &VerificationInput) -> Vec<VerificationResult> {
         vec![self.verify_pmt(input)]
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 0-A: IVE→codegen linearity export
+// ---------------------------------------------------------------------------
+
+/// IVE-derived linearity information exported to codegen for proof-directed
+/// dead-code elimination.
+///
+/// During [`VerificationEngine::verify_pmt`] the IVE walks the SCG and
+/// records which state vregs have been *linearly consumed* by a
+/// `StateTransform` / `ForeignConsume` node — i.e. the state was used up
+/// and may not be accessed again.  This struct carries that per-vreg
+/// consume set out of the verifier so codegen's DCE passes can perform
+/// *linearity-directed* elimination:
+///
+/// - `dead_store_eliminate` treats a `Store` whose address vreg is in
+///   [`Self::consumed_vregs`] as dead (the state is gone).
+/// - `dead_state_eliminate` removes the entire `Alloc` + `Store` + `Load`
+///   lifecycle for a consumed vreg.
+///
+/// This complements the existing *provenance-directed* (non-aliasing)
+/// DCE, which reasons about allocation identity rather than consumption.
+///
+/// **Wiring note:** threading this report from IVE through
+/// `run_optimizations` is deferred to Wave 4-A.  Until then, codegen
+/// obtains an empty report ([`LinearityReport::empty`]) and the passes
+/// behave exactly as before — linearity DCE is a pure refinement that
+/// only fires when consumption data is present.
+#[derive(Debug, Clone, Default)]
+pub struct LinearityReport {
+    /// Bare vregs linearly consumed by a `StateTransform` /
+    /// `ForeignConsume` node in the verified SCG.
+    pub consumed_vregs: HashSet<u32>,
+}
+
+impl LinearityReport {
+    /// An empty report (no consumption recorded) — the safe default used
+    /// when IVE linearity data is unavailable (e.g. before Wave 4-A wires
+    /// the pipeline).
+    pub fn empty() -> Self {
+        Self {
+            consumed_vregs: HashSet::new(),
+        }
+    }
+
+    /// Returns `true` if `vreg` was linearly consumed.
+    pub fn is_consumed(&self, vreg: u32) -> bool {
+        self.consumed_vregs.contains(&vreg)
+    }
+}
+
+/// Re-derive the set of bare vregs linearly consumed by `StateTransform` /
+/// `ForeignConsume` nodes in `scg`.
+///
+/// This mirrors the inline consume tracking performed inside
+/// [`VerificationEngine::verify_pmt`] (which keys each `StateWriteOp`'s
+/// `after_consume` flag on the same set).  Factoring it out as a
+/// standalone SCG walker lets the pipeline obtain the linearity report
+/// *without* re-running verification, and gives codegen a stable contract
+/// for the Wave 4-A wiring.
+///
+/// A vreg is consumed iff some node in the SCG is a `StateTransform` or
+/// `ForeignConsume` whose `input_vreg` equals it.  The walk order matches
+/// `verify_pmt` (nodes sorted by `NodeId`).
+pub fn collect_consumed_vregs(scg: &CodegenScg) -> HashSet<u32> {
+    use vuma_scg::node::{ForeignConsumeNode, NodePayload, StateTransformNode};
+
+    let mut consumed_vregs: HashSet<u32> = HashSet::new();
+
+    // Collect NodeIds first to avoid holding an immutable borrow of
+    // `scg.node_index` across the `node_payload` / `node_type` calls
+    // (mirrors the borrow pattern in `verify_pmt`).
+    let mut node_ids: Vec<NodeId> = scg.node_index.keys().copied().collect();
+    node_ids.sort_by_key(|id| id.as_u64());
+
+    for id in node_ids {
+        let payload = match scg.node_payload(id) {
+            Some(p) => p,
+            None => continue,
+        };
+        // Bind by reference so the destructured `input_vreg` is `&u32`
+        // (mirrors the `&state_nodes` iteration in `verify_pmt`); `node_payload`
+        // returns an owned `NodePayload`, so `&payload` gives us the shared
+        // reference the field borrow needs.
+        match &payload {
+            NodePayload::StateTransform(t) => {
+                let StateTransformNode { input_vreg, .. } = t;
+                consumed_vregs.insert(*input_vreg);
+            }
+            NodePayload::ForeignConsume(fc) => {
+                let ForeignConsumeNode { input_vreg, .. } = fc;
+                consumed_vregs.insert(*input_vreg);
+            }
+            _ => {}
+        }
+    }
+
+    consumed_vregs
 }
 
 /// Construct a default [`ProgramPoint`] (empty string) for use in
