@@ -744,29 +744,60 @@ pub fn verify_session_types_from_ir_for_backend(
     for (fi, func) in program.functions.iter().enumerate() {
         for (bi, block) in func.blocks.iter().enumerate() {
             for (ii, instr) in block.instructions.iter().enumerate() {
-                if let vuma_codegen::ir::IRInstr::Call { func: name, .. } = instr {
+                if let vuma_codegen::ir::IRInstr::Call {
+                    func: name,
+                    args,
+                    dst,
+                    ..
+                } = instr
+                {
                     // Skip wasm32 native channel builtins — they are
                     // host-RPC dispatch, and the host runner enforces
                     // session discipline at runtime.
                     if skip_native_channel && is_wasm32_native_channel_builtin(name) {
                         continue;
                     }
+                    // Extract the REAL channel handle vreg from the IR.
+                    //
+                    // - `channel_open()`: takes no args; the new channel
+                    //   handle is *returned* into the Call's `dst`
+                    //   register. Use that as the session vreg so the
+                    //   Open event is keyed on the same vreg that
+                    //   subsequent send/recv/close will reference.
+                    //
+                    // - `channel_send(ch, msg)` / `channel_recv(ch)` /
+                    //   `channel_close(ch)`: the channel handle is the
+                    //   FIRST argument. Extract its register id.
+                    //
+                    // Falls back to 0 (the old hardcoded sentinel) only
+                    // when the expected slot is missing or holds a
+                    // non-register value (immediate, address, etc.),
+                    // which should not happen for well-formed channel IR
+                    // but keeps the verifier from panicking.
+                    let ch_vreg = match args.first() {
+                        Some(vuma_codegen::ir::IRValue::Register(id)) => *id,
+                        _ => 0,
+                    };
+                    let open_vreg = match dst {
+                        Some(vuma_codegen::ir::IRValue::Register(id)) => *id,
+                        _ => 0,
+                    };
                     let kind = match name.as_str() {
                         "channel_open" => Some(SessionEventKind::Open {
-                            vreg: 0,
+                            vreg: open_vreg,
                             session_type: SessionType::End,
                         }),
                         "channel_send" | "channel_send_cap" => Some(SessionEventKind::Send {
-                            vreg: 0,
+                            vreg: ch_vreg,
                             msg_type: "i64".to_string(),
                         }),
                         "channel_recv" | "channel_recv_proto" | "channel_recv_timeout" => {
                             Some(SessionEventKind::Recv {
-                                vreg: 0,
+                                vreg: ch_vreg,
                                 expected_type: "i64".to_string(),
                             })
                         }
-                        "channel_close" => Some(SessionEventKind::Close { vreg: 0 }),
+                        "channel_close" => Some(SessionEventKind::Close { vreg: ch_vreg }),
                         _ => None,
                     };
                     if let Some(k) = kind {
