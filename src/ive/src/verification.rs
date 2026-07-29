@@ -3532,9 +3532,53 @@ pub struct L1L3CollapseIR {
 /// Each is an L1 runtime check that can potentially fold into an L3
 /// compile-time invariant.  The collapse succeeds if all checks have
 /// compile-time-known arguments (Immediate values).
+///
+/// **wasm32 native channel builtins exception**: On wasm32, the four basic
+/// channel builtins (`channel_open`/`channel_send`/`channel_recv`/
+/// `channel_close`/`channel_try_recv`/`channel_recv_timeout`) are NOT
+/// lowered to syscall-based framed read/write paths (because wasm32 has
+/// no `pipe2`/`read`/`write` syscalls). Instead, they pass through to the
+/// backend's `IRInstr::Call` arm as host-RPC calls to the wasmtime host
+/// functions in `scripts/wasm32_runner.py`. These are NOT real L1
+/// invariant checks — they are host IPC dispatch. Treating them as L1
+/// checks would force the gate to fail on every wasm32 IPC program
+/// (channel args are runtime values by design).
+///
+/// Use `l1l3_collapse_from_ir_for_backend` to apply the wasm32 exception.
 pub fn l1l3_collapse_from_ir(program: &vuma_codegen::ir::IRProgram) -> L1L3CollapseIR {
+    l1l3_collapse_from_ir_for_backend(program, vuma_codegen::backend::BackendKind::AArch64)
+}
+
+/// Backend-aware variant of [`l1l3_collapse_from_ir`].
+///
+/// On `BackendKind::Wasm32`, the six native channel builtins are excluded
+/// from L1 check counting (see the doc on [`l1l3_collapse_from_ir`] for
+/// rationale). All other backends behave identically to the original
+/// function.
+pub fn l1l3_collapse_from_ir_for_backend(
+    program: &vuma_codegen::ir::IRProgram,
+    backend: vuma_codegen::backend::BackendKind,
+) -> L1L3CollapseIR {
     let mut folded_checks: usize = 0;
     let mut all_compile_time = true;
+
+    // On wasm32 these six builtins are host-RPC dispatch (no L1 invariant
+    // check on the wasm side; the host's wasmtime runner performs the
+    // actual channel operation). Skip them so the gate doesn't fire on
+    // every wasm32 IPC program.
+    let is_wasm32_native_channel_builtin = |name: &str| -> bool {
+        matches!(
+            name,
+            "channel_open"
+                | "channel_send"
+                | "channel_recv"
+                | "channel_close"
+                | "channel_try_recv"
+                | "channel_recv_timeout"
+        )
+    };
+    let skip_native_channel =
+        backend == vuma_codegen::backend::BackendKind::Wasm32;
 
     for func in &program.functions {
         for block in &func.blocks {
@@ -3543,6 +3587,11 @@ pub fn l1l3_collapse_from_ir(program: &vuma_codegen::ir::IRProgram) -> L1L3Colla
                     vuma_codegen::ir::IRInstr::Call {
                         func: name, args, ..
                     } => {
+                        // Skip wasm32 native channel builtins — they are
+                        // host-RPC dispatch, not L1 invariant checks.
+                        if skip_native_channel && is_wasm32_native_channel_builtin(name) {
+                            continue;
+                        }
                         let is_l1_check = matches!(
                             name.as_str(),
                             "channel_send"
