@@ -713,13 +713,44 @@ pub struct SessionViolationIR {
 pub fn verify_session_types_from_ir(
     program: &vuma_codegen::ir::IRProgram,
 ) -> Vec<SessionViolationIR> {
+    verify_session_types_from_ir_for_backend(
+        program,
+        vuma_codegen::backend::BackendKind::AArch64,
+    )
+}
+
+/// Backend-aware variant of [`verify_session_types_from_ir`].
+///
+/// On `BackendKind::Wasm32`, the six native channel builtins
+/// (`channel_open`/`channel_send`/`channel_recv`/`channel_close`/
+/// `channel_try_recv`/`channel_recv_timeout`) are NOT lowered to syscall-
+/// based framed read/write paths (because wasm32 has no `pipe2`/`read`/
+/// `write` syscalls). Instead, they pass through to the backend's
+/// `IRInstr::Call` arm as host-RPC calls to the wasmtime host functions
+/// in `scripts/wasm32_runner.py`. The host runner enforces session
+/// discipline at runtime through its channel state table, so the
+/// compile-time session-type check is skipped for these builtins on
+/// wasm32 to avoid false positives. All other backends behave
+/// identically to the original function.
+pub fn verify_session_types_from_ir_for_backend(
+    program: &vuma_codegen::ir::IRProgram,
+    backend: vuma_codegen::backend::BackendKind,
+) -> Vec<SessionViolationIR> {
     let mut violations = Vec::new();
     // Collect channel events from the IR (Call instructions to channel_send/recv/open/close).
     let mut events: Vec<SessionEvent> = Vec::new();
+    let skip_native_channel =
+        backend == vuma_codegen::backend::BackendKind::Wasm32;
     for (fi, func) in program.functions.iter().enumerate() {
         for (bi, block) in func.blocks.iter().enumerate() {
             for (ii, instr) in block.instructions.iter().enumerate() {
                 if let vuma_codegen::ir::IRInstr::Call { func: name, .. } = instr {
+                    // Skip wasm32 native channel builtins — they are
+                    // host-RPC dispatch, and the host runner enforces
+                    // session discipline at runtime.
+                    if skip_native_channel && is_wasm32_native_channel_builtin(name) {
+                        continue;
+                    }
                     let kind = match name.as_str() {
                         "channel_open" => Some(SessionEventKind::Open {
                             vreg: 0,
@@ -756,4 +787,22 @@ pub fn verify_session_types_from_ir(
         });
     }
     violations
+}
+
+/// Returns true if the named IPC builtin is a wasm32 native channel builtin
+/// (handled natively by the wasm32 backend's `IRInstr::Call` arm as
+/// host-RPC dispatch, NOT lowered to syscall-based framed read/write paths).
+///
+/// Keep this list in sync with `is_wasm32_native_channel_builtin` in
+/// `src/codegen/src/ipc_lowering.rs`.
+fn is_wasm32_native_channel_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "channel_open"
+            | "channel_send"
+            | "channel_recv"
+            | "channel_close"
+            | "channel_try_recv"
+            | "channel_recv_timeout"
+    )
 }
