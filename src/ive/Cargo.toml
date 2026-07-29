@@ -14,6 +14,8 @@ rust-version.workspace = true
 vuma-bd.workspace = true
 vuma-scg.workspace = true
 vuma-codegen.workspace = true
+# Z3 SMT solver for contract discharge (Wave 1: real verification)
+z3 = "0.20"
 # serde/serde_json removed in Wave 43 — all IVE types now rely on hand-written
 # Debug + Clone derives only; no JSON serialization is performed inside this
 # crate.
