@@ -6956,8 +6956,7 @@ fn param_has_secret_attr(param: &vuma_parser::ast::Param) -> bool {
 
 /// Translate a parser AST contract clause (`Expr`) into an IVE-side
 /// [`ContractClause`]. `trivially_true` is `true` iff the expression is a
-/// literal `true` — the only shape the IVE can currently discharge without
-/// an SMT solver.
+/// literal `true`. `smt_lib2` is the SMT-LIB2 translation for Z3 discharge.
 fn contract_clause_from_expr(
     expr: &vuma_parser::ast::Expr,
 ) -> vuma_ive::verification::ContractClause {
@@ -6965,7 +6964,66 @@ fn contract_clause_from_expr(
     let trivially_true = matches!(expr, Expr::Lit { value: Lit::Bool(true), .. });
     vuma_ive::verification::ContractClause {
         source: format!("{:?}", expr),
+        smt_lib2: expr_to_smt_lib2(expr),
         trivially_true,
+    }
+}
+
+/// Translate a VUMA AST expression to SMT-LIB2 string for Z3 discharge.
+///
+/// Supported expression shapes:
+/// - `Lit(Bool(true/false))` → `true` / `false`
+/// - `Lit(Int(n))` → `n`
+/// - `Var(name)` → `name` (declared as Int in Z3)
+/// - `BinOp(Add/Sub/Mul, lhs, rhs)` → `(+ lhs rhs)` etc.
+/// - `Cmp(Eq/Ne/Lt/Le/Gt/Ge, lhs, rhs)` → `(= lhs rhs)` etc.
+/// - `And(lhs, rhs)` → `(and lhs rhs)`
+/// - `Or(lhs, rhs)` → `(or lhs rhs)`
+/// - `Not(expr)` → `(not expr)`
+///
+/// Returns empty string for unsupported shapes (Z3 discharge skipped).
+fn expr_to_smt_lib2(expr: &vuma_parser::ast::Expr) -> String {
+    use vuma_parser::ast::{BinOp, Expr, Lit};
+    match expr {
+        Expr::Lit { value: Lit::Bool(b), .. } => b.to_string(),
+        Expr::Lit { value: Lit::Int(n), .. } => n.to_string(),
+        Expr::Var { name, .. } => name.clone(),
+        Expr::BinOp { op, lhs, rhs, .. } => {
+            let l = expr_to_smt_lib2(lhs);
+            let r = expr_to_smt_lib2(rhs);
+            if l.is_empty() || r.is_empty() {
+                return String::new();
+            }
+            match op {
+                BinOp::Add => format!("(+ {l} {r})"),
+                BinOp::Sub => format!("(- {l} {r})"),
+                BinOp::Mul => format!("(* {l} {r})"),
+                BinOp::Div => format!("(div {l} {r})"),
+                BinOp::Mod => format!("(mod {l} {r})"),
+                BinOp::And => format!("(and {l} {r})"),
+                BinOp::Or => format!("(or {l} {r})"),
+                BinOp::Eq => format!("(= {l} {r})"),
+                BinOp::Ne => format!("(not (= {l} {r}))"),
+                BinOp::Lt => format!("(< {l} {r})"),
+                BinOp::Le => format!("(<= {l} {r})"),
+                BinOp::Gt => format!("(> {l} {r})"),
+                BinOp::Ge => format!("(>= {l} {r})"),
+                _ => String::new(),
+            }
+        }
+        Expr::UnOp { op, expr: operand, .. } => {
+            use vuma_parser::ast::UnOp;
+            let o = expr_to_smt_lib2(operand);
+            if o.is_empty() {
+                return String::new();
+            }
+            match op {
+                UnOp::Not => format!("(not {o})"),
+                UnOp::Neg => format!("(- {o})"),
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
     }
 }
 
