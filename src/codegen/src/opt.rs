@@ -2093,7 +2093,88 @@ pub fn run_optimizations_with_target_and_inline_threshold(
     latency_table: &crate::target_desc::LatencyTable,
     inline_threshold: u32,
 ) -> IRProgram {
-    run_optimizations_inner(program, latency_table, None, inline_threshold)
+    // Wave 1-A: no linearity data at this entry point ⇒ `None` preserves the
+    // pre-Wave-1-A pipeline (provenance-only DCE).
+    run_optimizations_inner(program, latency_table, None, inline_threshold, None)
+}
+
+// ── Wave 1-A: linearity-aware pipeline entry points ──────────────────────
+// These mirror the existing target/threshold entry points but additionally
+// thread the IVE `LinearityReport::consumed_vregs` set into the inner
+// driver, switching DCE from provenance-only to linearity-directed mode.
+// The full compiler driver (src/pipeline.rs) will adopt the
+// `_with_linearity` variant once it obtains the `LinearityReport` from the
+// IVE; until then existing callers keep using the non-linearity entry
+// points and observe unchanged behaviour (`None` ⇒ provenance-only DCE).
+
+/// Run optimizations with the default latency table, default inline
+/// threshold, AND an IVE linearity report's consumed-vreg set.
+///
+/// `consumed_vregs` is `Some(&report.consumed_vregs)` when an IVE
+/// `LinearityReport` is available (proof-directed compilation path), or
+/// `None` to fall back to provenance-only DCE — identical to
+/// [`run_optimizations`].
+pub fn run_optimizations_with_linearity(
+    program: IRProgram,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRProgram {
+    run_optimizations_with_target_and_linearity(
+        program,
+        &crate::target_desc::LatencyTable::default_ooo(),
+        DEFAULT_INLINE_THRESHOLD,
+        consumed_vregs,
+    )
+}
+
+/// Run optimizations with a target-specific latency table, an explicit
+/// inline cost threshold, AND an IVE linearity report's consumed-vreg set.
+///
+/// This is the linearity-aware counterpart of
+/// [`run_optimizations_with_target_and_inline_threshold`]. When
+/// `consumed_vregs` is `Some`, DSE ([`dead_store_eliminate_with_linearity`])
+/// kills stores to linearly-consumed state vregs and
+/// [`dead_state_eliminate`] removes their full materialisation lifecycle;
+/// when `None`, behaviour is identical to the non-linearity variant.
+pub fn run_optimizations_with_target_and_linearity(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    inline_threshold: u32,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRProgram {
+    run_optimizations_inner(
+        program,
+        latency_table,
+        None,
+        inline_threshold,
+        consumed_vregs,
+    )
+}
+
+/// Run optimizations with PGO data, an explicit inline cost threshold, AND
+/// an IVE linearity report's consumed-vreg set (linearity-aware counterpart
+/// of [`run_optimizations_with_profile_and_inline_threshold`]).
+pub fn run_optimizations_with_profile_and_linearity(
+    program: IRProgram,
+    latency_table: &crate::target_desc::LatencyTable,
+    profile: &crate::egraph::ProfileData,
+    inline_threshold: u32,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRProgram {
+    if !profile.has_data() {
+        return run_optimizations_with_target_and_linearity(
+            program,
+            latency_table,
+            inline_threshold,
+            consumed_vregs,
+        );
+    }
+    run_optimizations_inner(
+        program,
+        latency_table,
+        Some(profile),
+        inline_threshold,
+        consumed_vregs,
+    )
 }
 
 /// Run optimizations with PGO data and an explicit inline cost threshold.
@@ -2110,7 +2191,9 @@ pub fn run_optimizations_with_profile_and_inline_threshold(
             inline_threshold,
         );
     }
-    run_optimizations_inner(program, latency_table, Some(profile), inline_threshold)
+    // Wave 1-A: no linearity data at this entry point ⇒ `None` preserves the
+    // pre-Wave-1-A pipeline (provenance-only DCE).
+    run_optimizations_inner(program, latency_table, Some(profile), inline_threshold, None)
 }
 
 /// Inner optimization driver shared by `run_optimizations_with_target` and
@@ -2120,11 +2203,25 @@ pub fn run_optimizations_with_profile_and_inline_threshold(
 /// `inline_threshold` is the per-callee cost budget — callees
 /// whose `function_inline_cost` ≤ threshold get inlined at their call
 /// sites. Plumbed in from `CompileConfig.inline_threshold`.
+///
+/// `consumed_vregs` (Wave 1-A) carries the IVE
+/// `LinearityReport::consumed_vregs` set — the bare vregs the IVE proved
+/// were linearly consumed by a `StateTransform` / `ForeignConsume` in the
+/// verified SCG. When `Some(set)`, the DSE pass
+/// ([`dead_store_eliminate_with_linearity`]) treats a `Store` whose address
+/// vreg is in `set` as dead, and [`dead_state_eliminate`] (run immediately
+/// after DCE) removes the full `Alloc`+`Store`+`Load` lifecycle of every
+/// consumed vreg. `None` ⇒ no linearity data ⇒ provenance-only DCE (the
+/// pre-Wave-1-A behaviour, identical to the old 2-arg
+/// [`dead_store_eliminate`]). The codegen crate does not (and need not)
+/// depend on `vuma_ive`: the report is reduced to its bare `HashSet<u32>`
+/// at the call boundary, keeping the IVE→codegen contract structural.
 fn run_optimizations_inner(
     mut program: IRProgram,
     latency_table: &crate::target_desc::LatencyTable,
     profile: Option<&crate::egraph::ProfileData>,
     inline_threshold: u32,
+    consumed_vregs: Option<&HashSet<u32>>,
 ) -> IRProgram {
     // Build a function lookup table (cloned to avoid borrow conflicts when
     // mutating program.functions).
@@ -2151,8 +2248,23 @@ fn run_optimizations_inner(
         let f = cse(f);
         let f = equality_saturation_with_cost(f, &cost_fn);
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
-        let f = dead_store_eliminate(f, &provenance);
+        // ── Wave 1-A: linearity-directed DSE ──────────────────────────
+        // Route the IVE `LinearityReport::consumed_vregs` set (if any)
+        // into DSE. `None` ⇒ provenance-only DCE (the pre-Wave-1-A
+        // behaviour, identical to the old 2-arg `dead_store_eliminate`).
+        let f = dead_store_eliminate_with_linearity(f, &provenance, consumed_vregs);
         let f = dead_code_eliminate(f);
+        // ── Wave 1-A: linearity-driven dead-state elimination ─────────
+        // With a verified `consumed_vregs` set, remove the full
+        // `Alloc`+`Store`+`Load` lifecycle of every linearly-consumed
+        // state vreg. `None` ⇒ no linearity data ⇒ skip (pre-Wave-1-A
+        // behaviour). `dead_state_eliminate` is a no-op on an empty set,
+        // so an empty report is cheap and safe.
+        let f = if let Some(consumed) = consumed_vregs {
+            dead_state_eliminate(f, consumed)
+        } else {
+            f
+        };
         // ── Inliner: ALWAYS enabled ──
         // Inlines small callees (threshold-gated) into callers. Required for
         // correctness of multi-function tests that rely on inlined calls.
@@ -3355,17 +3467,507 @@ pub fn ive_values_proven_non_aliasing_with(
     }
 }
 
-/// Dead store elimination pass.
+/// Build the happens-before dependency DAG for proof-directed scheduling.
+///
+/// Returns a set of `(instr_idx_a, instr_idx_b)` pairs meaning
+/// "instruction `a` must execute before instruction `b`".  Indices are
+/// **global flat instruction indices**: a 0-based counter that walks
+/// `func.blocks` in layout order and, within each block, the
+/// `instructions` vector in order.  Every edge connects two instructions
+/// **within the same block** — the DAG is strictly per-block (never
+/// cross-block); the global indexing merely makes each pair unambiguous
+/// across blocks so the whole-function result fits in a single
+/// `HashSet`.  A scheduler can recover block boundaries from
+/// `func.blocks` and slice the edge set accordingly.
+///
+/// # Edge rules
+///
+/// 1. **RAW** — instruction `i` writes vreg `V`, instruction `j` reads
+///    `V` => edge `(i, j)`.
+/// 2. **WAW** — instruction `i` writes vreg `V`, instruction `j` writes
+///    `V` => edge `(i, j)`.
+///    (WAR — `i` reads `V`, `j` writes `V` — is intentionally *not*
+///    emitted, per the task spec; the IVE provenance map and linearity
+///    make RAW+WAW sufficient for the scheduler's correctness envelope.)
+/// 3. **Memory aliasing** — `Load`/`Store` pairs that *may* alias are
+///    ordered (edge `(i, j)`), *unless* their address vregs are
+///    IVE-proven non-aliasing (different Alloc regions), in which case
+///    **no** edge is added — they may be freely reordered.  `Load`-`Load`
+///    pairs never receive an edge (reads don't conflict).  When aliasing
+///    cannot be disproven (either address lacks provenance), we
+///    conservatively assume aliasing and add the edge.
+/// 4. **Alloc->Free** — if `V` is the result of an `Alloc` (region root
+///    `R == V`) and a later instruction `Free`s a pointer deriving from
+///    `R`, add edge `(alloc, free)`.  This captures both a direct free of
+///    the Alloc's dst and a free of an offset pointer derived from it
+///    (which a plain vreg RAW on `V` would miss, since the freed pointer
+///    is a *different* vreg).
+///
+/// The DAG is conservative with respect to *unproven* aliasing: when we
+/// cannot prove two memory accesses non-aliasing, we assume they alias
+/// and add the ordering edge.  This is the happens-before input the
+/// (future) instruction scheduler consumes.
+pub fn build_happens_before_dag(
+    func: &IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> HashSet<(usize, usize)> {
+    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+
+    // Global flat instruction index — walks all blocks in layout order.
+    let mut cursor: usize = 0;
+
+    for block in &func.blocks {
+        let instrs = &block.instructions;
+        let n = instrs.len();
+        let base = cursor; // first global index belonging to this block
+
+        // ------------------------------------------------------------------
+        // Rule 1 & 2: vreg RAW / WAW dependencies.
+        //
+        // For each vreg V touched in this block, collect the (block-local)
+        // indices of its definitions and uses.  Then:
+        //   - def @ i, use @ j, i < j  ->  RAW edge (i, j)
+        //   - def @ i, def @ j, i < j  ->  WAW edge (i, j)
+        // Both index lists are in program order (we iterate in order), so
+        // ordering checks are simple comparisons.
+        // ------------------------------------------------------------------
+        let mut defs_by_vreg: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut uses_by_vreg: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, instr) in instrs.iter().enumerate() {
+            for d in instr.defined_regs() {
+                defs_by_vreg.entry(d).or_default().push(i);
+            }
+            for u in instr.used_regs() {
+                uses_by_vreg.entry(u).or_default().push(i);
+            }
+        }
+
+        // RAW: every (def, use) pair of the same vreg with def before use.
+        for (vreg, def_indices) in &defs_by_vreg {
+            if let Some(use_indices) = uses_by_vreg.get(vreg) {
+                for &di in def_indices {
+                    for &ui in use_indices {
+                        if di < ui {
+                            edges.insert((base + di, base + ui));
+                        }
+                    }
+                }
+            }
+        }
+        // WAW: every ordered pair of defs of the same vreg.
+        for def_indices in defs_by_vreg.values() {
+            for a in 0..def_indices.len() {
+                for b in (a + 1)..def_indices.len() {
+                    // def_indices is in program order => def_indices[a] < [b].
+                    edges.insert((base + def_indices[a], base + def_indices[b]));
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Rule 3: memory dependencies with the IVE non-aliasing exemption.
+        //
+        // Collect each Load/Store as (block-local idx, address vreg,
+        // writes_memory).  Two memory ops i < j get an edge iff at least
+        // one writes memory AND their addresses are NOT proven
+        // non-aliasing.  Load-Load never gets an edge.
+        // ------------------------------------------------------------------
+        #[derive(Clone, Copy)]
+        struct MemOp {
+            idx: usize,
+            addr: Option<u32>,
+            writes: bool,
+        }
+        let mem_ops: Vec<MemOp> = instrs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instr)| match instr {
+                IRInstr::Load { addr, .. } => Some(MemOp {
+                    idx: i,
+                    addr: addr.as_register(),
+                    writes: false,
+                }),
+                IRInstr::Store { addr, .. } => Some(MemOp {
+                    idx: i,
+                    addr: addr.as_register(),
+                    writes: true,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        for a in 0..mem_ops.len() {
+            for b in (a + 1)..mem_ops.len() {
+                let ma = mem_ops[a];
+                let mb = mem_ops[b];
+                // mem_ops is in program order, so ma.idx < mb.idx.
+                // Only order when at least one side writes memory.
+                if !ma.writes && !mb.writes {
+                    continue;
+                }
+                // Proven non-aliasing?  If BOTH addresses carry provenance
+                // and derive from DIFFERENT regions, skip the edge.
+                let non_aliasing = match (ma.addr, mb.addr) {
+                    (Some(va), Some(vb)) => {
+                        ive_proven_non_aliasing_with(provenance, va, vb)
+                    }
+                    _ => false,
+                };
+                if non_aliasing {
+                    continue;
+                }
+                edges.insert((base + ma.idx, base + mb.idx));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Rule 4: Alloc -> Free ordering.
+        //
+        // For each Alloc (region root R = its dst vreg), add an edge to
+        // every later Free whose pointer derives from R (i.e. whose
+        // provenance region equals R).  This covers a direct free of the
+        // Alloc's dst (provenance[dst] == dst == R) and a free of a
+        // derived/offset pointer (provenance[derived] == R) alike.
+        // ------------------------------------------------------------------
+        let allocs: Vec<(usize, u32)> = instrs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instr)| match instr {
+                IRInstr::Alloc { dst, .. } => dst.as_register().map(|r| (i, r)),
+                _ => None,
+            })
+            .collect();
+        let frees: Vec<(usize, Option<u32>)> = instrs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, instr)| match instr {
+                IRInstr::Free { ptr } => Some((i, ptr.as_register())),
+                _ => None,
+            })
+            .collect();
+
+        for &(alloc_idx, region_root) in &allocs {
+            for &(free_idx, free_ptr) in &frees {
+                if free_idx <= alloc_idx {
+                    continue;
+                }
+                let derives = match free_ptr {
+                    Some(p) => provenance.get(&p).copied() == Some(region_root),
+                    None => false,
+                };
+                if derives {
+                    edges.insert((base + alloc_idx, base + free_idx));
+                }
+            }
+        }
+
+        // Advance the global cursor past this block.
+        cursor += n;
+    }
+
+    edges
+}
+
+// ===========================================================================
+// Wave 3-A: proof-directed instruction scheduler
+// ===========================================================================
+
+/// Classify an instruction as a *scheduler barrier*: an instruction whose
+/// side effects are **not** fully captured by the happens-before DAG and
+/// which therefore must remain in its original program-order position
+/// relative to every other instruction in the block.
+///
+/// The DAG produced by [`build_happens_before_dag`] models four dependency
+/// classes: vreg RAW, vreg WAW, Load/Store aliasing (with the IVE
+/// non-aliasing exemption), and Alloc->Free.  It is *silent* about the
+/// arbitrary memory/control effects of calls, syscalls, channel I/O,
+/// atomics, bulk memory ops, state transforms, and explicit control flow.
+/// Reordering such an instruction past a neighbour with no DAG edge would
+/// change observable behaviour, so the conservative choice — mandated by
+/// the task spec ("if unsure, keep original order") — is to pin them.
+///
+/// The whitelist below is the set of *pure or DAG-modelled* instructions
+/// that the scheduler is willing to move:
+///   - `Load` / `Store` — memory ops, fully modelled by the DAG's alias
+///     rule (and prime candidates for latency hiding, hence priority 0).
+///   - Pure arithmetic / dataflow — `BinOp`, `UnaryOp`, `Add`, `Sub`,
+///     `Mul`, `Div`, `Cmp`, `Cast`, `GetAddress`, `Offset`, `Select`,
+///     `CtSelect`, `CtEq`, `VectorOp`.  These touch only their operand
+///     and destination vregs, so RAW/WAW in the DAG fully orders them.
+///   - `Alloc` — defines its dst vreg and has its only cross-instruction
+///     semantic (Alloc->Free) captured by DAG rule 4.
+///
+/// Everything else (the `_` arm) is a barrier.  In particular `Phi` is
+/// treated as a barrier: many backends require phi nodes at block entry,
+/// and moving them is never profitable, so pinning them is the safe call.
+fn is_scheduler_barrier(instr: &IRInstr) -> bool {
+    match instr {
+        IRInstr::Load { .. }
+        | IRInstr::Store { .. }
+        | IRInstr::BinOp { .. }
+        | IRInstr::UnaryOp { .. }
+        | IRInstr::Alloc { .. }
+        | IRInstr::Cast { .. }
+        | IRInstr::GetAddress { .. }
+        | IRInstr::Offset { .. }
+        | IRInstr::Select { .. }
+        | IRInstr::Add { .. }
+        | IRInstr::Sub { .. }
+        | IRInstr::Mul { .. }
+        | IRInstr::Div { .. }
+        | IRInstr::Cmp { .. }
+        | IRInstr::CtSelect { .. }
+        | IRInstr::CtEq { .. }
+        | IRInstr::VectorOp { .. } => false,
+        // Opaque side effects not modelled by the happens-before DAG, or
+        // control-flow / phi nodes that backends expect pinned: keep
+        // original order.
+        _ => true,
+    }
+}
+
+/// Latency-hiding priority class for list scheduling.  Lower values are
+/// scheduled earlier.  Memory ops (`Load`/`Store`) get class 0 so they
+/// float to the top of each barrier-delimited segment and their latency
+/// overlaps with the dependent computation that follows; everything else
+/// gets class 1.  Barriers are pinned by [`is_scheduler_barrier`] edges,
+/// so their priority class is immaterial — they are assigned 1 for
+/// uniformity.
+fn scheduler_priority(instr: &IRInstr) -> u8 {
+    match instr {
+        IRInstr::Load { .. } | IRInstr::Store { .. } => 0,
+        _ => 1,
+    }
+}
+
+/// Reorder the instructions of a single basic block into a latency-optimal
+/// topological order, honouring the happens-before DAG and the barrier
+/// policy.
+///
+/// `instrs` is the block's instruction slice (block-local indices `0..n`);
+/// `base` is the global instruction index of local index 0 (matching the
+/// flat cursor scheme used by [`build_happens_before_dag`]); `dag` is the
+/// global edge set.
+///
+/// Constraints modelled (all consistent because every DAG edge and every
+/// barrier edge follows program order, so the result is always acyclic):
+///   1. **DAG edges** — for every intra-block pair `i < j`, if
+///      `(base+i, base+j)` is in `dag`, add `i -> j`.
+///   2. **Barrier pinning** — for every barrier at position `k`, add
+///      `m -> k` for all `m < k` and `k -> m` for all `m > k`.  This pins
+///      the barrier's relative order with every neighbour while leaving
+///      non-barrier pairs free to reorder subject to (1).
+///
+/// List scheduling then repeatedly emits the ready node (in-degree zero)
+/// with the best `(scheduler_priority, original_index)` key — memory ops
+/// first, ties broken by smallest original index.  The original-index
+/// tie-break is the "conservative: keep original order" fallback.
+///
+/// If scheduling ever fails to emit all `n` nodes (which would indicate a
+/// cycle — impossible by construction, but checked defensively), the
+/// original order is returned unchanged.
+fn schedule_block_instructions(
+    instrs: &[IRInstr],
+    base: usize,
+    dag: &HashSet<(usize, usize)>,
+) -> Vec<IRInstr> {
+    let n = instrs.len();
+    if n <= 1 {
+        return instrs.to_vec();
+    }
+
+    // Adjacency + in-degree for the block-local dependency graph.
+    let mut adj: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut indeg: Vec<usize> = vec![0; n];
+
+    // Insert `from -> to`, deduplicating so in-degree stays consistent.
+    let add_edge = |adj: &mut Vec<HashSet<usize>>,
+                        indeg: &mut Vec<usize>,
+                        from: usize,
+                        to: usize| {
+        if from != to && adj[from].insert(to) {
+            indeg[to] += 1;
+        }
+    };
+
+    // (1) Intra-block DAG edges.  The DAG only ever records edges in
+    // program order, so for i < j we only need to check (base+i, base+j).
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if dag.contains(&(base + i, base + j)) {
+                add_edge(&mut adj, &mut indeg, i, j);
+            }
+        }
+    }
+
+    // (2) Barrier pinning: preserve program order between each barrier and
+    // every other instruction in the block.
+    for k in 0..n {
+        if is_scheduler_barrier(&instrs[k]) {
+            for m in 0..n {
+                if m < k {
+                    add_edge(&mut adj, &mut indeg, m, k);
+                } else if m > k {
+                    add_edge(&mut adj, &mut indeg, k, m);
+                }
+            }
+        }
+    }
+
+    // (3) List scheduling with memory-op-first priority + original-index
+    // tie-break.  Basic blocks are small, so a re-sort each step is fine
+    // and keeps the logic trivially verifiable.
+    let mut ready: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+
+    while !ready.is_empty() {
+        // Best = lowest (priority, original_index).
+        ready.sort_by(|&a, &b| {
+            scheduler_priority(&instrs[a])
+                .cmp(&scheduler_priority(&instrs[b]))
+                .then(a.cmp(&b))
+        });
+        let pick = ready.remove(0);
+        order.push(pick);
+
+        // Decrement successors; collect newly-ready to avoid borrow issues.
+        let mut newly_ready: Vec<usize> = Vec::new();
+        for &s in adj[pick].iter() {
+            indeg[s] -= 1;
+            if indeg[s] == 0 {
+                newly_ready.push(s);
+            }
+        }
+        ready.extend(newly_ready);
+    }
+
+    // Defensive cycle guard: if we couldn't schedule everything, fall back
+    // to the original order rather than emit a partial / wrong schedule.
+    if order.len() != n {
+        return instrs.to_vec();
+    }
+
+    order.into_iter().map(|i| instrs[i].clone()).collect()
+}
+
+/// Proof-directed instruction scheduler (Wave 3-A).
+///
+/// Reorders instructions **within each basic block** of `func` to find a
+/// latency-optimal topological order, using the happens-before DAG
+/// produced by [`build_happens_before_dag`].
+///
+/// # Correctness envelope
+///
+/// - **No cross-block reordering.**  Each block is scheduled independently;
+///   block layout, terminators, predecessor/successor sets, and all
+///   non-instruction fields of [`IRFunction`] are preserved verbatim.
+///   Only `block.instructions` may be permuted.
+/// - **DAG-respecting.**  Two instructions are swapped only if there is no
+///   happens-before edge between them in `dag` (a necessary condition per
+///   the task spec).  Edges are translated from global indices to
+///   block-local indices using the same flat-cursor scheme as
+///   [`build_happens_before_dag`].
+/// - **Conservative.**  Instructions whose side effects are not fully
+///   modelled by the DAG (calls, syscalls, channel I/O, atomics, bulk
+///   memory ops, state transforms, control flow, phi nodes) are treated
+///   as scheduler barriers and pinned to their original program-order
+///   position — see [`is_scheduler_barrier`].  When in doubt, the
+///   original order is preserved (the list-scheduling tie-break is the
+///   smallest original index).
+/// - **Latency hiding.**  Among ready, reorderable instructions, memory
+///   ops (`Load`/`Store`) are issued first so their latency overlaps with
+///   subsequent dependent computation — see [`scheduler_priority`].
+///
+/// This pass is **not** wired into the optimisation pipeline; Wave 4-A
+/// will do that.  It is exercised directly by callers such as
+/// [`schedule_with_provenance`].
+pub fn schedule_instructions(
+    func: &IRFunction,
+    dag: &HashSet<(usize, usize)>,
+) -> IRFunction {
+    let mut scheduled = func.clone();
+
+    // Mirror the flat global-index cursor used by build_happens_before_dag
+    // so block-local index `i` in block `b` maps to global index
+    // `base + i` exactly as it does in the DAG.
+    let mut base = 0usize;
+    for block in &mut scheduled.blocks {
+        let new_instrs =
+            schedule_block_instructions(&block.instructions, base, dag);
+        block.instructions = new_instrs;
+        base += block.instructions.len();
+    }
+
+    scheduled
+}
+
+/// Convenience wrapper: build the happens-before DAG from `provenance`
+/// then run [`schedule_instructions`].
+///
+/// This is the entry point Wave 4-A will thread into the optimisation
+/// pipeline once the DAG / scheduler have been validated in isolation.
+/// It exists so callers don't have to assemble the DAG by hand.
+pub fn schedule_with_provenance(
+    func: &IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> IRFunction {
+    let dag = build_happens_before_dag(func, provenance);
+    schedule_instructions(func, &dag)
+}
+
+/// Dead store elimination pass (backward-compatible 2-arg entry point).
+///
+/// Delegates to [`dead_store_eliminate_with_linearity`] with
+/// `consumed_vregs = None` — i.e. no IVE linearity data — preserving the
+/// pre-Wave-0-A provenance-only behaviour.  This 2-arg signature is kept
+/// so existing call sites (the optimisation pipeline, the `dump_stages`
+/// binary, and the `ive_loop_tests` conformance suite) compile unchanged;
+/// Wave 4-A will route the IVE linearity report
+/// (`vuma_ive::verification::LinearityReport`) through the 3-arg variant
+/// instead.
 ///
 /// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
 /// non-aliasing to identify stores that are overwritten before any load
-/// reads them. The IVE enhancement allows DSE to prove
-/// non-aliasing across same-type pointers from different allocations —
-/// a case TBAA cannot handle.
+/// reads them. The IVE enhancement allows DSE to prove non-aliasing
+/// across same-type pointers from different allocations — a case TBAA
+/// cannot handle.
 ///
 /// The provenance map is passed explicitly (no thread-local) from
 /// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
-pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>) -> IRFunction {
+pub fn dead_store_eliminate(
+    mut func: IRFunction,
+    provenance: &HashMap<u32, u32>,
+) -> IRFunction {
+    dead_store_eliminate_with_linearity(func, provenance, None)
+}
+
+/// Dead store elimination pass, **IVE-linearity-aware** (Wave 0-A).
+///
+/// This is the extended, linearity-aware entry point of
+/// [`dead_store_eliminate`].  In addition to the provenance
+/// (non-aliasing) directed kill, it accepts an optional `consumed_vregs`
+/// set — the bare vregs the IVE proved were linearly consumed by a
+/// `StateTransform` / `ForeignConsume` in the verified SCG
+/// (`vuma_ive::verification::LinearityReport::consumed_vregs`).  When
+/// `Some(set)`, a `Store` whose address vreg is in `set` is treated as
+/// dead: the state was consumed (destroyed) by the IVE-proven linear
+/// lifecycle, so the store has no observable effect.  `None` ⇒ no
+/// linearity data ⇒ provenance-only DCE (the pre-Wave-0-A behaviour,
+/// identical to [`dead_store_eliminate`]).
+///
+/// Uses type-based alias analysis (TBAA) AND IVE-proven Alloc-region
+/// non-aliasing to identify stores that are overwritten before any load
+/// reads them. The IVE enhancement allows DSE to prove non-aliasing
+/// across same-type pointers from different allocations — a case TBAA
+/// cannot handle.
+///
+/// The provenance map is passed explicitly (no thread-local) from
+/// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
+pub fn dead_store_eliminate_with_linearity(
+    mut func: IRFunction,
+    provenance: &HashMap<u32, u32>,
+    consumed_vregs: Option<&HashSet<u32>>,
+) -> IRFunction {
     use crate::alias_analysis::AliasAnalysis;
 
     let aa = AliasAnalysis::analyze(&func);
@@ -3411,6 +4013,22 @@ pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>
                 } => (addr, *offset as i64, crate::ir::size_of(ty) as i64),
                 _ => continue,
             };
+
+            // ── Wave 0-A: linearity-directed DCE ──────────────────────────
+            // If the IVE proved this store's address vreg was linearly
+            // consumed (the state was used up by a `StateTransform` /
+            // `ForeignConsume`), the store writes to destroyed state with
+            // no observable effect → it is dead.  This is a strictly
+            // stronger kill than the overwrite scan below and complements
+            // the provenance (non-aliasing) check.  `None` ⇒ skip.
+            if let Some(consumed) = consumed_vregs {
+                if let Some(addr_id) = store_addr_i.as_register() {
+                    if consumed.contains(&addr_id) {
+                        to_remove.insert(i);
+                        continue;
+                    }
+                }
+            }
 
             // Check if this store's value is ever read before being overwritten.
             let mut is_dead = false;
@@ -3506,6 +4124,91 @@ pub fn dead_store_eliminate(mut func: IRFunction, provenance: &HashMap<u32, u32>
 
         if !to_remove.is_empty() {
             let mut new_instrs = Vec::with_capacity(block.instructions.len() - to_remove.len());
+            for (i, instr) in block.instructions.drain(..).enumerate() {
+                if !to_remove.contains(&i) {
+                    new_instrs.push(instr);
+                }
+            }
+            block.instructions = new_instrs;
+        }
+    }
+
+    func
+}
+
+/// Linearity-directed **dead state** elimination (Wave 0-A).
+///
+/// For every vreg in `consumed_vregs` — i.e. every state vreg the IVE
+/// proved was linearly consumed by a `StateTransform` / `ForeignConsume`
+/// — remove its entire materialisation lifecycle from `func`:
+///
+/// - the `Alloc` that created the state buffer,
+/// - every `Store` whose address vreg is the consumed vreg, and
+/// - every `Load` whose address vreg is the consumed vreg (only when the
+///   load's destination is not read anywhere else, so the IR stays
+///   well-formed).
+///
+/// This is the aggressive counterpart to [`dead_store_eliminate`]'s
+/// linearity mode: instead of merely dropping the trailing stores to a
+/// consumed state, it drops the *whole* alloc/store/load chain.  It is
+/// sound only under the IVE consumption proof (the state is fully
+/// consumed and its materialisation has no externally-observable
+/// effect); the pipeline (Wave 4-A) is responsible for only calling it
+/// with a verified `consumed_vregs` set.
+///
+/// `consumed_vregs` may be empty, in which case `func` is returned
+/// unchanged.
+pub fn dead_state_eliminate(mut func: IRFunction, consumed_vregs: &HashSet<u32>) -> IRFunction {
+    if consumed_vregs.is_empty() {
+        return func;
+    }
+
+    // Global set of vregs *read* by some instruction or terminator.  A
+    // `Load` whose `dst` is in this set cannot be dropped without leaving
+    // a dangling use, so we keep it (conservative — the linearity proof
+    // should guarantee such loads don't exist for fully consumed state,
+    // but we never want to emit broken IR).
+    let mut globally_used: HashSet<u32> = HashSet::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.used_regs() {
+                globally_used.insert(id);
+            }
+        }
+        for id in terminator_used_regs(&block.terminator) {
+            globally_used.insert(id);
+        }
+    }
+
+    for block in &mut func.blocks {
+        let mut to_remove: HashSet<usize> = HashSet::new();
+        for i in 0..block.instructions.len() {
+            let drop_instr = match &block.instructions[i] {
+                IRInstr::Alloc { dst, .. } => dst
+                    .as_register()
+                    .map_or(false, |id| consumed_vregs.contains(&id)),
+                IRInstr::Store { addr, .. } => addr
+                    .as_register()
+                    .map_or(false, |id| consumed_vregs.contains(&id)),
+                IRInstr::Load { dst, addr, .. } => {
+                    let addr_consumed = addr
+                        .as_register()
+                        .map_or(false, |id| consumed_vregs.contains(&id));
+                    let dst_unused = dst
+                        .as_register()
+                        .map_or(true, |id| !globally_used.contains(&id));
+                    addr_consumed && dst_unused
+                }
+                _ => false,
+            };
+            if drop_instr {
+                to_remove.insert(i);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            let n = block.instructions.len();
+            let mut new_instrs = Vec::with_capacity(n - to_remove.len());
             for (i, instr) in block.instructions.drain(..).enumerate() {
                 if !to_remove.contains(&i) {
                     new_instrs.push(instr);

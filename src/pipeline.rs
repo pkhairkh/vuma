@@ -1373,10 +1373,18 @@ pub fn run_ir_pipeline(
         } else {
             vuma_codegen::target_desc::LatencyTable::default_ooo()
         };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+        // Wave 4-A: route the codegen-opt through the linearity-aware
+        // entry point so DSE/DCE can consume the IVE
+        // `LinearityReport::consumed_vregs` set. The IVE LinearityReport
+        // is produced at the SCG level and is not yet threaded to this
+        // IR-level call site, so pass `None` — provenance-only DCE,
+        // identical to the pre-Wave-4-A `run_optimizations_with_target
+        // _and_inline_threshold` behaviour (backward compatible).
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_linearity(
             ir_program,
             &latency_table,
             config.inline_threshold,
+            None,
         );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
@@ -1430,6 +1438,34 @@ pub fn run_ir_pipeline(
             slp_packs
         );
         timings.push(("vectorize".to_string(), tv.elapsed().as_millis() as u64));
+    }
+
+    // ── Wave 4-A: proof-directed instruction scheduling ───────────────
+    // Run the IVE happens-before DAG scheduler on every function AFTER
+    // DCE (which ran inside the codegen-opt pass above) and BEFORE
+    // register allocation (performed by the caller on the returned
+    // `IRProgram`). The scheduler reorders instructions within each
+    // basic block to hide memory latency, respecting the happens-before
+    // DAG built from vreg RAW/WAW dependencies, memory-alias edges
+    // (relaxed by the IVE Alloc-region non-aliasing proof), and
+    // Alloc→Free ordering.
+    //
+    // The provenance map (Alloc-region non-aliasing proof artifact) is
+    // rebuilt here via `mark_ive_proven_nonaliasing`, which is read-only
+    // w.r.t. the function body. When a future change threads the IVE
+    // `LinearityReport::consumed_vregs` to this site, the same
+    // provenance will additionally drive linearity-directed DCE above.
+    {
+        let tsched = Instant::now();
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (f, provenance) = vuma_codegen::opt::mark_ive_proven_nonaliasing(f);
+            *func = vuma_codegen::opt::schedule_with_provenance(&f, &provenance);
+        }
+        timings.push((
+            "proof-directed-schedule".to_string(),
+            tsched.elapsed().as_millis() as u64,
+        ));
     }
 
     Ok(ir_program)
@@ -2145,6 +2181,11 @@ pub fn compile_with_path(
             return Err(errors); // Cannot continue without IR.
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta so the
+    // proof-directed register allocator can use grades as interference
+    // constraints.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
 
     // ── Stage 8b: Shared post-IR-build O2 pipeline ────────────────────
     // The lowering passes (monomorphize,
@@ -2805,6 +2846,9 @@ pub fn compile_modules(
             return Err(errors);
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
     timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 4b: Shared post-IR-build O2 pipeline ────────────────────
@@ -3569,6 +3613,9 @@ pub fn compile_with_recovery(
             }));
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
 
     // Syscall allowlist — reject obviously invalid syscall numbers.
     // Since `nr` is arch-specific, we use a range check.
@@ -3621,10 +3668,14 @@ pub fn compile_with_recovery(
             } else {
                 vuma_codegen::target_desc::LatencyTable::default_ooo()
             };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+        // Wave 4-A: linearity-aware codegen-opt entry point. The IVE
+        // LinearityReport is not available on this recovery path — pass
+        // `None` (provenance-only DCE, backward compatible).
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_linearity(
             ir_program,
             &latency_table,
             config.inline_threshold,
+            None,
         );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
@@ -3646,6 +3697,23 @@ pub fn compile_with_recovery(
         timings.push((
             "escape-effects".to_string(),
             te.elapsed().as_millis() as u64,
+        ));
+    }
+
+    // ── Wave 4-A: proof-directed instruction scheduling ───────────────
+    // Run the IVE happens-before DAG scheduler after DCE (codegen-opt
+    // above) and before register allocation (Stage 9). See
+    // `run_ir_pipeline` for the full rationale.
+    {
+        let tsched = Instant::now();
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (f, provenance) = vuma_codegen::opt::mark_ive_proven_nonaliasing(f);
+            *func = vuma_codegen::opt::schedule_with_provenance(&f, &provenance);
+        }
+        timings.push((
+            "proof-directed-schedule".to_string(),
+            tsched.elapsed().as_millis() as u64,
         ));
     }
 
@@ -4067,6 +4135,9 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
             }])
         }
     };
+    // Wave 0-B: thread grade annotations from the codegen SCG's
+    // typed_state_meta into the IR's per-function vreg_meta.
+    populate_vreg_grades(&mut ir_program, &codegen_scg.typed_state_meta);
 
     // Syscall allowlist — reject obviously invalid syscall numbers.
     // Since `nr` is arch-specific, we use a range check.
@@ -4097,7 +4168,10 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // definitions were also deleted as dead-code cleanup.)
 
     // ── Codegen-Level IR Optimization (production caller) ────────
-    ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+    // Wave 4-A: use the linearity-aware entry point. The IVE
+    // LinearityReport is not available on this path — pass `None`
+    // (provenance-only DCE, backward compatible).
+    ir_program = vuma_codegen::opt::run_optimizations_with_linearity(ir_program, None);
 
     // Central pre-lowering float-op verification.
     //
@@ -4113,6 +4187,18 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
                 errs.join("; ")
             )),
         }]);
+    }
+
+    // ── Wave 4-A: proof-directed instruction scheduling ───────────────
+    // Run the IVE happens-before DAG scheduler after DCE (the opt pass
+    // above) and before register allocation (inside `compile_to_wasm`).
+    // See `run_ir_pipeline` for the full rationale.
+    {
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (f, provenance) = vuma_codegen::opt::mark_ive_proven_nonaliasing(f);
+            *func = vuma_codegen::opt::schedule_with_provenance(&f, &provenance);
+        }
     }
 
     // ── Stage 5: Compile IR → Wasm ──────────────────────────────
@@ -5982,6 +6068,70 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
 /// [`bridge_ast_to_codegen_scg_with_meta`] directly.
 pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     bridge_ast_to_codegen_scg_with_meta(program).0
+}
+
+/// Populate each IR function's `vreg_meta` from the codegen SCG's
+/// `typed_state_meta` (Wave 0-B: thread grade annotations to IR for
+/// proof-directed regalloc).
+///
+/// Grade mapping (proof-directed compilation linearity model):
+///   * `TypedStateMeta::StateInit { result_vreg, .. }` -> grade `Exclusive`
+///     (linearity class @1). The vreg holds an exclusively-owned state
+///     token (e.g. the pointer returned by `state_new(L)`) and must not
+///     share a physical register with any other simultaneously-live vreg.
+///     Over-stamping `Exclusive` is always sound: it is an over-constraint
+///     that can only cost a register, never break correctness.
+///   * `TypedStateMeta::StateRead { .. }` would map to grade `Shared`
+///     (linearity class one-half), but the codegen `StateRead` meta variant
+///     carries no result vreg (the loaded value's vreg is only known inside
+///     `IRBuilder` during lowering). Until a later wave threads the real
+///     vreg through the bridge, `StateRead` results fall back to `None`
+///     (liveness-only regalloc) -- the documented safe default.
+///   * All other `TypedStateMeta` variants (`StateWrite`, `StateTransform`,
+///     `ForeignConsume`) carry no result vreg and are skipped -> `None`.
+///
+/// Attribution caveat: `StateInit::result_vreg` is a *synthetic*
+/// program-wide source-order counter assigned by the AST -> codegen SCG
+/// bridge (`bridge_ast_to_codegen_scg_with_meta`), NOT the codegen IR
+/// vreg. `IRBuilder` likewise assigns program-wide unique vregs (its
+/// `next_vreg` counter is never reset across functions), so a given id is
+/// live in at most one IR function. Each grade is therefore stamped into
+/// the single IR function whose `vregs` table contains that id; ids that
+/// match no IR vreg are left absent -> `None` (regalloc falls back to
+/// liveness). A future wave that records grades inside `IRBuilder` (where
+/// the real IR vreg is known at lowering time) will make this attribution
+/// exact.
+pub fn populate_vreg_grades(
+    ir_program: &mut IRProgram,
+    meta: &[vuma_codegen::scg_to_ir::TypedStateMeta],
+) {
+    use vuma_codegen::ir::{VumaGrade, VregMeta};
+    for entry in meta {
+        let (vreg_id, grade) = match entry {
+            vuma_codegen::scg_to_ir::TypedStateMeta::StateInit { result_vreg, .. } => {
+                (*result_vreg, VumaGrade::Exclusive)
+            }
+            // StateRead meta carries no result vreg; the loaded value's
+            // vreg is only known inside IRBuilder at lowering time. Fall
+            // back to None (liveness-only regalloc) until a later wave
+            // threads the real vreg through the bridge.
+            vuma_codegen::scg_to_ir::TypedStateMeta::StateRead { .. } => continue,
+            // StateWrite / StateTransform / ForeignConsume carry no
+            // result vreg -> None (liveness fallback).
+            _ => continue,
+        };
+        // IRBuilder vregs are program-wide unique, so at most one function
+        // contains this id. Stamp the grade only where the vreg actually
+        // lives; absent vregs stay at the default (None -> liveness).
+        // `or_insert` keeps the first-wins grade if an id ever repeats.
+        for func in &mut ir_program.functions {
+            if func.vregs.contains_key(&vreg_id) {
+                func.vreg_meta
+                    .entry(vreg_id)
+                    .or_insert(VregMeta { grade: Some(grade) });
+            }
+        }
+    }
 }
 
 /// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter
