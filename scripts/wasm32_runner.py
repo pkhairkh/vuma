@@ -24,7 +24,7 @@ _current_wasm_path = None
 try:
     from wasmtime import (
         Engine, Store, Module, Linker, Func, FuncType, ValType,
-        Trap, WasiConfig, ExitTrap,
+        Config, Trap, WasiConfig, ExitTrap,
     )
 except ImportError:
     print("Error: wasmtime Python package not installed", file=sys.stderr)
@@ -231,7 +231,24 @@ def main():
     _current_wasm_path = wasm_path  # saved for vuma_fork() to use in child
     wasi_args = sys.argv[1:]  # argv[0] = wasm path, argv[1:] = extra args
 
-    engine = Engine()
+    # Enable wasm threads (--wasm-threads) so modules using shared
+    # memory + atomic wait/notify (Wave 3-A spawn_worker / 3-B channel
+    # sync) validate, and so __vuma_spawn_thread can in principle drive
+    # a real wasm thread sharing linear memory.  Older wasmtime bindings
+    # may not expose this knob; we fall back to a plain Engine then.
+    engine = None
+    try:
+        _cfg = Config()
+        try:
+            _cfg.wasm_threads(True)
+        except (AttributeError, TypeError):
+            try:
+                _cfg.wasm_threads = True
+            except Exception:
+                pass
+        engine = Engine(_cfg)
+    except Exception:
+        engine = Engine()
     store = Store(engine)
 
     # Configure WASI with command-line arguments
@@ -325,9 +342,15 @@ def main():
             addr += 4
         return ptrs
 
+    # Tracked pipe fds (read, write) created by vuma_pipe.  Used by the
+    # __vuma_spawn_thread subprocess fallback to wire parent<->child pipes,
+    # mirroring the legacy fork-emulation path.
+    _vuma_pipe_fds = []
+
     def vuma_pipe(pipefd_ptr):
         try:
             r, w = os.pipe()
+            _vuma_pipe_fds.append((r, w))
             write_mem(pipefd_ptr, struct.pack('<ii', r, w))
             ret = 0
         except OSError:
@@ -1052,6 +1075,127 @@ def main():
         write_mem(0, struct.pack('<i', ret))
         return ret
 
+    # ── __vuma_spawn_thread(func_idx: i32) -> i32 ─────────────────────
+    # Wave 3-C: spawn a worker that shares linear memory with the caller.
+    #
+    # Primary path: wasmtime wasm threads (--wasm-threads).  We try to
+    # start a native wasm thread sharing the instance memory; the child
+    # runs the worker entry.  (The codegen currently passes func_idx=0 as
+    # a sentinel — extracting the child as a real wasm function is future
+    # work; see src/codegen/src/wasm32/mod.rs.)
+    #
+    # Fallback path: if the wasmtime Python binding does not expose a
+    # thread-spawning API, we fall back to the existing fork emulation —
+    # relaunch this runner as a subprocess (the same mechanism the legacy
+    # vuma_fork uses), wiring the most recently created pipe fds to the
+    # child's stdin/stdout so pipe-based self_exec programs still work.
+    #
+    # Returns a non-zero thread id (>= 1) on success, or -1 on failure.
+    _vuma_workers = {}       # tid -> {"proc": Popen|None, "thread": obj|None, "exit": int|None}
+    _vuma_next_tid = [1]     # 0 is reserved as the wasm child sentinel
+
+    def _try_wasmtime_thread(func_idx):
+        """Attempt to spawn a real wasm thread sharing linear memory via
+        wasmtime's threading API.  Returns the thread object on success, or
+        None when the binding does not expose thread spawning (the common
+        case today), in which case the caller falls back to the subprocess
+        fork-emulation path."""
+        try:
+            if get_mem() is None:
+                return None
+            # wasmtime-python has no stable high-level API for spawning a
+            # wasm thread that re-enters a function in the same instance
+            # from host code.  Probe defensively so that, the day such an
+            # API lands, we adopt it automatically.
+            for _attr in ("spawn_thread", "start_thread", "new_thread"):
+                _fn = getattr(store, _attr, None)
+                if not callable(_fn):
+                    continue
+                try:
+                    return _fn(func_idx)
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
+
+    def vuma_spawn_thread(func_idx):
+        import subprocess
+        try:
+            tid = _vuma_next_tid[0]
+            thread_obj = _try_wasmtime_thread(func_idx)
+            if thread_obj is not None:
+                _vuma_workers[tid] = {"proc": None, "thread": thread_obj, "exit": None}
+                _vuma_next_tid[0] += 1
+                ret = tid
+            else:
+                # Fallback: fork emulation via subprocess.Popen.
+                runner = os.path.abspath(__file__)
+                wasm_path = _current_wasm_path
+                child_args = [sys.executable, runner, wasm_path, "child"]
+                if len(_vuma_pipe_fds) >= 2:
+                    # Wire the two most recently created pipes
+                    # (parent->child, child->parent), mirroring the
+                    # legacy vuma_fork subprocess path.
+                    p1r, _ = _vuma_pipe_fds[-2]
+                    _, p2w = _vuma_pipe_fds[-1]
+                    proc = subprocess.Popen(
+                        child_args,
+                        stdin=p1r, stdout=p2w, stderr=sys.stderr,
+                        pass_fds=[], close_fds=True,
+                    )
+                else:
+                    # No tracked pipes: inherit stdio (degraded mode).
+                    proc = subprocess.Popen(
+                        child_args,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=sys.stderr,
+                        close_fds=True,
+                    )
+                _vuma_workers[tid] = {"proc": proc, "thread": None, "exit": None}
+                _vuma_next_tid[0] += 1
+                ret = tid
+        except OSError:
+            ret = -1
+        except Exception as e:
+            sys.stderr.write(f"__vuma_spawn_thread error: {e}\n")
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
+    # ── __vuma_thread_join(thread_id: i32) -> i32 ────────────────────
+    # Wave 3-C: block until the worker identified by `thread_id` exits
+    # and return its exit code (0 for success, non-zero for failure).
+    # Returns -1 if `thread_id` is unknown.
+    def vuma_thread_join(thread_id):
+        try:
+            worker = _vuma_workers.get(thread_id)
+            if worker is None:
+                ret = -1
+            elif worker["proc"] is not None:
+                # Subprocess fallback: wait for the child process.
+                code = worker["proc"].wait()
+                worker["exit"] = code
+                ret = code
+            elif worker["thread"] is not None:
+                # Wasmtime-thread path: join the native thread.
+                join_fn = getattr(worker["thread"], "join", None)
+                if callable(join_fn):
+                    join_fn()
+                code = getattr(worker["thread"], "exit_code", None)
+                if code is None:
+                    code = getattr(worker["thread"], "result", 0)
+                worker["exit"] = code
+                ret = code if isinstance(code, int) else 0
+            else:
+                ret = worker.get("exit") or 0
+        except Exception as e:
+            sys.stderr.write(f"__vuma_thread_join error: {e}\n")
+            ret = -1
+        write_mem(0, struct.pack('<i', ret))
+        return ret
+
     i32 = ValType.i32()
     # Define the custom "vuma" module host functions in the linker
     linker.define_func("vuma", "pipe", FuncType([i32], [i32]), vuma_pipe)
@@ -1101,6 +1245,14 @@ def main():
     # Sleep (Wave 5).  clock_gettime is already aliased to WASI
     # clock_time_get; nanosleep is a new host function (real time.sleep).
     linker.define_func("vuma", "nanosleep", FuncType([i32, i32], [i32]), vuma_nanosleep)
+    # Wave 3-A/3-C: wasm thread spawn/join host imports.  spawn_worker is
+    # lowered (wasm32/mod.rs Syscall{220} handler) to __vuma_spawn_thread,
+    # which spawns a real wasm thread sharing linear memory (or falls back
+    # to fork emulation).  wait_worker is lowered (Load from
+    # WASM32_CHILD_EXIT_ADDR) to __vuma_thread_join, which joins the worker
+    # and returns its exit code.
+    linker.define_func("vuma", "__vuma_spawn_thread", FuncType([i32], [i32]), vuma_spawn_thread)
+    linker.define_func("vuma", "__vuma_thread_join", FuncType([i32], [i32]), vuma_thread_join)
 
     # Instantiate the module.
     #
