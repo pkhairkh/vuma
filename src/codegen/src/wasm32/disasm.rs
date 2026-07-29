@@ -348,6 +348,12 @@ impl std::fmt::Display for WasmInstr {
                 write!(f, "atomic.rmw.cmpxchg align={align} offset={offset}")
             }
             WasmInstr::MemoryAtomicFence => write!(f, "atomic.fence"),
+            WasmInstr::MemoryAtomicNotify { align, offset } => {
+                write!(f, "memory.atomic.notify align={align} offset={offset}")
+            }
+            WasmInstr::MemoryAtomicWait32 { align, offset } => {
+                write!(f, "memory.atomic.wait32 align={align} offset={offset}")
+            }
         }
     }
 }
@@ -911,6 +917,14 @@ impl WasmInstr {
                     let a = align as u32;
                     let o = offset as u32;
                     match sub_op {
+                        0x00 => WasmInstr::MemoryAtomicNotify {
+                            align: a,
+                            offset: o,
+                        },
+                        0x01 => WasmInstr::MemoryAtomicWait32 {
+                            align: a,
+                            offset: o,
+                        },
                         0x10 => WasmInstr::I32AtomicLoad {
                             align: a,
                             offset: o,
