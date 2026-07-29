@@ -1456,9 +1456,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // (NOT S0/S1, which hold the just-loaded float operands) so a
                                 // subsequent comparison that reloads the same operand from its
                                 // stack slot is not clobbered by this result landing in S0.
-                                let movcf2gr_word: u32 = 0x0114DC00u32 | ((S2.encoding() as u32) & 0x1F);
+                                let movcf2gr_word: u32 = 0x0114DC00u32 | ((Gpr::S3.encoding() as u32) & 0x1F);
                                 code.extend_from_slice(&movcf2gr_word.to_le_bytes());
-                                code.extend(encode_store_to_vreg(S2, dst_id, fp, &vreg_slots));
+                                code.extend(encode_store_to_vreg(Gpr::S3, dst_id, fp, &vreg_slots));
                             } else {
                                 code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                                 code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
@@ -1538,9 +1538,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // (NOT S0/S1, which hold the just-loaded float operands) so a
                         // subsequent comparison that reloads the same operand from its
                         // stack slot is not clobbered by this result landing in S0.
-                        let movcf2gr_word: u32 = 0x0114DC00u32 | ((S2.encoding() as u32) & 0x1F);
+                        let movcf2gr_word: u32 = 0x0114DC00u32 | ((Gpr::S3.encoding() as u32) & 0x1F);
                         code.extend_from_slice(&movcf2gr_word.to_le_bytes());
-                        code.extend(encode_store_to_vreg(S2, dst_id, fp, &vreg_slots));
+                        code.extend(encode_store_to_vreg(Gpr::S3, dst_id, fp, &vreg_slots));
                     } else {
                         code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                         code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
