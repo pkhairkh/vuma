@@ -4035,13 +4035,122 @@ fn binop_cmp_to_cc(op: &BinOpKind) -> Cc {
     }
 }
 
+/// Run the real target-agnostic linear-scan register allocator on `func`
+/// for the x86_64 target.
+///
+/// This is the "enable real regalloc" entry point used by
+/// [`X86_64Backend::allocate_registers`].  It looks up the x86_64
+/// `TargetDesc` from the [`TargetDescRegistry`], constructs a
+/// [`TargetAgnosticRegAlloc`], and runs [`allocate_function`] to produce a
+/// [`RegAllocResult`] mapping each virtual register to a physical register
+/// (or a spill slot, for evicted intervals).
+///
+/// # Return value
+///
+/// - `Some(result)` — the real allocator succeeded; the caller should
+///   annotate the stack-slot-ISel `AllocatedFunction` with this result via
+///   [`regalloc_emit::annotate_with_regalloc`].
+/// - `None` — either the x86_64 target description was not found in the
+///   registry (defensive — should never happen) or the allocator returned
+///   an `Err`.  In both cases the caller should fall back to the
+///   unannotated stack-slot-ISel output so that existing behaviour is
+///   preserved.
+///
+/// # Why a fallback exists
+///
+/// The real allocator operates on `LiveInterval`s computed from the IR and
+/// may reject functions whose control flow or value graph it cannot model
+/// (e.g. exotic terminators, unsupported IR types).  The stack-slot ISel
+/// path is always correct — it just gives every vreg an 8-byte stack slot —
+/// so it is the safe fallback.
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("x86_64") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "x86_64 allocate_registers: target 'x86_64' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "x86_64 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
+
 impl Backend for X86_64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
     }
 
+    /// Allocate physical registers for an IR function on x86_64.
+    ///
+    /// This method now drives the **real** target-agnostic linear-scan
+    /// register allocator ([`TargetAgnosticRegAlloc`]) instead of only the
+    /// stack-slot ISel.  The translation from the allocator's
+    /// [`RegAllocResult`] to the backend's [`AllocatedFunction`] is performed
+    /// by [`regalloc_emit::annotate_with_regalloc`].
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Always** run `stack_slot_isel::allocate_registers(func)` first.
+    ///    This produces a correct `AllocatedFunction` whose `encoded` bytes
+    ///    keep every vreg in a stack slot at `[rbp - offset]`, with a
+    ///    correct `frame_size` and `callee_saved` set.  This is the safety
+    ///    net for the fallback path and also the source of the encoded
+    ///    machine code (the real allocator produces register *assignments*
+    ///    but not raw bytes).
+    /// 2. Run [`try_real_regalloc`] to obtain a [`RegAllocResult`].  If it
+    ///    returns `Some`, call [`regalloc_emit::annotate_with_regalloc`] to
+    ///    fold the real register assignments into the `AllocatedFunction`:
+    ///      - each instruction's `reads`/`writes` are augmented with the
+    ///        callee-saved registers the allocator actually used,
+    ///      - `spill_slots` is set to the allocator's spill-slot count.
+    /// 3. If `try_real_regalloc` returns `None` (target description missing
+    ///    or allocator errored), the unannotated stack-slot-ISel output is
+    ///    returned unchanged — preserving the previous behaviour so no
+    ///    existing tests regress.
+    ///
+    /// # Why the encoded bytes stay stack-slot-based
+    ///
+    /// A complete register-based x86_64 encoder that consumes
+    /// `RegAllocResult.vreg_to_preg` and emits register-to-register machine
+    /// code (with spill/reload instructions inserted at the positions
+    /// recorded in `RegAllocResult.spill_code`) is a substantial undertaking
+    /// and would risk miscompilation.  The current design is the safe,
+    /// incremental path: the encoded bytes are correct (stack-slot ISel),
+    /// and the `reads`/`writes`/`spill_slots` metadata accurately reflects
+    /// the real allocator's decisions for downstream consumers (disassemblers,
+    /// debuggers, future codegen waves).
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        stack_slot_isel::allocate_registers(func)
+        // Step 1: baseline stack-slot ISel — always produces correct bytes.
+        let mut allocated = stack_slot_isel::allocate_registers(func)?;
+
+        // Step 2: run the real target-agnostic linear-scan allocator and,
+        // on success, annotate the AllocatedFunction with its decisions.
+        // On failure (or missing target desc), fall back to the unannotated
+        // stack-slot ISel output so existing behaviour is preserved.
+        if let Some(alloc) = try_real_regalloc(func) {
+            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
+        }
+
+        Ok(allocated)
     }
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
         let mut bytes = Vec::new();
