@@ -8261,20 +8261,27 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             let arena_ptr = ctx.alloc_temp();
-            // FFI-5-B (Gap #1 closure): route mmap through IRInstr::Syscall
-            // (asm-generic nr=222 → native x86_64 nr=9 via syscall_abi::translate).
-            // Eliminates the last `is_extern: true` CallNode for mmap in this path.
-            stmts.push(ScgStatement::Syscall(SyscallCallNode {
-                nr: 222,
+            // Route mmap through a CallNode so the per-backend `mmap` syscall
+            // stub (registered on all 19 backends) handles flag translation +
+            // arg placement. The generic 0x22 MAP_ANONYMOUS flag is wrong on
+            // alpha (0x10), mips64 (0x800), and hppa, and the raw Syscall path
+            // also misplaces args 5-6 on arm32. The backend stubs (e.g.
+            // alpha.rs:3523, mips64/mod.rs:4991, hppa.rs:6254) translate the
+            // flags / place args correctly. (Reverts the FFI-5-B "Gap #1"
+            // Syscall routing that bypassed these stubs.)
+            stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(arena_ptr.clone()),
+                func: "mmap".to_string(),
                 args: vec![
                     ScgExpr::Int(0),         // addr = NULL
                     ScgExpr::Var(mmap_size), // length = capacity + 4096 (guard page)
                     ScgExpr::Int(3),         // prot = PROT_READ|PROT_WRITE
-                    ScgExpr::Int(0x22),      // flags = MAP_PRIVATE|MAP_ANONYMOUS
+                    ScgExpr::Int(0x22),      // flags = MAP_PRIVATE|MAP_ANONYMOUS (generic; stub translates)
                     ScgExpr::Int(-1),        // fd = -1
                     ScgExpr::Int(0),         // offset = 0
                 ],
+                is_extern: true,
+                reassigns: None,
             }));
             // mprotect(arena_ptr + capacity, 4096, PROT_NONE=0) — guard page.
             // Return value is ignored (stored to a temp, never checked) so a
@@ -8289,16 +8296,17 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             let _mprot_ret = ctx.alloc_temp();
-            // FFI-5-B (Gap #1 closure): route mprotect through IRInstr::Syscall
-            // (asm-generic nr=226 → native x86_64 nr=10 via syscall_abi::translate).
-            stmts.push(ScgStatement::Syscall(SyscallCallNode {
-                nr: 226,
+            // Route mprotect through the per-backend `mprotect` syscall stub.
+            stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(_mprot_ret),
+                func: "mprotect".to_string(),
                 args: vec![
                     ScgExpr::Var(guard_addr),
                     ScgExpr::Int(4096), // size = one page
                     ScgExpr::Int(0),    // prot = PROT_NONE
                 ],
+                is_extern: true,
+                reassigns: None,
             }));
             // arena.base (offset 0) is already 0 (mmap zeroes the region).
             // Store arena.offset = 24 at [arena_ptr+8] via ComputationNode::Add
@@ -8495,17 +8503,19 @@ pub fn flatten_expr(
             }));
             // Call mremap(arena_ptr, capacity, min_capacity + 4096, MREMAP_MAYMOVE=1)
             let new_base = ctx.alloc_temp();
-            // FFI-5-B (Gap #1 closure): route mremap through IRInstr::Syscall
-            // (asm-generic nr=216 → native x86_64 nr=25 via syscall_abi::translate).
-            stmts.push(ScgStatement::Syscall(SyscallCallNode {
-                nr: 216,
+            // Route mremap through the per-backend `mremap` syscall stub so
+            // the backend handles native syscall numbering + arg placement.
+            stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(new_base.clone()),
+                func: "mremap".to_string(),
                 args: vec![
                     arena_ptr,
                     ScgExpr::Var(cap_val),
                     ScgExpr::Var(new_map_size),
                     ScgExpr::Int(1),
                 ],
+                is_extern: true,
+                reassigns: None,
             }));
             // mprotect(new_base + min_capacity, 4096, PROT_NONE=0) — guard
             // page on the new tail. Return value ignored.
@@ -8519,16 +8529,17 @@ pub fn flatten_expr(
                 reassigns: None,
             }));
             let _mprot_ret = ctx.alloc_temp();
-            // FFI-5-B (Gap #1 closure): route mprotect through IRInstr::Syscall
-            // (asm-generic nr=226 → native x86_64 nr=10 via syscall_abi::translate).
-            stmts.push(ScgStatement::Syscall(SyscallCallNode {
-                nr: 226,
+            // Route mprotect through the per-backend `mprotect` syscall stub.
+            stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(_mprot_ret),
+                func: "mprotect".to_string(),
                 args: vec![
                     ScgExpr::Var(guard_addr),
                     ScgExpr::Int(4096), // size = one page
                     ScgExpr::Int(0),    // prot = PROT_NONE
                 ],
+                is_extern: true,
+                reassigns: None,
             }));
             // Store min_capacity at [new_base+16]
             let cap_addr2 = ctx.alloc_temp();
@@ -8571,13 +8582,14 @@ pub fn flatten_expr(
                 offset: None,
                 ty: Some(vuma_codegen::ir::IRType::U64),
             }));
-            // Call munmap(arena_ptr, capacity)
-            // FFI-5-B (Gap #1 closure): route munmap through IRInstr::Syscall
-            // (asm-generic nr=215 → native x86_64 nr=11 via syscall_abi::translate).
-            stmts.push(ScgStatement::Syscall(SyscallCallNode {
-                nr: 215,
+            // Call munmap(arena_ptr, capacity) via the per-backend `munmap`
+            // syscall stub so the backend picks the native syscall number.
+            stmts.push(ScgStatement::Call(CallNode {
                 dst: None,
+                func: "munmap".to_string(),
                 args: vec![arena_ptr, ScgExpr::Var(cap_val)],
+                is_extern: true,
+                reassigns: None,
             }));
             ScgExpr::Int(0)
         }
