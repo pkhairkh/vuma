@@ -425,8 +425,13 @@ fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
     // post-split BFS incorrectly traverse through the child subtree and
     // mark the child's Return blocks as "shared with parent" (causing
     // Phase 3 to skip them, leaving the child's real proc_exit in place).
+    //
+    // Keep BOTH the ordered Vec (for Phase 2 — must search in execution
+    // order to find the FIRST channel_recv, not a random one) and the
+    // HashSet (for Phase 3 — O(1) contains() check).
+    let parent_reachable_ordered: Vec<usize> = bfs_reachable(func, parent_idx);
     let parent_reachable: std::collections::HashSet<usize> =
-        bfs_reachable(func, parent_idx).into_iter().collect();
+        parent_reachable_ordered.iter().copied().collect();
 
     let parent_post_lbl: String = {
         // (1) BFS child's CFG to detect any channel_recv.
@@ -440,7 +445,14 @@ fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
         // (2)/(3) BFS parent's CFG to find split point: prefer first
         // channel_recv (covers Pattern A and bidirectional), else wait_worker
         // Load (Pattern B).
-        let parent_blocks_ordered: Vec<usize> = parent_reachable.iter().copied().collect();
+        //
+        // CRITICAL: use parent_reachable_ordered (BFS traversal order) NOT
+        // parent_reachable.iter() (HashSet arbitrary order). HashSet iteration
+        // is non-deterministic, so the "first" channel_recv found could be
+        // the SECOND one in execution order. This causes the split to happen
+        // at the wrong recv, so the first recv runs on an empty buffer
+        // (returns 0) and the test gets the wrong exit code.
+        let parent_blocks_ordered: Vec<usize> = parent_reachable_ordered.clone();
         let mut split_block_idx: Option<usize> = None;
         let mut split_instr_idx: Option<usize> = None;
         for &bi in &parent_blocks_ordered {
