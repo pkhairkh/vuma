@@ -1112,6 +1112,7 @@ pub fn run_ir_pipeline(
     mut ir_program: IRProgram,
     config: &CompileConfig,
     backend_kind: vuma_codegen::backend::BackendKind,
+    secret_vars: &HashSet<String>,
     timings: &mut Vec<(String, u64)>,
 ) -> Result<IRProgram, VumaError> {
     // ── Lowering passes (monomorphize, closures, switch, tail-call,
@@ -1300,18 +1301,21 @@ pub fn run_ir_pipeline(
     // Wire session_type_check and information_flow_check
     // into the pipeline.
     // MANDATORY: both checks now hard-fail on any violation.
-    // IMPORTANT — structural, not empirical: the IR-level wrappers
-    // `verify_session_types_from_ir` and `verify_information_flow_from_ir`
-    // currently hardcode their inputs (session_type=`End`, `vreg=0` for
-    // every channel op; security labels=`Public` for every flow). By
-    // construction these wrappers cannot produce violations, so "zero
-    // violations" is structural, NOT empirically validated against the
-    // gold-standard suite. The underlying verifiers
-    // (`verify_session_types` / `verify_information_flow`) DO real work
-    // on real inputs; the gap is in the wrappers' input-shaping, which
-    // awaits AST→IR label / session-type annotation propagation
-    // (deferred to IVE Wave 2). See docs/caveats.md §0.7 for the
-    // per-verifier RESTORE/DEFER decision table.
+    //
+    // Information-flow wrapper (Wave 2 / Task 3): the IR-level wrapper
+    // `verify_information_flow_from_ir` now consults `secret_vars`
+    // (collected from `#[secret]` annotations by `collect_secret_vars`
+    // and threaded into `run_ir_pipeline`) to assign real
+    // `SecurityLabel::Secret` labels to vregs whose declared name is in
+    // that set. A `Secret → Public` `Store` (writing a secret-named value
+    // into a non-secret-named destination) or `ChannelSend` (sending a
+    // secret-named message on a public-named channel) is now flagged as a
+    // real violation. Limitation: this is a name-based proxy, not full
+    // AST→IR label propagation — anonymous temporaries holding secret
+    // values (post-optimisation) are not tainted. The session-type
+    // wrapper (`verify_session_types_from_ir_for_backend`) still
+    // hardcodes its inputs (`End`/`vreg=0`); its restoration is tracked
+    // separately in `docs/caveats.md` §0.7.
     {
         let tct = Instant::now();
         // Session type verification — MANDATORY.
@@ -1338,7 +1342,7 @@ pub fn run_ir_pipeline(
         }
         // Information-flow verification — MANDATORY.
         let flow_violations =
-            vuma_ive::information_flow::verify_information_flow_from_ir(&ir_program);
+            vuma_ive::information_flow::verify_information_flow_from_ir(&ir_program, secret_vars);
         if !flow_violations.is_empty() {
             for v in &flow_violations {
                 vuma_log!(
@@ -2205,7 +2209,23 @@ pub fn compile_with_path(
     // canonical Linux/ELF path — preserved exactly). Behavior is
     // identical to the previous inline sequence.
     let backend_kind = config.emit_config().backend;
-    ir_program = match run_ir_pipeline(ir_program, config, backend_kind, &mut timings) {
+    // (Wave 2 / Task 3) Re-collect `secret_vars` for the IR-level
+    // information-flow verifier. The set computed at line 1652 above was
+    // moved into the IVE `VerificationInput` (PMT state verification), so
+    // we recompute it here — `collect_secret_vars` is a single AST walk
+    // and the secret set is typically tiny. The information-flow wrapper
+    // uses this to label vregs `Secret` when their declared name appears
+    // in the set, so a `Secret → Public` `Store`/`ChannelSend` is now
+    // flagged as a real violation (previously the wrapper hardcoded
+    // `Public` for every flow and could never fire).
+    let secret_vars_for_flow = collect_secret_vars(&ast);
+    ir_program = match run_ir_pipeline(
+        ir_program,
+        config,
+        backend_kind,
+        &secret_vars_for_flow,
+        &mut timings,
+    ) {
         Ok(ir) => ir,
         Err(e) => {
             errors.push(e);
@@ -2869,7 +2889,19 @@ pub fn compile_modules(
     // exactly from the previous inline Stage 4b — `backend_kind` is also
     // reused below for the actual register-allocator backend).
     let backend_kind = host_backend_kind();
-    ir_program = match run_ir_pipeline(ir_program, config, backend_kind, &mut timings) {
+    // (Wave 2 / Task 3) Re-collect `secret_vars` for the IR-level
+    // information-flow verifier. The set computed at line 2767 above was
+    // moved into the IVE `VerificationInput` (PMT state verification), so
+    // we recompute it here for `run_ir_pipeline` — same rationale as in
+    // `compile_with_path` (single AST walk, tiny set).
+    let secret_vars_for_flow = collect_secret_vars(&merged_ast);
+    ir_program = match run_ir_pipeline(
+        ir_program,
+        config,
+        backend_kind,
+        &secret_vars_for_flow,
+        &mut timings,
+    ) {
         Ok(ir) => ir,
         Err(e) => {
             errors.push(e);

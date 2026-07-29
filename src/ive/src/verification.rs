@@ -2211,8 +2211,8 @@ impl LinearityReport {
     }
 }
 
-/// Re-derive the set of bare vregs linearly consumed by `StateTransform` /
-/// `ForeignConsume` nodes in `scg`.
+/// Re-derive the set of bare vregs linearly consumed by resource-consuming
+/// nodes in `scg`.
 ///
 /// This mirrors the inline consume tracking performed inside
 /// [`VerificationEngine::verify_pmt`] (which keys each `StateWriteOp`'s
@@ -2221,11 +2221,66 @@ impl LinearityReport {
 /// *without* re-running verification, and gives codegen a stable contract
 /// for the Wave 4-A wiring.
 ///
-/// A vreg is consumed iff some node in the SCG is a `StateTransform` or
-/// `ForeignConsume` whose `input_vreg` equals it.  The walk order matches
-/// `verify_pmt` (nodes sorted by `NodeId`).
+/// # Node kinds tracked
+///
+/// A vreg is recorded as consumed when the SCG contains a node whose
+/// payload denotes a linear resource consumption.  The following
+/// [`NodePayload`] arms are tracked (in addition to the original
+/// `StateTransform` / `ForeignConsume`):
+///
+/// - **`ArenaFree`** — `arena_free(arena)` unmaps the arena's mmap'd
+///   region; the arena vreg (`ArenaFreeNode::arena_vreg`) is consumed.
+/// - **`ChannelClose`** — `channel_close(ch)` releases the kernel channel
+///   handle; the channel vreg is consumed.  *Impedance mismatch:* the
+///   semantic [`vuma_scg::node::ChannelCloseNode`] only stores the
+///   channel as a `String` variable name (not a bare vreg).  We attempt
+///   a best-effort `u32::from_str` on that name; if it parses (e.g. the
+///   channel is referenced by a numeric vreg label), the vreg is
+///   recorded.  Otherwise the consume is silently skipped — recovering
+///   it requires either extending `ChannelCloseNode` to carry a vreg or
+///   threading a name→vreg map into this walker (see "Limitations"
+///   below).
+/// - **`Deallocation`** — `PmtOpStmt::ArenaFree { ptr }` is lowered by
+///   `vuma_codegen::scg_to_ir` to `NodePayload::Deallocation`, but the
+///   codegen-side lowering *drops* the `ptr` vreg (hard-codes
+///   `allocation_node: NodeId(0)` / `region_id: RegionId(0)` — see
+///   `Scg::node_payload`).  We pattern-match this arm so future
+///   lowerings that *do* preserve the vreg (e.g. via a field addition
+///   to `DeallocationNode`, or a dedicated `Free` payload) are picked
+///   up automatically; for now there is no vreg to extract.
+/// - **`Computation` with `IntrinsicKind::CapabilityRevoke`** (and
+///   `CapabilityDelegate`) — these intrinsics semantically consume the
+///   source capability.  The `ComputationNode` payload does not carry
+///   vregs (operand vregs flow through SCG *edges*, not the payload),
+///   so we cannot record a bare vreg here.  Tracking these requires
+///   edge inspection, which is out of scope for this payload-only
+///   walker; the match arm is present so the limitation is documented
+///   in code.
+///
+/// The walk order matches `verify_pmt` (nodes sorted by `NodeId`).
+///
+/// # Limitations
+///
+/// 1. **String-named operands.** `ChannelClose`, `ChannelSend`,
+///    `ChannelRecv`, and `Syscall` payloads store operands as `String`
+///    variable names rather than `u32` vregs.  Only `ChannelClose` is
+///    consume-like, and only best-effort numeric parsing is attempted.
+///    A proper fix requires adding a `channel_vreg: u32` field to
+///    `ChannelCloseNode` (or threading a name→vreg resolution map into
+///    this walker).
+/// 2. **Edge-keyed consumption.** Intrinsics like `capability_revoke`
+///    consume their operand vreg via SCG edges, not via the payload.
+///    Payload-only walkers cannot see these; a future extension could
+///    consult `scg.edges()` to recover the consumed operand.
+/// 3. **Codegen-side lossy lowering.** `PmtOpStmt::ArenaFree { ptr }`
+///    drops the `ptr` vreg when constructing `NodePayload::Deallocation`
+///    (see `Scg::node_payload`).  Until the codegen bridge preserves
+///    the freed vreg, the `Deallocation` arm cannot record anything.
 pub fn collect_consumed_vregs(scg: &CodegenScg) -> HashSet<u32> {
-    use vuma_scg::node::{ForeignConsumeNode, NodePayload, StateTransformNode};
+    use vuma_scg::node::{
+        ArenaFreeNode, ChannelCloseNode, ComputationKind, ForeignConsumeNode, IntrinsicKind,
+        NodePayload, StateTransformNode,
+    };
 
     let mut consumed_vregs: HashSet<u32> = HashSet::new();
 
@@ -2245,6 +2300,7 @@ pub fn collect_consumed_vregs(scg: &CodegenScg) -> HashSet<u32> {
         // returns an owned `NodePayload`, so `&payload` gives us the shared
         // reference the field borrow needs.
         match &payload {
+            // Original consume tracking — PMT state linear consumption.
             NodePayload::StateTransform(t) => {
                 let StateTransformNode { input_vreg, .. } = t;
                 consumed_vregs.insert(*input_vreg);
@@ -2253,6 +2309,77 @@ pub fn collect_consumed_vregs(scg: &CodegenScg) -> HashSet<u32> {
                 let ForeignConsumeNode { input_vreg, .. } = fc;
                 consumed_vregs.insert(*input_vreg);
             }
+
+            // Wave 4-A extension: arena free — `arena_free(arena)` consumes
+            // the arena vreg.  `ArenaFreeNode::arena_vreg` is a genuine
+            // `u32` vreg, so this is the most precise of the new arms.
+            //
+            // Note: in the codegen-side statement-list lowering
+            // (`Scg::node_payload`), `PmtOpStmt::ArenaFree` is *not*
+            // lowered to `NodePayload::ArenaFree` — it is lowered to
+            // `NodePayload::Deallocation` (see the `Deallocation` arm
+            // below for why that path is lossy).  This arm fires only
+            // when the SCG was constructed via `Scg::from_semantic_scg`
+            // (semantic-graph path) or when an `ArenaFreeNode` payload
+            // is otherwise directly attached.
+            NodePayload::ArenaFree(af) => {
+                let ArenaFreeNode { arena_vreg, .. } = af;
+                consumed_vregs.insert(*arena_vreg);
+            }
+
+            // Wave 4-A extension: channel close — `channel_close(ch)`
+            // consumes the channel handle.  The semantic
+            // `ChannelCloseNode` stores the channel as a `String`
+            // variable name (not a bare vreg), so we attempt a
+            // best-effort `u32::from_str`.  This succeeds for programs
+            // that reference channels by numeric vreg labels (e.g.
+            // `"42"`); for source-named channels (e.g. `"ch1"`) the
+            // consume is silently skipped — a proper fix requires
+            // extending `ChannelCloseNode` to carry a vreg, or
+            // threading a name→vreg map into this walker (see the
+            // doc-comment "Limitations" §1).
+            NodePayload::ChannelClose(cc) => {
+                let ChannelCloseNode { channel, .. } = cc;
+                if let Ok(vreg) = channel.parse::<u32>() {
+                    consumed_vregs.insert(vreg);
+                }
+            }
+
+            // Wave 4-A extension: deallocation — `PmtOpStmt::ArenaFree
+            // { ptr }` is lowered by `Scg::node_payload` to
+            // `NodePayload::Deallocation`, but the codegen-side
+            // lowering *drops* the `ptr` vreg (hard-codes
+            // `allocation_node: NodeId(0)` / `region_id: RegionId(0)`).
+            // The `DeallocationNode` struct has no vreg field, so there
+            // is nothing to extract here today.  The arm is present so
+            // that a future lowering that preserves the freed vreg
+            // (e.g. via a field addition to `DeallocationNode`, or a
+            // dedicated `Free` payload variant) is picked up
+            // automatically — until then it is a no-op.
+            NodePayload::Deallocation(_) => {
+                // No vreg available in `DeallocationNode` — see arm
+                // comment above.
+            }
+
+            // Wave 4-A extension: capability-revoke / capability-delegate
+            // intrinsics.  These semantically consume the source
+            // capability vreg, but `ComputationNode` does not carry
+            // operand vregs — they flow through SCG *edges*, not the
+            // payload.  A payload-only walker therefore cannot record
+            // the consumed vreg.  The arm is present to document the
+            // limitation in code; a proper fix requires consulting
+            // `scg.edges()` for this node's operand edge (see the
+            // doc-comment "Limitations" §2).
+            NodePayload::Computation(c) => {
+                if let ComputationKind::Intrinsic(
+                    IntrinsicKind::CapabilityRevoke | IntrinsicKind::CapabilityDelegate,
+                ) = &c.kind
+                {
+                    // Operand vreg flows through SCG edges, not the
+                    // payload — not recoverable here.
+                }
+            }
+
             _ => {}
         }
     }

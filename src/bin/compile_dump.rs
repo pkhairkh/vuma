@@ -310,7 +310,11 @@ fn compile_for_backend_with_path(
     // bv_verify abort (none currently fatal) becomes a compile error here
     // (test marked CE) — triaged in Waves 3-5.
     let mut timings: Vec<(String, u64)> = Vec::new();
-    let ir_program = run_ir_pipeline(ir_program, &o3_config, kind, &mut timings)
+    // (Wave 2 / Task 3) Pass `secret_vars` so the IR-level information-flow
+    // verifier can label `#[secret]`-annotated vregs `Secret` and flag
+    // real `Secret → Public` flows.
+    let secret_vars = collect_secret_vars(&ast);
+    let ir_program = run_ir_pipeline(ir_program, &o3_config, kind, &secret_vars, &mut timings)
         .map_err(|e| format!("ir_pipeline: {:?}", e))?;
 
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
