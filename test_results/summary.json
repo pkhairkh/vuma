@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-07-29 17:44:59 UTC",
+  "timestamp": "2026-07-29 20:31:34 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 29944,
-  "matches": 29905,
+  "matches": 29943,
   "skipped": 0,
-  "pass_rate": "99.87%",
+  "pass_rate": "100.00%",
   "per_backend": {
-    "x86_64": {
+    "aarch64": {
       "total": 1576,
       "match": 1576,
       "skipped": 0
@@ -17,7 +17,7 @@
       "match": 1576,
       "skipped": 0
     },
-    "aarch64": {
+    "x86_64": {
       "total": 1576,
       "match": 1576,
       "skipped": 0
@@ -39,7 +39,7 @@
     },
     "mips64": {
       "total": 1576,
-      "match": 1575,
+      "match": 1576,
       "skipped": 0
     },
     "mips64be": {
@@ -52,12 +52,12 @@
       "match": 1576,
       "skipped": 0
     },
-    "loongarch64": {
+    "ppc64le": {
       "total": 1576,
-      "match": 1574,
+      "match": 1576,
       "skipped": 0
     },
-    "ppc64le": {
+    "loongarch64": {
       "total": 1576,
       "match": 1576,
       "skipped": 0
@@ -99,13 +99,13 @@
     },
     "wasm32": {
       "total": 1576,
-      "match": 1540,
+      "match": 1575,
       "skipped": 0
     }
   },
   "ive_verification": {
-    "total": 29914,
-    "pass": 29914,
+    "total": 29944,
+    "pass": 29944,
     "fail": 0,
     "pass_rate": "100.00%"
   }
