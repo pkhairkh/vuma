@@ -556,6 +556,21 @@ pub enum WasmInstr {
     /// memory.atomic.fence: fence for atomic ordering (0xFE 0x1E)
     MemoryAtomicFence,
 
+    /// memory.atomic.notify: wake up to `count` waiters parked on an address
+    /// (0xFE 0x00).  Stack: [addr i32, count i32] -> [i32 (number woken)].
+    MemoryAtomicNotify {
+        align: u32,
+        offset: u32,
+    },
+    /// memory.atomic.wait32: block until notified, until the i32 at `addr`
+    /// differs from `expected`, or until `timeout` (i64 nanoseconds, -1 =
+    /// forever) elapses (0xFE 0x01).  Stack: [addr i32, expected i32,
+    /// timeout i64] -> [i32 (0=ok, 1=timeout, 2=not-equal)].
+    MemoryAtomicWait32 {
+        align: u32,
+        offset: u32,
+    },
+
     /// i32.atomic.rmw.cmpxchg: 32-bit compare-and-swap (0xFE 0x48)
     /// Stack: [addr, expected, replacement] → [old_value]
     I32AtomicRmwCmpxchg {
@@ -1114,6 +1129,18 @@ impl WasmInstr {
                 out.push(0xFE);
                 out.extend_from_slice(&encode_unsigned_leb128(0x1E)); // memory.atomic.fence
                 out.push(0x00); // reserved byte, must be 0
+            }
+            WasmInstr::MemoryAtomicNotify { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x00)); // memory.atomic.notify
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::MemoryAtomicWait32 { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x01)); // memory.atomic.wait32
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
             }
             WasmInstr::I32AtomicRmwCmpxchg { align, offset } => {
                 out.push(0xFE);
@@ -3183,6 +3210,18 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     // Store new_tail at [base+4].  Stack: [base, new_tail]
                     ctx.emit(WasmInstr::I32Store { align: 2, offset: 4 });
                     ctx.stack_depth -= 2;
+                    // 3-B: wake one receiver parked in memory.atomic.wait32 on
+                    // the head field at [base+0].  memory.atomic.notify takes
+                    // [addr i32, count i32] and returns the number woken (i32);
+                    // channel_send is void, so drop the result.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(1));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::MemoryAtomicNotify { align: 2, offset: 0 });
+                    ctx.stack_depth -= 1; // 2 operands in, 1 result out -> net -1
+                    ctx.emit(WasmInstr::Drop);
+                    ctx.stack_depth -= 1;
                     // No return value for channel_send in the IR (dst is None
                     // for statement-form calls).  If dst is present, store 0.
                     if let Some(IRValue::Register(id)) = dst {
@@ -3238,6 +3277,64 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     ctx.locals.push((1, WasmType::I32));
                     ctx.emit(WasmInstr::LocalSet(closed_local));
                     ctx.stack_depth -= 1;
+                    // 3-B: blocking semantics.  If the buffer is empty AND the
+                    // channel is still open (closed == 0), park the receiver on
+                    // memory.atomic.wait32 over the head field at [base+0].  A
+                    // sender's memory.atomic.notify (or channel_close) wakes us;
+                    // we then reload head/tail/closed and fall through to the
+                    // closed-empty / read logic below.  expected=head lets the
+                    // runtime reject spurious wakes (head unchanged => keep
+                    // waiting) and detect closure.  timeout = -1 => block
+                    // forever.
+                    //
+                    // cond_wait = (head == tail) AND (closed == 0)
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(tail_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Eq);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(closed_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Eq);
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::I32And);
+                    ctx.stack_depth -= 1;
+                    // if cond_wait: park on [base+0] then reload.
+                    ctx.emit(WasmInstr::If(None));
+                    ctx.stack_depth -= 1; // If consumes the condition
+                    // memory.atomic.wait32(addr=base+0, expected=head, timeout=-1)
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::LocalGet(head_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I64Const(-1));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::MemoryAtomicWait32 { align: 2, offset: 0 });
+                    ctx.stack_depth -= 2; // 3 operands in, 1 result out -> net -2
+                    // wait32 returns 0=ok, 1=timeout, 2=not-equal; discard it.
+                    ctx.emit(WasmInstr::Drop);
+                    ctx.stack_depth -= 1;
+                    // Reload head/tail/closed: the sender advanced tail (and,
+                    // for closure, set [base+12]=1) before notifying.
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
+                    ctx.emit(WasmInstr::LocalSet(head_local));
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 4 });
+                    ctx.emit(WasmInstr::LocalSet(tail_local));
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::LocalGet(base_local));
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 12 });
+                    ctx.emit(WasmInstr::LocalSet(closed_local));
+                    ctx.stack_depth -= 1;
+                    ctx.emit(WasmInstr::End);
                     // empty = (head == tail)
                     ctx.emit(WasmInstr::LocalGet(head_local));
                     ctx.stack_depth += 1;
