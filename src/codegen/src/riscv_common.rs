@@ -388,7 +388,7 @@ pub const OPC_OP_IMM_32: u32 = 0x1B;
 pub const OPC_OP_32: u32 = 0x3B;
 pub const OPC_MADD: u32 = 0x43;
 pub const OPC_NMSUB: u32 = 0x4B;
-pub const OPC_NMADD: u32 = 0x53;
+pub const OPC_NMADD: u32 = 0x4F;
 pub const OPC_MSUB: u32 = 0x47;
 
 // ===========================================================================
