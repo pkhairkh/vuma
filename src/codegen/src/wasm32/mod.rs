@@ -2963,35 +2963,10 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Load { dst, addr, offset, ty } => {
-            // ── Wave 3-A: wait_worker → host import __vuma_thread_join ──
-            // On wasm32, `wait_worker` is lowered (ipc_lowering.rs
-            // `expand_wait_worker`) to `Load { addr: WASM32_CHILD_EXIT_ADDR,
-            // offset: 0, ty: I32 }`.  Instead of loading from that address,
-            // call the host import `__vuma_thread_join(thread_id: i32) -> i32`
-            // (scripts/wasm32_runner.py, task 3-C), which joins the wasm
-            // thread spawned by `__vuma_spawn_thread` and returns its exit
-            // value.  The thread_id was stashed in the mutable global
-            // `__vuma_thread_id` (THREAD_ID_GLOBAL_IDX) by the spawn_worker
-            // lowering (the Syscall{220} handler above).
-            if let IRValue::Immediate(a) = addr {
-                if *a == WASM32_CHILD_EXIT_ADDR && *offset == 0 {
-                    ctx.emit(WasmInstr::GlobalGet(THREAD_ID_GLOBAL_IDX));
-                    ctx.stack_depth += 1;
-                    let instr_idx = ctx.instrs.len();
-                    ctx.call_targets
-                        .push((instr_idx, "__vuma_thread_join".to_string()));
-                    ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
-                    // host import: pops 1 arg, pushes 1 i32 result → net 0.
-                    // The i32 result (child exit value) is on the stack.
-                    if let IRValue::Register(id) = dst {
-                        ctx.pop_to_vreg(*id, WasmType::I32);
-                    } else {
-                        ctx.emit(WasmInstr::Drop);
-                        ctx.stack_depth -= 1;
-                    }
-                    return Ok(());
-                }
-            }
+            // wait_worker loads from WASM32_CHILD_EXIT_ADDR — this is a
+            // normal memory load (the fork emulation pass rewrites the
+            // child's Return to store the exit value there). No host call.
+            //
             // On Wasm32, all integers are i32 EXCEPT I64/U64 which are i64.
             // Float types F32/F64 retain their width. The default I32 path
             // handles all smaller integer types (I8/I16/I32/U8/U16/U32/Ptr).
@@ -3302,21 +3277,13 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     ctx.stack_depth -= 1;
                     ctx.emit(WasmInstr::I32And);
                     ctx.stack_depth -= 1;
-                    // if cond_wait: park on [base+0] then reload.
+                    // if cond_wait: under fork emulation (non-shared memory),
+                    // MemoryAtomicWait32 would trap ("atomic wait on non-shared
+                    // memory"). Replace with a simple reload — under fork
+                    // emulation the parent always runs first (sends), so the
+                    // buffer is never empty when the child reads.
                     ctx.emit(WasmInstr::If(None));
                     ctx.stack_depth -= 1; // If consumes the condition
-                    // memory.atomic.wait32(addr=base+0, expected=head, timeout=-1)
-                    ctx.emit(WasmInstr::LocalGet(base_local));
-                    ctx.stack_depth += 1;
-                    ctx.emit(WasmInstr::LocalGet(head_local));
-                    ctx.stack_depth += 1;
-                    ctx.emit(WasmInstr::I64Const(-1));
-                    ctx.stack_depth += 1;
-                    ctx.emit(WasmInstr::MemoryAtomicWait32 { align: 2, offset: 0 });
-                    ctx.stack_depth -= 2; // 3 operands in, 1 result out -> net -2
-                    // wait32 returns 0=ok, 1=timeout, 2=not-equal; discard it.
-                    ctx.emit(WasmInstr::Drop);
-                    ctx.stack_depth -= 1;
                     // Reload head/tail/closed: the sender advanced tail (and,
                     // for closure, set [base+12]=1) before notifying.
                     ctx.emit(WasmInstr::LocalGet(base_local));
@@ -4310,65 +4277,20 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     // spawn_worker is thread-based, not fork — see the
                     // module-level doc comment above and caveats.md §5 row 1.
                     if *nr == 220 {
-                        // ── Wave 3-A: spawn_worker → host import __vuma_spawn_thread ──
-                        // `spawn_worker` is lowered (ipc_lowering.rs
-                        // `expand_spawn_worker`) to `Syscall { nr: 220 (clone) }`.
-                        // Wasm has no clone/fork syscall, so instead call the
-                        // host import `__vuma_spawn_thread(func_idx: i32) -> i32`
-                        // (provided by scripts/wasm32_runner.py, task 3-C), which
-                        // spawns a real wasm thread (wasmtime --wasm-threads)
-                        // sharing linear memory.
-                        //
-                        // The host returns a non-zero thread_id (parent mode):
-                        // the caller's `if pid == 0` check takes the *parent*
-                        // branch, and the child branch runs in the spawned
-                        // thread (host-side responsibility — task 3-C).  This
-                        // is the simplest approach per the Wave 3-A spec;
-                        // extracting the child as a separate wasm function (so
-                        // the thread can execute it) is future work.  The key
-                        // requirement satisfied here: spawn_worker does NOT use
-                        // the fork/clone syscall.
-                        //
-                        // The returned thread_id is stashed in the mutable
-                        // global `__vuma_thread_id` (THREAD_ID_GLOBAL_IDX) so
-                        // the wait_worker lowering (Load from
-                        // WASM32_CHILD_EXIT_ADDR, see `IRInstr::Load`) can pass
-                        // it to `__vuma_thread_join`.
-                        //
-                        // func_idx argument = 0 (sentinel): the child-entry
-                        // function index is not yet wired through the IR; the
-                        // host resolves the thread entry point (task 3-C).
+                        // Fork emulation: return 0 (child mode) so the
+                        // fork_emulation_pass's CFG swap correctly routes
+                        // execution. The pass rewrites the child's Return
+                        // to Store+WASM32_CHILD_EXIT_ADDR and Jump to the
+                        // parent's post-block. wait_worker loads that slot.
                         WASM32_FORK_WARN_ONCE.get_or_init(|| {
                             vuma_log!(warn,
-                                "wasm32 spawn_worker: lowered to host import \
-                                 __vuma_spawn_thread (real wasm thread via wasmtime \
-                                 --wasm-threads), NOT clone/fork. Parent takes the \
-                                 pid != 0 branch; child runs in the spawned thread \
-                                 (shared memory — no isolation). See \
-                                 src/codegen/src/wasm32/mod.rs module doc and \
-                                 docs/architecture/caveats.md §5 row 1."
+                                "wasm32 spawn_worker: emulated in-process via \
+                                 CFG rewriting (parent + child run sequentially \
+                                 in the same wasm process). NOT fork, NOT thread \
+                                 — no isolation. See caveats.md §5 row 1."
                             );
                         });
-                        // Push func_idx = 0 argument.
-                        ctx.emit(WasmInstr::I32Const(0));
-                        ctx.stack_depth += 1;
-                        // Call __vuma_spawn_thread via the relocation mechanism
-                        // (resolved to the vuma.* import index in encode_program).
-                        let instr_idx = ctx.instrs.len();
-                        ctx.call_targets
-                            .push((instr_idx, "__vuma_spawn_thread".to_string()));
-                        ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
-                        // host import: pops 1 arg, pushes 1 i32 result → net 0
-                        // (do NOT adjust stack_depth for the call itself).
-                        // Save the returned thread_id into the global.
-                        ctx.emit(WasmInstr::GlobalSet(THREAD_ID_GLOBAL_IDX));
-                        ctx.stack_depth -= 1;
-                        // Reload and sign-extend to i64 (spawn_worker returns
-                        // an i64 pid in the IR).
-                        ctx.emit(WasmInstr::GlobalGet(THREAD_ID_GLOBAL_IDX));
-                        ctx.stack_depth += 1;
-                        ctx.emit(WasmInstr::I64ExtendI32S);
-                        // i64.extend_i32_s: pops i32, pushes i64 → net 0.
+                        ctx.emit(WasmInstr::I64Const(0));
                         ctx.pop_to_vreg(*id, WasmType::I64);
                     } else {
                         // All other syscalls: return -ENOSYS (-38) so callers
