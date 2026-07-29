@@ -4656,7 +4656,7 @@ fn expand_driver_call(
         args: vec![ch.clone(), cmd],
         is_extern: false,
     }];
-    pre.extend(emit_nanosleep(ctx, 1_000_000));
+    pre.extend(emit_nanosleep(ctx, 10_000_000));
 
     // On wasm32, emit the channel_recv in a separate
     // successor block so the fork-emulation pass can split at the recv
