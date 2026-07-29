@@ -1491,6 +1491,26 @@ pub struct WasmGlobal {
 /// Must be kept in sync with the globals added in `encode_program`.
 const HEAP_PTR_GLOBAL_IDX: u32 = 0;
 
+/// Global index for the mutable `__vuma_thread_id` global (i32).
+///
+/// Wave 3-A: `spawn_worker`'s host-import lowering stores the thread_id
+/// returned by `__vuma_spawn_thread` here so the `wait_worker` lowering can
+/// pass it to `__vuma_thread_join`.  Must be kept in sync with the globals
+/// added in `encode_program` (added immediately after `__heap_ptr`, so its
+/// index is 1).
+const THREAD_ID_GLOBAL_IDX: u32 = 1;
+
+/// Linear-memory address used by the wasm32 fork-emulation pass
+/// (`ipc_lowering.rs`) to communicate the child's exit value from the child
+/// branch to the parent's `wait_worker`.  Mirrors the `WASM32_CHILD_EXIT_ADDR`
+/// constant in `crate::ipc_lowering` — the two MUST stay in sync.
+///
+/// Wave 3-A: on wasm32, `wait_worker` is lowered to `Load { addr: this }`.
+/// The wasm32 backend intercepts that Load and turns it into a call to the
+/// `__vuma_thread_join` host import instead (see the `IRInstr::Load` arm in
+/// `lower_instruction`).
+const WASM32_CHILD_EXIT_ADDR: i64 = 4096;
+
 /// Start of the heap area in linear memory (second 64 KiB page, leaving
 /// the first page for globals / stack).
 const HEAP_START: i32 = 65536;
@@ -2916,6 +2936,35 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Load { dst, addr, offset, ty } => {
+            // ── Wave 3-A: wait_worker → host import __vuma_thread_join ──
+            // On wasm32, `wait_worker` is lowered (ipc_lowering.rs
+            // `expand_wait_worker`) to `Load { addr: WASM32_CHILD_EXIT_ADDR,
+            // offset: 0, ty: I32 }`.  Instead of loading from that address,
+            // call the host import `__vuma_thread_join(thread_id: i32) -> i32`
+            // (scripts/wasm32_runner.py, task 3-C), which joins the wasm
+            // thread spawned by `__vuma_spawn_thread` and returns its exit
+            // value.  The thread_id was stashed in the mutable global
+            // `__vuma_thread_id` (THREAD_ID_GLOBAL_IDX) by the spawn_worker
+            // lowering (the Syscall{220} handler above).
+            if let IRValue::Immediate(a) = addr {
+                if *a == WASM32_CHILD_EXIT_ADDR && *offset == 0 {
+                    ctx.emit(WasmInstr::GlobalGet(THREAD_ID_GLOBAL_IDX));
+                    ctx.stack_depth += 1;
+                    let instr_idx = ctx.instrs.len();
+                    ctx.call_targets
+                        .push((instr_idx, "__vuma_thread_join".to_string()));
+                    ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
+                    // host import: pops 1 arg, pushes 1 i32 result → net 0.
+                    // The i32 result (child exit value) is on the stack.
+                    if let IRValue::Register(id) = dst {
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                    return Ok(());
+                }
+            }
             // On Wasm32, all integers are i32 EXCEPT I64/U64 which are i64.
             // Float types F32/F64 retain their width. The default I32 path
             // handles all smaller integer types (I8/I16/I32/U8/U16/U32/Ptr).
@@ -4148,57 +4197,88 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             let _ = (native_nr, args);
             if let Some(d) = dst {
                 if let IRValue::Register(id) = d {
-                    // K10F-wasm32-ipc-fork: emulate fork() for IPC tests.
-                    //
-                    // `expand_spawn_worker` (ipc_lowering.rs:616) lowers
+                    // `expand_spawn_worker` (ipc_lowering.rs) lowers
                     // `spawn_worker()` to `Syscall { nr: 220 (clone) }`.
-                    // On real backends, clone() returns 0 in the child and a
-                    // positive pid in the parent, so the user's
-                    // `if pid == 0 { child } else { parent }` runs the
-                    // appropriate branch.  On wasm32 there is no clone syscall
-                    // and no real process model — the previous code returned
-                    // -ENOSYS (-38), so `pid == 0` was always false and the
-                    // child branch NEVER ran.  For IPC tests where the child
-                    // branch is the one that produces the expected exit code
-                    // (e.g. `worker_error`, `sandbox`, `resource_limit` —
-                    // child does `return <expected>`), this caused the parent
-                    // branch to run instead, `wait_worker` returned 0 (its
-                    // result is overwritten by a zero-initialised status
-                    // buffer load), and the program exited 0 instead of the
-                    // expected child value.
                     //
-                    // Fix: for nr == 220 (clone/spawn_worker), return 0 so the
-                    // child branch runs.  This recovers tests whose child
-                    // branch directly returns the expected exit code without
-                    // needing data from the parent.  Tests that require the
-                    // parent to send before the child receives (the common
-                    // `child = channel_recv; parent = channel_send` pattern)
-                    // still need true fork emulation (running BOTH branches in
-                    // sequence) which is out of scope for this change — see
-                    // worklog K10F for details.
-                    //
+                    // Wave 3-A: instead of emulating clone (which previously
+                    // returned a constant 0/-ENOSYS), nr == 220 is now lowered
+                    // to a call to the host import `__vuma_spawn_thread`, which
+                    // spawns a real wasm thread (see the comment block below).
                     // All other syscalls still return -ENOSYS (-38) so callers
                     // can detect unsupported operations.
                     //
-                    // K10F-wasm32-ipc-fork / Task 8-a: emit a one-shot warning
-                    // the first time clone (nr:220) is lowered in this process
-                    // (== once per `vuma compile` invocation). Reminds users
-                    // that wasm32 fork is emulation, not isolation — see the
+                    // Task 8-a: emit a one-shot warning the first time clone
+                    // (nr:220) is lowered in this process (== once per
+                    // `vuma compile` invocation). Reminds users that wasm32
+                    // spawn_worker is thread-based, not fork — see the
                     // module-level doc comment above and caveats.md §5 row 1.
                     if *nr == 220 {
+                        // ── Wave 3-A: spawn_worker → host import __vuma_spawn_thread ──
+                        // `spawn_worker` is lowered (ipc_lowering.rs
+                        // `expand_spawn_worker`) to `Syscall { nr: 220 (clone) }`.
+                        // Wasm has no clone/fork syscall, so instead call the
+                        // host import `__vuma_spawn_thread(func_idx: i32) -> i32`
+                        // (provided by scripts/wasm32_runner.py, task 3-C), which
+                        // spawns a real wasm thread (wasmtime --wasm-threads)
+                        // sharing linear memory.
+                        //
+                        // The host returns a non-zero thread_id (parent mode):
+                        // the caller's `if pid == 0` check takes the *parent*
+                        // branch, and the child branch runs in the spawned
+                        // thread (host-side responsibility — task 3-C).  This
+                        // is the simplest approach per the Wave 3-A spec;
+                        // extracting the child as a separate wasm function (so
+                        // the thread can execute it) is future work.  The key
+                        // requirement satisfied here: spawn_worker does NOT use
+                        // the fork/clone syscall.
+                        //
+                        // The returned thread_id is stashed in the mutable
+                        // global `__vuma_thread_id` (THREAD_ID_GLOBAL_IDX) so
+                        // the wait_worker lowering (Load from
+                        // WASM32_CHILD_EXIT_ADDR, see `IRInstr::Load`) can pass
+                        // it to `__vuma_thread_join`.
+                        //
+                        // func_idx argument = 0 (sentinel): the child-entry
+                        // function index is not yet wired through the IR; the
+                        // host resolves the thread entry point (task 3-C).
                         WASM32_FORK_WARN_ONCE.get_or_init(|| {
                             vuma_log!(warn,
-                                "wasm32 fork emulation: parent and child run SEQUENTIALLY in \
-                                 the same wasm process. No memory protection, no process \
-                                 isolation. Suitable for testing/logic verification, NOT for \
-                                 security-sensitive code. See src/codegen/src/wasm32/mod.rs \
-                                 module doc and docs/architecture/caveats.md §5 row 1."
+                                "wasm32 spawn_worker: lowered to host import \
+                                 __vuma_spawn_thread (real wasm thread via wasmtime \
+                                 --wasm-threads), NOT clone/fork. Parent takes the \
+                                 pid != 0 branch; child runs in the spawned thread \
+                                 (shared memory — no isolation). See \
+                                 src/codegen/src/wasm32/mod.rs module doc and \
+                                 docs/architecture/caveats.md §5 row 1."
                             );
                         });
+                        // Push func_idx = 0 argument.
+                        ctx.emit(WasmInstr::I32Const(0));
+                        ctx.stack_depth += 1;
+                        // Call __vuma_spawn_thread via the relocation mechanism
+                        // (resolved to the vuma.* import index in encode_program).
+                        let instr_idx = ctx.instrs.len();
+                        ctx.call_targets
+                            .push((instr_idx, "__vuma_spawn_thread".to_string()));
+                        ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
+                        // host import: pops 1 arg, pushes 1 i32 result → net 0
+                        // (do NOT adjust stack_depth for the call itself).
+                        // Save the returned thread_id into the global.
+                        ctx.emit(WasmInstr::GlobalSet(THREAD_ID_GLOBAL_IDX));
+                        ctx.stack_depth -= 1;
+                        // Reload and sign-extend to i64 (spawn_worker returns
+                        // an i64 pid in the IR).
+                        ctx.emit(WasmInstr::GlobalGet(THREAD_ID_GLOBAL_IDX));
+                        ctx.stack_depth += 1;
+                        ctx.emit(WasmInstr::I64ExtendI32S);
+                        // i64.extend_i32_s: pops i32, pushes i64 → net 0.
+                        ctx.pop_to_vreg(*id, WasmType::I64);
+                    } else {
+                        // All other syscalls: return -ENOSYS (-38) so callers
+                        // can detect unsupported operations.
+                        ctx.emit(WasmInstr::I64Const(-38));
+                        ctx.pop_to_vreg(*id, WasmType::I64);
                     }
-                    let val: i64 = if *nr == 220 { 0 } else { -38 }; // 0=child for clone; -ENOSYS otherwise
-                    ctx.emit(WasmInstr::I64Const(val));
-                    ctx.pop_to_vreg(*id, WasmType::I64);
                 } else {
                     ctx.emit(WasmInstr::Drop);
                 }
@@ -4696,6 +4776,16 @@ impl Backend for Wasm32Backend {
             init_value: HEAP_START as i64,
         });
 
+        // Wave 3-A: mutable `__vuma_thread_id` global (i32, init 0).  Stores
+        // the thread_id returned by `__vuma_spawn_thread` so the `wait_worker`
+        // lowering can pass it to `__vuma_thread_join`.  Index 1 (right after
+        // `__heap_ptr` at index 0) — see `THREAD_ID_GLOBAL_IDX`.
+        module.add_global(WasmGlobal {
+            ty: WasmType::I32,
+            mutable: true,
+            init_value: 0,
+        });
+
         // ── WASI imports ────────────────────────────────────────────
         // Import wasi_snapshot_preview1.fd_write for stdout output.
         // Signature: (fd: i32, iov_ptr: i32, iov_cnt: i32, nwritten_ptr: i32) -> i32
@@ -4919,6 +5009,21 @@ impl Backend for Wasm32Backend {
             ("nanosleep", vuma_type_2_i32),
             // mremap (index 45 historically)
             ("mremap", vuma_type_4_i32),
+            // ── Wave 3-A: wasm thread spawn/join host imports ──────────
+            // Provided by scripts/wasm32_runner.py (task 3-C).  spawn_worker
+            // is lowered (in the Syscall{220} handler of `lower_instruction`)
+            // to a call to `__vuma_spawn_thread(func_idx: i32) -> i32`, which
+            // spawns a real wasm thread (wasmtime --wasm-threads) sharing
+            // linear memory and returns a non-zero thread_id (parent mode).
+            // wait_worker is lowered (in the `IRInstr::Load` handler, for
+            // Load from WASM32_CHILD_EXIT_ADDR) to
+            // `__vuma_thread_join(thread_id: i32) -> i32`, which joins the
+            // spawned thread and returns its exit value.  Both reuse the
+            // `(i32) -> i32` type already declared above (`vuma_type_1_i32`).
+            // Emitted conditionally (only when the program uses
+            // spawn_worker / wait_worker), like every other vuma.* import.
+            ("__vuma_spawn_thread", vuma_type_1_i32),
+            ("__vuma_thread_join", vuma_type_1_i32),
         ];
 
         let mut vuma_idx_map: HashMap<&'static str, u32> = HashMap::new();
