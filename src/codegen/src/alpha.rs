@@ -360,10 +360,10 @@ impl Instruction {
     /// Encode this instruction into little-endian bytes.
     pub fn encode(&self) -> Vec<u8> {
         // ── Special case: CMPULE ──────────────────────────────────────────
-        // QEMU 7.2.0-alpha does NOT implement the
-        // CMPULE opcode (function 0x3F on INTA major opcode 0x10) — it
+        // QEMU 10.0-alpha does NOT implement the
+        // CMPULE opcode (function 0x3D on INTA major opcode 0x10) — it
         // raises SIGILL ("Illegal instruction") whenever the encoded
-        // function field is 0x3F. This breaks every arena_wave* test that
+        // function field is 0x3D. This breaks every arena_wave* test that
         // exercises `arena_alloc` (the overflow check
         // `arena.offset + size <= arena.capacity` lowers to CMPULE on
         // alpha). The real DEC Alpha 21264 hardware DOES implement

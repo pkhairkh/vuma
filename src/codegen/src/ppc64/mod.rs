@@ -870,15 +870,14 @@ impl Instruction {
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 491, 0)
             }
             Instruction::Divd { rt, ra, rb } => {
-                // DIVD rT, rA, rB: primary=31, OE=0, xo=459, Rc=0 (signed 64-bit)
-                // PowerISA v3.1B Book I: divd = XO 459 (signed), divdu = XO 457 (unsigned).
-                // The previous XO=487 is 'tlbsx' (supervisor-only) and causes SIGSEGV
-                // in user mode under QEMU.
-                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
+                // DIVD rT, rA, rB: primary=31, OE=0, xo=489, Rc=0 (signed 64-bit)
+                // Power ISA v3.1B: divd = XO 489 (was incorrectly XO=459 which is divwu).
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 489, 0)
             }
             Instruction::Divwu { rt, ra, rb } => {
-                // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0 (unsigned 32-bit)
-                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 455, 0)
+                // DIVWU rT, rA, rB: primary=31, OE=0, xo=459, Rc=0 (unsigned 32-bit)
+                // Power ISA v3.1B: divwu = XO 459 (was incorrectly XO=455 which is divweu).
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
             }
             Instruction::Divdu { rt, ra, rb } => {
                 // DIVDU rT, rA, rB: primary=31, OE=0, xo=457, Rc=0 (unsigned 64-bit)
@@ -1205,15 +1204,16 @@ impl Instruction {
             }
             Instruction::Isel { rt, ra, rb, bi } => {
                 // ISEL rT, rA, rB, BI: primary=31, rT, rA (true src), rB (false src),
-                // BI (CR bit), XO=30, reserved=0.
+                // BI (CR bit), XO=15, reserved=0.
+                // Power ISA v3.1B: isel = XO 15 (was incorrectly XO=30).
                 // Encoding: [0:5]=31, [6:10]=rT, [11:15]=rA, [16:20]=rB,
-                //           [21:25]=BI, [26:30]=XO(=30), [31]=0
+                //           [21:25]=BI, [26:30]=XO(=15), [31]=0
                 let word = (31u32 << 26)
                     | ((rt.encoding() & 0x1F) << 21)
                     | ((ra.encoding() & 0x1F) << 16)
                     | ((rb.encoding() & 0x1F) << 11)
                     | ((bi & 0x1F) << 6)
-                    | (30 << 1);
+                    | (15 << 1);
                 encode_word(word)
             }
 
@@ -1340,12 +1340,14 @@ impl Instruction {
                 encode_x_form(63, ft.encoding(), 0, fb.encoding(), 12, 0)
             }
             Instruction::Fcfidu { ft, fb } => {
-                // FCFIDU: primary=63, frS=ft, frB=fb, xo=847, Rc=0
-                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 847, 0)
+                // FCFIDU: primary=63, frT=ft, frB=fb, xo=974, Rc=0
+                // Power ISA v3.1B: fcfidu = XO 974 (was incorrectly XO=847).
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 974, 0)
             }
             Instruction::Fcfidus { ft, fb } => {
-                // FCFIDUS: primary=59, frS=ft, frB=fb, xo=847, Rc=0
-                encode_x_form(59, ft.encoding(), 0, fb.encoding(), 847, 0)
+                // FCFIDUS: primary=59, frT=ft, frB=fb, xo=974, Rc=0
+                // Power ISA v3.1B: fcfidus = XO 974 (was incorrectly XO=847).
+                encode_x_form(59, ft.encoding(), 0, fb.encoding(), 974, 0)
             }
             Instruction::Fmr { ft, fb } => {
                 // FMR: primary=63, frS=ft, frB=fb, xo=72, Rc=0
@@ -1409,10 +1411,10 @@ impl Instruction {
             }
             Instruction::Fcmpu { bf, fa, fb } => {
                 // FCMPU: X-form, primary=63, bf[6:8], reserved[9:10]=0,
-                // frA[11:15]=fa, frB[16:20]=fb, xo=32, Rc=0.
-                // We pack bf into the top 3 bits of the 5-bit rS slot.
+                // frA[11:15]=fa, frB[16:20]=fb, xo=0, Rc=0.
+                // Power ISA v3.1B: fcmpu = XO 0 (was incorrectly XO=32 which is fcmpo).
                 let bf5 = ((*bf as u32) & 0x7) << 2;
-                encode_x_form(63, bf5, fa.encoding(), fb.encoding(), 32, 0)
+                encode_x_form(63, bf5, fa.encoding(), fb.encoding(), 0, 0)
             }
         }
     }
