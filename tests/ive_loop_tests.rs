@@ -774,3 +774,149 @@ fn test_scheduler_keeps_original_when_unsafe() {
         instrs
     );
 }
+
+// ===========================================================================
+// Wave 4-B: proof-directed vs heuristic optimization benchmark
+// ===========================================================================
+//
+// A head-to-head benchmark of the OLD heuristic optimisation path
+// (`dead_store_eliminate` with no IVE linearity data, no scheduler) against
+// the NEW proof-directed path (`dead_store_eliminate_with_linearity` feeding
+// the IVE linearity report, followed by `schedule_with_provenance`).
+//
+// The IR is realistic for the vuma codegen path: two `Alloc`s from distinct
+// IVE-proven regions (so their pointers are provably non-aliasing even though
+// they share type `u32` -- a case TBAA alone cannot crack), two independent
+// `Store`s (one per region), and a `Load` from the first region. The IVE
+// linearity report marks v0 as linearly consumed (its state was destroyed by
+// a `StateTransform`/`ForeignConsume`), so the proof-directed DSE may kill
+// v0's store -- a kill the heuristic path cannot discover.
+
+#[test]
+fn test_proof_directed_benchmark() {
+    // -- Construct a realistic IRFunction -------------------------------
+    //   v0 = Alloc(8)               # region 0
+    //   v1 = Alloc(8)               # region 1  (different Alloc => non-aliasing)
+    //   Store(imm 42, [v0+0]:u32)   # independent store to v0
+    //   Store(imm 99, [v1+0]:u32)   # independent store to v1 (no aliasing)
+    //   v2 = Load([v0+0]:u32)       # load from v0
+    let mut func = IRFunction::new("pdc_benchmark");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        IRInstr::Alloc {
+            dst: IRValue::Register(1),
+            size: 8,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(42),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        IRInstr::Store {
+            value: IRValue::Immediate(99),
+            addr: IRValue::Register(1),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        IRInstr::Load {
+            dst: IRValue::Register(2),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    // Run the IVE provenance pass: v0 -> region 0, v1 -> region 1 (different).
+    let (func_base, provenance) = mark_ive_proven_nonaliasing(func);
+    assert_eq!(provenance.get(&0), Some(&0), "v0 derives from region 0");
+    assert_eq!(provenance.get(&1), Some(&1), "v1 derives from region 1");
+    assert!(
+        ive_proven_non_aliasing_with(&provenance, 0, 1),
+        "v0 and v1 must be proven non-aliasing (different Alloc regions)"
+    );
+
+    // IVE linearity report: v0 was linearly consumed (e.g. by a
+    // StateTransform). This is the proof the heuristic path does not have.
+    let mut consumed: HashSet<u32> = HashSet::new();
+    consumed.insert(0);
+
+    // -- OLD heuristic path: DSE (no linearity) + no scheduler ----------
+    // `dead_store_eliminate` is the backward-compatible 2-arg entry point
+    // (consumed_vregs = None). No scheduler runs afterward.
+    let heuristic = dead_store_eliminate(func_base.clone(), &provenance);
+
+    // -- NEW proof-directed path: linearity DSE + provenance scheduler --
+    let pdc_dse =
+        dead_store_eliminate_with_linearity(func_base.clone(), &provenance, Some(&consumed));
+    let pdc = schedule_with_provenance(&pdc_dse, &provenance);
+
+    // -- Measurement helpers --------------------------------------------
+    let measure = |f: &IRFunction| -> (usize, usize) {
+        let instrs = &f.blocks[0].instructions;
+        let total = instrs.len();
+        let stores = instrs
+            .iter()
+            .filter(|i| matches!(i, IRInstr::Store { .. }))
+            .count();
+        (total, stores)
+    };
+    let (h_total, h_stores) = measure(&heuristic);
+    let (p_total, p_stores) = measure(&pdc);
+
+    // -- Informational comparison table (NOT asserted) ------------------
+    eprintln!();
+    eprintln!("+----------------------------------------------------------------------+");
+    eprintln!("|  PROOF-DIRECTED vs HEURISTIC OPTIMIZATION BENCHMARK                 |");
+    eprintln!("+----------------------------------+-----------------+----------------+");
+    eprintln!("|  metric                          |  heuristic      |  proof-direct |");
+    eprintln!("+----------------------------------+-----------------+----------------+");
+    eprintln!(
+        "|  total instructions              |  {:>12}  |  {:>12}  |",
+        h_total, p_total
+    );
+    eprintln!(
+        "|  store count                     |  {:>12}  |  {:>12}  |",
+        h_stores, p_stores
+    );
+    eprintln!("|  IVE linearity report            |  not used       |  v0 consumed  |");
+    eprintln!("|  instruction scheduler           |  none           |  provenance   |");
+    eprintln!("+----------------------------------+-----------------+----------------+");
+    eprintln!(
+        "|  instr delta (heuristic - pdc)   |  {:>12}                       |",
+        h_total.saturating_sub(p_total)
+    );
+    eprintln!(
+        "|  store delta  (heuristic - pdc)  |  {:>12}                       |",
+        h_stores.saturating_sub(p_stores)
+    );
+    eprintln!("+----------------------------------------------------------------------+");
+    eprintln!("  heuristic instrs: {:?}", heuristic.blocks[0].instructions);
+    eprintln!("  pdc instrs:       {:?}", pdc.blocks[0].instructions);
+
+    // -- Hard assertion: proof-directed must not grow the program -------
+    assert!(
+        p_total <= h_total,
+        "proof-directed instruction count ({}) must be <= heuristic ({})",
+        p_total,
+        h_total
+    );
+
+    // -- Store-elimination check: v0 consumed => its store is killed ----
+    // The heuristic keeps v0's store (it is read by the later Load, so the
+    // overwrite scan cannot kill it). The proof-directed path knows v0's
+    // state was linearly consumed, so the store has no observable effect.
+    assert_eq!(
+        p_stores,
+        h_stores.saturating_sub(1),
+        "proof-directed should eliminate v0's consumed store \
+         (heuristic stores = {}, pdc stores = {})",
+        h_stores,
+        p_stores
+    );
+}
