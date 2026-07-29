@@ -5,14 +5,15 @@
 //! receives it as a parameter and uses it to prove non-aliasing across
 //! same-type pointers from different allocations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use vuma_codegen::ir::{
     BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VregMeta, VumaGrade,
 };
 use vuma_codegen::opt::{
-    dead_state_eliminate, dead_store_eliminate, dead_store_eliminate_with_linearity,
-    ive_proven_non_aliasing_with, mark_ive_proven_nonaliasing,
+    build_happens_before_dag, dead_state_eliminate, dead_store_eliminate,
+    dead_store_eliminate_with_linearity, ive_proven_non_aliasing_with,
+    mark_ive_proven_nonaliasing, schedule_instructions, schedule_with_provenance,
 };
 use vuma_codegen::regalloc::build_grade_interference;
 
@@ -516,5 +517,260 @@ fn test_unknown_grade_no_interference() {
         !edges.contains(&(0, 1)),
         "None-grade pair must not appear in grade interference; got {:?}",
         edges
+    );
+}
+
+// ===========================================================================
+// Wave 3-B: proof-directed instruction scheduler tests
+//
+// These exercise `schedule_instructions` / `schedule_with_provenance`
+// (Wave 3-A, opt.rs) and the happens-before DAG (`build_happens_before_dag`,
+// Wave 0-C).  The scheduler list-schedules each block honouring the DAG and
+// a barrier policy; memory ops float to the top, ties broken by smallest
+// original index ("if unsure, keep original order").
+// ===========================================================================
+
+/// A real memory dependency (Store then Load of the *same* address) must be
+/// preserved: the DAG carries a Store -> Load edge, so after scheduling the
+/// Store still precedes the Load.
+#[test]
+fn test_scheduler_preserves_dependencies() {
+    let mut func = IRFunction::new("sched_preserve_deps");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        // v0 = alloc (region root 0)
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        // store imm 1 -> [v0+0]   (global idx 1)
+        IRInstr::Store {
+            value: IRValue::Immediate(1),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        // v1 = load [v0+0]        (global idx 2) -- RAW on the Store's memory
+        IRInstr::Load {
+            dst: IRValue::Register(1),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    // Realistic IVE provenance: v0 derives from region 0.  Store and Load
+    // address the *same* region (0), so they are NOT proven non-aliasing and
+    // the DAG must keep the Store -> Load memory edge.
+    let (func, provenance) = mark_ive_proven_nonaliasing(func);
+    assert_eq!(
+        provenance.get(&0),
+        Some(&0),
+        "v0 should derive from region 0"
+    );
+
+    // The DAG must record the Store(1) -> Load(2) memory dependency.
+    let dag = build_happens_before_dag(&func, &provenance);
+    assert!(
+        dag.contains(&(1, 2)),
+        "Store->Load on the same address must produce a DAG edge; got {:?}",
+        dag
+    );
+
+    let scheduled = schedule_with_provenance(&func, &provenance);
+    let instrs = &scheduled.blocks[0].instructions;
+
+    let store_pos = instrs
+        .iter()
+        .position(|i| matches!(i, IRInstr::Store { .. }))
+        .expect("Store must survive scheduling");
+    let load_pos = instrs
+        .iter()
+        .position(|i| matches!(i, IRInstr::Load { .. }))
+        .expect("Load must survive scheduling");
+    assert!(
+        store_pos < load_pos,
+        "Store must remain before Load after scheduling (store@{} >= load@{}); order: {:?}",
+        store_pos,
+        load_pos,
+        instrs
+    );
+}
+
+/// Two `Alloc`s from *different* IVE regions are fully independent: the DAG
+/// emits no edge between them, so either program order is a valid schedule.
+#[test]
+fn test_scheduler_reorders_independent() {
+    let mut func = IRFunction::new("sched_reorder_independent");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        // v0 = alloc (region 0)
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        // v1 = alloc (region 1) -- independent of v0
+        IRInstr::Alloc {
+            dst: IRValue::Register(1),
+            size: 8,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    // IVE proves v0 and v1 originate from different regions.
+    let (func, provenance) = mark_ive_proven_nonaliasing(func);
+    assert_eq!(provenance.get(&0), Some(&0));
+    assert_eq!(provenance.get(&1), Some(&1));
+    assert!(
+        ive_proven_non_aliasing_with(&provenance, 0, 1),
+        "v0 and v1 (different Allocs) must be proven non-aliasing"
+    );
+
+    // No vreg RAW/WAW (distinct vregs), no memory ops, no Free ->
+    // the two Allocs share NO DAG edge, so either order is valid.
+    let dag = build_happens_before_dag(&func, &provenance);
+    assert!(
+        !dag.contains(&(0, 1)) && !dag.contains(&(1, 0)),
+        "independent Allocs must have no DAG edge between them; got {:?}",
+        dag
+    );
+    assert!(
+        dag.is_empty(),
+        "two independent Allocs should yield an edge-free DAG; got {:?}",
+        dag
+    );
+
+    // Scheduling must still produce a well-formed function containing both
+    // Allocs (the multiset of instructions is preserved; the tie-break picks
+    // the original order, which is one of the valid orders).
+    let scheduled = schedule_with_provenance(&func, &provenance);
+    let mut defined: Vec<u32> = scheduled.blocks[0]
+        .instructions
+        .iter()
+        .filter_map(|i| match i {
+            IRInstr::Alloc { dst, .. } => dst.as_register(),
+            _ => None,
+        })
+        .collect();
+    defined.sort();
+    assert_eq!(
+        defined,
+        vec![0, 1],
+        "both independent Allocs must survive scheduling; got order {:?}",
+        scheduled.blocks[0].instructions
+    );
+
+    // Sanity: the bare schedule_instructions entry point agrees (same DAG,
+    // no provenance-driven edges to drop).
+    let scheduled2 = schedule_instructions(&func, &dag);
+    let mut defined2: Vec<u32> = scheduled2.blocks[0]
+        .instructions
+        .iter()
+        .filter_map(|i| match i {
+            IRInstr::Alloc { dst, .. } => dst.as_register(),
+            _ => None,
+        })
+        .collect();
+    defined2.sort();
+    assert_eq!(defined2, vec![0, 1]);
+}
+
+/// When aliasing is *unknown* (no IVE provenance), the scheduler must play it
+/// safe: a conservative Store -> Store memory edge is emitted and the original
+/// Store order is preserved.  With IVE provenance proving the two stores target
+/// different regions, that same edge is dropped -- proving the safety gate is
+/// what keeps the order when unsafe.
+#[test]
+fn test_scheduler_keeps_original_when_unsafe() {
+    let mut func = IRFunction::new("sched_keep_when_unsafe");
+    func.blocks[0].label = "entry".to_string();
+    func.blocks[0].instructions = vec![
+        // v0 = alloc (region 0)            global idx 0
+        IRInstr::Alloc {
+            dst: IRValue::Register(0),
+            size: 8,
+        },
+        // v1 = alloc (region 1)            global idx 1
+        IRInstr::Alloc {
+            dst: IRValue::Register(1),
+            size: 8,
+        },
+        // store imm 1 -> [v0+0]            global idx 2
+        IRInstr::Store {
+            value: IRValue::Immediate(1),
+            addr: IRValue::Register(0),
+            offset: 0,
+            ty: IRType::U32,
+        },
+        // store imm 2 -> [v1+0]            global idx 3
+        IRInstr::Store {
+            value: IRValue::Immediate(2),
+            addr: IRValue::Register(1),
+            offset: 0,
+            ty: IRType::U32,
+        },
+    ];
+    func.blocks[0].terminator = IRTerminator::Return(vec![]);
+
+    // --- Unsafe case: NO IVE provenance -> aliasing unknown ---------------
+    // The DAG must conservatively order the two Stores (Store(2) -> Store(3)).
+    let empty_prov: HashMap<u32, u32> = HashMap::new();
+    let dag_unsafe = build_happens_before_dag(&func, &empty_prov);
+    assert!(
+        dag_unsafe.contains(&(2, 3)),
+        "unknown aliasing must force a Store->Store DAG edge; got {:?}",
+        dag_unsafe
+    );
+
+    // --- Safe case: IVE proves v0,v1 from different regions --------------
+    // The non-aliasing exemption drops the Store->Store memory edge.
+    let mut prov = HashMap::new();
+    prov.insert(0, 0);
+    prov.insert(1, 1);
+    let dag_safe = build_happens_before_dag(&func, &prov);
+    assert!(
+        !dag_safe.contains(&(2, 3)),
+        "proven non-aliasing must drop the Store->Store edge; got {:?}",
+        dag_safe
+    );
+
+    // --- Run the scheduler under the UNSAFE (empty) provenance ----------
+    // The conservative edge forces the original Store order to be kept.
+    let scheduled = schedule_with_provenance(&func, &empty_prov);
+    let instrs = &scheduled.blocks[0].instructions;
+
+    let mut store_v0_pos = None;
+    let mut store_v1_pos = None;
+    for (i, instr) in instrs.iter().enumerate() {
+        if let IRInstr::Store {
+            addr: IRValue::Register(r),
+            ..
+        } = instr
+        {
+            if *r == 0 {
+                store_v0_pos = Some(i);
+            } else if *r == 1 {
+                store_v1_pos = Some(i);
+            }
+        }
+    }
+    let store_v0_pos = store_v0_pos.expect("Store to v0 must survive scheduling");
+    let store_v1_pos = store_v1_pos.expect("Store to v1 must survive scheduling");
+    assert!(
+        store_v0_pos < store_v1_pos,
+        "under unknown aliasing the original Store order must be preserved \
+         (store[v0]@{} >= store[v1]@{}); order: {:?}",
+        store_v0_pos,
+        store_v1_pos,
+        instrs
+    );
+
+    // All four original instructions must still be present.
+    assert_eq!(
+        instrs.len(),
+        4,
+        "scheduler must preserve the instruction multiset; got {:?}",
+        instrs
     );
 }
