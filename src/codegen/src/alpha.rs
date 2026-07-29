@@ -961,7 +961,21 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
             if let IRInstr::Alloc { dst, size } = instr {
                 if let Some(id) = dst.as_register() {
                     stack_alloc_vregs.insert(id);
-                    let aligned_size = ((*size as i32 + 15) & !15) as i32;
+                    // Reserve 16 bytes of dedicated padding per Alloc region
+                    // (on top of the 16-byte alignment).  The frontend's PMT
+                    // bounds-check instrumentation emits a 1-byte probe store to
+                    // [base + size] (one past the LOGICAL end of every Alloc)
+                    // before each field access.  Without slack, that probe lands
+                    // in the immediately following frame region -- for the
+                    // top-most Alloc this is the RA/FP save area at the top of
+                    // the frame (frame_size-16), corrupting the saved return
+                    // address and causing SIGILL on `main`'s return.  Because
+                    // vreg_area_size is always 16-aligned, there is otherwise
+                    // ZERO gap between the last Alloc and the save area, so
+                    // every probed struct access clobbers RA.  The +16 keeps the
+                    // probe inside the Alloc's own reserved space.  (Same fix as
+                    // the s390x backend -- ALPHA-FIX2.)
+                    let aligned_size = ((*size as i32 + 15) & !15) + 16;
                     alloc_sizes.insert(id, aligned_size);
                 }
             }
