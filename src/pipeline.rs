@@ -1265,7 +1265,10 @@ pub fn run_ir_pipeline(
         // Promotion to mandatory is forward-looking: it WILL fire on
         // real violations once such programs appear. See
         // docs/caveats.md §0.7.
-        let collapse = vuma_ive::verification::l1l3_collapse_from_ir(&ir_program);
+        let collapse = vuma_ive::verification::l1l3_collapse_from_ir_for_backend(
+            &ir_program,
+            backend_kind,
+        );
         if collapse.folded_checks > 0 {
             vuma_log!(
                 info,
@@ -1312,7 +1315,10 @@ pub fn run_ir_pipeline(
     {
         let tct = Instant::now();
         // Session type verification — MANDATORY.
-        let session_violations = vuma_ive::session_type::verify_session_types_from_ir(&ir_program);
+        let session_violations = vuma_ive::session_type::verify_session_types_from_ir_for_backend(
+            &ir_program,
+            backend_kind,
+        );
         if !session_violations.is_empty() {
             for v in &session_violations {
                 vuma_log!(
