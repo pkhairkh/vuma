@@ -3064,6 +3064,54 @@ impl fmt::Display for IRBlock {
 // IRFunction
 // ---------------------------------------------------------------------------
 
+/// Proof-directed compilation grade (Wave 0-B).
+///
+/// Grades come from the SCG's typed-state metadata: a vreg that is the
+/// result of a `StateInit` (linearity class @1) is [`VumaGrade::Exclusive`]
+/// -- it may not share a physical register with any simultaneously-live
+/// vreg. A vreg that is the result of a `StateRead` (linearity class 1/2)
+/// is [`VumaGrade::Shared`] -- it is read-only and may share a register
+/// with other shared reads under the proof-directed register allocator's
+/// interference rules.
+///
+/// `None` (the default) means "grade unknown": the register allocator
+/// falls back to plain liveness-only interference, which is always sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VumaGrade {
+    /// Linearity class @1: the vreg holds an exclusively-owned state
+    /// token (e.g. the pointer returned by `state_new(L)`). It must not
+    /// be co-located with any other live vreg -- an over-constraint that
+    /// is always safe (it can only cost a register, never break
+    /// correctness).
+    Exclusive,
+    /// Linearity class 1/2: the vreg holds a shared/read-only view (e.g.
+    /// the value loaded by `p.field`). May share a physical register with
+    /// other `Shared` vregs under the proof-directed allocator.
+    Shared,
+}
+
+/// Per-vreg proof-directed metadata (Wave 0-B).
+///
+/// Threading this table alongside `vregs` lets the register allocator
+/// use grades as interference constraints in addition to liveness. The
+/// table is keyed by vreg id and is populated from the codegen SCG's
+/// `typed_state_meta` during SCG -> IR lowering (see
+/// `vuma::pipeline::populate_vreg_grades`). Entries that cannot be
+/// attributed to a concrete IR vreg are simply absent, which the
+/// allocator treats as "grade unknown" -> liveness fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VregMeta {
+    /// The proof-directed grade for this vreg, or `None` when unknown
+    /// (regalloc falls back to liveness-only interference).
+    pub grade: Option<VumaGrade>,
+}
+
+impl Default for VregMeta {
+    fn default() -> Self {
+        Self { grade: None }
+    }
+}
+
 /// A function in the IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IRFunction {
@@ -3083,6 +3131,11 @@ pub struct IRFunction {
     pub blocks: Vec<IRBlock>,
     /// Source file path (for debug info generation).
     pub source_file: String,
+    /// Proof-directed per-vreg grade metadata (Wave 0-B). Populated from
+    /// the codegen SCG's `typed_state_meta` during lowering; empty by
+    /// default. The register allocator consults this to tighten
+    /// interference constraints beyond plain liveness.
+    pub vreg_meta: HashMap<u32, VregMeta>,
 }
 
 impl IRFunction {
@@ -3098,6 +3151,7 @@ impl IRFunction {
             vregs: HashMap::new(),
             blocks: vec![IRBlock::new(entry_label)],
             source_file: String::new(),
+            vreg_meta: HashMap::new(),
         }
     }
 

@@ -501,6 +501,15 @@ pub struct AllocationResult {
     /// Mapping from coalesced vreg IDs to the representative vreg ID.
     /// When intervals are merged, all constituent vregs map to the same preg.
     pub coalesced_map: HashMap<IRValueId, IRValueId>,
+    /// Merged interference graph used for proof-directed colouring
+    /// (Wave 2-A): the UNION of the liveness interference graph and the
+    /// grade-based interference graph ([`build_merged_interference`]).
+    /// Each entry is a normalised `(min(a,b), max(a,b))` pair of vreg IDs
+    /// that CANNOT share a physical register. Populated by
+    /// [`LinearScanAllocator::allocate_function`] and consulted by
+    /// [`LinearScanAllocator::coalesce_copies_post_alloc`]. Empty when no
+    /// grade metadata is present (liveness-only fallback).
+    pub interference_graph: HashSet<(IRValueId, IRValueId)>,
 }
 
 impl AllocationResult {
@@ -517,6 +526,7 @@ impl AllocationResult {
             live_intervals: Vec::new(),
             eliminated_copies: Vec::new(),
             coalesced_map: HashMap::new(),
+            interference_graph: HashSet::new(),
         }
     }
 
@@ -595,6 +605,149 @@ impl Default for AllocationResult {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Proof-directed interference graphs (Wave 2-A)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The register allocator's interference relation is, by default, derived
+// purely from liveness: two vregs interfere iff their live intervals
+// overlap. Wave 2-A tightens this with *grade-based* constraints sourced
+// from `IRFunction::vreg_meta` (Wave 0-B): an `Exclusive` state token may
+// not be co-located with any other live vreg, while `Shared` reads may
+// share a register with one another. The final interference graph used for
+// colouring is the UNION of the liveness graph and the grade graph.
+
+/// Normalize a pair of vreg IDs so interference edges are stored in a
+/// canonical `(min, max)` form, making set lookups direction-independent.
+fn interference_edge(a: IRValueId, b: IRValueId) -> (IRValueId, IRValueId) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Liveness interference over a precomputed interval slice.
+///
+/// Two vregs interfere iff their live intervals *strictly* overlap
+/// (half-open: `[a_s, a_e]` and `[b_s, b_e]` strictly overlap iff
+/// `a_s < b_e && b_s < a_e`). This is the same boundary-safe,
+/// read-before-write overlap rule used by
+/// [`LinearScanAllocator::coalesce_copies_post_alloc`].
+fn liveness_interference_from(intervals: &[LiveInterval]) -> HashSet<(IRValueId, IRValueId)> {
+    let mut edges: HashSet<(IRValueId, IRValueId)> = HashSet::new();
+    for i in 0..intervals.len() {
+        for j in (i + 1)..intervals.len() {
+            let a = &intervals[i];
+            let b = &intervals[j];
+            if a.start < b.end && b.start < a.end {
+                edges.insert(interference_edge(a.vreg, b.vreg));
+            }
+        }
+    }
+    edges
+}
+
+/// Grade-based interference over a precomputed interval slice.
+///
+/// Applies the Wave 2-A grade rules (see [`build_grade_interference`]).
+/// Only vregs with a known grade participate; `None`-grade vregs are
+/// skipped here and fall back to liveness via [`build_merged_interference`].
+fn grade_interference_from(
+    intervals: &[LiveInterval],
+    func: &IRFunction,
+) -> HashSet<(IRValueId, IRValueId)> {
+    use crate::ir::VumaGrade;
+
+    // Collect (interval, grade) for vregs carrying a known grade.
+    let mut graded: Vec<(&LiveInterval, VumaGrade)> = Vec::new();
+    for iv in intervals {
+        if let Some(meta) = func.vreg_meta.get(&iv.vreg) {
+            if let Some(grade) = meta.grade {
+                graded.push((iv, grade));
+            }
+        }
+    }
+
+    let mut edges: HashSet<(IRValueId, IRValueId)> = HashSet::new();
+    for i in 0..graded.len() {
+        for j in (i + 1)..graded.len() {
+            let (iva, ga) = graded[i];
+            let (ivb, gb) = graded[j];
+            let pair = interference_edge(iva.vreg, ivb.vreg);
+            let overlaps = iva.start < ivb.end && ivb.start < iva.end;
+
+            match (ga, gb) {
+                // Shared + Shared CAN share a register -> never interfere.
+                (VumaGrade::Shared, VumaGrade::Shared) => {}
+                // Exclusive can't share with a Shared vreg -> always
+                // interfere (over-constraint, sound regardless of liveness).
+                (VumaGrade::Exclusive, VumaGrade::Shared)
+                | (VumaGrade::Shared, VumaGrade::Exclusive) => {
+                    edges.insert(pair);
+                }
+                // Two Exclusive vregs interfere iff live simultaneously.
+                (VumaGrade::Exclusive, VumaGrade::Exclusive) => {
+                    if overlaps {
+                        edges.insert(pair);
+                    }
+                }
+            }
+        }
+    }
+    edges
+}
+
+/// Build the **liveness-only** interference graph for a function (Wave 2-A).
+///
+/// Two vregs interfere iff their live intervals are live simultaneously
+/// (strict half-open overlap). This is the existing liveness interference
+/// relation — made explicit here as a set of vreg pairs so it can be
+/// unioned with grade-based constraints. Pairs are stored normalized as
+/// `(min(a,b), max(a,b))`.
+pub fn build_liveness_interference(func: &IRFunction) -> HashSet<(IRValueId, IRValueId)> {
+    let (intervals, _call_positions) = LiveRangeComputer::new().compute(func);
+    liveness_interference_from(&intervals)
+}
+
+/// Build the **grade-based** interference graph for a function (Wave 2-A).
+///
+/// Returns the set of vreg pairs that CANNOT share a physical register
+/// based on proof-directed grades (`IRFunction::vreg_meta`):
+///
+/// - Two `Exclusive` vregs that are live simultaneously (strict interval
+///   overlap) -> interfere.
+/// - An `Exclusive` and a `Shared` vreg -> interfere (an exclusive state
+///   token may never be co-located with a shared read, regardless of
+///   liveness -- an over-constraint that is always sound).
+/// - Two `Shared` vregs -> do NOT interfere (they CAN share a register).
+/// - Any pair involving a vreg whose grade is unknown (`None`) -> skipped;
+///   such pairs fall back to standard liveness interference via
+///   [`build_merged_interference`].
+///
+/// Pairs are stored normalized as `(min(a,b), max(a,b))`.
+pub fn build_grade_interference(func: &IRFunction) -> HashSet<(IRValueId, IRValueId)> {
+    let (intervals, _call_positions) = LiveRangeComputer::new().compute(func);
+    grade_interference_from(&intervals, func)
+}
+
+/// Build the **merged** interference graph: the UNION of the liveness
+/// interference graph and the grade-based interference graph (Wave 2-A).
+///
+/// `merged = build_liveness_interference(func) | build_grade_interference(func)`.
+///
+/// Grade constraints can only *add* edges beyond plain liveness, so the
+/// merged graph is always at least as conservative as liveness-only
+/// interference -- never unsound. The register allocator stores this graph
+/// in [`AllocationResult::interference_graph`] and consults it during
+/// copy-coalescing (the colouring step).
+pub fn build_merged_interference(func: &IRFunction) -> HashSet<(IRValueId, IRValueId)> {
+    let (intervals, _call_positions) = LiveRangeComputer::new().compute(func);
+    let mut merged = liveness_interference_from(&intervals);
+    merged.extend(grade_interference_from(&intervals, func));
+    merged
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1190,6 +1343,10 @@ impl LinearScanAllocator {
         });
 
         let mut result = self.allocate_intervals(&intervals, &call_positions)?;
+        // Wave 2-A: build the merged (liveness | grade) interference graph
+        // and attach it to the result so copy-coalescing can honour
+        // proof-directed grade constraints during colouring.
+        result.interference_graph = build_merged_interference(func);
         result.function_name = func.name.clone();
         Ok(result)
     }
@@ -1210,6 +1367,9 @@ impl LinearScanAllocator {
         intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
         let mut result = self.allocate_intervals(&intervals, &call_positions)?;
+        // Wave 2-A: merged (liveness | grade) interference graph for
+        // proof-directed colouring (see `allocate_function`).
+        result.interference_graph = build_merged_interference(func);
         result.function_name = func.name.clone();
         Ok(result)
     }
@@ -1770,6 +1930,15 @@ impl LinearScanAllocator {
         let mut eliminated = 0usize;
         let mut pos: u32 = 0;
 
+        // Wave 2-A: merged interference graph (liveness | grade). Used by
+        // the copy-coalescing safety check below so that grade-based
+        // constraints (e.g. an `Exclusive` vreg can't share with a `Shared`
+        // vreg) are honoured during colouring. Always recomputed from
+        // `func` so coalescing stays sound even if the caller built the
+        // `AllocationResult` without `allocate_function`.
+        let merged_interference: HashSet<(IRValueId, IRValueId)> =
+            build_merged_interference(func);
+
         for block in &func.blocks {
             for instr in &block.instructions {
                 if let IRInstr::Cast {
@@ -1851,9 +2020,20 @@ impl LinearScanAllocator {
                         if other_preg != src_preg {
                             return true;
                         }
-                        // Strict overlap: [a_s, a_e] and [b_s, b_e] strictly
-                        // overlap iff a_s < b_e && b_s < a_e.
-                        !(other.start < dst_iv.end && dst_iv.start < other.end)
+                        // Liveness interference: strict half-open overlap
+                        // ([a_s, a_e] and [b_s, b_e] strictly overlap iff
+                        // a_s < b_e && b_s < a_e) -- read-before-write safe
+                        // at boundaries. This is the liveness portion of
+                        // `merged_interference`.
+                        let liveness_conflict =
+                            other.start < dst_iv.end && dst_iv.start < other.end;
+                        // Wave 2-A: grade-based interference from the merged
+                        // graph. An explicit (dst, other) edge forbids
+                        // co-locating them on src_preg even when their live
+                        // ranges do not overlap (e.g. Exclusive + Shared).
+                        let grade_conflict = merged_interference
+                            .contains(&interference_edge(dst_id, other.vreg));
+                        !(liveness_conflict || grade_conflict)
                     });
 
                     if !safe {
