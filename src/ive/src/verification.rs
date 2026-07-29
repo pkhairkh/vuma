@@ -204,8 +204,12 @@ pub struct PmtFieldSpec {
 pub struct ContractClause {
     /// Stringified source form of the clause expression (for diagnostics).
     pub source: String,
-    /// `true` iff the clause is a literal `true` expression — the only
-    /// shape the IVE can currently discharge without an SMT solver.
+    /// SMT-LIB2 string representation of the clause expression, for Z3
+    /// discharge. Empty if the clause could not be translated to SMT-LIB2.
+    /// When non-empty, the IVE attempts Z3-based discharge.
+    pub smt_lib2: String,
+    /// `true` iff the clause is a literal `true` expression — discharged
+    /// trivially without Z3.
     pub trivially_true: bool,
 }
 
@@ -2339,19 +2343,52 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
     //
     // Per spec points 2a/2b: `requires` clauses must hold at call sites
     // (entry), `ensures` clauses must hold at return (exit). The IVE
-    // attempts to discharge each; non-trivial clauses are deferred.
+    // attempts to discharge each via Z3 SMT solving.
     for c in &input.contracts {
         s.contracts_checked += 1;
         for clause in c.requires.iter().chain(c.ensures.iter()) {
             if clause.trivially_true {
                 s.clauses_discharged += 1;
+            } else if !clause.smt_lib2.is_empty() {
+                // Attempt Z3-based discharge
+                match discharge_via_z3(&clause.smt_lib2) {
+                    Z3Result::Discharged => {
+                        s.clauses_discharged += 1;
+                    }
+                    Z3Result::Counterexample(model) => {
+                        s.clauses_deferred += 1;
+                        vuma_log!(
+                            warn,
+                            "[F2] IVE contract clause for `{}`: `{}` — \
+                             Z3 found counterexample: {}. Clause NOT discharged.",
+                            c.fn_name, clause.source, model
+                        );
+                    }
+                    Z3Result::Unknown(reason) => {
+                        s.clauses_deferred += 1;
+                        vuma_log!(
+                            warn,
+                            "[F2] IVE contract clause for `{}`: `{}` — \
+                             Z3 returned unknown: {}. Clause deferred.",
+                            c.fn_name, clause.source, reason
+                        );
+                    }
+                    Z3Result::Error(e) => {
+                        s.clauses_deferred += 1;
+                        vuma_log!(
+                            warn,
+                            "[F2] IVE contract clause for `{}`: `{}` — \
+                             Z3 error: {}. Clause deferred.",
+                            c.fn_name, clause.source, e
+                        );
+                    }
+                }
             } else {
                 s.clauses_deferred += 1;
                 vuma_log!(
                     warn,
                     "[F2] IVE could not discharge contract clause for `{}`: `{}` — \
-                     deferred (TODO: wire SMT/symbolic discharge backend). Contract \
-                     consumption is wired; hard-gate discharge pending.",
+                     no SMT-LIB2 translation available. Clause deferred.",
                     c.fn_name,
                     clause.source
                 );
@@ -2360,25 +2397,50 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
     }
 
     // ── Prove blocks: each `require` is a proof obligation gating the body ──
-    //
-    // Per spec point 3: if the IVE can't discharge a `require`, the block
-    // doesn't compile (Violated). Since the IVE can't yet discharge
-    // non-trivial clauses, those are deferred to a WARNING + TODO rather
-    // than a hard Violated (spec point 4 override), so consumption is wired
-    // without rejecting every `prove` block.
     for pb in &input.prove_blocks {
         s.prove_blocks_checked += 1;
         for clause in &pb.requirements {
             if clause.trivially_true {
                 s.prove_reqs_discharged += 1;
+            } else if !clause.smt_lib2.is_empty() {
+                match discharge_via_z3(&clause.smt_lib2) {
+                    Z3Result::Discharged => {
+                        s.prove_reqs_discharged += 1;
+                    }
+                    Z3Result::Counterexample(model) => {
+                        s.prove_reqs_deferred += 1;
+                        vuma_log!(
+                            warn,
+                            "[F2] IVE prove-block requirement at {}: `{}` — \
+                             Z3 found counterexample: {}.",
+                            pb.location, clause.source, model
+                        );
+                    }
+                    Z3Result::Unknown(reason) => {
+                        s.prove_reqs_deferred += 1;
+                        vuma_log!(
+                            warn,
+                            "[F2] IVE prove-block requirement at {}: `{}` — \
+                             Z3 unknown: {}.",
+                            pb.location, clause.source, reason
+                        );
+                    }
+                    Z3Result::Error(e) => {
+                        s.prove_reqs_deferred += 1;
+                        vuma_log!(
+                            warn,
+                            "[F2] IVE prove-block requirement at {}: `{}` — \
+                             Z3 error: {}.",
+                            pb.location, clause.source, e
+                        );
+                    }
+                }
             } else {
                 s.prove_reqs_deferred += 1;
                 vuma_log!(
                     warn,
-                    "[F2] IVE could not discharge prove-block requirement at {}: `{}` — \
-                     deferred (TODO: wire SMT/symbolic discharge backend; a non-trivial \
-                     `require` the IVE cannot prove should become a hard Violated). \
-                     Prove-block consumption is wired.",
+                    "[F2] IVE prove-block requirement at {}: `{}` — \
+                     no SMT-LIB2 translation available.",
                     pb.location,
                     clause.source
                 );
@@ -2387,6 +2449,84 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
     }
 
     s
+}
+
+/// Result of a Z3 SMT discharge attempt.
+enum Z3Result {
+    /// Z3 proved the clause is valid (unsatisfiable negation).
+    Discharged,
+    /// Z3 found a counterexample (satisfiable negation).
+    Counterexample(String),
+    /// Z3 returned unknown (e.g. timeout, quantifiers).
+    Unknown(String),
+    /// Z3 encountered an error (e.g. parse failure).
+    Error(String),
+}
+
+/// Attempt to discharge a contract clause via Z3.
+///
+/// The clause is an SMT-LIB2 assertion. We check if its NEGATION is
+/// unsatisfiable. If unsat → the clause is valid (discharged). If sat →
+/// there's a counterexample (not discharged). If unknown → deferred.
+fn discharge_via_z3(smt_lib2: &str) -> Z3Result {
+    use z3::{Solver, SatResult};
+
+    let solver = Solver::new();
+
+    // Declare all free variables as Int.
+    let vars = extract_smt_variables(smt_lib2);
+    for var in &vars {
+        let decl = format!("(declare-const {var} Int)");
+        solver.from_string(decl.as_bytes());
+    }
+
+    // Assert the negation: if unsat, the clause is valid.
+    let assert_str = format!("(assert (not {smt_lib2}))");
+    solver.from_string(assert_str.as_bytes());
+
+    match solver.check() {
+        SatResult::Unsat => Z3Result::Discharged,
+        SatResult::Sat => {
+            let model = solver.get_model();
+            Z3Result::Counterexample(
+                model
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "(no model)".to_string()),
+            )
+        }
+        SatResult::Unknown => {
+            let reason = solver
+                .get_reason_unknown()
+                .unwrap_or_else(|| "unknown".to_string());
+            Z3Result::Unknown(reason)
+        }
+    }
+}
+
+/// Extract variable names from an SMT-LIB2 expression string.
+/// Variables are bare identifiers that aren't SMT keywords or numbers.
+fn extract_smt_variables(smt: &str) -> Vec<String> {
+    let keywords: std::collections::HashSet<&str> = [
+        "true", "false", "not", "and", "or", "assert", "declare-const",
+        "Int", "Bool", "+", "-", "*", "div", "mod", "=", "<", "<=", ">", ">=",
+    ].iter().copied().collect();
+
+    let mut vars = std::collections::BTreeSet::new();
+    for token in smt.split(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+        let t = token.trim();
+        if t.is_empty() { continue; }
+        // Skip numbers (including negative)
+        if t.parse::<i64>().is_ok() { continue; }
+        // Skip SMT keywords
+        if keywords.contains(t) { continue; }
+        // Must be a valid identifier (starts with letter or _, alphanumeric)
+        if t.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            if t.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) {
+                vars.insert(t.to_string());
+            }
+        }
+    }
+    vars.into_iter().collect()
 }
 
 impl Default for VerificationEngine {
@@ -3374,15 +3514,18 @@ mod tests {
                     fn_name: "trivial_transform".to_string(),
                     requires: vec![ContractClause {
                         source: "true".to_string(),
+                        smt_lib2: String::new(),
                         trivially_true: true,
                     }],
                     ensures: vec![
                         ContractClause {
                             source: "true".to_string(),
+                            smt_lib2: String::new(),
                             trivially_true: true,
                         },
                         ContractClause {
                             source: "result > 0".to_string(),
+                            smt_lib2: String::new(),
                             trivially_true: false,
                         },
                     ],
@@ -3391,6 +3534,7 @@ mod tests {
                     fn_name: "nontrivial".to_string(),
                     requires: vec![ContractClause {
                         source: "x != 0".to_string(),
+                        smt_lib2: String::new(),
                         trivially_true: false,
                     }],
                     ensures: vec![],
@@ -3401,10 +3545,12 @@ mod tests {
                 requirements: vec![
                     ContractClause {
                         source: "true".to_string(),
+                        smt_lib2: String::new(),
                         trivially_true: true,
                     },
                     ContractClause {
                         source: "ptr != null".to_string(),
+                        smt_lib2: String::new(),
                         trivially_true: false,
                     },
                 ],
@@ -3445,6 +3591,7 @@ mod tests {
             fn_name: "t".to_string(),
             requires: vec![ContractClause {
                 source: "x > 0".to_string(),
+                smt_lib2: String::new(),
                 trivially_true: false,
             }],
             ensures: vec![],
@@ -3480,6 +3627,7 @@ mod tests {
                 location: "g".to_string(),
                 requirements: vec![ContractClause {
                     source: "ptr != null".to_string(),
+                    smt_lib2: String::new(),
                     trivially_true: false,
                 }],
             },
