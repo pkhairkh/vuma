@@ -3771,10 +3771,23 @@ fn expand_shared_memory_open(
     }
     // flags = MAP_SHARED | MAP_ANONYMOUS, per-arch (alpha/hppa/sparc/mips
     // use legacy MAP_ANONYMOUS values that differ from asm-generic's 0x20).
+    //
+    // Emit IRInstr::Call { func: "mmap" } rather than a raw IRInstr::Syscall
+    // { nr: 222 }. The raw Syscall path bypasses the per-backend `mmap` stub
+    // registered in each target's `syscall_stubs` table. That stub is
+    // essential on backends with constrained C ABIs: hppa has only 4 C ABI
+    // arg registers (R26-R23) so mmap's args 5-6 (fd, offset) must be fetched
+    // from the outgoing stack args area, and the stub also translates the
+    // legacy MAP_ANONYMOUS bit (e.g. hppa uses 0x10, not x86's 0x20). Routing
+    // through the Call node lets each backend's relocation patcher resolve
+    // "mmap" to its stub, which performs both the flag translation and the
+    // correct arg placement. The args are unchanged: (addr=0, len=size,
+    // prot=PROT_READ|PROT_WRITE=3, flags, fd=-1, offset=0).
     let flags = map_shared_anon_flags(ctx.backend);
     vec![
-        IRInstr::Syscall {
-            nr: 222, // mmap
+        IRInstr::Call {
+            dst: Some(ret.clone()),
+            func: "mmap".to_string(),
             args: vec![
                 IRValue::Immediate(0),
                 size,
@@ -3783,7 +3796,7 @@ fn expand_shared_memory_open(
                 IRValue::Immediate(-1i64),
                 IRValue::Immediate(0),
             ],
-            dst: Some(ret.clone()),
+            is_extern: true,
         },
         IRInstr::BinOp {
             op: BinOpKind::Add,
