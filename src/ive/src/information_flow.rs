@@ -33,6 +33,8 @@
 //! value assignment, channel send, or branch condition) and returns a
 //! list of `FlowViolation`s for any disallowed flows.
 
+use std::collections::HashSet;
+
 /// A security label in the Denning lattice.
 ///
 /// The ordering is `Public ⊑ Internal ⊑ Secret ⊑ TopSecret`. Higher
@@ -463,6 +465,20 @@ mod tests {
 //
 // TASKS.md §0.5 requires that information flow checking be CALLED from
 // src/pipeline.rs, not just defined as library code with unit tests.
+//
+// Wave 2 fix (Task 3): the wrapper now consults `secret_vars` (collected
+// from `#[secret]` annotations by `pipeline.rs::collect_secret_vars`) to
+// assign real `SecurityLabel::Secret` labels to vregs whose declared name
+// is in that set, instead of hardcoding `SecurityLabel::Public` for every
+// flow. The vreg→name lookup goes through `IRFunction::vregs`, which the
+// SCG→IR bridge populates from source-level `let`/parameter names. This
+// means a `#[secret] let k = ...` in the source produces an IR vreg named
+// `"k"`, and any `Store`/`ChannelSend` involving that vreg is labeled
+// `Secret` here. Limitation: this is a name-based proxy, not full
+// AST→IR label propagation — vregs whose names are stripped by optimisation
+// (e.g. anonymous temporaries holding a secret value) will not be tainted.
+// Full label plumbing through the IR is deferred to a later wave (see
+// `docs/caveats.md` §0.7).
 
 /// IR-based information flow violation ( pipeline wiring).
 #[derive(Debug, Clone)]
@@ -471,44 +487,127 @@ pub struct FlowViolationIR {
     pub message: String,
 }
 
+/// Resolve a vreg's [`SecurityLabel`] from its declared name.
+///
+/// Returns `SecurityLabel::Secret` when `vreg` is an `IRValue::Register`
+/// whose ID maps (via `vregs`) to a `VirtualRegister` whose `name` is in
+/// `secret_vars`. Returns `SecurityLabel::Public` otherwise — covering
+/// immediates, addresses, labels, anonymous vregs, and named vregs that
+/// are not annotated `#[secret]` at the source level.
+fn label_of_vreg(
+    vreg: &vuma_codegen::ir::IRValue,
+    vregs: &std::collections::HashMap<u32, vuma_codegen::ir::VirtualRegister>,
+    secret_vars: &HashSet<String>,
+) -> SecurityLabel {
+    match vreg {
+        vuma_codegen::ir::IRValue::Register(id) => {
+            let is_secret = vregs
+                .get(id)
+                .and_then(|vr| vr.name.as_deref())
+                .map(|name| secret_vars.contains(name))
+                .unwrap_or(false);
+            if is_secret {
+                SecurityLabel::Secret
+            } else {
+                SecurityLabel::Public
+            }
+        }
+        _ => SecurityLabel::Public,
+    }
+}
+
 /// Scan an IRProgram for information-flow violations (High → Low flows).
 /// This is the pipeline-facing wrapper.
 ///
-/// Currently advisory — logs warnings but does NOT abort compilation.
+/// `secret_vars` is the set of source-level variable names annotated with
+/// `#[secret]` (collected by `pipeline.rs::collect_secret_vars` and threaded
+/// down through `run_ir_pipeline`). Each `Store` and `ChannelSend` event
+/// derived from the IR is labeled `Secret` if any of its vregs' declared
+/// names appears in `secret_vars`, otherwise `Public`. The underlying
+/// `verify_information_flow` then flags any `Secret → Public` (or higher)
+/// flow as a violation.
+///
+/// Currently advisory in shape but wired as a hard-fail gate by the caller
+/// in `pipeline.rs` — any non-empty `Vec<FlowViolationIR>` aborts compilation.
 pub fn verify_information_flow_from_ir(
     program: &vuma_codegen::ir::IRProgram,
+    secret_vars: &HashSet<String>,
 ) -> Vec<FlowViolationIR> {
     let mut violations = Vec::new();
     // Collect flow events from the IR.
     // A High → Low flow occurs when a value from a high-security source
-    // is assigned to a low-security destination.  Since VUMA doesn't have
-    // explicit security label annotations in the IR yet (only in the AST),
-    // we scan for patterns that COULD be flows (assignments, channel sends)
-    // and report them as informational.
+    // is assigned to a low-security destination. We derive real
+    // `SecurityLabel`s by consulting `secret_vars`: any vreg whose
+    // declared name (from `IRFunction::vregs`) is in `secret_vars` is
+    // labeled `Secret`; everything else is `Public`.
     let mut events: Vec<FlowEvent> = Vec::new();
     for (fi, func) in program.functions.iter().enumerate() {
         for (bi, block) in func.blocks.iter().enumerate() {
             for (ii, instr) in block.instructions.iter().enumerate() {
-                if let vuma_codegen::ir::IRInstr::Call { func: name, .. } = instr {
-                    if name == "channel_send" || name == "channel_send_cap" {
+                let at_node = fi * 10000 + bi * 100 + ii;
+                match instr {
+                    // Canonical channel-send instruction emitted by the
+                    // SCG→IR bridge. The channel handle (`ch`) is the
+                    // destination label, the message (`msg`) is the source.
+                    vuma_codegen::ir::IRInstr::ChannelSend { ch, msg, .. } => {
                         events.push(FlowEvent {
                             kind: FlowKind::ChannelSend {
-                                channel_label: SecurityLabel::Public,
-                                msg_label: SecurityLabel::Public,
+                                channel_label: label_of_vreg(ch, &func.vregs, secret_vars),
+                                msg_label: label_of_vreg(msg, &func.vregs, secret_vars),
                             },
-                            at_node: fi * 10000 + bi * 100 + ii,
+                            at_node,
                         });
                     }
-                }
-                if let vuma_codegen::ir::IRInstr::Store { .. } = instr {
-                    events.push(FlowEvent {
-                        kind: FlowKind::Assign {
-                            dst_vreg: 0,
-                            dst_label: SecurityLabel::Public,
-                            src_label: SecurityLabel::Public,
-                        },
-                        at_node: fi * 10000 + bi * 100 + ii,
-                    });
+                    // Legacy / pre-IPC-lowering form: a `Call` to
+                    // `channel_send`/`channel_send_cap` with
+                    // `args = [ch, msg]`. Handled for robustness — by the
+                    // time `verify_information_flow_from_ir` runs in
+                    // `run_ir_pipeline`, IPC lowering has usually rewritten
+                    // these into `Syscall`/`Store`/`Load`/`BinOp`, but the
+                    // canonical `IRInstr::ChannelSend` form above covers the
+                    // SCG-NodePayload path.
+                    vuma_codegen::ir::IRInstr::Call { func: name, args, .. }
+                        if name == "channel_send" || name == "channel_send_cap" =>
+                    {
+                        let channel_label = args
+                            .get(0)
+                            .map(|v| label_of_vreg(v, &func.vregs, secret_vars))
+                            .unwrap_or(SecurityLabel::Public);
+                        let msg_label = args
+                            .get(1)
+                            .map(|v| label_of_vreg(v, &func.vregs, secret_vars))
+                            .unwrap_or(SecurityLabel::Public);
+                        events.push(FlowEvent {
+                            kind: FlowKind::ChannelSend {
+                                channel_label,
+                                msg_label,
+                            },
+                            at_node,
+                        });
+                    }
+                    // `Store { value, addr, .. }` — treat as an assignment
+                    // from `value` (source) to the memory location at `addr`
+                    // (destination). Real vreg IDs are extracted from the
+                    // `IRValue::Register` fields instead of the previous
+                    // hardcoded `0`. Labels are resolved via `label_of_vreg`
+                    // — `Secret` when the vreg's declared name is in
+                    // `secret_vars`, `Public` otherwise. A `Secret → Public`
+                    // store (writing a secret value to a non-secret
+                    // destination) is flagged by `verify_information_flow`.
+                    vuma_codegen::ir::IRInstr::Store { value, addr, .. } => {
+                        let dst_vreg = addr.as_register().unwrap_or(0);
+                        let dst_label = label_of_vreg(addr, &func.vregs, secret_vars);
+                        let src_label = label_of_vreg(value, &func.vregs, secret_vars);
+                        events.push(FlowEvent {
+                            kind: FlowKind::Assign {
+                                dst_vreg,
+                                dst_label,
+                                src_label,
+                            },
+                            at_node,
+                        });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -521,4 +620,183 @@ pub fn verify_information_flow_from_ir(
         });
     }
     violations
+}
+
+#[cfg(test)]
+mod ir_tests {
+    //! Tests for the IR-based wrapper `verify_information_flow_from_ir`.
+    //!
+    //! These construct minimal `IRProgram`s with named vregs and verify
+    //! that the wrapper (a) assigns `Secret` to vregs whose declared name
+    //! is in `secret_vars`, (b) assigns `Public` to everything else, and
+    //! (c) surfaces `Secret → Public` flows as `FlowViolationIR`s. The
+    //! underlying `verify_information_flow` lattice is exercised in the
+    //! `tests` module above; here we only test the wrapper's input-shaping.
+    use super::*;
+
+    /// Build a one-function, one-block `IRProgram` whose block holds the
+    /// supplied instructions. Each `(id, name)` pair in `named_vregs` is
+    /// registered in the function's `vregs` table so `label_of_vreg` can
+    /// resolve it.
+    fn build_program(
+        instructions: Vec<vuma_codegen::ir::IRInstr>,
+        named_vregs: &[(u32, &str)],
+    ) -> vuma_codegen::ir::IRProgram {
+        use vuma_codegen::ir::{IRFunction, IRProgram, VirtualRegister};
+        let mut func = IRFunction::new("test_fn");
+        for (id, name) in named_vregs {
+            func.register_vreg(VirtualRegister::named(*id, *name));
+        }
+        // `IRFunction::new` pre-populates a single entry block at index 0.
+        func.blocks[0].instructions = instructions;
+        let mut prog = IRProgram::new();
+        prog.functions.push(func);
+        prog
+    }
+
+    #[test]
+    fn test_store_secret_to_public_is_leak() {
+        // `Store { value: %v1 (named "secret_key"), addr: %v0 (named "out") }`
+        // with `secret_vars = {"secret_key"}`.
+        // → src_label=Secret, dst_label=Public → Secret ⊀ Public → LEAK.
+        let instr = vuma_codegen::ir::IRInstr::Store {
+            value: vuma_codegen::ir::IRValue::Register(1),
+            addr: vuma_codegen::ir::IRValue::Register(0),
+            offset: 0,
+            ty: vuma_codegen::ir::IRType::I64,
+        };
+        let prog = build_program(vec![instr], &[(0, "out"), (1, "secret_key")]);
+        let mut secrets = HashSet::new();
+        secrets.insert("secret_key".to_string());
+        let violations = verify_information_flow_from_ir(&prog, &secrets);
+        assert_eq!(
+            violations.len(),
+            1,
+            "storing a secret-named value into a non-secret destination must be flagged"
+        );
+        assert!(
+            violations[0].message.contains("would leak"),
+            "violation message should mention the leak: {:?}",
+            violations[0].message
+        );
+    }
+
+    #[test]
+    fn test_store_public_to_public_is_ok() {
+        // `Store { value: %v1 (named "x"), addr: %v0 (named "out") }`
+        // with `secret_vars = {"secret_key"}` (neither "x" nor "out" is secret).
+        // → src=Public, dst=Public → Public ⊑ Public → OK.
+        let instr = vuma_codegen::ir::IRInstr::Store {
+            value: vuma_codegen::ir::IRValue::Register(1),
+            addr: vuma_codegen::ir::IRValue::Register(0),
+            offset: 0,
+            ty: vuma_codegen::ir::IRType::I64,
+        };
+        let prog = build_program(vec![instr], &[(0, "out"), (1, "x")]);
+        let mut secrets = HashSet::new();
+        secrets.insert("secret_key".to_string());
+        let violations = verify_information_flow_from_ir(&prog, &secrets);
+        assert!(
+            violations.is_empty(),
+            "public→public store must not be flagged: {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_store_secret_to_secret_is_ok() {
+        // Both source and destination are secret-named.
+        // → src=Secret, dst=Secret → Secret ⊑ Secret → OK.
+        let instr = vuma_codegen::ir::IRInstr::Store {
+            value: vuma_codegen::ir::IRValue::Register(1),
+            addr: vuma_codegen::ir::IRValue::Register(0),
+            offset: 0,
+            ty: vuma_codegen::ir::IRType::I64,
+        };
+        let prog = build_program(
+            vec![instr],
+            &[(0, "secret_buf"), (1, "secret_key")],
+        );
+        let mut secrets = HashSet::new();
+        secrets.insert("secret_key".to_string());
+        secrets.insert("secret_buf".to_string());
+        let violations = verify_information_flow_from_ir(&prog, &secrets);
+        assert!(
+            violations.is_empty(),
+            "secret→secret store must not be flagged: {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_channel_send_secret_on_public_channel_is_leak() {
+        // `ChannelSend { ch: %v0 (named "public_ch"), msg: %v1 (named "secret_key") }`
+        // with `secret_vars = {"secret_key"}`.
+        // → channel_label=Public, msg_label=Secret → Secret ⊀ Public → LEAK.
+        let instr = vuma_codegen::ir::IRInstr::ChannelSend {
+            ch: vuma_codegen::ir::IRValue::Register(0),
+            msg: vuma_codegen::ir::IRValue::Register(1),
+            ty: None,
+        };
+        let prog = build_program(vec![instr], &[(0, "public_ch"), (1, "secret_key")]);
+        let mut secrets = HashSet::new();
+        secrets.insert("secret_key".to_string());
+        let violations = verify_information_flow_from_ir(&prog, &secrets);
+        assert_eq!(
+            violations.len(),
+            1,
+            "sending a secret-named message on a public-named channel must be flagged"
+        );
+        assert!(
+            violations[0].message.contains("channel"),
+            "violation message should mention the channel: {:?}",
+            violations[0].message
+        );
+    }
+
+    #[test]
+    fn test_empty_secret_vars_yields_no_violations() {
+        // With an empty `secret_vars`, every vreg is labeled `Public` and
+        // no flow can be a leak — this preserves the historical "structural
+        // zero-violations" behaviour for programs without `#[secret]`
+        // annotations.
+        let instr = vuma_codegen::ir::IRInstr::Store {
+            value: vuma_codegen::ir::IRValue::Register(1),
+            addr: vuma_codegen::ir::IRValue::Register(0),
+            offset: 0,
+            ty: vuma_codegen::ir::IRType::I64,
+        };
+        let prog = build_program(vec![instr], &[(0, "out"), (1, "x")]);
+        let secrets: HashSet<String> = HashSet::new();
+        let violations = verify_information_flow_from_ir(&prog, &secrets);
+        assert!(
+            violations.is_empty(),
+            "with no #[secret] annotations no flows should be flagged: {:?}",
+            violations
+        );
+    }
+
+    #[test]
+    fn test_real_vreg_id_propagated_not_hardcoded_zero() {
+        // Regression guard: the wrapper used to hardcode `dst_vreg: 0` for
+        // every Store. Now the real vreg ID from `addr` must appear in the
+        // violation message. We use `addr = Register(7)` and assert the
+        // message references "vreg 7" (not "vreg 0").
+        let instr = vuma_codegen::ir::IRInstr::Store {
+            value: vuma_codegen::ir::IRValue::Register(8),
+            addr: vuma_codegen::ir::IRValue::Register(7),
+            offset: 0,
+            ty: vuma_codegen::ir::IRType::I64,
+        };
+        let prog = build_program(vec![instr], &[(7, "out"), (8, "secret_key")]);
+        let mut secrets = HashSet::new();
+        secrets.insert("secret_key".to_string());
+        let violations = verify_information_flow_from_ir(&prog, &secrets);
+        assert_eq!(violations.len(), 1);
+        assert!(
+            violations[0].message.contains("vreg 7"),
+            "violation should reference the real dst vreg id (7), not hardcoded 0: {:?}",
+            violations[0].message
+        );
+    }
 }

@@ -54,7 +54,8 @@ fn main() {
     // Use the full production pipeline (matches compile_dump) so the IR
     // we display reflects all post-lowering opts + backend latency table.
     use vuma::pipeline::{
-        run_ir_pipeline, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
+        collect_secret_vars, run_ir_pipeline, CompileConfig, CompileTarget, OptLevel,
+        VerificationLevel,
     };
     let cfg = CompileConfig {
         target: if kind == vuma_codegen::backend::BackendKind::Wasm32 {
@@ -68,7 +69,11 @@ fn main() {
         ..Default::default()
     };
     let mut timings: Vec<(String, u64)> = Vec::new();
-    let ir_program = run_ir_pipeline(ir_program, &cfg, kind, &mut timings).unwrap();
+    // (Wave 2 / Task 3) Pass `secret_vars` so the IR-level information-flow
+    // verifier can label `#[secret]`-annotated vregs `Secret` and flag
+    // real `Secret → Public` flows.
+    let secret_vars = collect_secret_vars(&ast);
+    let ir_program = run_ir_pipeline(ir_program, &cfg, kind, &secret_vars, &mut timings).unwrap();
 
     println!("=== IR for {} (backend={}) ===", path, backend_name);
     for func in &ir_program.functions {

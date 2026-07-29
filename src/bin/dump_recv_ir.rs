@@ -1,7 +1,7 @@
 //! Dump the IR after the full optimization pipeline
 use vuma::pipeline::{
-    bridge_ast_to_codegen_scg, run_ir_pipeline, CompileConfig, CompileTarget, OptLevel,
-    VerificationLevel,
+    bridge_ast_to_codegen_scg, collect_secret_vars, run_ir_pipeline, CompileConfig,
+    CompileTarget, OptLevel, VerificationLevel,
 };
 use vuma_codegen::backend::BackendKind;
 use vuma_codegen::scg_to_ir::IRBuilder;
@@ -26,8 +26,18 @@ fn main() {
         ..Default::default()
     };
     let mut timings: Vec<(String, u64)> = Vec::new();
-    let ir_program =
-        run_ir_pipeline(ir_program, &o3_config, BackendKind::AArch64, &mut timings).unwrap();
+    // (Wave 2 / Task 3) Pass `secret_vars` so the IR-level information-flow
+    // verifier can label `#[secret]`-annotated vregs `Secret` and flag
+    // real `Secret → Public` flows.
+    let secret_vars = collect_secret_vars(&ast);
+    let ir_program = run_ir_pipeline(
+        ir_program,
+        &o3_config,
+        BackendKind::AArch64,
+        &secret_vars,
+        &mut timings,
+    )
+    .unwrap();
     for func in &ir_program.functions {
         println!("\n--- Function: {} ---", func.name);
         for (i, bb) in func.blocks.iter().enumerate() {
