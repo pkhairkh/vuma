@@ -1,5 +1,5 @@
-VUMA Test Failures — 2026-07-29 20:31:34 UTC
+VUMA Test Failures — 2026-07-29 21:29:56 UTC
 Total: 1 failures across 1 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  ipc                  protocol_valid.vuma                           exp=  50 [('wasm32', 40, 'MM')]
+  ipc                  ffi_isolation.vuma                            exp=  42 [('riscv32', 124, 'TO')]
