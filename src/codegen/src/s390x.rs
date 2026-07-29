@@ -941,7 +941,28 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
             if let IRInstr::Alloc { dst, size } = instr {
                 if let Some(id) = dst.as_register() {
                     stack_alloc_vregs.insert(id);
-                    let aligned_size = ((*size as i32 + 15) & !15) as i32;
+                    // Reserve 16 bytes of slack BEYOND the 16-aligned size.
+                    //
+                    // The frontend's PMT bounds-check instrumentation emits a
+                    // 1-byte probe store to [base + size] (one past the
+                    // LOGICAL end of every Alloc) before each field access —
+                    // see e.g. `store 1, [%v + size] (u8)` in
+                    // struct_four_fields' IR.  When the Alloc size is an exact
+                    // multiple of 16, the 16-aligned reservation leaves NO
+                    // slack, so this probe writes into the immediately
+                    // following frame region: the LR/FP/callee-saved save
+                    // area.  The probe (STC of value 1) overwrites the MSB of
+                    // the saved return address (R14), and on `main`'s return
+                    // the restored LR (e.g. 0x0000000000010000) becomes
+                    // 0x0100000000010000 — exactly the SIGSEGV address seen
+                    // under qemu-s390x.  32- and 64-byte structs (sizes that
+                    // are 16-multiples) all crash this way; 24-byte structs
+                    // already had implicit slack and passed.
+                    //
+                    // Adding 16 bytes of dedicated padding per Alloc region
+                    // keeps the probe inside the Alloc's own reserved space,
+                    // away from the save area and neighbouring Allocs.
+                    let aligned_size = ((*size as i32 + 15) & !15) + 16;
                     alloc_sizes.insert(id, aligned_size);
                 }
             }
