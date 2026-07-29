@@ -276,6 +276,16 @@ pub fn lower_ipc_builtins(func: &mut IRFunction, backend: BackendKind) {
 /// the child's `Return` intact (the program exits with the child's value —
 /// see the Pattern-B limitation note in the project caveats).
 fn wasm32_fork_emulation_pass(func: &mut IRFunction) {
+    // Disabled: wasm32 now uses threads (Wave 3-A) instead of fork emulation.
+    // spawn_worker is lowered to the `__vuma_spawn_thread` host import (a real
+    // wasm thread sharing linear memory) and wait_worker to `__vuma_thread_join`
+    // (see src/codegen/src/wasm32/mod.rs).  The CFG-rewriting logic below is
+    // no longer reachable; it is retained verbatim for reference and in case a
+    // future backend needs to re-enable fork-style emulation.  Returning early
+    // here means `func` is left untouched (no `if pid == 0` rewriting, no
+    // parent/child Return splitting), which is the intended behavior now that
+    // the host (scripts/wasm32_runner.py, task 3-C) owns worker execution.
+    return;
     // Phase 1: build a map of vreg → defining instruction so we can trace
     // `pid` back to `Syscall{nr:220}` across block boundaries. The
     // `expand_spawn_worker` emission is `Syscall{220, dst: ret}` followed
