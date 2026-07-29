@@ -1373,10 +1373,18 @@ pub fn run_ir_pipeline(
         } else {
             vuma_codegen::target_desc::LatencyTable::default_ooo()
         };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+        // Wave 4-A: route the codegen-opt through the linearity-aware
+        // entry point so DSE/DCE can consume the IVE
+        // `LinearityReport::consumed_vregs` set. The IVE LinearityReport
+        // is produced at the SCG level and is not yet threaded to this
+        // IR-level call site, so pass `None` — provenance-only DCE,
+        // identical to the pre-Wave-4-A `run_optimizations_with_target
+        // _and_inline_threshold` behaviour (backward compatible).
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_linearity(
             ir_program,
             &latency_table,
             config.inline_threshold,
+            None,
         );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
@@ -1430,6 +1438,34 @@ pub fn run_ir_pipeline(
             slp_packs
         );
         timings.push(("vectorize".to_string(), tv.elapsed().as_millis() as u64));
+    }
+
+    // ── Wave 4-A: proof-directed instruction scheduling ───────────────
+    // Run the IVE happens-before DAG scheduler on every function AFTER
+    // DCE (which ran inside the codegen-opt pass above) and BEFORE
+    // register allocation (performed by the caller on the returned
+    // `IRProgram`). The scheduler reorders instructions within each
+    // basic block to hide memory latency, respecting the happens-before
+    // DAG built from vreg RAW/WAW dependencies, memory-alias edges
+    // (relaxed by the IVE Alloc-region non-aliasing proof), and
+    // Alloc→Free ordering.
+    //
+    // The provenance map (Alloc-region non-aliasing proof artifact) is
+    // rebuilt here via `mark_ive_proven_nonaliasing`, which is read-only
+    // w.r.t. the function body. When a future change threads the IVE
+    // `LinearityReport::consumed_vregs` to this site, the same
+    // provenance will additionally drive linearity-directed DCE above.
+    {
+        let tsched = Instant::now();
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (f, provenance) = vuma_codegen::opt::mark_ive_proven_nonaliasing(f);
+            *func = vuma_codegen::opt::schedule_with_provenance(&f, &provenance);
+        }
+        timings.push((
+            "proof-directed-schedule".to_string(),
+            tsched.elapsed().as_millis() as u64,
+        ));
     }
 
     Ok(ir_program)
@@ -3632,10 +3668,14 @@ pub fn compile_with_recovery(
             } else {
                 vuma_codegen::target_desc::LatencyTable::default_ooo()
             };
-        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_inline_threshold(
+        // Wave 4-A: linearity-aware codegen-opt entry point. The IVE
+        // LinearityReport is not available on this recovery path — pass
+        // `None` (provenance-only DCE, backward compatible).
+        ir_program = vuma_codegen::opt::run_optimizations_with_target_and_linearity(
             ir_program,
             &latency_table,
             config.inline_threshold,
+            None,
         );
         timings.push(("codegen-opt".to_string(), topt.elapsed().as_millis() as u64));
     }
@@ -3657,6 +3697,23 @@ pub fn compile_with_recovery(
         timings.push((
             "escape-effects".to_string(),
             te.elapsed().as_millis() as u64,
+        ));
+    }
+
+    // ── Wave 4-A: proof-directed instruction scheduling ───────────────
+    // Run the IVE happens-before DAG scheduler after DCE (codegen-opt
+    // above) and before register allocation (Stage 9). See
+    // `run_ir_pipeline` for the full rationale.
+    {
+        let tsched = Instant::now();
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (f, provenance) = vuma_codegen::opt::mark_ive_proven_nonaliasing(f);
+            *func = vuma_codegen::opt::schedule_with_provenance(&f, &provenance);
+        }
+        timings.push((
+            "proof-directed-schedule".to_string(),
+            tsched.elapsed().as_millis() as u64,
         ));
     }
 
@@ -4111,7 +4168,10 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     // definitions were also deleted as dead-code cleanup.)
 
     // ── Codegen-Level IR Optimization (production caller) ────────
-    ir_program = vuma_codegen::opt::run_optimizations(ir_program);
+    // Wave 4-A: use the linearity-aware entry point. The IVE
+    // LinearityReport is not available on this path — pass `None`
+    // (provenance-only DCE, backward compatible).
+    ir_program = vuma_codegen::opt::run_optimizations_with_linearity(ir_program, None);
 
     // Central pre-lowering float-op verification.
     //
@@ -4127,6 +4187,18 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
                 errs.join("; ")
             )),
         }]);
+    }
+
+    // ── Wave 4-A: proof-directed instruction scheduling ───────────────
+    // Run the IVE happens-before DAG scheduler after DCE (the opt pass
+    // above) and before register allocation (inside `compile_to_wasm`).
+    // See `run_ir_pipeline` for the full rationale.
+    {
+        for func in &mut ir_program.functions {
+            let f = std::mem::replace(func, IRFunction::new("__tmp__"));
+            let (f, provenance) = vuma_codegen::opt::mark_ive_proven_nonaliasing(f);
+            *func = vuma_codegen::opt::schedule_with_provenance(&f, &provenance);
+        }
     }
 
     // ── Stage 5: Compile IR → Wasm ──────────────────────────────
