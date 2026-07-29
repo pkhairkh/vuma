@@ -1505,42 +1505,129 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Dispatch on operand type: FP types use FCmpS/FCmpD,
-                    // integer types use the integer Slt/Sltu/Eq/Ne path.
+                    // Dispatch on operand type: FP types use integer comparison
+                    // on bit-patterns (NOT FCmp+MOVCF2GR, which has a QEMU 7.2
+                    // LoongArch condition-code decoding bug — QEMU 7.2 decodes
+                    // cond=1 (CLT) as cond=0 (CAF, always false), causing every
+                    // float comparison to return false).
+                    //
+                    // The integer-comparison-on-bit-patterns approach uses the
+                    // standard IEEE 754 sign-magnitude → two's-complement trick:
+                    //   key(x) = (sign_bit(x)) ? ~raw(x) : (raw(x) | SIGN_BIT)
+                    // This maps the signed-magnitude IEEE 754 representation to
+                    // a monotonic unsigned integer, so `key(a) <u key(b)` iff
+                    // `a < b` (float) for all non-NaN values. NaN is not handled
+                    // (returns false for all ordered comparisons, matching the
+                    // C/IEEE 754 default for ordered comparisons).
                     let is_fp = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32 | IRType::F64));
                     if is_fp {
                         let is_f32 = ty.as_ref().is_some_and(|t| matches!(t, IRType::F32));
-                        // For > and >=, swap operands so we can use CLT/CLE.
-                        let (lhs_val, rhs_val) = if fp_cmp_swap(kind) {
-                            (rhs, lhs)
-                        } else {
-                            (lhs, rhs)
-                        };
-                        // Load float bit-patterns from stack slots into GPR S0/S1
-                        code.extend(encode_load_value(lhs_val, S0, fp, &vreg_slots));
-                        code.extend(encode_load_value(rhs_val, S1, fp, &vreg_slots));
-                        // Move GPR → FPR for comparison
-                        code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
-                        code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
-                        // FCmp writes result to condition register fcc0.
-                        let cond = fp_cmp_cond(kind);
+                        // Load float bit-patterns into GPR S0 (lhs) and S1 (rhs)
+                        code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                        code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
+
+                        // For f32, the bit-pattern is in the low 32 bits (zero-extended).
+                        // The sign bit is bit 31. We need to sign-extend the key to 64 bits.
+                        // For f64, the sign bit is bit 63.
+                        //
+                        // Compute key(a) in S0 and key(b) in S1:
+                        //   if sign_bit: key = ~raw  (flip all bits)
+                        //   else:        key = raw | SIGN_BIT  (set the sign bit)
+                        //
+                        // For f64: SIGN_BIT = 0x8000000000000000 (bit 63)
+                        // For f32: SIGN_BIT = 0x80000000 (bit 31), then sign-extend to 64 bits
+                        //
+                        // Implementation (f64):
+                        //   sign_mask = S0 >> 63   (0 or 1, in S2)
+                        //   flipped = ~S0           (in S3)
+                        //   or_sign = S0 | 0x8000000000000000  (in S4)
+                        //   key_a = sign_mask ? flipped : or_sign
+                        //         = (sign_mask & flipped) | (~sign_mask & or_sign)
+                        //
+                        // Simplified using the identity:
+                        //   key = (sign_bit) ? ~raw : (raw | SIGN_BIT)
+                        //       = raw ^ ((sign_bit) ? 0xFFFFFFFFFFFFFFFF : 0x8000000000000000)
+                        //       = raw ^ (sign_mask_extended ? ALL_ONES : SIGN_BIT)
+                        //
+                        // Where sign_mask_extended = (sign_bit) ? 0xFFFFFFFFFFFFFFFF : 0
+                        // = -sign_bit (two's complement: 0 or -1)
+                        //
+                        // So: key = raw ^ (-sign_bit | SIGN_BIT)
+                        //         = raw ^ (sign_mask | SIGN_BIT)
+                        //         = raw ^ mask
+                        //   where mask = sign_mask | SIGN_BIT
+                        //         sign_mask = (0 - sign_bit) = -sign_bit (0 or -1)
+                        //
+                        // Even simpler:
+                        //   mask = (raw >> 63) ? 0xFFFFFFFFFFFFFFFF : 0x8000000000000000
+                        //   key = raw ^ mask
+                        //
+                        // Using SUB_D: sign_mask = 0 - sign_bit (negate)
+                        //   sign_mask = SUB_D(R0, sign_bit) = -sign_bit
+                        //   mask = OR(sign_mask, SIGN_BIT)
+                        //   key = XOR(raw, mask)
+
+                        // Step 1: Compute key for S0 (lhs)
+                        // sign_bit_a = S0 >> 63 → S2 (0 or 1)
+                        code.extend_from_slice(&Instruction::SrliD { rd: S2, rj: S0, imm8: 63 }.encode());
+                        // sign_mask_a = 0 - S2 = -sign_bit_a → S2 (0 or -1)
+                        code.extend_from_slice(&Instruction::SubD { rd: S2, rj: Gpr::R0, rk: S2 }.encode());
+                        // mask_a = S2 | SIGN_BIT → S2
                         if is_f32 {
-                            code.extend_from_slice(&Instruction::FCmpS { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
+                            // For f32: SIGN_BIT = 0x80000000
+                            code.extend(encode_load_imm(S3, 0x80000000));
                         } else {
-                            code.extend_from_slice(&Instruction::FCmpD { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
+                            // For f64: SIGN_BIT = 0x8000000000000000
+                            code.extend(encode_load_imm(S3, 0x8000000000000000u64 as i64));
                         }
-                        // MOVCF2GR rd, fcc0 — moves condition flag (0 or 1) to GPR.
-                        // Encoding (verified via QEMU 7.2 disasm):
-                        //   0000 0001 0001 0100 1101 11 cj(4:0) rd(4:0)
-                        //   bits[31:10] = 0x004537 ; cj in bits[9:5] ; rd in bits[4:0]
-                        // For cd=0 (fcc0): 0x0114DC00 | rd
-                        // MOVCF2GR writes the 0/1 comparison result to a GPR. Use S2
-                        // (NOT S0/S1, which hold the just-loaded float operands) so a
-                        // subsequent comparison that reloads the same operand from its
-                        // stack slot is not clobbered by this result landing in S0.
-                        let movcf2gr_word: u32 = 0x0114DC00u32 | ((Gpr::S3.encoding() as u32) & 0x1F);
-                        code.extend_from_slice(&movcf2gr_word.to_le_bytes());
-                        code.extend(encode_store_to_vreg(Gpr::S3, dst_id, fp, &vreg_slots));
+                        code.extend_from_slice(&Instruction::Or { rd: S2, rj: S2, rk: S3 }.encode());
+                        // key_a = S0 ^ S2 → S0
+                        code.extend_from_slice(&Instruction::Xor { rd: S0, rj: S0, rk: S2 }.encode());
+
+                        // Step 2: Compute key for S1 (rhs)
+                        // sign_bit_b = S1 >> 63 → S2 (0 or 1)
+                        code.extend_from_slice(&Instruction::SrliD { rd: S2, rj: S1, imm8: 63 }.encode());
+                        // sign_mask_b = 0 - S2 = -sign_bit_b → S2 (0 or -1)
+                        code.extend_from_slice(&Instruction::SubD { rd: S2, rj: Gpr::R0, rk: S2 }.encode());
+                        // mask_b = S2 | SIGN_BIT → S2 (S3 still has SIGN_BIT)
+                        code.extend_from_slice(&Instruction::Or { rd: S2, rj: S2, rk: S3 }.encode());
+                        // key_b = S1 ^ S2 → S1
+                        code.extend_from_slice(&Instruction::Xor { rd: S1, rj: S1, rk: S2 }.encode());
+
+                        // Step 3: For f32, sign-extend the 32-bit keys to 64 bits
+                        // The key for f32 is in the low 32 bits. Bit 31 is now the
+                        // "sign" of the key (1 for positive floats, 0 for negative).
+                        // Sign-extend from bit 31 to 64 bits.
+                        if is_f32 {
+                            // Sign-extend S0 from 32 bits: shift left 32, then arithmetic right shift 32
+                            code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                            code.extend_from_slice(&Instruction::SraiD { rd: S0, rj: S0, imm8: 32 }.encode());
+                            code.extend_from_slice(&Instruction::SlliD { rd: S1, rj: S1, imm8: 32 }.encode());
+                            code.extend_from_slice(&Instruction::SraiD { rd: S1, rj: S1, imm8: 32 }.encode());
+                        }
+
+                        // Step 4: Compare the keys using integer comparison
+                        // For SLt/SGt/ULt/UGt: use unsigned comparison (SLtu)
+                        // For SLe/SGe/ULe/UGe: use unsigned comparison with equality
+                        // For Eq/Ne: use equality comparison
+                        //
+                        // Map float CmpKind to integer CmpKind:
+                        //   SLt → ULt (unsigned less-than on keys)
+                        //   SLe → ULe (unsigned less-or-equal on keys)
+                        //   SGt → UGt (unsigned greater-than on keys)
+                        //   SGe → UGe (unsigned greater-or-equal on keys)
+                        //   ULt/UGt/ULe/UGe → same (unordered = ordered for non-NaN)
+                        //   Eq/Ne → Eq/Ne (bit-pattern equality)
+                        let int_kind = match kind {
+                            CmpKind::Eq => CmpKind::Eq,
+                            CmpKind::Ne => CmpKind::Ne,
+                            CmpKind::SLt | CmpKind::ULt => CmpKind::ULt,
+                            CmpKind::SLe | CmpKind::ULe => CmpKind::ULe,
+                            CmpKind::SGt | CmpKind::UGt => CmpKind::UGt,
+                            CmpKind::SGe | CmpKind::UGe => CmpKind::UGe,
+                        };
+                        code.extend(encode_cmp(&int_kind, S0, S0, S1));
+                        code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     } else {
                         code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                         code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
