@@ -228,12 +228,9 @@ fn compile_for_backend_with_path(
             result.summary.failed,
             result.summary.unverified,
             result.summary.total_checked,
-            if result.summary.passed + result.summary.unverified > 0 {
-                100 * result.summary.passed
-                    / (result.summary.passed + result.summary.unverified)
-            } else {
-                100
-            }
+            (100 * result.summary.passed)
+                .checked_div(result.summary.passed + result.summary.unverified)
+                .unwrap_or(100)
         );
         ive_status = Some(format!("{} {}", verdict, summary));
         eprintln!("IVE: {} {}", verdict, summary);
