@@ -3802,8 +3802,8 @@ fn schedule_block_instructions(
 
     // (2) Barrier pinning: preserve program order between each barrier and
     // every other instruction in the block.
-    for k in 0..n {
-        if is_scheduler_barrier(&instrs[k]) {
+    for (k, instr) in instrs.iter().enumerate() {
+        if is_scheduler_barrier(instr) {
             for m in 0..n {
                 if m < k {
                     add_edge(&mut adj, &mut indeg, m, k);
@@ -3935,7 +3935,7 @@ pub fn schedule_with_provenance(
 /// The provenance map is passed explicitly (no thread-local) from
 /// `mark_ive_proven_nonaliasing`, which must run BEFORE this pass.
 pub fn dead_store_eliminate(
-    mut func: IRFunction,
+    func: IRFunction,
     provenance: &HashMap<u32, u32>,
 ) -> IRFunction {
     dead_store_eliminate_with_linearity(func, provenance, None)
@@ -4186,17 +4186,17 @@ pub fn dead_state_eliminate(mut func: IRFunction, consumed_vregs: &HashSet<u32>)
             let drop_instr = match &block.instructions[i] {
                 IRInstr::Alloc { dst, .. } => dst
                     .as_register()
-                    .map_or(false, |id| consumed_vregs.contains(&id)),
+                    .is_some_and(|id| consumed_vregs.contains(&id)),
                 IRInstr::Store { addr, .. } => addr
                     .as_register()
-                    .map_or(false, |id| consumed_vregs.contains(&id)),
+                    .is_some_and(|id| consumed_vregs.contains(&id)),
                 IRInstr::Load { dst, addr, .. } => {
                     let addr_consumed = addr
                         .as_register()
-                        .map_or(false, |id| consumed_vregs.contains(&id));
+                        .is_some_and(|id| consumed_vregs.contains(&id));
                     let dst_unused = dst
                         .as_register()
-                        .map_or(true, |id| !globally_used.contains(&id));
+                        .is_none_or(|id| !globally_used.contains(&id));
                     addr_consumed && dst_unused
                 }
                 _ => false,

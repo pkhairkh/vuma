@@ -41,7 +41,7 @@
 /// `Some((new_used, alloc_id + 1, base_addr + used, alloc_id))` on
 /// success, or `None` on overflow / OOB.
 pub fn arena_alloc_verified(base_addr: u64, capacity: u64, used: u64,
-    alloc_id: u64, size: u64, align: u64) -> Option<(u64, u64, u64, u64)> {
+    alloc_id: u64, size: u64, _align: u64) -> Option<(u64, u64, u64, u64)> {
     let aligned_size = (size + 7) & !7;
     let new_used = (used as u128).checked_add(aligned_size as u128)?;
     if new_used >= (1u128 << 64) { return None; }

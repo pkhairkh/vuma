@@ -1525,6 +1525,7 @@ const HEAP_PTR_GLOBAL_IDX: u32 = 0;
 /// pass it to `__vuma_thread_join`.  Must be kept in sync with the globals
 /// added in `encode_program` (added immediately after `__heap_ptr`, so its
 /// index is 1).
+#[allow(dead_code)] // reserved: index must stay in sync with encode_program globals layout
 const THREAD_ID_GLOBAL_IDX: u32 = 1;
 
 /// Linear-memory address used by the wasm32 fork-emulation pass
@@ -1536,6 +1537,7 @@ const THREAD_ID_GLOBAL_IDX: u32 = 1;
 /// The wasm32 backend intercepts that Load and turns it into a call to the
 /// `__vuma_thread_join` host import instead (see the `IRInstr::Load` arm in
 /// `lower_instruction`).
+#[allow(dead_code)] // reserved: mirrors crate::ipc_lowering::WASM32_CHILD_EXIT_ADDR; kept in sync for the wasm32 fork-emulation pass
 const WASM32_CHILD_EXIT_ADDR: i64 = 4096;
 
 /// Start of the heap area in linear memory (second 64 KiB page, leaving
